@@ -1,0 +1,22 @@
+# BL-04：仅改 scrollOffset（API 滚动），不经过滚动条 thumb。
+# 与 uitoolkit_scrollbar_drag_example.yaml 对照阅读。
+specVersion: "1"
+name: scroll_offset_only_example
+timeoutS: 120
+defaults:
+  targetWindow: "upilot"
+
+setup:
+  - action: menu
+    menuPath: "upilot/upilot"
+  - action: wait
+    ms: 400
+
+steps:
+  - action: uitoolkit.scroll
+    elementName: "main-scroll"
+    mode: delta
+    deltaX: 0
+    deltaY: 80
+
+teardown: []

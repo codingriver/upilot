@@ -1,0 +1,23 @@
+name: "29-display-and-container-controls"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: assert_visible
+    selector: "#progress-bar"
+  - action: assert_property
+    selector: "#progress-bar"
+    property: "value"
+    expected: "65"
+  - action: assert_visible
+    selector: "#preview-image"
+  - action: assert_visible
+    selector: "#help-box"
+  - action: assert_text
+    selector: "#help-box"
+    expected: "Helpful message"
+  - action: assert_visible
+    selector: "#display-box"
+  - action: assert_visible
+    selector: "#settings-group"

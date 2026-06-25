@@ -1,0 +1,14 @@
+name: "63-advanced-controls-column-sort-resize"
+fixture:
+  host_window:
+    type: UnityUIFlow.AdvancedControlsWindow
+    reopen_if_open: true
+steps:
+  - action: sort_column
+    selector: '#planet-list'
+    column: 'Planet'
+    direction: 'ascending'
+  - action: resize_column
+    selector: '#planet-list'
+    index: '0'
+    width: '240'

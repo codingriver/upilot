@@ -1,0 +1,23 @@
+name: "33-toolbar-core-controls"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: click
+    selector: "#toolbar-run"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: button"
+  - action: set_value
+    selector: "#toolbar-live-toggle"
+    value: "true"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: live=true"
+  - action: type_text_fast
+    selector: "#toolbar-search"
+    value: "hello"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: search=hello"

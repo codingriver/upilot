@@ -1,0 +1,20 @@
+name: "06-custom-action-and-json"
+description: Covers JSON-driven rows and custom action parameters.
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCustomActionWindow
+    reopen_if_open: true
+data:
+  from_json: example-users.json
+steps:
+  - name: Run custom login for {{ username }}
+    action: custom_login
+    username_selector: "#username-input"
+    password_selector: "#password-input"
+    button_selector: "#login-button"
+    username: "{{ username }}"
+    password: "{{ password }}"
+  - name: Assert custom result
+    action: assert_text
+    selector: "#status-label"
+    expected: "{{ expected }}"

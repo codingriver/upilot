@@ -1,0 +1,14 @@
+name: "57-screenshot-attachment"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+steps:
+  - action: type_text
+    selector: "#username-input"
+    value: "screenshot"
+  - action: screenshot
+    tag: "login-filled"
+  - action: assert_text_contains
+    selector: "#username-input"
+    expected: "screenshot"

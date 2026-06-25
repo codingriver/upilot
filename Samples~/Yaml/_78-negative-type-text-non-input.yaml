@@ -1,0 +1,15 @@
+name: "_78-negative-type-text-non-input"
+description: |
+  Verifies that type_text fails when applied to a non-editable element.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: type_text on a Label element should fail
+    action: type_text
+    selector: "#gesture-status"
+    value: "should fail"

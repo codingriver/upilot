@@ -1,0 +1,70 @@
+# --- Python / MCP ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.env
+.env.*
+!.env.example
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Logs ---
+*.log
+*.err
+
+# --- OS / IDE / 工具本地配置（勿提交）---
+.DS_Store
+Thumbs.db
+.idea/
+.cursor/
+# Cursor MCP 工具/资源描述缓存（IDE 用，打包与运行 unitypilot-mcp 不需要）
+mcps/
+.opencode/
+.vscode/
+.mcp.json
+*.swp
+*.swo
+
+# --- Build artifacts ---
+deploy/resources/*.zip
+
+# --- Temporary runner scripts (root only) ---
+/run_*.py
+/http_run_uiflow_suite.py
+/trigger_compile_via_mcp.py
+!run_unitypilot_mcp.py
+!run_upilot_mcp.py
+
+# --- Unity (UnityPilot/) ---
+UnityPilot/[Ll]ibrary/
+UnityPilot/[Tt]emp/
+UnityPilot/[Oo]bj/
+UnityPilot/[Bb]uild/
+UnityPilot/[Bb]uilds/
+UnityPilot/[Ll]ogs/
+UnityPilot/[Uu]ser[Ss]ettings/
+UnityPilot/[Mm]emoryCaptures/
+UnityPilot/[Rr]ecordings/
+UnityPilot/.idea/
+UnityPilot/*.csproj
+UnityPilot/*.csproj.user
+UnityPilot/*.sln
+UnityPilot/*.suo
+UnityPilot/*.user
+UnityPilot/*.userprefs
+UnityPilot/*.pidb
+UnityPilot/*.booproj
+UnityPilot/*.svd
+UnityPilot/*.pdb
+UnityPilot/*.mdb
+UnityPilot/*.opendb
+UnityPilot/*.VC.db

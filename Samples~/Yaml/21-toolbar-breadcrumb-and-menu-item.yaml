@@ -1,0 +1,50 @@
+name: "21-toolbar-breadcrumb-and-menu-item"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: set_value
+    selector: "#toolbar-live-toggle"
+    value: "true"
+  - action: type_text_fast
+    selector: "#toolbar-search"
+    value: "ship"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: search=ship"
+  - action: read_breadcrumbs
+    selector: "#toolbar-breadcrumbs"
+    bag_key: "crumbs"
+  - action: navigate_breadcrumb
+    selector: "#toolbar-breadcrumbs"
+    label: "Settings"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: breadcrumb-settings"
+  - action: menu_item
+    selector: "#toolbar-menu"
+    kind: "popup"
+    mode: "assert_enabled"
+    item: "Refresh"
+  - action: menu_item
+    selector: "#toolbar-menu"
+    kind: "popup"
+    mode: "assert_disabled"
+    item: "Disabled"
+  - action: menu_item
+    selector: "#toolbar-menu"
+    kind: "popup"
+    mode: "select"
+    item: "Refresh"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: refresh"
+  - action: menu_item
+    selector: "#context-target"
+    kind: "context"
+    mode: "select"
+    item: "Copy"
+  - action: assert_text
+    selector: "#command-status"
+    expected: "Context: Copy"

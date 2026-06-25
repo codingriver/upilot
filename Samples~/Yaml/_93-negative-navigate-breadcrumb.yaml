@@ -1,0 +1,10 @@
+name: "_93-negative-navigate-breadcrumb"
+description: Expects failure when navigating breadcrumb with invalid label.
+fixture:
+  host_window:
+    type: ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: navigate_breadcrumb
+    selector: "#toolbar-breadcrumbs"
+    label: "NonExistent"

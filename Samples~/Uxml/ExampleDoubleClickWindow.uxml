@@ -1,0 +1,8 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-double-click-root" class="example-root">
+        <ui:VisualElement name="example-double-click-panel" class="example-panel">
+            <ui:Button name="double-button" text="Double Click" class="example-button" />
+            <ui:Label name="double-status" text="Double Count: 0" class="example-status" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

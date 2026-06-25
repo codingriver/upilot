@@ -1,0 +1,12 @@
+name: "60-host-window-switch"
+fixture:
+  host_window:
+    type: UnityUIFlow.SampleLoginWindow
+    reopen_if_open: true
+steps:
+  - action: type_text_fast
+    selector: '#username-input'
+    value: 'window-a'
+  - action: assert_text_contains
+    selector: '#status-label'
+    expected: 'Idle'

@@ -1,0 +1,40 @@
+name: "76-validate-command-advanced"
+description: |
+  Tests validate_command and execute_command with multiple command names
+  on a TextField that registers ValidateCommandEvent and ExecuteCommandEvent.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: Type text into command input
+    action: type_text
+    selector: "#command-input"
+    value: "HelloWorld"
+
+  - name: Validate SelectAll command
+    action: validate_command
+    selector: "#command-input"
+    command: "SelectAll"
+
+  - name: Execute SelectAll command
+    action: execute_command
+    selector: "#command-input"
+    command: "SelectAll"
+
+  - name: Validate Copy command
+    action: validate_command
+    selector: "#command-input"
+    command: "Copy"
+
+  - name: Execute Delete command
+    action: execute_command
+    selector: "#command-input"
+    command: "Delete"
+
+  - name: Assert command status recorded events
+    action: assert_text_contains
+    selector: "#command-status"
+    expected: "Execute: Delete"

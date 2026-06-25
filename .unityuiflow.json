@@ -1,0 +1,9 @@
+{
+  "headed": true,
+  "reportPath": "./Reports",
+  "screenshotOnFailure": true,
+  "defaultTimeoutMs": 10000,
+  "customActionAssemblies": [
+    "UnityUIFlow.Tests"
+  ]
+}

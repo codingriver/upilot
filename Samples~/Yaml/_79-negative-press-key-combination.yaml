@@ -1,0 +1,14 @@
+name: "_79-negative-press-key-combination"
+description: |
+  Verifies that press_key_combination fails with only modifiers and no non-modifier key.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: press_key_combination with only modifiers should fail
+    action: press_key_combination
+    keys: "Ctrl+Shift"

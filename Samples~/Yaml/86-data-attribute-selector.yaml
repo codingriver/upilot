@@ -1,0 +1,27 @@
+name: "86-data-attribute-selector"
+description: |
+  Tests CSS-like data attribute selector [data-key=value] on elements
+  that have userData set with Dictionary<string, string>.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleSelectorsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Click button by data-role attribute selector
+    action: click
+    selector: "[data-role=primary]"
+
+  - name: Assert status after data-attribute click
+    action: assert_text
+    selector: "#selector-status"
+    expected: "Inspect ready"
+
+  - name: Hover over button by data-role attribute
+    action: hover
+    selector: "[data-role=primary]"
+
+  - name: Screenshot after data attribute interaction
+    action: screenshot
+    tag: "data_attribute_result"

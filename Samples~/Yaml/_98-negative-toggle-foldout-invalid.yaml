@@ -1,0 +1,9 @@
+name: "_98-negative-toggle-foldout-invalid"
+description: Expects failure when toggle_foldout target is not a Foldout.
+fixture:
+  host_window:
+    type: ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: toggle_foldout
+    selector: "#integer-field"

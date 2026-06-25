@@ -1,0 +1,23 @@
+name: "107-tab-view-select-index"
+description: Covers select_tab action using index parameter on TabView.
+fixture:
+  host_window:
+    type: ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - name: Select tab by index 1
+    action: select_tab
+    selector: "#settings-tabs"
+    index: "1"
+  - name: Assert Advanced tab is active
+    action: assert_text
+    selector: "#tab-selection-status"
+    expected: "Tab: Advanced"
+  - name: Select tab by index 0
+    action: select_tab
+    selector: "#settings-tabs"
+    index: "0"
+  - name: Assert General tab is active
+    action: assert_text
+    selector: "#tab-selection-status"
+    expected: "Tab: General"

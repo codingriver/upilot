@@ -1,0 +1,11 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-loop-root" class="example-root">
+        <ui:VisualElement name="example-loop-panel" class="example-panel">
+            <ui:VisualElement name="loop-actions" class="example-row">
+                <ui:Button name="save-button" text="Save" class="example-button" />
+                <ui:Button name="reset-button" text="Reset" class="example-button" />
+            </ui:VisualElement>
+            <ui:VisualElement name="toast-host" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

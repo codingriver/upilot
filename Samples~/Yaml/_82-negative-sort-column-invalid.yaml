@@ -1,0 +1,16 @@
+name: "_82-negative-sort-column-invalid"
+description: |
+  Verifies that sort_column fails when given an invalid column name.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+
+steps:
+  - name: sort_column with invalid column should fail
+    action: sort_column
+    selector: "#planet-list"
+    column: "NonExistentColumn"
+    direction: "ascending"

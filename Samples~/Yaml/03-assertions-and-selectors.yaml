@@ -1,0 +1,18 @@
+name: "03-assertions-and-selectors"
+fixture:
+  host_window:
+    type: UnityUIFlow.SampleLoginWindow
+    reopen_if_open: true
+steps:
+  - name: First menu item is Dashboard
+    action: assert_text
+    selector: ".item:first-child"
+    expected: "Dashboard"
+  - name: Login button tooltip check
+    action: assert_property
+    selector: "#login-button"
+    property: "tooltip"
+    expected: "Login"
+  - name: Save button visible
+    action: assert_visible
+    selector: "[tooltip=Save]"

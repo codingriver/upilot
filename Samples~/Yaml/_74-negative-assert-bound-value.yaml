@@ -1,0 +1,16 @@
+name: "_74-negative-assert-bound-value"
+description: |
+  Verifies that assert_bound_value fails when expected value does not match.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: assert_bound_value with wrong expected value should fail
+    action: assert_bound_value
+    selector: "#property-title-field"
+    binding_path: "title"
+    expected: "WrongValue"

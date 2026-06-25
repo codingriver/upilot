@@ -1,0 +1,15 @@
+name: "_80-negative-page-scroller"
+description: |
+  Verifies that page_scroller fails with an invalid direction parameter.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+
+steps:
+  - name: page_scroller with invalid direction should fail
+    action: page_scroller
+    selector: "#standalone-scroller"
+    direction: "sideways"

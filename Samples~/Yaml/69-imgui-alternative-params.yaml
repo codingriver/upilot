@@ -1,0 +1,41 @@
+name: "69-imgui-alternative-params"
+description: |
+  Tests alternative parameters for IMGUI actions:
+  imgui_select_option with option text, imgui_press_key with selector,
+  imgui_press_key_combination with selector.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ImguiExampleWindow
+    reopen_if_open: true
+
+steps:
+  - name: Select quality by option text instead of index
+    action: imgui_select_option
+    selector: 'gui(dropdown, control_name="quality-popup")'
+    option: "2"
+    field_name: "_qualityIndex"
+
+  - name: Assert quality selected
+    action: imgui_assert_text
+    selector: 'gui(label, control_name="status-label")'
+    text: "Status: Ready"
+
+  - name: Focus text field via selector then press Delete key
+    action: imgui_press_key
+    selector: 'gui(textfield, control_name="project-name-field")'
+    key: Delete
+
+  - name: Focus text field via selector then press Ctrl+A combination
+    action: imgui_press_key_combination
+    selector: 'gui(textfield, control_name="project-name-field")'
+    keys: "Ctrl+A"
+
+  - name: Type replacement text after selection
+    action: imgui_type
+    selector: 'gui(textfield, control_name="project-name-field")'
+    text: "AliasTest"
+
+  - name: Final screenshot
+    action: screenshot
+    tag: "imgui_alias_test"

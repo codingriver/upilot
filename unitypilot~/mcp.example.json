@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "upilot": {
+      "command": "python",
+      "args": [
+        "<PATH_TO_UPILOT_REPO>/run_upilot_mcp.py",
+        "--transport",
+        "stdio",
+        "--port",
+        "8765",
+        "--log-file",
+        "<PATH_TO_UPILOT_REPO>/logs/mcp.log",
+        "--log-level",
+        "INFO"
+      ],
+      "env": {
+        "PYTHONUTF8": "1"
+      },
+      "_comments": {
+        "_usage": "复制本文件：项目根目录命名为 .mcp.json；Cursor 可放在 .cursor/mcp.json（自行创建 .cursor 目录）。将全部 <PATH_TO_UPILOT_REPO> 替换为本机仓库绝对路径。当前示例是 stdio/local command 默认配置。",
+        "command": "启动命令：用 python 直接运行入口脚本",
+        "--transport": "MCP 传输模式：stdio（当前示例）或 http。对于 Claude Desktop/Cursor 这类 local command 配置，通常保持 stdio。",
+        "--port": "Unity Editor Bridge 使用的内部 WebSocket 监听端口，Unity Editor 需连接同一端口。多项目场景下每个项目配不同端口（如 8765、8766）",
+        "--http-host": "仅 transport=http 时使用，Streamable HTTP 监听主机，默认 127.0.0.1",
+        "--http-port": "仅 transport=http 时使用，Streamable HTTP 监听端口，默认 8000，FastMCP 默认路径为 /mcp",
+        "--label": "可选。省略则使用工作区根目录文件夹名；需要自定义显示名时再添加，例如 \"--label\", \"我的项目MCP\"",
+        "--log-file": "日志输出文件，留空则仅输出到 stderr",
+        "--log-level": "日志级别：DEBUG | INFO | WARNING | ERROR | CRITICAL",
+        "http-example": "若使用支持 remote MCP / Streamable HTTP 的客户端，应先单独启动：python <PATH_TO_UPILOT_REPO>/run_upilot_mcp.py --transport http --port 8765 --http-port 8011 --log-file <PATH_TO_UPILOT_REPO>/logs/http-mcp.log --log-level INFO",
+        "http-url": "然后在支持 remote MCP 的客户端中配置 URL：http://127.0.0.1:8011/mcp",
+        "PYTHONUTF8": "强制 Python UTF-8 模式，避免中文路径/内容乱码"
+      }
+    }
+  }
+}

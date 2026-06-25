@@ -1,0 +1,6 @@
+- username: alice
+  password: secret
+  expected: Welcome alice
+- username: bob
+  password: password
+  expected: Welcome bob

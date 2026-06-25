@@ -1,0 +1,60 @@
+name: "91-state-assertions"
+description: |
+  Covers assert_enabled, assert_disabled, assert_property,
+  and assert_bound_value actions on various control states.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+setup:
+  - name: Open coverage input window
+    action: execute_command
+    command: "upilot/UIFlow/Examples/Coverage Input Window"
+
+steps:
+  - name: Assert enabled button is enabled
+    action: assert_enabled
+    selector: "#enabled-button"
+
+  - name: Assert disabled button is disabled
+    action: assert_disabled
+    selector: "#disabled-button"
+
+  - name: Assert keyboard input has text property
+    action: assert_property
+    selector: "#keyboard-input"
+    property: "text"
+    expected: ""
+
+  - name: Type into keyboard input
+    action: type_text
+    selector: "#keyboard-input"
+    value: "property_test"
+
+  - name: Assert property updated
+    action: assert_property
+    selector: "#keyboard-input"
+    property: "text"
+    expected: "property_test"
+
+  - name: Hover enabled button
+    action: hover
+    selector: "#enabled-button"
+
+  - name: Click enabled button
+    action: click
+    selector: "#enabled-button"
+
+  - name: Assert toolbar run button visible
+    action: assert_visible
+    selector: "#toolbar-run"
+
+  - name: Click toolbar run
+    action: click
+    selector: "#toolbar-run"
+
+  - name: Capture state assertions result
+    action: screenshot
+    tag: "state_assertions_final"

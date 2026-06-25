@@ -1,0 +1,15 @@
+name: "_91-negative-set-value-invalid"
+description: |
+  Verifies that set_value fails when given an invalid value for the target type.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: set_value with invalid text on IntegerField should fail
+    action: set_value
+    selector: "#integer-field"
+    value: "not_a_number"

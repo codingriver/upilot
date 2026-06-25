@@ -1,0 +1,16 @@
+name: "12-type-text"
+description: Covers the type_text action and property assertion.
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleTypeTextWindow
+    reopen_if_open: true
+steps:
+  - name: Type slowly
+    action: type_text
+    selector: "#type-text-input"
+    value: "typed slowly"
+  - name: Assert field value
+    action: assert_property
+    selector: "#type-text-input"
+    property: "value"
+    expected: "typed slowly"

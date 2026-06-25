@@ -1,0 +1,15 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="minimal-page-root" class="page-root">
+        <ui:VisualElement name="minimal-page-panel" class="page-panel">
+            <ui:TextField name="username-input" label="Username" class="page-input" />
+            <ui:TextField name="password-input" label="Password" class="page-input" is-password-field="true" />
+
+            <ui:VisualElement name="action-row" class="page-row">
+                <ui:Button name="submit-button" text="Submit" class="page-button page-button-primary" />
+            </ui:VisualElement>
+
+            <ui:Label name="status-label" text="Idle" class="page-status" />
+            <ui:VisualElement name="toast-host" class="page-toast-host" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

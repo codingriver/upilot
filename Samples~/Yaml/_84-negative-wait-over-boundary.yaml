@@ -1,0 +1,14 @@
+name: "_84-negative-wait-over-boundary"
+description: |
+  Verifies that wait fails when duration exceeds the maximum boundary (600s).
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: wait with duration over 600s boundary should fail
+    action: wait
+    duration: "601s"

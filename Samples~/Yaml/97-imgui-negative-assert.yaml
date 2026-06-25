@@ -1,0 +1,24 @@
+name: "97-imgui-negative-assert"
+description: |
+  Verifies that imgui_assert_text correctly fails when the actual
+  text does not match the expected value. This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ImguiExampleWindow
+    reopen_if_open: true
+
+setup:
+  - name: Open IMGUI example window
+    action: execute_command
+    command: "upilot/UIFlow/Examples/IMGUI Example Window"
+
+steps:
+  - name: Click Reset to ensure known state
+    action: imgui_click
+    selector: "gui(button, text=\"Reset\")"
+
+  - name: Assert status (this should fail because status is "Reset" not "Wrong")
+    action: imgui_assert_text
+    selector: "gui(label, control_name=\"status-label\")"
+    text: "Status: WrongText"

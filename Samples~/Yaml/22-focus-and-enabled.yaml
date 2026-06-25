@@ -1,0 +1,18 @@
+name: "22-focus-and-enabled"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: focus
+    selector: "#keyboard-input"
+  - action: assert_enabled
+    selector: "#enabled-button"
+  - action: assert_disabled
+    selector: "#disabled-button"
+  - action: type_text_fast
+    selector: "#keyboard-input"
+    value: "batch"
+  - action: assert_text
+    selector: "#keyboard-status"
+    expected: "Input: batch"

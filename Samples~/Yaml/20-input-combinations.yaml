@@ -1,0 +1,51 @@
+name: "20-input-combinations"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: click
+    selector: "#gesture-click-target"
+    button: "right"
+    modifiers: "shift,ctrl"
+  - action: assert_text_contains
+    selector: "#gesture-status"
+    expected: "button=1"
+  - action: hover
+    selector: "#gesture-hover-target"
+    modifiers: "alt"
+    duration: "32ms"
+  - action: assert_text_contains
+    selector: "#gesture-status"
+    expected: "Alt"
+  - action: drag
+    from: "#gesture-drag-target"
+    to: "#gesture-drag-target"
+    button: "right"
+    modifiers: "alt"
+    duration: "64ms"
+  - action: assert_text_contains
+    selector: "#gesture-status"
+    expected: "completed"
+  - action: focus
+    selector: "#keyboard-input"
+  - action: type_text
+    selector: "#keyboard-input"
+    value: "hello"
+  - action: assert_text
+    selector: "#keyboard-status"
+    expected: "Input: hello"
+  - action: press_key
+    selector: "#keyboard-input"
+    key: "A"
+  - action: assert_text
+    selector: "#keyboard-status"
+    expected: "Key: A"
+  - action: focus
+    selector: "#command-input"
+  - action: press_key_combination
+    selector: "#command-input"
+    keys: "Ctrl+C"
+  - action: assert_text
+    selector: "#command-status"
+    expected: "Execute: Copy"

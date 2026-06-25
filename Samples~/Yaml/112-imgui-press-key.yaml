@@ -1,0 +1,29 @@
+name: "112-imgui-press-key"
+description: Covers imgui_press_key by sending Return key to an IMGUI TextField and verifying UI stability.
+fixture:
+  host_window:
+    type: ImguiExampleWindow
+    reopen_if_open: true
+steps:
+  - name: Focus project name field
+    action: imgui_focus
+    selector: 'gui(textfield, control_name="project-name-field")'
+  - name: Type text
+    action: imgui_type
+    selector: 'gui(textfield, control_name="project-name-field")'
+    text: "PressKeyTest"
+  - name: Press Return key
+    action: imgui_press_key
+    selector: 'gui(textfield, control_name="project-name-field")'
+    key: "Return"
+  - name: Assert text unchanged
+    action: imgui_assert_text
+    selector: 'gui(textfield, control_name="project-name-field")'
+    text: "PressKeyTest"
+  - name: Click Generate to prove UI is responsive
+    action: imgui_click
+    selector: 'gui(button, text="Generate")'
+  - name: Assert status reflects typed text
+    action: imgui_assert_text
+    selector: 'gui(label, control_name="status-label")'
+    text: "Status: Generated: PressKeyTest, Quality=Low, Scale=1.00, DoubleClicks=0"

@@ -1,0 +1,32 @@
+name: "95-menu-item-modes"
+description: Covers menu_item action with kind and mode combinations on DropdownMenu.
+fixture:
+  host_window:
+    type: ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - name: Assert disabled menu item
+    action: menu_item
+    selector: "#toolbar-menu"
+    item: "Disabled"
+    kind: popup
+    mode: assert_disabled
+
+  - name: Assert enabled menu item
+    action: menu_item
+    selector: "#toolbar-menu"
+    item: "Refresh"
+    kind: popup
+    mode: assert_enabled
+
+  - name: Select menu item
+    action: menu_item
+    selector: "#toolbar-menu"
+    item: "Refresh"
+    kind: popup
+    mode: select
+
+  - name: Assert menu action fired
+    action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: refresh"

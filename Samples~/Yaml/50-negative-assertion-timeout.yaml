@@ -1,0 +1,20 @@
+name: "50-negative-assertion-timeout"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+steps:
+  - action: type_text
+    selector: "#username-input"
+    value: "admin"
+  - action: assert_text
+    selector: "#status-label"
+    expected: "This text does not exist"
+    continue_on_step_failure: true
+  - action: wait_for_element
+    selector: "#nonexistent-element"
+    timeout: "500ms"
+    continue_on_step_failure: true
+  - action: assert_text_contains
+    selector: "#status-label"
+    expected: "Missing credentials"

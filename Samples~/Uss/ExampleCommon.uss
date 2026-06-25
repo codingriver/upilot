@@ -1,0 +1,76 @@
+.example-root {
+    flex-grow: 1;
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 16px;
+    padding-bottom: 16px;
+    background-color: rgb(246, 247, 242);
+}
+
+.example-panel {
+    flex-direction: column;
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    background-color: rgb(255, 255, 255);
+    border-left-width: 1px;
+    border-right-width: 1px;
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-color: rgb(185, 190, 182);
+    border-right-color: rgb(185, 190, 182);
+    border-top-color: rgb(185, 190, 182);
+    border-bottom-color: rgb(185, 190, 182);
+}
+
+.example-row {
+    flex-direction: row;
+    margin-bottom: 8px;
+}
+
+.example-input {
+    margin-bottom: 8px;
+}
+
+.example-button {
+    margin-right: 8px;
+}
+
+.example-status {
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+.example-card {
+    width: 140px;
+    height: 40px;
+    margin-bottom: 8px;
+    background-color: rgb(220, 231, 238);
+    border-left-width: 1px;
+    border-right-width: 1px;
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-color: rgb(104, 124, 136);
+    border-right-color: rgb(104, 124, 136);
+    border-top-color: rgb(104, 124, 136);
+    border-bottom-color: rgb(104, 124, 136);
+}
+
+.example-scroll {
+    height: 120px;
+    margin-top: 8px;
+}
+
+.example-item {
+    margin-bottom: 4px;
+}
+
+.example-toast {
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    background-color: rgb(42, 160, 87);
+    color: rgb(255, 255, 255);
+}

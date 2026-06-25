@@ -1,0 +1,8 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-hover-root" class="example-root">
+        <ui:VisualElement name="example-hover-panel" class="example-panel">
+            <ui:VisualElement name="hover-box" class="example-card" />
+            <ui:Label name="hover-status" text="Hover: idle" class="example-status" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

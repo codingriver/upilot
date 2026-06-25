@@ -1,0 +1,42 @@
+name: "28-numeric-and-radio"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: set_value
+    selector: "#integer-field"
+    value: "12"
+  - action: set_value
+    selector: "#long-field"
+    value: "1234567890123"
+  - action: set_value
+    selector: "#float-field"
+    value: "3.25"
+  - action: set_value
+    selector: "#double-field"
+    value: "6.5"
+  - action: set_value
+    selector: "#single-radio"
+    value: "true"
+  - action: select_option
+    selector: "#radio-group"
+    index: "2"
+  - action: assert_value
+    selector: "#integer-field"
+    expected: "12"
+  - action: assert_value
+    selector: "#long-field"
+    expected: "1234567890123"
+  - action: assert_value
+    selector: "#float-field"
+    expected: "3.25"
+  - action: assert_value
+    selector: "#double-field"
+    expected: "6.5"
+  - action: assert_value
+    selector: "#single-radio"
+    expected: "true"
+  - action: assert_value
+    selector: "#radio-group"
+    expected: "2"

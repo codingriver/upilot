@@ -1,0 +1,15 @@
+name: "_90-negative-execute-command-invalid"
+description: |
+  Verifies that execute_command fails with an invalid command name.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: execute_command with invalid command should fail
+    action: execute_command
+    selector: "#command-input"
+    command: "NonExistentCommand"

@@ -1,0 +1,66 @@
+﻿
+# IDE / Editor
+.idea/
+.vscode/
+.vs/
+.fleet/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs & runtime artifacts
+/log/
+*.log
+temp_*.cs
+*.tmp
+
+# Reports & build artifacts
+/Reports/
+/artifacts/
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Unity generated folders
+Tests~/UnityUIFlowTest/[Ll]ibrary/
+Tests~/UnityUIFlowTest/[Tt]emp/
+Tests~/UnityUIFlowTest/[Oo]bj/
+Tests~/UnityUIFlowTest/[Bb]uild/
+Tests~/UnityUIFlowTest/[Bb]uilds/
+Tests~/UnityUIFlowTest/[Ll]ogs/
+Tests~/UnityUIFlowTest/[Ll]og/
+Tests~/UnityUIFlowTest/[Uu]ser[Ss]ettings/
+Tests~/UnityUIFlowTest/[Mm]emory[Cc]aptures/
+Tests~/UnityUIFlowTest/[Rr]ecordings/
+
+# Generated project files
+Tests~/UnityUIFlowTest/*.csproj
+Tests~/UnityUIFlowTest/*.unityproj
+Tests~/UnityUIFlowTest/*.sln
+Tests~/UnityUIFlowTest/*.suo
+Tests~/UnityUIFlowTest/*.tmp
+Tests~/UnityUIFlowTest/*.user
+Tests~/UnityUIFlowTest/*.userprefs
+Tests~/UnityUIFlowTest/*.pidb
+Tests~/UnityUIFlowTest/*.booproj
+Tests~/UnityUIFlowTest/*.svd
+Tests~/UnityUIFlowTest/*.pdb
+Tests~/UnityUIFlowTest/*.mdb
+Tests~/UnityUIFlowTest/*.opendb
+Tests~/UnityUIFlowTest/*.VC.db
+
+# Crash reports & cache
+Tests~/UnityUIFlowTest/*.stacktrace
+Tests~/UnityUIFlowTest/sysinfo.txt
+
+# Keep (do not ignore)
+!.github/
+!.github/**
+!.gitignore
+!.unityuiflow.json
+Tests~/UnityUIFlowTest/Packages/packages-lock.json

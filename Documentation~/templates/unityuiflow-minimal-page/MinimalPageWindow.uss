@@ -1,0 +1,60 @@
+.page-root {
+    flex-grow: 1;
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 16px;
+    padding-bottom: 16px;
+    background-color: rgb(245, 246, 248);
+}
+
+.page-panel {
+    flex-direction: column;
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    background-color: rgb(255, 255, 255);
+    border-left-width: 1px;
+    border-right-width: 1px;
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-color: rgb(196, 200, 206);
+    border-right-color: rgb(196, 200, 206);
+    border-top-color: rgb(196, 200, 206);
+    border-bottom-color: rgb(196, 200, 206);
+}
+
+.page-input {
+    margin-bottom: 8px;
+}
+
+.page-row {
+    flex-direction: row;
+    margin-bottom: 8px;
+}
+
+.page-button {
+    margin-right: 8px;
+}
+
+.page-button-primary {
+    unity-font-style: bold;
+}
+
+.page-status {
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+.page-toast-host {
+    min-height: 28px;
+}
+
+.page-toast {
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    background-color: rgb(40, 148, 84);
+    color: rgb(255, 255, 255);
+}

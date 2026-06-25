@@ -1,0 +1,15 @@
+name: "65-advanced-controls-scroller-split"
+fixture:
+  host_window:
+    type: UnityUIFlow.AdvancedControlsWindow
+    reopen_if_open: true
+steps:
+  - action: page_scroller
+    selector: '#standalone-scroller'
+    direction: 'down'
+    pages: '2'
+    page_size: '7.5'
+  - action: set_split_view_size
+    selector: '#workspace-split'
+    pane: '0'
+    size: '220'

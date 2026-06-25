@@ -1,0 +1,32 @@
+name: "84-loop-multi-step"
+description: |
+  Tests repeat_while with multiple steps per iteration and max_iterations exit.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Multi-step loop with max_iterations exit
+    repeat_while:
+      condition:
+        exists: "#login-button"
+      max_iterations: 3
+      steps:
+        - name: Assert button visible
+          action: assert_visible
+          selector: "#login-button"
+
+        - name: Assert status label present
+          action: assert_text_contains
+          selector: "#status-label"
+          expected: "Idle"
+
+        - name: Short wait
+          action: wait
+          duration: "50ms"
+
+  - name: Assert final state stable
+    action: assert_visible
+    selector: "#login-button"

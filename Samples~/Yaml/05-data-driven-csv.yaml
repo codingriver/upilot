@@ -1,0 +1,32 @@
+name: "05-data-driven-csv"
+description: Covers CSV-driven rows with fixture setup and teardown.
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCsvLoginWindow
+    reopen_if_open: true
+  setup:
+    - name: Reset before row
+      action: click
+      selector: "#reset-button"
+  teardown:
+    - name: Reset after row
+      action: click
+      selector: "#reset-button"
+data:
+  from_csv: example-users.csv
+steps:
+  - name: Fill username {{ username }}
+    action: type_text_fast
+    selector: "#username-input"
+    value: "{{ username }}"
+  - name: Fill password
+    action: type_text_fast
+    selector: "#password-input"
+    value: "{{ password }}"
+  - name: Submit row
+    action: click
+    selector: "#login-button"
+  - name: Assert row result
+    action: assert_text
+    selector: "#status-label"
+    expected: "{{ expected }}"

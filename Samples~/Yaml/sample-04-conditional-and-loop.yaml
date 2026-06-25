@@ -1,0 +1,30 @@
+name: "sample-04-conditional-and-loop"
+fixture:
+  host_window:
+    type: UnityUIFlow.SampleLoginWindow
+    reopen_if_open: true
+steps:
+  - name: Maybe click reset when present
+    action: click
+    selector: "#reset-button"
+    if:
+      exists: "#reset-button"
+  - name: Click save
+    action: click
+    selector: "#save-button"
+  - name: Toast becomes visible
+    action: assert_visible
+    selector: "#toast-message"
+    timeout: "5s"
+  - name: Wait until toast disappears
+    repeat_while:
+      condition:
+        exists: "#toast-message"
+      max_iterations: 40
+      steps:
+        - action: wait
+          duration: "50ms"
+  - name: Toast hidden
+    action: assert_not_visible
+    selector: "#toast-message"
+    timeout: "2s"

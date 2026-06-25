@@ -1,0 +1,10 @@
+name: "_96-negative-select-tab-invalid"
+description: Expects failure when selecting tab with invalid label.
+fixture:
+  host_window:
+    type: ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - action: select_tab
+    selector: "#main-tab-view"
+    label: "NonExistentTab"

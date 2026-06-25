@@ -1,0 +1,28 @@
+name: "102-if-nested-loop"
+description: Covers if block containing repeat_while with wait steps.
+fixture:
+  host_window:
+    type: ExampleConditionalLoopWindow
+    reopen_if_open: true
+steps:
+  - name: Click save to show toast
+    action: click
+    selector: "#save-button"
+  - name: Wait for toast
+    action: wait_for_element
+    selector: "#toast-message"
+    timeout: "3000ms"
+  - name: Wait while toast exists
+    if:
+      exists: "#toast-message"
+    repeat_while:
+      condition:
+        exists: "#toast-message"
+      max_iterations: 10
+      steps:
+        - name: Wait for toast to disappear
+          action: wait
+          duration: "800ms"
+  - name: Assert toast is gone
+    action: assert_not_visible
+    selector: "#toast-message"

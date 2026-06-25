@@ -1,0 +1,23 @@
+name: "02-data-driven-csv"
+fixture:
+  host_window:
+    type: UnityUIFlow.SampleLoginWindow
+    reopen_if_open: true
+data:
+  from_csv: users.csv
+steps:
+  - name: Fill username {{ username }}
+    action: type_text_fast
+    selector: "#username-input"
+    value: "{{ username }}"
+  - name: Fill password
+    action: type_text_fast
+    selector: "#password-input"
+    value: "{{ password }}"
+  - name: Click login
+    action: click
+    selector: "#login-button"
+  - name: Assert welcome
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "{{ expected }}"

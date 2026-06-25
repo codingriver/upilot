@@ -1,0 +1,14 @@
+name: "_85-negative-read-breadcrumbs-missing"
+description: |
+  Verifies that read_breadcrumbs fails when the target element does not exist.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: read_breadcrumbs on non-existent element should fail
+    action: read_breadcrumbs
+    selector: "#nonexistent-breadcrumbs"

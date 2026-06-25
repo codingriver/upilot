@@ -1,0 +1,114 @@
+name: "99-imgui-example"
+description: |
+  Demonstrates IMGUI automation capabilities using imgui_* actions.
+  Tests a simple IMGUI editor window with buttons, text fields,
+  toggles, popups, sliders, labels, hover, right-click, and keyboard input.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ImguiExampleWindow
+    reopen_if_open: true
+
+steps:
+  - name: Wait for window to initialize
+    action: wait
+    duration: "2s"
+
+  - name: Hover over Generate button
+    action: imgui_hover
+    selector: "gui(button, text=\"Generate\")"
+
+  - name: Focus project name field
+    action: imgui_focus
+    selector: "gui(textfield, control_name=\"project-name-field\")"
+
+  - name: Type project name
+    action: imgui_type
+    selector: "gui(textfield, control_name=\"project-name-field\")"
+    text: "MyTestProject"
+
+  - name: Read value from text field
+    action: imgui_read_value
+    selector: "gui(textfield, control_name=\"project-name-field\")"
+    bag_key: "project_name"
+
+  - name: Toggle feature on
+    action: imgui_click
+    selector: "gui(toggle, control_name=\"feature-toggle\")"
+
+  - name: Assert toggle value (best-effort)
+    action: imgui_assert_value
+    selector: "gui(toggle, control_name=\"feature-toggle\")"
+    expected: "unknown"
+
+  - name: Select High Quality
+    action: imgui_select_option
+    selector: "gui(dropdown, control_name=\"quality-popup\")"
+    index: 2
+    field_name: "_qualityIndex"
+
+  - name: Read selected quality
+    action: imgui_read_value
+    selector: "gui(dropdown, control_name=\"quality-popup\")"
+    bag_key: "quality_level"
+
+  - name: Click Generate
+    action: imgui_click
+    selector: "gui(button, text=\"Generate\")"
+
+  - name: Scroll log output area
+    action: imgui_scroll
+    selector: "gui(label, text=\"Log Output\")"
+    delta: -240
+
+  - name: Assert status after generate
+    action: imgui_assert_text
+    selector: "gui(label, control_name=\"status-label\")"
+    text: "Status: Generated: MyTestProject, Quality=High, Scale=1.00, DoubleClicks=0"
+
+  - name: Double click Generate button
+    action: imgui_double_click
+    selector: "gui(button, text=\"Generate\")"
+
+  - name: Assert status after double click
+    action: imgui_assert_text
+    selector: "gui(label, control_name=\"status-label\")"
+    text: "Status: Generated: MyTestProject, Quality=High, Scale=1.00, DoubleClicks=1"
+
+  - name: Assert Reset button visible
+    action: imgui_assert_visible
+    selector: "gui(button, text=\"Reset\")"
+
+  - name: Right click on Reset button
+    action: imgui_right_click
+    selector: "gui(button, text=\"Reset\")"
+
+  - name: Dismiss context menu with Escape
+    action: imgui_press_key
+    key: Escape
+
+  - name: Click Reset
+    action: imgui_click
+    selector: "gui(button, text=\"Reset\")"
+
+  - name: Assert status after reset
+    action: imgui_assert_text
+    selector: "gui(label, control_name=\"status-label\")"
+    text: "Status: Reset"
+
+  - name: Click text field for keyboard shortcut demo
+    action: imgui_click
+    selector: "gui(textfield, control_name=\"project-name-field\")"
+
+  - name: Select all with Ctrl+A
+    action: imgui_press_key_combination
+    keys: "Ctrl+A"
+
+  - name: Type replacement text
+    action: imgui_type
+    selector: "gui(textfield, control_name=\"project-name-field\")"
+    text: "ReplacedText"
+
+  - name: Capture final state
+    action: screenshot
+    tag: "imgui_example_final_state"

@@ -1,0 +1,10 @@
+name: "_100-negative-tab-view-invalid-index"
+description: Expects failure when select_tab index is out of range.
+fixture:
+  host_window:
+    type: ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - action: select_tab
+    selector: "#settings-tabs"
+    index: "99"

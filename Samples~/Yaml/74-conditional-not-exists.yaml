@@ -1,0 +1,42 @@
+name: "74-conditional-not-exists"
+description: |
+  Tests if condition with not_exists to skip steps when element is absent.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Click login only if toast does NOT exist
+    action: click
+    selector: "#login-button"
+    if:
+      not_exists: "#toast-message"
+
+  - name: Assert status after conditional click
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "Missing credentials"
+
+  - name: Skip typing if toast exists (it should not, so this runs)
+    action: type_text
+    selector: "#username-input"
+    value: "admin"
+    if:
+      not_exists: "#toast-message"
+
+  - name: Assert username typed
+    action: assert_text_contains
+    selector: "#username-input"
+    expected: "admin"
+
+  - name: Skip click on non-existent element using exists
+    action: click
+    selector: "#nonexistent-button"
+    if:
+      exists: "#nonexistent-button"
+
+  - name: Final state should still be valid
+    action: assert_visible
+    selector: "#login-button"

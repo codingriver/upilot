@@ -1,0 +1,7 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-press-key-root" class="example-root">
+        <ui:VisualElement name="example-press-key-panel" class="example-panel">
+            <ui:Label name="key-status" text="Key: none" class="example-status" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

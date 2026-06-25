@@ -1,0 +1,15 @@
+name: "_88-negative-set-slider-invalid"
+description: |
+  Verifies that set_slider fails when given an invalid non-numeric value.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: set_slider with invalid value should fail
+    action: set_slider
+    selector: "#volume-slider"
+    value: "abc"

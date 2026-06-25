@@ -1,0 +1,38 @@
+# 示例：UIToolkit ScrollView 滚动 + 按钮点击 + 断言（请按实际窗口标题与 name 修改）
+specVersion: "1"
+name: uitoolkit_scroll_and_click_example
+timeoutS: 180
+defaults:
+  targetWindow: "upilot"   # 改为你的 EditorWindow 标题
+
+setup:
+  - action: menu
+    menuPath: "upilot/upilot"
+  - action: wait
+    ms: 400
+
+steps:
+  # ScrollView：按 name 定位；mode=delta 向下滚动 200px（可多次）
+  - action: uitoolkit.scroll
+    elementName: "main-scroll"   # 改为你的 ScrollView.name
+    mode: delta
+    deltaX: 0
+    deltaY: 200
+  - action: wait
+    ms: 200
+
+  # 按钮：interactAction 使用 click
+  - action: uitoolkit.interact
+    elementName: "apply-button"   # 改为你的 Button.name
+    interactAction: click
+  - action: wait
+    ms: 150
+
+  - assert:
+      type: uitoolkit.query
+      nameFilter: "status-label"
+      expect:
+        minMatches: 1
+        textContains: "OK"
+
+teardown: []

@@ -1,0 +1,15 @@
+name: "_77-negative-assert-not-visible-timeout"
+description: |
+  Verifies that assert_not_visible fails with timeout when the element IS visible.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: assert_not_visible on visible element with short timeout should fail
+    action: assert_not_visible
+    selector: "#login-button"
+    timeout: "100ms"

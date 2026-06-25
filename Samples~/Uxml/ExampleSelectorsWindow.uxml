@@ -1,0 +1,13 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-selectors-root" class="example-root">
+        <ui:VisualElement name="example-selectors-panel" class="example-panel">
+            <ui:Label name="selector-status" text="Idle" class="example-status" />
+            <ui:VisualElement name="selector-list" class="example-panel">
+                <ui:Label name="selector-item-1" text="Overview" class="selector-item example-item" />
+                <ui:Label name="selector-item-2" text="Reports" class="selector-item example-item" />
+                <ui:Label name="selector-item-3" text="Settings" class="selector-item example-item" />
+            </ui:VisualElement>
+            <ui:Button name="inspect-button" text="Inspect" class="example-button" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

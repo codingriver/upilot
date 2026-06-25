@@ -1,0 +1,22 @@
+name: "05-custom-action-and-json"
+fixture:
+  host_window:
+    type: UnityUIFlow.SampleLoginWindow
+    reopen_if_open: true
+data:
+  from_json: users.json
+steps:
+  - name: Run custom login
+    action: custom_login
+    username_selector: "#username-input"
+    password_selector: "#password-input"
+    button_selector: "#login-button"
+    username: "{{ username }}"
+    password: "{{ password }}"
+  - name: Assert status contains expected
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "{{ expected }}"
+  - name: Capture custom login
+    action: screenshot
+    tag: "custom-login"

@@ -1,0 +1,8 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-wait-root" class="example-root">
+        <ui:VisualElement name="example-wait-panel" class="example-panel">
+            <ui:Button name="start-button" text="Start Wait" class="example-button" />
+            <ui:Label name="delayed-message" text="Pending" class="example-status" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

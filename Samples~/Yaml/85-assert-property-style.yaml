@@ -1,0 +1,46 @@
+name: "85-assert-property-style"
+description: |
+  Tests assert_property on element metadata and visibility properties
+  across different control types.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Assert element name property
+    action: assert_property
+    selector: "#enabled-toggle"
+    property: "name"
+    expected: "enabled-toggle"
+
+  - name: Assert element visible property
+    action: assert_property
+    selector: "#enabled-toggle"
+    property: "visible"
+    expected: "True"
+
+  - name: Assert IntegerField tabIndex property
+    action: assert_property
+    selector: "#integer-field"
+    property: "tabIndex"
+    expected: "0"
+
+  - name: Assert HelpBox text property
+    action: assert_property
+    selector: "#help-box"
+    property: "text"
+    expected: "Helpful message"
+
+  - name: Assert ProgressBar lowValue property
+    action: assert_property
+    selector: "#progress-bar"
+    property: "lowValue"
+    expected: "0"
+
+  - name: Assert ProgressBar highValue property
+    action: assert_property
+    selector: "#progress-bar"
+    property: "highValue"
+    expected: "100"

@@ -1,0 +1,14 @@
+name: "64-advanced-controls-bound-value"
+fixture:
+  host_window:
+    type: UnityUIFlow.AdvancedControlsWindow
+    reopen_if_open: true
+steps:
+  - action: set_bound_value
+    selector: '#property-title-field'
+    property: 'inspectorTitle'
+    value: 'Automated'
+  - action: assert_bound_value
+    selector: '#property-title-field'
+    property: 'inspectorTitle'
+    expected: 'Automated'

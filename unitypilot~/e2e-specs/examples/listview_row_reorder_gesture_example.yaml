@@ -1,0 +1,34 @@
+# BL-06：列表行重排 — 用 pointerSequence 在行 VisualElement 上 down→move→up。
+# 需业务列表项有稳定 name；坐标按实际 worldBound 调整。
+specVersion: "1"
+name: listview_row_reorder_gesture_example
+timeoutS: 180
+defaults:
+  targetWindow: "YourWindow"
+
+setup:
+  - action: wait
+    ms: 300
+
+steps:
+  - action: uitoolkit.pointerSequence
+    elementName: "list-row-0"
+    events:
+      - eventType: mousedown
+        mouseButton: 0
+        mouseX: 40
+        mouseY: 24
+      - eventType: mousemove
+        mouseX: 40
+        mouseY: 72
+      - eventType: mousemove
+        mouseX: 40
+        mouseY: 120
+      - eventType: mouseup
+        mouseButton: 0
+        mouseX: 40
+        mouseY: 120
+  - action: wait
+    ms: 200
+
+teardown: []

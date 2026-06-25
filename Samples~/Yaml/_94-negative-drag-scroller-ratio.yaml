@@ -1,0 +1,10 @@
+name: "_94-negative-drag-scroller-ratio"
+description: Expects failure when drag_scoller ratio is out of bounds.
+fixture:
+  host_window:
+    type: ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - action: drag_scroller
+    selector: "#standalone-scroller"
+    ratio: "1.5"

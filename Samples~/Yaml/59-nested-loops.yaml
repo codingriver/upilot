@@ -1,0 +1,24 @@
+name: "59-nested-loops"
+fixture:
+  host_window:
+    type: UnityUIFlow.SampleLoginWindow
+    reopen_if_open: true
+steps:
+  - action: click
+    selector: '#reset-button'
+  - action: type_text_fast
+    selector: '#username-input'
+    value: 'loop-user'
+  - name: Outer loop waiting for toast
+    repeat_while:
+      condition:
+        exists: '#toast-message'
+      max_iterations: 5
+      steps:
+        - action: wait
+          duration: '100ms'
+    if:
+      exists: '#toast-message'
+  - action: assert_text
+    selector: '#status-label'
+    expected: 'Idle'

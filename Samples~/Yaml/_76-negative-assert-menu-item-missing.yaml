@@ -1,0 +1,15 @@
+name: "_76-negative-assert-menu-item-missing"
+description: |
+  Verifies that assert_menu_item fails when the menu item does not exist.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: assert_menu_item with missing item should fail
+    action: assert_menu_item
+    selector: "#toolbar-menu"
+    item: "NonExistentItem"

@@ -1,0 +1,23 @@
+name: "81-open-popup-menu-modifiers"
+description: |
+  Tests open_popup_menu with modifiers parameter on ToolbarMenu.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: Open popup menu with shift modifier
+    action: open_popup_menu
+    selector: "#toolbar-menu"
+    modifiers: "shift"
+
+  - name: Dismiss popup menu with Escape
+    action: press_key
+    key: Escape
+
+  - name: Assert toolbar status still idle after dismiss
+    action: assert_text_contains
+    selector: "#toolbar-status"
+    expected: "Toolbar: idle"

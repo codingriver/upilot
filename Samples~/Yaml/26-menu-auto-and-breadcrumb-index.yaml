@@ -1,0 +1,25 @@
+name: "26-menu-auto-and-breadcrumb-index"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: navigate_breadcrumb
+    selector: "#toolbar-breadcrumbs"
+    index: "0"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: breadcrumb-home"
+  - action: menu_item
+    selector: "#toolbar-menu"
+    kind: "auto"
+    mode: "assert_enabled"
+    item: "Refresh"
+  - action: menu_item
+    selector: "#toolbar-menu"
+    kind: "auto"
+    mode: "select"
+    item: "Reset"
+  - action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: reset"

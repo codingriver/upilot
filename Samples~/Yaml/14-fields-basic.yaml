@@ -1,0 +1,50 @@
+name: "14-fields-basic"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: select_option
+    selector: "#choice-dropdown"
+    value: "Beta"
+  - action: set_value
+    selector: "#enabled-toggle"
+    value: "true"
+  - action: select_option
+    selector: "#mode-enum"
+    value: "Advanced"
+  - action: select_option
+    selector: "#permissions-flags"
+    indices: "0,2"
+  - action: select_option
+    selector: "#feature-mask"
+    indices: "0,2"
+  - action: select_option
+    selector: "#quick-popup"
+    value: "South"
+  - action: set_slider
+    selector: "#volume-slider"
+    value: "7.5"
+  - action: set_slider
+    selector: "#level-slider"
+    value: "4"
+  - action: set_slider
+    selector: "#range-slider"
+    min_value: "25"
+    max_value: "40"
+  - action: assert_value
+    selector: "#choice-dropdown"
+    expected: "Beta"
+  - action: assert_value
+    selector: "#enabled-toggle"
+    expected: "true"
+  - action: assert_value
+    selector: "#mode-enum"
+    expected: "Advanced"
+  - action: assert_value
+    selector: "#quick-popup"
+    expected: "South"
+  - action: assert_property
+    selector: "#volume-slider"
+    property: "value"
+    expected: "7.5"

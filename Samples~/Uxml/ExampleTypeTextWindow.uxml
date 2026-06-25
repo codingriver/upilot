@@ -1,0 +1,7 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-type-text-root" class="example-root">
+        <ui:VisualElement name="example-type-text-panel" class="example-panel">
+            <ui:TextField name="type-text-input" label="Type Slowly" class="example-input" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

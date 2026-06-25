@@ -1,0 +1,20 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="sample-login-root" class="window-root">
+        <ui:VisualElement name="login-panel" class="panel">
+            <ui:TextField name="username-input" label="Username" class="text-input" />
+            <ui:TextField name="password-input" label="Password" class="text-input" is-password-field="true" />
+            <ui:VisualElement name="button-row" class="button-row">
+                <ui:Button name="login-button" text="Login" tooltip="Login" class="btn primary" />
+                <ui:Button name="reset-button" text="Reset" class="btn" />
+                <ui:Button name="save-button" text="Save" tooltip="Save" class="btn" />
+            </ui:VisualElement>
+            <ui:Label name="status-label" text="Idle" class="status" />
+            <ui:Label name="toast-message" text="Saved" class="toast" />
+            <ui:VisualElement name="menu-list" class="menu">
+                <ui:Label name="menu-item-1" text="Dashboard" class="item" />
+                <ui:Label name="menu-item-2" text="Reports" class="item" />
+                <ui:Label name="menu-item-3" text="Settings" class="item" />
+            </ui:VisualElement>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

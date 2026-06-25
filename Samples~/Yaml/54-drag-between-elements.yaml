@@ -1,0 +1,13 @@
+name: "54-drag-between-elements"
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: drag
+    from: "#gesture-drag-target"
+    to: "#gesture-drag-target"
+    duration: "64ms"
+  - action: assert_text_contains
+    selector: "#gesture-status"
+    expected: "completed"

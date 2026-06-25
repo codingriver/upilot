@@ -1,0 +1,22 @@
+# BL-04：沿滚动条轨道拖拽 thumb（指针路径），与直接改 scrollOffset 语义不同。
+# 若工程无 main-scroll，请改为 dump/query 得到的 ScrollView.name。
+specVersion: "1"
+name: scrollbar_drag_example
+timeoutS: 120
+defaults:
+  targetWindow: "upilot"
+
+setup:
+  - action: menu
+    menuPath: "upilot/upilot"
+  - action: wait
+    ms: 400
+
+steps:
+  - action: uitoolkit.scrollbar.drag
+    scrollViewElementName: "main-scroll"
+    scrollbarAxis: "vertical"
+    normalizedThumbPosition: 0.35
+    dragSteps: 6
+
+teardown: []

@@ -1,0 +1,15 @@
+name: "09-hover"
+description: Covers the hover action.
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleHoverWindow
+    reopen_if_open: true
+steps:
+  - name: Hover target
+    action: hover
+    selector: "#hover-box"
+    duration: "50ms"
+  - name: Assert hover state
+    action: assert_text
+    selector: "#hover-status"
+    expected: "Hover: active"

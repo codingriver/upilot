@@ -1,0 +1,31 @@
+# 模板：列表行拖拽（重排/拖入）— 多段 mousemove 插值。
+specVersion: "1"
+name: list_row_drag_gesture_template
+timeoutS: 180
+defaults:
+  targetWindow: "YourWindow"
+
+setup: []
+
+steps:
+  - action: uitoolkit.pointerSequence
+    elementName: "draggable-row"
+    events:
+      - eventType: mousedown
+        mouseButton: 0
+        mouseX: 50
+        mouseY: 20
+      - eventType: mousemove
+        mouseX: 50
+        mouseY: 60
+      - eventType: mousemove
+        mouseX: 50
+        mouseY: 100
+      - eventType: mouseup
+        mouseButton: 0
+        mouseX: 50
+        mouseY: 100
+  - action: wait
+    ms: 200
+
+teardown: []

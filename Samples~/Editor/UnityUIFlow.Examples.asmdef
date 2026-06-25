@@ -1,0 +1,24 @@
+{
+    "name": "UnityUIFlow.Examples",
+    "rootNamespace": "UnityUIFlow.Examples",
+    "references": [
+        "UnityUIFlow",
+        "UnityPilot.UIFlowBridge",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": true,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "UNITY_6000_0_OR_NEWER",
+        "UNITYPILOT_ENABLE_UIFLOW"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

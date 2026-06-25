@@ -1,0 +1,49 @@
+name: "89-set-slider-boundary"
+description: |
+  Tests set_slider at min and max boundary values for both Slider and SliderInt.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Set Slider to minimum boundary
+    action: set_slider
+    selector: "#volume-slider"
+    value: "0"
+
+  - name: Assert Slider at min
+    action: assert_value
+    selector: "#volume-slider"
+    expected: "0"
+
+  - name: Set Slider to maximum boundary
+    action: set_slider
+    selector: "#volume-slider"
+    value: "10"
+
+  - name: Assert Slider at max
+    action: assert_value
+    selector: "#volume-slider"
+    expected: "10"
+
+  - name: Set SliderInt to minimum boundary
+    action: set_slider
+    selector: "#level-slider"
+    value: "0"
+
+  - name: Assert SliderInt at min
+    action: assert_value
+    selector: "#level-slider"
+    expected: "0"
+
+  - name: Set SliderInt to maximum boundary
+    action: set_slider
+    selector: "#level-slider"
+    value: "5"
+
+  - name: Assert SliderInt at max
+    action: assert_value
+    selector: "#level-slider"
+    expected: "5"

@@ -1,0 +1,3 @@
+username,password,expected
+alice,secret,Welcome alice
+bob,123456,Welcome bob

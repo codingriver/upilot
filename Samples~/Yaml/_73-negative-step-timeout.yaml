@@ -1,0 +1,15 @@
+name: "_73-negative-step-timeout"
+description: |
+  Verifies that a step fails with timeout when action duration exceeds step timeout.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Wait longer than step timeout should fail
+    action: wait
+    duration: "5s"
+    timeout: "100ms"

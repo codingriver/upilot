@@ -1,0 +1,31 @@
+name: "80-wait-boundary-durations"
+description: |
+  Tests wait action with boundary duration values including zero and normal values.
+
+fixture:
+  host_window:
+    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Wait zero milliseconds
+    action: wait
+    duration: "0ms"
+
+  - name: Assert window still functional after zero wait
+    action: assert_visible
+    selector: "#login-button"
+
+  - name: Wait one second
+    action: wait
+    duration: "1s"
+
+  - name: Type after wait
+    action: type_text
+    selector: "#username-input"
+    value: "boundary_test"
+
+  - name: Assert text entered
+    action: assert_text_contains
+    selector: "#username-input"
+    expected: "boundary_test"

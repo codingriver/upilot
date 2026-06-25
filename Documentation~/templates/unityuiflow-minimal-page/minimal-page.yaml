@@ -1,0 +1,45 @@
+name: Minimal Page Smoke
+description: Minimal UnityUIFlow smoke test for a new UIToolkit page.
+fixture:
+  host_window:
+    type: YourCompany.YourFeature.MinimalPageWindow
+    reopen_if_open: true
+steps:
+  - name: Fill username
+    action: type_text_fast
+    selector: "#username-input"
+    value: "alice"
+
+  - name: Fill password
+    action: type_text_fast
+    selector: "#password-input"
+    value: "secret"
+
+  - name: Submit form
+    action: click
+    selector: "#submit-button"
+
+  - name: Assert welcome text
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "alice"
+
+  - name: Assert toast visible
+    action: assert_visible
+    selector: "#toast-message"
+    timeout: "1s"
+
+  - name: Wait until toast removed
+    repeat_while:
+      condition:
+        exists: "#toast-message"
+      max_iterations: 20
+      steps:
+        - name: Wait a small interval
+          action: wait
+          duration: "50ms"
+
+  - name: Assert toast hidden
+    action: assert_not_visible
+    selector: "#toast-message"
+    timeout: "500ms"
