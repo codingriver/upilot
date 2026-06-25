@@ -131,7 +131,7 @@ UnityPilot MCP — Windows 离线安装包
 
 三、Unity 插件
   在 Unity 工程的 Packages/manifest.json 中添加 UPM 依赖（与仓库 README 一致），例如：
-  "io.github.codingriver.unitypilot-editor": "https://github.com/codingriver/unitypilot.git?path=/unitypilot-editor"
+  "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git"
   Unity 菜单中启用 UnityPilot（勾选）
 
 四、验证
@@ -168,7 +168,7 @@ UnityPilot MCP — macOS 离线安装包
 
 三、Unity 插件
   在 Unity 工程的 Packages/manifest.json 中添加 UPM 依赖，例如：
-  "io.github.codingriver.unitypilot-editor": "https://github.com/codingriver/unitypilot.git?path=/unitypilot-editor"
+  "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git"
   Unity 菜单中启用 UnityPilot（勾选）
 
 四、验证

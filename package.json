@@ -4,6 +4,12 @@
   "displayName": "upilot",
   "description": "Open-source Unity Editor automation bridge for AI agents and MCP clients, with optional UIFlow YAML automation.",
   "unity": "2022.3",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codingriver/upilot.git"
+  },
+  "documentationUrl": "https://github.com/codingriver/upilot#readme",
+  "changelogUrl": "https://github.com/codingriver/upilot/blob/main/CHANGELOG.md",
   "dependencies": {},
   "keywords": [
     "upilot",
@@ -19,6 +25,6 @@
   ],
   "author": {
     "name": "Codingriver",
-    "url": "https://github.com/codingriver"
+    "url": "https://github.com/codingriver/upilot"
   }
 }

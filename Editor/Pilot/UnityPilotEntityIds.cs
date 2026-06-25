@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// UnityPilot Editor - https://github.com/codingriver/unitypilot
+// UnityPilot Editor - https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 // Unity 6.3+: Object.GetInstanceID / EditorUtility.InstanceIDToObject are
