@@ -147,11 +147,28 @@ These remain intentionally for source and script compatibility while the public 
 ## Documentation
 
 - Chinese README: `README.zh-CN.md`
-- upilot MCP server details: `unitypilot~/README.md`
+- Changelog: `CHANGELOG.md`
+- Chinese changelog: `CHANGELOG.zh-CN.md`
+- License: `LICENSE.md`
+- Third-party notices: `NOTICE.md`
+- upilot MCP server development: `unitypilot~/DEVELOPMENT.md`
+- upilot MCP server development (Chinese): `unitypilot~/DEVELOPMENT.zh-CN.md`
 - UIFlow guide: `Documentation~/UIFlow.md`
 - UIFlow Chinese guide: `Documentation~/UIFlow.zh-CN.md`
 - Agent/MCP execution rules: `Documentation~/03-UnityUIFlow-Agent-MCP测试强制规范.md`
 
 ## License
 
-See `LICENSE` for the main project terms. Embedded third-party components keep their original licenses.
+See `LICENSE.md` for the main project terms and `NOTICE.md` for third-party component notices. Embedded third-party components keep their original licenses.
+
+## Embedded MonoHook and unsafe code
+
+This package includes a copy of the core [MonoHook](https://github.com/Misaka-Mikoto-Tech/MonoHook) sources under `Editor/Plugins/MonoHook/`. MonoHook is MIT licensed and is used inside the Unity Editor to hook managed methods at runtime.
+
+- **Unsafe code**: MonoHook requires C# `unsafe` code. The required assemblies enable this through the `allowUnsafeCode` option in their `.asmdef` files, including `Editor/Plugins/MonoHook/MonoHook.asmdef` and editor assemblies that consume the hook support.
+- **Native plugin**: `Editor/Plugins/MonoHook/Plugins/` includes the macOS `libMonoHookUtils_OSX.dylib` and `Utils.cpp`, matching the upstream implementation.
+- **Usage boundary**: Editor scripts that need hook support can reference the `MonoHook` namespace, such as `MethodHook`. Keep product logic decoupled from MonoHook, and revalidate hook targets after upgrading Unity minor versions.
+
+When `allowUnsafeCode` is enabled, Unity allows that assembly to compile pointer and unmanaged-memory access code. This is required for MonoHook to work. Disabling the option tightens the assembly boundary, but any source that depends on `unsafe` code will fail to compile and MonoHook-based IMGUI/Editor method interception will be unavailable. Leave it enabled unless those hook features are intentionally removed.
+
+See `NOTICE.md` for the third-party component notice.

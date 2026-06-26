@@ -147,7 +147,24 @@ steps:
 ## 文档
 
 - 英文 README：`README.md`
-- upilot MCP server 说明：`unitypilot~/README.md`
+- 更新日志：`CHANGELOG.md`
+- 中文更新日志：`CHANGELOG.zh-CN.md`
+- 许可证：`LICENSE.md`
+- 第三方组件声明：`NOTICE.md`
+- upilot MCP server 开发文档：`unitypilot~/DEVELOPMENT.md`
+- upilot MCP server 中文开发文档：`unitypilot~/DEVELOPMENT.zh-CN.md`
 - UIFlow 使用指南：`Documentation~/UIFlow.zh-CN.md`
 - UIFlow 英文指南：`Documentation~/UIFlow.md`
 - Agent/MCP 执行规则：`Documentation~/03-UnityUIFlow-Agent-MCP测试强制规范.md`
+
+## MonoHook 开源组件与不安全代码
+
+本项目内置了 [MonoHook](https://github.com/Misaka-Mikoto-Tech/MonoHook) 的核心源码拷贝，用于在 Unity Editor 内对托管方法做运行时 Hook。MonoHook 为 MIT License，相关源码位于 `Editor/Plugins/MonoHook/`。
+
+- **不安全代码**：MonoHook 依赖 C# `unsafe` 代码，当前由相关 `.asmdef` 文件的 `allowUnsafeCode` 选项启用，例如 `Editor/Plugins/MonoHook/MonoHook.asmdef` 和使用该能力的编辑器程序集。
+- **原生插件**：`Editor/Plugins/MonoHook/Plugins/` 中包含 macOS 用 `libMonoHookUtils_OSX.dylib` 与 `Utils.cpp`，与上游实现保持一致。
+- **用法边界**：需要 Hook 能力的 Editor 脚本可以引用 `MonoHook` 命名空间，例如 `MethodHook`；业务代码不应与 MonoHook 强耦合，升级 Unity 小版本后也应重新验证 Hook 目标方法是否仍适用。
+
+`allowUnsafeCode` 开启后，Unity 会允许对应程序集编译指针、非托管内存访问等 `unsafe` 代码，这是 MonoHook 这类底层 Hook 能力正常工作的前提。关闭该选项可以收紧程序集的安全边界，但依赖 `unsafe` 的源码会编译失败，MonoHook 相关的 IMGUI/Editor 方法拦截能力也将不可用。因此，除非确认不再使用这些 Hook 功能，否则不要关闭相关程序集的 `allowUnsafeCode`。
+
+第三方组件声明见 `NOTICE.md`。
