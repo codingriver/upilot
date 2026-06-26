@@ -11,7 +11,7 @@ UIFlow 面向：
 - 基于 UIToolkit 的 Unity EditorWindow。
 - 通过 `imgui_*` 动作覆盖的部分 IMGUI EditorWindow 工作流。
 - 本地 headed 可视化调试。
-- MCP 驱动的 Agent 验证流程。
+- MCP 驱动的自动化验证流程。
 
 UIFlow 不面向：
 
@@ -92,8 +92,6 @@ steps:
 | 报告 | 截图、Markdown 报告、JSON 报告、失败附件 |
 | IMGUI | `imgui_click`、`imgui_type`、`imgui_focus`、`imgui_scroll`、`imgui_select_option`、`imgui_press_key`、`imgui_assert_*`、`imgui_wait` |
 
-完整动作表见 `Documentation~/00-API速查与最佳实践.md`。
-
 ## 执行方式
 
 本地 headed 执行：
@@ -107,7 +105,7 @@ upilot/UIFlow/Test Runner
 MCP 驱动执行：
 
 - 使用 upilot MCP endpoint：`http://127.0.0.1:8011/mcp`。
-- Agent 需要验证 YAML 时，只通过 MCP 执行。
+- 需要自动化验证 YAML 时，通过 MCP 执行。
 - YAML MCP 验证必须使用 headed 模式。
 
 批量执行时需要分片。单次 UIFlow batch 不要超过 15 个 YAML 文件。
@@ -132,10 +130,7 @@ Reports/upilot/UIFlowMcp
 - 窗口打开或 `PrepareForAutomatedTest()` 执行时要重置页面状态。
 - 动态 UI 先 `wait_for_element`，再执行断言。
 
-页面接入细节见：
-
-- `Documentation~/01-UnityUIFlow-UXML-USS自动化开发规范.md`
-- `Documentation~/02-UnityUIFlow-新页面接入最小模板.md`
+`Documentation~/templates/unityuiflow-minimal-page/` 提供了最小页面接入示例。
 
 ## 已知边界
 
@@ -148,14 +143,7 @@ UIFlow V1 不宣称完整支持：
 - `PropertyField` / `InspectorElement` 内所有生成子控件的直接语义自动化。
 - 系统剪贴板、IME、多窗口协同、像素级视觉 diff。
 
-覆盖细节见：
-
-- `Documentation~/00-UIToolkit控件自动化覆盖与限制说明.md`
-- `Documentation~/00-IMGUI控件自动化覆盖与限制说明.md`
-
 ## 相关文档
 
 - upilot 根 README：`README.zh-CN.md`
 - UIFlow 英文指南：`Documentation~/UIFlow.md`
-- API 速查：`Documentation~/00-API速查与最佳实践.md`
-- Agent/MCP 执行规则：`Documentation~/03-UnityUIFlow-Agent-MCP测试强制规范.md`

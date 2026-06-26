@@ -8,8 +8,6 @@
 
 `upilot` 是 Unity package 与公开产品名。本目录中的 Python 代码提供 Unity package 使用的 MCP server。
 
-在重命名迁移期间，目录仍保留为 `unitypilot~/`，以兼容既有 Unity package 布局、脚本、已安装项目和旧集成。新的用户可见命令和文档应使用 `upilot` 命名。
-
 Python server 负责：
 
 - 通过 stdio 或 Streamable HTTP 暴露 MCP tools；
@@ -22,7 +20,6 @@ Python server 负责：
 ```text
 unitypilot~/
   run_upilot_mcp.py          # 推荐的源码启动入口。
-  run_unitypilot_mcp.py      # 兼容旧命名的启动入口。
   pyproject.toml             # Python 包元数据和 console scripts。
   requirements.txt           # 源码运行所需依赖。
   mcp.example.json           # 本地 MCP client 配置示例。
@@ -83,7 +80,6 @@ python -m pip install -e .[dev]
 
 - `upilot`
 - `upilot-mcp`
-- `unitypilot-mcp` 旧兼容别名
 
 ## 从源码运行
 
@@ -103,12 +99,6 @@ http://127.0.0.1:8011/mcp
 
 ```bash
 python run_upilot_mcp.py --transport stdio --port 8765
-```
-
-旧兼容启动入口：
-
-```bash
-python run_unitypilot_mcp.py --transport http --http-port 8011 --port 8765
 ```
 
 开发模式安装后的 console script 启动方式：
@@ -197,11 +187,9 @@ python -m pytest
 ## 开发约定
 
 - 保持 `run_upilot_mcp.py` 作为推荐源码启动入口。
-- 保留 `run_unitypilot_mcp.py` 和 `unitypilot-mcp` 兼容别名，除非有明确迁移计划移除它们。
 - MCP HTTP 路径保持为 `/mcp`。
 - WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint。
-- 重命名期间优先新增兼容别名，避免破坏旧 client。
-- 不要随意重命名 Python module `unitypilot_mcp`；已安装项目和脚本可能仍在导入它。
+- 不要随意重命名 Python module `unitypilot_mcp`；包元数据和源码布局依赖它。
 
 ## 排障
 

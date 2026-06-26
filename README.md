@@ -1,5 +1,7 @@
 # upilot
 
+中文文档：[README.zh-CN.md](README.zh-CN.md)
+
 upilot is an open-source Unity Editor automation bridge for AI agents and MCP clients.
 It lets external tools inspect, control, and diagnose the Unity Editor through a local MCP server.
 
@@ -18,7 +20,7 @@ UIFlow is included as an optional add-on for YAML-driven EditorWindow UI automat
 | Capability | Requirement | Notes |
 | --- | --- | --- |
 | upilot core bridge | Unity `2022.3` or newer | Compiled by default. |
-| upilot MCP server | Python `3.11` or newer | Bundled under `unitypilot~/` during the rename. |
+| upilot MCP server | Python `3.11` or newer | Bundled with the package. |
 | UIFlow YAML automation | Unity `6000.0` or newer | Requires `UNITYPILOT_ENABLE_UIFLOW`. |
 | Current validation project | Unity `6000.6.0a2` | See `Tests~/UnityUIFlowTest`. |
 
@@ -79,12 +81,6 @@ Configure MCP clients to use:
 }
 ```
 
-The legacy launcher remains available for compatibility:
-
-```bash
-python unitypilot~/run_unitypilot_mcp.py --transport http --http-port 8011 --port 8765
-```
-
 ## UIFlow Add-On
 
 UIFlow automates Unity Editor `EditorWindow` UI with YAML test cases. It is not a Game View or Play Mode runtime UI test framework.
@@ -98,7 +94,7 @@ Supported capabilities:
 - Assertions and waits: visible, not visible, text, value, enabled state, property, element wait.
 - Screenshots and Markdown/JSON reports.
 - Selected IMGUI workflows through `imgui_*` actions.
-- Headed Test Runner for local visual debugging and MCP-driven runs for agent validation.
+- Headed Test Runner for local visual debugging and MCP-driven validation runs.
 
 Enable UIFlow with this scripting define symbol:
 
@@ -131,18 +127,10 @@ steps:
       text: "Login successful"
 ```
 
-Complex UIFlow usage, action details, selector rules, page authoring conventions, and automation limits are documented separately:
+Complex UIFlow usage, selector rules, page authoring conventions, and automation limits are documented separately:
 
 - `Documentation~/UIFlow.md`
 - `Documentation~/UIFlow.zh-CN.md`
-- `Documentation~/00-API速查与最佳实践.md`
-- `Documentation~/00-UIToolkit控件自动化覆盖与限制说明.md`
-- `Documentation~/00-IMGUI控件自动化覆盖与限制说明.md`
-
-## Compatibility Aliases
-
-During the rename, some internal C# namespaces, assembly names, Python module names, and legacy MCP tool aliases still contain `UnityPilot`, `unitypilot`, or `UnityUIFlow`.
-These remain intentionally for source and script compatibility while the public package, menu, panel, and MCP server identity move to `upilot`.
 
 ## Documentation
 
@@ -155,7 +143,6 @@ These remain intentionally for source and script compatibility while the public 
 - upilot MCP server development (Chinese): `unitypilot~/DEVELOPMENT.zh-CN.md`
 - UIFlow guide: `Documentation~/UIFlow.md`
 - UIFlow Chinese guide: `Documentation~/UIFlow.zh-CN.md`
-- Agent/MCP execution rules: `Documentation~/03-UnityUIFlow-Agent-MCP测试强制规范.md`
 
 ## License
 

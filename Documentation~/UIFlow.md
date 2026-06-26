@@ -10,7 +10,7 @@ UIFlow targets:
 
 - Unity Editor windows built with UIToolkit.
 - Selected IMGUI EditorWindow workflows through `imgui_*` actions.
-- Local headed debugging and MCP-driven agent validation.
+- Local headed debugging and MCP-driven validation.
 
 UIFlow does not target:
 
@@ -91,8 +91,6 @@ UIToolkit page authors should give every important interactive element a unique 
 | Reporting | screenshots, Markdown reports, JSON reports, failure attachments |
 | IMGUI | `imgui_click`, `imgui_type`, `imgui_focus`, `imgui_scroll`, `imgui_select_option`, `imgui_press_key`, `imgui_assert_*`, `imgui_wait` |
 
-For the full action table, see `Documentation~/00-API速查与最佳实践.md`.
-
 ## Execution Modes
 
 Headed local run:
@@ -106,7 +104,7 @@ Use this for visual debugging, highlighting, step mode, and inspecting selector 
 MCP-driven runs:
 
 - Use the upilot MCP server endpoint: `http://127.0.0.1:8011/mcp`.
-- Run YAML only through MCP when agent validation is required.
+- Run YAML through MCP when automated validation is required.
 - Keep headed mode enabled for YAML MCP verification.
 
 Batch runs should be chunked. Do not send more than 15 YAML files in a single UIFlow batch call.
@@ -131,7 +129,7 @@ For reliable automation:
 - Reset page state when the host window opens or `PrepareForAutomatedTest()` runs.
 - Use `wait_for_element` before assertions on dynamic UI.
 
-See `Documentation~/01-UnityUIFlow-UXML-USS自动化开发规范.md` and `Documentation~/02-UnityUIFlow-新页面接入最小模板.md` for page integration details.
+The template in `Documentation~/templates/unityuiflow-minimal-page/` provides a minimal page integration example.
 
 ## Known Boundaries
 
@@ -144,14 +142,7 @@ UIFlow V1 intentionally does not claim full coverage for:
 - Direct automation of every generated child inside `PropertyField` / `InspectorElement`.
 - System clipboard, IME, multi-window choreography, and pixel-level visual diffing.
 
-Detailed coverage notes:
-
-- `Documentation~/00-UIToolkit控件自动化覆盖与限制说明.md`
-- `Documentation~/00-IMGUI控件自动化覆盖与限制说明.md`
-
 ## Related Docs
 
 - Root upilot README: `README.md`
 - Chinese UIFlow guide: `Documentation~/UIFlow.zh-CN.md`
-- API quick reference: `Documentation~/00-API速查与最佳实践.md`
-- Agent/MCP rules: `Documentation~/03-UnityUIFlow-Agent-MCP测试强制规范.md`

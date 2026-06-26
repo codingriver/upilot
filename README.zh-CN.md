@@ -18,7 +18,7 @@ UIFlow 是随包提供的可选附属工具，用 YAML 驱动 Unity EditorWindow
 | 能力 | 要求 | 说明 |
 | --- | --- | --- |
 | upilot 核心桥接 | Unity `2022.3` 或更高 | 默认编译。 |
-| upilot MCP 服务 | Python `3.11` 或更高 | 当前仍放在 `unitypilot~/` 目录内以兼容旧布局。 |
+| upilot MCP 服务 | Python `3.11` 或更高 | 随包提供。 |
 | UIFlow YAML 自动化 | Unity `6000.0` 或更高 | 需要启用 `UNITYPILOT_ENABLE_UIFLOW`。 |
 | 当前验证工程 | Unity `6000.6.0a2` | 见 `Tests~/UnityUIFlowTest`。 |
 
@@ -79,12 +79,6 @@ MCP client 推荐配置：
 }
 ```
 
-旧入口仍保留用于兼容：
-
-```bash
-python unitypilot~/run_unitypilot_mcp.py --transport http --http-port 8011 --port 8765
-```
-
 ## UIFlow 附属工具
 
 UIFlow 用 YAML 描述 Unity Editor `EditorWindow` UI 测试流程，不面向 Game View，也不是 PlayMode Runtime UI 测试框架。
@@ -98,7 +92,7 @@ UIFlow 用 YAML 描述 Unity Editor `EditorWindow` UI 测试流程，不面向 G
 - 等待与断言：可见、不可见、文本、值、启用状态、属性、等待元素出现。
 - 截图、Markdown/JSON 报告和失败截图。
 - 通过 `imgui_*` 动作支持部分 IMGUI 工作流。
-- Headed Test Runner 可视化调试，以及 MCP 驱动的 Agent 验证。
+- Headed Test Runner 可视化调试，以及 MCP 驱动的自动化验证。
 
 启用 UIFlow 需要添加脚本宏：
 
@@ -131,18 +125,10 @@ steps:
       text: "Login successful"
 ```
 
-复杂 UIFlow 用法、动作参数、选择器规则、页面接入规范和自动化边界已经拆分到独立文档：
+复杂 UIFlow 用法、选择器规则、页面接入规范和自动化边界已经拆分到独立文档：
 
 - `Documentation~/UIFlow.md`
 - `Documentation~/UIFlow.zh-CN.md`
-- `Documentation~/00-API速查与最佳实践.md`
-- `Documentation~/00-UIToolkit控件自动化覆盖与限制说明.md`
-- `Documentation~/00-IMGUI控件自动化覆盖与限制说明.md`
-
-## 兼容策略
-
-这次迁移会把公开品牌、包名、菜单、面板和 MCP server identity 统一为 `upilot`。
-为了避免破坏已有脚本，内部 C# namespace、assembly 名称、Python module 名称，以及旧的 `UnityPilot` / `UnityUIFlow` / `unityuiflow` 工具别名会暂时保留。
 
 ## 文档
 
@@ -155,7 +141,6 @@ steps:
 - upilot MCP server 中文开发文档：`unitypilot~/DEVELOPMENT.zh-CN.md`
 - UIFlow 使用指南：`Documentation~/UIFlow.zh-CN.md`
 - UIFlow 英文指南：`Documentation~/UIFlow.md`
-- Agent/MCP 执行规则：`Documentation~/03-UnityUIFlow-Agent-MCP测试强制规范.md`
 
 ## MonoHook 开源组件与不安全代码
 

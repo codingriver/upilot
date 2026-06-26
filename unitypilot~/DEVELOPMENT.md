@@ -9,8 +9,6 @@ The English file is the default development document. The Chinese version is `DE
 
 `upilot` is the Unity package and public product name. The Python code in this directory provides the MCP server used by the Unity package.
 
-The directory is still named `unitypilot~/` during the rename so existing Unity package layouts, scripts, installed projects, and legacy integrations keep working. New user-facing commands and documentation should use `upilot` naming.
-
 The Python server:
 
 - exposes MCP tools over stdio or Streamable HTTP;
@@ -23,7 +21,6 @@ The Python server:
 ```text
 unitypilot~/
   run_upilot_mcp.py          # Preferred source launcher.
-  run_unitypilot_mcp.py      # Legacy-compatible launcher.
   pyproject.toml             # Python package metadata and console scripts.
   requirements.txt           # Runtime dependencies for source runs.
   mcp.example.json           # Example local MCP client config.
@@ -84,7 +81,6 @@ Editable installs expose these console scripts:
 
 - `upilot`
 - `upilot-mcp`
-- `unitypilot-mcp` legacy alias
 
 ## Run From Source
 
@@ -104,12 +100,6 @@ Stdio run for local-command MCP clients:
 
 ```bash
 python run_upilot_mcp.py --transport stdio --port 8765
-```
-
-Legacy launcher:
-
-```bash
-python run_unitypilot_mcp.py --transport http --http-port 8011 --port 8765
 ```
 
 Console script run after editable install:
@@ -198,11 +188,9 @@ Some tests start local server processes and bind ports. If a test fails because 
 ## Development Notes
 
 - Keep `run_upilot_mcp.py` as the preferred source launcher.
-- Keep `run_unitypilot_mcp.py` and `unitypilot-mcp` as compatibility aliases unless a migration plan explicitly removes them.
 - Keep the MCP HTTP path as `/mcp`.
 - Treat WebSocket `8765` as an internal Unity bridge port, not a client-facing MCP endpoint.
-- Prefer additive tool aliases during rename work so older clients continue to function.
-- Do not rename Python modules from `unitypilot_mcp` casually; installed projects and scripts may still import them.
+- Do not rename Python modules from `unitypilot_mcp` casually; the package metadata and source layout depend on them.
 
 ## Troubleshooting
 
