@@ -186,6 +186,7 @@ namespace codingriver.unity.pilot
         private readonly SemaphoreSlim             _sendLock          = new(1, 1);
         private readonly object                    _logLock           = new();
         private readonly List<BridgeLogEntry>      _logBuffer         = new(MaxLogEntries);
+        private readonly int                       _mainThreadId;
 
         // Module services (initialized in constructor after Router is available)
         private UnityPilotConsoleService    _consoleService;
@@ -219,6 +220,7 @@ namespace codingriver.unity.pilot
 
         private ClientWebSocket      _ws;
         private CancellationTokenSource _cts;
+        private Task                 _connectLoopTask;
         private string               _sessionId;
         private string               _mcpLabelFromServer = "";
         private string               _mcpHostFromServer = "";
@@ -241,6 +243,7 @@ namespace codingriver.unity.pilot
 
         private UnityPilotBridge()
         {
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             LoadEndpointFromEditorPrefs();
             _debugWireLogsEnabled = EditorPrefs.GetBool(DebugLogPrefsKey, false);
             _verboseLogsEnabled = EditorPrefs.GetBool(VerboseLogPrefsKey, false);
@@ -365,6 +368,28 @@ namespace codingriver.unity.pilot
 
         public string GetServerUrl() => $"ws://{_wsHost}:{_wsPort}";
 
+        private bool CurrentIsCompiling()
+        {
+            if (Thread.CurrentThread.ManagedThreadId != _mainThreadId)
+                return _compileService.IsCompiling;
+
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                _compileService.ClearStaleCompileBusy(
+                    "Unity is in PlayMode or changing PlayMode; script compilation is not available.",
+                    ignoreEditorCompiling: true);
+                return false;
+            }
+
+            return _compileService.IsCompiling || EditorApplication.isCompiling;
+        }
+
+        private bool IsPlayingOrWillChangePlaymode()
+        {
+            return Thread.CurrentThread.ManagedThreadId == _mainThreadId &&
+                   EditorApplication.isPlayingOrWillChangePlaymode;
+        }
+
         public BridgeStatus GetStatus() => new BridgeStatus
         {
             IsStarted           = _started,
@@ -372,7 +397,7 @@ namespace codingriver.unity.pilot
             IsAuthenticated     = _isAuthenticated,
             SessionId           = _sessionId ?? "",
             LastHeartbeatSentAt = _lastHeartbeatSentAt,
-            IsCompiling         = _compileService.IsCompiling,
+            IsCompiling         = CurrentIsCompiling(),
             LastErrorCount      = _compileService.LastErrorCount,
             PlayModeState       = _playInputService.CurrentPlayModeChangedPayload().state,
             McpLabel            = _mcpLabelFromServer ?? "",
@@ -407,7 +432,17 @@ namespace codingriver.unity.pilot
 
         public void EnsureStarted()
         {
-            if (_started) return;
+            if (_started)
+            {
+                if (IsConnectLoopAlive()) return;
+
+                Logger.LogWarning("SYSTEM", "Bridge marked started but connect loop is not alive; restarting loop.");
+                UnityPilotOperationTracker.Instance.RecordSystemEvent(
+                    "sys.bridge.loop.recover", "连接循环自愈",
+                    $"endpoint={GetServerUrl()} wsState={_ws?.State}");
+                StartConnectLoop();
+                return;
+            }
             if (Application.isBatchMode)
             {
                 Logger.LogWarning("SYSTEM", "Bridge startup skipped: batch mode is temporarily disabled.");
@@ -427,7 +462,7 @@ namespace codingriver.unity.pilot
             UnityPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.bridge.start", "Bridge启动",
                 $"sessionId={_sessionId} endpoint={GetServerUrl()}");
-            _ = ConnectLoopAsync(_cts.Token);
+            StartConnectLoop();
         }
 
         public void Stop()
@@ -451,6 +486,7 @@ namespace codingriver.unity.pilot
                 _isAuthenticated = false;
                 _lastHeartbeatSentAt = 0;
                 _connectFailureStreak = 0;
+                _connectLoopTask = null;
                 ClearMcpServerDisplayState();
                 UnityPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.stop", "Bridge停止",
@@ -461,6 +497,54 @@ namespace codingriver.unity.pilot
 
         private double _lastWatchdogCheck;
         private uint _connectFailureStreak;
+
+        private bool IsConnectLoopAlive()
+        {
+            return _connectLoopTask != null && !_connectLoopTask.IsCompleted && _cts != null && !_cts.IsCancellationRequested;
+        }
+
+        private void StartConnectLoop()
+        {
+            if (_cts == null || _cts.IsCancellationRequested)
+                _cts = new CancellationTokenSource();
+
+            _connectLoopTask = ConnectLoopAsync(_cts.Token);
+            _ = WatchConnectLoopAsync(_connectLoopTask);
+        }
+
+        private async Task WatchConnectLoopAsync(Task loopTask)
+        {
+            try
+            {
+                await loopTask.ConfigureAwait(false);
+                if (_started && _connectLoopTask == loopTask && !(_cts?.IsCancellationRequested ?? true))
+                {
+                    Logger.LogError("NETWORK", "WS connect loop exited unexpectedly while Bridge is still started.");
+                    UnityPilotOperationTracker.Instance.RecordSystemEvent(
+                        "sys.bridge.loop.dead", "连接循环异常退出",
+                        $"endpoint={GetServerUrl()} wsState={_ws?.State}",
+                        "error");
+                    _mainThreadQueue.Enqueue(() =>
+                    {
+                        if (_started && _connectLoopTask == loopTask)
+                            StartConnectLoop();
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("NETWORK", $"WS connect loop crashed: {ex}");
+                UnityPilotOperationTracker.Instance.RecordSystemEvent(
+                    "sys.bridge.loop.crash", "连接循环崩溃",
+                    ex.ToString(),
+                    "error");
+                _mainThreadQueue.Enqueue(() =>
+                {
+                    if (_started && _connectLoopTask == loopTask)
+                        StartConnectLoop();
+                });
+            }
+        }
 
         private void ProcessMainThreadQueue()
         {
@@ -978,7 +1062,16 @@ namespace codingriver.unity.pilot
             Logger.Log("COMPILE", $"收到 compile.request: requestId={requestId} id={id}");
 
             // Fast-path: already compiling
-            if (_compileService.IsCompiling)
+            if (IsPlayingOrWillChangePlaymode())
+            {
+                _compileService.ClearStaleCompileBusy(
+                    "compile.request received while Unity is in PlayMode.",
+                    ignoreEditorCompiling: true);
+                await SendErrorAsync(id, "EDITOR_IN_PLAY_MODE", "Unity 正在 PlayMode 或切换 PlayMode，不能触发脚本编译", token, "compile.request");
+                return;
+            }
+
+            if (CurrentIsCompiling())
             {
                 await SendErrorAsync(id, "EDITOR_BUSY", "编译进行中，请稍后重试", token, "compile.request");
                 return;
@@ -1014,6 +1107,7 @@ namespace codingriver.unity.pilot
             if (winner == timeoutTask)
             {
                 Logger.LogWarning("COMPILE", $"compile.request 超时 (120s): requestId={requestId}");
+                _compileService.ClearStaleCompileBusy("compile.request timed out before Unity reported compilation finished.");
                 await SendErrorAsync(id, "COMMAND_TIMEOUT", "编译超时", token, "compile.request");
                 return;
             }
@@ -1042,7 +1136,7 @@ namespace codingriver.unity.pilot
             if (timeoutMs < 1000) timeoutMs = 1000;
             if (timeoutMs > 600000) timeoutMs = 600000;
             opCtx?.Step("等待编译空闲", $"timeout={timeoutMs}ms");
-            Logger.Log("COMPILE", $"compile.wait 开始: timeout={timeoutMs}ms isCompiling={EditorApplication.isCompiling} id={id}");
+            Logger.Log("COMPILE", $"compile.wait 开始: timeout={timeoutMs}ms isCompiling={CurrentIsCompiling()} id={id}");
 
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var stop = false;
@@ -1050,7 +1144,7 @@ namespace codingriver.unity.pilot
             void PollIdle()
             {
                 if (stop) return;
-                if (!EditorApplication.isCompiling && !_compileService.IsCompiling)
+                if (!CurrentIsCompiling())
                 {
                     EditorApplication.update -= PollIdle;
                     tcs.TrySetResult(true);
@@ -1059,7 +1153,7 @@ namespace codingriver.unity.pilot
 
             EnqueueTracked(id, () =>
             {
-                if (!EditorApplication.isCompiling && !_compileService.IsCompiling)
+                if (!CurrentIsCompiling())
                 {
                     tcs.TrySetResult(true);
                     return;
@@ -1137,7 +1231,7 @@ namespace codingriver.unity.pilot
             var payload = new EditorStatePayload
             {
                 connected = true,
-                isCompiling = _compileService.IsCompiling,
+                isCompiling = CurrentIsCompiling(),
                 playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
                 activeScene = _activeSceneName,
             };
@@ -1310,7 +1404,7 @@ namespace codingriver.unity.pilot
             var payload = new EditorStatePayload
             {
                 connected = true,
-                isCompiling = _compileService.IsCompiling,
+                isCompiling = CurrentIsCompiling(),
                 playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
                 activeScene = _activeSceneName,
             };
@@ -1321,7 +1415,7 @@ namespace codingriver.unity.pilot
             // After reconnect, proactively send current compile errors snapshot.
             // Even if _lastErrors is empty (cleared by domain reload), this tells
             // the Python side there are no errors, overriding any stale cache.
-            if (!_compileService.IsCompiling)
+            if (!CurrentIsCompiling())
             {
                 var errorsPayload = _compileService.BuildLastCompileErrorsPayload();
                 await SendEventAsync(
@@ -1337,7 +1431,7 @@ namespace codingriver.unity.pilot
             var payload = new EditorStatePayload
             {
                 connected = true,
-                isCompiling = _compileService.IsCompiling,
+                isCompiling = CurrentIsCompiling(),
                 playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
                 activeScene = _activeSceneName,
             };
@@ -1358,6 +1452,15 @@ namespace codingriver.unity.pilot
         private void OnPlayModeStateChanged(PlayModeStateChange change)
         {
             Logger.Log("SYSTEM", $"PlayMode 状态变更: {change}");
+            if (change == PlayModeStateChange.ExitingEditMode ||
+                change == PlayModeStateChange.EnteredPlayMode ||
+                change == PlayModeStateChange.ExitingPlayMode)
+            {
+                _compileService.ClearStaleCompileBusy(
+                    $"PlayMode state changed: {change}",
+                    ignoreEditorCompiling: true);
+            }
+
             UnityPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.playmode.changed", "PlayMode状态变更",
                 $"state={change}");
@@ -1383,9 +1486,10 @@ namespace codingriver.unity.pilot
         private void OnBeforeAssemblyReload()
         {
             var focus = GetFocusStateString();
+            var isCompiling = CurrentIsCompiling();
             UnityPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.domain.reload.start", "Domain Reload开始",
-                $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 认证={(_isAuthenticated ? "是" : "否")} 编译={(_compileService.IsCompiling ? "是" : "否")}");
+                $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 认证={(_isAuthenticated ? "是" : "否")} 编译={(isCompiling ? "是" : "否")}");
             if (_ws?.State == WebSocketState.Open && _isAuthenticated)
             {
                 try
@@ -1393,7 +1497,7 @@ namespace codingriver.unity.pilot
                     var payload = new DomainReloadPayload
                     {
                         phase = "starting",
-                        isCompiling = _compileService.IsCompiling,
+                        isCompiling = isCompiling,
                         playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
                     };
                     // Synchronous send — we must complete before the domain unloads
@@ -1444,7 +1548,7 @@ namespace codingriver.unity.pilot
         private void OnCompilationStarted(object _)
         {
             _pipelineCompileStartUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            _pipelineCompileFromMcp = _compileService.IsCompiling && !string.IsNullOrEmpty(_compileService.LastRequestId);
+            _pipelineCompileFromMcp = _compileService.IsRequestCompileActive && !string.IsNullOrEmpty(_compileService.LastRequestId);
             _pipelineCompileStatusRequestId = _pipelineCompileFromMcp
                 ? _compileService.LastRequestId
                 : $"editor-{_pipelineCompileStartUtcMs}";
@@ -1599,7 +1703,7 @@ namespace codingriver.unity.pilot
         {
             try
             {
-                if (_compileService.IsCompiling)
+                if (CurrentIsCompiling())
                 {
                     Logger.Log("COMPILE", "Compile snapshot skipped: still compiling");
                     return;

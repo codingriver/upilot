@@ -23,6 +23,7 @@ class CommandDispatcher:
         "compile.request": 180000,
         "compile.wait": 660000,
         "compile.errors.get": 45000,
+        "playmode.set": 180000,
         "editor.delay": 150000,
         "test.run": 300000,
         "build.start": 600000,

@@ -1,49 +1,50 @@
-# UIFlow Guide
+# UIFlow 使用指南
 
-UIFlow is the optional UI automation add-on shipped with upilot. It runs YAML-defined tests against Unity Editor `EditorWindow` UI.
+UIFlow 是 upilot 随包提供的可选 UI 自动化附属工具。它用 YAML 描述测试步骤，目标是自动化 Unity Editor 中的 `EditorWindow` UI。
 
-Use this guide for UIFlow-specific setup, YAML authoring, action categories, execution modes, reports, and limits. The root `README.md` stays focused on upilot installation and basic usage.
+根目录 `README.md` 只介绍 upilot 的安装和基础使用；复杂的 UIFlow 用法放在本文档和相关专题文档中。
 
-## Scope
+## 适用范围
 
-UIFlow targets:
+UIFlow 面向：
 
-- Unity Editor windows built with UIToolkit.
-- Selected IMGUI EditorWindow workflows through `imgui_*` actions.
-- Local headed debugging and MCP-driven validation.
+- 基于 UIToolkit 的 Unity EditorWindow。
+- 通过 `imgui_*` 动作覆盖的部分 IMGUI EditorWindow 工作流。
+- 本地 headed 可视化调试。
+- MCP 驱动的自动化验证流程。
 
-UIFlow does not target:
+UIFlow 不面向：
 
-- Game View runtime UI.
-- Play Mode gameplay testing.
-- Pixel-level visual diffing.
-- General web/CSS/browser automation.
+- Game View Runtime UI。
+- Play Mode 游戏逻辑测试。
+- 像素级视觉 diff。
+- 通用 Web/CSS/浏览器自动化。
 
-## Requirements
+## 启用条件
 
-- Unity `6000.0` or newer.
-- Scripting define symbol: `UNITYPILOT_ENABLE_UIFLOW`.
-- Unity packages:
+- Unity `6000.0` 或更高。
+- 脚本宏：`UNITYPILOT_ENABLE_UIFLOW`。
+- Unity 包：
   - `com.unity.inputsystem`
   - `com.unity.ui`
   - `com.unity.ui.test-framework`
   - `com.unity.test-framework`
 
-On Unity 2022, keep UIFlow disabled. upilot core MCP tools still work without UIFlow.
+Unity 2022 中不要启用 UIFlow。upilot 核心 MCP 工具不依赖 UIFlow，仍可正常使用。
 
-## Enable UIFlow
+## 启用步骤
 
-1. Install upilot.
-2. Add `UNITYPILOT_ENABLE_UIFLOW` in **Project Settings > Player > Scripting Define Symbols**.
-3. Install the UIFlow dependency packages listed above.
-4. Let Unity recompile.
-5. Open:
+1. 安装 upilot。
+2. 在 **Project Settings > Player > Scripting Define Symbols** 中添加 `UNITYPILOT_ENABLE_UIFLOW`。
+3. 安装上面列出的 UIFlow 依赖包。
+4. 等待 Unity 重新编译。
+5. 打开菜单：
 
 ```text
 upilot/UIFlow/Test Runner
 ```
 
-## Minimal YAML
+## 最小 YAML 示例
 
 ```yaml
 fixture:
@@ -65,84 +66,84 @@ steps:
       text: "Login successful"
 ```
 
-Prefer `.yaml` file extensions. `.yml` is not the supported convention.
+推荐使用 `.yaml` 扩展名；当前约定不使用 `.yml`。
 
-## Selectors
+## 选择器建议
 
-Recommended selector order:
+推荐优先级：
 
-1. Stable `name` selectors: `#login-button`.
-2. Semantic data selectors: `[data-role=primary]`.
-3. Type selectors for broad checks: `Button`, `Label`, `TextField`.
-4. Class selectors only when they are stable and intentionally part of test semantics.
+1. 稳定 `name`：`#login-button`。
+2. 语义数据：`[data-role=primary]`。
+3. 控件类型：`Button`、`Label`、`TextField`。
+4. class 选择器只用于稳定且有测试语义的样式类。
 
-UIToolkit page authors should give every important interactive element a unique `name`.
+页面开发时，应给关键交互元素设置唯一 `name`。
 
-## Supported Capability List
+## 功能支持清单
 
-| Area | Examples |
+| 范围 | 示例 |
 | --- | --- |
-| Pointer | `click`, `double_click`, `hover`, `drag`, `scroll`, `open_context_menu`, `open_popup_menu` |
-| Keyboard/Input | `focus`, `press_key`, `type_text`, `type_text_fast` |
-| Fields | `set_value`, `set_slider`, `select_option`, `toggle_mask_option`, `set_bound_value`, `assert_bound_value` |
-| Collections | `select_list_item`, `drag_reorder`, `select_tree_item`, `sort_column`, `resize_column` |
-| Layout/Navigation | `select_tab`, `close_tab`, `toggle_foldout`, `navigate_breadcrumb`, `set_split_view_size`, `page_scroller` |
-| Waits/Assertions | `wait_for_element`, `assert_visible`, `assert_not_visible`, `assert_text`, `assert_text_contains`, `assert_value`, `assert_enabled`, `assert_disabled`, `assert_property` |
-| Reporting | screenshots, Markdown reports, JSON reports, failure attachments |
-| IMGUI | `imgui_click`, `imgui_type`, `imgui_focus`, `imgui_scroll`, `imgui_select_option`, `imgui_press_key`, `imgui_assert_*`, `imgui_wait` |
+| 指针动作 | `click`、`double_click`、`hover`、`drag`、`scroll`、`open_context_menu`、`open_popup_menu` |
+| 键盘/输入 | `focus`、`press_key`、`type_text`、`type_text_fast` |
+| 字段 | `set_value`、`set_slider`、`select_option`、`toggle_mask_option`、`set_bound_value`、`assert_bound_value` |
+| 集合控件 | `select_list_item`、`drag_reorder`、`select_tree_item`、`sort_column`、`resize_column` |
+| 布局/导航 | `select_tab`、`close_tab`、`toggle_foldout`、`navigate_breadcrumb`、`set_split_view_size`、`page_scroller` |
+| 等待/断言 | `wait_for_element`、`assert_visible`、`assert_not_visible`、`assert_text`、`assert_text_contains`、`assert_value`、`assert_enabled`、`assert_disabled`、`assert_property` |
+| 报告 | 截图、Markdown 报告、JSON 报告、失败附件 |
+| IMGUI | `imgui_click`、`imgui_type`、`imgui_focus`、`imgui_scroll`、`imgui_select_option`、`imgui_press_key`、`imgui_assert_*`、`imgui_wait` |
 
-## Execution Modes
+## 执行方式
 
-Headed local run:
+本地 headed 执行：
 
 ```text
 upilot/UIFlow/Test Runner
 ```
 
-Use this for visual debugging, highlighting, step mode, and inspecting selector matches.
+适合可视化调试、高亮、单步执行和检查选择器命中。
 
-MCP-driven runs:
+MCP 驱动执行：
 
-- Use the upilot MCP server endpoint: `http://127.0.0.1:8011/mcp`.
-- Run YAML through MCP when automated validation is required.
-- Keep headed mode enabled for YAML MCP verification.
+- 使用 upilot MCP endpoint：`http://127.0.0.1:8011/mcp`。
+- 需要自动化验证 YAML 时，通过 MCP 执行。
+- YAML MCP 验证必须使用 headed 模式。
 
-Batch runs should be chunked. Do not send more than 15 YAML files in a single UIFlow batch call.
+批量执行时需要分片。单次 UIFlow batch 不要超过 15 个 YAML 文件。
 
-## Reports
+## 报告输出
 
-Default MCP report root:
+默认 MCP 报告根目录：
 
 ```text
 Reports/upilot/UIFlowMcp
 ```
 
-Outputs include Markdown summaries, JSON results, per-case reports, and failure screenshots.
+输出包括 Markdown 汇总、JSON 结果、单用例报告和失败截图。
 
-## Page Authoring Rules
+## 页面接入规范
 
-For reliable automation:
+为了让 UI 自动化稳定：
 
-- Give key elements unique lower-kebab-case names, such as `username-input`, `login-button`, `status-label`.
-- Put assertion text in stable named elements instead of only logging to Console.
-- Prefer `MouseUpEvent` handlers for button logic in sample/test windows.
-- Reset page state when the host window opens or `PrepareForAutomatedTest()` runs.
-- Use `wait_for_element` before assertions on dynamic UI.
+- 给关键元素设置唯一 lower-kebab-case 名称，例如 `username-input`、`login-button`、`status-label`。
+- 断言文本应落在稳定命名元素上，不要只输出到 Console。
+- 示例/测试窗口中的按钮逻辑优先注册 `MouseUpEvent`。
+- 窗口打开或 `PrepareForAutomatedTest()` 执行时要重置页面状态。
+- 动态 UI 先 `wait_for_element`，再执行断言。
 
-The template in `Documentation~/templates/unityuiflow-minimal-page/` provides a minimal page integration example.
+`Documentation~/templates/unityuiflow-minimal-page/` 提供了最小页面接入示例。
 
-## Known Boundaries
+## 已知边界
 
-UIFlow V1 intentionally does not claim full coverage for:
+UIFlow V1 不宣称完整支持：
 
-- Object Picker drag-and-drop in `ObjectField`.
-- `CurveField` and `GradientField` editor popups.
-- `ToolbarPopupSearchField` result popups.
-- Full semantic navigation for `ToolbarBreadcrumbs`.
-- Direct automation of every generated child inside `PropertyField` / `InspectorElement`.
-- System clipboard, IME, multi-window choreography, and pixel-level visual diffing.
+- `ObjectField` Object Picker 中的拖拽。
+- `CurveField` / `GradientField` 独立编辑弹窗。
+- `ToolbarPopupSearchField` 弹出结果列表。
+- `ToolbarBreadcrumbs` 的完整语义导航封装。
+- `PropertyField` / `InspectorElement` 内所有生成子控件的直接语义自动化。
+- 系统剪贴板、IME、多窗口协同、像素级视觉 diff。
 
-## Related Docs
+## 相关文档
 
-- Root upilot README: `README.md`
-- Chinese UIFlow guide: `Documentation~/UIFlow.zh-CN.md`
+- upilot 根 README：`README.md`
+- MCP 工具状态矩阵：`Documentation~/ToolStatus.md`

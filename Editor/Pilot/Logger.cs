@@ -45,10 +45,12 @@ namespace codingriver.unity.pilot
         /// </summary>
         public static LogLevel MinLevel = LogLevel.Debug;
 
+        public const string LogToUnityConsolePrefsKey = "codingriver.unity.pilot.Logger.LogToUnityConsole";
+
         /// <summary>
         /// 是否同时将日志输出到 Unity Editor Console。默认开启。
         /// </summary>
-        public static bool LogToUnityConsole = true;
+        public static bool LogToUnityConsole = EditorPrefs.GetBool(LogToUnityConsolePrefsKey, true);
 
         /// <summary>
         /// 当前线程是否为主线程。
@@ -57,6 +59,8 @@ namespace codingriver.unity.pilot
 
         static Logger()
         {
+            LogToUnityConsole = EditorPrefs.GetBool(LogToUnityConsolePrefsKey, true);
+
             MainThreadId = Thread.CurrentThread.ManagedThreadId;
 
             var process = System.Diagnostics.Process.GetCurrentProcess();
@@ -73,6 +77,12 @@ namespace codingriver.unity.pilot
             {
                 _sessionPrepared = true;
             }
+        }
+
+        public static void SetLogToUnityConsole(bool enabled)
+        {
+            LogToUnityConsole = enabled;
+            EditorPrefs.SetBool(LogToUnityConsolePrefsKey, enabled);
         }
 
         // ── 会话检测与初始化 ──────────────────────────────────────────────────

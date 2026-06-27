@@ -47,12 +47,12 @@ namespace codingriver.unity.pilot
 
         public void RegisterCommands()
         {
-            _bridge.Router.Register("csharp.execute", HandleExecuteAsync);
-            _bridge.Router.Register("csharp.status",  HandleStatusAsync);
-            _bridge.Router.Register("csharp.abort",   HandleAbortAsync);
+            _bridge.Router.Register("roslyn.execute", HandleExecuteAsync);
+            _bridge.Router.Register("roslyn.status",  HandleStatusAsync);
+            _bridge.Router.Register("roslyn.abort",   HandleAbortAsync);
         }
 
-        // ── csharp.execute ──────────────────────────────────────────────────────
+        // ── roslyn.execute ──────────────────────────────────────────────────────
 
         private async Task HandleExecuteAsync(string id, string json, CancellationToken token)
         {
@@ -61,7 +61,7 @@ namespace codingriver.unity.pilot
 
             if (string.IsNullOrEmpty(p.code))
             {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "code is required.", token, "csharp.execute");
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "code is required.", token, "roslyn.execute");
                 return;
             }
 
@@ -70,12 +70,12 @@ namespace codingriver.unity.pilot
             {
                 await _bridge.SendErrorAsync(id, "SECURITY_VIOLATION",
                     "Code contains disallowed operations (Process.Start, File I/O outside project, etc.).",
-                    token, "csharp.execute");
+                    token, "roslyn.execute");
                 return;
             }
 
             var opCtx = UnityPilotOperationTracker.Instance.GetContext(id);
-            opCtx?.Step("安全检查通过，准备执行C#代码", $"timeout={p.timeoutSeconds}s codeLen={p.code.Length}");
+            opCtx?.Step("安全检查通过，准备执行 Roslyn 动态代码", $"timeout={p.timeoutSeconds}s codeLen={p.code.Length}");
 
             int timeout = Mathf.Clamp(p.timeoutSeconds, 1, 30);
             string execId = Guid.NewGuid().ToString("N").Substring(0, 12);
@@ -151,10 +151,10 @@ namespace codingriver.unity.pilot
             }
 
             _executions[execId] = result;
-            await _bridge.SendResultAsync(id, "csharp.execute", result, token);
+            await _bridge.SendResultAsync(id, "roslyn.execute", result, token);
         }
 
-        // ── csharp.status ───────────────────────────────────────────────────────
+        // ── roslyn.status ───────────────────────────────────────────────────────
 
         private async Task HandleStatusAsync(string id, string json, CancellationToken token)
         {
@@ -163,21 +163,21 @@ namespace codingriver.unity.pilot
 
             if (string.IsNullOrEmpty(p.executionId))
             {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "executionId is required.", token, "csharp.status");
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "executionId is required.", token, "roslyn.status");
                 return;
             }
 
             if (_executions.TryGetValue(p.executionId, out var result))
             {
-                await _bridge.SendResultAsync(id, "csharp.status", result, token);
+                await _bridge.SendResultAsync(id, "roslyn.status", result, token);
             }
             else
             {
-                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found: {p.executionId}", token, "csharp.status");
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found: {p.executionId}", token, "roslyn.status");
             }
         }
 
-        // ── csharp.abort ────────────────────────────────────────────────────────
+        // ── roslyn.abort ────────────────────────────────────────────────────────
 
         private async Task HandleAbortAsync(string id, string json, CancellationToken token)
         {
@@ -186,7 +186,7 @@ namespace codingriver.unity.pilot
 
             if (string.IsNullOrEmpty(p.executionId))
             {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "executionId is required.", token, "csharp.abort");
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "executionId is required.", token, "roslyn.abort");
                 return;
             }
 
@@ -198,11 +198,11 @@ namespace codingriver.unity.pilot
                     result.status = "aborted";
                     result.error = "Execution was aborted by user.";
                 }
-                await _bridge.SendResultAsync(id, "csharp.abort", new GenericOkPayload(), token);
+                await _bridge.SendResultAsync(id, "roslyn.abort", new GenericOkPayload(), token);
             }
             else
             {
-                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found or already completed: {p.executionId}", token, "csharp.abort");
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found or already completed: {p.executionId}", token, "roslyn.abort");
             }
         }
 

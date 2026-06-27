@@ -80,12 +80,6 @@ namespace codingriver.unity.pilot
             win.Show();
         }
 
-        [MenuItem("UnityUIFlow/UnityPilot", false, 2000)]
-        public static void OpenLegacy()
-        {
-            Open();
-        }
-
         private void OnEnable()
         {
             var bridge = UnityPilotBridge.Instance;
@@ -211,7 +205,7 @@ namespace codingriver.unity.pilot
             DrawSharedEndpointSection(bridge, status);
             EditorGUILayout.Space(4);
 
-            string[] tabs = new[] { "Pilot 客户端", "Pilot 服务器" };
+            string[] tabs = new[] { "Unity 桥接器", "MCP 服务器" };
             _activeTab = GUILayout.Toolbar(_activeTab, tabs);
 
             EditorGUILayout.Space(4);
@@ -577,7 +571,7 @@ namespace codingriver.unity.pilot
 
                     var mcpMgr = UnityPilotMcpServerManager.Instance;
                     var mcpStat = mcpMgr.GetStatus();
-                    DrawBadge("Server", mcpStat.IsRunning ? "运行中" : "已停止", mcpStat.IsRunning);
+                    DrawBadge("MCP 服务器", mcpStat.IsRunning ? "运行中" : "已停止", mcpStat.IsRunning);
                 }
 
                 EditorGUILayout.Space(4);
@@ -671,7 +665,24 @@ namespace codingriver.unity.pilot
 
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
-                EditorGUILayout.LabelField("连接配置（EditorPrefs 持久化）", EditorStyles.boldLabel);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField("连接配置（EditorPrefs 持久化）", EditorStyles.boldLabel);
+                    GUILayout.FlexibleSpace();
+
+                    var logToConsole = Logger.LogToUnityConsole;
+                    var newLogToConsole = GUILayout.Toggle(
+                        logToConsole,
+                        "输出到 Unity Console",
+                        EditorStyles.miniButton,
+                        GUILayout.Width(128));
+                    if (newLogToConsole != logToConsole)
+                    {
+                        Logger.SetLogToUnityConsole(newLogToConsole);
+                        ShowToast(newLogToConsole ? "已开启 Unity Console 日志输出" : "已关闭 Unity Console 日志输出");
+                    }
+                }
+
                 EditorGUILayout.HelpBox(
                     "地址按项目保存在本机 EditorPrefs（键名带路径哈希后缀，例如 upilot.WsHost." +
                     UnityPilotBridge.WsEndpointEditorPrefsKeySuffix + "），重启 Unity 后仍有效。",
@@ -968,6 +979,7 @@ namespace codingriver.unity.pilot
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
                 EditorGUILayout.LabelField("日志文件", EditorStyles.boldLabel);
+
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     if (GUILayout.Button("打开日志文件", GUILayout.Height(22)))

@@ -304,7 +304,7 @@ async def main_async() -> int:
             return (_ok(r), _err_msg(r) if not _ok(r) else "ok")
 
         async def t_p2_01() -> tuple[bool, str]:
-            r = await facade.csharp_execute("return (1+2).ToString();", timeout_seconds=15)
+            r = await facade.roslyn_execute("return (1+2).ToString();", timeout_seconds=15)
             if not _ok(r):
                 return False, _err_msg(r)
             out = str((r.data or {}).get("result", ""))
@@ -315,20 +315,20 @@ async def main_async() -> int:
                 "var list = new System.Collections.Generic.List<int>{1,2,3}; "
                 "return list.Where(x=>x>1).Count().ToString();"
             )
-            r = await facade.csharp_execute(code, timeout_seconds=15)
+            r = await facade.roslyn_execute(code, timeout_seconds=15)
             if not _ok(r):
                 return False, _err_msg(r)
             return ("2" in str((r.data or {}).get("result", "")), str(r.data))
 
         async def t_p2_03() -> tuple[bool, str]:
-            r = await facade.csharp_execute(
+            r = await facade.roslyn_execute(
                 "return UnityEngine.Application.unityVersion;",
                 timeout_seconds=15,
             )
             return (_ok(r) and len(str((r.data or {}).get("result", ""))) > 0, str(r.data))
 
         async def t_p2_04() -> tuple[bool, str]:
-            r = await facade.csharp_execute(
+            r = await facade.roslyn_execute(
                 "return UnityEditor.EditorApplication.isPlaying.ToString();",
                 timeout_seconds=15,
             )
@@ -338,7 +338,7 @@ async def main_async() -> int:
             return ("false" in out, str(r.data))
 
         async def t_p2_05() -> tuple[bool, str]:
-            r = await facade.csharp_execute(
+            r = await facade.roslyn_execute(
                 'System.Diagnostics.Process.Start("notepad"); return "done";',
                 timeout_seconds=15,
             )
@@ -350,7 +350,7 @@ async def main_async() -> int:
             return (ok_sec, f"code={code} msg={msg[:120]}")
 
         async def t_p3_01() -> tuple[bool, str]:
-            await facade.csharp_execute(
+            await facade.roslyn_execute(
                 'UnityEngine.Debug.Log("MCP_TEST_LOG_12345"); return "ok";',
                 timeout_seconds=15,
             )
@@ -363,7 +363,7 @@ async def main_async() -> int:
             return ("MCP_TEST_LOG_12345" in text, f"logs_len={len(logs)}")
 
         async def t_p3_02() -> tuple[bool, str]:
-            await facade.csharp_execute(
+            await facade.roslyn_execute(
                 'UnityEngine.Debug.LogWarning("MCP_WARN_TEST"); return "ok";',
                 timeout_seconds=15,
             )
@@ -671,7 +671,7 @@ async def main_async() -> int:
             if not _ok(r):
                 return False, _err_msg(r)
             await facade.console_get_logs(count=5)
-            r3 = await facade.csharp_execute('return "post_compile_ok";', timeout_seconds=15)
+            r3 = await facade.roslyn_execute('return "post_compile_ok";', timeout_seconds=15)
             if not _ok(r3):
                 return False, _err_msg(r3)
             return ("post_compile_ok" in str((r3.data or {}).get("result", "")), str(r3.data))
@@ -738,7 +738,7 @@ async def main_async() -> int:
             return ("total" in data, str(data.get("total")))
 
         async def t_m26_10() -> tuple[bool, str]:
-            r0 = await facade.csharp_execute(
+            r0 = await facade.roslyn_execute(
                 'UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1); return "ok";',
                 timeout_seconds=15,
             )
@@ -759,7 +759,7 @@ async def main_async() -> int:
                 "foreach (var w in wins) { if (w != null && w.titleContent.text == \"upilot\") "
                 "{ w.Close(); return \"closed\"; } } return \"notfound\";"
             )
-            c2 = await facade.csharp_execute(close_code, timeout_seconds=15)
+            c2 = await facade.roslyn_execute(close_code, timeout_seconds=15)
             if not _ok(c2):
                 return False, _err_msg(c2)
             await asyncio.sleep(0.5)
@@ -848,7 +848,7 @@ async def main_async() -> int:
             return (bool(err) or not (ss.get("imageData")), f"screenshot branch={ss}")
 
         async def t_m26_18() -> tuple[bool, str]:
-            await facade.csharp_execute(
+            await facade.roslyn_execute(
                 'UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1); return "ok";',
                 timeout_seconds=15,
             )

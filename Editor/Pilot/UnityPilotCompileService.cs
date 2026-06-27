@@ -35,6 +35,7 @@ namespace codingriver.unity.pilot
         public long CompileFinishedAt { get; private set; }
         public int LastErrorCount => _lastErrors.Count;
         public bool HasCompileErrors { get; private set; }
+        public bool IsRequestCompileActive { get; private set; }
 
         public UnityPilotCompileService()
         {
@@ -141,6 +142,12 @@ namespace codingriver.unity.pilot
 
         public bool TryBeginCompile(string requestId)
         {
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                Logger.LogWarning("COMPILE", $"编译失败: Unity 正在 PlayMode 或切换 PlayMode，跳过脚本编译 requestId={requestId}");
+                return false;
+            }
+
             if (IsCompiling || EditorApplication.isCompiling)
             {
                 Logger.LogWarning("COMPILE", $"编译失败: 已在编译中 requestId={requestId}");
@@ -152,6 +159,7 @@ namespace codingriver.unity.pilot
 
             _lastRequestId = requestId;
             IsCompiling = true;
+            IsRequestCompileActive = true;
             _compileTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Clear previous persistent errors when starting a new compile
@@ -173,12 +181,25 @@ namespace codingriver.unity.pilot
         // Called when compilation starts (both auto and request-scoped)
         private void OnCompilationStarted(object _)
         {
+            IsCompiling = true;
             _lastErrors.Clear();
             _lastWarningCount = 0;
             HasCompileErrors = false;
             CompileStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             CompileFinishedAt = 0;
             Logger.Log("COMPILE", "编译流水线开始");
+        }
+
+        public void ClearStaleCompileBusy(string reason, bool ignoreEditorCompiling = false)
+        {
+            if (!IsCompiling || (!ignoreEditorCompiling && EditorApplication.isCompiling))
+                return;
+
+            IsCompiling = false;
+            IsRequestCompileActive = false;
+            CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _compileTcs?.TrySetResult(false);
+            Logger.LogWarning("COMPILE", $"清理编译忙状态: {reason}");
         }
 
         // Called on main thread for each assembly as it finishes (both auto and request-scoped)
@@ -215,6 +236,7 @@ namespace codingriver.unity.pilot
         {
             CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             IsCompiling = false;
+            IsRequestCompileActive = false;
             var elapsed = CompileFinishedAt - CompileStartedAt;
             var focus = GetFocusStateString();
             Logger.Log("COMPILE", $"编译流水线完成: requestId={_lastRequestId} errors={_lastErrors.Count} warnings={_lastWarningCount} elapsed={elapsed}ms 焦点={focus}");

@@ -23,16 +23,5 @@ namespace codingriver.unity.pilot
             return !Application.isPlaying;
         }
 
-        [MenuItem("UnityUIFlow/Force Restart UnityPilotBridge")]
-        public static void RestartBridgeLegacy()
-        {
-            RestartBridge();
-        }
-
-        [MenuItem("UnityUIFlow/Force Restart UnityPilotBridge", true)]
-        public static bool ValidateRestartBridgeLegacy()
-        {
-            return ValidateRestartBridge();
-        }
     }
 }

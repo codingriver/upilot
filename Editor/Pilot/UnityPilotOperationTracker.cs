@@ -462,10 +462,10 @@ namespace codingriver.unity.pilot
             { "sceneview.navigate",    "场景视图导航" },
             // drag & drop
             { "dragdrop.execute",      "执行拖放" },
-            // csharp
-            { "csharp.execute",        "执行C#代码" },
-            { "csharp.status",         "C#执行状态" },
-            { "csharp.abort",          "中止C#执行" },
+            // roslyn
+            { "roslyn.execute",        "执行 Roslyn 动态代码" },
+            { "roslyn.status",         "Roslyn 执行状态" },
+            { "roslyn.abort",          "中止 Roslyn 执行" },
             // UIToolkit (MCP disabled)
             // { "uitoolkit.dump",        "导出UI元素树" },
             // { "uitoolkit.query",       "查询UI元素" },

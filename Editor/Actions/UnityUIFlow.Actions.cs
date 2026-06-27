@@ -1106,6 +1106,43 @@ namespace UnityUIFlow
             return null;
         }
 
+        public static IEnumerable<string> MenuItemNameCandidates(string itemName)
+        {
+            if (string.IsNullOrWhiteSpace(itemName))
+                yield break;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var candidate in BuildMenuItemNameCandidates(itemName))
+            {
+                if (!string.IsNullOrWhiteSpace(candidate) && seen.Add(candidate))
+                    yield return candidate;
+            }
+        }
+
+        private static IEnumerable<string> BuildMenuItemNameCandidates(string itemName)
+        {
+            string trimmed = itemName.Trim();
+            yield return trimmed;
+
+            string slashNormalized = NormalizeMenuPath(trimmed, '/');
+            yield return slashNormalized;
+
+            string arrowNormalized = NormalizeMenuPath(trimmed, '>');
+            if (!string.Equals(arrowNormalized, slashNormalized, StringComparison.Ordinal))
+                yield return arrowNormalized;
+        }
+
+        private static string NormalizeMenuPath(string itemName, char separator)
+        {
+            if (string.IsNullOrWhiteSpace(itemName))
+                return itemName;
+
+            char[] separators = separator == '>'
+                ? new[] { '>' }
+                : new[] { '/', '\\' };
+            return string.Join("/", itemName.Split(separators, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()));
+        }
+
         public static bool TryFindDropdownMenuAction(VisualElement element, string itemName, out DropdownMenuAction action)
         {
             action = null;
@@ -1113,15 +1150,35 @@ namespace UnityUIFlow
             if (menu == null || string.IsNullOrWhiteSpace(itemName))
                 return false;
 
-            foreach (var item in menu.MenuItems())
+            var actions = menu.MenuItems().OfType<DropdownMenuAction>().ToList();
+            foreach (string candidate in MenuItemNameCandidates(itemName))
             {
-                if (item is DropdownMenuAction a && a.name == itemName)
+                action = actions.FirstOrDefault(a => string.Equals(a.name, candidate, StringComparison.Ordinal));
+                if (action != null)
                 {
-                    action = a;
                     return true;
                 }
             }
+
+            string requestedLeaf = LastMenuPathSegment(itemName);
+            var leafMatches = actions
+                .Where(a => string.Equals(LastMenuPathSegment(a.name), requestedLeaf, StringComparison.Ordinal))
+                .Take(2)
+                .ToList();
+            if (leafMatches.Count == 1)
+            {
+                action = leafMatches[0];
+                return true;
+            }
+
             return false;
+        }
+
+        private static string LastMenuPathSegment(string itemName)
+        {
+            string normalized = NormalizeMenuPath(itemName ?? string.Empty, '/');
+            int slash = normalized.LastIndexOf('/');
+            return slash >= 0 ? normalized.Substring(slash + 1) : normalized;
         }
 
         public static bool TryExecuteDropdownMenuItem(VisualElement element, string itemName)
@@ -2005,12 +2062,31 @@ namespace UnityUIFlow
         {
             if (!usedFallback)
             {
+                bool selected;
                 if (menuKind == "context")
-                    return context?.SimulationSession?.TrySelectContextMenuItem(itemName, context) == true;
-                if (menuKind == "popup")
-                    return context?.SimulationSession?.TrySelectPopupMenuItem(itemName, context) == true;
-                return (context?.SimulationSession?.TrySelectPopupMenuItem(itemName, context) == true)
+                {
+                    selected = context?.SimulationSession?.TrySelectContextMenuItem(itemName, context) == true;
+                }
+                else if (menuKind == "popup")
+                {
+                    selected = context?.SimulationSession?.TrySelectPopupMenuItem(itemName, context) == true;
+                }
+                else
+                {
+                    selected = (context?.SimulationSession?.TrySelectPopupMenuItem(itemName, context) == true)
                     || (context?.SimulationSession?.TrySelectContextMenuItem(itemName, context) == true);
+                }
+
+                if (selected)
+                    return true;
+
+                if (element != null && ActionHelpers.TryGetDropdownMenu(element) != null)
+                {
+                    context?.Log($"menu_item: official menu selection failed; using DropdownMenu fallback for {element.GetType().Name}");
+                    return ActionHelpers.TryExecuteDropdownMenuItem(element, itemName);
+                }
+
+                return false;
             }
 
             return ActionHelpers.TryExecuteDropdownMenuItem(element, itemName);
@@ -2020,7 +2096,13 @@ namespace UnityUIFlow
         {
             if (!usedFallback)
             {
-                return context?.SimulationSession?.TryAssertMenuItem(itemName, expectDisabled, context) == true;
+                if (context?.SimulationSession?.TryAssertMenuItem(itemName, expectDisabled, context) == true)
+                    return true;
+
+                if (element == null || ActionHelpers.TryGetDropdownMenu(element) == null)
+                    return false;
+
+                context?.Log($"menu_item: official menu assertion failed; using DropdownMenu fallback for {element.GetType().Name}");
             }
 
             if (!ActionHelpers.TryFindDropdownMenuAction(element, itemName, out DropdownMenuAction action))
@@ -2285,4 +2367,3 @@ namespace UnityUIFlow
         }
     }
 }
-

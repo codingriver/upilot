@@ -28,12 +28,12 @@ namespace codingriver.unity.pilot
 
         private static void TryStartBridge()
         {
-            if (!EditorApplication.isPlayingOrWillChangePlaymode && IsEnabled)
-            {
-                UnityEngine.Debug.Log("[UnityPilotBootstrap] TryStartBridge -> EnsureStarted");
-                EditorApplication.update -= TryStartBridge;
-                UnityPilotBridge.Instance.EnsureStarted();
-            }
+            if (!IsEnabled)
+                return;
+
+            UnityEngine.Debug.Log("[UnityPilotBootstrap] TryStartBridge -> EnsureStarted");
+            EditorApplication.update -= TryStartBridge;
+            UnityPilotBridge.Instance.EnsureStarted();
         }
 
         private static void TryStartMcpServer()

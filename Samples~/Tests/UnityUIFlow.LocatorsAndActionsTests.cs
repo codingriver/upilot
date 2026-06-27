@@ -1363,6 +1363,16 @@ namespace UnityUIFlow
 
             yield return UnityUIFlowTestTaskUtility.Await(ExecuteActionAsync(new MenuItemAction(), new Dictionary<string, string>
             {
+                ["selector"] = "#toolbar-menu",
+                ["kind"] = "popup",
+                ["mode"] = "select",
+                ["item"] = "Spawn > Enemy",
+            }));
+
+            Assert.That(Root.Q<Label>("toolbar-status").text, Is.EqualTo("Toolbar: spawn-enemy"));
+
+            yield return UnityUIFlowTestTaskUtility.Await(ExecuteActionAsync(new MenuItemAction(), new Dictionary<string, string>
+            {
                 ["selector"] = "#context-menu-target",
                 ["kind"] = "context",
                 ["mode"] = "assert_disabled",

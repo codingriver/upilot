@@ -290,6 +290,7 @@ namespace UnityUIFlow
             };
             toolbarMenu.menu.AppendAction("Refresh", _ => toolbarStatus.text = "Toolbar: refresh");
             toolbarMenu.menu.AppendAction("Reset", _ => toolbarStatus.text = "Toolbar: reset");
+            toolbarMenu.menu.AppendAction("Spawn/Enemy", _ => toolbarStatus.text = "Toolbar: spawn-enemy");
 
             VisualElement toolbarPopupSearch = CreateToolbarPopupSearchField();
             VisualElement toolbarBreadcrumbs = CreateToolbarBreadcrumbs(toolbarStatus);

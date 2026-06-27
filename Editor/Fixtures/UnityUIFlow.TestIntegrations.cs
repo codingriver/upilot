@@ -185,10 +185,27 @@ namespace UnityUIFlow
                 return false;
             }
 
-            bool selected = _contextMenuSimulator.menuIsDisplayed && _contextMenuSimulator.SimulateMenuSelection(itemName);
-            if (selected)
+            bool selected = false;
+            try
             {
-                _contextMenuSimulator.DiscardMenu();
+                if (_contextMenuSimulator.menuIsDisplayed)
+                {
+                    foreach (string candidate in ActionHelpers.MenuItemNameCandidates(itemName))
+                    {
+                        if (_contextMenuSimulator.SimulateMenuSelection(candidate))
+                        {
+                            selected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (_contextMenuSimulator.menuIsDisplayed)
+                {
+                    _contextMenuSimulator.DiscardMenu();
+                }
             }
 
             return selected;
@@ -225,10 +242,27 @@ namespace UnityUIFlow
                 return false;
             }
 
-            bool selected = _popupMenuSimulator.menuIsDisplayed && _popupMenuSimulator.SimulateMenuSelection(itemName);
-            if (selected)
+            bool selected = false;
+            try
             {
-                _popupMenuSimulator.DiscardMenu();
+                if (_popupMenuSimulator.menuIsDisplayed)
+                {
+                    foreach (string candidate in ActionHelpers.MenuItemNameCandidates(itemName))
+                    {
+                        if (_popupMenuSimulator.SimulateMenuSelection(candidate))
+                        {
+                            selected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (_popupMenuSimulator.menuIsDisplayed)
+                {
+                    _popupMenuSimulator.DiscardMenu();
+                }
             }
 
             return selected;
@@ -249,13 +283,13 @@ namespace UnityUIFlow
             {
                 if (_contextMenuSimulator != null && _contextMenuSimulator.menuIsDisplayed)
                 {
-                    _contextMenuSimulator.AssertContainsAction(itemName, expectedStatus);
+                    AssertContainsAnyMenuAction(_contextMenuSimulator, itemName, expectedStatus);
                     return true;
                 }
 
                 if (_popupMenuSimulator != null && _popupMenuSimulator.menuIsDisplayed)
                 {
-                    _popupMenuSimulator.AssertContainsAction(itemName, expectedStatus);
+                    AssertContainsAnyMenuAction(_popupMenuSimulator, itemName, expectedStatus);
                     return true;
                 }
             }
@@ -321,6 +355,44 @@ namespace UnityUIFlow
             }
 
             return element.Q<VisualElement>(className: "unity-base-popup-field__input") ?? element;
+        }
+
+        private static void AssertContainsAnyMenuAction(ContextMenuSimulator simulator, string itemName, DropdownMenuAction.Status expectedStatus)
+        {
+            AssertionException last = null;
+            foreach (string candidate in ActionHelpers.MenuItemNameCandidates(itemName))
+            {
+                try
+                {
+                    simulator.AssertContainsAction(candidate, expectedStatus);
+                    return;
+                }
+                catch (AssertionException ex)
+                {
+                    last = ex;
+                }
+            }
+
+            throw last ?? new AssertionException($"Menu item was not available: {itemName}");
+        }
+
+        private static void AssertContainsAnyMenuAction(PopupMenuSimulator simulator, string itemName, DropdownMenuAction.Status expectedStatus)
+        {
+            AssertionException last = null;
+            foreach (string candidate in ActionHelpers.MenuItemNameCandidates(itemName))
+            {
+                try
+                {
+                    simulator.AssertContainsAction(candidate, expectedStatus);
+                    return;
+                }
+                catch (AssertionException ex)
+                {
+                    last = ex;
+                }
+            }
+
+            throw last ?? new AssertionException($"Menu item was not available: {itemName}");
         }
     }
 

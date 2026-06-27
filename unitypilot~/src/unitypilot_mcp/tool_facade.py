@@ -76,6 +76,28 @@ class McpToolFacade:
                 r.error.message if r.error else "unknown",
             )
 
+    def _update_editor_cache_from_resource_state(self, data: dict) -> dict:
+        is_playing = bool(data.get("isPlaying", False))
+        is_paused = bool(data.get("isPaused", False))
+        play_mode_state = "pause" if is_paused else ("play" if is_playing else "edit")
+        active_scene = str(data.get("activeSceneName", ""))
+        is_compiling = bool(data.get("isCompiling", False))
+        self.server.state.update_editor_state(
+            {
+                "connected": True,
+                "isCompiling": is_compiling,
+                "playModeState": play_mode_state,
+                "activeScene": active_scene,
+            }
+        )
+        return {
+            "isPlaying": is_playing,
+            "isPaused": is_paused,
+            "playModeState": play_mode_state,
+            "activeScene": active_scene,
+            "isCompiling": is_compiling,
+        }
+
     @staticmethod
     def _command_requests_batchmode(command: str) -> bool:
         cmd = (command or "").strip()
@@ -564,9 +586,26 @@ class McpToolFacade:
 
     async def editor_state(self) -> ToolResponse:
         request_id = new_id("req")
+        if self.server.is_ready():
+            live = await self.dispatcher.call(
+                request_id, "resource.editorState", {}, timeout_ms=5000
+            )
+            if live.ok and live.data is not None:
+                state = self._update_editor_cache_from_resource_state(live.data)
+                return ok(
+                    request_id,
+                    {
+                        "connected": True,
+                        "isCompiling": state["isCompiling"],
+                        "playModeState": state["playModeState"],
+                        "activeScene": state["activeScene"],
+                        "isPlaying": state["isPlaying"],
+                        "isPaused": state["isPaused"],
+                        "source": "resource",
+                    },
+                )
+
         s = self.server.state.editor
-        # Derive connected from the live WebSocket/session manager when the cached
-        # editor.state event may have been missed (e.g. after a server restart).
         connected = s.connected or self.server.is_ready()
         return ok(
             request_id,
@@ -575,7 +614,7 @@ class McpToolFacade:
                 "isCompiling": s.is_compiling,
                 "playModeState": s.play_mode_state,
                 "activeScene": s.active_scene,
-                "source": "live",
+                "source": "cache-fallback",
             },
         )
 
@@ -627,12 +666,82 @@ class McpToolFacade:
     async def console_get_logs(
         self, log_type: str = "", count: int = 100
     ) -> ToolResponse:
+        # Compatibility for internal E2E helpers. The public MCP tool was
+        # replaced by mark/tail/search to avoid fixed-window log loss.
         request_id = new_id("req")
-        payload: dict = {}
+        payload: dict = {
+            "count": max(1, min(count, 5000)),
+            "newestFirst": True,
+            "excludeUnityPilot": False,
+            "includeStackTrace": True,
+        }
         if log_type:
             payload["logType"] = log_type
-        payload["count"] = max(1, min(count, 1000))
-        return await self.dispatcher.call(request_id, "console.logs.get", payload)
+        return await self.dispatcher.call(request_id, "console.logs.search", payload)
+
+    async def console_mark_logs(self) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(request_id, "console.logs.mark", {})
+
+    async def console_tail_logs(
+        self,
+        cursor: int = -1,
+        count: int = 200,
+        log_type: str = "",
+        include_stack_trace: bool = False,
+        exclude_unity_pilot: bool = True,
+        contains: list[str] | None = None,
+        contains_all: bool = False,
+        regex: str = "",
+        newest_first: bool = False,
+        max_message_length: int = 0,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        payload: dict = {
+            "cursor": cursor,
+            "count": max(1, min(count, 5000)),
+            "includeStackTrace": include_stack_trace,
+            "excludeUnityPilot": exclude_unity_pilot,
+            "containsAll": contains_all,
+            "newestFirst": newest_first,
+            "maxMessageLength": max(0, max_message_length),
+        }
+        if log_type:
+            payload["logType"] = log_type
+        if contains:
+            payload["contains"] = contains
+        if regex:
+            payload["regex"] = regex
+        return await self.dispatcher.call(request_id, "console.logs.tail", payload)
+
+    async def console_search_logs(
+        self,
+        count: int = 200,
+        log_type: str = "",
+        include_stack_trace: bool = False,
+        exclude_unity_pilot: bool = True,
+        contains: list[str] | None = None,
+        contains_all: bool = False,
+        regex: str = "",
+        newest_first: bool = True,
+        max_message_length: int = 0,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        payload: dict = {
+            "count": max(1, min(count, 5000)),
+            "includeStackTrace": include_stack_trace,
+            "excludeUnityPilot": exclude_unity_pilot,
+            "containsAll": contains_all,
+            "newestFirst": newest_first,
+            "maxMessageLength": max(0, max_message_length),
+        }
+        if log_type:
+            payload["logType"] = log_type
+        if contains:
+            payload["contains"] = contains
+        if regex:
+            payload["regex"] = regex
+        return await self.dispatcher.call(request_id, "console.logs.search", payload)
 
     async def console_clear(self) -> ToolResponse:
         request_id = new_id("req")
@@ -1359,16 +1468,16 @@ class McpToolFacade:
             request_id, "script.delete", {"scriptPath": script_path}
         )
 
-    # ── M19 C# 代码执行 ──────────────────────────────────────────────────────
+    # ── M19 Roslyn 代码执行 ──────────────────────────────────────────────────
 
-    async def csharp_execute(
+    async def roslyn_execute(
         self, code: str, timeout_seconds: int = 10
     ) -> ToolResponse:
         request_id = new_id("req")
         clamped = max(1, min(timeout_seconds, 30))
         return await self.dispatcher.call(
             request_id,
-            "csharp.execute",
+            "roslyn.execute",
             {
                 "code": code,
                 "timeoutSeconds": clamped,
@@ -1376,16 +1485,16 @@ class McpToolFacade:
             timeout_ms=clamped * 1000 + 5000,
         )
 
-    async def csharp_status(self, execution_id: str) -> ToolResponse:
+    async def roslyn_status(self, execution_id: str) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
-            request_id, "csharp.status", {"executionId": execution_id}
+            request_id, "roslyn.status", {"executionId": execution_id}
         )
 
-    async def csharp_abort(self, execution_id: str) -> ToolResponse:
+    async def roslyn_abort(self, execution_id: str) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
-            request_id, "csharp.abort", {"executionId": execution_id}
+            request_id, "roslyn.abort", {"executionId": execution_id}
         )
 
     # ── M20 反射调用 ─────────────────────────────────────────────────────────
@@ -1482,7 +1591,10 @@ class McpToolFacade:
 
     async def resource_editor_state(self) -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(request_id, "resource.editorState", {})
+        result = await self.dispatcher.call(request_id, "resource.editorState", {})
+        if result.ok and result.data is not None:
+            self._update_editor_cache_from_resource_state(result.data)
+        return result
 
     async def resource_packages(self) -> ToolResponse:
         request_id = new_id("req")

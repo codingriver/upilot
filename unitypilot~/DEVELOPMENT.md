@@ -1,131 +1,137 @@
-# upilot MCP Server Development
+# upilot MCP Server 开发文档
 
-This document is for developers working on the Python MCP server that ships with `upilot`.
-For package installation and normal user setup, start with the root `../README.md`.
+本文档面向维护 `upilot` 随包 Python MCP server 的开发者。普通用户安装与基础使用请先阅读根目录 `../README.md`。
 
-The English file is the default development document. The Chinese version is `DEVELOPMENT.zh-CN.md`.
+## 定位
 
-## Role
+`upilot` 是 Unity package 与公开产品名。本目录中的 Python 代码提供 Unity package 使用的 MCP server。
 
-`upilot` is the Unity package and public product name. The Python code in this directory provides the MCP server used by the Unity package.
+Python server 负责：
 
-The Python server:
+- 通过 stdio 或 Streamable HTTP 暴露 MCP tools；
+- 通过 WebSocket 接收 Unity Editor bridge 连接；
+- 转发编辑器状态、Console 日志、编译、资源、场景、GameObject、组件、窗口、截图、包、菜单、脚本、Prefab、材质、构建、测试和诊断等工具调用；
+- 当 Unity 侧启用 UIFlow 时，转发 UIFlow YAML 自动化调用。
 
-- exposes MCP tools over stdio or Streamable HTTP;
-- accepts Unity Editor bridge connections over WebSocket;
-- forwards tool calls for editor status, console logs, compilation, assets, scenes, GameObjects, components, windows, screenshots, packages, menus, scripts, prefabs, materials, builds, tests, and diagnostics;
-- forwards UIFlow YAML automation calls when the Unity side enables UIFlow.
-
-## Directory Map
+## 目录结构
 
 ```text
 unitypilot~/
-  run_upilot_mcp.py          # Preferred source launcher.
-  pyproject.toml             # Python package metadata and console scripts.
-  requirements.txt           # Runtime dependencies for source runs.
-  mcp.example.json           # Example local MCP client config.
-  src/unitypilot_mcp/        # Server package.
-  tests/                     # Pytest tests.
-  scripts/                   # Acceptance and helper scripts.
-  deploy/                    # Release/deployment helper scripts.
-  e2e-specs/                 # Example UI/editor E2E specs.
+  run_upilot_mcp.py          # 推荐的源码启动入口。
+  pyproject.toml             # Python 包元数据和 console scripts。
+  requirements.txt           # 源码运行所需依赖。
+  mcp.example.json           # 本地 MCP client 配置示例。
+  src/unitypilot_mcp/        # Server Python 包。
+  tests/                     # Pytest 测试。
+  scripts/                   # 验收与辅助脚本。
+  deploy/                    # 发布/部署辅助脚本。
+  e2e-specs/                 # 示例 UI/editor E2E spec。
 ```
 
-## Requirements
+## 环境要求
 
-- Python `3.11` or newer.
-- Unity package `io.github.codingriver.upilot`.
-- Unity Editor opened in normal editor mode.
-- A Unity Editor bridge configured to connect to the same WebSocket host and port as the Python server.
+- Python `3.11` 或更高版本。
+- Unity package `io.github.codingriver.upilot`。
+- Unity Editor 以普通编辑器模式打开。
+- Unity Editor bridge 配置为连接到 Python server 相同的 WebSocket host 和 port。
 
-## Architecture
+## 架构
 
-The server has two transport layers:
+Server 有两层传输：
 
-- **MCP transport**: exposed to MCP clients through either stdio or Streamable HTTP.
-- **Unity bridge transport**: an internal WebSocket listener used by the Unity Editor bridge.
+- **MCP transport**：通过 stdio 或 Streamable HTTP 暴露给 MCP client。
+- **Unity bridge transport**：供 Unity Editor bridge 连接的内部 WebSocket listener。
 
-The common local development topology is:
+常见本地开发拓扑：
 
 ```text
 MCP client
-  -> stdio or http://127.0.0.1:8011/mcp
+  -> stdio 或 http://127.0.0.1:8011/mcp
   -> Python MCP server
   -> ws://127.0.0.1:8765
   -> Unity Editor bridge
 ```
 
-The HTTP MCP endpoint is always the `/mcp` path. For example:
+HTTP MCP endpoint 必须使用 `/mcp` 路径，例如：
 
 ```text
 http://127.0.0.1:8011/mcp
 ```
 
-The WebSocket port `8765` is not the MCP client endpoint. It is the internal connection between the Python server and the Unity Editor bridge.
+WebSocket 端口 `8765` 不是 MCP client endpoint，它是 Python server 与 Unity Editor bridge 之间的内部连接端口。
 
-## Source Setup
+## 源码环境
 
-From this directory:
+在本目录下安装运行依赖：
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-For editable development installs:
+开发模式安装：
 
 ```bash
 python -m pip install -e .[dev]
 ```
 
-Editable installs expose these console scripts:
+开发模式安装后会暴露这些 console scripts：
 
 - `upilot`
 - `upilot-mcp`
 
-## Run From Source
+## 从源码运行
 
-Recommended Streamable HTTP run:
+从仓库根目录启动：
+
+```bash
+python -m pip install -r unitypilot~/requirements.txt
+python unitypilot~/run_upilot_mcp.py --transport http --http-port 8011 --port 8765
+```
+
+从 `unitypilot~/` 目录启动：
+
+推荐的 Streamable HTTP 启动方式：
 
 ```bash
 python run_upilot_mcp.py --transport http --http-port 8011 --port 8765
 ```
 
-The MCP client URL is:
+MCP client URL：
 
 ```text
 http://127.0.0.1:8011/mcp
 ```
 
-Stdio run for local-command MCP clients:
+面向 local-command MCP client 的 stdio 启动方式：
 
 ```bash
 python run_upilot_mcp.py --transport stdio --port 8765
 ```
 
-Console script run after editable install:
+开发模式安装后的 console script 启动方式：
 
 ```bash
 upilot-mcp --transport http --http-port 8011 --port 8765
 ```
 
-## Options
+## 参数
 
-| CLI option | Environment variable | Default | Purpose |
+| CLI 参数 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- | --- |
-| `--transport` | `UNITYPILOT_TRANSPORT` | `stdio` | MCP transport: `stdio` or `http`. |
-| `--host` | `UNITYPILOT_HOST` | `127.0.0.1` | WebSocket host for the Unity Editor bridge. |
-| `--port` | `UNITYPILOT_PORT` | `8765` | WebSocket port for the Unity Editor bridge. |
-| `--http-host` | `UNITYPILOT_HTTP_HOST` | `127.0.0.1` | Streamable HTTP host. |
-| `--http-port` | `UNITYPILOT_HTTP_PORT` | `8000` | Streamable HTTP port. |
-| `--label` | none | current folder name | Display label used in Unity diagnostics. |
-| `--log-file` | `UNITYPILOT_LOG_FILE` | unset | Optional log file path. |
-| `--log-level` | `UNITYPILOT_LOG_LEVEL` | `DEBUG` | Python logging level. |
+| `--transport` | `UNITYPILOT_TRANSPORT` | `stdio` | MCP 传输方式：`stdio` 或 `http`。 |
+| `--host` | `UNITYPILOT_HOST` | `127.0.0.1` | Unity Editor bridge 使用的 WebSocket host。 |
+| `--port` | `UNITYPILOT_PORT` | `8765` | Unity Editor bridge 使用的 WebSocket port。 |
+| `--http-host` | `UNITYPILOT_HTTP_HOST` | `127.0.0.1` | Streamable HTTP host。 |
+| `--http-port` | `UNITYPILOT_HTTP_PORT` | `8000` | Streamable HTTP port。 |
+| `--label` | 无 | 当前目录名 | Unity 诊断中显示的标签。 |
+| `--log-file` | `UNITYPILOT_LOG_FILE` | 未设置 | 可选日志文件路径。 |
+| `--log-level` | `UNITYPILOT_LOG_LEVEL` | `DEBUG` | Python 日志级别。 |
 
-Use different `--port` values for multiple Unity projects running at the same time, for example `8765`, `8766`, and `8767`.
+如果同时运行多个 Unity 项目，给每个项目使用不同的 `--port`，例如 `8765`、`8766`、`8767`。
 
-## MCP Client Configuration
+## MCP Client 配置
 
-For clients that support Streamable HTTP, start the server yourself and configure the HTTP URL:
+对于支持 Streamable HTTP 的 client，先自行启动 server，再配置 HTTP URL：
 
 ```json
 {
@@ -138,7 +144,7 @@ For clients that support Streamable HTTP, start the server yourself and configur
 }
 ```
 
-For local-command clients, use stdio:
+对于 local-command client，使用 stdio：
 
 ```json
 {
@@ -160,67 +166,68 @@ For local-command clients, use stdio:
 }
 ```
 
-See `mcp.example.json` for a fuller local-command example.
+更完整的 local-command 示例见 `mcp.example.json`。
 
-## Unity Editor Connection
+## Unity Editor 连接
 
-The Python server is only one side of the bridge. The Unity Editor must also be open and connected to the same WebSocket endpoint.
+Python server 只是桥接的一侧，Unity Editor 必须同时打开并连接到同一个 WebSocket endpoint。
 
-Basic checks:
+基本检查项：
 
-- The Python process is listening on the configured WebSocket host and port.
-- The Unity Editor package is installed and the bridge is enabled.
-- The Unity Editor is not in batchmode.
-- The MCP tool `unity_mcp_status` reports `connected: true`.
+- Python 进程正在监听配置的 WebSocket host 和 port。
+- Unity Editor package 已安装并启用 bridge。
+- Unity Editor 没有运行在 batchmode。
+- MCP tool `unity_mcp_status` 返回 `connected: true`。
 
-If `unity_mcp_status` is reachable but reports that Unity is disconnected, the MCP server is running but the Unity Editor bridge is not connected.
+如果 `unity_mcp_status` 可调用，但显示 Unity 未连接，说明 MCP server 已运行，但 Unity Editor bridge 尚未连接。
 
-## Tests
+## 测试
 
-Run Python tests from this directory:
+在本目录运行 Python 测试：
 
 ```bash
 python -m pytest
 ```
 
-Some tests start local server processes and bind ports. If a test fails because a port is already in use, stop the old process or rerun with a free port where the test supports it.
+部分测试会启动本地 server 进程并绑定端口。如果测试因为端口占用失败，停止旧进程，或在测试支持时改用空闲端口后重试。
 
-## Development Notes
+## 开发约定
 
-- Keep `run_upilot_mcp.py` as the preferred source launcher.
-- Keep the MCP HTTP path as `/mcp`.
-- Treat WebSocket `8765` as an internal Unity bridge port, not a client-facing MCP endpoint.
-- Do not rename Python modules from `unitypilot_mcp` casually; the package metadata and source layout depend on them.
+- 保持 `run_upilot_mcp.py` 作为推荐源码启动入口。
+- MCP HTTP 路径保持为 `/mcp`。
+- WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint。
+- 不要随意重命名 Python module `unitypilot_mcp`；包元数据和源码布局依赖它。
+- MCP 工具命名需要与实现路径保持一致。动态代码片段执行工具名预留为 `unity_roslyn_execute` / `unity_roslyn_status` / `unity_roslyn_abort`，并转发到 Unity bridge 路由 `roslyn.execute` / `roslyn.status` / `roslyn.abort`。这些 Roslyn 执行工具当前暂不可用，正在随服务一起升级改造。稳定调用已有业务方法时应使用 `unity_reflection_call`。
 
-## Troubleshooting
+## 排障
 
-### HTTP root works but MCP calls fail
+### HTTP 根路径可访问，但 MCP 调用失败
 
-Use the full MCP endpoint:
+必须使用完整 MCP endpoint：
 
 ```text
 http://127.0.0.1:8011/mcp
 ```
 
-The root URL is only a human-facing landing page or health hint.
+根路径只适合作为人工查看的 landing page 或健康提示。
 
-### Unity is not connected
+### Unity 未连接
 
-Confirm the Unity Editor is open, the package is installed, and the bridge connects to the same WebSocket port passed through `--port`.
+确认 Unity Editor 已打开、package 已安装，并且 bridge 连接的 WebSocket port 与 server 启动时传入的 `--port` 一致。
 
-### Port conflict
+### 端口冲突
 
-Change the WebSocket port and keep Unity configured to the same value:
+修改 WebSocket port，并确保 Unity 使用同一个值：
 
 ```bash
 python run_upilot_mcp.py --transport http --http-port 8011 --port 8766
 ```
 
-For multiple HTTP servers, also change `--http-port`.
+如果同时运行多个 HTTP server，也要修改 `--http-port`。
 
-### Non-ASCII paths or text look broken
+### 非 ASCII 路径或文本乱码
 
-Set Python UTF-8 mode for local-command clients:
+local-command client 可以设置 Python UTF-8 模式：
 
 ```json
 {
@@ -230,8 +237,8 @@ Set Python UTF-8 mode for local-command clients:
 }
 ```
 
-## Related Documents
+## 相关文档
 
-- Root package README: `../README.md`
-- Chinese root README: `../README.zh-CN.md`
-- Chinese version of this document: `DEVELOPMENT.zh-CN.md`
+- 根目录 README：`../README.md`
+- MCP 工具状态矩阵：`../Documentation~/ToolStatus.md`
+- UIFlow 使用指南：`../Documentation~/UIFlow.md`

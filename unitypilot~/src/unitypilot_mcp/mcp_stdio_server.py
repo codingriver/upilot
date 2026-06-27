@@ -9,11 +9,12 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import StreamableHTTPASGIApp
 from mcp.shared.session import BaseSession
+from pydantic import Field
 from starlette.applications import Starlette
 import starlette.routing
 from uvicorn import Config, Server
@@ -421,6 +422,15 @@ async def _lifespan(app: FastMCP):
 
 mcp = FastMCP("upilot", lifespan=_lifespan, stateless_http=True)
 
+_PLAYMODE_HIDDEN_TOOLS = {
+    "unity_compile",
+    "unity_auto_fix_start",
+    "unity_roslyn_execute",
+    "unity_roslyn_status",
+    "unity_roslyn_abort",
+    "unity_safe_compile_and_wait",
+}
+
 
 def _get_facade() -> McpToolFacade:
     if _facade is None:
@@ -428,11 +438,54 @@ def _get_facade() -> McpToolFacade:
     return _facade
 
 
+def _response_context() -> dict[str, Any]:
+    if _facade is None:
+        return {
+            "unityConnected": False,
+            "playModeState": "unknown",
+            "isPlaying": False,
+            "isPaused": False,
+            "isCompiling": False,
+            "compileStatus": "unknown",
+            "compileErrorCount": 0,
+            "compileWarningCount": 0,
+            "activeScene": "",
+            "sessionId": "",
+            "lastHeartbeatAt": 0,
+            "source": "unavailable",
+            "timestamp": int(time.time() * 1000),
+        }
+
+    server = _facade.server
+    session = server.session_manager.active
+    editor = server.state.editor
+    compile_state = server.state.compile
+    play_mode_state = editor.play_mode_state or "unknown"
+
+    return {
+        "unityConnected": server.is_ready(),
+        "playModeState": play_mode_state,
+        "isPlaying": play_mode_state == "play",
+        "isPaused": play_mode_state == "pause",
+        "isCompiling": editor.is_compiling,
+        "compileStatus": compile_state.status,
+        "compileErrorCount": compile_state.error_count,
+        "compileWarningCount": compile_state.warning_count,
+        "activeScene": editor.active_scene,
+        "sessionId": session.session_id if session else "",
+        "lastHeartbeatAt": session.last_heartbeat_at if session else 0,
+        "source": "cache",
+        "timestamp": int(time.time() * 1000),
+    }
+
+
 def _payload(r) -> str:
+    response_context = getattr(r, "context", None) or _response_context()
     return json.dumps(
         {
             "ok": r.ok,
             "data": r.data,
+            "context": response_context,
             "error": (
                 {
                     "code": r.error.code,
@@ -446,6 +499,61 @@ def _payload(r) -> str:
             "timestamp": r.timestamp,
         },
         ensure_ascii=False,
+    )
+
+
+def _state_is_playmode(state: str | None) -> bool:
+    return (state or "").strip().lower() in {"play", "playing", "pause", "paused"}
+
+
+async def _unity_is_playmode() -> bool:
+    if _facade is None:
+        return False
+
+    try:
+        state = await _facade.editor_state()
+        if state.ok and state.data:
+            if bool(state.data.get("isPlaying", False)) or bool(
+                state.data.get("isPaused", False)
+            ):
+                return True
+            return _state_is_playmode(str(state.data.get("playModeState", "")))
+    except Exception as ex:
+        logger.debug("Failed to query Unity play mode for MCP tool filtering: %s", ex)
+
+    editor = _facade.server.state.editor
+    return _state_is_playmode(editor.play_mode_state)
+
+
+async def _reject_roslyn_in_playmode(tool_name: str):
+    if not await _unity_is_playmode():
+        return None
+    return _log_tool_result(
+        tool_name,
+        _payload(
+            fail(
+                new_id("req"),
+                "EDITOR_IN_PLAY_MODE",
+                "Unity 正在 PlayMode 或暂停状态，Roslyn 动态代码执行工具不可用。",
+                {"tool": tool_name},
+            )
+        ),
+    )
+
+
+async def _reject_compile_in_playmode(tool_name: str):
+    if not await _unity_is_playmode():
+        return None
+    return _log_tool_result(
+        tool_name,
+        _payload(
+            fail(
+                new_id("req"),
+                "EDITOR_IN_PLAY_MODE",
+                "Unity 正在 PlayMode 或暂停状态，MCP 不允许触发 Unity 编译。",
+                {"tool": tool_name},
+            )
+        ),
     )
 
 
@@ -477,6 +585,9 @@ async def unity_open_editor(command: str = "", waitForConnectMs: int = 60000) ->
 @mcp.tool(description="触发 Unity 编译。")
 async def unity_compile() -> str:
     _log_tool_call("unity_compile", {})
+    rejected = await _reject_compile_in_playmode("unity_compile")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().compile()
     return _log_tool_result("unity_compile", _payload(r))
 
@@ -515,6 +626,9 @@ async def unity_auto_fix_start(
         "unity_auto_fix_start",
         {"maxIterations": maxIterations, "stopWhenNoError": stopWhenNoError},
     )
+    rejected = await _reject_compile_in_playmode("unity_auto_fix_start")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().auto_fix_start(
         max_iterations=maxIterations, stop_when_no_error=stopWhenNoError
     )
@@ -823,11 +937,104 @@ async def unity_editor_focus_state() -> str:
 # ── M07 Console 日志读取 ─────────────────────────────────────────────────────
 
 
-@mcp.tool(description="获取 Unity 控制台日志列表，支持按类型过滤和数量限制。")
-async def unity_console_get_logs(logType: str = "", count: int = 100) -> str:
-    _log_tool_call("unity_console_get_logs", {"logType": logType, "count": count})
-    r = await _get_facade().console_get_logs(log_type=logType, count=count)
-    return _log_tool_result("unity_console_get_logs", _payload(r))
+@mcp.tool(description="标记 Unity 控制台当前末尾游标，用于后续 tail 读取新增日志。")
+async def unity_console_mark_logs() -> str:
+    _log_tool_call("unity_console_mark_logs", {})
+    r = await _get_facade().console_mark_logs()
+    return _log_tool_result("unity_console_mark_logs", _payload(r))
+
+
+@mcp.tool(
+    description=(
+        "从 Unity 控制台游标之后读取新增日志，支持服务端过滤。"
+        "默认不返回堆栈并排除 UnityPilot/MCP 自身日志。"
+    )
+)
+async def unity_console_tail_logs(
+    cursor: int = -1,
+    count: int = 200,
+    logType: str = "",
+    includeStackTrace: bool = False,
+    excludeUnityPilot: bool = True,
+    contains: list[str] | None = None,
+    containsAll: bool = False,
+    regex: str = "",
+    newestFirst: bool = False,
+    maxMessageLength: int = 0,
+) -> str:
+    _log_tool_call(
+        "unity_console_tail_logs",
+        {
+            "cursor": cursor,
+            "count": count,
+            "logType": logType,
+            "includeStackTrace": includeStackTrace,
+            "excludeUnityPilot": excludeUnityPilot,
+            "contains": contains,
+            "containsAll": containsAll,
+            "regex": regex,
+            "newestFirst": newestFirst,
+            "maxMessageLength": maxMessageLength,
+        },
+    )
+    r = await _get_facade().console_tail_logs(
+        cursor=cursor,
+        count=count,
+        log_type=logType,
+        include_stack_trace=includeStackTrace,
+        exclude_unity_pilot=excludeUnityPilot,
+        contains=contains,
+        contains_all=containsAll,
+        regex=regex,
+        newest_first=newestFirst,
+        max_message_length=maxMessageLength,
+    )
+    return _log_tool_result("unity_console_tail_logs", _payload(r))
+
+
+@mcp.tool(
+    description=(
+        "搜索 Unity 控制台全量日志，支持关键词/正则和日志类型过滤。"
+        "默认不返回堆栈并排除 UnityPilot/MCP 自身日志。"
+    )
+)
+async def unity_console_search_logs(
+    count: int = 200,
+    logType: str = "",
+    includeStackTrace: bool = False,
+    excludeUnityPilot: bool = True,
+    contains: list[str] | None = None,
+    containsAll: bool = False,
+    regex: str = "",
+    newestFirst: bool = True,
+    maxMessageLength: int = 0,
+) -> str:
+    _log_tool_call(
+        "unity_console_search_logs",
+        {
+            "count": count,
+            "logType": logType,
+            "includeStackTrace": includeStackTrace,
+            "excludeUnityPilot": excludeUnityPilot,
+            "contains": contains,
+            "containsAll": containsAll,
+            "regex": regex,
+            "newestFirst": newestFirst,
+            "maxMessageLength": maxMessageLength,
+        },
+    )
+    r = await _get_facade().console_search_logs(
+        count=count,
+        log_type=logType,
+        include_stack_trace=includeStackTrace,
+        exclude_unity_pilot=excludeUnityPilot,
+        contains=contains,
+        contains_all=containsAll,
+        regex=regex,
+        newest_first=newestFirst,
+        max_message_length=maxMessageLength,
+    )
+    return _log_tool_result("unity_console_search_logs", _payload(r))
 
 
 @mcp.tool(description="清空 Unity 控制台日志。")
@@ -1244,6 +1451,10 @@ async def unity_sync_after_disk_write(
         "unity_sync_after_disk_write",
         {"delayS": delayS, "triggerCompile": triggerCompile},
     )
+    if triggerCompile:
+        rejected = await _reject_compile_in_playmode("unity_sync_after_disk_write")
+        if rejected is not None:
+            return rejected
     r = await _get_facade().sync_after_disk_write(
         delay_s=delayS, trigger_compile=triggerCompile
     )
@@ -1652,39 +1863,57 @@ async def unity_script_delete(scriptPath: str) -> str:
     return _log_tool_result("unity_script_delete", _payload(r))
 
 
-# ── M19 C# 代码执行 ─────────────────────────────────────────────────────────
+# ── M19 Roslyn 代码执行 ─────────────────────────────────────────────────────
 
 
 @mcp.tool(
-    description="在 Unity 编辑器中实时执行 C# 代码片段（通过 Roslyn），返回执行结果。"
+    description="通过 Roslyn 动态编译并执行 C# 代码片段，返回执行结果。适合临时诊断；调用已有业务方法请优先使用 unity_reflection_call。"
 )
-async def unity_csharp_execute(code: str, timeoutSeconds: int = 10) -> str:
+async def unity_roslyn_execute(code: str, timeoutSeconds: int = 10) -> str:
     _log_tool_call(
-        "unity_csharp_execute", {"code": code, "timeoutSeconds": timeoutSeconds}
+        "unity_roslyn_execute", {"code": code, "timeoutSeconds": timeoutSeconds}
     )
-    r = await _get_facade().csharp_execute(code=code, timeout_seconds=timeoutSeconds)
-    return _log_tool_result("unity_csharp_execute", _payload(r))
+    rejected = await _reject_roslyn_in_playmode("unity_roslyn_execute")
+    if rejected is not None:
+        return rejected
+    r = await _get_facade().roslyn_execute(code=code, timeout_seconds=timeoutSeconds)
+    return _log_tool_result("unity_roslyn_execute", _payload(r))
 
 
-@mcp.tool(description="查询 C# 代码执行任务的当前状态。")
-async def unity_csharp_status(executionId: str) -> str:
-    _log_tool_call("unity_csharp_status", {"executionId": executionId})
-    r = await _get_facade().csharp_status(execution_id=executionId)
-    return _log_tool_result("unity_csharp_status", _payload(r))
+@mcp.tool(description="查询 Roslyn 动态代码执行任务的当前状态。")
+async def unity_roslyn_status(executionId: str) -> str:
+    _log_tool_call("unity_roslyn_status", {"executionId": executionId})
+    rejected = await _reject_roslyn_in_playmode("unity_roslyn_status")
+    if rejected is not None:
+        return rejected
+    r = await _get_facade().roslyn_status(execution_id=executionId)
+    return _log_tool_result("unity_roslyn_status", _payload(r))
 
 
-@mcp.tool(description="终止正在运行的 C# 代码执行任务。")
-async def unity_csharp_abort(executionId: str) -> str:
-    _log_tool_call("unity_csharp_abort", {"executionId": executionId})
-    r = await _get_facade().csharp_abort(execution_id=executionId)
-    return _log_tool_result("unity_csharp_abort", _payload(r))
+@mcp.tool(description="终止正在运行的 Roslyn 动态代码执行任务。")
+async def unity_roslyn_abort(executionId: str) -> str:
+    _log_tool_call("unity_roslyn_abort", {"executionId": executionId})
+    rejected = await _reject_roslyn_in_playmode("unity_roslyn_abort")
+    if rejected is not None:
+        return rejected
+    r = await _get_facade().roslyn_abort(execution_id=executionId)
+    return _log_tool_result("unity_roslyn_abort", _payload(r))
 
 
 # ── M20 反射调用 ────────────────────────────────────────────────────────────
 
 
-@mcp.tool(description="通过反射搜索 Unity 程序集中的类和方法。")
-async def unity_reflection_find(typeName: str, methodName: str = "") -> str:
+@mcp.tool(description="通过反射搜索 Unity 程序集中的指定类型，可选按方法名过滤。")
+async def unity_reflection_find(
+    typeName: Annotated[
+        str,
+        Field(description="要查找的 C# 类型名，可使用完整命名空间或不带命名空间的类名。"),
+    ],
+    methodName: Annotated[
+        str,
+        Field(description="可选的方法名过滤条件；留空时返回该类型的所有方法。"),
+    ] = "",
+) -> str:
     _log_tool_call(
         "unity_reflection_find", {"typeName": typeName, "methodName": methodName}
     )
@@ -1913,6 +2142,9 @@ async def unity_safe_compile_and_wait(
             "postCompileDelayS": postCompileDelayS,
         },
     )
+    rejected = await _reject_compile_in_playmode("unity_safe_compile_and_wait")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().safe_compile_and_wait(
         timeout_s=timeoutS,
         poll_interval_s=pollIntervalS,
@@ -2756,6 +2988,20 @@ async def unity_sceneview_navigate(
         in_2d_mode=in2DMode,
     )
     return _log_tool_result("unity_sceneview_navigate", _payload(r))
+
+
+_original_mcp_list_tools = mcp.list_tools
+
+
+async def _list_tools_filtered_for_playmode():
+    tools = await _original_mcp_list_tools()
+    if not await _unity_is_playmode():
+        return tools
+    return [tool for tool in tools if tool.name not in _PLAYMODE_HIDDEN_TOOLS]
+
+
+mcp.list_tools = _list_tools_filtered_for_playmode
+mcp._mcp_server.list_tools()(_list_tools_filtered_for_playmode)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

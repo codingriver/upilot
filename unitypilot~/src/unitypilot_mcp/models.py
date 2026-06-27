@@ -50,3 +50,4 @@ class ToolResponse:
     error: ToolError | None
     request_id: str
     timestamp: int = field(default_factory=lambda: int(time.time() * 1000))
+    context: dict[str, Any] | None = None
