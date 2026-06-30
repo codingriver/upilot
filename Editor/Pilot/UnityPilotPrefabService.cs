@@ -15,10 +15,10 @@ namespace codingriver.unity.pilot
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
     [Serializable] public class PrefabCreateMessage       { public PrefabCreatePayload payload; }
-    [Serializable] public class PrefabCreatePayload       { public int sourceGameObjectId; public string prefabPath = ""; }
+    [Serializable] public class PrefabCreatePayload       { public ulong sourceGameObjectId; public string prefabPath = ""; }
 
     [Serializable] public class PrefabInstantiateMessage   { public PrefabInstantiatePayload payload; }
-    [Serializable] public class PrefabInstantiatePayload   { public string prefabPath = ""; public int parentId; }
+    [Serializable] public class PrefabInstantiatePayload   { public string prefabPath = ""; public ulong parentId; }
 
     [Serializable] public class PrefabPathMessage          { public PrefabPathPayload payload; }
     [Serializable] public class PrefabPathPayload          { public string prefabPath = ""; }
@@ -26,7 +26,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class PrefabResultPayload
     {
-        public int    instanceId;
+        public ulong  instanceId;
         public string prefabPath;
         public string name;
     }
@@ -73,7 +73,7 @@ namespace codingriver.unity.pilot
             {
                 try
                 {
-                    var go = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)p.sourceGameObjectId);
+                    var go = UnityPilotEntityIds.GameObjectFromWireId(p.sourceGameObjectId);
                     if (go == null)
                     {
                         tcs.SetException(new Exception($"GameObject not found: {p.sourceGameObjectId}"));
@@ -99,7 +99,7 @@ namespace codingriver.unity.pilot
                     AssetDatabase.SaveAssets();
                     tcs.SetResult(new PrefabResultPayload
                     {
-                        instanceId = (int)UnityPilotEntityIds.ToWireId(prefab),
+                        instanceId = UnityPilotEntityIds.ToWireId(prefab),
                         prefabPath = p.prefabPath,
                         name       = prefab.name,
                     });
@@ -153,7 +153,7 @@ namespace codingriver.unity.pilot
                     // Set parent if specified
                     if (p.parentId != 0)
                     {
-                        var parent = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)p.parentId);
+                        var parent = UnityPilotEntityIds.GameObjectFromWireId(p.parentId);
                         if (parent != null)
                             instance.transform.SetParent(parent.transform, true);
                     }
@@ -162,7 +162,7 @@ namespace codingriver.unity.pilot
 
                     tcs.SetResult(new PrefabResultPayload
                     {
-                        instanceId = (int)UnityPilotEntityIds.ToWireId(instance),
+                        instanceId = UnityPilotEntityIds.ToWireId(instance),
                         prefabPath = p.prefabPath,
                         name       = instance.name,
                     });

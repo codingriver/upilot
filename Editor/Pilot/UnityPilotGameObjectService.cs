@@ -30,7 +30,7 @@ namespace codingriver.unity.pilot
     public class GameObjectCreatePayload
     {
         public string name = "New GameObject";
-        public int parentId;
+        public ulong parentId;
         public string primitiveType = "";
     }
 
@@ -51,7 +51,7 @@ namespace codingriver.unity.pilot
     {
         public string name = "";
         public string tag = "";
-        public int instanceId;
+        public ulong instanceId;
     }
 
     [Serializable]
@@ -69,13 +69,13 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class GameObjectModifyPayload
     {
-        public int instanceId;
+        public ulong instanceId;
         public string name;
         public string tag;
         public int layer = -1;        // -1 = not set
         public int activeSelf = -1;    // -1 = not set, 0 = false, 1 = true (JsonUtility lacks nullable bool)
         public int isStatic = -1;      // -1 = not set, 0 = false, 1 = true
-        public int parentId;           // 0 = not set (no reparent)
+        public ulong parentId;         // 0 = not set (no reparent)
     }
 
     [Serializable]
@@ -93,7 +93,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class GameObjectDeletePayload
     {
-        public int instanceId;
+        public ulong instanceId;
     }
 
     [Serializable]
@@ -111,7 +111,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class GameObjectMovePayload
     {
-        public int instanceId;
+        public ulong instanceId;
         public Vec3Payload position;
         public Vec3Payload rotation;
         public Vec3Payload scale;
@@ -132,7 +132,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class GameObjectDuplicatePayload
     {
-        public int instanceId;
+        public ulong instanceId;
     }
 
     [Serializable]
@@ -146,13 +146,13 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class GameObjectInfoPayload
     {
-        public int instanceId;
+        public ulong instanceId;
         public string name;
         public string tag;
         public int layer;
         public bool activeSelf;
         public bool isStatic;
-        public int parentId;
+        public ulong parentId;
         public TransformPayload transform;
     }
 
@@ -539,9 +539,9 @@ namespace codingriver.unity.pilot
 
         // ── Helpers ──────────────────────────────────────────────────────────
 
-        public static GameObject FindByInstanceId(int instanceId)
+        public static GameObject FindByInstanceId(ulong instanceId)
         {
-            return UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)instanceId);
+            return UnityPilotEntityIds.GameObjectFromWireId(instanceId);
         }
 
         public static GameObjectInfoPayload BuildInfo(GameObject go)
@@ -549,13 +549,13 @@ namespace codingriver.unity.pilot
             var t = go.transform;
             return new GameObjectInfoPayload
             {
-                instanceId = (int)UnityPilotEntityIds.ToWireId(go),
+                instanceId = UnityPilotEntityIds.ToWireId(go),
                 name = go.name,
                 tag = go.tag,
                 layer = go.layer,
                 activeSelf = go.activeSelf,
                 isStatic = go.isStatic,
-                parentId = t.parent != null ? (int)UnityPilotEntityIds.ToWireId(t.parent.gameObject) : 0,
+                parentId = t.parent != null ? UnityPilotEntityIds.ToWireId(t.parent.gameObject) : 0,
                 transform = new TransformPayload
                 {
                     position = new Vec3Payload { x = t.localPosition.x, y = t.localPosition.y, z = t.localPosition.z },

@@ -42,10 +42,10 @@ namespace codingriver.unity.pilot
     [Serializable] public class AssetFolderResultPayload { public string folderPath; }
 
     [Serializable] public class AssetGetDataMessage { public AssetGetDataPayload payload; }
-    [Serializable] public class AssetGetDataPayload { public string assetPath = ""; public int gameObjectId; public string componentType = ""; public int componentIndex; public int maxDepth = 10; }
+    [Serializable] public class AssetGetDataPayload { public string assetPath = ""; public ulong gameObjectId; public string componentType = ""; public int componentIndex; public int maxDepth = 10; }
 
     [Serializable] public class AssetModifyDataMessage { public AssetModifyDataPayload payload; }
-    [Serializable] public class AssetModifyDataPayload { public string assetPath = ""; public int gameObjectId; public string componentType = ""; public int componentIndex; public List<SerializedPropertyWrite> properties = new List<SerializedPropertyWrite>(); }
+    [Serializable] public class AssetModifyDataPayload { public string assetPath = ""; public ulong gameObjectId; public string componentType = ""; public int componentIndex; public List<SerializedPropertyWrite> properties = new List<SerializedPropertyWrite>(); }
 
     [Serializable] public class SerializedPropertyWrite { public string propertyPath = ""; public string value = ""; }
 
@@ -404,7 +404,7 @@ namespace codingriver.unity.pilot
                     SerializedObject so;
                     if (p.gameObjectId != 0)
                     {
-                        var go = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)p.gameObjectId);
+                        var go = UnityPilotEntityIds.GameObjectFromWireId(p.gameObjectId);
                         if (go == null)
                             throw new Exception($"GameObject not found: {p.gameObjectId}");
 
@@ -487,7 +487,7 @@ namespace codingriver.unity.pilot
                     SerializedObject so;
                     if (p.gameObjectId != 0)
                     {
-                        var go = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)p.gameObjectId);
+                        var go = UnityPilotEntityIds.GameObjectFromWireId(p.gameObjectId);
                         if (go == null)
                             throw new Exception($"GameObject not found: {p.gameObjectId}");
 

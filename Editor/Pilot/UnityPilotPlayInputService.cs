@@ -244,9 +244,9 @@ namespace codingriver.unity.pilot
             if (byFull != null) return byFull;
 
             // 4. Instance ID (numeric string)
-            if (int.TryParse(targetWindow, out int instanceId))
+            if (ulong.TryParse(targetWindow, out ulong instanceId))
             {
-                var byId = all.FirstOrDefault(w => (int)UnityPilotEntityIds.ToWireId(w) == instanceId);
+                var byId = all.FirstOrDefault(w => UnityPilotEntityIds.ToWireId(w) == instanceId);
                 if (byId != null) return byId;
             }
 

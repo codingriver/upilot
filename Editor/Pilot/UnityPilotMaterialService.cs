@@ -21,7 +21,7 @@ namespace codingriver.unity.pilot
     [Serializable] public class MaterialModifyPayload   { public string materialPath = ""; public string properties = ""; }
 
     [Serializable] public class MaterialAssignMessage   { public MaterialAssignPayload payload; }
-    [Serializable] public class MaterialAssignPayload   { public int targetGameObjectId; public string materialPath = ""; public int materialIndex; }
+    [Serializable] public class MaterialAssignPayload   { public ulong targetGameObjectId; public string materialPath = ""; public int materialIndex; }
 
     [Serializable] public class MaterialGetMessage      { public MaterialGetPayload payload; }
     [Serializable] public class MaterialGetPayload      { public string materialPath = ""; }
@@ -31,7 +31,7 @@ namespace codingriver.unity.pilot
     {
         public string materialPath;
         public string shaderName;
-        public int    instanceId;
+        public ulong  instanceId;
         public List<MaterialPropertyInfoPayload> properties = new List<MaterialPropertyInfoPayload>();
     }
 
@@ -47,7 +47,7 @@ namespace codingriver.unity.pilot
     public class MaterialCreateResultPayload
     {
         public string materialPath;
-        public int    instanceId;
+        public ulong  instanceId;
         public string shaderName;
     }
 
@@ -106,7 +106,7 @@ namespace codingriver.unity.pilot
                     tcs.SetResult(new MaterialCreateResultPayload
                     {
                         materialPath = p.materialPath,
-                        instanceId   = (int)UnityPilotEntityIds.ToWireId(mat),
+                        instanceId   = UnityPilotEntityIds.ToWireId(mat),
                         shaderName   = shader.name,
                     });
                 }
@@ -195,7 +195,7 @@ namespace codingriver.unity.pilot
             {
                 try
                 {
-                    var go = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)p.targetGameObjectId);
+                    var go = UnityPilotEntityIds.GameObjectFromWireId(p.targetGameObjectId);
                     if (go == null)
                     {
                         tcs.SetException(new Exception($"GameObject not found: {p.targetGameObjectId}"));
@@ -272,7 +272,7 @@ namespace codingriver.unity.pilot
                     {
                         materialPath = p.materialPath,
                         shaderName   = mat.shader != null ? mat.shader.name : "Unknown",
-                        instanceId   = (int)UnityPilotEntityIds.ToWireId(mat),
+                        instanceId   = UnityPilotEntityIds.ToWireId(mat),
                     };
 
                     // Read shader properties

@@ -86,8 +86,20 @@ namespace codingriver.unity.pilot
             var from = new Vector2(payload.fromX, payload.fromY);
             var to = new Vector2(payload.toX, payload.toY);
 
-            source.Focus();
-            DragAndDrop.PrepareStartDrag();
+            var eventWarning = false;
+            try { source.Focus(); }
+            catch (Exception ex)
+            {
+                eventWarning = true;
+                Logger.LogError("DragDrop", $"Source focus failed: {ex.Message}");
+            }
+
+            try { DragAndDrop.PrepareStartDrag(); }
+            catch (Exception ex)
+            {
+                eventWarning = true;
+                Logger.LogError("DragDrop", $"PrepareStartDrag failed: {ex.Message}");
+            }
 
             var dragType = (payload.dragType ?? "custom").ToLowerInvariant();
             switch (dragType)
@@ -116,7 +128,7 @@ namespace codingriver.unity.pilot
                     var objects = new List<UnityEngine.Object>();
                     foreach (var objectId in ids)
                     {
-                        var go = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)objectId);
+                        var go = UnityPilotEntityIds.GameObjectFromWireId(objectId);
                         if (go != null) objects.Add(go);
                     }
 
@@ -134,9 +146,14 @@ namespace codingriver.unity.pilot
                 }
             }
 
-            DragAndDrop.StartDrag($"unitypilot:{dragType}");
+            try { DragAndDrop.StartDrag($"unitypilot:{dragType}"); }
+            catch (Exception ex)
+            {
+                eventWarning = true;
+                Logger.LogError("DragDrop", $"StartDrag failed: {ex.Message}");
+            }
 
-            source.SendEvent(new Event
+            eventWarning |= !SafeSendEvent(source, new Event
             {
                 type = EventType.MouseDown,
                 mousePosition = from,
@@ -144,7 +161,7 @@ namespace codingriver.unity.pilot
                 modifiers = mods,
             });
 
-            source.SendEvent(new Event
+            eventWarning |= !SafeSendEvent(source, new Event
             {
                 type = EventType.MouseDrag,
                 mousePosition = from,
@@ -152,9 +169,14 @@ namespace codingriver.unity.pilot
                 modifiers = mods,
             });
 
-            target.Focus();
+            try { target.Focus(); }
+            catch (Exception ex)
+            {
+                eventWarning = true;
+                Logger.LogError("DragDrop", $"Target focus failed: {ex.Message}");
+            }
 
-            target.SendEvent(new Event
+            eventWarning |= !SafeSendEvent(target, new Event
             {
                 type = EventType.DragUpdated,
                 mousePosition = to,
@@ -162,7 +184,7 @@ namespace codingriver.unity.pilot
                 modifiers = mods,
             });
 
-            target.SendEvent(new Event
+            eventWarning |= !SafeSendEvent(target, new Event
             {
                 type = EventType.DragPerform,
                 mousePosition = to,
@@ -170,13 +192,32 @@ namespace codingriver.unity.pilot
                 modifiers = mods,
             });
 
+            try { DragAndDrop.AcceptDrag(); }
+            catch { eventWarning = true; }
+
             return new DragDropResultPayload
             {
                 ok = true,
-                state = $"dragdrop:{dragType}:{payload.sourceWindow}->{payload.targetWindow}",
+                state = eventWarning
+                    ? $"dragdrop:{dragType}:{payload.sourceWindow}->{payload.targetWindow}:event_warning"
+                    : $"dragdrop:{dragType}:{payload.sourceWindow}->{payload.targetWindow}",
                 dragType = dragType,
                 visualMode = DragAndDrop.visualMode.ToString(),
             };
+        }
+
+        private static bool SafeSendEvent(EditorWindow window, Event evt)
+        {
+            try
+            {
+                window.SendEvent(evt);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("DragDrop", $"SendEvent failed: {ex.Message}");
+                return false;
+            }
         }
     }
 }

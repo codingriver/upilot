@@ -21,7 +21,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class HierarchyNodePayload
     {
-        public int    instanceId;
+        public ulong  instanceId;
         public string name;
         public bool   activeSelf;
         public List<HierarchyNodePayload> children = new();
@@ -616,7 +616,7 @@ namespace codingriver.unity.pilot
         {
             var node = new HierarchyNodePayload
             {
-                instanceId = (int)UnityPilotEntityIds.ToWireId(t.gameObject),
+                instanceId = UnityPilotEntityIds.ToWireId(t.gameObject),
                 name       = t.gameObject.name,
                 activeSelf = t.gameObject.activeSelf,
             };

@@ -18,16 +18,16 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class SelectionSetPayload
     {
-        public List<int>    gameObjectIds = new();
+        public List<ulong>  gameObjectIds = new();
         public List<string> assetPaths    = new();
     }
 
     [Serializable]
     public class SelectionResultPayload
     {
-        public List<int>    selectedGameObjectIds = new();
+        public List<ulong>  selectedGameObjectIds = new();
         public List<string> selectedAssetPaths    = new();
-        public int          activeGameObjectId;
+        public ulong        activeGameObjectId;
         public int          selectionCount;
     }
 
@@ -85,9 +85,9 @@ namespace codingriver.unity.pilot
                     // Resolve game object IDs
                     if (p.gameObjectIds != null)
                     {
-                        foreach (int instanceId in p.gameObjectIds)
+                        foreach (ulong instanceId in p.gameObjectIds)
                         {
-                            var obj = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)instanceId);
+                            var obj = UnityPilotEntityIds.GameObjectFromWireId(instanceId);
                             if (obj != null) objects.Add(obj);
                         }
                     }
@@ -155,7 +155,7 @@ namespace codingriver.unity.pilot
             // Game objects in scene
             foreach (var go in Selection.gameObjects)
             {
-                result.selectedGameObjectIds.Add((int)UnityPilotEntityIds.ToWireId(go));
+                result.selectedGameObjectIds.Add(UnityPilotEntityIds.ToWireId(go));
             }
 
             // All selected objects — check for assets
@@ -169,7 +169,7 @@ namespace codingriver.unity.pilot
             }
 
             result.activeGameObjectId = Selection.activeGameObject != null
-                ? (int)UnityPilotEntityIds.ToWireId(Selection.activeGameObject)
+                ? UnityPilotEntityIds.ToWireId(Selection.activeGameObject)
                 : 0;
             result.selectionCount = Selection.objects.Length;
 

@@ -153,7 +153,7 @@ upilot 提供两类不同的 Unity 侧 C# 调用方式：
 
 ## MCP 工具清单
 
-当前 `tools/list` 暴露 116 个 MCP 工具，覆盖连接、编译、Console、编辑器输入、场景、GameObject、组件、资源、Prefab、材质、脚本、包、测试、构建、批处理、截图、E2E、UIFlow、反射和 Roslyn 动态执行等能力。维护状态、条件可用性和验收口径见 `Documentation~/ToolStatus.md`。
+当前 `tools/list` 暴露 115 个 MCP 工具，覆盖连接、编译、Console、编辑器输入、场景、GameObject、组件、资源、Prefab、材质、脚本、包、测试、构建、批处理、截图、E2E、UIFlow、反射和 Roslyn 动态执行等能力。维护状态、条件可用性和验收口径见 `Documentation~/ToolStatus.md`。
 
 ## UIFlow 附属工具
 

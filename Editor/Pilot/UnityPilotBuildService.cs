@@ -252,7 +252,11 @@ namespace codingriver.unity.pilot
             }
             else
             {
-                await _bridge.SendErrorAsync(id, "NOT_FOUND", "No active build to cancel.", token, "build.cancel");
+                await _bridge.SendResultAsync(
+                    id,
+                    "build.cancel",
+                    new GenericOkPayload { ok = true, state = "not_running" },
+                    token);
             }
         }
 

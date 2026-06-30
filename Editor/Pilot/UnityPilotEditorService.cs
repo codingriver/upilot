@@ -26,7 +26,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class SceneViewNavigatePayload
     {
-        public int lookAtInstanceId;           // LookAt a specific GameObject
+        public ulong lookAtInstanceId;         // LookAt a specific GameObject
         public Vec3Payload pivot;              // Set pivot directly
         public float size = -1;                // Camera size / zoom (-1 = not set)
         public Vec3Payload rotation;           // Euler angles for camera rotation
@@ -190,7 +190,7 @@ namespace codingriver.unity.pilot
                     // LookAt a specific GameObject
                     if (p.lookAtInstanceId != 0)
                     {
-                        var go = UnityPilotEntityIds.GameObjectFromWireId((ulong)(uint)p.lookAtInstanceId);
+                        var go = UnityPilotEntityIds.GameObjectFromWireId(p.lookAtInstanceId);
                         if (go != null)
                         {
                             sv.LookAt(go.transform.position);

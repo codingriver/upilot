@@ -271,6 +271,14 @@ namespace codingriver.unity.pilot
                 cts.Cancel();
                 await _bridge.SendResultAsync(id, "batch.cancel", new GenericOkPayload(), token);
             }
+            else if (_batches.ContainsKey(p.batchId))
+            {
+                await _bridge.SendResultAsync(
+                    id,
+                    "batch.cancel",
+                    new GenericOkPayload { ok = true, state = "not_running" },
+                    token);
+            }
             else
             {
                 await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Batch not found or already completed: {p.batchId}", token, "batch.cancel");

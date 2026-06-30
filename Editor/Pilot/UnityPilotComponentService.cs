@@ -29,7 +29,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class ComponentAddPayload
     {
-        public int gameObjectId;
+        public ulong gameObjectId;
         public string componentType = "";
     }
 
@@ -48,7 +48,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class ComponentRemovePayload
     {
-        public int gameObjectId;
+        public ulong gameObjectId;
         public string componentType = "";
         public int componentIndex;
     }
@@ -68,7 +68,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class ComponentGetPayload
     {
-        public int gameObjectId;
+        public ulong gameObjectId;
         public string componentType = "";
         public int componentIndex;
     }
@@ -88,7 +88,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class ComponentModifyPayload
     {
-        public int gameObjectId;
+        public ulong gameObjectId;
         public string componentType = "";
         public string properties = "{}"; // JSON string because JsonUtility can't handle dict
         public int componentIndex;
@@ -109,7 +109,7 @@ namespace codingriver.unity.pilot
     [Serializable]
     public class ComponentListPayload
     {
-        public int gameObjectId;
+        public ulong gameObjectId;
     }
 
     [Serializable]

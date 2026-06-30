@@ -200,6 +200,14 @@ namespace codingriver.unity.pilot
                 }
                 await _bridge.SendResultAsync(id, "roslyn.abort", new GenericOkPayload(), token);
             }
+            else if (_executions.ContainsKey(p.executionId))
+            {
+                await _bridge.SendResultAsync(
+                    id,
+                    "roslyn.abort",
+                    new GenericOkPayload { ok = true, state = "not_running" },
+                    token);
+            }
             else
             {
                 await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found or already completed: {p.executionId}", token, "roslyn.abort");
@@ -366,8 +374,27 @@ public static class __CSharpEval {
                 if (errors != null && errors.Count > 0)
                 {
                     var sb = new System.Text.StringBuilder("Compilation errors:\n");
-                    foreach (var err in errors) sb.AppendLine(err.ToString());
-                    return sb.ToString();
+                    var hasErrors = false;
+                    foreach (var err in errors)
+                    {
+                        var isWarning = false;
+                        try
+                        {
+                            var isWarningProperty = err.GetType().GetProperty("IsWarning");
+                            if (isWarningProperty != null)
+                                isWarning = (bool)isWarningProperty.GetValue(err);
+                        }
+                        catch { /* best-effort reflection over compiler errors */ }
+
+                        if (isWarning)
+                            continue;
+
+                        hasErrors = true;
+                        sb.AppendLine(err.ToString());
+                    }
+
+                    if (hasErrors)
+                        return sb.ToString();
                 }
 
                 var assemblyProp = results.GetType().GetProperty("CompiledAssembly");

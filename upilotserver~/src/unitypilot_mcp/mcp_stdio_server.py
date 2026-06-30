@@ -2845,25 +2845,6 @@ async def _run_unity_uiflow_batch(
 
 @mcp.tool(
     description=(
-        "M27（可选 P3）：对 PNG base64 调用 OpenAI 多模态模型做简短描述/断言辅助。"
-        "需 OPENAI_API_KEY 或 UNITYPILOT_OPENAI_API_KEY；默认模型可由 UNITYPILOT_VISION_MODEL 指定。"
-    ),
-)
-async def unity_vision_analyze(imageBase64: str, prompt: str, model: str = "") -> str:
-    _log_tool_call(
-        "unity_vision_analyze",
-        {"imageBase64": imageBase64, "prompt": prompt, "model": model},
-    )
-    r = await _get_facade().vision_analyze(
-        image_base64=imageBase64,
-        prompt=prompt,
-        model=model,
-    )
-    return _log_tool_result("unity_vision_analyze", _payload(r))
-
-
-@mcp.tool(
-    description=(
         "在 Unity 主线程延迟指定毫秒（不阻塞 Python）。用于等待编辑器布局；"
         "delayMs 最大 120000。"
     ),
