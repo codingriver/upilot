@@ -197,7 +197,8 @@ python -m pytest
 - MCP HTTP 路径保持为 `/mcp`。
 - WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint。
 - 不要随意重命名 Python module `unitypilot_mcp`；包元数据和源码布局依赖它。
-- MCP 工具命名需要与实现路径保持一致。动态代码片段执行工具名预留为 `unity_roslyn_execute` / `unity_roslyn_status` / `unity_roslyn_abort`，并转发到 Unity bridge 路由 `roslyn.execute` / `roslyn.status` / `roslyn.abort`。这些 Roslyn 执行工具当前暂不可用，正在随服务一起升级改造。稳定调用已有业务方法时应使用 `unity_reflection_call`。
+- MCP 工具命名需要与实现路径保持一致。动态代码片段执行工具名预留为 `unity_roslyn_execute` / `unity_roslyn_status` / `unity_roslyn_abort`，并转发到 Unity bridge 路由 `roslyn.execute` / `roslyn.status` / `roslyn.abort`。这些 Roslyn 执行工具当前暂不可用，正在随服务一起升级改造。
+- 稳定调用已有业务方法时应使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`，对应 Unity bridge 路由 `reflection.eval`。
 
 ## 排障
 

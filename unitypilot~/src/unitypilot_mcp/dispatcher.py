@@ -35,7 +35,6 @@ class CommandDispatcher:
         "package.": 120000,
         "scene.": 45000,
         "script.": 60000,
-        "rshell.": 120000,
     }
 
     def __init__(self, transport: "WsTransport", state: StateStore, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> None:

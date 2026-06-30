@@ -52,18 +52,10 @@
 | --- | --- | --- | --- | --- |
 | `unity_reflection_find` | 是 | 待补充 | 是 | 通过反射搜索已加载程序集中的类型和方法。 |
 | `unity_reflection_call` | 是 | 待补充 | 是 | 稳定调用已有业务方法的推荐入口。 |
+| `reflection_eval` | 是 | 是 | 是 | 执行一条受限 C# 表达式语句；支持链式访问、调用、运算符、赋值和 JSON 变量。 |
 | `unity_roslyn_execute` | 升级中 | 否 | 暂不可用 | 接口名已预留；Roslyn 执行服务正在升级改造。 |
 | `unity_roslyn_status` | 升级中 | 否 | 暂不可用 | 接口名已预留；Roslyn 执行服务正在升级改造。 |
 | `unity_roslyn_abort` | 升级中 | 否 | 暂不可用 | 接口名已预留；Roslyn 执行服务正在升级改造。 |
-| `unity_rshell_connect` | 是 | 设备验收中 | 条件可用 | 需 Player/设备侧集成 RShell 并监听端口。 |
-| `unity_rshell_disconnect` | 是 | 设备验收中 | 条件可用 | 需 Player/设备侧集成 RShell 并监听端口。 |
-| `unity_rshell_status` | 是 | 设备验收中 | 条件可用 | 需 Player/设备侧集成 RShell 并监听端口。 |
-| `unity_rshell_execute` | 是 | 设备验收中 | 条件可用 | 远程表达式求值。 |
-| `unity_rshell_get_value` | 是 | 设备验收中 | 条件可用 | 远程读取属性或表达式。 |
-| `unity_rshell_set_value` | 是 | 设备验收中 | 条件可用 | 远程写入属性。 |
-| `unity_rshell_call_method` | 是 | 设备验收中 | 条件可用 | 远程调用方法。 |
-| `unity_rshell_scene_list` | 是 | 设备验收中 | 条件可用 | RShell 场景列表映射。 |
-| `unity_rshell_scene_info` | 是 | 设备验收中 | 条件可用 | RShell 场景信息映射。 |
 
 ### 控制台、日志与诊断
 

@@ -446,6 +446,7 @@ namespace codingriver.unity.pilot
             // reflection
             { "reflection.find",       "反射查找" },
             { "reflection.call",       "反射调用" },
+            { "reflection.eval",       "反射表达式" },
             // batch
             { "batch.execute",         "批量执行" },
             { "batch.cancel",          "取消批量" },
@@ -478,16 +479,6 @@ namespace codingriver.unity.pilot
             { "editor.window.close",   "关闭编辑器窗口" },
             { "editor.window.setRect", "设置编辑器窗口矩形" },
             // { "uitoolkit.scrollbar.drag", "拖拽滚动条滑块" },
-            // rshell (M25)
-            { "rshell.connect",      "RShell连接设备" },
-            { "rshell.disconnect",   "RShell断开" },
-            { "rshell.status",       "RShell连接状态" },
-            { "rshell.execute",      "RShell执行表达式" },
-            { "rshell.scene_list",   "RShell场景列表" },
-            { "rshell.scene_info",   "RShell对象信息" },
-            { "rshell.get_value",    "RShell读取属性" },
-            { "rshell.set_value",    "RShell写入属性" },
-            { "rshell.call_method",  "RShell调用方法" },
             // resource
             { "resource.sceneHierarchy",    "获取场景层级" },
             { "resource.consoleLogs",       "获取控制台日志(资源)" },

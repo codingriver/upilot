@@ -204,6 +204,7 @@ namespace codingriver.unity.pilot
         private UnityPilotScriptService     _scriptService;
         private UnityPilotCSharpService     _csharpService;
         private UnityPilotReflectionService _reflectionService;
+        private ReflectionEvalService       _reflectionEvalService;
         private UnityPilotBatchService      _batchService;
         private UnityPilotSelectionService  _selectionService;
         private UnityPilotResourceService   _resourceService;
@@ -214,7 +215,6 @@ namespace codingriver.unity.pilot
         // private UnityPilotUIToolkitService  _uiToolkitService;
         private UnityPilotEditorService     _editorService;
         private UnityPilotWindowService     _windowService;
-        private UnityPilotRShellService     _rshellService;
         private UnityPilotEditorDelayService _editorDelayService;
         private object _unityUIFlowService;
 
@@ -995,6 +995,8 @@ namespace codingriver.unity.pilot
             _csharpService.RegisterCommands();
             _reflectionService = new UnityPilotReflectionService(this);
             _reflectionService.RegisterCommands();
+            _reflectionEvalService = new ReflectionEvalService(this);
+            _reflectionEvalService.RegisterCommands();
             _batchService = new UnityPilotBatchService(this);
             _batchService.RegisterCommands();
             _selectionService = new UnityPilotSelectionService(this);
@@ -1012,9 +1014,6 @@ namespace codingriver.unity.pilot
 
             _editorDelayService = new UnityPilotEditorDelayService(this);
             _editorDelayService.RegisterCommands();
-
-            _rshellService = new UnityPilotRShellService(this);
-            _rshellService.RegisterCommands();
 
             RegisterOptionalUnityUIFlowService();
         }

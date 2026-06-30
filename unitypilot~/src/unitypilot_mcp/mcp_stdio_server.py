@@ -1715,119 +1715,6 @@ async def unity_test_list(testMode: str = "EditMode") -> str:
     return _log_tool_result("unity_test_list", _payload(r))
 
 
-# ── M25 RShell（UDP 在 Unity Editor Bridge 内实现；本进程仅转发 WS）──────────
-
-
-@mcp.tool(
-    description=(
-        "M25：连接设备上 RShell 运行时（UDP）。需 Build 已集成 RShell 并监听 port；"
-        "返回 connectionId。网络与分片重组在 Unity Bridge 内完成。"
-    ),
-)
-async def unity_rshell_connect(
-    host: str,
-    port: int = 9999,
-    timeoutMs: int = 10000,
-    maxRetries: int = 3,
-) -> str:
-    _log_tool_call(
-        "unity_rshell_connect",
-        {"host": host, "port": port, "timeoutMs": timeoutMs, "maxRetries": maxRetries},
-    )
-    r = await _get_facade().rshell_connect(
-        host=host,
-        port=port,
-        timeout_ms=timeoutMs,
-        max_retries=maxRetries,
-    )
-    return _log_tool_result("unity_rshell_connect", _payload(r))
-
-
-@mcp.tool(description="M25：断开 RShell 连接。")
-async def unity_rshell_disconnect(connectionId: str) -> str:
-    _log_tool_call("unity_rshell_disconnect", {"connectionId": connectionId})
-    r = await _get_facade().rshell_disconnect(connection_id=connectionId)
-    return _log_tool_result("unity_rshell_disconnect", _payload(r))
-
-
-@mcp.tool(
-    description=("M25：查询 RShell 连接状态。connectionId 为空则返回全部连接摘要。"),
-)
-async def unity_rshell_status(connectionId: str = "") -> str:
-    _log_tool_call("unity_rshell_status", {"connectionId": connectionId})
-    r = await _get_facade().rshell_status(connection_id=connectionId)
-    return _log_tool_result("unity_rshell_status", _payload(r))
-
-
-@mcp.tool(description="M25：向 RShell 发送表达式字符串（远程求值）。")
-async def unity_rshell_execute(connectionId: str, expression: str) -> str:
-    _log_tool_call(
-        "unity_rshell_execute", {"connectionId": connectionId, "expression": expression}
-    )
-    r = await _get_facade().rshell_execute(
-        connection_id=connectionId, expression=expression
-    )
-    return _log_tool_result("unity_rshell_execute", _payload(r))
-
-
-@mcp.tool(description="M25：RShell Scene.List() 映射。")
-async def unity_rshell_scene_list(connectionId: str) -> str:
-    _log_tool_call("unity_rshell_scene_list", {"connectionId": connectionId})
-    r = await _get_facade().rshell_scene_list(connection_id=connectionId)
-    return _log_tool_result("unity_rshell_scene_list", _payload(r))
-
-
-@mcp.tool(description="M25：RShell Scene.Info(path)。")
-async def unity_rshell_scene_info(connectionId: str, path: str) -> str:
-    _log_tool_call(
-        "unity_rshell_scene_info", {"connectionId": connectionId, "path": path}
-    )
-    r = await _get_facade().rshell_scene_info(connection_id=connectionId, path=path)
-    return _log_tool_result("unity_rshell_scene_info", _payload(r))
-
-
-@mcp.tool(description="M25：RShell 读取属性（表达式求值）。")
-async def unity_rshell_get_value(connectionId: str, expression: str) -> str:
-    _log_tool_call(
-        "unity_rshell_get_value",
-        {"connectionId": connectionId, "expression": expression},
-    )
-    r = await _get_facade().rshell_get_value(
-        connection_id=connectionId, expression=expression
-    )
-    return _log_tool_result("unity_rshell_get_value", _payload(r))
-
-
-@mcp.tool(description="M25：RShell 写入属性（expr=value）。")
-async def unity_rshell_set_value(connectionId: str, expression: str, value: str) -> str:
-    _log_tool_call(
-        "unity_rshell_set_value",
-        {"connectionId": connectionId, "expression": expression, "value": value},
-    )
-    r = await _get_facade().rshell_set_value(
-        connection_id=connectionId,
-        expression=expression,
-        value=value,
-    )
-    return _log_tool_result("unity_rshell_set_value", _payload(r))
-
-
-@mcp.tool(description="M25：RShell 调用方法 expression(args)。")
-async def unity_rshell_call_method(
-    connectionId: str, expression: str, args: str = ""
-) -> str:
-    _log_tool_call(
-        "unity_rshell_call_method",
-        {"connectionId": connectionId, "expression": expression, "args": args},
-    )
-    r = await _get_facade().rshell_call_method(
-        connection_id=connectionId,
-        expression=expression,
-        args=args,
-    )
-    return _log_tool_result("unity_rshell_call_method", _payload(r))
-
-
 # ── M18 脚本读写 ────────────────────────────────────────────────────────────
 
 
@@ -1928,6 +1815,8 @@ async def unity_reflection_call(
     parameters: list | None = None,
     isStatic: bool = True,
     targetInstancePath: str = "",
+    targetStaticTypeName: str = "",
+    targetStaticMemberPath: str = "",
 ) -> str:
     _log_tool_call(
         "unity_reflection_call",
@@ -1937,6 +1826,8 @@ async def unity_reflection_call(
             "parameters": parameters,
             "isStatic": isStatic,
             "targetInstancePath": targetInstancePath,
+            "targetStaticTypeName": targetStaticTypeName,
+            "targetStaticMemberPath": targetStaticMemberPath,
         },
     )
     r = await _get_facade().reflection_call(
@@ -1945,8 +1836,34 @@ async def unity_reflection_call(
         parameters=parameters,
         is_static=isStatic,
         target_instance_path=targetInstancePath,
+        target_static_type_name=targetStaticTypeName,
+        target_static_member_path=targetStaticMemberPath,
     )
     return _log_tool_result("unity_reflection_call", _payload(r))
+
+
+@mcp.tool(
+    description=(
+        "执行一条受限 C#-like 反射表达式语句。支持成员访问、索引、链式方法调用、"
+        "常见运算符、三元、cast/as/is、null 条件访问和 typed array 字面量；"
+        "不支持 lambda/LINQ/async/控制语句/ref/out/任意对象构造。"
+    ),
+)
+async def reflection_eval(
+    code: str,
+    variables: dict | None = None,
+    options: dict | None = None,
+) -> str:
+    _log_tool_call(
+        "reflection_eval",
+        {"code": code, "variables": variables, "options": options},
+    )
+    r = await _get_facade().reflection_eval(
+        code=code,
+        variables=variables,
+        options=options,
+    )
+    return _log_tool_result("reflection_eval", _payload(r))
 
 
 # ── M21 批量操作 ────────────────────────────────────────────────────────────

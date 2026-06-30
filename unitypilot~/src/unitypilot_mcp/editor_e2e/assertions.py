@@ -66,9 +66,28 @@ async def run_assert(
             parameters=list(ast.get("parameters") or []),
             is_static=bool(ast.get("isStatic", True)),
             target_instance_path=str(ast.get("targetInstancePath") or ""),
+            target_static_type_name=str(ast.get("targetStaticTypeName") or ""),
+            target_static_member_path=str(ast.get("targetStaticMemberPath") or ""),
         )
         if not _tool_ok(r):
             return False, f"reflection.call failed: {r.error.message if r.error else ''}", {}
+        res = str((r.data or {}).get("result") or "")
+        if "expectContains" in ast and str(ast["expectContains"]) not in res:
+            return False, "result does not contain expected substring", {"result": res[:500]}
+        if "expectEquals" in ast and res != str(ast["expectEquals"]):
+            return False, "result does not equal expected", {"result": res[:500]}
+        return True, "ok", {}
+
+    if at == "reflection.eval":
+        variables = ast.get("variables") if isinstance(ast.get("variables"), dict) else None
+        options = ast.get("options") if isinstance(ast.get("options"), dict) else None
+        r = await facade.reflection_eval(
+            code=str(ast.get("code") or ""),
+            variables=variables,
+            options=options,
+        )
+        if not _tool_ok(r):
+            return False, f"reflection.eval failed: {r.error.message if r.error else ''}", {}
         res = str((r.data or {}).get("result") or "")
         if "expectContains" in ast and str(ast["expectContains"]) not in res:
             return False, "result does not contain expected substring", {"result": res[:500]}

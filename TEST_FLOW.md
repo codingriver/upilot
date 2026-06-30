@@ -1095,55 +1095,6 @@ repeat_while:
 
 ---
 
-## 馃殌 MCP 鏈嶅姟鍣ㄦ墽琛屽懡浠ら€熸煡琛?
-### 鍗曚釜 YAML 娴嬭瘯
-```powershell
-# 鍩虹鐧诲綍娴嬭瘯 - Headed 妯″紡
-Tool: mcp_unitypilot_unity_editor_e2e_run
-Parameters:
-  specPath: Samples~/Yaml/01-basic-login.yaml
-  artifactDir: D:\UnityUIFlow\artifacts
-  exportZip: false
-  stopOnFirstFailure: true
-```
-
-### 閫夋嫨鍣ㄩ獙璇佹祴璇?```powershell
-# 楠岃瘉澶氱閫夋嫨鍣?Tool: mcp_unitypilot_unity_editor_e2e_run
-Parameters:
-  specPath: Samples~/Yaml/02-selectors-and-assertions.yaml
-  artifactDir: D:\UnityUIFlow\artifacts
-  exportZip: false
-```
-
-### 寮傛绛夊緟娴嬭瘯
-```powershell
-# 娴嬭瘯绛夊緟鍔ㄦ€佸厓绱?Tool: mcp_unitypilot_unity_editor_e2e_run
-Parameters:
-  specPath: Samples~/Yaml/03-wait-for-element.yaml
-  artifactDir: D:\UnityUIFlow\artifacts
-  exportZip: false
-```
-
-### 鏉′欢鍜屽惊鐜祴璇?```powershell
-# 娴嬭瘯鏉′欢鎵ц鍜屽惊鐜?Tool: mcp_unitypilot_unity_editor_e2e_run
-Parameters:
-  specPath: Samples~/Yaml/04-conditional-and-loop.yaml
-  artifactDir: D:\UnityUIFlow\artifacts
-  exportZip: false
-```
-
-### 鏁版嵁椹卞姩娴嬭瘯
-```powershell
-# 澶氳鏁版嵁鍚屾椂娴嬭瘯
-Tool: mcp_unitypilot_unity_editor_e2e_run
-Parameters:
-  specPath: Samples~/Yaml/05-data-driven-csv.yaml
-  artifactDir: D:\UnityUIFlow\artifacts
-  exportZip: true
-```
-
----
-
 ## 馃搱 娴嬭瘯鎵ц鐨勫畬鏁村伐浣滄祦
 
 ```

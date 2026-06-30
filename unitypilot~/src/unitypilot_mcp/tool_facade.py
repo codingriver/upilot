@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shlex
@@ -20,6 +21,27 @@ from .server import WsOrchestratorServer
 
 # 1×1 PNG — last-resort when editor-window capture fails but clients still need non-empty imageData
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+
+def _normalize_reflection_parameters(parameters: list | None) -> list:
+    if not parameters:
+        return []
+
+    normalized: list = []
+    for value in parameters:
+        if value is None:
+            normalized.append(None)
+        elif isinstance(value, (list, dict)):
+            normalized.append(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        else:
+            normalized.append(str(value))
+    return normalized
+
+
+def _json_dumps_or_empty(value: object | None) -> str:
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 class McpToolFacade:
@@ -1341,97 +1363,6 @@ class McpToolFacade:
             request_id, "test.list", {"testMode": test_mode}
         )
 
-    # ── M25 RShell（UDP/协议在 Unity Bridge；Python 仅转发）────────────────────
-
-    async def rshell_connect(
-        self,
-        host: str,
-        port: int = 9999,
-        timeout_ms: int = 10000,
-        max_retries: int = 3,
-    ) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.connect",
-            {
-                "host": host,
-                "port": port,
-                "timeoutMs": timeout_ms,
-                "maxRetries": max_retries,
-            },
-        )
-
-    async def rshell_disconnect(self, connection_id: str) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.disconnect",
-            {"connectionId": connection_id},
-        )
-
-    async def rshell_status(self, connection_id: str = "") -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.status",
-            {"connectionId": connection_id},
-        )
-
-    async def rshell_execute(self, connection_id: str, expression: str) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.execute",
-            {"connectionId": connection_id, "expression": expression},
-        )
-
-    async def rshell_scene_list(self, connection_id: str) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.scene_list",
-            {"connectionId": connection_id},
-        )
-
-    async def rshell_scene_info(self, connection_id: str, path: str) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.scene_info",
-            {"connectionId": connection_id, "path": path},
-        )
-
-    async def rshell_get_value(
-        self, connection_id: str, expression: str
-    ) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.get_value",
-            {"connectionId": connection_id, "expression": expression},
-        )
-
-    async def rshell_set_value(
-        self, connection_id: str, expression: str, value: str
-    ) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.set_value",
-            {"connectionId": connection_id, "expression": expression, "value": value},
-        )
-
-    async def rshell_call_method(
-        self, connection_id: str, expression: str, args: str = ""
-    ) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "rshell.call_method",
-            {"connectionId": connection_id, "expression": expression, "args": args},
-        )
-
     # ── M18 脚本读写 ─────────────────────────────────────────────────────────
 
     async def script_read(self, script_path: str) -> ToolResponse:
@@ -1515,17 +1446,37 @@ class McpToolFacade:
         parameters: list | None = None,
         is_static: bool = True,
         target_instance_path: str = "",
+        target_static_type_name: str = "",
+        target_static_member_path: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {
             "typeName": type_name,
             "methodName": method_name,
-            "parameters": parameters or [],
+            "parameters": _normalize_reflection_parameters(parameters),
             "isStatic": is_static,
         }
         if target_instance_path:
             payload["targetInstancePath"] = target_instance_path
+        if target_static_type_name:
+            payload["targetStaticTypeName"] = target_static_type_name
+        if target_static_member_path:
+            payload["targetStaticMemberPath"] = target_static_member_path
         return await self.dispatcher.call(request_id, "reflection.call", payload)
+
+    async def reflection_eval(
+        self,
+        code: str,
+        variables: dict | None = None,
+        options: dict | None = None,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        payload: dict = {"code": code}
+        if variables is not None:
+            payload["variablesJson"] = _json_dumps_or_empty(variables)
+        if options is not None:
+            payload["optionsJson"] = _json_dumps_or_empty(options)
+        return await self.dispatcher.call(request_id, "reflection.eval", payload)
 
     # ── M21 批量操作 ─────────────────────────────────────────────────────────
 
