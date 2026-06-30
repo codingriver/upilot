@@ -822,6 +822,11 @@ namespace codingriver.unity.pilot
                         {
                             mgr.SetPythonEntryPath(newPath);
                         }
+                        if (GUILayout.Button("重置", GUILayout.Width(52)))
+                        {
+                            mgr.ResetPythonEntryPathToDefaultAbsolute();
+                            ShowToast("Python 入口已重置为默认绝对路径");
+                        }
                     }
                 }
 

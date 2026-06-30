@@ -202,7 +202,7 @@ $UNITY_PATH -projectPath . \
 浣跨敤 MCP 宸ュ叿杩愯 E2E 娴嬭瘯锛?
 **绀轰緥 1: 杩愯鍩虹鐧诲綍娴嬭瘯**
 ```
-宸ュ叿璋冪敤: mcp_unitypilot_unity_editor_e2e_run
+宸ュ叿璋冪敤: unity_editor_e2e_run
 鍙傛暟:
   - specPath: Samples~/Yaml/01-basic-login.yaml
   - artifactDir: D:\UnityUIFlow\artifacts
@@ -366,7 +366,7 @@ steps:
     鈹斺攢 "defaultTimeoutMs": 10000
 
 2锔忊儯  閫氳繃 MCP 鍚姩 E2E 娴嬭瘯
-    Tool: mcp_unitypilot_unity_editor_e2e_run
+    Tool: unity_editor_e2e_run
     Parameters:
       specPath: Samples~/Yaml/01-basic-login.yaml
       artifactDir: D:\UnityUIFlow\artifacts

@@ -923,11 +923,48 @@ namespace codingriver.unity.pilot
                 Logger.Log("COMMAND", $"Received {envelope.name} id={id}");
             }
 
-            if (!await _router.TryHandleAsync(envelope.name, id, json, token))
+            try
             {
-                Logger.LogWarning("COMMAND", $"Unknown command: {envelope.name}");
-                await SendErrorAsync(id, "COMMAND_NOT_FOUND", $"未注册命令：{envelope.name}", token, envelope.name);
+                if (!await _router.TryHandleAsync(envelope.name, id, json, token))
+                {
+                    Logger.LogWarning("COMMAND", $"Unknown command: {envelope.name}");
+                    await SendErrorAsync(id, "COMMAND_NOT_FOUND", $"未注册命令：{envelope.name}", token, envelope.name);
+                }
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("COMMAND", $"Unhandled command exception: {envelope.name} id={id} | {ex.Message}");
+                if (CommandResultAlreadyReported(id))
+                    return;
+
+                try
+                {
+                    await SendErrorAsync(id, "INTERNAL_ERROR", $"命令处理异常：{ex.Message}", token, envelope.name);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception sendEx)
+                {
+                    Logger.LogWarning("COMMAND", $"Failed to report command exception: {envelope.name} id={id} | {sendEx.Message}");
+                }
+            }
+        }
+
+        private static bool CommandResultAlreadyReported(string commandId)
+        {
+            var entries = UnityPilotOperationTracker.Instance.GetEntriesCopy();
+            for (int i = entries.Count - 1; i >= 0; i--)
+            {
+                if (entries[i].CommandId == commandId)
+                    return entries[i].ResultReported;
+            }
+            return false;
         }
 
         // ──────────────────────────────── Legacy command registration ────────────────────────────────

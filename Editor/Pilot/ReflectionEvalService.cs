@@ -133,7 +133,7 @@ namespace codingriver.unity.pilot
             if (mode == "type") return value?.GetType().FullName ?? "(null)";
             if (mode == "instanceid")
             {
-                return value is UnityEngine.Object obj ? obj.GetInstanceID().ToString(CultureInfo.InvariantCulture) : "";
+                return value is UnityEngine.Object obj ? UnityPilotEntityIds.ToWireId(obj).ToString(CultureInfo.InvariantCulture) : "";
             }
             if (mode == "json") return ToJsonLike(value, options.MaxResultItems);
             if (mode == "full")
@@ -164,7 +164,7 @@ namespace codingriver.unity.pilot
             if (IsNumeric(value)) return Convert.ToString(value, CultureInfo.InvariantCulture);
             if (value is UnityEngine.Object obj)
             {
-                return "{\"type\":\"" + EscapeJsonString(obj.GetType().FullName) + "\",\"name\":\"" + EscapeJsonString(obj.name) + "\",\"instanceId\":" + obj.GetInstanceID().ToString(CultureInfo.InvariantCulture) + "}";
+                return "{\"type\":\"" + EscapeJsonString(obj.GetType().FullName) + "\",\"name\":\"" + EscapeJsonString(obj.name) + "\",\"instanceId\":" + UnityPilotEntityIds.ToWireId(obj).ToString(CultureInfo.InvariantCulture) + "}";
             }
             if (value is IDictionary dict)
             {

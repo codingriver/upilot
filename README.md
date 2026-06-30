@@ -147,9 +147,13 @@ upilot 提供两类不同的 Unity 侧 C# 调用方式：
 
 - `unity_reflection_call` 调用已经编译并加载到 Unity 程序集中的现有方法。稳定自动化入口，例如 `EnterBattle`、`ExitBattle`、`GetState`，优先使用它。
 - `reflection_eval(code, variables = null, options = null)` 执行一条受限 C# 表达式语句，适合调试和自动化验收中的链式访问、索引、方法调用、运算符、赋值、三元、cast/as/is、空条件访问和 typed array 参数。它不支持 lambda/LINQ/async/await/控制流/ref-out-in/任意对象构造。
-- `unity_roslyn_execute` 预留用于通过 Roslyn/Mono 编译链路动态编译并运行临时 C# 代码片段。该工具以及 `unity_roslyn_status`、`unity_roslyn_abort` 当前暂不可用，正在随 Roslyn 执行服务一起升级改造。
+- `unity_roslyn_execute` 通过 Roslyn 动态编译并执行临时 C# 代码片段，适合一次性诊断和实验。`unity_roslyn_status`、`unity_roslyn_abort` 按 `executionId` 查询或终止动态执行任务。
 
-旧的 `unity_csharp_execute` 工具名不再暴露。在 Roslyn 工具可用前，稳定业务自动化和已有方法调用请使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`。
+旧的 `unity_csharp_execute` 工具名不再暴露。稳定业务自动化和已有方法调用请优先使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`；只有确实需要动态编译临时代码时再使用 Roslyn 工具。
+
+## MCP 工具清单
+
+当前 `tools/list` 暴露 116 个 MCP 工具，覆盖连接、编译、Console、编辑器输入、场景、GameObject、组件、资源、Prefab、材质、脚本、包、测试、构建、批处理、截图、E2E、UIFlow、反射和 Roslyn 动态执行等能力。维护状态、条件可用性和验收口径见 `Documentation~/ToolStatus.md`。
 
 ## UIFlow 附属工具
 

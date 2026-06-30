@@ -57,6 +57,13 @@ namespace codingriver.unity.pilot
         public int WsPort => UnityPilotBridge.Instance?.WsPort ?? 8765;
         public string PythonEntryPath => _pythonEntryPath;
 
+        public void ResetPythonEntryPathToDefaultAbsolute()
+        {
+            string defaultPath = ResolveDefaultPythonEntry();
+            _pythonEntryPath = ToAbsoluteProjectPath(defaultPath).Replace('\\', '/');
+            SavePrefs();
+        }
+
         public void SetPythonEntryPath(string path)
         {
             if (_pythonEntryPath == path) return;
@@ -190,8 +197,12 @@ namespace codingriver.unity.pilot
                                         absPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
                                     
                                     Debug.Log($"[UnityPilotMcpServerManager] Resolved file: reference to: {absPath}");
+                                    string currentCandidate = Path.Combine(absPath, "upilotserver~", "run_upilot_mcp.py");
+                                    if (TryCandidate(currentCandidate, "manifest file: ref current server", out string result))
+                                        return result;
+
                                     string candidate = Path.Combine(absPath, "unitypilot~", "run_upilot_mcp.py");
-                                    if (TryCandidate(candidate, "manifest file: ref", out string result))
+                                    if (TryCandidate(candidate, "manifest file: ref", out result))
                                         return result;
 
                                     string legacyCandidate = Path.Combine(absPath, "unitypilot~", "run_unitypilot_mcp.py");
@@ -223,8 +234,12 @@ namespace codingriver.unity.pilot
                 {
                     foreach (var dir in Directory.GetDirectories(packagesDir))
                     {
+                        string currentCandidate = Path.Combine(dir, "upilotserver~", "run_upilot_mcp.py");
+                        if (TryCandidate(currentCandidate, "Packages dir scan current server", out string result))
+                            return result;
+
                         string candidate = Path.Combine(dir, "unitypilot~", "run_upilot_mcp.py");
-                        if (TryCandidate(candidate, "Packages dir scan", out string result))
+                        if (TryCandidate(candidate, "Packages dir scan", out result))
                             return result;
 
                         string legacyCandidate = Path.Combine(dir, "unitypilot~", "run_unitypilot_mcp.py");
@@ -240,8 +255,12 @@ namespace codingriver.unity.pilot
                 {
                     foreach (var dir in Directory.GetDirectories(cacheDir, "io.github.codingriver.upilot*"))
                     {
+                        string currentCandidate = Path.Combine(dir, "upilotserver~", "run_upilot_mcp.py");
+                        if (TryCandidate(currentCandidate, "PackageCache top-level current server", out string result))
+                            return result;
+
                         string candidate = Path.Combine(dir, "unitypilot~", "run_upilot_mcp.py");
-                        if (TryCandidate(candidate, "PackageCache top-level", out string result))
+                        if (TryCandidate(candidate, "PackageCache top-level", out result))
                             return result;
                     }
 
@@ -259,8 +278,12 @@ namespace codingriver.unity.pilot
                         {
                             foreach (var dir in Directory.GetDirectories(subDir, "io.github.codingriver.upilot*"))
                             {
+                                string currentCandidate = Path.Combine(dir, "upilotserver~", "run_upilot_mcp.py");
+                                if (TryCandidate(currentCandidate, "PackageCache nested current server", out string result))
+                                    return result;
+
                                 string candidate = Path.Combine(dir, "unitypilot~", "run_upilot_mcp.py");
-                                if (TryCandidate(candidate, "PackageCache nested", out string result))
+                                if (TryCandidate(candidate, "PackageCache nested", out result))
                                     return result;
                             }
 
@@ -276,8 +299,12 @@ namespace codingriver.unity.pilot
                 }
 
                 // 3. Search project root directly (legacy / alternative layout)
+                string rootCurrentCandidate = Path.Combine(projectRoot, "upilotserver~", "run_upilot_mcp.py");
+                if (TryCandidate(rootCurrentCandidate, "project root current server", out string rootResult))
+                    return rootResult;
+
                 string rootCandidate = Path.Combine(projectRoot, "unitypilot~", "run_upilot_mcp.py");
-                if (TryCandidate(rootCandidate, "project root", out string rootResult))
+                if (TryCandidate(rootCandidate, "project root", out rootResult))
                     return rootResult;
 
                 string rootLegacyCandidate = Path.Combine(projectRoot, "unitypilot~", "run_unitypilot_mcp.py");
@@ -298,13 +325,29 @@ namespace codingriver.unity.pilot
                 }
                 catch { /* ignore */ }
 
-                Debug.LogWarning("[UnityPilotMcpServerManager] No valid python entry found, falling back to ./unitypilot~/run_upilot_mcp.py");
+                Debug.LogWarning("[UnityPilotMcpServerManager] No valid python entry found, falling back to ./upilotserver~/run_upilot_mcp.py");
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[UnityPilotMcpServerManager] ResolveDefaultPythonEntry exception: {ex}");
             }
-            return "./unitypilot~/run_upilot_mcp.py";
+            return "./upilotserver~/run_upilot_mcp.py";
+        }
+
+        private static string ToAbsoluteProjectPath(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                path = "./upilotserver~/run_upilot_mcp.py";
+            }
+
+            if (Path.IsPathRooted(path))
+            {
+                return Path.GetFullPath(path);
+            }
+
+            string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
+            return Path.GetFullPath(Path.Combine(projectRoot, path));
         }
 
         private UnityPilotMcpServerManager()

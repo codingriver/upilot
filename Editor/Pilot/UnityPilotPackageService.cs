@@ -82,36 +82,27 @@ namespace codingriver.unity.pilot
             var opCtx = UnityPilotOperationTracker.Instance.GetContext(id);
             opCtx?.Step("准备添加包", identifier);
 
-            AddRequest request = null;
-            var tcs = new TaskCompletionSource<bool>();
-
-            _bridge.EnqueueTracked(id, () =>
+            PackageAddResultPayload result;
+            try
             {
-                request = Client.Add(identifier);
-            });
-
-            await Task.Delay(100, token);
-
-            opCtx?.Step("等待包管理器完成");
-            while (request == null || !request.IsCompleted)
-            {
-                token.ThrowIfCancellationRequested();
-                await Task.Delay(200, token);
+                result = await RunPackageRequestAsync(
+                    id,
+                    "等待包管理器完成",
+                    () => Client.Add(identifier),
+                    request => new PackageAddResultPayload
+                    {
+                        packageName = request.Result?.name ?? p.packageName,
+                        version     = request.Result?.version ?? p.version,
+                        status      = "ok",
+                    },
+                    token);
             }
-
-            if (request.Status == StatusCode.Failure)
+            catch (PackageRequestFailedException ex)
             {
-                string errMsg = request.Error != null ? request.Error.message : "Unknown error";
-                await _bridge.SendErrorAsync(id, "PACKAGE_ADD_FAILED", errMsg, token, "package.add");
+                await _bridge.SendErrorAsync(id, "PACKAGE_ADD_FAILED", ex.Message, token, "package.add");
                 return;
             }
 
-            var result = new PackageAddResultPayload
-            {
-                packageName = request.Result?.name ?? p.packageName,
-                version     = request.Result?.version ?? p.version,
-                status      = "ok",
-            };
             await _bridge.SendResultAsync(id, "package.add", result, token);
         }
 
@@ -128,24 +119,18 @@ namespace codingriver.unity.pilot
                 return;
             }
 
-            RemoveRequest request = null;
-            _bridge.EnqueueTracked(id, () =>
+            try
             {
-                request = Client.Remove(p.packageName);
-            });
-
-            await Task.Delay(100, token);
-
-            while (request == null || !request.IsCompleted)
-            {
-                token.ThrowIfCancellationRequested();
-                await Task.Delay(200, token);
+                await RunPackageRequestAsync(
+                    id,
+                    "等待包管理器完成",
+                    () => Client.Remove(p.packageName),
+                    _ => true,
+                    token);
             }
-
-            if (request.Status == StatusCode.Failure)
+            catch (PackageRequestFailedException ex)
             {
-                string errMsg = request.Error != null ? request.Error.message : "Unknown error";
-                await _bridge.SendErrorAsync(id, "PACKAGE_REMOVE_FAILED", errMsg, token, "package.remove");
+                await _bridge.SendErrorAsync(id, "PACKAGE_REMOVE_FAILED", ex.Message, token, "package.remove");
                 return;
             }
 
@@ -156,38 +141,20 @@ namespace codingriver.unity.pilot
 
         private async Task HandleListAsync(string id, string json, CancellationToken token)
         {
-            ListRequest request = null;
-            _bridge.EnqueueTracked(id, () =>
+            PackageListResultPayload result;
+            try
             {
-                request = Client.List(true); // include dependencies
-            });
-
-            await Task.Delay(100, token);
-
-            while (request == null || !request.IsCompleted)
-            {
-                token.ThrowIfCancellationRequested();
-                await Task.Delay(200, token);
+                result = await RunPackageRequestAsync(
+                    id,
+                    "等待包管理器完成",
+                    () => Client.List(true), // include dependencies
+                    request => BuildPackageListPayload(request.Result),
+                    token);
             }
-
-            if (request.Status == StatusCode.Failure)
+            catch (PackageRequestFailedException ex)
             {
-                string errMsg = request.Error != null ? request.Error.message : "Unknown error";
-                await _bridge.SendErrorAsync(id, "PACKAGE_LIST_FAILED", errMsg, token, "package.list");
+                await _bridge.SendErrorAsync(id, "PACKAGE_LIST_FAILED", ex.Message, token, "package.list");
                 return;
-            }
-
-            var result = new PackageListResultPayload();
-            foreach (var pkg in request.Result)
-            {
-                result.packages.Add(new PackageInfoPayload
-                {
-                    packageName = pkg.name,
-                    version     = pkg.version,
-                    displayName = pkg.displayName,
-                    description = pkg.description ?? "",
-                    source      = pkg.source.ToString(),
-                });
             }
 
             await _bridge.SendResultAsync(id, "package.list", result, token);
@@ -206,29 +173,105 @@ namespace codingriver.unity.pilot
                 return;
             }
 
-            SearchRequest request = null;
-            _bridge.EnqueueTracked(id, () =>
+            PackageListResultPayload result;
+            try
             {
-                request = Client.SearchAll();
-            });
-
-            await Task.Delay(100, token);
-
-            while (request == null || !request.IsCompleted)
-            {
-                token.ThrowIfCancellationRequested();
-                await Task.Delay(200, token);
+                result = await RunPackageRequestAsync(
+                    id,
+                    "等待包管理器完成",
+                    Client.SearchAll,
+                    request => BuildPackageListPayload(request.Result),
+                    token);
             }
-
-            if (request.Status == StatusCode.Failure)
+            catch (PackageRequestFailedException ex)
             {
-                string errMsg = request.Error != null ? request.Error.message : "Unknown error";
-                await _bridge.SendErrorAsync(id, "PACKAGE_SEARCH_FAILED", errMsg, token, "package.search");
+                await _bridge.SendErrorAsync(id, "PACKAGE_SEARCH_FAILED", ex.Message, token, "package.search");
                 return;
             }
 
+            await _bridge.SendResultAsync(id, "package.search", result, token);
+        }
+
+        private Task<TResult> RunPackageRequestAsync<TRequest, TResult>(
+            string id,
+            string waitingStep,
+            Func<TRequest> startRequest,
+            Func<TRequest, TResult> buildResult,
+            CancellationToken token)
+            where TRequest : Request
+        {
+            var tcs = new TaskCompletionSource<TResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var opCtx = UnityPilotOperationTracker.Instance.GetContext(id);
+            TRequest request = null;
+            bool started = false;
+            EditorApplication.CallbackFunction tick = null;
+
+            void Cleanup()
+            {
+                if (tick != null)
+                    EditorApplication.update -= tick;
+            }
+
+            tick = () =>
+            {
+                try
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        Cleanup();
+                        tcs.TrySetCanceled(token);
+                        return;
+                    }
+
+                    if (!started)
+                    {
+                        request = startRequest();
+                        started = true;
+                        opCtx?.Step(waitingStep);
+                    }
+
+                    if (request == null || !request.IsCompleted)
+                        return;
+
+                    Cleanup();
+                    if (request.Status == StatusCode.Failure)
+                    {
+                        string errMsg = request.Error != null ? request.Error.message : "Unknown error";
+                        tcs.TrySetException(new PackageRequestFailedException(errMsg));
+                        return;
+                    }
+
+                    tcs.TrySetResult(buildResult(request));
+                }
+                catch (Exception ex)
+                {
+                    Cleanup();
+                    tcs.TrySetException(ex);
+                }
+            };
+
+            _bridge.EnqueueTracked(id, () =>
+            {
+                if (token.IsCancellationRequested)
+                {
+                    tcs.TrySetCanceled(token);
+                    return;
+                }
+
+                EditorApplication.update += tick;
+                tick();
+            });
+
+            return tcs.Task;
+        }
+
+        private static PackageListResultPayload BuildPackageListPayload(IEnumerable<UnityEditor.PackageManager.PackageInfo> packages)
+        {
             var result = new PackageListResultPayload();
-            foreach (var pkg in request.Result)
+            if (packages == null)
+                return result;
+
+            foreach (var pkg in packages)
             {
                 result.packages.Add(new PackageInfoPayload
                 {
@@ -240,7 +283,12 @@ namespace codingriver.unity.pilot
                 });
             }
 
-            await _bridge.SendResultAsync(id, "package.search", result, token);
+            return result;
+        }
+
+        private sealed class PackageRequestFailedException : Exception
+        {
+            public PackageRequestFailedException(string message) : base(message) { }
         }
     }
 }
