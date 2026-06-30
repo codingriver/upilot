@@ -213,7 +213,7 @@
       "url": "https://packages.unity.com"
     },
     "io.github.codingriver.upilot": {
-      "version": "file:D:/upilot",
+      "version": "file:../../..",
       "depth": 0,
       "source": "local",
       "dependencies": {}
