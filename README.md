@@ -221,3 +221,34 @@ steps:
 `allowUnsafeCode` 开启后，Unity 会允许对应程序集编译指针、非托管内存访问等 `unsafe` 代码，这是 MonoHook 这类底层 Hook 能力正常工作的前提。关闭该选项可以收紧程序集的安全边界，但依赖 `unsafe` 的源码会编译失败，MonoHook 相关的 IMGUI/Editor 方法拦截能力也将不可用。因此，除非确认不再使用这些 Hook 功能，否则不要关闭相关程序集的 `allowUnsafeCode`。
 
 第三方组件声明见 `NOTICE.md`。
+
+## reflection_eval 能力边界
+
+`reflection_eval(code, variables = null, options = null)` 是一个受限的 Unity Editor 反射表达式执行工具。调用侧传入一条标准 C# 表达式语句即可，例如：
+
+```csharp
+IGG.Game.Module.KingShotBattle.KingShotBattleModule.Inst.RequestEnterLevel(10001u, false, new uint[1]{10001u});
+```
+
+支持内容：
+
+- 一条表达式语句，可带末尾分号。
+- 静态类型路径、已有对象访问、链式成员访问、索引器、数组/List/Dictionary 索引和方法调用。
+- `variables` JSON 注入的只读参数，包括带 `{ "type": "...", "value": ... }` 的 typed value。
+- 字面量：`null`、`true/false`、字符串/字符、整数/浮点数和常见数字后缀。
+- typed array：`new uint[]{1,2}`、`new uint[2]{1,2}`、`uint[]{1,2}`。
+- 白名单值类型构造：`Vector2`、`Vector3`、`Vector4`、`Quaternion`。
+- 运算符：一元 `!`、`+`、`-`、`~`；二元 `*`、`/`、`%`、`+`、`-`、`<<`、`>>`、`<`、`<=`、`>`、`>=`、`==`、`!=`、`&`、`^`、`|`、`&&`、`||`。
+- 三元 `?:`、括号、cast、`is`、`as`、空条件访问 `?.`。
+- 对反射成员或索引器赋值：`=`、`+=`、`-=`。
+- `options`：`resultMode`、`timeoutMs`、`maxTokens`、`maxCallDepth`、`maxResultItems`、`allowNamespacePrefixes`、`denyMethods`、`allowNonPublic`、`trace`。
+
+不支持内容：
+
+- 完整 C# 语句块，只支持单条表达式语句。
+- `if`、`for`、`foreach`、`while`、`do`、`switch` 等控制流。
+- lambda 表达式、LINQ 查询语法、`async/await`、直接 delegate 调用。
+- `ref`、`out`、`in` 参数。
+- 任意对象构造、创建不存在的类、定义新类型或动态编译代码。
+- `using`、`namespace`、方法定义、本地函数、局部变量声明。
+- 将修改写回 `variables` JSON；`variables` 只作为表达式输入。

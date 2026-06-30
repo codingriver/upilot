@@ -17,6 +17,33 @@ using UnityEngine;
 
 namespace codingriver.unity.pilot
 {
+    /*
+     * reflection.eval / reflection_eval is a bounded, expression-only C# evaluator
+     * for Unity Editor automation. It parses one C# expression statement, evaluates
+     * it with reflection, and returns a formatted result.
+     *
+     * Supported:
+     * - Static type paths and existing object access, for example TypeName.Inst.Member.
+     * - Chained member access, indexers, dictionary/list/array indexes, and method calls.
+     * - JSON-provided variables as readable expression inputs.
+     * - Literals: null, bool, string/char, integer/floating numeric values with common suffixes.
+     * - Typed arrays: new uint[]{1,2}, new uint[2]{1,2}, and uint[]{1,2}.
+     * - Whitelisted Unity value constructors: Vector2, Vector3, Vector4, Quaternion.
+     * - Operators: unary ! + - ~; binary * / % + - << >> < <= > >= == != & ^ | && ||.
+     * - Ternary ?:, casts, is/as, null-conditional access ?., and parentheses.
+     * - Assignment to reflected members or indexers with =, +=, and -=.
+     * - Options for result mode, timeout, max token/call limits, namespace allow-list,
+     *   deny-method list, non-public member access, and trace output.
+     *
+     * Not supported:
+     * - Full C# statements or blocks; only one expression statement with an optional semicolon.
+     * - if/for/foreach/while/do/switch control flow.
+     * - lambda expressions, LINQ query syntax, async/await, or direct delegate invocation.
+     * - ref/out/in arguments.
+     * - Creating arbitrary new objects or classes that do not already exist in loaded assemblies.
+     * - Defining types, methods, local functions, variables, using directives, or namespaces.
+     * - Persistently writing back to the variables JSON object; variables are read inputs.
+     */
     [Serializable] public class ReflectionEvalMessage { public ReflectionEvalPayload payload; }
 
     [Serializable]
