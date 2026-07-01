@@ -1,7 +1,7 @@
 name: "53-strict-mode-options"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBasicLoginWindow
     reopen_if_open: true
   options:
     pre_step_delay_ms: 50

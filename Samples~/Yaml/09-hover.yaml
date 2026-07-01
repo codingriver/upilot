@@ -2,7 +2,7 @@ name: "09-hover"
 description: Covers the hover action.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleHoverWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleHoverWindow
     reopen_if_open: true
 steps:
   - name: Hover target

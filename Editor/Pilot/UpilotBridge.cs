@@ -209,7 +209,7 @@ namespace codingriver.upilot
         private UpilotEditorService     _editorService;
         private UpilotWindowService     _windowService;
         private UpilotEditorDelayService _editorDelayService;
-        private object _unityUIFlowService;
+        private object _uiFlowService;
 
         private ClientWebSocket      _ws;
         private CancellationTokenSource _cts;
@@ -889,7 +889,7 @@ namespace codingriver.upilot
             }
 
             var id = envelope.id;
-            if (!string.Equals(envelope.name, "unityuiflow.results", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(envelope.name, "uiflow.results", StringComparison.OrdinalIgnoreCase))
             {
                 Logger.Log("COMMAND", $"Received {envelope.name} id={id}");
             }
@@ -1023,12 +1023,12 @@ namespace codingriver.upilot
             _editorDelayService = new UpilotEditorDelayService(this);
             _editorDelayService.RegisterCommands();
 
-            RegisterOptionalUnityUIFlowService();
+            RegisterOptionalUIFlowService();
         }
 
-        private void RegisterOptionalUnityUIFlowService()
+        private void RegisterOptionalUIFlowService()
         {
-            const string typeName = "codingriver.upilot.UpilotUnityUIFlowService, Upilot.UIFlowBridge";
+            const string typeName = "codingriver.upilot.UpilotUIFlowService, Upilot.UIFlowBridge";
 
             try
             {
@@ -1043,20 +1043,20 @@ namespace codingriver.upilot
                     }
 
                     registerMethod.Invoke(service, null);
-                    _unityUIFlowService = service;
-                    Logger.Log("UnityUIFlow", "UnityUIFlow MCP bridge registered.");
+                    _uiFlowService = service;
+                    Logger.Log("UIFlow", "UIFlow MCP bridge registered.");
                     return;
                 }
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("UnityUIFlow", $"UnityUIFlow MCP bridge is unavailable: {ex.Message}");
+                Logger.LogWarning("UIFlow", $"UIFlow MCP bridge is unavailable: {ex.Message}");
             }
 
-            var unavailableService = new UpilotUnityUIFlowUnavailableService(this);
+            var unavailableService = new UpilotUIFlowUnavailableService(this);
             unavailableService.RegisterCommands();
-            _unityUIFlowService = unavailableService;
-            Logger.Log("UnityUIFlow", "UnityUIFlow MCP bridge disabled; registered unavailable command handlers.");
+            _uiFlowService = unavailableService;
+            Logger.Log("UIFlow", "UIFlow MCP bridge disabled; registered unavailable command handlers.");
         }
 
         // ──────────────────────────────── Command handlers ────────────────────────────────
@@ -1754,7 +1754,7 @@ namespace codingriver.upilot
             var type = string.IsNullOrEmpty(envelope.type) ? "(unknown)" : envelope.type;
             if (type == "heartbeat" ||
                 string.Equals(envelope.name, "session.heartbeat", StringComparison.OrdinalIgnoreCase)) return;
-            if (string.Equals(envelope.name, "unityuiflow.results", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.Equals(envelope.name, "uiflow.results", StringComparison.OrdinalIgnoreCase)) return;
 
             var payload = Logger.TruncatePayload(UpilotWireJson.StripEnvelopeForDisplay(json));
             Logger.LogNetwork("NETWORK",
@@ -1769,7 +1769,7 @@ namespace codingriver.upilot
             if (envelope == null) return;
             var type = string.IsNullOrEmpty(envelope.type) ? "(unknown)" : envelope.type;
             if (type == "heartbeat") return;
-            if (string.Equals(envelope.name, "unityuiflow.results", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.Equals(envelope.name, "uiflow.results", StringComparison.OrdinalIgnoreCase)) return;
 
             var payload = Logger.TruncatePayload(UpilotWireJson.StripEnvelopeForDisplay(json));
             Logger.LogNetwork("NETWORK",

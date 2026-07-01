@@ -1,7 +1,7 @@
 name: "56-inline-data-rows"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBasicLoginWindow
     reopen_if_open: true
 data:
   rows:

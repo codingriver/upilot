@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-UnityUIFlow Batch YAML Runner — Agent-side batch executor via MCP HTTP.
+UIFlow Batch YAML Runner — Agent-side batch executor via MCP HTTP.
 
 Usage:
     python batch_yaml_runner.py --yaml-dir Assets/Examples/Yaml --batch-size 10 --report-dir Reports/AgentBatch
@@ -123,7 +123,7 @@ def run_batch(
 
 
 def _extract_execution_payload(result: dict) -> dict:
-    """Extract the UnityUIFlow payload from an MCP tool result."""
+    """Extract the UIFlow payload from an MCP tool result."""
     text = McpHttpClient._extract_text(result)
     if not text:
         return {}
@@ -154,14 +154,14 @@ def run_batch_with_polling(
 ) -> dict[str, Any]:
     """Async batch execution with per-case progress via polling.
 
-    1. Calls unityuiflow.run to start the batch and get an executionId.
-    2. Polls unityuiflow.results every poll_interval_s.
+    1. Calls uiflow.run to start the batch and get an executionId.
+    2. Polls uiflow.results every poll_interval_s.
     3. Prints progress whenever a new case finishes.
     4. If no new case appears for event_timeout_s, prints a warning and
        triggers an extra poll (fallback).
     5. Returns the final aggregated result.
 
-    Falls back to legacy run_batch() if unityuiflow.run is unavailable.
+    Falls back to legacy run_batch() if uiflow.run is unavailable.
     """
     print(f"[Batch] Running {len(yaml_paths)} file(s) with polling -> {report_dir}")
     for yp in yaml_paths:
@@ -404,7 +404,7 @@ def save_failed_manifest(path: Path, yaml_paths: list[str], batch_idx: int, repo
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Batch YAML test runner for UnityUIFlow")
+    parser = argparse.ArgumentParser(description="Batch YAML test runner for UIFlow")
     parser.add_argument("--yaml-dir", default="Assets/Examples/Yaml", help="Directory containing YAML test files")
     parser.add_argument("--batch-size", type=int, default=10, help="Files per batch")
     parser.add_argument("--report-dir", default="Reports/AgentBatch", help="Base report directory")

@@ -2,7 +2,7 @@ name: "10-drag"
 description: Covers the drag action.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleDragWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleDragWindow
     reopen_if_open: true
 steps:
   - name: Drag on surface

@@ -1,7 +1,7 @@
 name: "54-drag-between-elements"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCoverageInputWindow
     reopen_if_open: true
 steps:
   - action: drag

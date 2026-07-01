@@ -1,7 +1,7 @@
 name: "58-engine-reliability"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCsvLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCsvLoginWindow
     reopen_if_open: true
   setup:
     - action: type_text_fast

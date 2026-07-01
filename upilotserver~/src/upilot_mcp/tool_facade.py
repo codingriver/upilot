@@ -2139,7 +2139,7 @@ class McpToolFacade:
             webhook_on_failure=webhook_on_failure,
         )
 
-    async def unityuiflow_run(
+    async def uiflow_run(
         self,
         yaml_paths: list[str] | None = None,
         yaml_directory: str = "",
@@ -2174,32 +2174,32 @@ class McpToolFacade:
         if yaml_directory:
             payload["yamlDirectory"] = yaml_directory
         return await self.dispatcher.call(
-            request_id, "unityuiflow.run", payload, timeout_ms=180000
+            request_id, "uiflow.run", payload, timeout_ms=180000
         )
 
-    async def unityuiflow_results(self, execution_id: str) -> ToolResponse:
+    async def uiflow_results(self, execution_id: str) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
             request_id,
-            "unityuiflow.results",
+            "uiflow.results",
             {"executionId": execution_id},
             timeout_ms=30000,
         )
 
-    async def unityuiflow_cancel(self, execution_id: str) -> ToolResponse:
+    async def uiflow_cancel(self, execution_id: str) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
             request_id,
-            "unityuiflow.cancel",
+            "uiflow.cancel",
             {"executionId": execution_id},
             timeout_ms=30000,
         )
 
-    async def unityuiflow_force_reset(self) -> ToolResponse:
+    async def uiflow_force_reset(self) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
             request_id,
-            "unityuiflow.force_reset",
+            "uiflow.force_reset",
             {},
             timeout_ms=30000,
         )

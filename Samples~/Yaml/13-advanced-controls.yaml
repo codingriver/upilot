@@ -2,7 +2,7 @@ name: "13-advanced-controls"
 description: Covers advanced value fields, tree selection, tab switching, and list/dropdown/foldout actions.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleAdvancedControlsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleAdvancedControlsWindow
     reopen_if_open: true
 steps:
   - name: Choose dropdown option

@@ -2,7 +2,7 @@ name: "sample-01-basic-login"
 description: Basic login flow through built-in actions.
 fixture:
   host_window:
-    type: UnityUIFlow.SampleLoginWindow
+    type: codingriver.upilot.UIFlow.SampleLoginWindow
     reopen_if_open: true
 steps:
   - name: Fill username

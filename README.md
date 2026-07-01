@@ -20,7 +20,7 @@ UIFlow 是随包提供的可选附属工具，用 YAML 驱动 Unity EditorWindow
 | upilot 核心桥接 | Unity `2022.3` 或更高 | 默认编译。 |
 | upilot MCP 服务 | Python `3.11` 或更高 | 随包提供。 |
 | UIFlow YAML 自动化 | Unity `6000.0` 或更高 | 需要启用 `UPILOT_ENABLE_UIFLOW`。 |
-| 当前验证工程 | Unity `6000.6.0a2` | 见 `Tests~/UnityUIFlowTest`。 |
+| 当前验证工程 | Unity `6000.6.0a2` | 见 `Tests~/UPilotTest`。 |
 
 UIFlow 还需要消费项目安装以下 Unity 包：
 

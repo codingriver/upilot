@@ -2,7 +2,7 @@ name: "11-scroll"
 description: Covers the scroll action.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleScrollWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleScrollWindow
     reopen_if_open: true
 steps:
   - name: Scroll list

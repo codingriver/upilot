@@ -2222,8 +2222,8 @@ async def unity_editor_e2e_run(
 
 @mcp.tool(
     description=(
-        "通过 Unity 内置 C# TestRunner.RunFileAsync 执行 UnityUIFlow YAML 文件。"
-        "要求项目内可解析 UnityUIFlow.TestRunner 与有效 host_window。"
+        "通过 Unity 内置 C# TestRunner.RunFileAsync 执行 UIFlow YAML 文件。"
+        "要求项目内可解析 codingriver.upilot.UIFlow.TestRunner 与有效 host_window。"
     ),
 )
 async def unity_uiflow_run_file(
@@ -2273,7 +2273,7 @@ async def unity_uiflow_run_file(
 
 @mcp.tool(
     description=(
-        "通过 Unity 内置 C# TestRunner.RunSuiteAsync 执行 UnityUIFlow YAML 目录。"
+        "通过 Unity 内置 C# TestRunner.RunSuiteAsync 执行 UIFlow YAML 目录。"
         "directoryPath 应指向包含 .yaml 的目录。"
     ),
 )
@@ -2321,7 +2321,7 @@ async def unity_uiflow_run_suite(
 
 @mcp.tool(
     description=(
-        "批量执行指定的 UnityUIFlow YAML 文件列表，支持分批次运行以避免超时。"
+        "批量执行指定的 UIFlow YAML 文件列表，支持分批次运行以避免超时。"
         "yamlPaths 为文件路径列表；batchSize 控制每批数量（默认 10），"
         "batchOffset 为起始偏移；totalAll 为所有批次的总文件数（用于显示整体进度）。"
         "返回结果中包含 hasMore/nextOffset，客户端可根据 hasMore 继续发起下一批。"
@@ -2383,19 +2383,19 @@ async def unity_uiflow_run_batch(
 
 @mcp.tool(
     description=(
-        "强制重置 UnityUIFlow 执行状态。无需 executionId，直接释放 EDITOR_BUSY 锁，"
+        "强制重置 UIFlow 执行状态。无需 executionId，直接释放 EDITOR_BUSY 锁，"
         "Dispose 当前 ExecutionContext，关闭测试窗口，并将所有进行中的执行标记为 aborted。"
     ),
 )
 async def unity_uiflow_force_reset() -> str:
     _log_tool_call("unity_uiflow_force_reset", {})
-    r = await _get_facade().unityuiflow_force_reset()
+    r = await _get_facade().uiflow_force_reset()
     return _log_tool_result("unity_uiflow_force_reset", _payload(r))
 
 
 @mcp.tool(
     description=(
-        "异步启动 UnityUIFlow 批量测试，立即返回 executionId，不等待执行完成。"
+        "异步启动 UIFlow 批量测试，立即返回 executionId，不等待执行完成。"
         "客户端拿到 executionId 后需自行调用 unity_uiflow_results 轮询进度。"
         "参数与 unity_uiflow_run_batch 相同。"
     ),
@@ -2448,7 +2448,7 @@ async def unity_uiflow_run_async(
         resolved.append(rp)
 
     report_root = reportOutputPath.strip() or "Reports/upilot/UIFlowMcp"
-    run_resp = await _get_facade().unityuiflow_run(
+    run_resp = await _get_facade().uiflow_run(
         yaml_paths=resolved,
         headed=headed,
         stop_on_first_failure=stopOnFirstFailure,
@@ -2473,7 +2473,7 @@ async def unity_uiflow_run_async(
                 fail(
                     new_id("uiflow"),
                     "UIFLOW_EXECUTION_ID_MISSING",
-                    "unityuiflow.run did not return executionId",
+                    "uiflow.run did not return executionId",
                     {"response": run_data},
                 )
             ),
@@ -2504,7 +2504,7 @@ async def unity_uiflow_run_async(
 
 @mcp.tool(
     description=(
-        "查询指定 executionId 的 UnityUIFlow 执行状态和结果。"
+        "查询指定 executionId 的 UIFlow 执行状态和结果。"
         "返回包含 status、cases 列表、passed/failed/errors/skipped 计数等字段。"
     ),
 )
@@ -2512,7 +2512,7 @@ async def unity_uiflow_results(
     executionId: str,
 ) -> str:
     _log_tool_call("unity_uiflow_results", {"executionId": executionId})
-    r = await _get_facade().unityuiflow_results(execution_id=executionId)
+    r = await _get_facade().uiflow_results(execution_id=executionId)
     return _log_tool_result("unity_uiflow_results", _payload(r))
 
 
@@ -2539,7 +2539,7 @@ async def _run_unity_uiflow_file(
         )
 
     report_root = report_output_path.strip() or "Reports/upilot/UIFlowMcp"
-    run_resp = await _get_facade().unityuiflow_run(
+    run_resp = await _get_facade().uiflow_run(
         yaml_paths=[resolved_yaml],
         headed=headed,
         stop_on_first_failure=stop_on_first_failure,
@@ -2559,7 +2559,7 @@ async def _run_unity_uiflow_file(
         return fail(
             new_id("uiflow"),
             "UIFLOW_EXECUTION_ID_MISSING",
-            "unityuiflow.run did not return executionId",
+            "uiflow.run did not return executionId",
             {"response": run_data},
         )
 
@@ -2569,18 +2569,18 @@ async def _run_unity_uiflow_file(
     last_progress_log = time.monotonic()
     while time.monotonic() < deadline:
         await asyncio.sleep(0.5)
-        status_resp = await _get_facade().unityuiflow_results(execution_id)
+        status_resp = await _get_facade().uiflow_results(execution_id)
         if not status_resp.ok:
             return status_resp
         last_data = status_resp.data or {}
         status = str(last_data.get("status") or "")
         if status != last_status:
-            logger.info("[unityuiflow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
+            logger.info("[uiflow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
             last_status = status
         elif time.monotonic() - last_progress_log >= 10.0:
             current_yaml = last_data.get("currentYamlPath") or ""
             current_case = last_data.get("currentCaseName") or ""
-            logger.info("[unityuiflow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(60.0, default_timeout_ms / 1000.0 + 120.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
+            logger.info("[uiflow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(60.0, default_timeout_ms / 1000.0 + 120.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
             last_progress_log = time.monotonic()
         if status in {"completed", "failed", "aborted"}:
             case = ((last_data.get("cases") or [None])[0]) or {}
@@ -2611,12 +2611,12 @@ async def _run_unity_uiflow_file(
                 },
             )
 
-    logger.error("[unityuiflow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(60.0, default_timeout_ms / 1000.0 + 120.0), last_status)
-    await _get_facade().unityuiflow_cancel(execution_id)
+    logger.error("[uiflow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(60.0, default_timeout_ms / 1000.0 + 120.0), last_status)
+    await _get_facade().uiflow_cancel(execution_id)
     return fail(
         new_id("uiflow"),
         "UIFLOW_WAIT_TIMEOUT",
-        f"Timed out waiting for unityuiflow execution: {execution_id}",
+        f"Timed out waiting for uiflow execution: {execution_id}",
         {"executionId": execution_id, "lastStatus": last_data.get("status")},
     )
 
@@ -2643,7 +2643,7 @@ async def _run_unity_uiflow_suite(
         )
 
     report_root = report_output_path.strip() or "Reports/upilot/UIFlowMcp"
-    run_resp = await _get_facade().unityuiflow_run(
+    run_resp = await _get_facade().uiflow_run(
         yaml_directory=resolved_dir,
         headed=headed,
         stop_on_first_failure=stop_on_first_failure,
@@ -2662,7 +2662,7 @@ async def _run_unity_uiflow_suite(
         return fail(
             new_id("uiflow"),
             "UIFLOW_EXECUTION_ID_MISSING",
-            "unityuiflow.run did not return executionId",
+            "uiflow.run did not return executionId",
             {"response": run_data},
         )
 
@@ -2672,18 +2672,18 @@ async def _run_unity_uiflow_suite(
     last_progress_log = time.monotonic()
     while time.monotonic() < deadline:
         await asyncio.sleep(0.5)
-        status_resp = await _get_facade().unityuiflow_results(execution_id)
+        status_resp = await _get_facade().uiflow_results(execution_id)
         if not status_resp.ok:
             return status_resp
         last_data = status_resp.data or {}
         status = str(last_data.get("status") or "")
         if status != last_status:
-            logger.info("[unityuiflow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
+            logger.info("[uiflow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
             last_status = status
         elif time.monotonic() - last_progress_log >= 10.0:
             current_yaml = last_data.get("currentYamlPath") or ""
             current_case = last_data.get("currentCaseName") or ""
-            logger.info("[unityuiflow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(120.0, default_timeout_ms / 1000.0 + 300.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
+            logger.info("[uiflow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(120.0, default_timeout_ms / 1000.0 + 300.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
             last_progress_log = time.monotonic()
         if status in {"completed", "failed", "aborted"}:
             report_path = str(last_data.get("reportPath") or report_root)
@@ -2715,12 +2715,12 @@ async def _run_unity_uiflow_suite(
                 },
             )
 
-    logger.error("[unityuiflow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(120.0, default_timeout_ms / 1000.0 + 300.0), last_status)
-    await _get_facade().unityuiflow_cancel(execution_id)
+    logger.error("[uiflow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(120.0, default_timeout_ms / 1000.0 + 300.0), last_status)
+    await _get_facade().uiflow_cancel(execution_id)
     return fail(
         new_id("uiflow"),
         "UIFLOW_WAIT_TIMEOUT",
-        f"Timed out waiting for unityuiflow execution: {execution_id}",
+        f"Timed out waiting for uiflow execution: {execution_id}",
         {"executionId": execution_id, "lastStatus": last_data.get("status")},
     )
 
@@ -2758,7 +2758,7 @@ async def _run_unity_uiflow_batch(
     effective_total_all = total_all if total_all > 0 else len(resolved)
 
     report_root = report_output_path.strip() or "Reports/upilot/UIFlowMcp"
-    run_resp = await _get_facade().unityuiflow_run(
+    run_resp = await _get_facade().uiflow_run(
         yaml_paths=resolved,
         headed=headed,
         stop_on_first_failure=stop_on_first_failure,
@@ -2781,7 +2781,7 @@ async def _run_unity_uiflow_batch(
         return fail(
             new_id("uiflow"),
             "UIFLOW_EXECUTION_ID_MISSING",
-            "unityuiflow.run did not return executionId",
+            "uiflow.run did not return executionId",
             {"response": run_data},
         )
 
@@ -2792,18 +2792,18 @@ async def _run_unity_uiflow_batch(
     last_progress_log = time.monotonic()
     while time.monotonic() < deadline:
         await asyncio.sleep(0.5)
-        status_resp = await _get_facade().unityuiflow_results(execution_id)
+        status_resp = await _get_facade().uiflow_results(execution_id)
         if not status_resp.ok:
             return status_resp
         last_data = status_resp.data or {}
         status = str(last_data.get("status") or "")
         if status != last_status:
-            logger.info("[unityuiflow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
+            logger.info("[uiflow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
             last_status = status
         elif time.monotonic() - last_progress_log >= 10.0:
             current_yaml = last_data.get("currentYamlPath") or ""
             current_case = last_data.get("currentCaseName") or ""
-            logger.info("[unityuiflow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(120.0, default_timeout_ms / 1000.0 * batch_size + 120.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
+            logger.info("[uiflow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(120.0, default_timeout_ms / 1000.0 * batch_size + 120.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
             last_progress_log = time.monotonic()
         if status in {"completed", "failed", "aborted"}:
             report_path = str(last_data.get("reportPath") or report_root)
@@ -2834,12 +2834,12 @@ async def _run_unity_uiflow_batch(
                 },
             )
 
-    logger.error("[unityuiflow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(120.0, default_timeout_ms / 1000.0 * batch_size + 120.0), last_status)
-    await _get_facade().unityuiflow_cancel(execution_id)
+    logger.error("[uiflow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(120.0, default_timeout_ms / 1000.0 * batch_size + 120.0), last_status)
+    await _get_facade().uiflow_cancel(execution_id)
     return fail(
         new_id("uiflow"),
         "UIFLOW_WAIT_TIMEOUT",
-        f"Timed out waiting for unityuiflow execution: {execution_id}",
+        f"Timed out waiting for uiflow execution: {execution_id}",
         {"executionId": execution_id, "lastStatus": last_data.get("status")},
     )
 

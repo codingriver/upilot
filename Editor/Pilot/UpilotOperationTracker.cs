@@ -216,7 +216,7 @@ namespace codingriver.upilot
             _activeContexts[commandId] = ctx;
 
             if (UpilotBridge.Instance.VerboseLogsEnabled &&
-                !string.Equals(commandName, "unityuiflow.results", StringComparison.OrdinalIgnoreCase))
+                !string.Equals(commandName, "uiflow.results", StringComparison.OrdinalIgnoreCase))
             {
                 WriteLogLine("INFO", "COMMAND", $"RECV {commandName} id={commandId} | ({desc})");
             }

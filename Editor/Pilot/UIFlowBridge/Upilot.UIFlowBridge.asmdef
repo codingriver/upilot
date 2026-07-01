@@ -3,7 +3,7 @@
     "rootNamespace": "codingriver.upilot",
     "references": [
         "Upilot.Editor",
-        "UnityUIFlow"
+        "UIFlow"
     ],
     "includePlatforms": [
         "Editor"

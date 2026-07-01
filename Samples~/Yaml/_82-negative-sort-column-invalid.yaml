@@ -5,7 +5,7 @@ description: |
 
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCoverageCollectionsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCoverageCollectionsWindow
     reopen_if_open: true
 
 steps:

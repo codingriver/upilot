@@ -130,7 +130,7 @@ Reports/upilot/UIFlowMcp
 - 窗口打开或 `PrepareForAutomatedTest()` 执行时要重置页面状态。
 - 动态 UI 先 `wait_for_element`，再执行断言。
 
-`Documentation~/templates/unityuiflow-minimal-page/` 提供了最小页面接入示例。
+`Documentation~/templates/uiflow-minimal-page/` 提供了最小页面接入示例。
 
 ## 已知边界
 

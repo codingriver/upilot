@@ -2,7 +2,7 @@ name: "03-wait-for-element"
 description: Covers delayed appearance and wait_for_element.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleWaitForElementWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleWaitForElementWindow
     reopen_if_open: true
 steps:
   - name: Start delayed reveal

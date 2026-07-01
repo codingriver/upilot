@@ -2,7 +2,7 @@ name: "06-custom-action-and-json"
 description: Covers JSON-driven rows and custom action parameters.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCustomActionWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCustomActionWindow
     reopen_if_open: true
 data:
   from_json: example-users.json

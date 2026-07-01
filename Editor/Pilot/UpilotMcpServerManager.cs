@@ -339,7 +339,7 @@ namespace codingriver.upilot
             // If the persisted path points to a file that no longer exists
             // (e.g. old root-level upilot/ was removed), or if the path
             // mistakenly uses the UPM package name as the directory name
-            // (e.g. "Packages/io.github.codingriver.unityuiflow/..."), re-discover.
+            // (e.g. "Packages/io.github.codingriver.upilot/..."), re-discover.
             if (!string.IsNullOrEmpty(_pythonEntryPath))
             {
                 string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;

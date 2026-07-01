@@ -1,7 +1,7 @@
 name: "64-advanced-controls-bound-value"
 fixture:
   host_window:
-    type: UnityUIFlow.AdvancedControlsWindow
+    type: codingriver.upilot.UIFlow.AdvancedControlsWindow
     reopen_if_open: true
 steps:
   - action: set_bound_value

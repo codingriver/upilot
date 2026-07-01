@@ -5,7 +5,7 @@ description: |
 
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleSelectorsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleSelectorsWindow
     reopen_if_open: true
 
 steps:

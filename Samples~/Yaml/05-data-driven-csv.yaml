@@ -2,7 +2,7 @@ name: "05-data-driven-csv"
 description: Covers CSV-driven rows with fixture setup and teardown.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCsvLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCsvLoginWindow
     reopen_if_open: true
   setup:
     - name: Reset before row

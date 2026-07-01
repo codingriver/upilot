@@ -2,7 +2,7 @@ name: "12-type-text"
 description: Covers the type_text action and property assertion.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleTypeTextWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleTypeTextWindow
     reopen_if_open: true
 steps:
   - name: Type slowly

@@ -1,13 +1,13 @@
-# UnityUIFlow 娴嬭瘯娴佺▼鎸囧崡
+# UIFlow 娴嬭瘯娴佺▼鎸囧崡
 
 ## 馃搶 椤圭洰姒傝堪
 
-**UnityUIFlow** 鏄竴涓?Unity Editor UIToolkit 鑷姩鍖栨祴璇曟鏋讹紝鏀寔 YAML 澹版槑寮忚剼鏈拰 C# 浠ｇ爜涓ょ鏂瑰紡椹卞姩 EditorWindow 鐣岄潰娴佺▼娴嬭瘯銆傝妗嗘灦鎻愪緵 16 涓唴缃姩浣溿€佹暟鎹┍鍔ㄣ€佹潯浠跺惊鐜€佸彲瑙嗗寲 Headed 妯″紡绛夊畬鏁村姛鑳姐€?
+**UIFlow** 鏄竴涓?Unity Editor UIToolkit 鑷姩鍖栨祴璇曟鏋讹紝鏀寔 YAML 澹版槑寮忚剼鏈拰 C# 浠ｇ爜涓ょ鏂瑰紡椹卞姩 EditorWindow 鐣岄潰娴佺▼娴嬭瘯銆傝妗嗘灦鎻愪緵 16 涓唴缃姩浣溿€佹暟鎹┍鍔ㄣ€佹潯浠跺惊鐜€佸彲瑙嗗寲 Headed 妯″紡绛夊畬鏁村姛鑳姐€?
 ---
 
 ## 馃幆 娴嬭瘯鎵ц鏂瑰紡
 
-鏍规嵁椤圭洰閰嶇疆鍜屼唬鐮佺粨鏋勶紝UnityUIFlow 鏀寔浠ヤ笅 **4 绉嶆祴璇曟墽琛屾柟寮?*锛?
+鏍规嵁椤圭洰閰嶇疆鍜屼唬鐮佺粨鏋勶紝UIFlow 鏀寔浠ヤ笅 **4 绉嶆祴璇曟墽琛屾柟寮?*锛?
 ### 1锔忊儯 **YAML 椹卞姩娴嬭瘯** (鎺ㄨ崘鐢ㄤ簬蹇€熼獙璇?
 
 #### 鏂囦欢浣嶇疆
@@ -16,7 +16,7 @@
 - **鍛藉悕瑙勮寖**: `01-basic-login.yaml`, `02-selectors-and-assertions.yaml` 绛?
 #### 鎵ц鏂瑰紡 (Editor UI)
 1. 鎵撳紑 Unity Editor
-2. 瀵艰埅鍒拌彍鍗? **UnityUIFlow > Samples > [绀轰緥绐楀彛]**
+2. 瀵艰埅鍒拌彍鍗? **UIFlow > Samples > [绀轰緥绐楀彛]**
 3. 鐐瑰嚮瀵瑰簲鐨勭ず渚嬬獥鍙ｆ墦寮€ EditorWindow
 4. 妗嗘灦鑷姩鍔犺浇骞舵墽琛?YAML 娴嬭瘯鏂囦欢
 
@@ -55,19 +55,19 @@ steps:
 
 #### 鏂囦欢浣嶇疆
 - **娴嬭瘯鏂囦欢鐩綍**: `Samples~/Tests/`
-- **娴嬭瘯绋嬪簭闆?*: `UnityUIFlow.Tests.asmdef`
+- **娴嬭瘯绋嬪簭闆?*: `UIFlow.Tests.asmdef`
 - **鍏抽敭娴嬭瘯鏂囦欢**:
-  - `UnityUIFlow.ParsingAndPlanningTests.cs` - YAML 瑙ｆ瀽娴嬭瘯
-  - `UnityUIFlow.LocatorsAndActionsTests.cs` - 鍔ㄤ綔鍜屽畾浣嶅櫒娴嬭瘯
-  - `UnityUIFlow.ExamplesAcceptanceTests.cs` - 鎺ユ敹搴︽祴璇?  - `UnityUIFlow.ExecutionReportingCliTests.cs` - 鎶ュ憡鍜?CLI 娴嬭瘯
+  - `UIFlow.ParsingAndPlanningTests.cs` - YAML 瑙ｆ瀽娴嬭瘯
+  - `UIFlow.LocatorsAndActionsTests.cs` - 鍔ㄤ綔鍜屽畾浣嶅櫒娴嬭瘯
+  - `UIFlow.ExamplesAcceptanceTests.cs` - 鎺ユ敹搴︽祴璇?  - `UIFlow.ExecutionReportingCliTests.cs` - 鎶ュ憡鍜?CLI 娴嬭瘯
 
 #### Fixture 缁ф壙鏂瑰紡
 ```csharp
-using UnityUIFlow;
+using codingriver.upilot.UIFlow;
 using UnityEngine.UIElements;
 
-// 缁ф壙 UnityUIFlowFixture<TWindow>
-public class MyWindowTests : UnityUIFlowFixture<ExampleBasicLoginWindow>
+// 缁ф壙 UIFlowFixture<TWindow>
+public class MyWindowTests : UIFlowFixture<ExampleBasicLoginWindow>
 {
     [Test]
     public async Task TestLoginFlow()
@@ -81,7 +81,7 @@ public class MyWindowTests : UnityUIFlowFixture<ExampleBasicLoginWindow>
 #### 鎵ц鏂瑰紡 (Unity Test Framework)
 1. 鎵撳紑 **Window > General > Test Runner**
 2. 鍒囨崲鍒?**EditMode** 鎴?**PlayMode**
-3. 閫夋嫨娴嬭瘯鐢ㄤ緥 (濡?`UnityUIFlow.Tests`)
+3. 閫夋嫨娴嬭瘯鐢ㄤ緥 (濡?`UIFlow.Tests`)
 4. 鐐瑰嚮 **Run** 鎵ц
 
 #### 娴嬭瘯绫诲瀷
@@ -101,12 +101,12 @@ public class MyWindowTests : UnityUIFlowFixture<ExampleBasicLoginWindow>
 ```bash
 # 杩愯鍗曚釜 YAML 娴嬭瘯鏂囦欢
 $UNITY_PATH -projectPath . \
-  -executeMethod UnityUIFlow.Cli.RunYamlTest \
+  -executeMethod codingriver.upilot.UIFlow.UIFlowCliEntry.RunAllFromCommandLine \
   Samples~/Yaml/01-basic-login.yaml
 
 # 杩愯鎵€鏈?YAML 娴嬭瘯 (甯︽姤鍛婅緭鍑?
 $UNITY_PATH -projectPath . \
-  -executeMethod UnityUIFlow.Cli.RunAllYamlTests \
+  -executeMethod codingriver.upilot.UIFlow.UIFlowCliEntry.RunAllFromCommandLine \
   --reportPath ./Reports \
   --format json
 ```
@@ -117,14 +117,14 @@ $UNITY_PATH -projectPath . \
 - **鎴浘**: `./Reports/screenshots/` (澶辫触鏃?
 
 #### CI 閰嶇疆鏂囦欢
-- **椤圭洰閰嶇疆**: `.unityuiflow.json`
+- **椤圭洰閰嶇疆**: `.uiflow.json`
 
 ---
 
 ### 4锔忊儯 **Headed 鍙鍖栨ā寮?* (浜や簰寮忚皟璇?
 
 #### 鍚敤鏂瑰紡
-缂栬緫 `.unityuiflow.json`:
+缂栬緫 `.uiflow.json`:
 ```json
 {
   "headed": true,
@@ -139,19 +139,19 @@ $UNITY_PATH -projectPath . \
 ---
 
 ## 锟斤笍 MCP 鏈嶅姟鍣ㄦ墽琛屾祴璇曪紙鎺ㄨ崘鏂瑰紡锛?
-**MCP (Model Context Protocol) 鏈嶅姟鍣?* 鏄?UnityUIFlow 鐨勬牳蹇冩墽琛屽紩鎿庯紝鎻愪緵杩滅▼娴嬭瘯鎵ц銆佸疄鏃跺弽棣堝拰鍙鍖栬皟璇曡兘鍔涖€?
+**MCP (Model Context Protocol) 鏈嶅姟鍣?* 鏄?UIFlow 鐨勬牳蹇冩墽琛屽紩鎿庯紝鎻愪緵杩滅▼娴嬭瘯鎵ц銆佸疄鏃跺弽棣堝拰鍙鍖栬皟璇曡兘鍔涖€?
 ### 馃寪 MCP 鏈嶅姟鍣ㄤ俊鎭?
-褰撳墠 UnityUIFlow MCP 鏈嶅姟鍣ㄩ厤缃細
+褰撳墠 UIFlow MCP 鏈嶅姟鍣ㄩ厤缃細
 
 ```json
 {
-  "label": "UnityUIFlow",
+  "label": "UIFlow",
   "host": "127.0.0.1",
   "port": 8767,
   "status": "connected",
   "serverReady": true,
   "sessionId": "2a928d0b29fc475cb0f3383ab37da326",
-  "projectPath": "D:\\UnityUIFlow",
+  "projectPath": "D:\\upilot",
   "unityVersion": "6000.6.0a2",
   "platform": "windows"
 }
@@ -164,14 +164,14 @@ $UNITY_PATH -projectPath . \
 | `port` | 8767 | MCP 鏈嶅姟閫氫俊绔彛 |
 | `status` | connected | 杩炴帴鐘舵€?鉁?|
 | `serverReady` | true | 鏈嶅姟鍣ㄥ噯澶囧氨缁?鉁?|
-| `projectPath` | D:\UnityUIFlow | Unity 椤圭洰璺緞 |
+| `projectPath` | D:\upilot | Unity 椤圭洰璺緞 |
 | `unityVersion` | 6000.6.0a2 | Unity 缂栬緫鍣ㄧ増鏈?|
 
 ### 瀹屾暣鐨?MCP 娴嬭瘯鎵ц娴佺▼
 
 #### **姝ラ 1: 鍚敤 Headed 妯″紡骞堕厤缃?MCP**
 
-缂栬緫椤圭洰鏍圭洰褰曠殑 `.unityuiflow.json` 閰嶇疆鏂囦欢锛?
+缂栬緫椤圭洰鏍圭洰褰曠殑 `.uiflow.json` 閰嶇疆鏂囦欢锛?
 ```json
 {
   "headed": true,
@@ -179,7 +179,7 @@ $UNITY_PATH -projectPath . \
   "screenshotOnFailure": true,
   "defaultTimeoutMs": 10000,
   "customActionAssemblies": [
-    "UnityUIFlow.Tests"
+    "UIFlow.Tests"
   ]
 }
 ```
@@ -193,7 +193,7 @@ $UNITY_PATH -projectPath . \
 #### **鎵ц鍓嶈ˉ鍏咃細stdio MCP 鏈嶅姟鍣ㄦ帴绠′笌鍚庡彴淇濇椿绛栫暐**
 
 褰?MCP 鏈嶅姟鍣ㄩ噰鐢?`.vscode/mcp.json` 涓殑 `stdio` 鏂瑰紡鍚姩鏃讹紝鎵ц娴嬭瘯鍓嶅缓璁寜浠ヤ笅瑙勫垯澶勭悊锛?
-- 浼樺厛妫€鏌ュ綋鍓嶆槸鍚﹀凡缁忓瓨鍦ㄥ彲鐢ㄧ殑 `upilot` MCP 鏈嶅姟鍣ㄣ€?- 瀵?`stdio` 鍨?MCP锛屼笉瑕佸彧鐪嬧€滆繘绋嬫槸鍚﹀瓨鍦ㄢ€濓紝鑰岃浠モ€滃綋鍓嶆墽琛岀幆澧冩槸鍚﹀凡缁忔垚鍔熸帴绠″苟鑳界洿鎺ヨ皟鐢?MCP tool鈥濅负鍑嗐€?- 濡傛灉褰撳墠鐜宸茬粡鎺ョ璇?MCP 鏈嶅姟鍣紝骞朵笖鍙互鐩存帴璋冪敤鐩稿叧宸ュ叿锛屽垯**鐩存帴澶嶇敤鐜版湁 MCP 鏈嶅姟鍣?*锛屼笉瑕侀噸澶嶅惎鍔ㄣ€?- 濡傛灉 MCP 鏈嶅姟鍣ㄦ湭鍚姩锛屾垨鑰呰櫧鐒跺凡鏈夎繘绋嬩絾褰撳墠鐜**鏃犳硶鎺ョ / 鏃犳硶鐩存帴璋冪敤**锛屽垯搴斿厛鍏抽棴鏃х殑 MCP 杩涚▼锛岄伩鍏嶄繚鐣欐棤鏁堝崰鐢ㄦ垨绔彛鍐茬獊銆?- 鍏抽棴鏃ц繘绋嬪悗锛屾寜 [`.vscode/mcp.json`](d:/UnityUIFlow/.vscode/mcp.json) 鐨勯厤缃噸鏂板惎鍔?`upilot` MCP 鏈嶅姟鍣ㄣ€?- 鏂板惎鍔ㄧ殑 MCP 鏈嶅姟鍣ㄥ簲淇濇寔**鍚庡彴甯搁┗杩愯**锛屽悗缁祴璇曠洿鎺ュ鐢紱闄ら潪鏄庣‘瑕佹眰鍏抽棴锛屽惁鍒欎笉瑕佸湪姣忔娴嬭瘯鍚庤嚜鍔ㄥ仠姝€?
+- 浼樺厛妫€鏌ュ綋鍓嶆槸鍚﹀凡缁忓瓨鍦ㄥ彲鐢ㄧ殑 `upilot` MCP 鏈嶅姟鍣ㄣ€?- 瀵?`stdio` 鍨?MCP锛屼笉瑕佸彧鐪嬧€滆繘绋嬫槸鍚﹀瓨鍦ㄢ€濓紝鑰岃浠モ€滃綋鍓嶆墽琛岀幆澧冩槸鍚﹀凡缁忔垚鍔熸帴绠″苟鑳界洿鎺ヨ皟鐢?MCP tool鈥濅负鍑嗐€?- 濡傛灉褰撳墠鐜宸茬粡鎺ョ璇?MCP 鏈嶅姟鍣紝骞朵笖鍙互鐩存帴璋冪敤鐩稿叧宸ュ叿锛屽垯**鐩存帴澶嶇敤鐜版湁 MCP 鏈嶅姟鍣?*锛屼笉瑕侀噸澶嶅惎鍔ㄣ€?- 濡傛灉 MCP 鏈嶅姟鍣ㄦ湭鍚姩锛屾垨鑰呰櫧鐒跺凡鏈夎繘绋嬩絾褰撳墠鐜**鏃犳硶鎺ョ / 鏃犳硶鐩存帴璋冪敤**锛屽垯搴斿厛鍏抽棴鏃х殑 MCP 杩涚▼锛岄伩鍏嶄繚鐣欐棤鏁堝崰鐢ㄦ垨绔彛鍐茬獊銆?- 鍏抽棴鏃ц繘绋嬪悗锛屾寜 [`.vscode/mcp.json`](d:/upilot/.vscode/mcp.json) 鐨勯厤缃噸鏂板惎鍔?`upilot` MCP 鏈嶅姟鍣ㄣ€?- 鏂板惎鍔ㄧ殑 MCP 鏈嶅姟鍣ㄥ簲淇濇寔**鍚庡彴甯搁┗杩愯**锛屽悗缁祴璇曠洿鎺ュ鐢紱闄ら潪鏄庣‘瑕佹眰鍏抽棴锛屽惁鍒欎笉瑕佸湪姣忔娴嬭瘯鍚庤嚜鍔ㄥ仠姝€?
 **鎺ㄨ崘鍐崇瓥椤哄簭锛?*
 
 1. 妫€鏌ュ綋鍓?MCP 鏄惁宸插瓨鍦ㄤ笖褰撳墠鐜鍙洿鎺ヤ娇鐢ㄣ€?2. 鑻ュ彲鐩存帴浣跨敤锛屽鐢ㄧ幇鏈夋湇鍔″櫒骞剁户缁墽琛屾祴璇曘€?3. 鑻ヤ笉鍙娇鐢紝鍏抽棴鏃?MCP 杩涚▼銆?4. 閲嶆柊鍦ㄥ悗鍙板惎鍔?MCP 鏈嶅姟鍣紝骞朵繚鎸佸叾鎸佺画杩愯銆?5. 纭 MCP 宸ュ叿鍙皟鐢ㄥ悗锛屽啀鎵ц YAML E2E 娴嬭瘯銆?
@@ -205,7 +205,7 @@ $UNITY_PATH -projectPath . \
 宸ュ叿璋冪敤: unity_editor_e2e_run
 鍙傛暟:
   - specPath: Samples~/Yaml/01-basic-login.yaml
-  - artifactDir: D:\UnityUIFlow\artifacts
+  - artifactDir: D:\upilot\artifacts
   - exportZip: true
   - stopOnFirstFailure: true
   - webhookOnFailure: true
@@ -216,7 +216,7 @@ $UNITY_PATH -projectPath . \
 name: Example Basic Login
 description: 鍩虹鐧诲綍娴佺▼娴嬭瘯 - 鍖呭惈鏂囨湰杈撳叆銆佺偣鍑汇€佹柇瑷€鍜屾埅鍥?fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBasicLoginWindow
     reopen_if_open: true
 steps:
   - name: 濉厖鐢ㄦ埛鍚?    action: type_text_fast
@@ -287,7 +287,7 @@ name: Example Selectors And Assertions
 description: 楠岃瘉澶氱閫夋嫨鍣ㄥ舰寮忓拰鏂█鏂规硶
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleSelectorsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleSelectorsWindow
     reopen_if_open: true
 steps:
   - name: 鍖归厤瀛愬厓绱犻€夋嫨鍣?    action: assert_visible
@@ -322,7 +322,7 @@ steps:
 name: Example Wait For Element
 description: 娴嬭瘯寮傛鍔犺浇鍏冪礌鍜岀瓑寰呰秴鏃?fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleWaitForElementWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleWaitForElementWindow
     reopen_if_open: true
 steps:
   - name: 鍚姩寤惰繜鏄剧ず
@@ -361,7 +361,7 @@ steps:
 
 ```
 1锔忊儯  鍚敤 Headed 閰嶇疆
-    Action: 缂栬緫 .unityuiflow.json
+    Action: 缂栬緫 .uiflow.json
     鈹溾攢 "headed": true
     鈹斺攢 "defaultTimeoutMs": 10000
 
@@ -369,7 +369,7 @@ steps:
     Tool: unity_editor_e2e_run
     Parameters:
       specPath: Samples~/Yaml/01-basic-login.yaml
-      artifactDir: D:\UnityUIFlow\artifacts
+      artifactDir: D:\upilot\artifacts
       exportZip: true
       stopOnFirstFailure: true
 
@@ -410,13 +410,13 @@ steps:
 ## 锟金煋?娴嬭瘯閰嶇疆涓庡搴斿叧绯?
 椤圭洰鍖呭惈涓や釜灞傜骇鐨勯厤缃枃浠讹細
 
-### `.unityuiflow.json` - 椤圭洰绾ч厤缃?```json
+### `.uiflow.json` - 椤圭洰绾ч厤缃?```json
 {
   "headed": false,
   "reportPath": "./Reports",
   "screenshotOnFailure": true,
   "defaultTimeoutMs": 10000,
-  "customActionAssemblies": ["UnityUIFlow.Tests"]
+  "customActionAssemblies": ["UIFlow.Tests"]
 }
 ```
 
@@ -457,9 +457,9 @@ Samples~/Yaml/
 
 ## 馃敡 绋嬪簭闆嗕緷璧栧叧绯?
 ```
-鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?  UnityUIFlow.Tests     鈹? 鈫?娴嬭瘯绋嬪簭闆?(C# 娴嬭瘯鐢ㄤ緥)
+鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?  UIFlow.Tests     鈹? 鈫?娴嬭瘯绋嬪簭闆?(C# 娴嬭瘯鐢ㄤ緥)
 鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?             鈹?references
-             鈻?鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?    UnityUIFlow         鈹? 鈫?鏍稿績妗嗘灦绋嬪簭闆?(瑙ｆ瀽銆佹墽琛屻€佹姤鍛?
+             鈻?鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?    UIFlow         鈹? 鈫?鏍稿績妗嗘灦绋嬪簭闆?(瑙ｆ瀽銆佹墽琛屻€佹姤鍛?
 鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?             鈹?references
              鈻?鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹? External Dependencies  鈹?鈹溾攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?鈥?Unity Test Framework  鈹?鈹?鈥?InputSystem           鈹?鈹?鈥?UI TestFramework      鈹?鈹?鈥?YamlDotNet.dll        鈹?鈹?鈥?nunit.framework.dll   鈹?鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?```
 
@@ -471,7 +471,7 @@ Samples~/Yaml/
 鍓嶇疆鏉′欢:
   鉁?Unity 6000.6.0a2 鎴栨洿楂樼増鏈?  鉁?Editor 鏍稿績妗嗘灦瀛樺湪
   鉁?Samples~/Yaml YAML 娴嬭瘯鏂囦欢瀛樺湪
-  鉁?.unityuiflow.json 閰嶇疆鏂囦欢瀛樺湪
+  鉁?.uiflow.json 閰嶇疆鏂囦欢瀛樺湪
   鉁?Packages/manifest.json 渚濊禆宸插畨瑁?```
 
 ### **绗?2 姝? 鍔犺浇 YAML 娴嬭瘯鏂囦欢** 馃摑
@@ -493,7 +493,7 @@ Samples~/Yaml/
 ```
 娴佺▼:
   1. 鍔犺浇绀轰緥 EditorWindow (濡?ExampleBasicLoginWindow)
-  2. 鍒濆鍖?UIDocument 鍜?VisualElement 鏍?  3. 缁戝畾绀轰緥绐楀彛鍒?UnityUIFlowFixture
+  2. 鍒濆鍖?UIDocument 鍜?VisualElement 鏍?  3. 缁戝畾绀轰緥绐楀彛鍒?UIFlowFixture
   4. 鍑嗗鍏冪礌閫夋嫨鍣ㄤ笂涓嬫枃
 ```
 
@@ -588,7 +588,7 @@ Samples~/Yaml/
 - **杈撳嚭**: 鎶ュ憡鏂囦欢 (Markdown/JSON)
 - **閰嶇疆**: `reportPath`, `format`
 
-### 6. **UnityUIFlowFixture<TWindow>** (璧勬簮璺緞: 寰呭畾)
+### 6. **UIFlowFixture<TWindow>** (璧勬簮璺緞: 寰呭畾)
 - **鑱岃矗**: C# 鍗曞厓娴嬭瘯鐨勫熀绫伙紝鎻愪緵 YAML 娴嬭瘯椹卞姩鏀寔
 - **娉涘瀷**: `TWindow` 涓虹洰鏍?EditorWindow 绫诲瀷
 - **鍏抽敭鏂规硶**: `ExecuteYamlTest(string path)`, `Setup()`, `TearDown()`
@@ -601,7 +601,7 @@ Samples~/Yaml/
 | 鏂囦欢璺緞 | 鐢ㄩ€?|
 |----------|------|
 | [README.md](README.md) | 椤圭洰鏂囨。銆乊AML 璇硶銆佸揩閫熷紑濮?|
-| [.unityuiflow.json](.unityuiflow.json) | 椤圭洰閰嶇疆 |
+| [.uiflow.json](.uiflow.json) | 椤圭洰閰嶇疆 |
 | [Editor/](Editor/) | 鏍稿績妗嗘灦浠ｇ爜 |
 | [Samples~/Yaml/](Samples~/Yaml/) | 19 涓ず渚?YAML 娴嬭瘯 |
 | [Samples~/Editor/](Samples~/Editor/) | 绀轰緥 EditorWindow 瀹炵幇 |
@@ -748,7 +748,7 @@ steps:
 name: Example Data Driven Csv
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCsvLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCsvLoginWindow
     reopen_if_open: true
   setup:
     - name: 姣忚鍓嶉噸缃?      action: click
@@ -1032,7 +1032,7 @@ repeat_while:
 
 ## 馃摎 鎵╁睍鍜岃嚜瀹氫箟
 
-### 娣诲姞鑷畾涔夊姩浣滄楠?1. 鍒涘缓瀹炵幇 `IAction` 鎺ュ彛鐨?C# 绫?2. 鍦?`.unityuiflow.json` 涓敞鍐岀▼搴忛泦:
+### 娣诲姞鑷畾涔夊姩浣滄楠?1. 鍒涘缓瀹炵幇 `IAction` 鎺ュ彛鐨?C# 绫?2. 鍦?`.uiflow.json` 涓敞鍐岀▼搴忛泦:
    ```json
    {
      "customActionAssemblies": ["YourCustomAssembly"]
@@ -1058,7 +1058,7 @@ repeat_while:
 ### 鐜妫€鏌?- [ ] Unity 鐗堟湰 6000.6.0a2 鎴栨洿楂?- [ ] 鎵€鏈変緷璧栧寘宸插畨瑁?(Test Framework銆両nputSystem銆乁I TestFramework 绛?
 - [ ] MCP 鏈嶅姟鍣ㄥ凡杩炴帴 (鐘舵€? connected 鉁?
 - [ ] 椤圭洰鏈瓨鍦ㄧ紪璇戦敊璇?
-### 閰嶇疆妫€鏌?- [ ] `.unityuiflow.json` 鏂囦欢瀛樺湪涓斿彲璇?- [ ] `"headed": true` 宸插惎鐢?- [ ] `"reportPath": "./Reports"` 鐩綍鏈夊啓鏉冮檺
+### 閰嶇疆妫€鏌?- [ ] `.uiflow.json` 鏂囦欢瀛樺湪涓斿彲璇?- [ ] `"headed": true` 宸插惎鐢?- [ ] `"reportPath": "./Reports"` 鐩綍鏈夊啓鏉冮檺
 - [ ] `"screenshotOnFailure": true` 宸插惎鐢紙渚夸簬璋冭瘯锛?- [ ] `"defaultTimeoutMs": 10000` 璁剧疆鍚堢悊
 
 ### 娴嬭瘯鏂囦欢妫€鏌?- [ ] YAML 娴嬭瘯鏂囦欢瀛樺湪浜?`Samples~/Yaml/`
@@ -1098,7 +1098,7 @@ repeat_while:
 ## 馃搱 娴嬭瘯鎵ц鐨勫畬鏁村伐浣滄祦
 
 ```
-鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?                 寮€濮?Headed 妯″紡娴嬭瘯                     鈹?鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                         鈹?                         鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?1 姝ワ細鍚敤 Headed 閰嶇疆       鈹?      鈹?(.unityuiflow.json)            鈹?      鈹?- "headed": true               鈹?      鈹?- "defaultTimeoutMs": 10000    鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?                   鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?2 姝ワ細閫夋嫨娴嬭瘯鏂囦欢            鈹?      鈹?(Samples~/Yaml/...)      鈹?      鈹?鉁?01-basic-login.yaml          鈹?      鈹?鉁?02-selectors-and-assertions  鈹?      鈹?鉁?03-wait-for-element.yaml     鈹?      鈹?鉁?...鍏朵粬娴嬭瘯鏂囦欢              鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?                   鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?3 姝ワ細MCP 鏈嶅姟鍣ㄦ墽琛?         鈹?      鈹?Tool: mcp_upilot_...e2e_run 鈹?      鈹?- specPath: 娴嬭瘯鏂囦欢璺緞        鈹?      鈹?- artifactDir: 杈撳嚭鐩綍         鈹?      鈹?- exportZip: 瀵煎嚭鍘嬬缉鍖?        鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?                   鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?4 姝ワ細Headed 妯″紡鎵ц         鈹?      鈹?馃摵 缂栬緫鍣ㄥ彲瑙嗗寲鏄剧ず             鈹?      鈹?- 鍏冪礌楂樹寒                      鈹?      鈹?- 姝ラ鎵ц杩涘害                  鈹?      鈹?- 鎴浘淇濆瓨                     鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?        鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹粹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?        鈹?                    鈹?        鈻?                    鈻?    鉁?鍏ㄩ儴閫氳繃          鉂?鍑虹幇澶辫触
+鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?鈹?                 寮€濮?Headed 妯″紡娴嬭瘯                     鈹?鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                         鈹?                         鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?1 姝ワ細鍚敤 Headed 閰嶇疆       鈹?      鈹?(.uiflow.json)            鈹?      鈹?- "headed": true               鈹?      鈹?- "defaultTimeoutMs": 10000    鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?                   鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?2 姝ワ細閫夋嫨娴嬭瘯鏂囦欢            鈹?      鈹?(Samples~/Yaml/...)      鈹?      鈹?鉁?01-basic-login.yaml          鈹?      鈹?鉁?02-selectors-and-assertions  鈹?      鈹?鉁?03-wait-for-element.yaml     鈹?      鈹?鉁?...鍏朵粬娴嬭瘯鏂囦欢              鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?                   鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?3 姝ワ細MCP 鏈嶅姟鍣ㄦ墽琛?         鈹?      鈹?Tool: mcp_upilot_...e2e_run 鈹?      鈹?- specPath: 娴嬭瘯鏂囦欢璺緞        鈹?      鈹?- artifactDir: 杈撳嚭鐩綍         鈹?      鈹?- exportZip: 瀵煎嚭鍘嬬缉鍖?        鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?                   鈻?      鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?      鈹?绗?4 姝ワ細Headed 妯″紡鎵ц         鈹?      鈹?馃摵 缂栬緫鍣ㄥ彲瑙嗗寲鏄剧ず             鈹?      鈹?- 鍏冪礌楂樹寒                      鈹?      鈹?- 姝ラ鎵ц杩涘害                  鈹?      鈹?- 鎴浘淇濆瓨                     鈹?      鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                   鈹?        鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹粹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?        鈹?                    鈹?        鈻?                    鈻?    鉁?鍏ㄩ儴閫氳繃          鉂?鍑虹幇澶辫触
     鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?       鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?    鈹?鐢熸垚鎶ュ憡 鈹?       鈹?鏌ョ湅闂    鈹?    鈹?result   鈹?       鈹?- 閫夋嫨鍣ㄩ敊璇攤
     鈹?PASS     鈹?       鈹?- 瓒呮椂      鈹?    鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?       鈹?- 鏂█澶辫触  鈹?                        鈹斺攢鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹?                              鈹?                              鈻?                        鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                        鈹?璋冭瘯鍜屼慨澶?  鈹?                        鈹?- 鏇存柊 YAML  鈹?                        鈹?- 淇敼閰嶇疆   鈹?                        鈹斺攢鈹€鈹€鈹€鈹€鈹攢鈹€鈹€鈹€鈹€鈹€鈹€鈹?                              鈹?                              鈻?                        銆愰噸鏂版墽琛屻€?                        
 鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?```
@@ -1147,18 +1147,18 @@ duration: "5000ms"  # 澶暱娴垂鏃堕棿
 ## 馃摓 蹇€熷弬鑰冨懡浠?
 | 闇€姹?| 鍛戒护/姝ラ | 璇存槑 |
 |------|---------|------|
-| **鍚敤 Headed** | 缂栬緫 `.unityuiflow.json` + `"headed": true` | 绔嬪嵆鍚敤鍙鍖栨ā寮?|
+| **鍚敤 Headed** | 缂栬緫 `.uiflow.json` + `"headed": true` | 绔嬪嵆鍚敤鍙鍖栨ā寮?|
 | **杩愯鍗曚釜娴嬭瘯** | MCP 宸ュ叿 + specPath + 鏂囦欢璺緞 | 鎵ц鎸囧畾鐨?YAML 娴嬭瘯 |
 | **杩愯澶氫釜娴嬭瘯** | 寰幆璋冪敤 MCP 宸ュ叿 + 涓嶅悓鐨?specPath | 渚濇鎵ц涓嶅悓鐨勬祴璇曟枃浠?|
 | **鏌ョ湅鎶ュ憡** | 鎵撳紑 `./Reports/report.md` | 鏌ョ湅瀹屾暣鐨勬祴璇曟姤鍛?|
 | **鏌ョ湅鎴浘** | 鎵撳紑 `./Reports/screenshots/` | 鏌ョ湅澶辫触鏃剁殑璇佹嵁鎴浘 |
-| **绂佺敤 Headed** | 缂栬緫 `.unityuiflow.json` + `"headed": false` | 鍒囨崲鍥炲揩閫熸ā寮?|
-| **澧炲姞瓒呮椂** | 缂栬緫 `.unityuiflow.json` + `"defaultTimeoutMs": 15000` | 缁欐參閫?PC 鏇村鏃堕棿 |
+| **绂佺敤 Headed** | 缂栬緫 `.uiflow.json` + `"headed": false` | 鍒囨崲鍥炲揩閫熸ā寮?|
+| **澧炲姞瓒呮椂** | 缂栬緫 `.uiflow.json` + `"defaultTimeoutMs": 15000` | 缁欐參閫?PC 鏇村鏃堕棿 |
 | **鍑忓皯杩囩▼杈撳嚭** | 閰嶇疆鏃ュ織绾у埆锛堝鏈夛級 | 绠€鍖栨帶鍒跺彴杈撳嚭 |
 
 ---
 
 **鏂囨。鐗堟湰**: 2.0 (Headed 妯″紡瀹屽叏鎸囧崡)  
 **鏈€鍚庢洿鏂?*: 2026 骞?4 鏈?14 鏃? 
-**閫傜敤椤圭洰**: UnityUIFlow 鑷姩鍖栨祴璇曟鏋? 
+**閫傜敤椤圭洰**: UIFlow 鑷姩鍖栨祴璇曟鏋? 
 **閲嶇偣**: MCP 鏈嶅姟鍣?+ Headed 鍙鍖栬皟璇曞畬鏁村伐浣滄祦

@@ -2,7 +2,7 @@ name: "04-conditional-and-loop"
 description: Covers if.exists, repeat_while, wait and assert_not_visible.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleConditionalLoopWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleConditionalLoopWindow
     reopen_if_open: true
 steps:
   - name: Save when button exists

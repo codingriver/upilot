@@ -2,7 +2,7 @@ name: "43-custom-sort"
 description: Covers ColumnSortingMode.Custom for MultiColumnListView via sort_column action.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCoverageCollectionsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCoverageCollectionsWindow
     reopen_if_open: true
 steps:
   - name: Sort with custom mode descending

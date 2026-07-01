@@ -1,7 +1,7 @@
 name: "59-nested-loops"
 fixture:
   host_window:
-    type: UnityUIFlow.SampleLoginWindow
+    type: codingriver.upilot.UIFlow.SampleLoginWindow
     reopen_if_open: true
 steps:
   - action: click

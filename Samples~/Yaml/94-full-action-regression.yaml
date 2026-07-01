@@ -6,7 +6,7 @@ description: |
 
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBasicLoginWindow
     reopen_if_open: true
 
 steps:

@@ -2,7 +2,7 @@ name: "42-bound-inference"
 description: Covers set_bound_value and assert_bound_value with infer=true for unbound containers.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBoundInferenceWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBoundInferenceWindow
     reopen_if_open: true
 steps:
   - name: Set inferred float

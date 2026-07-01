@@ -7,7 +7,7 @@ using UnityEditor;
 using UnityEngine;
 using MonoHook;
 
-namespace UnityUIFlow
+namespace codingriver.upilot.UIFlow
 {
     /// <summary>
     /// Centralized registry for IMGUI execution bridges.
@@ -65,7 +65,7 @@ namespace UnityUIFlow
             var onguiMethod = windowType.GetMethod("OnGUI", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
             if (onguiMethod == null)
             {
-                Codingriver.Logger.LogWarning($"[UnityUIFlow] Could not find OnGUI method on {windowType.Name}");
+                Codingriver.Logger.LogWarning($"[UIFlow] Could not find OnGUI method on {windowType.Name}");
                 return;
             }
 
@@ -84,11 +84,11 @@ namespace UnityUIFlow
                 var hook = new MethodHook(onguiMethod, replacementMethod, proxyMethod, windowType.FullName);
                 hook.Install();
                 Hooks[windowType] = hook;
-                Codingriver.Logger.Log($"[UnityUIFlow] MonoHook installed on {windowType.Name}.OnGUI");
+                Codingriver.Logger.Log($"[UIFlow] MonoHook installed on {windowType.Name}.OnGUI");
             }
             catch (Exception ex)
             {
-                Codingriver.Logger.LogWarning($"[UnityUIFlow] Failed to install MonoHook on {windowType.Name}.OnGUI: {ex.Message}");
+                Codingriver.Logger.LogWarning($"[UIFlow] Failed to install MonoHook on {windowType.Name}.OnGUI: {ex.Message}");
             }
         }
 
@@ -115,11 +115,11 @@ namespace UnityUIFlow
                 {
                     hook.Uninstall();
                     Hooks.Remove(windowType);
-                    Codingriver.Logger.Log($"[UnityUIFlow] MonoHook uninstalled from {windowType.Name}.OnGUI");
+                    Codingriver.Logger.Log($"[UIFlow] MonoHook uninstalled from {windowType.Name}.OnGUI");
                 }
                 catch (Exception ex)
                 {
-                    Codingriver.Logger.LogWarning($"[UnityUIFlow] Failed to uninstall MonoHook: {ex.Message}");
+                    Codingriver.Logger.LogWarning($"[UIFlow] Failed to uninstall MonoHook: {ex.Message}");
                 }
             }
         }
@@ -212,7 +212,7 @@ namespace UnityUIFlow
         private static void OnGUIProxy(EditorWindow __this)
         {
             // This will be patched by MonoHook to call the original OnGUI
-            Codingriver.Logger.LogError("[UnityUIFlow] OnGUIProxy should never be called directly!");
+            Codingriver.Logger.LogError("[UIFlow] OnGUIProxy should never be called directly!");
         }
 
         /// <summary>
@@ -224,13 +224,13 @@ namespace UnityUIFlow
             if (window == null) return;
             try
             {
-                Codingriver.Logger.Log($"[UnityUIFlow] InvokeOriginalOnGUI calling OnGUIProxy for {window.GetType().Name}, Event.current={Event.current?.type}");
+                Codingriver.Logger.Log($"[UIFlow] InvokeOriginalOnGUI calling OnGUIProxy for {window.GetType().Name}, Event.current={Event.current?.type}");
                 OnGUIProxy(window);
-                Codingriver.Logger.Log($"[UnityUIFlow] InvokeOriginalOnGUI OnGUIProxy returned for {window.GetType().Name}");
+                Codingriver.Logger.Log($"[UIFlow] InvokeOriginalOnGUI OnGUIProxy returned for {window.GetType().Name}");
             }
             catch (Exception ex) when (ex.GetType().Name.Contains("ExitGUIException") || ex.GetType().Name.Contains("TargetInvocationException"))
             {
-                Codingriver.Logger.Log($"[UnityUIFlow] InvokeOriginalOnGUI caught {ex.GetType().Name} for {window.GetType().Name}");
+                Codingriver.Logger.Log($"[UIFlow] InvokeOriginalOnGUI caught {ex.GetType().Name} for {window.GetType().Name}");
             }
         }
 
@@ -256,12 +256,12 @@ namespace UnityUIFlow
                 {
                     _getRectHook = new MethodHook(getRectMethod, replacementMethod, proxyMethod, "GUILayoutUtility.GetRect");
                     _getRectHook.Install();
-                    Codingriver.Logger.Log("[UnityUIFlow] MonoHook installed on GUILayoutUtility.GetRect");
+                    Codingriver.Logger.Log("[UIFlow] MonoHook installed on GUILayoutUtility.GetRect");
                     return;
                 }
                 catch (Exception ex)
                 {
-                    Codingriver.Logger.LogWarning($"[UnityUIFlow] Failed to install MonoHook on GUILayoutUtility.GetRect: {ex.Message}");
+                    Codingriver.Logger.LogWarning($"[UIFlow] Failed to install MonoHook on GUILayoutUtility.GetRect: {ex.Message}");
                 }
             }
 
@@ -277,7 +277,7 @@ namespace UnityUIFlow
 
             if (doGetRectMethod == null)
             {
-                Codingriver.Logger.LogWarning("[UnityUIFlow] Could not find GUILayoutUtility.DoGetRect for hooking.");
+                Codingriver.Logger.LogWarning("[UIFlow] Could not find GUILayoutUtility.DoGetRect for hooking.");
                 return;
             }
 
@@ -285,11 +285,11 @@ namespace UnityUIFlow
             {
                 _getRectHook = new MethodHook(doGetRectMethod, replacementMethod, proxyMethod, "GUILayoutUtility.DoGetRect");
                 _getRectHook.Install();
-                Codingriver.Logger.Log("[UnityUIFlow] MonoHook installed on GUILayoutUtility.DoGetRect");
+                Codingriver.Logger.Log("[UIFlow] MonoHook installed on GUILayoutUtility.DoGetRect");
             }
             catch (Exception ex)
             {
-                Codingriver.Logger.LogWarning($"[UnityUIFlow] Failed to install MonoHook on GUILayoutUtility.DoGetRect: {ex.Message}");
+                Codingriver.Logger.LogWarning($"[UIFlow] Failed to install MonoHook on GUILayoutUtility.DoGetRect: {ex.Message}");
             }
         }
 
@@ -300,7 +300,7 @@ namespace UnityUIFlow
             if (_currentOnGUIWindow != null)
             {
                 string styleName = style?.name ?? "unknown";
-                Codingriver.Logger.Log($"[UnityUIFlow] DoGetRectReplacement: style={styleName}, content={content?.text}, rect={result}");
+                Codingriver.Logger.Log($"[UIFlow] DoGetRectReplacement: style={styleName}, content={content?.text}, rect={result}");
                 _pendingDrawCalls.Add(new ImguiSnapshotEntry
                 {
                     Rect = result,
@@ -339,7 +339,7 @@ namespace UnityUIFlow
 
             if (popupMethod == null)
             {
-                Codingriver.Logger.LogWarning("[UnityUIFlow] Could not find EditorGUILayout.Popup for hooking.");
+                Codingriver.Logger.LogWarning("[UIFlow] Could not find EditorGUILayout.Popup for hooking.");
                 return;
             }
 
@@ -350,11 +350,11 @@ namespace UnityUIFlow
             {
                 _editorPopupHook = new MethodHook(popupMethod, replacementMethod, proxyMethod, "EditorGUILayout.Popup");
                 _editorPopupHook.Install();
-                Codingriver.Logger.Log("[UnityUIFlow] MonoHook installed on EditorGUILayout.Popup");
+                Codingriver.Logger.Log("[UIFlow] MonoHook installed on EditorGUILayout.Popup");
             }
             catch (Exception ex)
             {
-                Codingriver.Logger.LogWarning($"[UnityUIFlow] Failed to install MonoHook on EditorGUILayout.Popup: {ex.Message}");
+                Codingriver.Logger.LogWarning($"[UIFlow] Failed to install MonoHook on EditorGUILayout.Popup: {ex.Message}");
             }
         }
 
@@ -401,7 +401,7 @@ namespace UnityUIFlow
 
             if (drawMethod == null)
             {
-                Codingriver.Logger.LogWarning("[UnityUIFlow] Could not find GUIStyle.Draw for hooking.");
+                Codingriver.Logger.LogWarning("[UIFlow] Could not find GUIStyle.Draw for hooking.");
                 return;
             }
 
@@ -412,11 +412,11 @@ namespace UnityUIFlow
             {
                 _guiStyleDrawHook = new MethodHook(drawMethod, replacementMethod, proxyMethod, "GUIStyle.Draw");
                 _guiStyleDrawHook.Install();
-                Codingriver.Logger.Log("[UnityUIFlow] MonoHook installed on GUIStyle.Draw");
+                Codingriver.Logger.Log("[UIFlow] MonoHook installed on GUIStyle.Draw");
             }
             catch (Exception ex)
             {
-                Codingriver.Logger.LogWarning($"[UnityUIFlow] Failed to install MonoHook on GUIStyle.Draw: {ex.Message}");
+                Codingriver.Logger.LogWarning($"[UIFlow] Failed to install MonoHook on GUIStyle.Draw: {ex.Message}");
             }
         }
 
@@ -448,7 +448,7 @@ namespace UnityUIFlow
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void DrawProxy(GUIStyle __this, Rect position, GUIContent content, bool isHover, bool isActive, bool on, bool hasKeyboardFocus)
         {
-            Codingriver.Logger.LogError("[UnityUIFlow] DrawProxy should never be called directly!");
+            Codingriver.Logger.LogError("[UIFlow] DrawProxy should never be called directly!");
         }
 
         #endregion

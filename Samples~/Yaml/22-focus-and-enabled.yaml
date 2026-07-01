@@ -1,7 +1,7 @@
 name: "22-focus-and-enabled"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCoverageInputWindow
     reopen_if_open: true
 steps:
   - action: focus

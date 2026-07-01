@@ -1,7 +1,7 @@
 name: "sample-04-conditional-and-loop"
 fixture:
   host_window:
-    type: UnityUIFlow.SampleLoginWindow
+    type: codingriver.upilot.UIFlow.SampleLoginWindow
     reopen_if_open: true
 steps:
   - name: Maybe click reset when present

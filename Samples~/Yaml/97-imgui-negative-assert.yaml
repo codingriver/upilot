@@ -5,7 +5,7 @@ description: |
 
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ImguiExampleWindow
+    type: codingriver.upilot.UIFlow.Examples.ImguiExampleWindow
     reopen_if_open: true
 
 setup:

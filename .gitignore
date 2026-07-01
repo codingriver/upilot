@@ -1,4 +1,4 @@
-﻿
+
 # IDE / Editor
 .idea/
 .vscode/
@@ -60,4 +60,4 @@ Tests~/*/sysinfo.txt
 !.github/
 !.github/**
 !.gitignore
-!.unityuiflow.json
+!.uiflow.json

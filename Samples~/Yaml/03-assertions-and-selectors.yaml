@@ -1,7 +1,7 @@
 name: "03-assertions-and-selectors"
 fixture:
   host_window:
-    type: UnityUIFlow.SampleLoginWindow
+    type: codingriver.upilot.UIFlow.SampleLoginWindow
     reopen_if_open: true
 steps:
   - name: First menu item is Dashboard

@@ -2,7 +2,7 @@ name: "01-basic-login"
 description: Covers type_text, click, assert_text_contains and screenshot.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBasicLoginWindow
     reopen_if_open: true
 steps:
   - name: Fill username

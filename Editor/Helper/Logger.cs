@@ -21,7 +21,7 @@ namespace Codingriver
         private static readonly DateTime CurrentProcessStartTime;
         private static readonly string SessionMarkerPath = "./log/.session";
 
-        public static string LogFilePath = "./log/UnityUIFlow.log";
+        public static string LogFilePath = "./log/UIFlow.log";
 
         /// <summary>
         /// 最低输出日志级别。低于此级别的日志将被忽略。默认 Debug。

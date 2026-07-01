@@ -1,7 +1,7 @@
 name: "62-advanced-controls-tab-tree"
 fixture:
   host_window:
-    type: UnityUIFlow.AdvancedControlsWindow
+    type: codingriver.upilot.UIFlow.AdvancedControlsWindow
     reopen_if_open: true
 steps:
   - action: select_tab

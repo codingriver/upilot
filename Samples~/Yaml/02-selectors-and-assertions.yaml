@@ -2,7 +2,7 @@ name: "02-selectors-and-assertions"
 description: Covers selector forms, assert_visible, assert_property and assert_text.
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleSelectorsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleSelectorsWindow
     reopen_if_open: true
 steps:
   - name: Match child selector

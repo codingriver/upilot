@@ -1,7 +1,7 @@
 name: "51-negative-missing-element"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleBasicLoginWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleBasicLoginWindow
     reopen_if_open: true
 steps:
   - action: click

@@ -5,7 +5,7 @@ description: |
 
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCoverageFieldsWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCoverageFieldsWindow
     reopen_if_open: true
 
 steps:

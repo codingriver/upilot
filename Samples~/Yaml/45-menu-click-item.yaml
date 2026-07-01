@@ -1,7 +1,7 @@
 name: "45-menu-click-item"
 fixture:
   host_window:
-    type: UnityUIFlow.Examples.ExampleCoverageInputWindow
+    type: codingriver.upilot.UIFlow.Examples.ExampleCoverageInputWindow
     reopen_if_open: true
 steps:
   - name: Click ToolbarMenu with menu_item via generic click
