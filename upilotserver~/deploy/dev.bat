@@ -6,13 +6,13 @@ set "SCRIPT_DIR=%~dp0"
 set "PROJECT_ROOT=%SCRIPT_DIR%\..\.."
 
 echo ============================================================
-echo   UnityPilot MCP ^— 开发模式启动
+echo   upilot MCP ^— 开发模式启动
 echo ============================================================
 
-cd /d "%PROJECT_ROOT%"
+cd /d "%SCRIPT_DIR%\.."
 
 REM ── 配置源码路径（src layout） ────────────────────────────────
-set "PYTHONPATH=%PROJECT_ROOT%\unitypilot_mcp\src;%PYTHONPATH%"
+set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
 
 REM ── 检查 Python ──────────────────────────────────────────────
 python --version >nul 2>&1
@@ -42,7 +42,7 @@ for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":8765 " ^| findstr "L
 
 REM ── 启动 WS 服务器（后台）────────────────────────────────────
 echo [INFO] 启动 WebSocket 服务器 ws://127.0.0.1:8765 ...
-start "UnityPilot-WS" /min cmd /c "set PYTHONPATH=%PYTHONPATH%&& python -m unitypilot_mcp.main & pause"
+start "upilot-WS" /min cmd /c "set PYTHONPATH=%PYTHONPATH%&& python -m upilot_mcp.main & pause"
 
 REM ── 等待端口就绪 ─────────────────────────────────────────────
 set /a retry=0
@@ -52,7 +52,7 @@ netstat -ano 2>nul | findstr ":8765 " | findstr "LISTENING" >nul
 if errorlevel 1 (
     set /a retry+=1
     if %retry% lss 10 goto wait_loop
-    echo [WARN] 等待端口超时，服务器可能启动失败，请检查 UnityPilot-WS 窗口
+    echo [WARN] 等待端口超时，服务器可能启动失败，请检查 upilot-WS 窗口
 ) else (
     echo [OK] WebSocket 服务器已就绪
 )
@@ -60,7 +60,7 @@ if errorlevel 1 (
 REM ── 冒烟测试 ─────────────────────────────────────────────────
 echo.
 echo [INFO] 运行 MCP 冒烟测试...
-python unitypilot_mcp\src\unitypilot_mcp\mcp_smoke_test.py
+python src\upilot_mcp\mcp_smoke_test.py
 if errorlevel 1 (
     echo [WARN] 冒烟测试失败，请检查上方输出
 ) else (
@@ -71,9 +71,9 @@ echo.
 echo ============================================================
 echo   开发环境就绪
 echo   WebSocket: ws://127.0.0.1:8765
-echo   现在打开 Unity Editor，等待 UnityPilot 自动连接
+echo   现在打开 Unity Editor，等待 upilot 自动连接
 echo ============================================================
 echo.
-echo 提示：修改 Python 文件后运行 unitypilot_mcp\deploy\restart_mcp.bat 重启服务器
+echo 提示：修改 Python 文件后运行 deploy\restart_mcp.bat 重启服务器
 echo.
 pause

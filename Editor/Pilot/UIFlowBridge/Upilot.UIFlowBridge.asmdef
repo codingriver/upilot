@@ -1,0 +1,22 @@
+{
+    "name": "Upilot.UIFlowBridge",
+    "rootNamespace": "codingriver.upilot",
+    "references": [
+        "Upilot.Editor",
+        "UnityUIFlow"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "UNITY_6000_0_OR_NEWER",
+        "UPILOT_ENABLE_UIFLOW"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

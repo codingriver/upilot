@@ -11,7 +11,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 WORKSPACE = Path(__file__).resolve().parent.parent
-SERVER_SCRIPT = WORKSPACE / "run_unitypilot_mcp.py"
+SERVER_SCRIPT = WORKSPACE / "run_upilot_mcp.py"
 UNITY_PORT = 8765
 HTTP_PORT = 8011
 LOG_FILE = WORKSPACE / "http-test-8011.log"

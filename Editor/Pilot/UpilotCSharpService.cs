@@ -1,0 +1,455 @@
+// -----------------------------------------------------------------------
+// Upilot Editor — https://github.com/codingriver/upilot
+// SPDX-License-Identifier: MIT
+// -----------------------------------------------------------------------
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
+using UnityEngine;
+
+namespace codingriver.upilot
+{
+    // ── DTOs ────────────────────────────────────────────────────────────────────
+
+    [Serializable] public class CSharpExecuteMessage  { public CSharpExecutePayload payload; }
+    [Serializable] public class CSharpExecutePayload  { public string code = ""; public int timeoutSeconds = 10; }
+
+    [Serializable] public class CSharpStatusMessage   { public CSharpStatusPayload payload; }
+    [Serializable] public class CSharpStatusPayload   { public string executionId = ""; }
+
+    [Serializable] public class CSharpAbortMessage    { public CSharpAbortPayload payload; }
+    [Serializable] public class CSharpAbortPayload    { public string executionId = ""; }
+
+    [Serializable]
+    public class CSharpExecuteResultPayload
+    {
+        public string executionId;
+        public string status;      // pending, running, completed, failed, timeout, aborted
+        public string result;      // serialized return value or null
+        public string error;       // error message or null
+    }
+
+    // ── Service ─────────────────────────────────────────────────────────────────
+
+    public class UpilotCSharpService
+    {
+        private readonly UpilotBridge _bridge;
+
+        // Execution tracking
+        private readonly ConcurrentDictionary<string, CSharpExecuteResultPayload> _executions = new();
+        private readonly ConcurrentDictionary<string, CancellationTokenSource> _execCts = new();
+
+        public UpilotCSharpService(UpilotBridge bridge) { _bridge = bridge; }
+
+        public void RegisterCommands()
+        {
+            _bridge.Router.Register("roslyn.execute", HandleExecuteAsync);
+            _bridge.Router.Register("roslyn.status",  HandleStatusAsync);
+            _bridge.Router.Register("roslyn.abort",   HandleAbortAsync);
+        }
+
+        // ── roslyn.execute ──────────────────────────────────────────────────────
+
+        private async Task HandleExecuteAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<CSharpExecuteMessage>(json);
+            var p   = msg?.payload ?? new CSharpExecutePayload();
+
+            if (string.IsNullOrEmpty(p.code))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "code is required.", token, "roslyn.execute");
+                return;
+            }
+
+            // Sandbox: block dangerous patterns
+            if (ContainsDangerousCode(p.code))
+            {
+                await _bridge.SendErrorAsync(id, "SECURITY_VIOLATION",
+                    "Code contains disallowed operations (Process.Start, File I/O outside project, etc.).",
+                    token, "roslyn.execute");
+                return;
+            }
+
+            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            opCtx?.Step("安全检查通过，准备执行 Roslyn 动态代码", $"timeout={p.timeoutSeconds}s codeLen={p.code.Length}");
+
+            int timeout = Mathf.Clamp(p.timeoutSeconds, 1, 30);
+            string execId = Guid.NewGuid().ToString("N").Substring(0, 12);
+
+            var result = new CSharpExecuteResultPayload
+            {
+                executionId = execId,
+                status = "running",
+            };
+            _executions[execId] = result;
+
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _execCts[execId] = cts;
+
+            // Execute on main thread with timeout
+            var tcs = new TaskCompletionSource<string>();
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    if (cts.Token.IsCancellationRequested)
+                    {
+                        tcs.SetCanceled();
+                        return;
+                    }
+
+                    string evalResult = EvaluateCSharpCode(p.code);
+                    tcs.SetResult(evalResult);
+                }
+                catch (Exception ex) { tcs.SetException(ex); }
+            });
+
+            try
+            {
+                var timeoutTask = Task.Delay(timeout * 1000, cts.Token);
+                var completed = await Task.WhenAny(tcs.Task, timeoutTask);
+
+                if (completed == timeoutTask)
+                {
+                    result.status = "timeout";
+                    result.error = $"Execution timed out after {timeout}s.";
+                    cts.Cancel();
+                }
+                else if (tcs.Task.IsCanceled)
+                {
+                    result.status = "aborted";
+                    result.error = "Execution was aborted.";
+                }
+                else if (tcs.Task.IsFaulted)
+                {
+                    result.status = "failed";
+                    result.error = tcs.Task.Exception?.InnerException?.Message ?? "Unknown error";
+                }
+                else
+                {
+                    result.status = "completed";
+                    result.result = tcs.Task.Result;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                result.status = "aborted";
+                result.error = "Execution was aborted.";
+            }
+            catch (Exception ex)
+            {
+                result.status = "failed";
+                result.error = ex.Message;
+            }
+            finally
+            {
+                _execCts.TryRemove(execId, out _);
+            }
+
+            _executions[execId] = result;
+            await _bridge.SendResultAsync(id, "roslyn.execute", result, token);
+        }
+
+        // ── roslyn.status ───────────────────────────────────────────────────────
+
+        private async Task HandleStatusAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<CSharpStatusMessage>(json);
+            var p   = msg?.payload ?? new CSharpStatusPayload();
+
+            if (string.IsNullOrEmpty(p.executionId))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "executionId is required.", token, "roslyn.status");
+                return;
+            }
+
+            if (_executions.TryGetValue(p.executionId, out var result))
+            {
+                await _bridge.SendResultAsync(id, "roslyn.status", result, token);
+            }
+            else
+            {
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found: {p.executionId}", token, "roslyn.status");
+            }
+        }
+
+        // ── roslyn.abort ────────────────────────────────────────────────────────
+
+        private async Task HandleAbortAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<CSharpAbortMessage>(json);
+            var p   = msg?.payload ?? new CSharpAbortPayload();
+
+            if (string.IsNullOrEmpty(p.executionId))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "executionId is required.", token, "roslyn.abort");
+                return;
+            }
+
+            if (_execCts.TryRemove(p.executionId, out var cts))
+            {
+                cts.Cancel();
+                if (_executions.TryGetValue(p.executionId, out var result))
+                {
+                    result.status = "aborted";
+                    result.error = "Execution was aborted by user.";
+                }
+                await _bridge.SendResultAsync(id, "roslyn.abort", new GenericOkPayload(), token);
+            }
+            else if (_executions.ContainsKey(p.executionId))
+            {
+                await _bridge.SendResultAsync(
+                    id,
+                    "roslyn.abort",
+                    new GenericOkPayload { ok = true, state = "not_running" },
+                    token);
+            }
+            else
+            {
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found or already completed: {p.executionId}", token, "roslyn.abort");
+            }
+        }
+
+        // ── Helpers ─────────────────────────────────────────────────────────────
+
+        private static bool ContainsDangerousCode(string code)
+        {
+            string lower = code.ToLowerInvariant();
+            // Block process execution, raw file I/O outside Unity, and network
+            string[] blocked = new[]
+            {
+                "process.start", "system.diagnostics.process",
+                "environment.exit", "application.quit",
+                "assembly.load", "activator.createinstance",
+                "appdomain",
+            };
+            foreach (var pattern in blocked)
+            {
+                if (lower.Contains(pattern)) return true;
+            }
+            return false;
+        }
+
+        private static string EvaluateCSharpCode(string code)
+        {
+            // Strategy: Use System.Reflection to compile and evaluate via
+            // Microsoft.CSharp.CSharpCodeProvider if available, otherwise
+            // fallback to Mono's evaluator if available, or simple eval via Reflection.
+            //
+            // For Unity editor, we use the Mono evaluator approach:
+            // Wrap code in a static method, compile via CodeDomProvider, invoke.
+
+            try
+            {
+                // Try using Mono.CSharp.Evaluator via reflection (available in Unity's Mono)
+                var monoEvalType = FindType("Mono.CSharp.Evaluator");
+                if (monoEvalType != null)
+                {
+                    return EvaluateViaMono(monoEvalType, code);
+                }
+
+                // Fallback: try CSharpCodeProvider
+                var providerType = FindType("Microsoft.CSharp.CSharpCodeProvider");
+                if (providerType != null)
+                {
+                    return EvaluateViaCodeDom(providerType, code);
+                }
+
+                return "Error: No C# evaluator available in this Unity runtime.";
+            }
+            catch (Exception ex)
+            {
+                return $"Error: {ex.Message}";
+            }
+        }
+
+        private static string EvaluateViaMono(Type evalType, string code)
+        {
+            // Mono.CSharp.Evaluator is a static class with Init + Evaluate methods
+            try
+            {
+                // Try to init the evaluator
+                var initMethod = evalType.GetMethod("Init", BindingFlags.Static | BindingFlags.Public);
+                if (initMethod != null && initMethod.GetParameters().Length == 0)
+                {
+                    initMethod.Invoke(null, null);
+                }
+
+                // Evaluate the code
+                var evalMethod = evalType.GetMethod("Evaluate", BindingFlags.Static | BindingFlags.Public,
+                    null, new[] { typeof(string) }, null);
+
+                if (evalMethod == null)
+                {
+                    // Try overload with out parameters
+                    var methods = evalType.GetMethods(BindingFlags.Static | BindingFlags.Public);
+                    foreach (var m in methods)
+                    {
+                        if (m.Name == "Evaluate")
+                        {
+                            var parms = m.GetParameters();
+                            if (parms.Length >= 1 && parms[0].ParameterType == typeof(string))
+                            {
+                                evalMethod = m;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (evalMethod != null)
+                {
+                    var parms = evalMethod.GetParameters();
+                    object result;
+                    if (parms.Length == 1)
+                    {
+                        result = evalMethod.Invoke(null, new object[] { code });
+                    }
+                    else
+                    {
+                        // Overload: Evaluate(string, out object result, out bool result_set)
+                        var args = new object[parms.Length];
+                        args[0] = code;
+                        evalMethod.Invoke(null, args);
+                        result = parms.Length > 1 ? args[1] : null;
+                    }
+                    return result?.ToString() ?? "(null)";
+                }
+
+                // Fallback: Run / ReferenceAssembly pattern
+                var runMethod = evalType.GetMethod("Run", BindingFlags.Static | BindingFlags.Public);
+                if (runMethod != null)
+                {
+                    runMethod.Invoke(null, new object[] { code });
+                    return "(executed, no return value)";
+                }
+
+                return "Error: Could not find suitable Evaluate method on Mono.CSharp.Evaluator.";
+            }
+            catch (TargetInvocationException tie)
+            {
+                throw tie.InnerException ?? tie;
+            }
+        }
+
+        private static string EvaluateViaCodeDom(Type providerType, string code)
+        {
+            try
+            {
+                string wrappedCode = @"
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+using UnityEditor;
+
+public static class __CSharpEval {
+    public static object Run() {
+        " + code + @"
+        return null;
+    }
+}";
+                var provider = Activator.CreateInstance(providerType);
+                var compileMethod = providerType.GetMethod("CompileAssemblyFromSource");
+                if (compileMethod == null) return "Error: CompileAssemblyFromSource not found.";
+
+                var paramsType = FindType("System.CodeDom.Compiler.CompilerParameters");
+                if (paramsType == null) return "Error: CompilerParameters not found.";
+
+                var compParams = Activator.CreateInstance(paramsType);
+                var refAssemblies = paramsType.GetProperty("ReferencedAssemblies")?.GetValue(compParams) as System.Collections.IList;
+                if (refAssemblies != null)
+                {
+                    CollectAssemblyReferences(refAssemblies);
+                }
+                paramsType.GetProperty("GenerateInMemory")?.SetValue(compParams, true);
+
+                var results = compileMethod.Invoke(provider, new[] { compParams, new[] { wrappedCode } });
+                var errorsProperty = results.GetType().GetProperty("Errors");
+                var errors = errorsProperty?.GetValue(results) as System.Collections.ICollection;
+                if (errors != null && errors.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder("Compilation errors:\n");
+                    var hasErrors = false;
+                    foreach (var err in errors)
+                    {
+                        var isWarning = false;
+                        try
+                        {
+                            var isWarningProperty = err.GetType().GetProperty("IsWarning");
+                            if (isWarningProperty != null)
+                                isWarning = (bool)isWarningProperty.GetValue(err);
+                        }
+                        catch { /* best-effort reflection over compiler errors */ }
+
+                        if (isWarning)
+                            continue;
+
+                        hasErrors = true;
+                        sb.AppendLine(err.ToString());
+                    }
+
+                    if (hasErrors)
+                        return sb.ToString();
+                }
+
+                var assemblyProp = results.GetType().GetProperty("CompiledAssembly");
+                var assembly = assemblyProp?.GetValue(results) as Assembly;
+                if (assembly == null) return "Error: Compilation produced no assembly.";
+
+                var evalClass = assembly.GetType("__CSharpEval");
+                var runMethod = evalClass?.GetMethod("Run", BindingFlags.Static | BindingFlags.Public);
+                var result = runMethod?.Invoke(null, null);
+                return result?.ToString() ?? "(null)";
+            }
+            catch (TargetInvocationException tie)
+            {
+                throw tie.InnerException ?? tie;
+            }
+        }
+
+        private static void CollectAssemblyReferences(System.Collections.IList refAssemblies)
+        {
+            var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (asm.IsDynamic) continue;
+                try
+                {
+                    var loc = asm.Location;
+                    if (string.IsNullOrEmpty(loc)) continue;
+                    if (!added.Add(loc)) continue;
+                    refAssemblies.Add(loc);
+                }
+                catch { /* skip assemblies that can't report location */ }
+            }
+
+            // Ensure netstandard.dll is present (facade assembly often missed)
+            var runtimeDir = System.IO.Path.GetDirectoryName(typeof(object).Assembly.Location) ?? "";
+            foreach (var facade in new[] { "netstandard.dll", "mscorlib.dll", "System.Runtime.dll" })
+            {
+                var path = System.IO.Path.Combine(runtimeDir, facade);
+                if (System.IO.File.Exists(path) && added.Add(path))
+                    refAssemblies.Add(path);
+            }
+        }
+
+        private static Type FindType(string fullName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    var t = asm.GetType(fullName);
+                    if (t != null) return t;
+                }
+                catch { /* skip */ }
+            }
+            return null;
+        }
+    }
+}

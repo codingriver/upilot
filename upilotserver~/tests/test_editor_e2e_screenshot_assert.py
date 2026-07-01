@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from unitypilot_mcp.editor_e2e import assertions
+from upilot_mcp.editor_e2e import assertions
 
 
 def _run(coro):

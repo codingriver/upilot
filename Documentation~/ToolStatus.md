@@ -190,9 +190,9 @@
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `unity_uiflow_run_file` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UNITYPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_run_suite` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UNITYPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_run_batch` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UNITYPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_force_reset` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UNITYPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_run_async` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UNITYPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_results` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UNITYPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_uiflow_run_file` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_uiflow_run_suite` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_uiflow_run_batch` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_uiflow_force_reset` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_uiflow_run_async` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_uiflow_results` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# dev.sh — UnityPilot MCP 开发模式一键启动（macOS / Linux）
+# dev.sh — upilot MCP 开发模式一键启动（macOS / Linux）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")"; pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.."; pwd)"
-cd "$PROJECT_ROOT"
+MCP_ROOT="$(cd "$SCRIPT_DIR/.."; pwd)"
+cd "$MCP_ROOT"
 
-export PYTHONPATH="$PROJECT_ROOT/unitypilot_mcp/src:${PYTHONPATH:-}"
+export PYTHONPATH="$MCP_ROOT/src:${PYTHONPATH:-}"
 
 echo "============================================================"
-echo "  UnityPilot MCP — 开发模式启动"
+echo "  upilot MCP — 开发模式启动"
 echo "============================================================"
 
 # ── 检查 Python ──────────────────────────────────────────────
@@ -42,7 +42,7 @@ fi
 
 # ── 启动 WS 服务器（后台）────────────────────────────────────
 echo "[INFO] 启动 WebSocket 服务器 ws://127.0.0.1:8765 ..."
-python3 -m unitypilot_mcp.main &
+python3 -m upilot_mcp.main &
 WS_PID=$!
 echo "[INFO] WS 服务器 PID=$WS_PID"
 
@@ -61,7 +61,7 @@ done
 # ── 冒烟测试 ─────────────────────────────────────────────────
 echo ""
 echo "[INFO] 运行 MCP 冒烟测试..."
-if python3 unitypilot_mcp/src/unitypilot_mcp/mcp_smoke_test.py; then
+if python3 src/upilot_mcp/mcp_smoke_test.py; then
     echo "[OK] MCP 服务器协议正常"
 else
     echo "[WARN] 冒烟测试失败，请检查上方输出"
@@ -71,10 +71,10 @@ echo ""
 echo "============================================================"
 echo "  开发环境就绪"
 echo "  WebSocket: ws://127.0.0.1:8765  (PID=$WS_PID)"
-echo "  现在打开 Unity Editor，等待 UnityPilot 自动连接"
+echo "  现在打开 Unity Editor，等待 upilot 自动连接"
 echo "============================================================"
 echo ""
-echo "提示：修改 Python 文件后运行 ./unitypilot_mcp/deploy/restart_mcp.sh 重启服务器"
-echo "提示：停止服务器: kill $WS_PID  或  ./unitypilot_mcp/deploy/restart_mcp.sh stop"
+echo "提示：修改 Python 文件后运行 ./deploy/restart_mcp.sh 重启服务器"
+echo "提示：停止服务器: kill $WS_PID  或  ./deploy/restart_mcp.sh stop"
 echo ""
 wait "$WS_PID"

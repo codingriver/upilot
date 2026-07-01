@@ -1,23 +1,23 @@
 // -----------------------------------------------------------------------
-// UnityPilot — M26 Phase B: EditMode test assembly smoke (UTF).
+// Upilot — M26 Phase B: EditMode test assembly smoke (UTF).
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using NUnit.Framework;
 
-namespace codingriver.unity.pilot.tests
+namespace codingriver.upilot.tests
 {
     /// <summary>
     /// Verifies the Editor Tests assembly loads; extend with VisualElement-driven checks as needed.
     /// </summary>
-    [Category("UnityPilot")]
+    [Category("Upilot")]
     public sealed class EditorE2EAssemblySmokeTest
     {
         [Test]
-        [Category("UnityPilot")]
+        [Category("Upilot")]
         public void EditorTests_Assembly_Resolves()
         {
-            Assert.Pass("UnityPilot.Editor.Tests loaded.");
+            Assert.Pass("Upilot.Editor.Tests loaded.");
         }
     }
 }

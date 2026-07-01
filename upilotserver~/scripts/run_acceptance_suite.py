@@ -9,11 +9,11 @@ Requires Unity Editor with upilot bridge connected to the same host:port as this
 Includes **M27** cases (T-M27-01…08): window list `closable`, close/setRect errors, `wheel`, nested `scrollViewNamePath` failure, E2E `exportZip`, `capturePointer`/`releasePointer`. Default layout should include a **Game** view (close-deny test).
 
 Env:
-  UNITYPILOT_HOST, UNITYPILOT_PORT — WebSocket bind (default 127.0.0.1:8765)
-  UNITYPILOT_TEST_CONNECT_TIMEOUT — seconds to wait for Unity (default 180)
-  UNITYPILOT_SCREENSHOT_DEGRADE — none|auto|scene|minimal (default auto)
-  UNITYPILOT_TEST_SCENE_NAME — default unitypilot-test (passed to scene_ensure_test)
-  UNITYPILOT_TEST_SCENE_PATH — if set, overrides scene name (Assets/... path)
+  UPILOT_HOST, UPILOT_PORT — WebSocket bind (default 127.0.0.1:8765)
+  UPILOT_TEST_CONNECT_TIMEOUT — seconds to wait for Unity (default 180)
+  UPILOT_SCREENSHOT_DEGRADE — none|auto|scene|minimal (default auto)
+  UPILOT_TEST_SCENE_NAME — default upilot-test (passed to scene_ensure_test)
+  UPILOT_TEST_SCENE_PATH — if set, overrides scene name (Assets/... path)
 """
 
 from __future__ import annotations
@@ -31,8 +31,9 @@ _SRC = _REPO / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unitypilot_mcp.server import WsOrchestratorServer  # noqa: E402
-from unitypilot_mcp.tool_facade import McpToolFacade  # noqa: E402
+from upilot_mcp.server import WsOrchestratorServer  # noqa: E402
+from upilot_mcp.tool_facade import McpToolFacade  # noqa: E402
+from upilot_mcp.env import env_float, env_int, getenv  # noqa: E402
 
 
 class CaseResult:
@@ -45,17 +46,11 @@ class CaseResult:
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
+    return env_float(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
+    return env_int(name, default)
 
 
 async def _wait_unity(orchestrator: WsOrchestratorServer, timeout_s: float) -> bool:
@@ -213,9 +208,9 @@ async def strict_preflight(facade: McpToolFacade, ctx: dict) -> tuple[bool, str]
 
 
 async def main_async() -> int:
-    host = os.environ.get("UNITYPILOT_HOST", "127.0.0.1")
-    port = _env_int("UNITYPILOT_PORT", 8765)
-    connect_timeout = _env_float("UNITYPILOT_TEST_CONNECT_TIMEOUT", 180.0)
+    host = getenv("UPILOT_HOST", "127.0.0.1")
+    port = _env_int("UPILOT_PORT", 8765)
+    connect_timeout = _env_float("UPILOT_TEST_CONNECT_TIMEOUT", 180.0)
 
     orchestrator = WsOrchestratorServer(host=host, port=port)
     facade = McpToolFacade(orchestrator)
@@ -228,8 +223,8 @@ async def main_async() -> int:
             print(f"FAIL: Unity not connected within {connect_timeout}s on {host}:{port}", flush=True)
             return 2
 
-        scene_path_env = (os.environ.get("UNITYPILOT_TEST_SCENE_PATH") or "").strip()
-        scene_name_env = (os.environ.get("UNITYPILOT_TEST_SCENE_NAME") or "unitypilot-test").strip()
+        scene_path_env = getenv("UPILOT_TEST_SCENE_PATH", "").strip()
+        scene_name_env = getenv("UPILOT_TEST_SCENE_NAME", "upilot-test").strip()
         r_sc = await facade.scene_ensure_test(
             scene_name=scene_name_env,
             scene_path=scene_path_env,
@@ -244,7 +239,7 @@ async def main_async() -> int:
         print(f"[ok] scene_ensure_test: {action} {path_shown}", flush=True)
 
         r_go = await facade.gameobject_create(
-            name="UnityPilotAcceptanceTarget", primitive_type="Cube"
+            name="UpilotAcceptanceTarget", primitive_type="Cube"
         )
         if not _ok(r_go):
             print(f"[FAIL] bootstrap GameObject for Inspector: {_err_msg(r_go)}", flush=True)
@@ -408,7 +403,7 @@ async def main_async() -> int:
                 facade.resource_editor_state(),
                 facade.resource_window_diagnostics(),
                 facade.resource_console_summary(),
-                facade.resource_unitypilot_logs_tab(),
+                facade.resource_upilot_logs_tab(),
                 return_exceptions=True,
             )
             for x in rs:
@@ -827,7 +822,7 @@ async def main_async() -> int:
             return (h1 == h2 or (h1 is not None and h2 is not None), f"h batch={h1} res={h2}")
 
         async def t_m26_15() -> tuple[bool, str]:
-            r = await facade.resource_unitypilot_logs_tab()
+            r = await facade.resource_upilot_logs_tab()
             return (_ok(r), _err_msg(r) if not _ok(r) else "ok")
 
         async def t_m26_16() -> tuple[bool, str]:
@@ -855,7 +850,7 @@ async def main_async() -> int:
             await facade.menu_execute("upilot/upilot")
             await asyncio.sleep(0.6)
             rw = await facade.resource_window_diagnostics()
-            rl = await facade.resource_unitypilot_logs_tab()
+            rl = await facade.resource_upilot_logs_tab()
             if not (_ok(rw) and _ok(rl)):
                 return False, f"{_err_msg(rw)} / {_err_msg(rl)}"
             wtab = (rw.data or {}).get("activeTab", -1)
@@ -863,7 +858,7 @@ async def main_async() -> int:
             if int(wtab) != 1:
                 return False, f"STRICT: resource window activeTab={wtab} expected 1 on logs tab"
             if not snap:
-                return False, "STRICT: resource unitypilot-logs-tab snapshotValid must be true on diagnostics tab"
+                return False, "STRICT: resource upilot-logs-tab snapshotValid must be true on diagnostics tab"
             return True, "resources cross-check ok"
 
         async def t_m27_01() -> tuple[bool, str]:

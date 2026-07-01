@@ -25,10 +25,9 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [project.scripts]
-upilot = "unitypilot_mcp.mcp_main:_cli"
-upilot-mcp = "unitypilot_mcp.mcp_main:_cli"
-unitypilot-mcp = "unitypilot_mcp.mcp_main:_cli"
+upilot = "upilot_mcp.mcp_main:_cli"
+upilot-mcp = "upilot_mcp.mcp_main:_cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["unitypilot_mcp*"]
+include = ["upilot_mcp*"]

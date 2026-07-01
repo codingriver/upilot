@@ -16,12 +16,12 @@ Python server 负责：
 ## 目录结构
 
 ```text
-unitypilot~/
+upilotserver~/
   run_upilot_mcp.py          # 推荐的源码启动入口。
   pyproject.toml             # Python 包元数据和 console scripts。
   requirements.txt           # 源码运行所需依赖。
   mcp.example.json           # 本地 MCP client 配置示例。
-  src/unitypilot_mcp/        # Server Python 包。
+  src/upilot_mcp/        # Server Python 包。
   tests/                     # Pytest 测试。
   scripts/                   # 验收与辅助脚本。
   deploy/                    # 发布/部署辅助脚本。
@@ -84,11 +84,11 @@ python -m pip install -e .[dev]
 从仓库根目录启动：
 
 ```bash
-python -m pip install -r unitypilot~/requirements.txt
-python unitypilot~/run_upilot_mcp.py --transport http --http-port 8011 --port 8765
+python -m pip install -r upilotserver~/requirements.txt
+python upilotserver~/run_upilot_mcp.py --transport http --http-port 8011 --port 8765
 ```
 
-从 `unitypilot~/` 目录启动：
+从 `upilotserver~/` 目录启动：
 
 推荐的 Streamable HTTP 启动方式：
 
@@ -118,14 +118,14 @@ upilot-mcp --transport http --http-port 8011 --port 8765
 
 | CLI 参数 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- | --- |
-| `--transport` | `UNITYPILOT_TRANSPORT` | `stdio` | MCP 传输方式：`stdio` 或 `http`。 |
-| `--host` | `UNITYPILOT_HOST` | `127.0.0.1` | Unity Editor bridge 使用的 WebSocket host。 |
-| `--port` | `UNITYPILOT_PORT` | `8765` | Unity Editor bridge 使用的 WebSocket port。 |
-| `--http-host` | `UNITYPILOT_HTTP_HOST` | `127.0.0.1` | Streamable HTTP host。 |
-| `--http-port` | `UNITYPILOT_HTTP_PORT` | `8000` | Streamable HTTP port。 |
+| `--transport` | `UPILOT_TRANSPORT` | `stdio` | MCP 传输方式：`stdio` 或 `http`。 |
+| `--host` | `UPILOT_HOST` | `127.0.0.1` | Unity Editor bridge 使用的 WebSocket host。 |
+| `--port` | `UPILOT_PORT` | `8765` | Unity Editor bridge 使用的 WebSocket port。 |
+| `--http-host` | `UPILOT_HTTP_HOST` | `127.0.0.1` | Streamable HTTP host。 |
+| `--http-port` | `UPILOT_HTTP_PORT` | `8000` | Streamable HTTP port。 |
 | `--label` | 无 | 当前目录名 | Unity 诊断中显示的标签。 |
-| `--log-file` | `UNITYPILOT_LOG_FILE` | 未设置 | 可选日志文件路径。 |
-| `--log-level` | `UNITYPILOT_LOG_LEVEL` | `DEBUG` | Python 日志级别。 |
+| `--log-file` | `UPILOT_LOG_FILE` | 未设置 | 可选日志文件路径。 |
+| `--log-level` | `UPILOT_LOG_LEVEL` | `DEBUG` | Python 日志级别。 |
 
 如果同时运行多个 Unity 项目，给每个项目使用不同的 `--port`，例如 `8765`、`8766`、`8767`。
 
@@ -152,7 +152,7 @@ upilot-mcp --transport http --http-port 8011 --port 8765
     "upilot": {
       "command": "python",
       "args": [
-        "<PATH_TO_UPILOT_REPO>/unitypilot~/run_upilot_mcp.py",
+        "<PATH_TO_UPILOT_REPO>/upilotserver~/run_upilot_mcp.py",
         "--transport",
         "stdio",
         "--port",
@@ -196,7 +196,7 @@ python -m pytest
 - 保持 `run_upilot_mcp.py` 作为推荐源码启动入口。
 - MCP HTTP 路径保持为 `/mcp`。
 - WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint。
-- 不要随意重命名 Python module `unitypilot_mcp`；包元数据和源码布局依赖它。
+- Python import module 为 `upilot_mcp`，对外发布名和命令为 `upilot-mcp`。
 - MCP 工具命名需要与实现路径保持一致。动态代码片段执行工具名为 `unity_roslyn_execute` / `unity_roslyn_status` / `unity_roslyn_abort`，并转发到 Unity bridge 路由 `roslyn.execute` / `roslyn.status` / `roslyn.abort`。`status` 和 `abort` 按 `executionId` 操作 Roslyn 动态执行任务。
 - 稳定调用已有业务方法时应使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`，对应 Unity bridge 路由 `reflection.eval`。
 

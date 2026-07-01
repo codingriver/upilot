@@ -3,7 +3,7 @@
     "rootNamespace": "UnityUIFlow.Examples",
     "references": [
         "UnityUIFlow",
-        "UnityPilot.UIFlowBridge",
+        "Upilot.UIFlowBridge",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner"
     ],
@@ -17,7 +17,7 @@
     "autoReferenced": true,
     "defineConstraints": [
         "UNITY_6000_0_OR_NEWER",
-        "UNITYPILOT_ENABLE_UIFLOW"
+        "UPILOT_ENABLE_UIFLOW"
     ],
     "versionDefines": [],
     "noEngineReferences": false

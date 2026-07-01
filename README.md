@@ -19,7 +19,7 @@ UIFlow 是随包提供的可选附属工具，用 YAML 驱动 Unity EditorWindow
 | --- | --- | --- |
 | upilot 核心桥接 | Unity `2022.3` 或更高 | 默认编译。 |
 | upilot MCP 服务 | Python `3.11` 或更高 | 随包提供。 |
-| UIFlow YAML 自动化 | Unity `6000.0` 或更高 | 需要启用 `UNITYPILOT_ENABLE_UIFLOW`。 |
+| UIFlow YAML 自动化 | Unity `6000.0` 或更高 | 需要启用 `UPILOT_ENABLE_UIFLOW`。 |
 | 当前验证工程 | Unity `6000.6.0a2` | 见 `Tests~/UnityUIFlowTest`。 |
 
 UIFlow 还需要消费项目安装以下 Unity 包：
@@ -29,7 +29,7 @@ UIFlow 还需要消费项目安装以下 Unity 包：
 - `com.unity.ui.test-framework`
 - `com.unity.test-framework`
 
-在 Unity 2022 中不要启用 `UNITYPILOT_ENABLE_UIFLOW`。此时 UIFlow 相关 MCP 调用会返回 `UIFLOW_UNAVAILABLE`，但 upilot 其他能力仍可用。
+在 Unity 2022 中不要启用 `UPILOT_ENABLE_UIFLOW`。此时 UIFlow 相关 MCP 调用会返回 `UIFLOW_UNAVAILABLE`，但 upilot 其他能力仍可用。
 
 ## 安装
 
@@ -173,7 +173,7 @@ UIFlow 用 YAML 描述 Unity Editor `EditorWindow` UI 测试流程，不面向 G
 启用 UIFlow 需要添加脚本宏：
 
 ```text
-UNITYPILOT_ENABLE_UIFLOW
+UPILOT_ENABLE_UIFLOW
 ```
 
 启用后菜单入口：
@@ -210,7 +210,7 @@ steps:
 - README：`README.md`
 - 许可证：`LICENSE.md`
 - 第三方组件声明：`NOTICE.md`
-- upilot MCP server 开发文档：`unitypilot~/DEVELOPMENT.md`
+- upilot MCP server 开发文档：`upilotserver~/DEVELOPMENT.md`
 - MCP 工具状态矩阵：`Documentation~/ToolStatus.md`
 - UIFlow 使用指南：`Documentation~/UIFlow.md`
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unitypilot_mcp.editor_e2e.runner import _flatten_pointer_sequences
+from upilot_mcp.editor_e2e.runner import _flatten_pointer_sequences
 
 
 def test_flatten_pointer_sequence_expands_events() -> None:
@@ -40,9 +40,9 @@ def test_flatten_merges_defaults() -> None:
             "events": [{"eventType": "wheel", "wheelDeltaY": 5}],
         }
     ]
-    defaults = {"targetWindow": "UnityPilot", "elementName": "sv"}
+    defaults = {"targetWindow": "Upilot", "elementName": "sv"}
     out = _flatten_pointer_sequences(items, defaults)
     assert len(out) == 1
-    assert out[0]["targetWindow"] == "UnityPilot"
+    assert out[0]["targetWindow"] == "Upilot"
     assert out[0]["elementName"] == "sv"
     assert out[0]["wheelDeltaY"] == 5

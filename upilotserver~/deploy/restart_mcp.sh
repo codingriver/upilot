@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# restart_mcp.sh — 重启 UnityPilot WS 服务器（macOS / Linux）
+# restart_mcp.sh — 重启 upilot WS 服务器（macOS / Linux）
 #
 # 用法:
 #   ./restart_mcp.sh          # 重启
@@ -7,10 +7,10 @@
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")"; pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.."; pwd)"
-cd "$PROJECT_ROOT"
+MCP_ROOT="$(cd "$SCRIPT_DIR/.."; pwd)"
+cd "$MCP_ROOT"
 
-export PYTHONPATH="$PROJECT_ROOT/mcp/src:${PYTHONPATH:-}"
+export PYTHONPATH="$MCP_ROOT/src:${PYTHONPATH:-}"
 
 ACTION="${1:-restart}"
 
@@ -32,7 +32,7 @@ fi
 
 # ── 重启 ─────────────────────────────────────────────────────
 echo "[INFO] 启动 WebSocket 服务器 ws://127.0.0.1:8765 ..."
-python3 -m unitypilot_mcp.main &
+python3 -m upilot_mcp.main &
 NEW_PID=$!
 
 for i in $(seq 1 10); do

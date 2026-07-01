@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-build_release.py — UnityPilot MCP 一键打包脚本
+build_release.py — upilot MCP 一键打包脚本
 
 MCP 协议（JSON-RPC/stdio）对所有 AI 工具完全相同（Claude Code / Cursor /
 VSCode Copilot / OpenCode），无需多份服务端；但 Python 二进制依赖（pywin32、
 cryptography 等）是平台相关的，因此按平台出独立离线安装包。
 
 用法:
-  python unitypilot_mcp/deploy/build_release.py                 # 为当前平台打包
-  python unitypilot_mcp/deploy/build_release.py --platform win  # 仅打包 Windows 版（需在 Win 上运行）
-  python unitypilot_mcp/deploy/build_release.py --platform mac  # 仅打包 macOS 版（需在 Mac 上运行）
+  python upilotserver~/deploy/build_release.py                 # 为当前平台打包
+  python upilotserver~/deploy/build_release.py --platform win  # 仅打包 Windows 版（需在 Win 上运行）
+  python upilotserver~/deploy/build_release.py --platform mac  # 仅打包 macOS 版（需在 Mac 上运行）
 
 产物（放在 dist/ 目录）:
-  unitypilot-mcp-<ver>-win64.zip    — Windows 离线包
-  unitypilot-mcp-<ver>-macos.zip    — macOS 离线包
+  upilot-mcp-<ver>-win64.zip    — Windows 离线包
+  upilot-mcp-<ver>-macos.zip    — macOS 离线包
 
 包内结构:
   wheels/          所有依赖 wheel（离线 pip install 用）
@@ -41,15 +41,14 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MCP_ROOT = SCRIPT_DIR.parent
-WORKSPACE_ROOT = MCP_ROOT.parent
 DIST = MCP_ROOT / "dist"
 BUILD = MCP_ROOT / "build" / "release_tmp"
-PACKAGE_NAME = "unitypilot-mcp"
-ENTRY_POINT = "unitypilot-mcp"  # console_scripts 名
+PACKAGE_NAME = "upilot-mcp"
+ENTRY_POINT = "upilot-mcp"  # console_scripts 名
 
 # 读取 pyproject.toml 中的版本号
 def _get_version() -> str:
-    toml = WORKSPACE_ROOT / "pyproject.toml"
+    toml = MCP_ROOT / "pyproject.toml"
     for line in toml.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line.startswith("version") and "=" in line:
@@ -66,7 +65,7 @@ def _make_configs(cmd: str, args: list[str], platform_name: str) -> dict[str, di
     # Claude Code / Claude VSCode 扩展 / OpenCode  → .mcp.json
     claude = {
         "mcpServers": {
-            "unitypilot": {
+            "upilot": {
                 "command": cmd,
                 "args": args,
                 **({"env": {"PYTHONUTF8": "1"}} if "win" in platform_name else {}),
@@ -78,7 +77,7 @@ def _make_configs(cmd: str, args: list[str], platform_name: str) -> dict[str, di
     # Cursor → .cursor/mcp.json  （格式与 Claude Code 相同）
     cursor = {
         "mcpServers": {
-            "unitypilot": {
+            "upilot": {
                 "command": cmd,
                 "args": args,
                 **({"env": {"PYTHONUTF8": "1"}} if "win" in platform_name else {}),
@@ -90,7 +89,7 @@ def _make_configs(cmd: str, args: list[str], platform_name: str) -> dict[str, di
     # VSCode Copilot → .vscode/mcp.json  （"servers" 键，需 "type":"stdio"）
     vscode = {
         "servers": {
-            "unitypilot": {
+            "upilot": {
                 "type": "stdio",
                 "command": cmd,
                 "args": args,
@@ -106,15 +105,15 @@ def _make_configs(cmd: str, args: list[str], platform_name: str) -> dict[str, di
 # ── README 文本 ───────────────────────────────────────────────────────────────
 
 README_WIN = """\
-UnityPilot MCP — Windows 离线安装包
+upilot MCP — Windows 离线安装包
 ====================================
 
 一、安装（双击或在命令提示符中运行）
   install.bat
 
-  安装完成后 PATH 中会出现 unitypilot-mcp 命令。
+  安装完成后 PATH 中会出现 upilot-mcp 命令。
   若提示找不到命令，用完整路径：
-    %APPDATA%\\Python\\Python311\\Scripts\\unitypilot-mcp.exe
+    %APPDATA%\\Python\\Python311\\Scripts\\upilot-mcp.exe
 
 二、配置 AI 工具（选择你使用的工具）
   1. Claude Code / OpenCode / Claude VSCode 扩展
@@ -132,12 +131,12 @@ UnityPilot MCP — Windows 离线安装包
 三、Unity 插件
   在 Unity 工程的 Packages/manifest.json 中添加 UPM 依赖（与仓库 README 一致），例如：
   "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git"
-  Unity 菜单中启用 UnityPilot（勾选）
+  Unity 菜单中启用 upilot（勾选）
 
 四、验证
   # Claude Code
   claude mcp list
-  # 应显示：unitypilot: ... - Connected
+  # 应显示：upilot: ... - Connected
 
 MCP 协议说明：
   Claude Code、Cursor、VSCode Copilot、OpenCode 使用完全相同的 MCP 协议
@@ -146,13 +145,13 @@ MCP 协议说明：
 """
 
 README_MAC = """\
-UnityPilot MCP — macOS 离线安装包
+upilot MCP — macOS 离线安装包
 ===================================
 
 一、安装
   chmod +x install.sh && ./install.sh
 
-  安装完成后 PATH 中会出现 unitypilot-mcp 命令。
+  安装完成后 PATH 中会出现 upilot-mcp 命令。
 
 二、配置 AI 工具（选择你使用的工具）
   1. Claude Code / OpenCode / Claude VSCode 扩展
@@ -169,11 +168,11 @@ UnityPilot MCP — macOS 离线安装包
 三、Unity 插件
   在 Unity 工程的 Packages/manifest.json 中添加 UPM 依赖，例如：
   "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git"
-  Unity 菜单中启用 UnityPilot（勾选）
+  Unity 菜单中启用 upilot（勾选）
 
 四、验证
   claude mcp list
-  # 应显示：unitypilot: ... - Connected
+  # 应显示：upilot: ... - Connected
 
 MCP 协议说明：
   Claude Code、Cursor、VSCode Copilot、OpenCode 使用完全相同的 MCP 协议
@@ -192,8 +191,8 @@ def step_build_wheel(tmp: Path) -> Path:
     print("\n[1/4] 构建 wheel...")
     wheels_out = tmp / "wheels"
     wheels_out.mkdir(parents=True, exist_ok=True)
-    run([sys.executable, "-m", "build", "--wheel", "--outdir", str(wheels_out)], cwd=str(WORKSPACE_ROOT))
-    whl = next(wheels_out.glob("unitypilot_mcp-*.whl"), None)
+    run([sys.executable, "-m", "build", "--wheel", "--outdir", str(wheels_out)], cwd=str(MCP_ROOT))
+    whl = next(wheels_out.glob("upilot_mcp-*.whl"), None)
     if not whl:
         raise RuntimeError("wheel 构建失败，dist/ 中没有找到 .whl 文件")
     print(f"  wheel: {whl.name}")
@@ -224,18 +223,18 @@ def step_write_scripts(tmp: Path, plat: str, cmd_after_install: str) -> None:
     bat = tmp / "install.bat"
     bat.write_text(
         "@echo off\n"
-        "echo Installing UnityPilot MCP...\n"
+        "echo Installing upilot MCP...\n"
         f'python -m pip install --find-links "%~dp0{wheels_rel}" '
-        f'--no-index unitypilot-mcp\n'
+        f'--no-index upilot-mcp\n'
         "if %errorlevel% neq 0 (\n"
         "  echo.\n"
         "  echo [WARN] 系统 pip 失败，尝试 --user 安装...\n"
         f'  python -m pip install --find-links "%~dp0{wheels_rel}" '
-        f'--no-index --user unitypilot-mcp\n'
+        f'--no-index --user upilot-mcp\n'
         ")\n"
         "echo.\n"
         "echo 安装完成！\n"
-        "echo 命令: unitypilot-mcp\n"
+        "echo 命令: upilot-mcp\n"
         "pause\n",
         encoding="utf-8",
     )
@@ -246,12 +245,12 @@ def step_write_scripts(tmp: Path, plat: str, cmd_after_install: str) -> None:
         "#!/usr/bin/env bash\n"
         "set -e\n"
         'DIR="$(cd "$(dirname "$0")"; pwd)"\n'
-        "echo 'Installing UnityPilot MCP...'\n"
+        "echo 'Installing upilot MCP...'\n"
         f'python3 -m pip install --find-links "$DIR/{wheels_rel}" '
-        f'--no-index unitypilot-mcp || \\\n'
+        f'--no-index upilot-mcp || \\\n'
         f'  python3 -m pip install --find-links "$DIR/{wheels_rel}" '
-        f'--no-index --user unitypilot-mcp\n'
-        "echo 'Done! Command: unitypilot-mcp'\n",
+        f'--no-index --user upilot-mcp\n'
+        "echo 'Done! Command: upilot-mcp'\n",
         encoding="utf-8",
     )
 
@@ -276,7 +275,7 @@ def step_zip(tmp: Path, plat: str) -> Path:
     """打包成 zip。"""
     print("\n[4/4] 打包 zip...")
     DIST.mkdir(exist_ok=True)
-    zip_name = f"unitypilot-mcp-{VERSION}-{plat}.zip"
+    zip_name = f"upilot-mcp-{VERSION}-{plat}.zip"
     zip_path = DIST / zip_name
     if zip_path.exists():
         zip_path.unlink()
@@ -289,7 +288,7 @@ def step_zip(tmp: Path, plat: str) -> Path:
                 print(f"  + {arcname}")
 
     size_mb = zip_path.stat().st_size / 1024 / 1024
-    print(f"\n  产物: unitypilot_mcp/dist/{zip_name}  ({size_mb:.1f} MB)")
+    print(f"\n  产物: upilotserver~/dist/{zip_name}  ({size_mb:.1f} MB)")
     return zip_path
 
 
@@ -306,9 +305,9 @@ def build_platform(plat: str) -> Path:
 
     # console_scripts 安装后的命令名
     if "win" in plat:
-        cmd_after_install = "unitypilot-mcp"
+        cmd_after_install = "upilot-mcp"
     else:
-        cmd_after_install = "unitypilot-mcp"
+        cmd_after_install = "upilot-mcp"
 
     whl = step_build_wheel(tmp)
     step_download_deps(whl, tmp)
@@ -335,7 +334,7 @@ def ensure_build_tool() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="UnityPilot MCP 一键打包脚本",
+        description="upilot MCP 一键打包脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -374,7 +373,7 @@ def main() -> None:
     3. 将 mcp-configs/claude-code.mcp.json 复制为项目根 .mcp.json
 
   macOS:
-    1. unzip unitypilot-mcp-*.zip
+    1. unzip upilot-mcp-*.zip
     2. chmod +x install.sh && ./install.sh
     3. cp mcp-configs/claude-code.mcp.json <项目根>/.mcp.json
 """)

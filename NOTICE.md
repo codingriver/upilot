@@ -25,6 +25,6 @@ licenses.
 ## Python Dependencies
 
 Python dependencies for the MCP server are declared in
-`unitypilot~/pyproject.toml` and `unitypilot~/requirements.txt`. They are not
+`upilotserver~/pyproject.toml` and `upilotserver~/requirements.txt`. They are not
 vendored as source in this Unity package and retain their respective upstream
 licenses.
