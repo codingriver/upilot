@@ -1,9 +1,14 @@
 # upilot
 
+upilot is an open-source Unity Editor automation bridge and MCP server for AI agents such as Codex, Claude, Cursor, and other MCP clients.
+
 upilot 是一个开源 Unity Editor 自动化桥接包，面向 AI Agent 和 MCP client。
 它通过本地 MCP 服务让外部工具检查、控制和诊断 Unity Editor。
 
 UIFlow 是随包提供的可选附属工具，用 YAML 驱动 Unity EditorWindow UI 自动化。主品牌统一为小写 `upilot`。
+
+Agent skill entry: this repository includes `skills/upilot-unity-mcp/SKILL.md` for agents that want to use upilot as a Unity Editor MCP server.
+Codex repo-scope skill entry is also mirrored at `.agents/skills/upilot-unity-mcp/SKILL.md` for automatic discovery when this repository is opened in Codex.
 
 ## 核心功能
 
@@ -47,6 +52,26 @@ https://github.com/codingriver/upilot.git#v0.1.0
     "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.1.0"
   }
 }
+```
+
+Agent 自动安装入口：
+
+```bash
+python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT>
+```
+
+该脚本会将 upilot UPM 包写入目标 Unity 项目的 `Packages/manifest.json`，为 `upilotserver~` 创建 Python 虚拟环境并安装 MCP server，并把技能安装到目标项目的 `.agents/skills/upilot-unity-mcp`。
+
+如果目标项目需要 UIFlow：
+
+```bash
+python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT> --enable-uiflow
+```
+
+如需同时写入项目级 Codex MCP 配置：
+
+```bash
+python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT> --write-codex-mcp project
 ```
 
 ## 使用 upilot
@@ -213,6 +238,8 @@ steps:
 - upilot MCP server 开发文档：`upilotserver~/DEVELOPMENT.md`
 - MCP 工具状态矩阵：`Documentation~/ToolStatus.md`
 - UIFlow 使用指南：`Documentation~/UIFlow.md`
+- Codex/agent 技能入口：`skills/upilot-unity-mcp/SKILL.md`
+- Codex repo-scope 自动发现入口：`.agents/skills/upilot-unity-mcp/SKILL.md`
 
 ## MonoHook 开源组件与不安全代码
 

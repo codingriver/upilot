@@ -9,7 +9,7 @@ description = "upilot MCP bridge — lets AI tools control the Unity Editor via 
 readme = "DEVELOPMENT.md"
 requires-python = ">=3.11"
 license = "MIT"
-keywords = ["unity", "mcp", "editor", "ai", "game-dev"]
+keywords = ["unity", "unity-editor", "mcp", "mcp-server", "model-context-protocol", "codex", "openai", "claude", "cursor", "ai-agent", "editor-automation", "game-dev", "upilot"]
 dependencies = [
     "mcp>=1.26.0",
     "websockets>=12.0",
