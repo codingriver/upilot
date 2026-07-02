@@ -671,11 +671,10 @@ namespace codingriver.upilot
                     GUILayout.FlexibleSpace();
 
                     var logToConsole = Logger.LogToUnityConsole;
-                    var newLogToConsole = GUILayout.Toggle(
-                        logToConsole,
-                        "输出到 Unity Console",
-                        EditorStyles.miniButton,
-                        GUILayout.Width(128));
+                    var logToConsoleLabel = new GUIContent(
+                        "日志写入 Console",
+                        "勾选后 upilot 日志会同步输出到 Unity Console。");
+                    var newLogToConsole = EditorGUILayout.ToggleLeft(logToConsoleLabel, logToConsole, GUILayout.Width(124));
                     if (newLogToConsole != logToConsole)
                     {
                         Logger.SetLogToUnityConsole(newLogToConsole);
@@ -685,7 +684,8 @@ namespace codingriver.upilot
 
                 EditorGUILayout.HelpBox(
                     "地址按项目保存在本机 EditorPrefs（键名带路径哈希后缀，例如 upilot.WsHost." +
-                    UpilotBridge.WsEndpointEditorPrefsKeySuffix + "），重启 Unity 后仍有效。",
+                    UpilotBridge.WsEndpointEditorPrefsKeySuffix +
+                    "），重启 Unity 后仍有效。\n勾选「日志写入 Console」会将 upilot 日志同步输出到 Unity Console；取消勾选仅关闭 Console 双写，不影响日志文件。",
                     MessageType.None);
 
                 using (new EditorGUILayout.HorizontalScope())
