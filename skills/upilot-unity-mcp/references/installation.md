@@ -45,6 +45,17 @@ python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_
 - upilot Python venv under `upilotserver~/.venv` unless `--venv` is passed
 - optional project or user Codex config when `--write-codex-mcp` is used
 
+## UPM First Import Behavior
+
+When the UPM package is first imported in Unity, its editor bootstrap creates missing project-level agent discovery files:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `.cursor/rules/upilot-unity-mcp.mdc`
+- `.agents/skills/upilot-unity-mcp`
+
+It does not silently write MCP client configuration for Codex, Claude, or Cursor. Users can create those explicit project-level client configs from `upilot/upilot` under the MCP server tab, or from the `upilot/Agent Setup` menu.
+
 ## Defaults
 
 - UPM package: `io.github.codingriver.upilot`

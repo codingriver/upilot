@@ -908,6 +908,49 @@ namespace codingriver.upilot
                     EditorGUILayout.LabelField($"CMD: {cmd}", EditorStyles.miniLabel);
                 }
             }
+
+            DrawAgentSetupSection();
+        }
+
+        private void DrawAgentSetupSection()
+        {
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("Agent 自动识别", EditorStyles.boldLabel);
+                EditorGUILayout.HelpBox(
+                    "upilot 会首次创建 AGENTS.md、CLAUDE.md、Cursor 规则和 .agents skill。MCP 客户端配置需要显式写入。",
+                    MessageType.None);
+
+                EditorGUILayout.LabelField("MCP URL: " + UpilotAgentSetup.McpUrl, EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("Health: " + UpilotAgentSetup.HealthUrl, EditorStyles.miniLabel);
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("写入规则", GUILayout.Height(22)))
+                    {
+                        Debug.Log("[upilot] Agent rules:\n" + UpilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+                        ShowToast("Agent 规则已检查/写入");
+                    }
+
+                    if (GUILayout.Button("Codex", GUILayout.Height(22)))
+                    {
+                        Debug.Log("[upilot] Codex MCP config:\n" + UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                        ShowToast("Codex MCP 配置已处理");
+                    }
+
+                    if (GUILayout.Button("Claude", GUILayout.Height(22)))
+                    {
+                        Debug.Log("[upilot] Claude MCP config:\n" + UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                        ShowToast("Claude MCP 配置已处理");
+                    }
+
+                    if (GUILayout.Button("Cursor", GUILayout.Height(22)))
+                    {
+                        Debug.Log("[upilot] Cursor MCP config:\n" + UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                        ShowToast("Cursor MCP 配置已处理");
+                    }
+                }
+            }
         }
 
         // ── Diagnostics ───────────────────────────────────────────────────────

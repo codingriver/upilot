@@ -54,6 +54,15 @@ https://github.com/codingriver/upilot.git#v0.1.0
 }
 ```
 
+首次导入 UPM 包后，upilot 会在 Unity 项目根目录自动创建缺失的 agent 识别规则：
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `.cursor/rules/upilot-unity-mcp.mdc`
+- `.agents/skills/upilot-unity-mcp`
+
+upilot 不会静默改写 Codex、Claude 或 Cursor 的 MCP 客户端配置。需要项目级 MCP 配置时，打开 `upilot/upilot`，在 `MCP 服务器 > Agent 自动识别` 中点击对应客户端按钮，或使用 `upilot/Agent Setup` 菜单。
+
 Agent 自动安装入口：
 
 ```bash
