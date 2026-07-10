@@ -407,6 +407,7 @@ namespace codingriver.upilot
             { "screenshot.sceneView",    "截图场景视图" },
             { "screenshot.camera",       "截图摄像机" },
             { "screenshot.editorWindow", "截图编辑器窗口" },
+            { "screenshot.save",         "保存截图文件" },
             // prefab
             { "prefab.create",         "创建预制体" },
             { "prefab.instantiate",    "实例化预制体" },

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
 import logging
 import os
@@ -8,6 +11,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from .auto_fix_loop import AutoFixLoopService
@@ -1057,6 +1061,185 @@ class McpToolFacade:
                 "quality": quality,
             },
         )
+
+    async def screenshot_save(
+        self,
+        path: str = "",
+        source: str = "gameView",
+        overwrite: bool = False,
+        width: int = 1280,
+        height: int = 720,
+        format: str = "png",
+        quality: int = 75,
+        camera_name: str = "",
+        window_title: str = "Game",
+        allow_outside_project: bool = False,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        image_format = (format or "png").strip().lower()
+        if image_format != "png":
+            return fail(
+                request_id,
+                "INVALID_SCREENSHOT_FORMAT",
+                "保存型截图工具当前仅支持 format=png。",
+                {"format": format, "path": path},
+            )
+
+        source_key = (source or "gameView").strip().lower()
+        normalized_source = self._normalize_screenshot_source(source_key)
+        if not normalized_source:
+            return fail(
+                request_id,
+                "INVALID_SCREENSHOT_SOURCE",
+                "source 仅支持 gameView、sceneView、camera、editorWindow。",
+                {"source": source, "path": path},
+            )
+        if normalized_source == "camera" and not camera_name:
+            return fail(
+                request_id,
+                "CAMERA_NAME_REQUIRED",
+                "source=camera 时必须提供 cameraName。",
+                {"path": path},
+            )
+
+        target_result = self._resolve_screenshot_save_path(
+            path, normalized_source, allow_outside_project
+        )
+        if isinstance(target_result, ToolResponse):
+            return target_result
+        target_path = target_result
+        if target_path.exists() and not overwrite:
+            return fail(
+                request_id,
+                "FILE_EXISTS",
+                "目标截图文件已存在，若需要覆盖请传 overwrite=true。",
+                {"path": str(target_path)},
+            )
+
+        bridge_save = await self.dispatcher.call(
+            new_id("req"),
+            "screenshot.save",
+            {
+                "path": str(target_path),
+                "source": normalized_source,
+                "overwrite": overwrite,
+                "width": width,
+                "height": height,
+                "format": image_format,
+                "quality": quality,
+                "cameraName": camera_name,
+                "windowTitle": window_title,
+                "allowOutsideProject": allow_outside_project,
+            },
+        )
+        if bridge_save.ok:
+            data = bridge_save.data or {}
+            return ok(
+                request_id,
+                {
+                    "path": data.get("path", str(target_path)),
+                    "source": data.get("source", normalized_source),
+                    "bytes": data.get("bytes", 0),
+                    "width": data.get("width", width),
+                    "height": data.get("height", height),
+                    "format": data.get("format", image_format),
+                    "sha256": data.get("sha256", ""),
+                    "overwritten": data.get("overwritten", overwrite),
+                    "savedBy": "unity_bridge",
+                },
+            )
+        return bridge_save
+
+    @staticmethod
+    def _normalize_screenshot_source(source_key: str) -> str:
+        if source_key in ("gameview", "game_view", "game"):
+            return "gameView"
+        if source_key in ("sceneview", "scene_view", "scene"):
+            return "sceneView"
+        if source_key == "camera":
+            return "camera"
+        if source_key in ("editorwindow", "editor_window", "window"):
+            return "editorWindow"
+        return ""
+
+    @staticmethod
+    def _is_command_not_found(resp: ToolResponse) -> bool:
+        if resp.ok or not resp.error:
+            return False
+        return (resp.error.code or "").upper() == "COMMAND_NOT_FOUND"
+
+    def _resolve_screenshot_save_path(
+        self, path: str, normalized_source: str, allow_outside_project: bool
+    ) -> Path | ToolResponse:
+        request_id = new_id("req")
+        raw_path = (path or "").strip()
+        if not raw_path:
+            project_root = self._active_project_root()
+            if not project_root:
+                return fail(
+                    request_id,
+                    "PROJECT_PATH_UNAVAILABLE",
+                    "path 为空时需要当前 Unity 工程路径来生成默认截图保存路径。",
+                    {},
+                )
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+            safe_source = "".join(
+                ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in normalized_source
+            )
+            target_path = project_root / "Log" / "UpilotScreenshots" / f"{timestamp}_{safe_source}.png"
+            return target_path.expanduser().resolve()
+
+        target_path = Path(raw_path)
+        if not target_path.is_absolute():
+            project_root = self._active_project_root()
+            target_path = (project_root / target_path) if project_root else target_path
+        target_path = target_path.expanduser().resolve()
+
+        if target_path.suffix.lower() != ".png":
+            return fail(
+                request_id,
+                "INVALID_SCREENSHOT_EXTENSION",
+                "当前保存型截图工具仅允许写入 .png 文件。",
+                {"path": str(target_path)},
+            )
+
+        if allow_outside_project:
+            return target_path
+
+        project_root = self._active_project_root()
+        if not project_root:
+            return fail(
+                request_id,
+                "PROJECT_PATH_UNAVAILABLE",
+                "当前没有可用 Unity 工程路径，无法校验截图保存目录。",
+                {"path": str(target_path)},
+            )
+
+        try:
+            target_path.relative_to(project_root)
+        except ValueError:
+            return fail(
+                request_id,
+                "SCREENSHOT_PATH_OUTSIDE_PROJECT",
+                "默认只允许将截图保存到当前 Unity 工程目录内。",
+                {"path": str(target_path), "projectRoot": str(project_root)},
+            )
+
+        return target_path
+
+    def _active_project_root(self) -> Path | None:
+        session = self.server.session_manager.active
+        if session and session.project_path:
+            return Path(session.project_path).expanduser().resolve()
+        return None
+
+    @staticmethod
+    def _decode_screenshot_image_data(image_data: str) -> bytes:
+        value = image_data.strip()
+        if "," in value and value.lower().startswith("data:"):
+            value = value.split(",", 1)[1]
+        return base64.b64decode(value, validate=True)
 
     # ── M12 Asset 管理 ──────────────────────────────────────────────────────
 

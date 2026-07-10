@@ -1377,6 +1377,51 @@ async def unity_screenshot_camera(
     return _log_tool_result("unity_screenshot_camera", _payload(r))
 
 
+@mcp.tool(
+    description="截取 Unity 画面并保存为 .png，成功后返回完整路径、大小、分辨率和 sha256。path 可为空；为空时保存到当前 Unity 工程 Log/UpilotScreenshots。source: gameView|sceneView|camera|editorWindow。默认只允许写入当前 Unity 工程目录内。"
+)
+async def unity_screenshot_save(
+    path: str = "",
+    source: str = "gameView",
+    overwrite: bool = False,
+    width: int = 1280,
+    height: int = 720,
+    format: str = "png",
+    quality: int = 75,
+    cameraName: str = "",
+    windowTitle: str = "Game",
+    allowOutsideProject: bool = False,
+) -> str:
+    _log_tool_call(
+        "unity_screenshot_save",
+        {
+            "path": path,
+            "source": source,
+            "overwrite": overwrite,
+            "width": width,
+            "height": height,
+            "format": format,
+            "quality": quality,
+            "cameraName": cameraName,
+            "windowTitle": windowTitle,
+            "allowOutsideProject": allowOutsideProject,
+        },
+    )
+    r = await _get_facade().screenshot_save(
+        path=path,
+        source=source,
+        overwrite=overwrite,
+        width=width,
+        height=height,
+        format=format,
+        quality=quality,
+        camera_name=cameraName,
+        window_title=windowTitle,
+        allow_outside_project=allowOutsideProject,
+    )
+    return _log_tool_result("unity_screenshot_save", _payload(r))
+
+
 # ── M12 Asset 管理 ──────────────────────────────────────────────────────────
 
 

@@ -5,6 +5,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -66,6 +68,40 @@ namespace codingriver.upilot
         public string windowTitle = "upilot";
     }
 
+    [Serializable]
+    public class ScreenshotSaveMessage
+    {
+        public ScreenshotSavePayload payload;
+    }
+
+    [Serializable]
+    public class ScreenshotSavePayload
+    {
+        public string path = "";
+        public string source = "gameView";
+        public bool overwrite = false;
+        public int width = 1280;
+        public int height = 720;
+        public string format = "png";
+        public int quality = 75;
+        public string cameraName = "";
+        public string windowTitle = "Game";
+        public bool allowOutsideProject = false;
+    }
+
+    [Serializable]
+        public class ScreenshotSaveResultPayload
+        {
+            public string path;
+            public string source;
+            public long bytes;
+        public int width;
+        public int height;
+            public string format;
+            public string sha256;
+            public bool overwritten;
+        }
+
     // ── Service ─────────────────────────────────────────────────────────────────
 
     public class UpilotScreenshotService
@@ -83,6 +119,7 @@ namespace codingriver.upilot
             _bridge.Router.Register("screenshot.sceneView",     HandleSceneViewAsync);
             _bridge.Router.Register("screenshot.camera",        HandleCameraAsync);
             _bridge.Router.Register("screenshot.editorWindow",  HandleEditorWindowAsync);
+            _bridge.Router.Register("screenshot.save",          HandleSaveAsync);
         }
 
         // ── screenshot.editorWindow ───────────────────────────────────────────
@@ -141,12 +178,11 @@ namespace codingriver.upilot
             string fmt = NormalizeFormat(p.format);
             int qual   = Clamp(p.quality, 1, 100, 75);
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<ScreenshotBytesResult>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    // Render the Game view camera to a RenderTexture
                     var cam = GetGameViewCamera();
                     if (cam == null)
                     {
@@ -154,8 +190,12 @@ namespace codingriver.upilot
                         return;
                     }
 
-                    string base64 = RenderCameraToBase64(cam, w, h, fmt, qual);
-                    tcs.SetResult(base64);
+                    tcs.SetResult(new ScreenshotBytesResult
+                    {
+                        Bytes = RenderCameraToBytes(cam, w, h, fmt, qual),
+                        Width = w,
+                        Height = h
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -163,7 +203,7 @@ namespace codingriver.upilot
                 }
             });
 
-            string result;
+            ScreenshotBytesResult result;
             try
             {
                 result = await tcs.Task;
@@ -180,7 +220,13 @@ namespace codingriver.upilot
                 return;
             }
 
-            var payload = new ScreenshotResultPayload { imageData = result, width = w, height = h, format = fmt };
+            var payload = new ScreenshotResultPayload
+            {
+                imageData = Convert.ToBase64String(result.Bytes),
+                width = result.Width,
+                height = result.Height,
+                format = fmt
+            };
             await _bridge.SendResultAsync(id, "screenshot.gameView", payload, token);
         }
 
@@ -325,10 +371,177 @@ namespace codingriver.upilot
             await _bridge.SendResultAsync(id, "screenshot.camera", payload, token);
         }
 
+        // ── screenshot.save ─────────────────────────────────────────────────────
+
+        private async Task HandleSaveAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<ScreenshotSaveMessage>(json);
+            var p = msg?.payload ?? new ScreenshotSavePayload();
+
+            var tcs = new TaskCompletionSource<ScreenshotSaveResultPayload>();
+            string errorCode = string.Empty;
+            string errorMessage = string.Empty;
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    if (TrySaveScreenshot(p, out var result, out errorCode, out errorMessage))
+                    {
+                        tcs.SetResult(result);
+                    }
+                    else
+                    {
+                        tcs.SetResult(null);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    tcs.SetException(ex);
+                }
+            });
+
+            ScreenshotSaveResultPayload payload;
+            try
+            {
+                payload = await tcs.Task;
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(id, "SCREENSHOT_FAILED", ex.Message, token, "screenshot.save");
+                return;
+            }
+
+            if (payload == null)
+            {
+                await _bridge.SendErrorAsync(id,
+                    string.IsNullOrEmpty(errorCode) ? "SCREENSHOT_FAILED" : errorCode,
+                    string.IsNullOrEmpty(errorMessage) ? "Screenshot save failed." : errorMessage,
+                    token,
+                    "screenshot.save");
+                return;
+            }
+
+            await _bridge.SendResultAsync(id, "screenshot.save", payload, token);
+        }
+
         // ── Helpers ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Save a Unity screenshot to disk.
+        /// This public API is intended for Editor automation that needs a deterministic file path.
+        /// </summary>
+        public static bool TrySaveScreenshot(
+            ScreenshotSavePayload payload,
+            out ScreenshotSaveResultPayload result,
+            out string errorCode,
+            out string errorMessage)
+        {
+            result = null;
+            errorCode = string.Empty;
+            errorMessage = string.Empty;
+
+            ScreenshotSavePayload p = payload ?? new ScreenshotSavePayload();
+            string fmt = NormalizeFormat(p.format);
+            if (fmt != "png")
+            {
+                errorCode = "INVALID_SCREENSHOT_FORMAT";
+                errorMessage = "screenshot.save only supports format=png.";
+                return false;
+            }
+
+            string targetPath = ResolveSavePath(p.path, p.allowOutsideProject, out string pathError);
+            if (!string.IsNullOrEmpty(pathError))
+            {
+                errorCode = "INVALID_SCREENSHOT_PATH";
+                errorMessage = pathError;
+                return false;
+            }
+
+            if (File.Exists(targetPath) && !p.overwrite)
+            {
+                errorCode = "FILE_EXISTS";
+                errorMessage = $"Screenshot target already exists: {targetPath}";
+                return false;
+            }
+
+            int w = Clamp(p.width, 1, 4096, 1280);
+            int h = Clamp(p.height, 1, 4096, 720);
+            int qual = Clamp(p.quality, 1, 100, 75);
+            string source = NormalizeSource(p.source);
+
+            ScreenshotBytesResult capture;
+            try
+            {
+                capture = CaptureBytes(source, p.cameraName ?? "", p.windowTitle ?? "Game", w, h, fmt, qual);
+            }
+            catch (Exception ex)
+            {
+                errorCode = "SCREENSHOT_FAILED";
+                errorMessage = ex.Message;
+                return false;
+            }
+
+            if (capture == null || capture.Bytes == null || capture.Bytes.Length == 0)
+            {
+                errorCode = "SCREENSHOT_FAILED";
+                errorMessage = $"No screenshot data captured for source={source}.";
+                return false;
+            }
+
+            try
+            {
+                string dir = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                string tempPath = Path.Combine(dir ?? "", $".{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}.tmp");
+                File.WriteAllBytes(tempPath, capture.Bytes);
+                if (File.Exists(targetPath))
+                {
+                    File.Delete(targetPath);
+                }
+
+                File.Move(tempPath, targetPath);
+
+                var info = new FileInfo(targetPath);
+                result = new ScreenshotSaveResultPayload
+                {
+                    path = targetPath,
+                    source = string.IsNullOrEmpty(capture.Source) ? source : capture.Source,
+                    bytes = info.Length,
+                    width = capture.Width,
+                    height = capture.Height,
+                    format = "png",
+                    sha256 = ComputeSha256(capture.Bytes),
+                    overwritten = p.overwrite
+                };
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorCode = "SCREENSHOT_WRITE_FAILED";
+                errorMessage = ex.Message;
+                return false;
+            }
+        }
+
+        private class ScreenshotBytesResult
+        {
+            public byte[] Bytes;
+            public int Width;
+            public int Height;
+            public string Source;
+        }
 
         /// <summary>Render a camera to RenderTexture → Texture2D → Base64 string.</summary>
         private static string RenderCameraToBase64(Camera cam, int w, int h, string format, int quality)
+        {
+            return Convert.ToBase64String(RenderCameraToBytes(cam, w, h, format, quality));
+        }
+
+        private static byte[] RenderCameraToBytes(Camera cam, int w, int h, string format, int quality)
         {
             var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
             rt.antiAliasing = 1;
@@ -353,7 +566,7 @@ namespace codingriver.upilot
                     bytes = tex.EncodeToPNG();
 
                 UnityEngine.Object.DestroyImmediate(tex);
-                return Convert.ToBase64String(bytes);
+                return bytes;
             }
             finally
             {
@@ -371,6 +584,136 @@ namespace codingriver.upilot
             if (Camera.main != null) return Camera.main;
             var allCams = Camera.allCameras;
             return allCams.Length > 0 ? allCams[0] : null;
+        }
+
+        private static ScreenshotBytesResult CaptureBytes(string source, string cameraName, string windowTitle, int w, int h, string format, int quality)
+        {
+            if (source == "editorWindow")
+            {
+                string base64 = UpilotWindowDiagnostics.CaptureEditorWindowBase64(windowTitle);
+                if (string.IsNullOrEmpty(base64))
+                {
+                    return null;
+                }
+
+                return new ScreenshotBytesResult
+                {
+                    Bytes = Convert.FromBase64String(base64),
+                    Width = 0,
+                    Height = 0,
+                    Source = "editorWindow"
+                };
+            }
+
+            Camera cam = null;
+            if (source == "gameView")
+            {
+                cam = GetGameViewCamera();
+            }
+            else if (source == "sceneView")
+            {
+                var sceneView = SceneView.lastActiveSceneView;
+                cam = sceneView != null ? sceneView.camera : null;
+            }
+            else if (source == "camera")
+            {
+                cam = FindCamera(cameraName);
+            }
+
+            if (cam == null)
+            {
+                return null;
+            }
+
+            return new ScreenshotBytesResult
+            {
+                Bytes = RenderCameraToBytes(cam, w, h, format, quality),
+                Width = w,
+                Height = h,
+                Source = source == "gameView" ? "gameView-camera" : source
+            };
+        }
+
+        private static Camera FindCamera(string camName)
+        {
+            if (string.IsNullOrEmpty(camName))
+            {
+                return Camera.main;
+            }
+
+            foreach (var c in Camera.allCameras)
+            {
+                if (string.Equals(c.name, camName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return c;
+                }
+            }
+
+            foreach (var c in UnityEngine.Object.FindObjectsOfType<Camera>(true))
+            {
+                if (string.Equals(c.name, camName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return c;
+                }
+            }
+
+            return null;
+        }
+
+        private static string NormalizeSource(string source)
+        {
+            string value = string.IsNullOrEmpty(source) ? "gameView" : source.Trim().ToLowerInvariant();
+            if (value == "gameview" || value == "game_view" || value == "game") return "gameView";
+            if (value == "sceneview" || value == "scene_view" || value == "scene") return "sceneView";
+            if (value == "editorwindow" || value == "editor_window" || value == "window") return "editorWindow";
+            if (value == "camera") return "camera";
+            return "gameView";
+        }
+
+        private static string ResolveSavePath(string rawPath, bool allowOutsideProject, out string error)
+        {
+            error = string.Empty;
+            if (string.IsNullOrEmpty(rawPath))
+            {
+                error = "path is required.";
+                return string.Empty;
+            }
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string targetPath = rawPath;
+            if (!Path.IsPathRooted(targetPath))
+            {
+                targetPath = Path.Combine(projectRoot, targetPath);
+            }
+
+            targetPath = Path.GetFullPath(targetPath);
+            if (!string.Equals(Path.GetExtension(targetPath), ".png", StringComparison.OrdinalIgnoreCase))
+            {
+                error = "screenshot.save only writes .png files.";
+                return string.Empty;
+            }
+
+            if (!allowOutsideProject)
+            {
+                string rootWithSeparator = projectRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                if (!targetPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = $"path must be under current Unity project: {projectRoot}";
+                    return string.Empty;
+                }
+            }
+
+            return targetPath;
+        }
+
+        private static string ComputeSha256(byte[] bytes)
+        {
+            using (var sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(bytes);
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            }
         }
 
         private static string NormalizeFormat(string fmt)
