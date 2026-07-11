@@ -564,7 +564,9 @@ async def unity_open_editor(command: str = "", waitForConnectMs: int = 60000) ->
     return _log_tool_result("unity_open_editor", _payload(r))
 
 
-@mcp.tool(description="触发 Unity 编译。")
+@mcp.tool(
+    description="触发 Unity 脚本编译请求。会刷新/编译项目代码；PlayMode 下会被拒绝。修改代码后优先用 unity_safe_compile_and_wait 或 compile + compile_wait。"
+)
 async def unity_compile() -> str:
     _log_tool_call("unity_compile", {})
     rejected = await _reject_compile_in_playmode("unity_compile")
@@ -600,7 +602,9 @@ async def unity_mcp_status() -> str:
     return _log_tool_result("unity_mcp_status", _payload(r))
 
 
-@mcp.tool(description="启动自动修复循环。")
+@mcp.tool(
+    description="启动自动修复循环。会反复读取编译错误并尝试修复代码，可能写文件并触发编译；适合明确要求自动修复时使用，不要用于普通查询或小改动。"
+)
 async def unity_auto_fix_start(
     maxIterations: int = 20, stopWhenNoError: bool = True
 ) -> str:
@@ -631,14 +635,18 @@ async def unity_auto_fix_status() -> str:
     return _log_tool_result("unity_auto_fix_status", _payload(r))
 
 
-@mcp.tool(description="进入 PlayMode。")
+@mcp.tool(
+    description="进入 PlayMode。会改变编辑器运行状态，可能触发脚本生命周期和场景运行逻辑；调用前确认用户需要运行态验证。"
+)
 async def unity_playmode_start() -> str:
     _log_tool_call("unity_playmode_start", {})
     r = await _get_facade().playmode_start()
     return _log_tool_result("unity_playmode_start", _payload(r))
 
 
-@mcp.tool(description="退出 PlayMode。")
+@mcp.tool(
+    description="退出 PlayMode。会停止运行态并回到编辑模式；PlayMode 中的非持久化运行时变更通常会丢失。"
+)
 async def unity_playmode_stop() -> str:
     _log_tool_call("unity_playmode_stop", {})
     r = await _get_facade().playmode_stop()
@@ -646,7 +654,7 @@ async def unity_playmode_stop() -> str:
 
 
 @mcp.tool(
-    description="执行 Unity 编辑器鼠标动作。支持 elementName 按名称自动定位元素中心坐标（无需手动算坐标）。"
+    description="执行 Unity 编辑器鼠标动作。用于真实 UI 交互；优先用 elementName 自动定位元素中心，少用裸坐标。调用前确认目标窗口/控件，避免误点菜单、删除按钮或不稳定布局。"
 )
 async def unity_mouse_event(
     action: str,
@@ -703,7 +711,7 @@ async def unity_ensure_ready(timeoutS: float = 120) -> str:
 
 
 @mcp.tool(
-    description="带超时看门狗执行 MCP 工具。超时→尝试重连 Unity→重试→总时间超限则跳过。用于自动化测试流水线防卡死。"
+    description="带超时看门狗执行另一个 MCP 工具。超时后可尝试重连 Unity 并重试；适合长耗时或可能卡住的幂等操作。不要包裹非幂等/破坏性操作重试，除非用户已确认可重复执行。"
 )
 async def unity_task_execute(
     taskName: str,
@@ -738,7 +746,9 @@ async def unity_task_execute(
     return _log_tool_result("unity_task_execute", _payload(r))
 
 
-@mcp.tool(description="执行 Unity 编辑器拖放操作。")
+@mcp.tool(
+    description="执行 Unity 编辑器拖放操作。用于 Project/Hierarchy/Inspector 等真实 UI 拖拽；可能改变场景、Prefab 或资源引用。调用前确认源/目标窗口、坐标和 assetPaths/gameObjectIds。"
+)
 async def unity_drag_drop(
     sourceWindow: str,
     targetWindow: str,
@@ -784,7 +794,9 @@ async def unity_drag_drop(
     return _log_tool_result("unity_drag_drop", _payload(r))
 
 
-@mcp.tool(description="执行 Unity 编辑器键盘动作。")
+@mcp.tool(
+    description="执行 Unity 编辑器键盘动作。用于真实 UI 输入；targetWindow 必须明确，text 会输入到当前焦点控件。优先使用专用设置/脚本/组件工具，避免焦点不确定时盲打。"
+)
 async def unity_keyboard_event(
     action: str,
     targetWindow: str,
@@ -1019,7 +1031,9 @@ async def unity_console_search_logs(
     return _log_tool_result("unity_console_search_logs", _payload(r))
 
 
-@mcp.tool(description="清空 Unity 控制台日志。")
+@mcp.tool(
+    description="清空 Unity 控制台日志。会移除当前 Console 历史；如果需要诊断先用 tail/search 读取或保存关键日志。"
+)
 async def unity_console_clear() -> str:
     _log_tool_call("unity_console_clear", {})
     r = await _get_facade().console_clear()
@@ -1094,7 +1108,9 @@ async def unity_gameobject_modify(
     return _log_tool_result("unity_gameobject_modify", _payload(r))
 
 
-@mcp.tool(description="销毁 Unity 场景中的 GameObject。")
+@mcp.tool(
+    description="销毁 Unity 场景中的 GameObject。破坏性操作：调用前先用 find/list/get 确认 instanceId 属于目标对象；不会删除磁盘资源，但会修改当前场景，之后需要 scene_save 才会持久化。"
+)
 async def unity_gameobject_delete(instanceId: int) -> str:
     _log_tool_call("unity_gameobject_delete", {"instanceId": instanceId})
     r = await _get_facade().gameobject_delete(instance_id=instanceId)
@@ -1136,28 +1152,36 @@ async def unity_gameobject_duplicate(instanceId: int) -> str:
 # ── M09 Scene 管理 ──────────────────────────────────────────────────────────
 
 
-@mcp.tool(description="在 Unity 中新建空场景。")
+@mcp.tool(
+    description="在 Unity 中新建空场景。会改变当前编辑器场景上下文；若当前场景有未保存更改，先确认保存策略。"
+)
 async def unity_scene_create(sceneName: str = "") -> str:
     _log_tool_call("unity_scene_create", {"sceneName": sceneName})
     r = await _get_facade().scene_create(scene_name=sceneName)
     return _log_tool_result("unity_scene_create", _payload(r))
 
 
-@mcp.tool(description="在 Unity 中打开指定路径的场景。")
+@mcp.tool(
+    description="在 Unity 中打开指定路径的场景。mode=single 会替换当前场景，mode=additive 叠加打开；先确认未保存更改和目标路径。"
+)
 async def unity_scene_open(scenePath: str, mode: str = "single") -> str:
     _log_tool_call("unity_scene_open", {"scenePath": scenePath, "mode": mode})
     r = await _get_facade().scene_open(scene_path=scenePath, mode=mode)
     return _log_tool_result("unity_scene_open", _payload(r))
 
 
-@mcp.tool(description="保存当前 Unity 场景或指定路径的场景。")
+@mcp.tool(
+    description="保存当前 Unity 场景或指定路径的场景。会将当前场景修改写入磁盘；调用前确认目标场景和用户意图。scenePath 为空时保存当前激活场景。"
+)
 async def unity_scene_save(scenePath: str = "") -> str:
     _log_tool_call("unity_scene_save", {"scenePath": scenePath})
     r = await _get_facade().scene_save(scene_path=scenePath)
     return _log_tool_result("unity_scene_save", _payload(r))
 
 
-@mcp.tool(description="加载 Unity 场景（支持叠加模式或单场景模式）。")
+@mcp.tool(
+    description="加载 Unity 场景。mode=additive 叠加加载；mode=single 会替换当前打开场景，可能丢失未保存更改，调用前应确认或先保存。"
+)
 async def unity_scene_load(scenePath: str, mode: str = "additive") -> str:
     _log_tool_call("unity_scene_load", {"scenePath": scenePath, "mode": mode})
     r = await _get_facade().scene_load(scene_path=scenePath, mode=mode)
@@ -1178,7 +1202,9 @@ async def unity_scene_list() -> str:
     return _log_tool_result("unity_scene_list", _payload(r))
 
 
-@mcp.tool(description="卸载 Unity 场景（可选择从层级视图中移除）。")
+@mcp.tool(
+    description="卸载 Unity 场景。可能移除层级视图中的场景；不会删除 .unity 资源。若场景有未保存修改，调用前应确认保存策略。"
+)
 async def unity_scene_unload(scenePath: str, removeScene: bool = False) -> str:
     _log_tool_call(
         "unity_scene_unload", {"scenePath": scenePath, "removeScene": removeScene}
@@ -1209,7 +1235,9 @@ async def unity_scene_ensure_test(
 # ── M10 Component 操作 ──────────────────────────────────────────────────────
 
 
-@mcp.tool(description="在指定 GameObject 上添加组件。")
+@mcp.tool(
+    description="在指定 GameObject 上添加组件。会修改场景或 Prefab 实例；先确认 gameObjectId 和 componentType，添加后需要保存场景/Prefab 才持久化。"
+)
 async def unity_component_add(gameObjectId: int, componentType: str) -> str:
     _log_tool_call(
         "unity_component_add",
@@ -1221,7 +1249,9 @@ async def unity_component_add(gameObjectId: int, componentType: str) -> str:
     return _log_tool_result("unity_component_add", _payload(r))
 
 
-@mcp.tool(description="从指定 GameObject 上移除组件。")
+@mcp.tool(
+    description="从指定 GameObject 上移除组件。破坏性场景修改：先用 unity_component_list/get 确认 componentType 与 componentIndex，尤其同类型多组件时。之后需要 scene/prefab 保存才会持久化。"
+)
 async def unity_component_remove(
     gameObjectId: int, componentType: str, componentIndex: int = 0
 ) -> str:
@@ -1261,7 +1291,9 @@ async def unity_component_get(
     return _log_tool_result("unity_component_get", _payload(r))
 
 
-@mcp.tool(description="修改指定 GameObject 上组件的属性。")
+@mcp.tool(
+    description="修改指定 GameObject 上组件的序列化属性。会改变场景或 Prefab 实例状态；先用 unity_component_get 查看属性路径和值，谨慎处理同类型多组件 componentIndex。"
+)
 async def unity_component_modify(
     gameObjectId: int,
     componentType: str,
@@ -1425,7 +1457,9 @@ async def unity_asset_create_folder(parentFolder: str, newFolderName: str) -> st
     return _log_tool_result("unity_asset_create_folder", _payload(r))
 
 
-@mcp.tool(description="复制 Unity 资源到指定路径。")
+@mcp.tool(
+    description="复制 Unity 资源到指定路径。会在项目磁盘创建新资源和 .meta；确认 destinationPath 不覆盖重要资源。"
+)
 async def unity_asset_copy(sourcePath: str, destinationPath: str) -> str:
     _log_tool_call(
         "unity_asset_copy",
@@ -1437,7 +1471,9 @@ async def unity_asset_copy(sourcePath: str, destinationPath: str) -> str:
     return _log_tool_result("unity_asset_copy", _payload(r))
 
 
-@mcp.tool(description="移动 Unity 资源到指定路径。")
+@mcp.tool(
+    description="移动 Unity 资源到指定路径。会改动项目磁盘资源和 .meta/GUID 引用关系；sourcePath/destinationPath 应在 Assets 或 Packages 可写范围内，调用前确认路径。"
+)
 async def unity_asset_move(sourcePath: str, destinationPath: str) -> str:
     _log_tool_call(
         "unity_asset_move",
@@ -1449,7 +1485,9 @@ async def unity_asset_move(sourcePath: str, destinationPath: str) -> str:
     return _log_tool_result("unity_asset_move", _payload(r))
 
 
-@mcp.tool(description="删除指定路径的 Unity 资源。")
+@mcp.tool(
+    description="删除指定路径的 Unity 资源。破坏性磁盘操作：调用前先用 unity_asset_get_info/find 确认路径，不要删除未确认的目录或共享资源。"
+)
 async def unity_asset_delete(assetPath: str) -> str:
     _log_tool_call("unity_asset_delete", {"assetPath": assetPath})
     r = await _get_facade().asset_delete(asset_path=assetPath)
@@ -1532,7 +1570,9 @@ async def unity_asset_get_data(
     return _log_tool_result("unity_asset_get_data", _payload(r))
 
 
-@mcp.tool(description="修改 Unity 资源的序列化属性数据（SerializedObject 深度写入）。")
+@mcp.tool(
+    description="修改 Unity 资源或组件的 SerializedObject 属性。低层写入工具，适合没有专用工具的属性调整；调用前先用 unity_asset_get_data 确认 propertyPath、类型和值，避免写错序列化路径。"
+)
 async def unity_asset_modify_data(
     properties: list[dict],
     assetPath: str = "",
@@ -1586,21 +1626,27 @@ async def unity_prefab_instantiate(prefabPath: str, parentId: int = 0) -> str:
     return _log_tool_result("unity_prefab_instantiate", _payload(r))
 
 
-@mcp.tool(description="进入 Prefab 编辑模式。")
+@mcp.tool(
+    description="进入 Prefab 编辑模式。会切换编辑上下文到指定 Prefab；修改后需 unity_prefab_save 保存或 unity_prefab_close 退出。"
+)
 async def unity_prefab_open(prefabPath: str) -> str:
     _log_tool_call("unity_prefab_open", {"prefabPath": prefabPath})
     r = await _get_facade().prefab_open(prefab_path=prefabPath)
     return _log_tool_result("unity_prefab_open", _payload(r))
 
 
-@mcp.tool(description="退出 Prefab 编辑模式。")
+@mcp.tool(
+    description="退出 Prefab 编辑模式。离开当前 Prefab 编辑上下文；若有修改，先确认是否已保存。"
+)
 async def unity_prefab_close() -> str:
     _log_tool_call("unity_prefab_close", {})
     r = await _get_facade().prefab_close()
     return _log_tool_result("unity_prefab_close", _payload(r))
 
 
-@mcp.tool(description="保存当前 Prefab 编辑模式下的修改。")
+@mcp.tool(
+    description="保存当前 Prefab 编辑模式下的修改。会将 Prefab 编辑内容写入磁盘；调用前确认当前 Prefab 是目标资源。"
+)
 async def unity_prefab_save() -> str:
     _log_tool_call("unity_prefab_save", {})
     r = await _get_facade().prefab_save()
@@ -1671,7 +1717,9 @@ async def unity_shader_list() -> str:
 # ── M15 菜单项执行 ──────────────────────────────────────────────────────────
 
 
-@mcp.tool(description="执行 Unity 编辑器中指定路径的菜单项。")
+@mcp.tool(
+    description="执行 Unity 编辑器中指定路径的菜单项。菜单项可能触发任意编辑器行为、编译、窗口打开或项目修改；调用前确认 menuPath，必要时先 unity_menu_list。"
+)
 async def unity_menu_execute(menuPath: str) -> str:
     _log_tool_call("unity_menu_execute", {"menuPath": menuPath})
     r = await _get_facade().menu_execute(menu_path=menuPath)
@@ -1688,7 +1736,9 @@ async def unity_menu_list() -> str:
 # ── M16 Package 管理 ────────────────────────────────────────────────────────
 
 
-@mcp.tool(description="通过 Unity Package Manager 添加包（支持名称、版本或 Git URL）。")
+@mcp.tool(
+    description="通过 Unity Package Manager 添加包（名称、版本或 Git URL）。会修改 Packages/manifest.json 并触发 Unity 包解析/编译；添加前确认包名、版本和项目兼容性。"
+)
 async def unity_package_add(packageName: str, version: str = "") -> str:
     _log_tool_call(
         "unity_package_add", {"packageName": packageName, "version": version}
@@ -1697,7 +1747,9 @@ async def unity_package_add(packageName: str, version: str = "") -> str:
     return _log_tool_result("unity_package_add", _payload(r))
 
 
-@mcp.tool(description="通过 Unity Package Manager 移除已安装的包。")
+@mcp.tool(
+    description="通过 Unity Package Manager 移除已安装的包。破坏性项目配置操作：会修改 Packages/manifest.json 并可能导致编译错误；先用 unity_package_list 确认依赖。"
+)
 async def unity_package_remove(packageName: str) -> str:
     _log_tool_call("unity_package_remove", {"packageName": packageName})
     r = await _get_facade().package_remove(package_name=packageName)
@@ -1752,7 +1804,9 @@ async def unity_script_read(scriptPath: str) -> str:
     return _log_tool_result("unity_script_read", _payload(r))
 
 
-@mcp.tool(description="在 Unity 项目中创建新的 C# 脚本文件。")
+@mcp.tool(
+    description="在 Unity 项目中创建新的 C# 脚本文件。写磁盘操作：scriptPath 应位于 Assets 下并以 .cs 结尾；创建/更新完本轮文件后调用 unity_sync_after_disk_write，再编译等待。"
+)
 async def unity_script_create(scriptPath: str, content: str = "") -> str:
     _log_tool_call(
         "unity_script_create", {"scriptPath": scriptPath, "content": content}
@@ -1761,7 +1815,9 @@ async def unity_script_create(scriptPath: str, content: str = "") -> str:
     return _log_tool_result("unity_script_create", _payload(r))
 
 
-@mcp.tool(description="更新 Unity 项目中已有 C# 脚本文件的内容。")
+@mcp.tool(
+    description="更新 Unity 项目中已有 C# 脚本文件。会覆盖文件内容；调用前读取或确认目标文件，完成本轮所有脚本写入后调用 unity_sync_after_disk_write，再用 compile_wait/safe_compile 验证。"
+)
 async def unity_script_update(scriptPath: str, content: str) -> str:
     _log_tool_call(
         "unity_script_update", {"scriptPath": scriptPath, "content": content}
@@ -1770,7 +1826,9 @@ async def unity_script_update(scriptPath: str, content: str) -> str:
     return _log_tool_result("unity_script_update", _payload(r))
 
 
-@mcp.tool(description="删除 Unity 项目中指定路径的 C# 脚本文件。")
+@mcp.tool(
+    description="删除 Unity 项目中指定路径的 C# 脚本文件。破坏性磁盘操作：调用前确认路径和影响；删除后调用 unity_sync_after_disk_write 并检查编译错误。"
+)
 async def unity_script_delete(scriptPath: str) -> str:
     _log_tool_call("unity_script_delete", {"scriptPath": scriptPath})
     r = await _get_facade().script_delete(script_path=scriptPath)
@@ -1798,7 +1856,9 @@ async def unity_reflection_find(
     return _log_tool_result("unity_reflection_find", _payload(r))
 
 
-@mcp.tool(description="通过反射动态调用 Unity 程序集中的方法。")
+@mcp.tool(
+    description="通过反射调用已编译并加载的 Unity/C# 方法。不是脚本执行器；适合稳定业务入口和静态/实例方法调用。调用前可用 unity_reflection_find 确认类型和方法；复杂多步逻辑应放进项目 helper 方法。"
+)
 async def unity_reflection_call(
     typeName: str,
     methodName: str,
@@ -1864,7 +1924,9 @@ async def reflection_eval(
 # ── M21 批量操作 ────────────────────────────────────────────────────────────
 
 
-@mcp.tool(description="批量执行多个 Unity 操作指令（支持顺序或并行模式）。")
+@mcp.tool(
+    description="批量执行多个 Unity 操作指令（sequential 或 parallel）。用于重复/组合操作；批量中包含删除、写磁盘、包变更、场景保存等破坏性步骤时，必须先确认目标。stopOnError=true 时首个失败会停止后续步骤。"
+)
 async def unity_batch_execute(
     operations: list,
     mode: str = "sequential",
@@ -2142,7 +2204,9 @@ async def unity_build_status() -> str:
     return _log_tool_result("unity_build_status", _payload(r))
 
 
-@mcp.tool(description="取消正在进行的 Unity 构建任务。")
+@mcp.tool(
+    description="取消正在进行的 Unity 构建任务。会中断当前 Player 构建；仅在用户要求停止构建或构建卡住时使用。"
+)
 async def unity_build_cancel() -> str:
     _log_tool_call("unity_build_cancel", {})
     r = await _get_facade().build_cancel()
@@ -2159,14 +2223,18 @@ async def unity_build_targets() -> str:
 # ── M25 Editor Commands ─────────────────────────────────────────────────────
 
 
-@mcp.tool(description="执行 Unity 撤销操作（Undo）。")
+@mcp.tool(
+    description="执行 Unity 撤销操作（Undo）。会改变编辑器状态并回退最近操作；steps>1 前确认用户意图和当前 Undo 栈上下文。"
+)
 async def unity_editor_undo(steps: int = 1) -> str:
     _log_tool_call("unity_editor_undo", {"steps": steps})
     r = await _get_facade().editor_undo(steps=steps)
     return _log_tool_result("unity_editor_undo", _payload(r))
 
 
-@mcp.tool(description="执行 Unity 重做操作（Redo）。")
+@mcp.tool(
+    description="执行 Unity 重做操作（Redo）。会重新应用最近撤销的操作；steps>1 前确认用户意图和当前 Redo 栈上下文。"
+)
 async def unity_editor_redo(steps: int = 1) -> str:
     _log_tool_call("unity_editor_redo", {"steps": steps})
     r = await _get_facade().editor_redo(steps=steps)
@@ -2185,6 +2253,7 @@ async def unity_editor_execute_command(commandName: str) -> str:
         "M26：从磁盘路径加载 YAML 规格并执行编辑器 E2E（setup/steps/teardown），"
         "断言 console/截图等；失败时在 artifactDir 写入 report.json 与附件。"
         "M27：exportZip 打包 e2e-bundle.zip；webhookOnFailure 在失败时 POST UPILOT_E2E_WEBHOOK_URL。"
+        "只用于已有 YAML 规格的端到端验收；不要把它当作通用 UI 操作工具。"
     ),
 )
 async def unity_editor_e2e_run(
@@ -2217,7 +2286,8 @@ async def unity_editor_e2e_run(
 @mcp.tool(
     description=(
         "通过 Unity 内置 C# TestRunner.RunFileAsync 执行 UIFlow YAML 文件。"
-        "要求项目内可解析 codingriver.upilot.UIFlow.TestRunner 与有效 host_window。"
+        "要求项目内可解析 codingriver.upilot.UIFlow.TestRunner、启用 UIFlow 且 YAML 含有效 host_window。"
+        "只用于 YAML 驱动的 EditorWindow 自动化，不用于 Game View 或运行时 UI。"
     ),
 )
 async def unity_uiflow_run_file(
@@ -2268,7 +2338,7 @@ async def unity_uiflow_run_file(
 @mcp.tool(
     description=(
         "通过 Unity 内置 C# TestRunner.RunSuiteAsync 执行 UIFlow YAML 目录。"
-        "directoryPath 应指向包含 .yaml 的目录。"
+        "directoryPath 应指向包含 .yaml 的目录。只用于 UIFlow EditorWindow YAML 套件，不用于普通 Unity Test Runner。"
     ),
 )
 async def unity_uiflow_run_suite(
@@ -2319,6 +2389,7 @@ async def unity_uiflow_run_suite(
         "yamlPaths 为文件路径列表；batchSize 控制每批数量（默认 10），"
         "batchOffset 为起始偏移；totalAll 为所有批次的总文件数（用于显示整体进度）。"
         "返回结果中包含 hasMore/nextOffset，客户端可根据 hasMore 继续发起下一批。"
+        "只用于 UIFlow YAML；大量用例优先分批，失败后查询结果再决定是否继续。"
     ),
 )
 async def unity_uiflow_run_batch(
@@ -2391,7 +2462,7 @@ async def unity_uiflow_force_reset() -> str:
     description=(
         "异步启动 UIFlow 批量测试，立即返回 executionId，不等待执行完成。"
         "客户端拿到 executionId 后需自行调用 unity_uiflow_results 轮询进度。"
-        "参数与 unity_uiflow_run_batch 相同。"
+        "参数与 unity_uiflow_run_batch 相同。适合长套件；不要启动后不轮询结果。"
     ),
 )
 async def unity_uiflow_run_async(

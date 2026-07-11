@@ -2,6 +2,8 @@
 
 Use these rules before irreversible or environment-sensitive actions.
 
+For a broader capability map, read `tool-boundaries.md`.
+
 ## Destructive Operations
 
 Confirm the target and project before:

@@ -41,7 +41,7 @@ UIFlow 还需要消费项目安装以下 Unity 包：
 在 **Window > Package Manager > Add package from git URL** 中添加：
 
 ```text
-https://github.com/codingriver/upilot.git#v0.1.0
+https://github.com/codingriver/upilot.git#v0.1.1
 ```
 
 也可以直接编辑 `Packages/manifest.json`：
@@ -49,7 +49,7 @@ https://github.com/codingriver/upilot.git#v0.1.0
 ```json
 {
   "dependencies": {
-    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.1.0"
+    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.1.1"
   }
 }
 ```

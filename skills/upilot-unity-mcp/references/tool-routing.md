@@ -2,6 +2,8 @@
 
 Use the narrowest tool that matches the user's intent.
 
+For destructive, input-driven, batch, reflection, UIFlow, screenshot, or package operations, also read `tool-boundaries.md`.
+
 ## Status And Readiness
 
 | Intent | Prefer |

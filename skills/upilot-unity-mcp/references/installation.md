@@ -59,7 +59,7 @@ It does not silently write MCP client configuration for Codex, Claude, or Cursor
 ## Defaults
 
 - UPM package: `io.github.codingriver.upilot`
-- UPM source: `https://github.com/codingriver/upilot.git#v0.1.0`
+- UPM source: `https://github.com/codingriver/upilot.git#v0.1.1`
 - Python install: editable install from `upilotserver~`
 - UIFlow package defaults come from this repository's validated test project and can be overridden with `--upm-dep name=version`.
 

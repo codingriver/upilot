@@ -22,6 +22,7 @@ For any Unity Editor task:
 - For installing upilot into a Unity project, read `references/installation.md`.
 - For common task flows, read `references/workflows.md`.
 - For tool choice, read `references/tool-routing.md`.
+- For tool capability boundaries, read `references/tool-boundaries.md`.
 - For client setup or transport confusion, read `references/client-configs.md`.
 - For destructive operations, timeout recovery, or unavailable features, read `references/safety.md`.
 
@@ -31,6 +32,7 @@ For any Unity Editor task:
 - Treat WebSocket port `8765` as internal to the Python server and Unity Editor bridge; do not use it as the MCP client URL.
 - Prefer existing compiled entry points through `unity_reflection_call`; use `reflection_eval` only for one bounded expression. Roslyn dynamic compilation tools are not exposed.
 - `reflection_eval` is not a C# script runner: do not use `var`, local declarations, loops, `if`, `foreach`, lambdas/LINQ, async/await, helper method definitions, arbitrary `new` objects, or dynamic compilation. If `reflection_eval` fails because the requested logic needs those constructs, do not retry with more C# syntax; use a dedicated upilot tool, `unity_reflection_call`, or ask the user to add a stable helper method.
+- Destructive or persistent tools must be preceded by a read/list/find/get of the target. Do not hide destructive steps inside `unity_batch_execute` or retried `unity_task_execute` unless the user approved the batch.
 - Use UIFlow only for YAML-driven Unity EditorWindow automation. Require Unity 6+ and `UPILOT_ENABLE_UIFLOW`; in Unity 2022, continue with core upilot tools.
 
 ## References

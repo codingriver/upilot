@@ -14,7 +14,7 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/codingriver/upilot.git"
 UPM_PACKAGE = "io.github.codingriver.upilot"
-DEFAULT_UPM_REF = "v0.1.0"
+DEFAULT_UPM_REF = "v0.1.1"
 SKILL_NAME = "upilot-unity-mcp"
 
 UIFLOW_DEPS = {
