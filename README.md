@@ -193,13 +193,12 @@ upilot 提供两类不同的 Unity 侧 C# 调用方式：
 
 - `unity_reflection_call` 调用已经编译并加载到 Unity 程序集中的现有方法。稳定自动化入口，例如 `EnterBattle`、`ExitBattle`、`GetState`，优先使用它。
 - `reflection_eval(code, variables = null, options = null)` 执行一条受限 C# 表达式语句，适合调试和自动化验收中的链式访问、索引、方法调用、运算符、赋值、三元、cast/as/is、空条件访问和 typed array 参数。它不支持 lambda/LINQ/async/await/控制流/ref-out-in/任意对象构造。
-- `unity_roslyn_execute` 通过 Roslyn 动态编译并执行临时 C# 代码片段，适合一次性诊断和实验。`unity_roslyn_status`、`unity_roslyn_abort` 按 `executionId` 查询或终止动态执行任务。
 
-旧的 `unity_csharp_execute` 工具名不再暴露。稳定业务自动化和已有方法调用请优先使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`；只有确实需要动态编译临时代码时再使用 Roslyn 工具。
+旧的 `unity_csharp_execute` 和 Roslyn 动态编译工具不再暴露。稳定业务自动化和已有方法调用请优先使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`。
 
 ## MCP 工具清单
 
-当前 `tools/list` 暴露 115 个 MCP 工具，覆盖连接、编译、Console、编辑器输入、场景、GameObject、组件、资源、Prefab、材质、脚本、包、测试、构建、批处理、截图、E2E、UIFlow、反射和 Roslyn 动态执行等能力。维护状态、条件可用性和验收口径见 `Documentation~/ToolStatus.md`。
+当前 `tools/list` 暴露 113 个 MCP 工具，覆盖连接、编译、Console、编辑器输入、场景、GameObject、组件、资源、Prefab、材质、脚本、包、测试、构建、批处理、截图、E2E、UIFlow 和反射调用等能力。维护状态、条件可用性和验收口径见 `Documentation~/ToolStatus.md`。
 
 ## UIFlow 附属工具
 
@@ -276,7 +275,40 @@ steps:
 
 ## reflection_eval 能力边界
 
-`reflection_eval(code, variables = null, options = null)` 是一个受限的 Unity Editor 反射表达式执行工具。调用侧传入一条标准 C# 表达式语句即可，例如：
+`reflection_eval(code, variables = null, options = null)` 是一个受限的 Unity Editor 反射表达式执行工具，**不是 C# 脚本执行器，也不是 Roslyn 动态编译器**。它只适合一条表达式级诊断或调用。
+
+适合：
+
+- 读取静态属性或实例属性。
+- 调用已经编译并加载的现有方法。
+- 做一次简单赋值或索引访问。
+- 用 JSON `variables` 传入参数。
+
+不适合：
+
+- 多行脚本、局部变量、临时 helper 函数。
+- `if` / `for` / `foreach` / `while` / `switch`。
+- lambda、LINQ、`async/await`。
+- `ref` / `out` / `in` 参数。
+- 任意 `new SomeClass()`、定义新类型、动态编译。
+
+如果因为这些边界失败，不要反复改写 C# 片段继续测试；请改用专用 MCP 工具、`unity_reflection_call`，或在项目里添加一个稳定 helper 方法后再调用。
+
+示例：
+
+```csharp
+UnityEngine.Application.unityVersion
+```
+
+```csharp
+UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)
+```
+
+```csharp
+new uint[]{1,2,3}[1]
+```
+
+调用已有业务入口时，传入一条标准 C# 表达式语句即可，例如：
 
 ```csharp
 IGG.Game.Module.KingShotBattle.KingShotBattleModule.Inst.RequestEnterLevel(10001u, false, new uint[1]{10001u});
@@ -298,6 +330,7 @@ IGG.Game.Module.KingShotBattle.KingShotBattleModule.Inst.RequestEnterLevel(10001
 不支持内容：
 
 - 完整 C# 语句块，只支持单条表达式语句。
+- `var`、局部变量声明、临时变量复用。
 - `if`、`for`、`foreach`、`while`、`do`、`switch` 等控制流。
 - lambda 表达式、LINQ 查询语法、`async/await`、直接 delegate 调用。
 - `ref`、`out`、`in` 参数。

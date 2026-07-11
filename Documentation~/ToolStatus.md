@@ -2,7 +2,7 @@
 
 本文档用于跟踪 upilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 返回的实时 schema。
 
-最近同步：2026-06-30，`tools/list` 返回 115 个工具。
+最近同步：2026-07-11，`tools/list` 返回 113 个工具。
 
 ## 状态口径
 
@@ -18,7 +18,7 @@
 - 工具重命名时，旧名若不保留兼容别名，应在 README 中明确说明。
 - 验收通过需要能追溯到测试、手工验收记录或 release checklist。
 - 破坏性工具即使“可用状态”为“是”，也需要在调用前确认目标和影响范围。
-- `unity_roslyn_execute` / `unity_roslyn_status` / `unity_roslyn_abort` 已在 MCP schema 中暴露。它们用于临时诊断和动态代码执行，稳定业务自动化仍应优先使用 `unity_reflection_call` 或 `reflection_eval`。
+- Roslyn 动态编译工具已从 MCP schema 中移除。稳定业务自动化使用 `unity_reflection_call`；表达式级诊断使用 `reflection_eval`。
 
 ## MCP 工具状态矩阵
 
@@ -54,10 +54,7 @@
 | --- | --- | --- | --- | --- |
 | `unity_reflection_find` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功搜索 `UnityEngine.Application` 并返回方法列表。 |
 | `unity_reflection_call` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功调用 `UnityEngine.Application.get_unityVersion`。 |
-| `reflection_eval` | 是 | 是 | 是 | 执行一条受限 C# 表达式语句；支持链式访问、调用、运算符、赋值和 JSON 变量。 |
-| `unity_roslyn_execute` | 是 | 是 | 是 | 2026-06-30 自动验收通过：修正 CodeDom warnings 误判后成功执行 `return 1 + 2;` 并返回 `3`；调用时会使用 Unity 当前运行时可用的 C# evaluator。 |
-| `unity_roslyn_status` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功按 executionId 查询 Roslyn completed 状态；调用时需传入 `unity_roslyn_execute` 产生的 executionId。 |
-| `unity_roslyn_abort` | 是 | 是 | 是 | 2026-06-30 自动验收通过：对已完成 executionId 返回幂等 `not_running`；调用时按 active executionId 取消运行中的 Roslyn 执行。 |
+| `reflection_eval` | 是 | 是 | 是 | 执行一条受限 C# 表达式语句；支持链式访问、调用、运算符、赋值和 JSON 变量。不是脚本执行器，不支持局部变量、控制流、lambda/LINQ、async/await、任意对象构造或动态编译。 |
 
 ### 控制台、日志与诊断
 

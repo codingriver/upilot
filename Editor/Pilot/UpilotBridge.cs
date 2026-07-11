@@ -195,7 +195,6 @@ namespace codingriver.upilot
         private UpilotTestService       _testService;
         // P2 services
         private UpilotScriptService     _scriptService;
-        private UpilotCSharpService     _csharpService;
         private UpilotReflectionService _reflectionService;
         private ReflectionEvalService       _reflectionEvalService;
         private UpilotBatchService      _batchService;
@@ -999,8 +998,6 @@ namespace codingriver.upilot
             // P2 services
             _scriptService = new UpilotScriptService(this);
             _scriptService.RegisterCommands();
-            _csharpService = new UpilotCSharpService(this);
-            _csharpService.RegisterCommands();
             _reflectionService = new UpilotReflectionService(this);
             _reflectionService.RegisterCommands();
             _reflectionEvalService = new ReflectionEvalService(this);

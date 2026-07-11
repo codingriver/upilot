@@ -426,9 +426,6 @@ mcp = FastMCP("upilot", lifespan=_lifespan, stateless_http=True)
 _PLAYMODE_HIDDEN_TOOLS = {
     "unity_compile",
     "unity_auto_fix_start",
-    "unity_roslyn_execute",
-    "unity_roslyn_status",
-    "unity_roslyn_abort",
     "unity_safe_compile_and_wait",
 }
 
@@ -524,22 +521,6 @@ async def _unity_is_playmode() -> bool:
 
     editor = _facade.server.state.editor
     return _state_is_playmode(editor.play_mode_state)
-
-
-async def _reject_roslyn_in_playmode(tool_name: str):
-    if not await _unity_is_playmode():
-        return None
-    return _log_tool_result(
-        tool_name,
-        _payload(
-            fail(
-                new_id("req"),
-                "EDITOR_IN_PLAY_MODE",
-                "Unity 正在 PlayMode 或暂停状态，Roslyn 动态代码执行工具不可用。",
-                {"tool": tool_name},
-            )
-        ),
-    )
 
 
 async def _reject_compile_in_playmode(tool_name: str):
@@ -1796,43 +1777,6 @@ async def unity_script_delete(scriptPath: str) -> str:
     return _log_tool_result("unity_script_delete", _payload(r))
 
 
-# ── M19 Roslyn 代码执行 ─────────────────────────────────────────────────────
-
-
-@mcp.tool(
-    description="通过 Roslyn 动态编译并执行 C# 代码片段，返回执行结果。适合临时诊断；调用已有业务方法请优先使用 unity_reflection_call。"
-)
-async def unity_roslyn_execute(code: str, timeoutSeconds: int = 10) -> str:
-    _log_tool_call(
-        "unity_roslyn_execute", {"code": code, "timeoutSeconds": timeoutSeconds}
-    )
-    rejected = await _reject_roslyn_in_playmode("unity_roslyn_execute")
-    if rejected is not None:
-        return rejected
-    r = await _get_facade().roslyn_execute(code=code, timeout_seconds=timeoutSeconds)
-    return _log_tool_result("unity_roslyn_execute", _payload(r))
-
-
-@mcp.tool(description="查询 Roslyn 动态代码执行任务的当前状态。")
-async def unity_roslyn_status(executionId: str) -> str:
-    _log_tool_call("unity_roslyn_status", {"executionId": executionId})
-    rejected = await _reject_roslyn_in_playmode("unity_roslyn_status")
-    if rejected is not None:
-        return rejected
-    r = await _get_facade().roslyn_status(execution_id=executionId)
-    return _log_tool_result("unity_roslyn_status", _payload(r))
-
-
-@mcp.tool(description="终止正在运行的 Roslyn 动态代码执行任务。")
-async def unity_roslyn_abort(executionId: str) -> str:
-    _log_tool_call("unity_roslyn_abort", {"executionId": executionId})
-    rejected = await _reject_roslyn_in_playmode("unity_roslyn_abort")
-    if rejected is not None:
-        return rejected
-    r = await _get_facade().roslyn_abort(execution_id=executionId)
-    return _log_tool_result("unity_roslyn_abort", _payload(r))
-
-
 # ── M20 反射调用 ────────────────────────────────────────────────────────────
 
 
@@ -1890,9 +1834,14 @@ async def unity_reflection_call(
 
 @mcp.tool(
     description=(
-        "执行一条受限 C#-like 反射表达式语句。支持成员访问、索引、链式方法调用、"
-        "常见运算符、三元、cast/as/is、null 条件访问和 typed array 字面量；"
-        "不支持 lambda/LINQ/async/控制语句/ref/out/任意对象构造。"
+        "执行一条受限 C#-like 反射表达式，不是 C# 脚本/编译器。适合读属性、调用已有方法、"
+        "简单赋值和单表达式诊断，例如 `UnityEngine.Application.unityVersion`、"
+        "`Some.Type.Inst.Method(1, \"x\")`、`UnityEditor.EditorPrefs.SetInt(\"k\", 1)`。"
+        "只接受一条表达式语句，可带分号；支持成员/索引/链式调用、常见运算符、三元、cast/as/is、"
+        "null 条件访问、typed array、Vector2/3/4/Quaternion 构造。"
+        "不支持 var/局部变量、if/for/foreach/while/switch、lambda/LINQ、async/await、ref/out/in、"
+        "using/namespace/方法或类型定义、任意 new 对象、动态编译。遇到这些失败不要反复尝试，"
+        "改用已有专用工具、unity_reflection_call，或请用户添加稳定 helper 方法。"
     ),
 )
 async def reflection_eval(

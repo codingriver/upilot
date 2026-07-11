@@ -28,9 +28,15 @@ Prefer this order:
 
 1. `unity_reflection_call` for stable compiled methods.
 2. `reflection_eval` for one expression, property access, simple assignment, or diagnostic call.
-3. `unity_roslyn_execute` for temporary dynamic C# that cannot fit the first two options.
 
-Avoid `unity_roslyn_execute` for routine game logic calls that already exist in loaded assemblies.
+`reflection_eval` quick rules:
+
+- Good: `UnityEngine.Application.unityVersion`, `Some.Type.Inst.Method(1, "x")`, `UnityEditor.EditorPrefs.SetInt("k", 1)`, `new uint[]{1,2}[0]`.
+- Good: one chained expression, one property read, one method call, one assignment, simple arithmetic/boolean/ternary/cast.
+- Bad: `var`, local declarations, `if`, `for`, `foreach`, `while`, `switch`, lambdas/LINQ, async/await, ref/out/in, helper method/type definitions, arbitrary `new SomeClass()`.
+- Bad: multi-step scripts. Split into existing tools where possible, or ask for a compiled helper.
+
+If `reflection_eval` returns a syntax/boundary error, do not repeatedly test variants using unsupported C# constructs. Roslyn dynamic compilation tools are not exposed. If a task cannot be expressed through compiled entry points or one `reflection_eval` expression, ask the user to add a stable helper method or script.
 
 ## Editor Objects And Assets
 

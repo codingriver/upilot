@@ -52,6 +52,8 @@ If a UIFlow tool returns `UIFLOW_UNAVAILABLE`:
 
 ## Dynamic Code
 
-Prefer `unity_reflection_call` and `reflection_eval` before `unity_roslyn_execute`.
+Use `unity_reflection_call` for compiled entry points and `reflection_eval` for one bounded expression. Roslyn dynamic compilation tools are not exposed.
+
+`reflection_eval` is intentionally limited. After a failure caused by unsupported syntax such as local variables, control flow, lambda/LINQ, async/await, arbitrary object construction, or method/type definitions, stop trying more dynamic C# snippets. Switch to a dedicated tool, call a compiled method, or ask the user to add a helper.
 
 Do not use dynamic code for destructive changes when a dedicated upilot tool exists.

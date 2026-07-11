@@ -299,44 +299,31 @@ async def main_async() -> int:
             return (_ok(r), _err_msg(r) if not _ok(r) else "ok")
 
         async def t_p2_01() -> tuple[bool, str]:
-            r = await facade.roslyn_execute("return (1+2).ToString();", timeout_seconds=15)
+            r = await facade.reflection_eval("1 + 2")
             if not _ok(r):
                 return False, _err_msg(r)
             out = str((r.data or {}).get("result", ""))
-            return ("3" in out, f"result={out!r}")
+            return (out == "3", f"result={out!r}")
 
         async def t_p2_02() -> tuple[bool, str]:
-            code = (
-                "var list = new System.Collections.Generic.List<int>{1,2,3}; "
-                "return list.Where(x=>x>1).Count().ToString();"
-            )
-            r = await facade.roslyn_execute(code, timeout_seconds=15)
+            r = await facade.reflection_eval("new uint[]{1,2,3}[1]")
             if not _ok(r):
                 return False, _err_msg(r)
             return ("2" in str((r.data or {}).get("result", "")), str(r.data))
 
         async def t_p2_03() -> tuple[bool, str]:
-            r = await facade.roslyn_execute(
-                "return UnityEngine.Application.unityVersion;",
-                timeout_seconds=15,
-            )
+            r = await facade.reflection_eval("UnityEngine.Application.unityVersion")
             return (_ok(r) and len(str((r.data or {}).get("result", ""))) > 0, str(r.data))
 
         async def t_p2_04() -> tuple[bool, str]:
-            r = await facade.roslyn_execute(
-                "return UnityEditor.EditorApplication.isPlaying.ToString();",
-                timeout_seconds=15,
-            )
+            r = await facade.reflection_eval("UnityEditor.EditorApplication.isPlaying")
             if not _ok(r):
                 return False, _err_msg(r)
             out = str((r.data or {}).get("result", "")).lower()
             return ("false" in out, str(r.data))
 
         async def t_p2_05() -> tuple[bool, str]:
-            r = await facade.roslyn_execute(
-                'System.Diagnostics.Process.Start("notepad"); return "done";',
-                timeout_seconds=15,
-            )
+            r = await facade.reflection_eval('System.Diagnostics.Process.Start("notepad")')
             if _ok(r):
                 return False, "expected failure for sandbox"
             code = (r.error.code if r.error else "") or ""
@@ -345,10 +332,7 @@ async def main_async() -> int:
             return (ok_sec, f"code={code} msg={msg[:120]}")
 
         async def t_p3_01() -> tuple[bool, str]:
-            await facade.roslyn_execute(
-                'UnityEngine.Debug.Log("MCP_TEST_LOG_12345"); return "ok";',
-                timeout_seconds=15,
-            )
+            await facade.reflection_eval('UnityEngine.Debug.Log("MCP_TEST_LOG_12345")')
             await asyncio.sleep(1.0)
             r = await facade.console_get_logs(count=20)
             if not _ok(r):
@@ -358,10 +342,7 @@ async def main_async() -> int:
             return ("MCP_TEST_LOG_12345" in text, f"logs_len={len(logs)}")
 
         async def t_p3_02() -> tuple[bool, str]:
-            await facade.roslyn_execute(
-                'UnityEngine.Debug.LogWarning("MCP_WARN_TEST"); return "ok";',
-                timeout_seconds=15,
-            )
+            await facade.reflection_eval('UnityEngine.Debug.LogWarning("MCP_WARN_TEST")')
             r = await facade.console_get_logs(log_type="Warning", count=30)
             if not _ok(r):
                 return False, _err_msg(r)
@@ -666,7 +647,7 @@ async def main_async() -> int:
             if not _ok(r):
                 return False, _err_msg(r)
             await facade.console_get_logs(count=5)
-            r3 = await facade.roslyn_execute('return "post_compile_ok";', timeout_seconds=15)
+            r3 = await facade.reflection_eval('"post_compile_ok"')
             if not _ok(r3):
                 return False, _err_msg(r3)
             return ("post_compile_ok" in str((r3.data or {}).get("result", "")), str(r3.data))
@@ -733,10 +714,7 @@ async def main_async() -> int:
             return ("total" in data, str(data.get("total")))
 
         async def t_m26_10() -> tuple[bool, str]:
-            r0 = await facade.roslyn_execute(
-                'UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1); return "ok";',
-                timeout_seconds=15,
-            )
+            r0 = await facade.reflection_eval('UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
             if not _ok(r0):
                 return False, _err_msg(r0)
             m = await facade.menu_execute("upilot/upilot")
@@ -749,12 +727,7 @@ async def main_async() -> int:
             tab = ((b.data or {}).get("windowDiagnostics") or {}).get("activeTab", -1)
             if int(tab) != 1:
                 return False, f"STRICT: activeTab must be 1 after prefs+menu, got {tab}"
-            close_code = (
-                "var wins = UnityEngine.Resources.FindObjectsOfTypeAll<UnityEditor.EditorWindow>();"
-                "foreach (var w in wins) { if (w != null && w.titleContent.text == \"upilot\") "
-                "{ w.Close(); return \"closed\"; } } return \"notfound\";"
-            )
-            c2 = await facade.roslyn_execute(close_code, timeout_seconds=15)
+            c2 = await facade.editor_window_close(window_title="upilot", match_mode="exact")
             if not _ok(c2):
                 return False, _err_msg(c2)
             await asyncio.sleep(0.5)
@@ -843,10 +816,7 @@ async def main_async() -> int:
             return (bool(err) or not (ss.get("imageData")), f"screenshot branch={ss}")
 
         async def t_m26_18() -> tuple[bool, str]:
-            await facade.roslyn_execute(
-                'UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1); return "ok";',
-                timeout_seconds=15,
-            )
+            await facade.reflection_eval('UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
             await facade.menu_execute("upilot/upilot")
             await asyncio.sleep(0.6)
             rw = await facade.resource_window_diagnostics()

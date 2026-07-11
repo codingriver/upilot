@@ -1583,35 +1583,6 @@ class McpToolFacade:
             request_id, "script.delete", {"scriptPath": script_path}
         )
 
-    # ── M19 Roslyn 代码执行 ──────────────────────────────────────────────────
-
-    async def roslyn_execute(
-        self, code: str, timeout_seconds: int = 10
-    ) -> ToolResponse:
-        request_id = new_id("req")
-        clamped = max(1, min(timeout_seconds, 30))
-        return await self.dispatcher.call(
-            request_id,
-            "roslyn.execute",
-            {
-                "code": code,
-                "timeoutSeconds": clamped,
-            },
-            timeout_ms=clamped * 1000 + 5000,
-        )
-
-    async def roslyn_status(self, execution_id: str) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id, "roslyn.status", {"executionId": execution_id}
-        )
-
-    async def roslyn_abort(self, execution_id: str) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id, "roslyn.abort", {"executionId": execution_id}
-        )
-
     # ── M20 反射调用 ─────────────────────────────────────────────────────────
 
     async def reflection_find(

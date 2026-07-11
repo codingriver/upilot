@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Unity Editor automation through the upilot MCP server. Use when an agent needs to inspect, control, diagnose, or modify Unity Editor projects via MCP, Codex, Claude, Cursor, or other AI clients, including compile errors, Console logs, scenes, GameObjects, components, assets, prefabs, packages, tests, screenshots, UIFlow YAML, UIToolkit EditorWindow automation, reflection_eval, and Roslyn execution.
+description: Unity Editor automation through the upilot MCP server. Use when an agent needs to inspect, control, diagnose, or modify Unity Editor projects via MCP, Codex, Claude, Cursor, or other AI clients, including compile errors, Console logs, scenes, GameObjects, components, assets, prefabs, packages, tests, screenshots, UIFlow YAML, UIToolkit EditorWindow automation, reflection_call, and reflection_eval.
 ---
 
 # upilot Unity MCP
@@ -29,7 +29,8 @@ For any Unity Editor task:
 
 - Prefer Streamable HTTP endpoint `http://127.0.0.1:8011/mcp` when the client supports remote MCP.
 - Treat WebSocket port `8765` as internal to the Python server and Unity Editor bridge; do not use it as the MCP client URL.
-- Prefer existing compiled entry points through `unity_reflection_call`; use `reflection_eval` for one-line diagnostics; use `unity_roslyn_execute` only when dynamic code is truly needed.
+- Prefer existing compiled entry points through `unity_reflection_call`; use `reflection_eval` only for one bounded expression. Roslyn dynamic compilation tools are not exposed.
+- `reflection_eval` is not a C# script runner: do not use `var`, local declarations, loops, `if`, `foreach`, lambdas/LINQ, async/await, helper method definitions, arbitrary `new` objects, or dynamic compilation. If `reflection_eval` fails because the requested logic needs those constructs, do not retry with more C# syntax; use a dedicated upilot tool, `unity_reflection_call`, or ask the user to add a stable helper method.
 - Use UIFlow only for YAML-driven Unity EditorWindow automation. Require Unity 6+ and `UPILOT_ENABLE_UIFLOW`; in Unity 2022, continue with core upilot tools.
 
 ## References
