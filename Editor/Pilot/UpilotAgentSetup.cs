@@ -7,6 +7,7 @@ using System;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 
@@ -18,9 +19,14 @@ namespace codingriver.upilot
         private const string PackageName = "io.github.codingriver.upilot";
         private const string SkillName = "upilot-unity-mcp";
         private const string AutoSetupKeyPrefix = "codingriver.upilot.AgentSetup.AutoRulesWritten.";
+        private const string ManagedBlockStart = "<!-- upilot:start -->";
+        private const string ManagedBlockEnd = "<!-- upilot:end -->";
 
-        public const string McpUrl = "http://127.0.0.1:8011/mcp";
-        public const string HealthUrl = "http://127.0.0.1:8011/health";
+        public static string McpUrl => GetMcpUrl(UpilotBridge.Instance.HttpPort);
+        public static string HealthUrl => GetHealthUrl(UpilotBridge.Instance.HttpPort);
+
+        public static string GetMcpUrl(int httpPort) => $"http://127.0.0.1:{httpPort}/mcp";
+        public static string GetHealthUrl(int httpPort) => $"http://127.0.0.1:{httpPort}/health";
 
         static UpilotAgentSetup()
         {
@@ -60,21 +66,20 @@ namespace codingriver.upilot
             var projectRoot = GetProjectRoot();
             var result = new StringBuilder();
 
-            WriteTextFile(
+            WriteManagedTextFile(
                 Path.Combine(projectRoot, "AGENTS.md"),
                 BuildAgentsMd(),
                 overwriteExisting,
                 result);
 
-            WriteTextFile(
+            WriteManagedTextFile(
                 Path.Combine(projectRoot, "CLAUDE.md"),
                 "@AGENTS.md\n",
                 overwriteExisting,
                 result);
 
-            WriteTextFile(
+            WriteCursorRuleFile(
                 Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc"),
-                BuildCursorRule(),
                 overwriteExisting,
                 result);
 
@@ -86,31 +91,39 @@ namespace codingriver.upilot
         public static string WriteCodexMcpConfig(bool promptBeforeOverwrite)
         {
             var path = Path.Combine(GetProjectRoot(), ".codex", "config.toml");
-            return WriteExplicitConfig(path, BuildCodexConfig(), promptBeforeOverwrite);
+            return WriteTomlMcpConfig(path, promptBeforeOverwrite);
         }
 
         public static string WriteClaudeCodeMcpConfig(bool promptBeforeOverwrite)
         {
             var path = Path.Combine(GetProjectRoot(), ".mcp.json");
-            return WriteExplicitConfig(path, BuildMcpJson(includeType: true), promptBeforeOverwrite);
+            return WriteJsonMcpConfig(path, includeType: true, promptBeforeOverwrite);
         }
 
         public static string WriteCursorMcpConfig(bool promptBeforeOverwrite)
         {
             var path = Path.Combine(GetProjectRoot(), ".cursor", "mcp.json");
-            return WriteExplicitConfig(path, BuildMcpJson(includeType: false), promptBeforeOverwrite);
+            return WriteJsonMcpConfig(path, includeType: false, promptBeforeOverwrite);
+        }
+
+        public static void MarkAgentRulesHandledForCurrentProject()
+        {
+            EditorPrefs.SetBool(AutoSetupKeyPrefix + StableHash(GetProjectRoot()), true);
         }
 
         private static void EnsureAgentRulesOnce()
         {
             try
             {
+                if (!UpilotSetupState.IsCompleted)
+                    return;
+
                 var key = AutoSetupKeyPrefix + StableHash(GetProjectRoot());
                 if (EditorPrefs.GetBool(key, false))
                     return;
 
                 var result = WriteAgentRules(overwriteExisting: false);
-                EditorPrefs.SetBool(key, true);
+                MarkAgentRulesHandledForCurrentProject();
 
                 if (!string.Equals(result, "No changes needed.", StringComparison.Ordinal))
                     Debug.Log("[upilot] Agent discovery rules installed:\n" + result);
@@ -121,35 +134,112 @@ namespace codingriver.upilot
             }
         }
 
-        private static string WriteExplicitConfig(string path, string content, bool promptBeforeOverwrite)
+        private static string WriteJsonMcpConfig(string path, bool includeType, bool promptBeforeOverwrite)
         {
-            if (File.Exists(path) && promptBeforeOverwrite)
+            var content = BuildMcpJson(includeType);
+            if (!File.Exists(path))
+            {
+                EnsureParentDirectory(path);
+                File.WriteAllText(path, content, new UTF8Encoding(false));
+                return "Wrote " + NormalizePathForLog(path);
+            }
+
+            if (promptBeforeOverwrite)
             {
                 var ok = EditorUtility.DisplayDialog(
-                    "Write upilot MCP config?",
-                    "This will replace the existing file:\n\n" + path,
-                    "Replace",
+                    "Update upilot MCP config?",
+                    "This will update only the upilot MCP server entry in:\n\n" + path,
+                    "Update",
                     "Cancel");
                 if (!ok)
                     return "Cancelled.";
             }
 
-            EnsureParentDirectory(path);
-            File.WriteAllText(path, content, new UTF8Encoding(false));
-            return "Wrote " + NormalizePathForLog(path);
+            var original = File.ReadAllText(path, Encoding.UTF8);
+            var updated = UpsertJsonMcpServer(original, includeType);
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+            return "Updated upilot entry in " + NormalizePathForLog(path);
         }
 
-        private static void WriteTextFile(string path, string content, bool overwriteExisting, StringBuilder result)
+        private static string WriteTomlMcpConfig(string path, bool promptBeforeOverwrite)
         {
-            if (File.Exists(path) && !overwriteExisting)
+            var content = BuildCodexConfig();
+            if (!File.Exists(path))
+            {
+                EnsureParentDirectory(path);
+                File.WriteAllText(path, content, new UTF8Encoding(false));
+                return "Wrote " + NormalizePathForLog(path);
+            }
+
+            if (promptBeforeOverwrite)
+            {
+                var ok = EditorUtility.DisplayDialog(
+                    "Update upilot MCP config?",
+                    "This will update only the [mcp_servers.upilot] section in:\n\n" + path,
+                    "Update",
+                    "Cancel");
+                if (!ok)
+                    return "Cancelled.";
+            }
+
+            var original = File.ReadAllText(path, Encoding.UTF8);
+            var updated = UpsertTomlSection(original, "[mcp_servers.upilot]", content);
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+            return "Updated upilot section in " + NormalizePathForLog(path);
+        }
+
+        private static void WriteManagedTextFile(string path, string content, bool overwriteExisting, StringBuilder result)
+        {
+            var managedContent = WrapManagedBlock(content);
+            if (!File.Exists(path))
+            {
+                EnsureParentDirectory(path);
+                File.WriteAllText(path, managedContent, new UTF8Encoding(false));
+                result.AppendLine("Wrote " + NormalizePathForLog(path));
+                return;
+            }
+
+            var original = File.ReadAllText(path, Encoding.UTF8);
+            if (overwriteExisting)
+            {
+                File.WriteAllText(path, managedContent, new UTF8Encoding(false));
+                result.AppendLine("Replaced " + NormalizePathForLog(path));
+                return;
+            }
+
+            var updated = UpsertManagedBlock(original, content);
+            if (string.Equals(original, updated, StringComparison.Ordinal))
             {
                 result.AppendLine("Kept existing " + NormalizePathForLog(path));
                 return;
             }
 
-            EnsureParentDirectory(path);
-            File.WriteAllText(path, content, new UTF8Encoding(false));
-            result.AppendLine("Wrote " + NormalizePathForLog(path));
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+            result.AppendLine("Updated upilot block in " + NormalizePathForLog(path));
+        }
+
+        private static void WriteCursorRuleFile(string path, bool overwriteExisting, StringBuilder result)
+        {
+            var content = BuildCursorRule();
+            var existed = File.Exists(path);
+            if (!existed || overwriteExisting)
+            {
+                EnsureParentDirectory(path);
+                File.WriteAllText(path, content, new UTF8Encoding(false));
+                result.AppendLine((existed && overwriteExisting ? "Replaced " : "Wrote ") + NormalizePathForLog(path));
+                return;
+            }
+
+            var original = File.ReadAllText(path, Encoding.UTF8);
+            var updated = UpsertManagedBlock(original, BuildAgentsMd());
+            if (string.Equals(original, updated, StringComparison.Ordinal))
+            {
+                result.AppendLine("Kept existing " + NormalizePathForLog(path));
+                return;
+            }
+
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+            result.AppendLine("Updated upilot block in " + NormalizePathForLog(path));
         }
 
         private static void CopySkillInstall(string projectRoot, bool overwriteExisting, StringBuilder result)
@@ -157,6 +247,7 @@ namespace codingriver.upilot
             var target = Path.Combine(projectRoot, ".agents", "skills", SkillName);
             if (Directory.Exists(target) && !overwriteExisting)
             {
+                RewriteCopiedSkillEndpoint(target);
                 result.AppendLine("Kept existing " + NormalizePathForLog(target));
                 return;
             }
@@ -174,7 +265,20 @@ namespace codingriver.upilot
                 Directory.Delete(target, recursive: true);
 
             CopyDirectoryWithoutMeta(source, target);
+            RewriteCopiedSkillEndpoint(target);
             result.AppendLine("Wrote " + NormalizePathForLog(target));
+        }
+
+        private static void RewriteCopiedSkillEndpoint(string target)
+        {
+            var skillPath = Path.Combine(target, "SKILL.md");
+            if (!File.Exists(skillPath))
+                return;
+
+            var text = File.ReadAllText(skillPath, Encoding.UTF8);
+            text = Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/mcp", McpUrl);
+            text = Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/health", HealthUrl);
+            File.WriteAllText(skillPath, text, new UTF8Encoding(false));
         }
 
         private static void CopyDirectoryWithoutMeta(string source, string target)
@@ -219,12 +323,14 @@ namespace codingriver.upilot
 
         private static string BuildAgentsMd()
         {
+            var mcpUrl = McpUrl;
+            var healthUrl = HealthUrl;
             return "# upilot Unity MCP\n\n" +
                    "This Unity project has the `io.github.codingriver.upilot` UPM package installed.\n\n" +
                    "Use the upilot MCP server for Unity Editor automation when available.\n\n" +
                    "MCP endpoints:\n\n" +
-                   "- Streamable HTTP: `http://127.0.0.1:8011/mcp`\n" +
-                   "- Health check: `http://127.0.0.1:8011/health`\n\n" +
+                   $"- Streamable HTTP: `{mcpUrl}`\n" +
+                   $"- Health check: `{healthUrl}`\n\n" +
                    "Do not configure MCP clients to use port `8765` directly. Port `8765` is the internal Unity bridge WebSocket.\n\n" +
                    "Before Unity Editor mutations:\n\n" +
                    "- Check MCP status.\n" +
@@ -238,7 +344,7 @@ namespace codingriver.upilot
                    "description: Use upilot MCP for Unity Editor automation\n" +
                    "alwaysApply: true\n" +
                    "---\n\n" +
-                   BuildAgentsMd();
+                   WrapManagedBlock(BuildAgentsMd());
         }
 
         private static string BuildFallbackSkill()
@@ -248,14 +354,14 @@ namespace codingriver.upilot
                    "description: Unity Editor automation through the upilot MCP server.\n" +
                    "---\n\n" +
                    "# upilot Unity MCP\n\n" +
-                   "Use the MCP endpoint `http://127.0.0.1:8011/mcp` when working in this Unity project.\n" +
+                   $"Use the MCP endpoint `{McpUrl}` when working in this Unity project.\n" +
                    "Do not use port `8765` as an MCP client URL; it is the internal Unity bridge WebSocket.\n";
         }
 
         private static string BuildCodexConfig()
         {
             return "[mcp_servers.upilot]\n" +
-                   "url = \"http://127.0.0.1:8011/mcp\"\n" +
+                   $"url = \"{McpUrl}\"\n" +
                    "startup_timeout_sec = 10\n" +
                    "tool_timeout_sec = 60\n";
         }
@@ -267,10 +373,164 @@ namespace codingriver.upilot
                    "  \"mcpServers\": {\n" +
                    "    \"upilot\": {\n" +
                    typeLine +
-                   "      \"url\": \"http://127.0.0.1:8011/mcp\"\n" +
+                   $"      \"url\": \"{McpUrl}\"\n" +
                    "    }\n" +
                    "  }\n" +
                    "}\n";
+        }
+
+        private static string BuildMcpServerEntry(bool includeType, int indentSpaces)
+        {
+            var indent = new string(' ', indentSpaces);
+            var inner = new string(' ', indentSpaces + 2);
+            var typeLine = includeType ? inner + "\"type\": \"http\",\n" : "";
+            return indent + "\"upilot\": {\n" +
+                   typeLine +
+                   inner + $"\"url\": \"{McpUrl}\"\n" +
+                   indent + "}";
+        }
+
+        private static string WrapManagedBlock(string content)
+        {
+            return ManagedBlockStart + "\n" +
+                   (content ?? string.Empty).TrimEnd() + "\n" +
+                   ManagedBlockEnd + "\n";
+        }
+
+        private static string UpsertManagedBlock(string original, string content)
+        {
+            var block = WrapManagedBlock(content);
+            if (string.IsNullOrWhiteSpace(original))
+                return block;
+
+            var pattern = Regex.Escape(ManagedBlockStart) + ".*?" + Regex.Escape(ManagedBlockEnd) + "\\s*";
+            if (Regex.IsMatch(original, pattern, RegexOptions.Singleline))
+                return Regex.Replace(original, pattern, block, RegexOptions.Singleline);
+
+            var separator = original.EndsWith("\n") ? "\n" : "\n\n";
+            return original.TrimEnd() + separator + block;
+        }
+
+        private static string UpsertJsonMcpServer(string original, bool includeType)
+        {
+            if (string.IsNullOrWhiteSpace(original))
+                return BuildMcpJson(includeType);
+
+            var rootOpen = original.IndexOf('{');
+            if (rootOpen < 0)
+                return BuildMcpJson(includeType);
+
+            var rootClose = FindMatchingBrace(original, rootOpen);
+            if (rootClose < 0)
+                return BuildMcpJson(includeType);
+
+            var mcpMatch = Regex.Match(original, "\"mcpServers\"\\s*:");
+            if (!mcpMatch.Success)
+                return InsertMcpServersObject(original, rootOpen, rootClose, includeType);
+
+            var mcpObjectOpen = original.IndexOf('{', mcpMatch.Index + mcpMatch.Length);
+            if (mcpObjectOpen < 0)
+                return BuildMcpJson(includeType);
+
+            var mcpObjectClose = FindMatchingBrace(original, mcpObjectOpen);
+            if (mcpObjectClose < 0)
+                return BuildMcpJson(includeType);
+
+            var bodyStart = mcpObjectOpen + 1;
+            var bodyLength = mcpObjectClose - bodyStart;
+            var body = original.Substring(bodyStart, bodyLength);
+            var upilotMatch = Regex.Match(body, "\"upilot\"\\s*:");
+            var entry = BuildMcpServerEntry(includeType, 4);
+
+            if (!upilotMatch.Success)
+            {
+                var bodyHasContent = !string.IsNullOrWhiteSpace(body);
+                var insertion = "\n" + entry + (bodyHasContent ? "," : "") + "\n  ";
+                return original.Insert(bodyStart, insertion);
+            }
+
+            var upilotPropertyStart = bodyStart + upilotMatch.Index;
+            var upilotObjectOpen = original.IndexOf('{', upilotPropertyStart + upilotMatch.Length);
+            if (upilotObjectOpen < 0)
+                return BuildMcpJson(includeType);
+
+            var upilotObjectClose = FindMatchingBrace(original, upilotObjectOpen);
+            if (upilotObjectClose < 0)
+                return BuildMcpJson(includeType);
+
+            return original.Substring(0, upilotPropertyStart) +
+                   entry +
+                   original.Substring(upilotObjectClose + 1);
+        }
+
+        private static string InsertMcpServersObject(string original, int rootOpen, int rootClose, bool includeType)
+        {
+            var rootBody = original.Substring(rootOpen + 1, rootClose - rootOpen - 1);
+            var rootHasContent = !string.IsNullOrWhiteSpace(rootBody);
+            var block = (rootHasContent ? ",\n" : "\n") +
+                        "  \"mcpServers\": {\n" +
+                        BuildMcpServerEntry(includeType, 4) + "\n" +
+                        "  }\n";
+            return original.Insert(rootClose, block);
+        }
+
+        private static int FindMatchingBrace(string text, int openIndex)
+        {
+            var depth = 0;
+            var inString = false;
+            var escape = false;
+
+            for (var i = openIndex; i < text.Length; i++)
+            {
+                var c = text[i];
+                if (inString)
+                {
+                    if (escape)
+                    {
+                        escape = false;
+                    }
+                    else if (c == '\\')
+                    {
+                        escape = true;
+                    }
+                    else if (c == '"')
+                    {
+                        inString = false;
+                    }
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = true;
+                    continue;
+                }
+
+                if (c == '{')
+                    depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                        return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static string UpsertTomlSection(string original, string sectionName, string sectionContent)
+        {
+            var normalizedSection = sectionContent.TrimEnd() + "\n";
+            if (string.IsNullOrWhiteSpace(original))
+                return normalizedSection;
+
+            var pattern = "(?ms)^" + Regex.Escape(sectionName) + "\\s*.*?(?=^\\[|\\z)";
+            if (Regex.IsMatch(original, pattern))
+                return Regex.Replace(original, pattern, normalizedSection);
+
+            var separator = original.EndsWith("\n") ? "\n" : "\n\n";
+            return original + separator + normalizedSection;
         }
 
         private static string GetProjectRoot()

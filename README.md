@@ -54,14 +54,26 @@ https://github.com/codingriver/upilot.git#v0.1.0
 }
 ```
 
-首次导入 UPM 包后，upilot 会在 Unity 项目根目录自动创建缺失的 agent 识别规则：
+首次导入 UPM 包后，upilot 会先打开首次设置向导：
+
+1. 设置当前项目使用的 Unity Bridge WS 端口和 MCP HTTP 端口。
+2. 选择是否写入 agent 识别规则和项目级 MCP 客户端配置。
+3. 完成后再启动 Bridge 和 MCP server。
+
+Agent 识别规则会写入 upilot 管理块。文件不存在时创建；文件已存在时追加或更新 `<!-- upilot:start -->` / `<!-- upilot:end -->` 标记块，用户其它内容会保留：
 
 - `AGENTS.md`
 - `CLAUDE.md`
 - `.cursor/rules/upilot-unity-mcp.mdc`
 - `.agents/skills/upilot-unity-mcp`
 
-upilot 不会静默改写 Codex、Claude 或 Cursor 的 MCP 客户端配置。需要项目级 MCP 配置时，打开 `upilot/upilot`，在 `MCP 服务器 > Agent 自动识别` 中点击对应客户端按钮，或使用 `upilot/Agent Setup` 菜单。
+MCP 客户端配置需要显式勾选或点击写入。已存在配置时，upilot 只更新 `upilot` 映射：
+
+- `.codex/config.toml`：更新 `[mcp_servers.upilot]`
+- `.mcp.json`：更新 `mcpServers.upilot`
+- `.cursor/mcp.json`：更新 `mcpServers.upilot`
+
+其它 MCP server 配置会尽量保留。需要重新执行时，打开 `upilot/upilot`，在 `MCP 服务器 > Agent 自动识别` 中点击对应客户端按钮，或使用 `upilot/Agent Setup` 菜单。
 
 Agent 自动安装入口：
 

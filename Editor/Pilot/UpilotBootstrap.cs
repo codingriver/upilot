@@ -21,15 +21,31 @@ namespace codingriver.upilot
         static UpilotBootstrap()
         {
             UnityEngine.Debug.Log("[UpilotBootstrap] static constructor");
+            EditorApplication.delayCall += ShowFirstSetupIfNeeded;
             EditorApplication.update += TryStartBridge;
             EditorApplication.update += TryStartMcpServer;
             EditorApplication.quitting += () => UpilotBridge.Instance.Stop();
+        }
+
+        private static void ShowFirstSetupIfNeeded()
+        {
+            if (!IsEnabled || UpilotSetupState.IsCompleted)
+                return;
+
+            UnityEngine.Debug.Log("[UpilotBootstrap] First setup is not completed; delaying Bridge/MCP auto start.");
+            UpilotFirstSetupWindow.Open();
         }
 
         private static void TryStartBridge()
         {
             if (!IsEnabled)
                 return;
+
+            if (!UpilotSetupState.IsCompleted)
+            {
+                EditorApplication.update -= TryStartBridge;
+                return;
+            }
 
             UnityEngine.Debug.Log("[UpilotBootstrap] TryStartBridge -> EnsureStarted");
             EditorApplication.update -= TryStartBridge;
@@ -40,6 +56,12 @@ namespace codingriver.upilot
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode)
                 return;
+
+            if (!UpilotSetupState.IsCompleted)
+            {
+                EditorApplication.update -= TryStartMcpServer;
+                return;
+            }
 
             EditorApplication.update -= TryStartMcpServer;
 
