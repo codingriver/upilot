@@ -10,14 +10,14 @@ namespace codingriver.upilot
 {
     public static class UpilotMenuItems
     {
-        [MenuItem("upilot/Force Restart Bridge")]
+        [MenuItem("upilot/Advanced/Force Restart Unity Bridge")]
         public static void RestartBridge()
         {
             Logger.Log("[Menu] Force Restart UpilotBridge triggered.");
             UpilotBridge.Instance.Restart();
         }
 
-        [MenuItem("upilot/Force Restart Bridge", true)]
+        [MenuItem("upilot/Advanced/Force Restart Unity Bridge", true)]
         public static bool ValidateRestartBridge()
         {
             return !Application.isPlaying;

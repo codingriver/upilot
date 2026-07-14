@@ -13,12 +13,52 @@ using UnityEngine;
 
 namespace codingriver.upilot
 {
+    public readonly struct AgentMcpConfigStatus
+    {
+        public AgentMcpConfigStatus(
+            string clientName,
+            string configPath,
+            bool fileExists,
+            bool hasUpilotEntry,
+            bool usesCurrentUrl,
+            string errorMessage = "")
+        {
+            ClientName = clientName;
+            ConfigPath = configPath;
+            FileExists = fileExists;
+            HasUpilotEntry = hasUpilotEntry;
+            UsesCurrentUrl = usesCurrentUrl;
+            ErrorMessage = errorMessage ?? "";
+        }
+
+        public string ClientName { get; }
+        public string ConfigPath { get; }
+        public bool FileExists { get; }
+        public bool HasUpilotEntry { get; }
+        public bool UsesCurrentUrl { get; }
+        public string ErrorMessage { get; }
+        public bool IsConfigured => FileExists && HasUpilotEntry && UsesCurrentUrl && string.IsNullOrEmpty(ErrorMessage);
+
+        public string StateText
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(ErrorMessage)) return "读取失败";
+                if (!FileExists) return "未配置";
+                if (!HasUpilotEntry) return "缺少 upilot 配置";
+                if (!UsesCurrentUrl) return "端口已变化，需更新";
+                return "已配置";
+            }
+        }
+    }
+
     [InitializeOnLoad]
     public static class UpilotAgentSetup
     {
         private const string PackageName = "io.github.codingriver.upilot";
         private const string SkillName = "upilot-unity-mcp";
         private const string AutoSetupKeyPrefix = "codingriver.upilot.AgentSetup.AutoRulesWritten.";
+        private const int AgentRulesTemplateVersion = 2;
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
 
@@ -28,33 +68,44 @@ namespace codingriver.upilot
         public static string GetMcpUrl(int httpPort) => $"http://127.0.0.1:{httpPort}/mcp";
         public static string GetHealthUrl(int httpPort) => $"http://127.0.0.1:{httpPort}/health";
 
+        public static AgentMcpConfigStatus[] GetMcpConfigStatuses()
+        {
+            var projectRoot = GetProjectRoot();
+            return new[]
+            {
+                InspectTomlConfig("Codex", Path.Combine(projectRoot, ".codex", "config.toml")),
+                InspectJsonConfig("Claude Code", Path.Combine(projectRoot, ".mcp.json")),
+                InspectJsonConfig("Cursor", Path.Combine(projectRoot, ".cursor", "mcp.json")),
+            };
+        }
+
         static UpilotAgentSetup()
         {
             EditorApplication.delayCall += EnsureAgentRulesOnce;
         }
 
-        [MenuItem("upilot/Agent Setup/Write Agent Rules", false, 310)]
+        [MenuItem("upilot/Advanced/Agent Setup/Write Agent Rules", false, 310)]
         public static void MenuWriteAgentRules()
         {
             var result = WriteAgentRules(overwriteExisting: false);
             ReportResult("Agent rules", result);
         }
 
-        [MenuItem("upilot/Agent Setup/Write Codex MCP Config", false, 320)]
+        [MenuItem("upilot/Advanced/Agent Setup/Write Codex MCP Config", false, 320)]
         public static void MenuWriteCodexMcpConfig()
         {
             var result = WriteCodexMcpConfig(promptBeforeOverwrite: true);
             ReportResult("Codex MCP config", result);
         }
 
-        [MenuItem("upilot/Agent Setup/Write Claude Code MCP Config", false, 321)]
+        [MenuItem("upilot/Advanced/Agent Setup/Write Claude Code MCP Config", false, 321)]
         public static void MenuWriteClaudeCodeMcpConfig()
         {
             var result = WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true);
             ReportResult("Claude Code MCP config", result);
         }
 
-        [MenuItem("upilot/Agent Setup/Write Cursor MCP Config", false, 322)]
+        [MenuItem("upilot/Advanced/Agent Setup/Write Cursor MCP Config", false, 322)]
         public static void MenuWriteCursorMcpConfig()
         {
             var result = WriteCursorMcpConfig(promptBeforeOverwrite: true);
@@ -108,7 +159,76 @@ namespace codingriver.upilot
 
         public static void MarkAgentRulesHandledForCurrentProject()
         {
-            EditorPrefs.SetBool(AutoSetupKeyPrefix + StableHash(GetProjectRoot()), true);
+            EditorPrefs.SetBool(GetAgentRulesSetupKey(), true);
+        }
+
+        private static AgentMcpConfigStatus InspectTomlConfig(string clientName, string path)
+        {
+            if (!File.Exists(path))
+                return new AgentMcpConfigStatus(clientName, path, false, false, false);
+
+            try
+            {
+                var text = File.ReadAllText(path, Encoding.UTF8);
+                var section = Regex.Match(
+                    text,
+                    "(?ms)^\\[mcp_servers\\.upilot\\]\\s*(.*?)(?=^\\[|\\z)");
+                if (!section.Success)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false);
+
+                var urlMatch = Regex.Match(section.Value, "(?m)^\\s*url\\s*=\\s*\"([^\"]+)\"");
+                var usesCurrentUrl = urlMatch.Success &&
+                                     string.Equals(urlMatch.Groups[1].Value, McpUrl, StringComparison.OrdinalIgnoreCase);
+                return new AgentMcpConfigStatus(clientName, path, true, true, usesCurrentUrl);
+            }
+            catch (Exception ex)
+            {
+                return new AgentMcpConfigStatus(clientName, path, true, false, false, ex.Message);
+            }
+        }
+
+        private static AgentMcpConfigStatus InspectJsonConfig(string clientName, string path)
+        {
+            if (!File.Exists(path))
+                return new AgentMcpConfigStatus(clientName, path, false, false, false);
+
+            try
+            {
+                var text = File.ReadAllText(path, Encoding.UTF8);
+                var mcpMatch = Regex.Match(text, "\"mcpServers\"\\s*:");
+                if (!mcpMatch.Success)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false);
+
+                var mcpObjectOpen = text.IndexOf('{', mcpMatch.Index + mcpMatch.Length);
+                if (mcpObjectOpen < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false, "mcpServers 格式无效");
+                var mcpObjectClose = FindMatchingBrace(text, mcpObjectOpen);
+                if (mcpObjectClose < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false, "mcpServers 格式无效");
+
+                var mcpBody = text.Substring(mcpObjectOpen + 1, mcpObjectClose - mcpObjectOpen - 1);
+                var upilotMatch = Regex.Match(mcpBody, "\"upilot\"\\s*:");
+                if (!upilotMatch.Success)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false);
+
+                var upilotPropertyStart = mcpObjectOpen + 1 + upilotMatch.Index;
+                var upilotObjectOpen = text.IndexOf('{', upilotPropertyStart + upilotMatch.Length);
+                if (upilotObjectOpen < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, true, false, "upilot 配置格式无效");
+                var upilotObjectClose = FindMatchingBrace(text, upilotObjectOpen);
+                if (upilotObjectClose < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, true, false, "upilot 配置格式无效");
+
+                var upilotBody = text.Substring(upilotObjectOpen, upilotObjectClose - upilotObjectOpen + 1);
+                var urlMatch = Regex.Match(upilotBody, "\"url\"\\s*:\\s*\"([^\"]+)\"");
+                var usesCurrentUrl = urlMatch.Success &&
+                                     string.Equals(urlMatch.Groups[1].Value, McpUrl, StringComparison.OrdinalIgnoreCase);
+                return new AgentMcpConfigStatus(clientName, path, true, true, usesCurrentUrl);
+            }
+            catch (Exception ex)
+            {
+                return new AgentMcpConfigStatus(clientName, path, true, false, false, ex.Message);
+            }
         }
 
         private static void EnsureAgentRulesOnce()
@@ -118,7 +238,7 @@ namespace codingriver.upilot
                 if (!UpilotSetupState.IsCompleted)
                     return;
 
-                var key = AutoSetupKeyPrefix + StableHash(GetProjectRoot());
+                var key = GetAgentRulesSetupKey();
                 if (EditorPrefs.GetBool(key, false))
                     return;
 
@@ -132,6 +252,11 @@ namespace codingriver.upilot
             {
                 Debug.LogWarning("[upilot] Agent discovery setup failed: " + ex.Message);
             }
+        }
+
+        private static string GetAgentRulesSetupKey()
+        {
+            return AutoSetupKeyPrefix + StableHash(GetProjectRoot()) + ".v" + AgentRulesTemplateVersion;
         }
 
         private static string WriteJsonMcpConfig(string path, bool includeType, bool promptBeforeOverwrite)
@@ -325,17 +450,91 @@ namespace codingriver.upilot
         {
             var mcpUrl = McpUrl;
             var healthUrl = HealthUrl;
-            return "# upilot Unity MCP\n\n" +
-                   "This Unity project has the `io.github.codingriver.upilot` UPM package installed.\n\n" +
-                   "Use the upilot MCP server for Unity Editor automation when available.\n\n" +
-                   "MCP endpoints:\n\n" +
-                   $"- Streamable HTTP: `{mcpUrl}`\n" +
-                   $"- Health check: `{healthUrl}`\n\n" +
-                   "Do not configure MCP clients to use port `8765` directly. Port `8765` is the internal Unity bridge WebSocket.\n\n" +
-                   "Before Unity Editor mutations:\n\n" +
-                   "- Check MCP status.\n" +
-                   "- Verify the Unity project path.\n" +
-                   "- Prefer upilot MCP tools over manual Unity YAML edits.\n";
+            var projectRoot = GetProjectRoot();
+            var unityVersion = Application.unityVersion;
+            var unityMajorText = unityVersion.Split('.')[0];
+            var isUnity6OrNewer = int.TryParse(unityMajorText, out var unityMajor) && unityMajor >= 6000;
+
+            var text = new StringBuilder();
+            text.AppendLine("# upilot Unity MCP");
+            text.AppendLine();
+            text.AppendLine("This Unity project has the `io.github.codingriver.upilot` UPM package installed.");
+            text.AppendLine();
+            text.AppendLine("Use the upilot MCP server for Unity Editor inspection, diagnostics, automation, and mutation when available. Its supported areas include Editor state, Console and compile diagnostics, scenes, GameObjects, components, assets, prefabs, packages, tests, builds, screenshots, Editor windows, reflection, and supported UI automation.");
+            text.AppendLine();
+            text.AppendLine("## Connection and project identity");
+            text.AppendLine();
+            text.AppendLine("Project MCP endpoints:");
+            text.AppendLine();
+            text.AppendLine($"- Streamable HTTP: `{mcpUrl}`");
+            text.AppendLine($"- Health check: `{healthUrl}`");
+            text.AppendLine();
+            text.AppendLine("These project-local endpoints and a successful health check take precedence over generic examples that use another HTTP port.");
+            text.AppendLine();
+            text.AppendLine("MCP clients must not connect directly to port `8765` or any other internal Unity bridge WebSocket port. Internal bridge ports may vary when multiple Unity projects are open; do not hardcode them. Use `unity_mcp_status` and its session/project information to identify the connected Editor.");
+            text.AppendLine();
+            text.AppendLine("## Standard Unity task workflow");
+            text.AppendLine();
+            text.AppendLine("For every Unity Editor task:");
+            text.AppendLine();
+            text.AppendLine("1. Call `unity_mcp_status`.");
+            text.AppendLine("2. Require `connected: true` and `serverReady: true`.");
+            text.AppendLine($"3. Verify `paths.unityProjectAbsolute` matches `{projectRoot}` (allow equivalent slash normalization).");
+            text.AppendLine("4. Stop and report the mismatch if another Unity project is connected.");
+            text.AppendLine("5. Call `unity_ensure_ready` before Editor mutations.");
+            text.AppendLine("6. Use the narrowest dedicated upilot tool that matches the task.");
+            text.AppendLine();
+            text.AppendLine("Prefer tools in this order:");
+            text.AppendLine();
+            text.AppendLine("1. Dedicated semantic tools for scenes, objects, components, assets, prefabs, packages, tests, builds, windows, and screenshots.");
+            text.AppendLine("2. Serialized-data tools only when no dedicated tool exposes the required property.");
+            text.AppendLine("3. `unity_reflection_call` for existing compiled entry points.");
+            text.AppendLine("4. `reflection_eval` for one bounded diagnostic or invocation expression.");
+            text.AppendLine("5. Focus-dependent mouse, keyboard, and drag-and-drop tools only after verifying the target window, focus, layout, and coordinates.");
+            text.AppendLine("6. Manual Unity YAML editing only as a last resort, preserving GUID and fileID integrity.");
+            text.AppendLine();
+            text.AppendLine("## Persistent and destructive operations");
+            text.AppendLine();
+            text.AppendLine("Before deleting, moving, overwriting, unloading, removing, installing, or persistently saving anything:");
+            text.AppendLine();
+            text.AppendLine("- Read, find, get, or list the exact target first.");
+            text.AppendLine("- Confirm the connected project, scene, asset path, GameObject, component, prefab, or package is the intended target.");
+            text.AppendLine("- Do not hide destructive operations inside `unity_batch_execute` or automatic retries unless the user approved the complete batch.");
+            text.AppendLine("- Use `unity_task_execute` retries only for idempotent operations. Do not automatically retry non-idempotent destructive operations.");
+            text.AppendLine("- Save scenes and prefabs only when the requested task requires persistent changes. Scene-only changes are not persistent until explicitly saved.");
+            text.AppendLine("- Treat package changes, builds, script writes, asset writes, and saved screenshots as persistent operations.");
+            text.AppendLine();
+            text.AppendLine("## Writes, compilation, and verification");
+            text.AppendLine();
+            text.AppendLine("- Read existing scripts or assets before overwriting them and preserve local project conventions.");
+            text.AppendLine("- After completing a batch of code or asset disk writes, call `unity_sync_after_disk_write` once for the batch.");
+            text.AppendLine("- After C# changes, call `unity_safe_compile_and_wait`, then re-read `unity_compile_errors` and relevant Console logs.");
+            text.AppendLine("- Read `unity_compile_errors` before changing files to fix compilation failures.");
+            text.AppendLine("- Avoid triggering compilation while Unity is in PlayMode unless the user explicitly requested a PlayMode workflow.");
+            text.AppendLine("- For tests and builds, poll their result/status tools until completion; starting an operation is not verification of success.");
+            text.AppendLine();
+            text.AppendLine("## Tool boundaries");
+            text.AppendLine();
+            text.AppendLine("- `unity_reflection_call` may call existing compiled methods; it is not a general script runner.");
+            text.AppendLine("- `reflection_eval` accepts one bounded expression only. Do not use local declarations, `var`, loops, branches, lambdas/LINQ, async/await, helper definitions, arbitrary object construction, or dynamic compilation.");
+            text.AppendLine("- If reflection reports a syntax or capability boundary, do not retry random C# variants. Switch to a dedicated tool, call a stable compiled helper, or ask for an appropriate helper method.");
+            text.AppendLine("- Prefer semantic tools over raw input tools. Keyboard, mouse, and drag-and-drop operations interact with the real Unity UI and depend on focus and layout.");
+            text.AppendLine("- Screenshot tools are observational except `unity_screenshot_save`, which writes a PNG. Writing outside the project requires explicit user intent.");
+            text.AppendLine();
+            text.AppendLine("## UIFlow");
+            text.AppendLine();
+            text.AppendLine("- Use `unity_uiflow_*` only for YAML-driven Unity EditorWindow automation, not for Game View or runtime UI testing.");
+            if (isUnity6OrNewer)
+                text.AppendLine($"- This project uses Unity `{unityVersion}`. UIFlow still requires `UPILOT_ENABLE_UIFLOW` and its optional packages; verify availability before using it.");
+            else
+                text.AppendLine($"- UIFlow requires Unity 6+ and `UPILOT_ENABLE_UIFLOW`. This project uses Unity `{unityVersion}`, so prefer core upilot tools.");
+            text.AppendLine();
+            text.AppendLine("## Failure and recovery");
+            text.AppendLine();
+            text.AppendLine("- If a tool times out, call `unity_mcp_status`, inspect connection and compile state, and retry at most once through `unity_task_execute` only when the operation is idempotent.");
+            text.AppendLine("- If Unity remains disconnected, busy, or connected to the wrong project, stop and report the state instead of continuing with filesystem or UI workarounds.");
+            text.AppendLine("- If a dedicated upilot tool reports that a feature is unavailable, respect the boundary and use the documented fallback rather than repeatedly probing unsupported variants.");
+            return text.ToString();
         }
 
         private static string BuildCursorRule()
@@ -353,9 +552,7 @@ namespace codingriver.upilot
                    "name: upilot-unity-mcp\n" +
                    "description: Unity Editor automation through the upilot MCP server.\n" +
                    "---\n\n" +
-                   "# upilot Unity MCP\n\n" +
-                   $"Use the MCP endpoint `{McpUrl}` when working in this Unity project.\n" +
-                   "Do not use port `8765` as an MCP client URL; it is the internal Unity bridge WebSocket.\n";
+                   BuildAgentsMd();
         }
 
         private static string BuildCodexConfig()

@@ -54,11 +54,7 @@ https://github.com/codingriver/upilot.git#v0.1.1
 }
 ```
 
-首次导入 UPM 包后，upilot 会先打开首次设置向导：
-
-1. 设置当前项目使用的 Unity Bridge WS 端口和 MCP HTTP 端口。
-2. 选择是否写入 agent 识别规则和项目级 MCP 客户端配置。
-3. 完成后再启动 Bridge 和 MCP server。
+首次导入 UPM 包后，upilot 会打开简化主面板。选择 Codex、Claude 或 Cursor 后点击“配置并启动”，upilot 会自动选择端口、写入项目配置并启动 Unity 桥接器和 MCP 服务。端口、进程和诊断信息仅在 `upilot/Advanced Settings` 中显示。
 
 Agent 识别规则会写入 upilot 管理块。文件不存在时创建；文件已存在时追加或更新 `<!-- upilot:start -->` / `<!-- upilot:end -->` 标记块，用户其它内容会保留：
 
@@ -73,7 +69,7 @@ MCP 客户端配置需要显式勾选或点击写入。已存在配置时，upil
 - `.mcp.json`：更新 `mcpServers.upilot`
 - `.cursor/mcp.json`：更新 `mcpServers.upilot`
 
-其它 MCP server 配置会尽量保留。需要重新执行时，打开 `upilot/upilot`，在 `MCP 服务器 > Agent 自动识别` 中点击对应客户端按钮，或使用 `upilot/Agent Setup` 菜单。
+其它 MCP server 配置会尽量保留。需要重新执行时，打开 `upilot/Advanced Settings`，在 `Agent` 页中更新对应客户端配置。
 
 Agent 自动安装入口：
 
@@ -103,7 +99,7 @@ python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_
 upilot/upilot
 ```
 
-主面板用于启动/停止 MCP 服务、查看连接状态、执行诊断和查看日志。
+主面板只展示是否可用，并提供一键配置、启动和自动修复。端口、进程、Agent 配置、日志和诊断位于 `upilot/Advanced Settings`。
 
 MCP client 推荐配置：
 

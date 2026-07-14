@@ -53,6 +53,12 @@ namespace codingriver.upilot
         public int WsPort => UpilotBridge.Instance?.WsPort ?? 8765;
         public string PythonEntryPath => _pythonEntryPath;
 
+        public bool IsPythonEntryValid(out string absolutePath)
+        {
+            absolutePath = ToAbsoluteProjectPath(_pythonEntryPath).Replace('\\', '/');
+            return File.Exists(absolutePath);
+        }
+
         public void ResetPythonEntryPathToDefaultAbsolute()
         {
             string defaultPath = ResolveDefaultPythonEntry();
@@ -124,6 +130,7 @@ namespace codingriver.upilot
         private McpServerStatus _cachedStatus;
         private volatile bool _refreshRunning;
         private long _lastRefreshMs;
+        private bool _restartPending;
 
         private static readonly System.Net.Http.HttpClient _httpClient = new()
         {
@@ -380,6 +387,13 @@ namespace codingriver.upilot
             lock (_statusLock) { return _cachedStatus; }
         }
 
+        public void InvalidateStatusCache()
+        {
+            lock (_statusLock)
+                _cachedStatus = default;
+            _lastRefreshMs = 0;
+        }
+
         private async Task RefreshStatusAsync()
         {
             if (_refreshRunning) return;
@@ -550,6 +564,7 @@ namespace codingriver.upilot
 
         public void StopServer()
         {
+            _restartPending = false;
             var (pid, cmdLine) = FindMcpProcessByPorts();
             if (!pid.HasValue)
             {
@@ -567,6 +582,45 @@ namespace codingriver.upilot
             {
                 Debug.LogError($"[UpilotMcpServerManager] Failed to kill process PID={pid.Value}: {ex.Message}");
             }
+        }
+
+        public void RestartServer()
+        {
+            StopServer();
+            InvalidateStatusCache();
+
+            _restartPending = true;
+            var deadline = EditorApplication.timeSinceStartup + 4d;
+            EditorApplication.CallbackFunction waitForPorts = null;
+            waitForPorts = () =>
+            {
+                if (!_restartPending)
+                {
+                    EditorApplication.update -= waitForPorts;
+                    return;
+                }
+
+                var portsAvailable = UpilotPortAllocator.IsPortAvailable(HttpPort) &&
+                                     UpilotPortAllocator.IsPortAvailable(WsPort);
+                if (portsAvailable)
+                {
+                    EditorApplication.update -= waitForPorts;
+                    _restartPending = false;
+                    InvalidateStatusCache();
+                    StartServer();
+                    return;
+                }
+
+                if (EditorApplication.timeSinceStartup < deadline)
+                    return;
+
+                EditorApplication.update -= waitForPorts;
+                _restartPending = false;
+                InvalidateStatusCache();
+                Debug.LogError(
+                    $"[UpilotMcpServerManager] MCP restart timed out waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.");
+            };
+            EditorApplication.update += waitForPorts;
         }
 
         // ── Port & Process Helpers ─────────────────────────────────────────

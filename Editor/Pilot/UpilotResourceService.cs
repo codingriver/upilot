@@ -459,7 +459,7 @@ namespace codingriver.upilot
                         horizontalBarRisk                = hx || !layoutOk,
                         layoutVersion                  = "toolbar-2row-scroll-hnone-2026-04",
                         note =
-                            "打开菜单 upilot/upilot，切换到「诊断日志」标签后，此处快照才有效；用于验收横向滚动风险（horizontalBarRisk=false 表示布局约束正常）。layoutVersion 含 toolbar-2row 表示已使用两行工具栏修复整窗横向条。",
+                            "打开菜单 upilot/Advanced Settings，切换到「日志与诊断」页后，此处快照才有效；用于验收横向滚动风险（horizontalBarRisk=false 表示布局约束正常）。",
                     };
                     tcs.SetResult(payload);
                 }

@@ -32,8 +32,8 @@ namespace codingriver.upilot
             if (!IsEnabled || UpilotSetupState.IsCompleted)
                 return;
 
-            UnityEngine.Debug.Log("[UpilotBootstrap] First setup is not completed; delaying Bridge/MCP auto start.");
-            UpilotFirstSetupWindow.Open();
+            UnityEngine.Debug.Log("[UpilotBootstrap] First setup is not completed; opening simplified upilot setup.");
+            UpilotMainWindow.Open();
         }
 
         private static void TryStartBridge()

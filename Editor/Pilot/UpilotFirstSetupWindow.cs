@@ -228,7 +228,7 @@ namespace codingriver.upilot
             }
 
             Close();
-            UpilotStatusWindow.Open();
+            UpilotMainWindow.Open();
         }
     }
 }

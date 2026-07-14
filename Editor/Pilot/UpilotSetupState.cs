@@ -18,13 +18,12 @@ namespace codingriver.upilot
             EditorPrefs.SetBool(SetupCompletedKey, true);
         }
 
-        [MenuItem("upilot/First Setup/Open", false, 250)]
         public static void OpenFirstSetup()
         {
-            UpilotFirstSetupWindow.Open();
+            UpilotMainWindow.Open();
         }
 
-        [MenuItem("upilot/First Setup/Reset Setup State", false, 251)]
+        [MenuItem("upilot/Advanced/Reset Setup State", false, 251)]
         public static void ResetSetupState()
         {
             if (!EditorUtility.DisplayDialog(
@@ -35,7 +34,7 @@ namespace codingriver.upilot
                 return;
 
             EditorPrefs.DeleteKey(SetupCompletedKey);
-            UpilotFirstSetupWindow.Open();
+            UpilotMainWindow.Open();
         }
     }
 }
