@@ -38,7 +38,7 @@ namespace CodingRiver.UPilot
         public static void Open()
         {
             var window = GetWindow<UPilotMainWindow>("UPilot");
-            window.minSize = new Vector2(360, 260);
+            window.minSize = new Vector2(360, 320);
             window.Show();
         }
 
@@ -203,7 +203,7 @@ namespace CodingRiver.UPilot
                 else if (snapshot.State == UPilotMainState.NeedsRepair)
                     DrawPrimaryButton("自动修复", RepairUPilot);
                 else
-                    EditorGUILayout.LabelField("无需其他操作", EditorStyles.centeredGreyMiniLabel);
+                    DrawReadyInfo();
 
                 GUILayout.FlexibleSpace();
             }
@@ -220,6 +220,45 @@ namespace CodingRiver.UPilot
             }
             EditorGUILayout.Space(8);
             DrawPrimaryButton("配置并启动", ConfigureAndStart);
+        }
+
+        private void DrawReadyInfo()
+        {
+            var mcpUrl = UPilotAgentSetup.McpUrl;
+
+            EditorGUILayout.LabelField("MCP 服务器地址（HTTP）", EditorStyles.centeredGreyMiniLabel);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                EditorGUILayout.SelectableLabel(mcpUrl, EditorStyles.textField,
+                    GUILayout.Height(EditorGUIUtility.singleLineHeight), GUILayout.MaxWidth(260));
+                if (GUILayout.Button("复制", EditorStyles.miniButton, GUILayout.Width(44)))
+                {
+                    EditorGUIUtility.systemCopyBuffer = mcpUrl;
+                    ShowNotice("已复制 MCP 地址");
+                }
+                GUILayout.FlexibleSpace();
+            }
+
+            EditorGUILayout.Space(6);
+            EditorGUILayout.LabelField(
+                "将上方地址作为 MCP 服务器（streamable-http）添加到 Agent 工具中，即可让 Agent 操作 Unity。",
+                _messageStyle);
+
+            EditorGUILayout.Space(4);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("复制介绍文本", EditorStyles.miniButton, GUILayout.Width(96)))
+                {
+                    EditorGUIUtility.systemCopyBuffer =
+                        $"UPilot 是 Unity Editor 的 MCP 自动化桥接服务，可用于查询和操作当前 Unity 工程。\n" +
+                        $"MCP 服务器地址（streamable-http）：{mcpUrl}\n" +
+                        $"请连接该 MCP 服务器后，通过其提供的工具操作 Unity。";
+                    ShowNotice("已复制介绍文本，可粘贴到 Agent 聊天工具中");
+                }
+                GUILayout.FlexibleSpace();
+            }
         }
 
         private static void DrawPrimaryButton(string label, Action action)
