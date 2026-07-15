@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,7 +11,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── Operation step record ────────────────────────────────────────────────
     public struct OperationStepRecord
@@ -51,9 +51,9 @@ namespace codingriver.upilot
     public sealed class OperationContext
     {
         private readonly OperationLogEntry _entry;
-        private readonly UpilotOperationTracker _tracker;
+        private readonly UPilotOperationTracker _tracker;
 
-        public OperationContext(OperationLogEntry entry, UpilotOperationTracker tracker)
+        public OperationContext(OperationLogEntry entry, UPilotOperationTracker tracker)
         {
             _entry   = entry;
             _tracker = tracker;
@@ -120,7 +120,7 @@ namespace codingriver.upilot
     }
 
     // ── Main tracker service (singleton) ─────────────────────────────────────
-    public sealed class UpilotOperationTracker
+    public sealed class UPilotOperationTracker
     {
         private const int MaxEntries = 500;
         private const int WatchdogQueuedThresholdMs   = 10_000;
@@ -128,8 +128,8 @@ namespace codingriver.upilot
         private const int WatchdogWaitingThresholdMs  = 120_000;
         private const int WatchdogAbsoluteThresholdMs = 300_000;
 
-        private static readonly Lazy<UpilotOperationTracker> Lazy = new(() => new UpilotOperationTracker());
-        public static UpilotOperationTracker Instance => Lazy.Value;
+        private static readonly Lazy<UPilotOperationTracker> Lazy = new(() => new UPilotOperationTracker());
+        public static UPilotOperationTracker Instance => Lazy.Value;
 
         private readonly ConcurrentDictionary<string, OperationContext> _activeContexts = new();
         private readonly object _listLock = new();
@@ -182,7 +182,7 @@ namespace codingriver.upilot
                 _entries.Add(entry);
             }
 
-            if (UpilotBridge.Instance.VerboseLogsEnabled)
+            if (UPilotBridge.Instance.VerboseLogsEnabled)
             {
                 var logDetail = detail != null ? $"{description} | {detail}" : description;
                 WriteLogLine("INFO", "SYSTEM", $"SYSTEM {eventName} id={entry.CommandId} | {logDetail}");
@@ -215,8 +215,8 @@ namespace codingriver.upilot
             var ctx = new OperationContext(entry, this);
             _activeContexts[commandId] = ctx;
 
-            if (UpilotBridge.Instance.VerboseLogsEnabled &&
-                !string.Equals(commandName, "uiflow.results", StringComparison.OrdinalIgnoreCase))
+            if (UPilotBridge.Instance.VerboseLogsEnabled &&
+                !string.Equals(commandName, "upilot_flow.results", StringComparison.OrdinalIgnoreCase))
             {
                 WriteLogLine("INFO", "COMMAND", $"RECV {commandName} id={commandId} | ({desc})");
             }
@@ -228,6 +228,50 @@ namespace codingriver.upilot
             if (string.IsNullOrEmpty(commandId)) return null;
             _activeContexts.TryGetValue(commandId, out var ctx);
             return ctx;
+        }
+
+        public OperationTimingPayload GetTimingSnapshot(string commandId)
+        {
+            OperationLogEntry entry = null;
+            lock (_listLock)
+            {
+                for (var i = _entries.Count - 1; i >= 0; i--)
+                {
+                    if (_entries[i].CommandId != commandId) continue;
+                    entry = _entries[i];
+                    break;
+                }
+            }
+
+            if (entry == null)
+                return new OperationTimingPayload();
+
+            var now = DateTime.Now;
+            DateTime? executionStarted = null;
+            DateTime? executionFinished = null;
+            lock (entry.Steps)
+            {
+                foreach (var step in entry.Steps)
+                {
+                    if (!executionStarted.HasValue && step.Step == "主线程执行中")
+                        executionStarted = step.Time;
+                    if (step.Step == "主线程执行完毕")
+                        executionFinished = step.Time;
+                }
+            }
+
+            var completed = entry.CompletedAt ?? now;
+            return new OperationTimingPayload
+            {
+                queueMs = executionStarted.HasValue
+                    ? Math.Max(0L, (long)(executionStarted.Value - entry.ReceivedAt).TotalMilliseconds)
+                    : 0L,
+                unityExecutionMs = executionStarted.HasValue
+                    ? Math.Max(0L, (long)((executionFinished ?? completed) - executionStarted.Value).TotalMilliseconds)
+                    : Math.Max(0L, entry.ElapsedMs),
+                bridgeMs = Math.Max(0L, (long)(completed - entry.ReceivedAt).TotalMilliseconds),
+                serializationMs = 0L,
+            };
         }
 
         public void EndOperation(string commandId)
@@ -523,7 +567,7 @@ namespace codingriver.upilot
             }
             catch (Exception ex)
             {
-                EditorUtility.DisplayDialog("upilot", $"无法打开日志: {ex.Message}", "确定");
+                EditorUtility.DisplayDialog("UPilot", $"无法打开日志: {ex.Message}", "确定");
             }
         }
     }

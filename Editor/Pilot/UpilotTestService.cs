@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -52,13 +52,13 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotTestService
+    public class UPilotTestService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
         private TestRunResultPayload _lastResults;
         private bool _isRunning;
 
-        public UpilotTestService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotTestService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -71,7 +71,7 @@ namespace codingriver.upilot
 
         private async Task HandleRunAsync(string id, string json, CancellationToken token)
         {
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             var msg = JsonUtility.FromJson<TestRunMessage>(json);
             var p   = msg?.payload ?? new TestRunPayload();
 
@@ -334,10 +334,10 @@ namespace codingriver.upilot
         // Placeholder for callback proxy
         private class TestCallbackProxy
         {
-            private readonly UpilotTestService _service;
+            private readonly UPilotTestService _service;
             private readonly TaskCompletionSource<TestRunResultPayload> _tcs;
 
-            public TestCallbackProxy(UpilotTestService service, TaskCompletionSource<TestRunResultPayload> tcs)
+            public TestCallbackProxy(UPilotTestService service, TaskCompletionSource<TestRunResultPayload> tcs)
             {
                 _service = service;
                 _tcs     = tcs;

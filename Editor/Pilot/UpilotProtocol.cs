@@ -1,12 +1,12 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using System;
 using System.Collections.Generic;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     [Serializable]
     public class BridgeEnvelope
@@ -80,6 +80,15 @@ namespace codingriver.upilot
     }
 
     [Serializable]
+    public class OperationTimingPayload
+    {
+        public long queueMs;
+        public long bridgeMs;
+        public long unityExecutionMs;
+        public long serializationMs;
+    }
+
+    [Serializable]
     public class ResultMessage<TPayload>
     {
         public string id;
@@ -89,6 +98,7 @@ namespace codingriver.upilot
         public long timestamp;
         public string sessionId;
         public string protocolVersion = "1.0";
+        public OperationTimingPayload timing;
     }
 
     [Serializable]
@@ -128,6 +138,7 @@ namespace codingriver.upilot
         public long timestamp;
         public string sessionId;
         public string protocolVersion = "1.0";
+        public OperationTimingPayload timing;
     }
 
     [Serializable]

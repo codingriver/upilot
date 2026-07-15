@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""upilot MCP server launcher used by the Unity Editor."""
+"""UPilot MCP server launcher used by the Unity Editor."""
 
 import os
 import sys

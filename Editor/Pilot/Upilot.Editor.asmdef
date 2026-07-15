@@ -1,6 +1,6 @@
 {
-    "name": "Upilot.Editor",
-    "rootNamespace": "codingriver.upilot",
+    "name": "UPilot.Editor",
+    "rootNamespace": "CodingRiver.UPilot",
     "references": [],
     "includePlatforms": [
         "Editor"

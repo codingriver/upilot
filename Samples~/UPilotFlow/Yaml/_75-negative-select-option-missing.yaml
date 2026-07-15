@@ -1,0 +1,16 @@
+schemaVersion: 2
+name: "_75-negative-select-option-missing"
+description: |
+  Verifies that select_option fails when the choice does not exist.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: select_option with non-existent choice should fail
+    action: select_option
+    selector: "#choice-dropdown"
+    value: "NonExistentChoice"

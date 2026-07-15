@@ -1,0 +1,69 @@
+schemaVersion: 2
+name: "66-advanced-controls-alternative-params"
+description: |
+  Tests alternative parameter names for advanced control actions:
+  select_tree_item by index, select_tab by index, close_tab by index,
+  sort_column by index, resize_column by column name, drag_scroller by ratio.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Select tree item by index instead of id
+    action: select_tree_item
+    selector: "#navigation-tree"
+    index: 1
+
+  - name: Assert tree selection by index
+    action: assert_text
+    selector: "#tree-selection-status"
+    expected: "Tree: Audio"
+
+  - name: Select tab by index instead of label
+    action: select_tab
+    selector: "#settings-tabs"
+    index: 1
+
+  - name: Assert tab selection by index
+    action: assert_text
+    selector: "#tab-selection-status"
+    expected: "Tab: Advanced"
+
+  - name: Close tab by index instead of label
+    action: close_tab
+    selector: "#settings-tabs"
+    index: 2
+
+  - name: Assert tab closed by index
+    action: assert_text
+    selector: "#tab-closed-status"
+    expected: "Closed: About"
+
+  - name: Sort column by index instead of column name
+    action: sort_column
+    selector: "#planet-list"
+    index: 0
+    direction: "descending"
+
+  - name: Assert column sorted by index
+    action: assert_text_contains
+    selector: "#collection-status"
+    expected: "planet:Descending"
+
+  - name: Resize column by column name instead of index
+    action: resize_column
+    selector: "#planet-list"
+    column: "Planet"
+    width: 200
+
+  - name: Drag scroller by ratio instead of direction
+    action: drag_scroller
+    selector: "#standalone-scroller"
+    ratio: 0.5
+
+  - name: Assert scroller status changed
+    action: assert_text_contains
+    selector: "#scroller-status"
+    expected: "Scroller:"

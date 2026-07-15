@@ -1,0 +1,30 @@
+{
+    "name": "UPilot.Flow",
+    "rootNamespace": "CodingRiver.UPilot.Flow",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "Unity.InputSystem",
+        "Unity.InputSystem.TestFramework",
+        "Unity.UI.TestFramework.Runtime",
+        "Unity.UI.TestFramework.Editor",
+        "MonoHook"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll",
+        "YamlDotNet.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_6000_0_OR_NEWER",
+        "UPILOT_ENABLE_FLOW"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

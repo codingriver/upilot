@@ -336,7 +336,7 @@ class WsOrchestratorServer(WsTransport):
         if not self._ws or not self.session_manager.active:
             return
         session_id = self.session_manager.active.session_id
-        if name == "uiflow.results":
+        if name == "upilot_flow.results":
             logger.debug("[%s] >>> %s  cmd=%s", session_id[:12], name, command_id[:16])
         else:
             logger.info("[%s] >>> %s  cmd=%s", session_id[:12], name, command_id[:16])
@@ -541,7 +541,7 @@ class WsOrchestratorServer(WsTransport):
             fut = self._pending.pop(message.id, None)
             if fut and not fut.done():
                 fut.set_result(to_wire(message))
-            if message.name == "uiflow.results":
+            if message.name == "upilot_flow.results":
                 logger.debug(
                     "[%s] <<< %s  type=%s  cmd=%s",
                     message.session_id[:12] if message.session_id else "?",

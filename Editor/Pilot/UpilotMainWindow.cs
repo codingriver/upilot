@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// upilot Editor — simple user-facing entry window.
+// UPilot Editor - simple user-facing entry window.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -7,15 +7,15 @@ using System;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public sealed class UpilotMainWindow : EditorWindow
+    public sealed class UPilotMainWindow : EditorWindow
     {
         private BridgeStatus _bridgeStatus;
         private McpServerStatus _mcpStatus;
         private AgentMcpConfigStatus[] _agentConfigs = Array.Empty<AgentMcpConfigStatus>();
-        private UpilotMainSnapshot _snapshot;
-        private UpilotMainState _lastState;
+        private UPilotMainSnapshot _snapshot;
+        private UPilotMainState _lastState;
         private double _stateChangedAt;
         private double _lastAgentRefresh;
         private double _lastRepaint;
@@ -34,10 +34,10 @@ namespace codingriver.upilot
         private GUIStyle _messageStyle;
         private bool _stylesInitialized;
 
-        [MenuItem("upilot/upilot", false, 200)]
+        [MenuItem("UPilot/UPilot", false, 200)]
         public static void Open()
         {
-            var window = GetWindow<UpilotMainWindow>("upilot");
+            var window = GetWindow<UPilotMainWindow>("UPilot");
             window.minSize = new Vector2(360, 260);
             window.Show();
         }
@@ -112,9 +112,9 @@ namespace codingriver.upilot
 
         private void RefreshSnapshot()
         {
-            _bridgeStatus = UpilotBridge.Instance.GetStatus();
-            _mcpStatus = UpilotMcpServerManager.Instance.GetStatus();
-            var next = UpilotQuickStart.Evaluate(_bridgeStatus, _mcpStatus, _agentConfigs);
+            _bridgeStatus = UPilotBridge.Instance.GetStatus();
+            _mcpStatus = UPilotMcpServerManager.Instance.GetStatus();
+            var next = UPilotQuickStart.Evaluate(_bridgeStatus, _mcpStatus, _agentConfigs);
             if (next.State != _lastState)
             {
                 _lastState = next.State;
@@ -123,14 +123,14 @@ namespace codingriver.upilot
             _snapshot = next;
         }
 
-        private UpilotMainSnapshot GetDisplaySnapshot()
+        private UPilotMainSnapshot GetDisplaySnapshot()
         {
-            if (_snapshot.State != UpilotMainState.Starting ||
+            if (_snapshot.State != UPilotMainState.Starting ||
                 EditorApplication.timeSinceStartup - _stateChangedAt < 8d)
                 return _snapshot;
 
-            return new UpilotMainSnapshot(
-                UpilotMainState.NeedsRepair,
+            return new UPilotMainSnapshot(
+                UPilotMainState.NeedsRepair,
                 "连接没有完成",
                 "可以自动检查并恢复服务连接。",
                 _snapshot.BridgeActive,
@@ -143,7 +143,7 @@ namespace codingriver.upilot
                 return;
 
             _lastAgentRefresh = EditorApplication.timeSinceStartup;
-            _agentConfigs = UpilotAgentSetup.GetMcpConfigStatuses();
+            _agentConfigs = UPilotAgentSetup.GetMcpConfigStatuses();
             if (_selectionInitialized)
                 return;
 
@@ -160,17 +160,17 @@ namespace codingriver.upilot
             foreach (var config in _agentConfigs)
             {
                 if (config.ClientName == clientName &&
-                    (config.IsConfigured || config.HasUpilotEntry))
+                    (config.IsConfigured || config.HasUPilotEntry))
                     return true;
             }
             return false;
         }
 
-        private void DrawHeader(UpilotMainSnapshot snapshot)
+        private void DrawHeader(UPilotMainSnapshot snapshot)
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUILayout.Label("upilot", EditorStyles.boldLabel);
+                GUILayout.Label("UPilot", EditorStyles.boldLabel);
                 GUILayout.FlexibleSpace();
 
                 var previous = GUI.color;
@@ -184,7 +184,7 @@ namespace codingriver.upilot
             }
         }
 
-        private void DrawMainCard(UpilotMainSnapshot snapshot)
+        private void DrawMainCard(UPilotMainSnapshot snapshot)
         {
             using (new EditorGUILayout.VerticalScope(_cardStyle))
             {
@@ -194,14 +194,14 @@ namespace codingriver.upilot
                 EditorGUILayout.LabelField(snapshot.Message, _messageStyle, GUILayout.MinHeight(34));
                 EditorGUILayout.Space(10);
 
-                if (snapshot.State == UpilotMainState.SetupRequired)
+                if (snapshot.State == UPilotMainState.SetupRequired)
                     DrawSetupControls();
-                else if (snapshot.State == UpilotMainState.Stopped)
-                    DrawPrimaryButton("启动 upilot", StartUpilot);
-                else if (snapshot.State == UpilotMainState.Starting)
-                    DrawPrimaryButton("重新连接", RepairUpilot);
-                else if (snapshot.State == UpilotMainState.NeedsRepair)
-                    DrawPrimaryButton("自动修复", RepairUpilot);
+                else if (snapshot.State == UPilotMainState.Stopped)
+                    DrawPrimaryButton("启动 UPilot", StartUPilot);
+                else if (snapshot.State == UPilotMainState.Starting)
+                    DrawPrimaryButton("重新连接", RepairUPilot);
+                else if (snapshot.State == UPilotMainState.NeedsRepair)
+                    DrawPrimaryButton("自动修复", RepairUPilot);
                 else
                     EditorGUILayout.LabelField("无需其他操作", EditorStyles.centeredGreyMiniLabel);
 
@@ -230,23 +230,23 @@ namespace codingriver.upilot
 
         private void ConfigureAndStart()
         {
-            var result = UpilotQuickStart.ConfigureAndStart(_useCodex, _useClaudeCode, _useCursor);
-            Debug.Log("[upilot] Quick setup:\n" + result);
+            var result = UPilotQuickStart.ConfigureAndStart(_useCodex, _useClaudeCode, _useCursor);
+            Debug.Log("[UPilot] Quick setup:\n" + result);
             RefreshAgentConfigs(force: true);
             _stateChangedAt = EditorApplication.timeSinceStartup;
-            ShowNotice("配置完成，upilot 正在启动…");
+            ShowNotice("配置完成，UPilot 正在启动…");
         }
 
-        private void StartUpilot()
+        private void StartUPilot()
         {
-            UpilotQuickStart.Start();
+            UPilotQuickStart.Start();
             _stateChangedAt = EditorApplication.timeSinceStartup;
-            ShowNotice("upilot 正在启动…");
+            ShowNotice("UPilot 正在启动…");
         }
 
-        private void RepairUpilot()
+        private void RepairUPilot()
         {
-            var message = UpilotQuickStart.AutoRepair(_bridgeStatus, _mcpStatus, _agentConfigs);
+            var message = UPilotQuickStart.AutoRepair(_bridgeStatus, _mcpStatus, _agentConfigs);
             RefreshAgentConfigs(force: true);
             _stateChangedAt = EditorApplication.timeSinceStartup;
             ShowNotice(message);
@@ -258,19 +258,19 @@ namespace codingriver.upilot
             {
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("高级设置…", EditorStyles.miniButton, GUILayout.Width(96)))
-                    UpilotStatusWindow.Open();
+                    UPilotStatusWindow.Open();
                 GUILayout.FlexibleSpace();
             }
         }
 
-        private void ShowMoreMenu(UpilotMainSnapshot snapshot)
+        private void ShowMoreMenu(UPilotMainSnapshot snapshot)
         {
             var menu = new GenericMenu();
-            if (UpilotSetupState.IsCompleted)
+            if (UPilotSetupState.IsCompleted)
                 menu.AddItem(new GUIContent("重新启动"), false, () =>
                 {
-                    UpilotQuickStart.Restart();
-                    ShowNotice("upilot 正在重新启动…");
+                    UPilotQuickStart.Restart();
+                    ShowNotice("UPilot 正在重新启动…");
                 });
             else
                 menu.AddDisabledItem(new GUIContent("重新启动"));
@@ -278,14 +278,14 @@ namespace codingriver.upilot
             if (snapshot.AnyServiceActive)
                 menu.AddItem(new GUIContent("停止服务"), false, () =>
                 {
-                    UpilotQuickStart.Stop();
-                    ShowNotice("upilot 已停止", MessageType.Warning);
+                    UPilotQuickStart.Stop();
+                    ShowNotice("UPilot 已停止", MessageType.Warning);
                 });
             else
                 menu.AddDisabledItem(new GUIContent("停止服务"));
 
             menu.AddSeparator("");
-            menu.AddItem(new GUIContent("高级设置"), false, UpilotStatusWindow.Open);
+            menu.AddItem(new GUIContent("高级设置"), false, UPilotStatusWindow.Open);
             menu.ShowAsContext();
         }
 
@@ -307,20 +307,20 @@ namespace codingriver.upilot
             _noticeUntil = EditorApplication.timeSinceStartup + 3.5d;
         }
 
-        private static Color GetStateColor(UpilotMainState state)
+        private static Color GetStateColor(UPilotMainState state)
         {
-            if (state == UpilotMainState.Ready) return Color.green;
-            if (state == UpilotMainState.Starting) return new Color(1f, 0.65f, 0.1f);
-            if (state == UpilotMainState.NeedsRepair) return new Color(1f, 0.35f, 0.2f);
+            if (state == UPilotMainState.Ready) return Color.green;
+            if (state == UPilotMainState.Starting) return new Color(1f, 0.65f, 0.1f);
+            if (state == UPilotMainState.NeedsRepair) return new Color(1f, 0.35f, 0.2f);
             return Color.gray;
         }
 
-        private static string GetStateLabel(UpilotMainState state)
+        private static string GetStateLabel(UPilotMainState state)
         {
-            if (state == UpilotMainState.Ready) return "已就绪";
-            if (state == UpilotMainState.Starting) return "启动中";
-            if (state == UpilotMainState.NeedsRepair) return "需修复";
-            if (state == UpilotMainState.SetupRequired) return "待配置";
+            if (state == UPilotMainState.Ready) return "已就绪";
+            if (state == UPilotMainState.Starting) return "启动中";
+            if (state == UPilotMainState.NeedsRepair) return "需修复";
+            if (state == UPilotMainState.SetupRequired) return "待配置";
             return "已停止";
         }
     }

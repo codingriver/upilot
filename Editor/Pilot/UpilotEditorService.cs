@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── Editor DTOs ─────────────────────────────────────────────────────────
 
@@ -47,11 +47,11 @@ namespace codingriver.upilot
 
     // ── Editor Service ──────────────────────────────────────────────────────
 
-    public sealed class UpilotEditorService
+    public sealed class UPilotEditorService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotEditorService(UpilotBridge bridge)
+        public UPilotEditorService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -190,7 +190,7 @@ namespace codingriver.upilot
                     // LookAt a specific GameObject
                     if (p.lookAtInstanceId != 0)
                     {
-                        var go = UpilotEntityIds.GameObjectFromWireId(p.lookAtInstanceId);
+                        var go = UPilotEntityIds.GameObjectFromWireId(p.lookAtInstanceId);
                         if (go != null)
                         {
                             sv.LookAt(go.transform.position);

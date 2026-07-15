@@ -1,0 +1,26 @@
+schemaVersion: 2
+name: "sample-01-basic-login"
+description: Basic login flow through built-in actions.
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.SampleLoginWindow
+    reopen_if_open: true
+steps:
+  - name: Fill username
+    action: type_text_fast
+    selector: "#username-input"
+    value: "alice"
+  - name: Fill password
+    action: type_text_fast
+    selector: "#password-input"
+    value: "secret"
+  - name: Click login
+    action: click
+    selector: "#login-button"
+  - name: Assert welcome message
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "Welcome alice"
+  - name: Capture result
+    action: screenshot
+    tag: "basic-login"

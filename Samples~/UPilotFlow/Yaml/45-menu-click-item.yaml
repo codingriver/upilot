@@ -1,0 +1,19 @@
+schemaVersion: 2
+name: "45-menu-click-item"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - name: Click ToolbarMenu with menu_item via generic click
+    action: click
+    selector: "#toolbar-menu"
+    menu_item: "Refresh"
+  - name: Assert menu action executed
+    action: assert_text
+    selector: "#toolbar-status"
+    expected: "Toolbar: refresh"
+  - name: Click disabled menu item should not throw but may not update status
+    action: click
+    selector: "#toolbar-menu"
+    menu_item: "Disabled"

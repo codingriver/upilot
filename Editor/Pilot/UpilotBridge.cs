@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -19,7 +19,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using Debug = UnityEngine.Debug;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── Status snapshot returned to the status window ──────────────────────────
     public struct BridgeStatus
@@ -128,7 +128,7 @@ namespace codingriver.upilot
         }
     }
 
-    public sealed class UpilotBridge
+    public sealed class UPilotBridge
     {
         public const string DefaultWsHost   = "127.0.0.1";
         public const int    DefaultWsPort   = 8765;
@@ -167,14 +167,14 @@ namespace codingriver.upilot
         private const string VerboseLogPrefsKey = "upilot.VerboseLogs";
         private const string AutoRestartPrefsKey = "upilot.AutoRestartOnStuck";
 
-        private static readonly Lazy<UpilotBridge> Lazy = new(() => new UpilotBridge());
-        public static UpilotBridge Instance => Lazy.Value;
+        private static readonly Lazy<UPilotBridge> Lazy = new(() => new UPilotBridge());
+        public static UPilotBridge Instance => Lazy.Value;
 
-        private readonly UpilotCompileService  _compileService    = new();
-        private readonly UpilotPlayInputService _playInputService  = new();
-        private readonly UpilotCommandRouter   _router            = new();
+        private readonly UPilotCompileService  _compileService    = new();
+        private readonly UPilotPlayInputService _playInputService  = new();
+        private readonly UPilotCommandRouter   _router            = new();
 
-        public UpilotCompileService CompileService => _compileService;
+        public UPilotCompileService CompileService => _compileService;
         private readonly ConcurrentQueue<Action>   _mainThreadQueue   = new();
         private readonly SemaphoreSlim             _sendLock          = new(1, 1);
         private readonly object                    _logLock           = new();
@@ -182,33 +182,34 @@ namespace codingriver.upilot
         private readonly int                       _mainThreadId;
 
         // Module services (initialized in constructor after Router is available)
-        private UpilotConsoleService    _consoleService;
-        private UpilotGameObjectService _gameObjectService;
-        private UpilotSceneService      _sceneService;
-        private UpilotComponentService  _componentService;
-        private UpilotScreenshotService _screenshotService;
-        private UpilotAssetService      _assetService;
-        private UpilotPrefabService     _prefabService;
-        private UpilotMaterialService   _materialService;
-        private UpilotMenuService       _menuService;
-        private UpilotPackageService    _packageService;
-        private UpilotTestService       _testService;
+        private UPilotConsoleService    _consoleService;
+        private UPilotGameObjectService _gameObjectService;
+        private UPilotSceneService      _sceneService;
+        private UPilotComponentService  _componentService;
+        private UPilotScreenshotService _screenshotService;
+        private UPilotAssetService      _assetService;
+        private UPilotPrefabService     _prefabService;
+        private UPilotMaterialService   _materialService;
+        private UPilotMenuService       _menuService;
+        private UPilotPackageService    _packageService;
+        private UPilotTestService       _testService;
         // P2 services
-        private UpilotScriptService     _scriptService;
-        private UpilotReflectionService _reflectionService;
+        private UPilotScriptService     _scriptService;
+        private UPilotReflectionService _reflectionService;
         private ReflectionEvalService       _reflectionEvalService;
-        private UpilotBatchService      _batchService;
-        private UpilotSelectionService  _selectionService;
-        private UpilotResourceService   _resourceService;
-        private UpilotBuildService      _buildService;
-        private UpilotDragDropService   _dragDropService;
-        private UpilotKeyboardService   _keyboardService;
-        // UIToolkit MCP disabled — UpilotUIToolkitService not registered (restore with RegisterCommands).
-        // private UpilotUIToolkitService  _uiToolkitService;
-        private UpilotEditorService     _editorService;
-        private UpilotWindowService     _windowService;
-        private UpilotEditorDelayService _editorDelayService;
-        private object _uiFlowService;
+        private UPilotBatchService      _batchService;
+        private UPilotSelectionService  _selectionService;
+        private UPilotResourceService   _resourceService;
+        private UPilotBuildService      _buildService;
+        private UPilotDragDropService   _dragDropService;
+        private UPilotKeyboardService   _keyboardService;
+        // UIToolkit MCP disabled — UPilotUIToolkitService not registered (restore with RegisterCommands).
+        // private UPilotUIToolkitService  _uiToolkitService;
+        private UPilotEditorService     _editorService;
+        private UPilotWindowService     _windowService;
+        private UPilotEditorDelayService _editorDelayService;
+        private UPilotOperationService  _operationService;
+        private object _flowService;
 
         private ClientWebSocket      _ws;
         private CancellationTokenSource _cts;
@@ -233,10 +234,10 @@ namespace codingriver.upilot
         private bool                 _verboseLogsEnabled;
         private bool                 _autoRestartOnCriticalStuck;
 
-        private UpilotBridge()
+        private UPilotBridge()
         {
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
-            LoadEndpointFromEditorPrefs();
+            LoadDefaultEndpoints();
             _debugWireLogsEnabled = EditorPrefs.GetBool(DebugLogPrefsKey, false);
             _verboseLogsEnabled = EditorPrefs.GetBool(VerboseLogPrefsKey, false);
             _autoRestartOnCriticalStuck = EditorPrefs.GetBool(AutoRestartPrefsKey, false);
@@ -244,27 +245,15 @@ namespace codingriver.upilot
             RegisterModuleServices();
         }
 
-        private void LoadEndpointFromEditorPrefs()
+        private void LoadDefaultEndpoints()
         {
-            var hKey = WsHostPrefsKey;
-            var pKey = WsPortPrefsKey;
-            var httpKey = HttpPortPrefsKey;
-
-            if (EditorPrefs.HasKey(hKey))
-            {
-                _wsHost = EditorPrefs.GetString(hKey, DefaultWsHost);
-                _wsPort = EditorPrefs.GetInt(pKey, DefaultWsPort);
-                _httpPort = EditorPrefs.GetInt(httpKey, DefaultHttpPort);
-                return;
-            }
-
             _wsHost = DefaultWsHost;
             _wsPort = DefaultWsPort;
             _httpPort = DefaultHttpPort;
         }
 
         /// <summary>The command router. Modules register handlers via Router.Register().</summary>
-        public UpilotCommandRouter Router => _router;
+        public UPilotCommandRouter Router => _router;
 
         /// <summary>The main-thread work queue. Enqueue actions that must run on Unity's main thread.</summary>
         public ConcurrentQueue<Action> MainThreadQueue => _mainThreadQueue;
@@ -280,7 +269,7 @@ namespace codingriver.upilot
             {
                 if (_httpPort == value) return;
                 _httpPort = value > 0 ? value : DefaultHttpPort;
-                EditorPrefs.SetInt(HttpPortPrefsKey, _httpPort);
+                SaveProjectEndpoints();
                 Logger.Log("NETWORK", $"设置HTTP端口: {_httpPort}");
             }
         }
@@ -324,16 +313,32 @@ namespace codingriver.upilot
         }
 
         /// <summary>
-        /// 更新 WebSocket 地址并写入 <see cref="EditorPrefs"/>。
-        /// 键为 <c>upilot.WsHost.{项目路径哈希}</c> / <c>upilot.WsPort.{项目路径哈希}</c>，按工程区分。
+        /// 更新 WebSocket 地址并写入项目级 UPilot 配置。
         /// </summary>
         public void SetWsEndpoint(string host, int port)
         {
             Logger.Log("NETWORK", $"设置WS端点: host={host} port={port}");
             _wsHost = string.IsNullOrWhiteSpace(host) ? DefaultWsHost : host.Trim();
             _wsPort = port > 0 ? port : DefaultWsPort;
-            EditorPrefs.SetString(WsHostPrefsKey, _wsHost);
-            EditorPrefs.SetInt(WsPortPrefsKey, _wsPort);
+            SaveProjectEndpoints();
+        }
+
+        public void ApplyProjectEndpoints(string wsHost, int wsPort, int httpPort)
+        {
+            _wsHost = string.IsNullOrWhiteSpace(wsHost) ? DefaultWsHost : wsHost.Trim();
+            _wsPort = wsPort > 0 ? wsPort : DefaultWsPort;
+            _httpPort = httpPort > 0 ? httpPort : DefaultHttpPort;
+            Logger.Log("NETWORK", $"应用项目配置端点: ws={_wsHost}:{_wsPort} http={_httpPort}");
+        }
+
+        private void SaveProjectEndpoints()
+        {
+            UPilotProjectConfigData config = UPilotProjectConfig.Current;
+            config.mcp ??= new UPilotMcpConfig();
+            config.mcp.wsHost = _wsHost;
+            config.mcp.wsPort = _wsPort;
+            config.mcp.httpPort = _httpPort;
+            UPilotProjectConfig.Save(config);
         }
 
         public string GetServerUrl() => $"ws://{_wsHost}:{_wsPort}";
@@ -392,7 +397,7 @@ namespace codingriver.upilot
 
         public void Restart()
         {
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.bridge.restart", "Bridge重启", "手动触发重启");
             Stop();
             EnsureStarted();
@@ -407,7 +412,7 @@ namespace codingriver.upilot
                 if (IsConnectLoopAlive()) return;
 
                 Logger.LogWarning("SYSTEM", "Bridge marked started but connect loop is not alive; restarting loop.");
-                UpilotOperationTracker.Instance.RecordSystemEvent(
+                UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.loop.recover", "连接循环自愈",
                     $"endpoint={GetServerUrl()} wsState={_ws?.State}");
                 StartConnectLoop();
@@ -429,7 +434,7 @@ namespace codingriver.upilot
             CompilationPipeline.compilationFinished += OnCompilationFinished;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
             AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.bridge.start", "Bridge启动",
                 $"sessionId={_sessionId} endpoint={GetServerUrl()}");
             StartConnectLoop();
@@ -458,7 +463,7 @@ namespace codingriver.upilot
                 _connectFailureStreak = 0;
                 _connectLoopTask = null;
                 ClearMcpServerDisplayState();
-                UpilotOperationTracker.Instance.RecordSystemEvent(
+                UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.stop", "Bridge停止",
                     $"原因=手动停止 连接状态={(wasWsOpen ? "已连接" : "未连接")} 认证状态={(wasAuthenticated ? "已认证" : "未认证")}",
                     "stopped");
@@ -490,7 +495,7 @@ namespace codingriver.upilot
                 if (_started && _connectLoopTask == loopTask && !(_cts?.IsCancellationRequested ?? true))
                 {
                     Logger.LogError("NETWORK", "WS connect loop exited unexpectedly while Bridge is still started.");
-                    UpilotOperationTracker.Instance.RecordSystemEvent(
+                    UPilotOperationTracker.Instance.RecordSystemEvent(
                         "sys.bridge.loop.dead", "连接循环异常退出",
                         $"endpoint={GetServerUrl()} wsState={_ws?.State}",
                         "error");
@@ -504,7 +509,7 @@ namespace codingriver.upilot
             catch (Exception ex)
             {
                 Logger.LogError("NETWORK", $"WS connect loop crashed: {ex}");
-                UpilotOperationTracker.Instance.RecordSystemEvent(
+                UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.loop.crash", "连接循环崩溃",
                     ex.ToString(),
                     "error");
@@ -523,13 +528,13 @@ namespace codingriver.upilot
             while (_mainThreadQueue.TryDequeue(out var action))
             {
                 try { action(); }
-                catch (Exception ex) { Debug.LogError($"[UpilotBridge] main thread error: {ex}"); }
+                catch (Exception ex) { Debug.LogError($"[UPilotBridge] main thread error: {ex}"); }
             }
 
             if (EditorApplication.timeSinceStartup - _lastWatchdogCheck > 2.0)
             {
                 _lastWatchdogCheck = EditorApplication.timeSinceStartup;
-                var tracker = UpilotOperationTracker.Instance;
+                var tracker = UPilotOperationTracker.Instance;
                 var stuckCommands = tracker.RunWatchdog();
                 foreach (var cmd in stuckCommands)
                     Logger.LogWarning("WATCHDOG", $"操作卡住: {cmd}");
@@ -553,7 +558,7 @@ namespace codingriver.upilot
         /// </summary>
         public void EnqueueTracked(string commandId, Action action)
         {
-            var ctx = UpilotOperationTracker.Instance.GetContext(commandId);
+            var ctx = UPilotOperationTracker.Instance.GetContext(commandId);
             ctx?.Step("排队等待主线程");
 
             _mainThreadQueue.Enqueue(() =>
@@ -576,7 +581,7 @@ namespace codingriver.upilot
 
         private async Task ConnectLoopAsync(CancellationToken token)
         {
-            var tracker = UpilotOperationTracker.Instance;
+            var tracker = UPilotOperationTracker.Instance;
             while (!token.IsCancellationRequested)
             {
                 var wasAuthenticated = _isAuthenticated;
@@ -816,7 +821,7 @@ namespace codingriver.upilot
                     {
                         var closeStatus = result.CloseStatus?.ToString() ?? "Unknown";
                         var closeDesc = result.CloseStatusDescription ?? "";
-                        UpilotOperationTracker.Instance.RecordSystemEvent(
+                        UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.ws.close.received", "收到服务端关闭帧",
                             $"CloseStatus={closeStatus} Description={closeDesc}",
                             "disconnected");
@@ -849,7 +854,7 @@ namespace codingriver.upilot
                 {
                     if (!ack.payload.accepted)
                     {
-                        UpilotOperationTracker.Instance.RecordSystemEvent(
+                        UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.auth.rejected", "认证被拒绝",
                             $"sessionId={_sessionId}", "error");
                         try { _ws?.Abort(); } catch { /* ignored */ }
@@ -866,7 +871,7 @@ namespace codingriver.upilot
                 }
 
                 _isAuthenticated = true;
-                UpilotOperationTracker.Instance.RecordSystemEvent(
+                UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.auth.success", "认证成功",
                     $"sessionId={_sessionId} {FormatMcpServerHintForLog()}");
                 _ = SendEditorStateEventAsync(token);
@@ -888,7 +893,7 @@ namespace codingriver.upilot
             }
 
             var id = envelope.id;
-            if (!string.Equals(envelope.name, "uiflow.results", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(envelope.name, "upilot_flow.results", StringComparison.OrdinalIgnoreCase))
             {
                 Logger.Log("COMMAND", $"Received {envelope.name} id={id}");
             }
@@ -928,7 +933,7 @@ namespace codingriver.upilot
 
         private static bool CommandResultAlreadyReported(string commandId)
         {
-            var entries = UpilotOperationTracker.Instance.GetEntriesCopy();
+            var entries = UPilotOperationTracker.Instance.GetEntriesCopy();
             for (int i = entries.Count - 1; i >= 0; i--)
             {
                 if (entries[i].CommandId == commandId)
@@ -953,79 +958,89 @@ namespace codingriver.upilot
 
         private void RegisterModuleServices()
         {
-            _consoleService = new UpilotConsoleService(this);
+            _consoleService = new UPilotConsoleService(this);
             _consoleService.RegisterCommands();
 
-            _gameObjectService = new UpilotGameObjectService(this);
+            _gameObjectService = new UPilotGameObjectService(this);
             _gameObjectService.RegisterCommands();
 
-            _sceneService = new UpilotSceneService(this);
+            _sceneService = new UPilotSceneService(this);
             _sceneService.RegisterCommands();
 
-            _componentService = new UpilotComponentService(this);
+            _componentService = new UPilotComponentService(this);
             _componentService.RegisterCommands();
 
-            _screenshotService = new UpilotScreenshotService(this);
+            _screenshotService = new UPilotScreenshotService(this);
             _screenshotService.RegisterCommands();
 
-            _assetService = new UpilotAssetService(this);
+            _assetService = new UPilotAssetService(this);
             _assetService.RegisterCommands();
 
-            _prefabService = new UpilotPrefabService(this);
+            _prefabService = new UPilotPrefabService(this);
             _prefabService.RegisterCommands();
 
-            _materialService = new UpilotMaterialService(this);
+            _materialService = new UPilotMaterialService(this);
             _materialService.RegisterCommands();
 
-            _menuService = new UpilotMenuService(this);
+            _menuService = new UPilotMenuService(this);
             _menuService.RegisterCommands();
 
-            _packageService = new UpilotPackageService(this);
+            _packageService = new UPilotPackageService(this);
             _packageService.RegisterCommands();
 
-            _testService = new UpilotTestService(this);
+            _testService = new UPilotTestService(this);
             _testService.RegisterCommands();
 
-            _dragDropService = new UpilotDragDropService(this);
+            _dragDropService = new UPilotDragDropService(this);
             _dragDropService.RegisterCommands();
 
-            // _uiToolkitService = new UpilotUIToolkitService(this);
+            // _uiToolkitService = new UPilotUIToolkitService(this);
             // _uiToolkitService.RegisterCommands();
 
-            _keyboardService = new UpilotKeyboardService(this);
+            _keyboardService = new UPilotKeyboardService(this);
             _keyboardService.RegisterCommands();
 
             // P2 services
-            _scriptService = new UpilotScriptService(this);
+            _scriptService = new UPilotScriptService(this);
             _scriptService.RegisterCommands();
-            _reflectionService = new UpilotReflectionService(this);
+            _reflectionService = new UPilotReflectionService(this);
             _reflectionService.RegisterCommands();
             _reflectionEvalService = new ReflectionEvalService(this);
             _reflectionEvalService.RegisterCommands();
-            _batchService = new UpilotBatchService(this);
+            _batchService = new UPilotBatchService(this);
             _batchService.RegisterCommands();
-            _selectionService = new UpilotSelectionService(this);
+            _selectionService = new UPilotSelectionService(this);
             _selectionService.RegisterCommands();
-            _resourceService = new UpilotResourceService(this);
+            _resourceService = new UPilotResourceService(this);
             _resourceService.RegisterCommands();
-            _buildService = new UpilotBuildService(this);
+            _buildService = new UPilotBuildService(this);
             _buildService.RegisterCommands();
 
-            _editorService = new UpilotEditorService(this);
+            _editorService = new UPilotEditorService(this);
             _editorService.RegisterCommands();
 
-            _windowService = new UpilotWindowService(this);
+            _windowService = new UPilotWindowService(this);
             _windowService.RegisterCommands();
 
-            _editorDelayService = new UpilotEditorDelayService(this);
+            _editorDelayService = new UPilotEditorDelayService(this);
             _editorDelayService.RegisterCommands();
 
-            RegisterOptionalUIFlowService();
+            _operationService = new UPilotOperationService(this);
+            _operationService.RegisterCommands();
+
+            RegisterOptionalUPilotFlowService();
         }
 
-        private void RegisterOptionalUIFlowService()
+        private void RegisterOptionalUPilotFlowService()
         {
-            const string typeName = "codingriver.upilot.UpilotUIFlowService, Upilot.UIFlowBridge";
+            if (!UPilotFeatureManager.IsFlowEnabled)
+            {
+                _flowService = null;
+                Logger.Log("UPilot.Flow", $"UPilot Flow disabled: {UPilotFeatureManager.FlowUnavailableReason}");
+                return;
+            }
+
+            const string typeName = "CodingRiver.UPilot.UPilotFlowService, UPilot.FlowBridge";
 
             try
             {
@@ -1040,27 +1055,25 @@ namespace codingriver.upilot
                     }
 
                     registerMethod.Invoke(service, null);
-                    _uiFlowService = service;
-                    Logger.Log("UIFlow", "UIFlow MCP bridge registered.");
+                    _flowService = service;
+                    Logger.Log("UPilot.Flow", "UPilot Flow MCP bridge registered.");
                     return;
                 }
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("UIFlow", $"UIFlow MCP bridge is unavailable: {ex.Message}");
+                Logger.LogWarning("UPilot.Flow", $"UPilot Flow MCP bridge is unavailable: {ex.Message}");
             }
 
-            var unavailableService = new UpilotUIFlowUnavailableService(this);
-            unavailableService.RegisterCommands();
-            _uiFlowService = unavailableService;
-            Logger.Log("UIFlow", "UIFlow MCP bridge disabled; registered unavailable command handlers.");
+            _flowService = null;
+            Logger.Log("UPilot.Flow", "UPilot Flow is disabled; optional MCP commands were not registered.");
         }
 
         // ──────────────────────────────── Command handlers ────────────────────────────────
 
         private async Task HandleCompileRequestAsync(string id, string json, CancellationToken token)
         {
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             var command = JsonUtility.FromJson<CompileRequestMessage>(json);
             var requestId = command?.payload?.requestId ?? string.Empty;
             Logger.Log("COMPILE", $"收到 compile.request: requestId={requestId} id={id}");
@@ -1134,7 +1147,7 @@ namespace codingriver.upilot
         /// </summary>
         private async Task HandleCompileWaitAsync(string id, string json, CancellationToken token)
         {
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             var command = JsonUtility.FromJson<CompileWaitMessage>(json);
             var timeoutMs = command?.payload?.timeoutMs ?? 300000;
             if (timeoutMs < 1000) timeoutMs = 1000;
@@ -1260,7 +1273,7 @@ namespace codingriver.upilot
             var msg = JsonUtility.FromJson<AgentReportErrorMessage>(json);
             var p   = msg?.payload ?? new AgentReportErrorPayload();
 
-            UpilotOperationTracker.Instance.IngestAgentError(
+            UPilotOperationTracker.Instance.IngestAgentError(
                 p.source, p.errorType, p.message, p.relatedCommandId, p.context);
             Logger.LogWarning("AGENT", $"[{p.errorType}] {p.message}");
 
@@ -1286,7 +1299,7 @@ namespace codingriver.upilot
         /// </summary>
         public static void ForceRestartUnityEditor()
         {
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.force.restart", "强制重启Unity",
                 $"project={Application.dataPath} pid={System.Diagnostics.Process.GetCurrentProcess().Id}",
                 "critical");
@@ -1297,7 +1310,7 @@ namespace codingriver.upilot
                 var unityExePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
                 if (string.IsNullOrEmpty(unityExePath))
                 {
-                    Debug.LogError("[Upilot] 无法获取 Unity 编辑器路径，放弃重启");
+                    Debug.LogError("[UPilot] 无法获取 Unity 编辑器路径，放弃重启");
                     return;
                 }
 
@@ -1307,10 +1320,10 @@ namespace codingriver.upilot
                 var restartScript = Path.Combine(Path.GetTempPath(), $"upilot_restart_{pid}.bat");
                 var scriptContent =
                     $"@echo off\r\n" +
-                    $"echo [Upilot] Waiting for Unity (PID {pid}) to exit...\r\n" +
+                    $"echo [UPilot] Waiting for Unity (PID {pid}) to exit...\r\n" +
                     $"taskkill /F /PID {pid} >nul 2>&1\r\n" +
                     $"timeout /t 3 /nobreak >nul\r\n" +
-                    $"echo [Upilot] Restarting Unity project: {projectPath}\r\n" +
+                    $"echo [UPilot] Restarting Unity project: {projectPath}\r\n" +
                     $"\"{unityExePath}\" -projectPath \"{projectPath}\"\r\n" +
                     $"del \"%~f0\"\r\n";
                 File.WriteAllText(restartScript, scriptContent, Encoding.Default);
@@ -1328,10 +1341,10 @@ namespace codingriver.upilot
                 var restartScript = Path.Combine(Path.GetTempPath(), $"upilot_restart_{pid}.sh");
                 var scriptContent =
                     $"#!/bin/bash\n" +
-                    $"echo '[Upilot] Waiting for Unity (PID {pid}) to exit...'\n" +
+                    $"echo '[UPilot] Waiting for Unity (PID {pid}) to exit...'\n" +
                     $"kill -9 {pid} 2>/dev/null\n" +
                     $"sleep 3\n" +
-                    $"echo '[Upilot] Restarting Unity project: {projectPath}'\n" +
+                    $"echo '[UPilot] Restarting Unity project: {projectPath}'\n" +
                     $"\"{unityExePath}\" -projectPath \"{projectPath}\" &\n" +
                     $"rm -f \"$0\"\n";
                 File.WriteAllText(restartScript, scriptContent, Encoding.UTF8);
@@ -1345,11 +1358,11 @@ namespace codingriver.upilot
                 };
                 System.Diagnostics.Process.Start(psi);
 #endif
-                Debug.LogWarning($"[Upilot] 重启脚本已启动，Unity 即将关闭");
+                Debug.LogWarning($"[UPilot] 重启脚本已启动，Unity 即将关闭");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[Upilot] 强制重启失败: {ex.Message}");
+                Debug.LogError($"[UPilot] 强制重启失败: {ex.Message}");
             }
         }
 
@@ -1357,6 +1370,7 @@ namespace codingriver.upilot
 
         public async Task SendResultAsync<TPayload>(string id, string name, TPayload payload, CancellationToken token)
         {
+            var timing = UPilotOperationTracker.Instance.GetTimingSnapshot(id);
             var result = new ResultMessage<TPayload>
             {
                 id = id,
@@ -1364,9 +1378,16 @@ namespace codingriver.upilot
                 payload = payload,
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
+                timing = timing,
             };
-            await SendJsonAsync(JsonUtility.ToJson(result), token);
-            UpilotOperationTracker.Instance.GetContext(id)?.MarkReported(false);
+            var serializeWatch = Stopwatch.StartNew();
+            var json = JsonUtility.ToJson(result);
+            serializeWatch.Stop();
+            timing.serializationMs = serializeWatch.ElapsedMilliseconds;
+            if (timing.serializationMs > 0)
+                json = JsonUtility.ToJson(result);
+            await SendJsonAsync(json, token);
+            UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(false);
         }
 
         public async Task SendEventAsync<TPayload>(string id, string name, TPayload payload, CancellationToken token)
@@ -1386,6 +1407,7 @@ namespace codingriver.upilot
             string commandName = "")
         {
             Logger.LogWarning("NETWORK", $"TX error [{code}] {message}  cmd={commandName} id={id}");
+            var timing = UPilotOperationTracker.Instance.GetTimingSnapshot(id);
             var err = new ErrorMessage
             {
                 id = id,
@@ -1398,9 +1420,16 @@ namespace codingriver.upilot
                 },
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
+                timing = timing,
             };
-            await SendJsonAsync(JsonUtility.ToJson(err), token);
-            UpilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
+            var serializeWatch = Stopwatch.StartNew();
+            var json = JsonUtility.ToJson(err);
+            serializeWatch.Stop();
+            timing.serializationMs = serializeWatch.ElapsedMilliseconds;
+            if (timing.serializationMs > 0)
+                json = JsonUtility.ToJson(err);
+            await SendJsonAsync(json, token);
+            UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
         }
 
         private async Task SendEditorStateEventAsync(CancellationToken token)
@@ -1465,7 +1494,7 @@ namespace codingriver.upilot
                     ignoreEditorCompiling: true);
             }
 
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.playmode.changed", "PlayMode状态变更",
                 $"state={change}");
             if (_cts == null || _cts.IsCancellationRequested) return;
@@ -1491,7 +1520,7 @@ namespace codingriver.upilot
         {
             var focus = GetFocusStateString();
             var isCompiling = CurrentIsCompiling();
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.domain.reload.start", "Domain Reload开始",
                 $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 认证={(_isAuthenticated ? "是" : "否")} 编译={(isCompiling ? "是" : "否")}");
             if (_ws?.State == WebSocketState.Open && _isAuthenticated)
@@ -1530,7 +1559,7 @@ namespace codingriver.upilot
         private void OnAfterAssemblyReload()
         {
             var focus = GetFocusStateString();
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.domain.reload.done", "Domain Reload完成",
                 $"Bridge={(_started ? "运行中" : "已停止")} 焦点={focus}");
 
@@ -1557,7 +1586,7 @@ namespace codingriver.upilot
                 ? _compileService.LastRequestId
                 : $"editor-{_pipelineCompileStartUtcMs}";
             var focus = GetFocusStateString();
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.compile.start", "Unity编译开始",
                 $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 焦点={focus}");
             var tok = _cts?.Token ?? CancellationToken.None;
@@ -1624,7 +1653,7 @@ namespace codingriver.upilot
             var duration = now - _pipelineCompileStartUtcMs;
             if (duration < 0) duration = 0;
             var focus = GetFocusStateString();
-            UpilotOperationTracker.Instance.RecordSystemEvent(
+            UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.compile.done", "Unity编译完成",
                 $"耗时={duration}ms errors={_compileService.LastErrorCount} ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 焦点={focus}");
             var tok = _cts?.Token ?? CancellationToken.None;
@@ -1751,9 +1780,9 @@ namespace codingriver.upilot
             var type = string.IsNullOrEmpty(envelope.type) ? "(unknown)" : envelope.type;
             if (type == "heartbeat" ||
                 string.Equals(envelope.name, "session.heartbeat", StringComparison.OrdinalIgnoreCase)) return;
-            if (string.Equals(envelope.name, "uiflow.results", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.Equals(envelope.name, "upilot_flow.results", StringComparison.OrdinalIgnoreCase)) return;
 
-            var payload = Logger.TruncatePayload(UpilotWireJson.StripEnvelopeForDisplay(json));
+            var payload = Logger.TruncatePayload(UPilotWireJson.StripEnvelopeForDisplay(json));
             Logger.LogNetwork("NETWORK",
                 $"sessionId={envelope.sessionId} | name={envelope.name} | type={envelope.type} | id={envelope.id} | {payload}",
                 isSend: false);
@@ -1766,9 +1795,9 @@ namespace codingriver.upilot
             if (envelope == null) return;
             var type = string.IsNullOrEmpty(envelope.type) ? "(unknown)" : envelope.type;
             if (type == "heartbeat") return;
-            if (string.Equals(envelope.name, "uiflow.results", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.Equals(envelope.name, "upilot_flow.results", StringComparison.OrdinalIgnoreCase)) return;
 
-            var payload = Logger.TruncatePayload(UpilotWireJson.StripEnvelopeForDisplay(json));
+            var payload = Logger.TruncatePayload(UPilotWireJson.StripEnvelopeForDisplay(json));
             Logger.LogNetwork("NETWORK",
                 $"sessionId={envelope.sessionId} | name={envelope.name} | type={envelope.type} | id={envelope.id} | {payload}",
                 isSend: true);

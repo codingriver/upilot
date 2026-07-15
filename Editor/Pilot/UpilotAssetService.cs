@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -73,11 +73,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotAssetService
+    public class UPilotAssetService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotAssetService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotAssetService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -404,14 +404,14 @@ namespace codingriver.upilot
                     SerializedObject so;
                     if (p.gameObjectId != 0)
                     {
-                        var go = UpilotEntityIds.GameObjectFromWireId(p.gameObjectId);
+                        var go = UPilotEntityIds.GameObjectFromWireId(p.gameObjectId);
                         if (go == null)
                             throw new Exception($"GameObject not found: {p.gameObjectId}");
 
                         if (string.IsNullOrEmpty(p.componentType))
                             throw new Exception("componentType is required when gameObjectId is provided.");
 
-                        var comp = UpilotComponentService.FindComponentByTypeAndIndex(go, p.componentType, p.componentIndex);
+                        var comp = UPilotComponentService.FindComponentByTypeAndIndex(go, p.componentType, p.componentIndex);
                         if (comp == null)
                             throw new Exception($"Component not found: {p.componentType}[{p.componentIndex}]");
 
@@ -487,14 +487,14 @@ namespace codingriver.upilot
                     SerializedObject so;
                     if (p.gameObjectId != 0)
                     {
-                        var go = UpilotEntityIds.GameObjectFromWireId(p.gameObjectId);
+                        var go = UPilotEntityIds.GameObjectFromWireId(p.gameObjectId);
                         if (go == null)
                             throw new Exception($"GameObject not found: {p.gameObjectId}");
 
                         if (string.IsNullOrEmpty(p.componentType))
                             throw new Exception("componentType is required when gameObjectId is provided.");
 
-                        var comp = UpilotComponentService.FindComponentByTypeAndIndex(go, p.componentType, p.componentIndex);
+                        var comp = UPilotComponentService.FindComponentByTypeAndIndex(go, p.componentType, p.componentIndex);
                         if (comp == null)
                             throw new Exception($"Component not found: {p.componentType}[{p.componentIndex}]");
 

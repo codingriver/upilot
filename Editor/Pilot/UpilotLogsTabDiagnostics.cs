@@ -1,17 +1,17 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using System;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     /// <summary>
     /// 供 MCP resource 读取：诊断日志标签页的最近一次布局参数（主线程写入）。
     /// </summary>
-    public static class UpilotLogsTabDiagnostics
+    public static class UPilotLogsTabDiagnostics
     {
         public static bool   SnapshotValid;
         public static int    ActiveTab;

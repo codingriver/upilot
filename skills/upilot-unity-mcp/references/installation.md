@@ -1,70 +1,18 @@
 # Installation
 
-Use this when a user asks an agent to install upilot into a Unity project.
+1. Verify the Unity project root contains `Packages/manifest.json`.
+2. Add `io.github.codingriver.upilot` at tag `v0.2.0`.
+3. Install the Python package from `upilotserver~`.
+4. Install the repository skill into `.agents/skills/upilot-unity-mcp`.
+5. Configure one MCP service named `upilot` at `http://127.0.0.1:8011/mcp`.
+6. Open Unity and verify project identity with `unity_mcp_status`.
 
-## Recommended Agent Flow
-
-1. Identify the Unity project root. It must contain `Packages/manifest.json`.
-2. Clone upilot if the repository is not already present locally.
-3. Add `io.github.codingriver.upilot` to the Unity project's `Packages/manifest.json`.
-4. Create a Python virtual environment for `upilotserver~`.
-5. Install the Python MCP server in editable mode.
-6. Install the skill into the Unity project at `.agents/skills/upilot-unity-mcp`.
-7. Ask the user to open Unity, then use `unity_mcp_status` after the MCP server is configured and running.
-
-## Scripted Install
-
-Run from a cloned upilot repository:
+Automated install:
 
 ```bash
 python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT>
 ```
 
-To clone upilot first:
+The core install keeps optional features disabled. When the user explicitly requests UPilot Flow, read `flow.md` before changing packages or scripting defines.
 
-```bash
-python install_upilot.py --clone-to <TOOLS_DIR>/upilot --unity-project <UNITY_PROJECT_ROOT>
-```
-
-To install UIFlow dependencies too:
-
-```bash
-python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT> --enable-uiflow
-```
-
-To configure project-scoped Codex MCP after creating the Python environment:
-
-```bash
-python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT> --write-codex-mcp project
-```
-
-## What The Script Changes
-
-- Unity project `Packages/manifest.json`
-- Unity project `.agents/skills/upilot-unity-mcp`
-- upilot Python venv under `upilotserver~/.venv` unless `--venv` is passed
-- optional project or user Codex config when `--write-codex-mcp` is used
-
-## UPM First Import Behavior
-
-When the UPM package is first imported in Unity, its editor bootstrap creates missing project-level agent discovery files:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `.cursor/rules/upilot-unity-mcp.mdc`
-- `.agents/skills/upilot-unity-mcp`
-
-It does not silently write MCP client configuration for Codex, Claude, or Cursor. Users can create those explicit project-level client configs from `upilot/upilot` under the MCP server tab, or from the `upilot/Agent Setup` menu.
-
-## Defaults
-
-- UPM package: `io.github.codingriver.upilot`
-- UPM source: `https://github.com/codingriver/upilot.git#v0.1.1`
-- Python install: editable install from `upilotserver~`
-- UIFlow package defaults come from this repository's validated test project and can be overridden with `--upm-dep name=version`.
-
-## When To Stop
-
-Stop and ask the user before overwriting an existing skill install unless `--force` is explicitly requested.
-
-Stop if the Unity project root cannot be verified by `Packages/manifest.json`.
+Do not overwrite an existing skill or MCP registration without checking its current content.

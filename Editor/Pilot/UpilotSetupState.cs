@@ -5,11 +5,11 @@
 
 using UnityEditor;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public static class UpilotSetupState
+    public static class UPilotSetupState
     {
-        private static string SetupCompletedKey => $"upilot.SetupCompleted.{UpilotBridge.WsEndpointEditorPrefsKeySuffix}";
+        private static string SetupCompletedKey => $"upilot.SetupCompleted.{UPilotBridge.WsEndpointEditorPrefsKeySuffix}";
 
         public static bool IsCompleted => EditorPrefs.GetBool(SetupCompletedKey, false);
 
@@ -20,21 +20,21 @@ namespace codingriver.upilot
 
         public static void OpenFirstSetup()
         {
-            UpilotMainWindow.Open();
+            UPilotMainWindow.Open();
         }
 
-        [MenuItem("upilot/Advanced/Reset Setup State", false, 251)]
+        [MenuItem("UPilot/Advanced/Reset Setup State", false, 251)]
         public static void ResetSetupState()
         {
             if (!EditorUtility.DisplayDialog(
-                    "Reset upilot setup?",
+                    "Reset UPilot setup?",
                     "This only resets the first-run setup marker for the current Unity project. Existing ports and config files are not deleted.",
                     "Reset",
                     "Cancel"))
                 return;
 
             EditorPrefs.DeleteKey(SetupCompletedKey);
-            UpilotMainWindow.Open();
+            UPilotMainWindow.Open();
         }
     }
 }

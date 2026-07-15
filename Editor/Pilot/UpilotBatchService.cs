@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -59,16 +59,16 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotBatchService
+    public class UPilotBatchService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
         private readonly ConcurrentDictionary<string, BatchExecuteResultPayload> _batches = new();
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _batchCts = new();
 
         private const int MaxOperations  = 100;
         private const int TotalTimeoutMs = 60000;
 
-        public UpilotBatchService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotBatchService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -96,7 +96,7 @@ namespace codingriver.upilot
                 return;
             }
 
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             string batchId = Guid.NewGuid().ToString("N").Substring(0, 12);
             var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
             cts.CancelAfter(TotalTimeoutMs);

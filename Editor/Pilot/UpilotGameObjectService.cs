@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── M08 GameObject DTOs ─────────────────────────────────────────────────
 
@@ -172,11 +172,11 @@ namespace codingriver.upilot
 
     // ── M08 GameObject Service ──────────────────────────────────────────────
 
-    public sealed class UpilotGameObjectService
+    public sealed class UPilotGameObjectService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotGameObjectService(UpilotBridge bridge)
+        public UPilotGameObjectService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -541,7 +541,7 @@ namespace codingriver.upilot
 
         public static GameObject FindByInstanceId(ulong instanceId)
         {
-            return UpilotEntityIds.GameObjectFromWireId(instanceId);
+            return UPilotEntityIds.GameObjectFromWireId(instanceId);
         }
 
         public static GameObjectInfoPayload BuildInfo(GameObject go)
@@ -549,13 +549,13 @@ namespace codingriver.upilot
             var t = go.transform;
             return new GameObjectInfoPayload
             {
-                instanceId = UpilotEntityIds.ToWireId(go),
+                instanceId = UPilotEntityIds.ToWireId(go),
                 name = go.name,
                 tag = go.tag,
                 layer = go.layer,
                 activeSelf = go.activeSelf,
                 isStatic = go.isStatic,
-                parentId = t.parent != null ? UpilotEntityIds.ToWireId(t.parent.gameObject) : 0,
+                parentId = t.parent != null ? UPilotEntityIds.ToWireId(t.parent.gameObject) : 0,
                 transform = new TransformPayload
                 {
                     position = new Vec3Payload { x = t.localPosition.x, y = t.localPosition.y, z = t.localPosition.z },

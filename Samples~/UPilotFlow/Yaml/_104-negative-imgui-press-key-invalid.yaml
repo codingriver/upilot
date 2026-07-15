@@ -1,0 +1,11 @@
+schemaVersion: 2
+name: "_104-negative-imgui-press-key-invalid"
+description: Expects failure when imgui_press_key key parameter is invalid.
+fixture:
+  host_window:
+    type: ImguiExampleWindow
+    reopen_if_open: true
+steps:
+  - action: imgui_press_key
+    selector: 'gui(textfield, control_name="project-name-field")'
+    key: "NotARealKey"

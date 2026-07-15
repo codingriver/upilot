@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ namespace codingriver.upilot
     [Serializable]
     public class EditorWindowScreenshotPayload
     {
-        public string windowTitle = "upilot";
+        public string windowTitle = "UPilot";
     }
 
     [Serializable]
@@ -104,11 +104,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotScreenshotService
+    public class UPilotScreenshotService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotScreenshotService(UpilotBridge bridge)
+        public UPilotScreenshotService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -127,14 +127,14 @@ namespace codingriver.upilot
         private async Task HandleEditorWindowAsync(string id, string json, CancellationToken token)
         {
             var msg = JsonUtility.FromJson<EditorWindowScreenshotMessage>(json);
-            var title = msg?.payload?.windowTitle ?? "upilot";
+            var title = msg?.payload?.windowTitle ?? "UPilot";
 
             var tcs = new TaskCompletionSource<string>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    string base64 = UpilotWindowDiagnostics.CaptureEditorWindowBase64(title);
+                    string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(title);
                     tcs.SetResult(base64);
                 }
                 catch (Exception ex)
@@ -590,7 +590,7 @@ namespace codingriver.upilot
         {
             if (source == "editorWindow")
             {
-                string base64 = UpilotWindowDiagnostics.CaptureEditorWindowBase64(windowTitle);
+                string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(windowTitle);
                 if (string.IsNullOrEmpty(base64))
                 {
                     return null;

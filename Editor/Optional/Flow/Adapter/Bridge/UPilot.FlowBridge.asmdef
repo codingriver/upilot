@@ -1,0 +1,22 @@
+{
+    "name": "UPilot.FlowBridge",
+    "rootNamespace": "CodingRiver.UPilot",
+    "references": [
+        "UPilot.Editor",
+        "UPilot.Flow"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "UNITY_6000_0_OR_NEWER",
+        "UPILOT_ENABLE_FLOW"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

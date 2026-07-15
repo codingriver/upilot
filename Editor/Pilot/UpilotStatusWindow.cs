@@ -11,9 +11,9 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public class UpilotStatusWindow : EditorWindow
+    public class UPilotStatusWindow : EditorWindow
     {
         // ── Volatile state written by background threads ───────────────────────
         private volatile string _diagResult  = "";
@@ -64,6 +64,9 @@ namespace codingriver.upilot
         private bool _showEndpointSettings;
         private bool _showConnectionDetails;
         private bool _showDangerousDiagnostics;
+        private bool _showProcessSettings;
+        private bool _showAgentOtherActions;
+        private bool _showDiagnosticDetails;
         private double _lastAgentConfigRefresh;
 
         // ── Styles (lazy-init on main thread) ─────────────────────────────────
@@ -79,39 +82,39 @@ namespace codingriver.upilot
         private GUIStyle _styleLogCard;
         private bool     _stylesInit;
 
-        [MenuItem("upilot/Advanced Settings", false, 210)]
+        [MenuItem("UPilot/Advanced Settings", false, 210)]
         public static void Open()
         {
-            var win = GetWindow<UpilotStatusWindow>("upilot Advanced");
-            win.minSize = new Vector2(400, 540);
+            var win = GetWindow<UPilotStatusWindow>("UPilot 高级设置");
+            win.minSize = new Vector2(500, 540);
             win.Show();
         }
 
         private void OnEnable()
         {
-            var bridge = UpilotBridge.Instance;
+            var bridge = UPilotBridge.Instance;
             _wsHostInput = bridge.WsHost;
             _wsPortInput = bridge.WsPort;
             _httpPortInput = bridge.HttpPort;
             EditorApplication.update += OnEditorUpdate;
 
             // Validate MCP server path once when the window is opened.
-            UpilotMcpServerManager.Instance.ValidateAndAutoFixPath();
+            UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
         }
 
         private void OnDisable()
         {
             EditorApplication.update -= OnEditorUpdate;
             PersistEndpointInputsIfIdle();
-            UpilotWindowDiagnostics.OnWindowClosed();
+            UPilotWindowDiagnostics.OnWindowClosed();
         }
 
         /// <summary>
-        /// 将 IP/端口写入 <see cref="UpilotBridge"/>（内部使用 EditorPrefs），Bridge 未运行时关闭窗口也会保存。
+        /// 将 IP/端口写入 <see cref="UPilotBridge"/>（内部使用 EditorPrefs），Bridge 未运行时关闭窗口也会保存。
         /// </summary>
         private void PersistEndpointInputsIfIdle()
         {
-            var bridge = UpilotBridge.Instance;
+            var bridge = UPilotBridge.Instance;
             if (bridge.GetStatus().IsStarted)
                 return;
 
@@ -186,17 +189,17 @@ namespace codingriver.upilot
         {
             InitStyles();
 
-            var bridge = UpilotBridge.Instance;
+            var bridge = UPilotBridge.Instance;
 
             if (Event.current.type == EventType.Layout || _guiLogsSnapshot.Count == 0)
             {
                 _guiStatusSnapshot       = bridge.GetStatus();
-                _guiMcpStatusSnapshot    = UpilotMcpServerManager.Instance.GetStatus();
+                _guiMcpStatusSnapshot    = UPilotMcpServerManager.Instance.GetStatus();
                 _guiLogsSnapshot         = bridge.GetLogsCopy();
                 _guiDiagResultSnapshot   = _diagResult;
                 _guiDiagRunningSnapshot  = _diagRunning;
                 _guiDiagResultAtMsSnapshot = _diagResultAtMs;
-                _guiOpLogsSnapshot       = UpilotOperationTracker.Instance.GetEntriesCopy();
+                _guiOpLogsSnapshot       = UPilotOperationTracker.Instance.GetEntriesCopy();
 
                 if (_guiAgentConfigSnapshot.Length == 0 ||
                     EditorApplication.timeSinceStartup - _lastAgentConfigRefresh > 2d)
@@ -205,8 +208,8 @@ namespace codingriver.upilot
                 }
             }
 
-            UpilotWindowDiagnostics.RecordWindow(position.width, position.height, 0);
-            UpilotLogsTabDiagnostics.ClearNotOnLogsTab();
+            UPilotWindowDiagnostics.RecordWindow(position.width, position.height, 0);
+            UPilotLogsTabDiagnostics.ClearNotOnLogsTab();
 
             _mainScroll.x = 0f;
             var mainContentWidth = Mathf.Max(280f, position.width - 20f);
@@ -221,7 +224,7 @@ namespace codingriver.upilot
             {
                 using (new EditorGUILayout.VerticalScope(GUILayout.Width(mainContentWidth)))
                 {
-                    DrawTopStatusOverview(bridge, _guiStatusSnapshot, _guiMcpStatusSnapshot);
+                    DrawTopStatusOverview(_guiStatusSnapshot, _guiMcpStatusSnapshot);
                     DrawToastIfAny();
 
                     EditorGUILayout.Space(4);
@@ -241,25 +244,29 @@ namespace codingriver.upilot
         }
 
         private void DrawRuntimeTab(
-            UpilotBridge bridge,
+            UPilotBridge bridge,
             BridgeStatus status,
             McpServerStatus mcpStatus,
             string diagResult,
             bool diagRunning,
             long diagResultAtMs)
         {
-            string[] tabs = new[] { "服务", "Agent", "日志与诊断" };
+            string[] tabs = new[] { "常规", "Agent", "诊断" };
             _activeTab = GUILayout.Toolbar(_activeTab, tabs);
 
             EditorGUILayout.Space(4);
 
             if (_activeTab == 0)
             {
-                DrawEnableSection(bridge, status);
+                DrawServiceSection(bridge, status, mcpStatus);
+                EditorGUILayout.Space(6);
+                DrawIssueGuidanceSection(bridge, status, mcpStatus);
+                EditorGUILayout.Space(6);
+                DrawLogOptionsSection(bridge);
                 EditorGUILayout.Space(6);
                 DrawSharedEndpointSection(bridge, status);
                 EditorGUILayout.Space(6);
-                DrawMcpServerSection(status, mcpStatus);
+                DrawProcessSettingsSection(mcpStatus);
             }
             else if (_activeTab == 1)
             {
@@ -275,7 +282,7 @@ namespace codingriver.upilot
             }
         }
 
-        private void DrawLogsTab(UpilotBridge bridge, List<BridgeLogEntry> logs)
+        private void DrawLogsTab(UPilotBridge bridge, List<BridgeLogEntry> logs)
         {
             var tabMaxW = Mathf.Max(100f, position.width);
             using (new EditorGUILayout.VerticalScope(_styleBox, GUILayout.MaxWidth(tabMaxW)))
@@ -331,8 +338,8 @@ namespace codingriver.upilot
                 if (_autoScroll && logs.Count > 0)
                     _logScroll = new Vector2(0, float.MaxValue);
 
-                UpilotLogsTabDiagnostics.RecordLogsTab(position.width, scrollViewportW, labelMaxW, _logScroll);
-                UpilotWindowDiagnostics.RecordSection("logScroll", labelMaxW, scrollViewportW);
+                UPilotLogsTabDiagnostics.RecordLogsTab(position.width, scrollViewportW, labelMaxW, _logScroll);
+                UPilotWindowDiagnostics.RecordSection("logScroll", labelMaxW, scrollViewportW);
             }
         }
 
@@ -381,7 +388,7 @@ namespace codingriver.upilot
 
         private void DrawOperationLogToolbar(List<OperationLogEntry> entries)
         {
-            var tracker = UpilotOperationTracker.Instance;
+            var tracker = UPilotOperationTracker.Instance;
 
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -434,7 +441,7 @@ namespace codingriver.upilot
             EditorGUILayout.Space(2);
             using (new EditorGUILayout.HorizontalScope())
             {
-                var bridge = UpilotBridge.Instance;
+                var bridge = UPilotBridge.Instance;
                 var autoRestart = bridge.AutoRestartOnCriticalStuck;
                 var newAutoRestart = GUILayout.Toggle(autoRestart, "临界超时自动重启", EditorStyles.miniButton, GUILayout.Width(110));
                 if (newAutoRestart != autoRestart)
@@ -448,7 +455,7 @@ namespace codingriver.upilot
                 {
                     if (EditorUtility.DisplayDialog("确认操作", "确定要强制关闭并重启当前 Unity 项目吗？\n未保存的更改将丢失！", "确定", "取消"))
                     {
-                        UpilotBridge.ForceRestartUnityEditor();
+                        UPilotBridge.ForceRestartUnityEditor();
                     }
                 }
                 GUI.color = prevColor;
@@ -582,13 +589,12 @@ namespace codingriver.upilot
             if (!entry.WireIsRaw)
                 return line1 + Environment.NewLine + entry.WireDetail;
 
-            var body = UpilotWireJson.StripEnvelopeForDisplay(entry.WireDetail);
+            var body = UPilotWireJson.StripEnvelopeForDisplay(entry.WireDetail);
             return line1 + Environment.NewLine + body;
         }
 
-        private void DrawTopStatusOverview(UpilotBridge bridge, BridgeStatus status, McpServerStatus mcpStatus)
+        private void DrawTopStatusOverview(BridgeStatus status, McpServerStatus mcpStatus)
         {
-            var mcpMgr = UpilotMcpServerManager.Instance;
             var mcpHealthy = mcpStatus.IsRunning && mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
             var isReady = mcpHealthy && status.IsWsOpen && status.IsAuthenticated;
             var isActive = mcpStatus.IsRunning || status.IsStarted;
@@ -597,61 +603,32 @@ namespace codingriver.upilot
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    EditorGUILayout.LabelField("upilot", EditorStyles.boldLabel);
-                    GUILayout.FlexibleSpace();
-
                     var dotColor = isReady ? Color.green : isActive ? new Color(1f, 0.6f, 0f) : Color.gray;
                     var prev = GUI.color;
                     GUI.color = dotColor;
                     GUILayout.Label("●", GUILayout.Width(18));
                     GUI.color = prev;
-                    GUILayout.Label(isReady ? "已就绪" : isActive ? "正在连接" : "已停止", GUILayout.Width(64));
-                }
 
-                EditorGUILayout.LabelField("Agent 客户端  ↔  MCP 服务  ↔  Unity 编辑器", EditorStyles.centeredGreyMiniLabel);
-                EditorGUILayout.Space(4);
+                    var stateText = isReady
+                        ? "已就绪"
+                        : isActive
+                            ? "正在连接"
+                            : "已停止";
+                    var unityText = status.IsAuthenticated ? "Unity 已连接" : status.IsWsOpen ? "Unity 待认证" : "Unity 未连接";
+                    var mcpText = mcpHealthy ? "MCP 正常" : mcpStatus.IsRunning ? "MCP 异常" : "MCP 已停止";
 
-                if (!isActive)
-                {
-                    if (GUILayout.Button("启动 upilot", GUILayout.Height(28)))
+                    EditorGUILayout.LabelField(
+                        $"{stateText} · {unityText} · {mcpText}",
+                        EditorStyles.miniBoldLabel);
+                    GUILayout.FlexibleSpace();
+
+                    if (GUILayout.Button("刷新", EditorStyles.miniButton, GUILayout.Width(48)))
                     {
-                        bridge.EnsureStarted();
-                        mcpMgr.StartServer();
-                        ShowToast("upilot 启动中…");
+                        UPilotMcpServerManager.Instance.InvalidateStatusCache();
+                        RefreshAgentConfigSnapshot();
+                        ShowToast("状态已刷新");
                     }
                 }
-                else
-                {
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        if (!isReady && GUILayout.Button("重新连接", GUILayout.Height(26)))
-                        {
-                            bridge.Restart();
-                            if (!mcpStatus.IsRunning)
-                                mcpMgr.StartServer();
-                            ShowToast("正在重新连接…");
-                        }
-
-                        if (GUILayout.Button("检查状态", GUILayout.Height(26)))
-                        {
-                            ShowToast(isReady ? "upilot 已就绪" : "服务正在启动或等待连接");
-                        }
-
-                        using (new EditorGUI.DisabledScope(status.IsCompiling && mcpStatus.IsRunning))
-                        {
-                            if (GUILayout.Button("停止", GUILayout.Width(72), GUILayout.Height(26)))
-                            {
-                                bridge.Stop();
-                                if (mcpStatus.IsRunning)
-                                    mcpMgr.StopServer();
-                                ShowToast("upilot 已停止", MessageType.Warning);
-                            }
-                        }
-                    }
-                }
-
-                EditorGUILayout.Space(4);
-                DrawResponsiveStatusGrid(status, mcpStatus);
             }
         }
 
@@ -710,17 +687,17 @@ namespace codingriver.upilot
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
                 EditorGUILayout.LabelField("快速开始", EditorStyles.boldLabel);
-                DrawSetupStep("1", "首次设置", UpilotSetupState.IsCompleted, UpilotSetupState.IsCompleted ? "已完成" : "需要设置端口和 Agent");
+                DrawSetupStep("1", "首次设置", UPilotSetupState.IsCompleted, UPilotSetupState.IsCompleted ? "已完成" : "需要设置端口和 Agent");
                 DrawSetupStep("2", "MCP 服务", mcpHealthy, mcpHealthy ? "运行中" : mcpStatus.IsRunning ? "监听异常" : "尚未启动");
                 DrawSetupStep("3", "Unity 桥接器", status.IsAuthenticated, status.IsAuthenticated ? "已连接并认证" : status.IsStarted ? "等待连接" : "尚未启动");
                 DrawSetupStep("4", "Agent 配置", configuredCount > 0, configuredCount > 0 ? $"{configuredCount}/3 已配置" : "尚未写入客户端配置");
                 DrawSetupStep("5", "Agent 连接", mcpStatus.HttpClientCount > 0, mcpStatus.HttpClientCount > 0 ? $"已连接 {mcpStatus.HttpClientCount} 个" : "等待 Agent 客户端连接");
 
                 EditorGUILayout.Space(4);
-                if (!UpilotSetupState.IsCompleted)
+                if (!UPilotSetupState.IsCompleted)
                 {
                     if (GUILayout.Button("打开首次设置向导", GUILayout.Height(24)))
-                        UpilotFirstSetupWindow.Open();
+                        UPilotFirstSetupWindow.Open();
                 }
                 else
                 {
@@ -750,15 +727,15 @@ namespace codingriver.upilot
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    DrawAgentConfigButton("Codex", () => UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("Claude", () => UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Claude", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    DrawAgentConfigButton("Cursor", () => UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
                     if (GUILayout.Button("写入规则", GUILayout.Height(22)))
                     {
-                        Debug.Log("[upilot] Agent rules:\n" + UpilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+                        Debug.Log("[UPilot] Agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
                         ShowToast("Agent 规则已检查/写入");
                     }
                 }
@@ -767,12 +744,12 @@ namespace codingriver.upilot
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    DrawAgentConfigButton("Codex", () => UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("Claude", () => UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("Cursor", () => UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Claude", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
                     if (GUILayout.Button("写入规则", GUILayout.Height(22)))
                     {
-                        Debug.Log("[upilot] Agent rules:\n" + UpilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+                        Debug.Log("[UPilot] Agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
                         ShowToast("Agent 规则已检查/写入");
                     }
                 }
@@ -801,16 +778,16 @@ namespace codingriver.upilot
 
         private void RefreshAgentConfigSnapshot()
         {
-            _guiAgentConfigSnapshot = UpilotAgentSetup.GetMcpConfigStatuses();
+            _guiAgentConfigSnapshot = UPilotAgentSetup.GetMcpConfigStatuses();
             _lastAgentConfigRefresh = EditorApplication.timeSinceStartup;
         }
 
         private void DrawIssueGuidanceSection(
-            UpilotBridge bridge,
+            UPilotBridge bridge,
             BridgeStatus status,
             McpServerStatus mcpStatus)
         {
-            var manager = UpilotMcpServerManager.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             var pythonEntryValid = manager.IsPythonEntryValid(out var pythonEntryPath);
             var partialListeners = mcpStatus.IsRunning &&
                                    (!mcpStatus.HttpPortListening || !mcpStatus.WsPortListening);
@@ -842,7 +819,7 @@ namespace codingriver.upilot
                     issueCount++;
                     DrawGuidanceItem(
                         "端口可能被其他进程占用",
-                        $"HTTP {manager.HttpPort} 或 WS {manager.WsPort} 已监听，但没有识别到 upilot MCP 进程。",
+                        $"HTTP {manager.HttpPort} 或 WS {manager.WsPort} 已监听，但没有识别到 UPilot MCP 进程。",
                         "切换空闲端口并重启",
                         () => RepairPortsAndRestart(bridge, mcpStatus));
                 }
@@ -911,7 +888,7 @@ namespace codingriver.upilot
 
         private void RepairPythonEntry()
         {
-            var manager = UpilotMcpServerManager.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
             if (!manager.IsPythonEntryValid(out _))
             {
@@ -927,15 +904,15 @@ namespace codingriver.upilot
                 4d);
         }
 
-        private void RepairPortsAndRestart(UpilotBridge bridge, McpServerStatus mcpStatus)
+        private void RepairPortsAndRestart(UPilotBridge bridge, McpServerStatus mcpStatus)
         {
-            var manager = UpilotMcpServerManager.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             if (mcpStatus.ProcessId.HasValue)
                 manager.StopServer();
             bridge.Stop();
 
-            var pair = UpilotPortAllocator.FindAvailablePair(_wsPortInput, _httpPortInput);
-            _wsHostInput = UpilotBridge.DefaultWsHost;
+            var pair = UPilotPortAllocator.FindAvailablePair(_wsPortInput, _httpPortInput);
+            _wsHostInput = UPilotBridge.DefaultWsHost;
             _wsPortInput = pair.wsPort;
             _httpPortInput = pair.httpPort;
             bridge.SetWsEndpoint(_wsHostInput, _wsPortInput);
@@ -988,73 +965,103 @@ namespace codingriver.upilot
             _toastExpireAt = EditorApplication.timeSinceStartup + seconds;
         }
 
-        // ── Enable / Disable ──────────────────────────────────────────────────
-
-        private void DrawEnableSection(UpilotBridge bridge, BridgeStatus status)
+        private void DrawServiceSection(UPilotBridge bridge, BridgeStatus status, McpServerStatus mcpStatus)
         {
+            var manager = UPilotMcpServerManager.Instance;
+            var mcpHealthy = mcpStatus.IsRunning && mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
+            var ready = mcpHealthy && status.IsWsOpen && status.IsAuthenticated;
+            var active = mcpStatus.IsRunning || status.IsStarted;
+
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
-                EditorGUILayout.LabelField("Unity 桥接器", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("UPilot 服务", EditorStyles.boldLabel);
 
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    bool enabled    = UpilotBootstrap.IsEnabled;
-                    bool newEnabled = EditorGUILayout.Toggle("自动启动", enabled);
-                    if (newEnabled != enabled)
-                        UpilotBootstrap.IsEnabled = newEnabled;
+                    var bootstrapEnabled = UPilotBootstrap.IsEnabled;
+                    var managerAutoStart = manager.AutoStartEnabled;
+                    var autoStart = bootstrapEnabled && managerAutoStart;
+                    var newAutoStart = EditorGUILayout.Toggle("自动启动", autoStart);
+                    if (newAutoStart != autoStart)
+                    {
+                        UPilotBootstrap.IsEnabled = newAutoStart;
+                        manager.AutoStartEnabled = newAutoStart;
+                        ShowToast(newAutoStart ? "已开启自动启动" : "已关闭自动启动");
+                    }
+
+                    GUILayout.FlexibleSpace();
+                    EditorGUILayout.LabelField(GetServiceSummary(status, mcpStatus), EditorStyles.miniLabel, GUILayout.MaxWidth(260));
                 }
 
-                EditorGUILayout.LabelField(
-                    status.IsAuthenticated
-                        ? "已连接并完成认证"
-                        : status.IsStarted ? "已启动，正在等待 MCP 服务连接" : "当前已停止",
-                    EditorStyles.miniLabel);
                 EditorGUILayout.Space(4);
-
-                if (!status.IsStarted)
+                if (!active)
                 {
-                    if (GUILayout.Button("启动 Unity 桥接器", GUILayout.Height(26)))
+                    if (GUILayout.Button("启动 UPilot", GUILayout.Height(28)))
                     {
-                        bridge.EnsureStarted();
-                        ShowToast("Unity 桥接器启动中…");
+                        UPilotQuickStart.Start();
+                        ShowToast("UPilot 启动中…");
                     }
                 }
                 else
                 {
                     using (new EditorGUILayout.HorizontalScope())
                     {
-                        if (GUILayout.Button(
-                                status.IsAuthenticated ? "重新连接" : "立即重连",
-                                GUILayout.Height(26)))
+                        var primaryLabel = ready ? "重启 UPilot" : "重新连接";
+                        if (GUILayout.Button(primaryLabel, GUILayout.Height(28)))
                         {
-                            bridge.Restart();
-                            ShowToast("Unity 桥接器正在重新连接…");
+                            UPilotQuickStart.Restart();
+                            ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
                         }
-                        if (GUILayout.Button("停止", EditorStyles.miniButton, GUILayout.Width(72), GUILayout.Height(26)))
+
+                        using (new EditorGUI.DisabledScope(status.IsCompiling && mcpStatus.IsRunning))
                         {
-                            bridge.Stop();
-                            ShowToast("Unity 桥接器已停止", MessageType.Warning);
+                            if (GUILayout.Button("停止", GUILayout.Width(72), GUILayout.Height(28)))
+                            {
+                                UPilotQuickStart.Stop();
+                                ShowToast("UPilot 已停止", MessageType.Warning);
+                            }
                         }
                     }
-                }
 
-                EditorGUILayout.Space(6);
-                EditorGUILayout.LabelField("日志选项", EditorStyles.miniBoldLabel);
+                    if (status.IsCompiling && mcpStatus.IsRunning)
+                        EditorGUILayout.LabelField("Unity 编译中，停止操作暂不可用。", EditorStyles.miniLabel);
+                }
+            }
+        }
+
+        private static string GetServiceSummary(BridgeStatus status, McpServerStatus mcpStatus)
+        {
+            var mcpHealthy = mcpStatus.IsRunning && mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
+            if (mcpHealthy && status.IsWsOpen && status.IsAuthenticated)
+                return "Agent 可以操作 Unity";
+            if (!mcpStatus.IsRunning && !status.IsStarted)
+                return "服务当前已停止";
+            if (mcpStatus.IsRunning && !mcpHealthy)
+                return "服务监听异常";
+            if (status.IsWsOpen && !status.IsAuthenticated)
+                return "等待 Unity 认证";
+            return "正在建立连接";
+        }
+
+        private void DrawLogOptionsSection(UPilotBridge bridge)
+        {
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("日志", EditorStyles.boldLabel);
+
                 var debugWire = bridge.DebugWireLogsEnabled;
-                var newDebugWire = EditorGUILayout.ToggleLeft("调试通信日志（收发命令）", debugWire);
+                var newDebugWire = EditorGUILayout.ToggleLeft("调试通信日志", debugWire);
                 if (newDebugWire != debugWire)
                     bridge.DebugWireLogsEnabled = newDebugWire;
 
-                EditorGUILayout.Space(2);
                 var verboseLogs = bridge.VerboseLogsEnabled;
-                var newVerboseLogs = EditorGUILayout.ToggleLeft("输出详细日志（心跳、连接、请求状态）", verboseLogs);
+                var newVerboseLogs = EditorGUILayout.ToggleLeft("详细运行日志", verboseLogs);
                 if (newVerboseLogs != verboseLogs)
                     bridge.VerboseLogsEnabled = newVerboseLogs;
 
-                EditorGUILayout.Space(2);
                 var logToConsole = Logger.LogToUnityConsole;
                 var newLogToConsole = EditorGUILayout.ToggleLeft(
-                    new GUIContent("日志同步到 Unity Console", "关闭后仍会写入 upilot 日志文件。"),
+                    new GUIContent("同步到 Unity Console", "关闭后仍会写入 UPilot 日志文件。"),
                     logToConsole);
                 if (newLogToConsole != logToConsole)
                 {
@@ -1064,7 +1071,80 @@ namespace codingriver.upilot
             }
         }
 
-        private void DrawSharedEndpointSection(UpilotBridge bridge, BridgeStatus status)
+        private void DrawProcessSettingsSection(McpServerStatus mcpStatus)
+        {
+            var manager = UPilotMcpServerManager.Instance;
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    _showProcessSettings = EditorGUILayout.Foldout(
+                        _showProcessSettings,
+                        "Python 与进程",
+                        true,
+                        EditorStyles.foldoutHeader);
+                    GUILayout.FlexibleSpace();
+                    var processText = mcpStatus.ProcessId.HasValue ? $"PID {mcpStatus.ProcessId}" : "未运行";
+                    EditorGUILayout.LabelField(processText, EditorStyles.miniLabel, GUILayout.Width(90));
+                }
+
+                if (!_showProcessSettings)
+                    return;
+
+                var isRunning = mcpStatus.IsRunning;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    string[] levels = new[] { "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL" };
+                    int levelIndex = Array.IndexOf(levels, manager.LogLevel);
+                    if (levelIndex < 0) levelIndex = 1;
+                    EditorGUILayout.LabelField("日志级别", GUILayout.Width(62));
+                    using (new EditorGUI.DisabledScope(isRunning))
+                    {
+                        levelIndex = EditorGUILayout.Popup(levelIndex, levels, GUILayout.Width(110));
+                        manager.LogLevel = levels[levelIndex];
+                    }
+                }
+
+                EditorGUILayout.LabelField("Python 入口", EditorStyles.miniBoldLabel);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    using (new EditorGUI.DisabledScope(isRunning))
+                    {
+                        EditorGUI.BeginChangeCheck();
+                        var newPath = EditorGUILayout.TextField(manager.PythonEntryPath);
+                        if (EditorGUI.EndChangeCheck())
+                            manager.SetPythonEntryPath(newPath);
+                    }
+
+                    using (new EditorGUI.DisabledScope(isRunning))
+                    {
+                        if (GUILayout.Button("重置", GUILayout.Width(52)))
+                        {
+                            manager.ResetPythonEntryPathToDefaultAbsolute();
+                            ShowToast("Python 入口已重置为默认绝对路径");
+                        }
+                    }
+                }
+
+                if (isRunning)
+                    EditorGUILayout.LabelField("服务运行中，停止后可修改 Python 入口和日志级别。", EditorStyles.miniLabel);
+
+                EditorGUILayout.Space(2);
+                DrawRow("HTTP", $"{manager.HttpPort} · {(mcpStatus.HttpPortListening ? "正常" : "未监听")}", mcpStatus.HttpPortListening);
+                DrawRow("WS", $"{manager.WsPort} · {(mcpStatus.WsPortListening ? "正常" : "未监听")}", mcpStatus.WsPortListening);
+                DrawRow("客户端", $"Unity {mcpStatus.WsClientCount} · Agent {mcpStatus.HttpClientCount}", true);
+
+                if (isRunning && !string.IsNullOrEmpty(mcpStatus.ProcessCommandLine))
+                {
+                    var cmd = mcpStatus.ProcessCommandLine;
+                    if (cmd.Length > 240) cmd = cmd.Substring(0, 240) + "…";
+                    EditorGUILayout.LabelField(new GUIContent("进程命令", mcpStatus.ProcessCommandLine), EditorStyles.miniBoldLabel);
+                    EditorGUILayout.LabelField(cmd, _styleInfo);
+                }
+            }
+        }
+
+        private void DrawSharedEndpointSection(UPilotBridge bridge, BridgeStatus status)
         {
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
@@ -1097,16 +1177,16 @@ namespace codingriver.upilot
                     {
                         if (GUILayout.Button("恢复默认", GUILayout.Height(22)))
                         {
-                            _wsHostInput = UpilotBridge.DefaultWsHost;
-                            _wsPortInput = UpilotBridge.DefaultWsPort;
-                            _httpPortInput = UpilotBridge.DefaultHttpPort;
+                            _wsHostInput = UPilotBridge.DefaultWsHost;
+                            _wsPortInput = UPilotBridge.DefaultWsPort;
+                            _httpPortInput = UPilotBridge.DefaultHttpPort;
                         }
 
                         if (GUILayout.Button("应用", GUILayout.Height(22)))
                         {
-                            if (_wsPortInput <= 0) _wsPortInput = UpilotBridge.DefaultWsPort;
-                            if (_httpPortInput <= 0) _httpPortInput = UpilotBridge.DefaultHttpPort;
-                            if (string.IsNullOrWhiteSpace(_wsHostInput)) _wsHostInput = UpilotBridge.DefaultWsHost;
+                            if (_wsPortInput <= 0) _wsPortInput = UPilotBridge.DefaultWsPort;
+                            if (_httpPortInput <= 0) _httpPortInput = UPilotBridge.DefaultHttpPort;
+                            if (string.IsNullOrWhiteSpace(_wsHostInput)) _wsHostInput = UPilotBridge.DefaultWsHost;
                             bridge.SetWsEndpoint(_wsHostInput, _wsPortInput);
                             bridge.HttpPort = _httpPortInput;
                             ShowToast($"已应用 ws://{_wsHostInput}:{_wsPortInput}  http://{_wsHostInput}:{_httpPortInput}/mcp");
@@ -1169,7 +1249,7 @@ namespace codingriver.upilot
                     }
 
                     // Show Bridge actual WS endpoint for diagnostics
-                    var bridge = UpilotBridge.Instance;
+                    var bridge = UPilotBridge.Instance;
                     DrawRow("Unity WS 地址", $"ws://{bridge.WsHost}:{bridge.WsPort}", !status.IsStarted || status.IsWsOpen);
                 }
             }
@@ -1179,173 +1259,31 @@ namespace codingriver.upilot
             }
         }
 
-        // ── MCP Server Management ─────────────────────────────────────────────
-
-        private void DrawMcpServerSection(BridgeStatus status, McpServerStatus mcpStatus)
-        {
-            var mgr = UpilotMcpServerManager.Instance;
-
-            using (new EditorGUILayout.VerticalScope(_styleBox))
-            {
-                EditorGUILayout.LabelField("MCP 服务", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(
-                    "MCP 服务作为独立进程运行，不受 Unity 编译和 Domain Reload 影响。",
-                    MessageType.None);
-
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    bool autoStart = mgr.AutoStartEnabled;
-                    bool newAutoStart = EditorGUILayout.Toggle("自动启动", autoStart);
-                    if (newAutoStart != autoStart)
-                    {
-                        mgr.AutoStartEnabled = newAutoStart;
-                        ShowToast(newAutoStart ? "已开启 MCP 服务自动启动" : "已关闭 MCP 服务自动启动");
-                    }
-                    EditorGUILayout.LabelField("Unity 启动时自动启动 MCP 服务", EditorStyles.miniLabel);
-                }
-
-                bool isRunning = mcpStatus.IsRunning;
-                bool isCompiling = status.IsCompiling;
-
-                // ── Configuration ──
-                if (isRunning)
-                {
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        EditorGUILayout.LabelField("日志级别", EditorStyles.miniBoldLabel, GUILayout.Width(62));
-                        EditorGUILayout.LabelField(mgr.LogLevel, EditorStyles.miniLabel);
-                    }
-                    EditorGUILayout.LabelField("Python 入口", EditorStyles.miniBoldLabel);
-                    EditorGUILayout.LabelField(mgr.PythonEntryPath, _styleInfo);
-                    EditorGUILayout.LabelField("停止 MCP 服务后可修改以上配置。", EditorStyles.miniLabel);
-                }
-                else
-                {
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        string[] levels = new[] { "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL" };
-                        int lvlIdx = Array.IndexOf(levels, mgr.LogLevel);
-                        if (lvlIdx < 0) lvlIdx = 1;
-                        EditorGUILayout.LabelField("日志级别", GUILayout.Width(62));
-                        lvlIdx = EditorGUILayout.Popup(lvlIdx, levels, GUILayout.Width(110));
-                        mgr.LogLevel = levels[lvlIdx];
-                    }
-
-                    EditorGUILayout.LabelField("Python 入口", EditorStyles.miniBoldLabel);
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        EditorGUI.BeginChangeCheck();
-                        var newPath = EditorGUILayout.TextField(mgr.PythonEntryPath);
-                        if (EditorGUI.EndChangeCheck())
-                            mgr.SetPythonEntryPath(newPath);
-                        if (GUILayout.Button("重置", GUILayout.Width(52)))
-                        {
-                            mgr.ResetPythonEntryPathToDefaultAbsolute();
-                            ShowToast("Python 入口已重置为默认绝对路径");
-                        }
-                    }
-                }
-
-                EditorGUILayout.Space(4);
-                if (!isRunning)
-                {
-                    if (GUILayout.Button("启动 MCP 服务", GUILayout.Height(26)))
-                    {
-                        mgr.StartServer();
-                        ShowToast("MCP 服务启动中…");
-                    }
-                }
-                else
-                {
-                    var listenersHealthy = mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        if (!mcpStatus.ProcessId.HasValue)
-                        {
-                            if (GUILayout.Button("查看端口异常", GUILayout.Height(26)))
-                                _activeTab = 0;
-                        }
-                        else if (!listenersHealthy)
-                        {
-                            if (GUILayout.Button("重启 MCP 服务", GUILayout.Height(26)))
-                            {
-                                mgr.RestartServer();
-                                ShowToast("MCP 服务正在重启…");
-                            }
-                        }
-                        else
-                        {
-                            if (GUILayout.Button("检查状态", GUILayout.Height(26)))
-                                ShowToast($"MCP 服务正常，PID={mcpStatus.ProcessId}");
-                        }
-
-                        using (new EditorGUI.DisabledScope(isCompiling))
-                        {
-                            if (GUILayout.Button("停止", EditorStyles.miniButton, GUILayout.Width(72), GUILayout.Height(26)))
-                            {
-                                mgr.StopServer();
-                                ShowToast("MCP 服务已停止", MessageType.Warning);
-                            }
-                        }
-                    }
-                }
-
-                if (isCompiling && isRunning)
-                {
-                    EditorGUILayout.LabelField("Unity 编译中，停止操作暂不可用。", EditorStyles.miniLabel);
-                }
-
-                // ── Status ──
-                EditorGUILayout.Space(2);
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    var dotColor = mcpStatus.IsRunning
-                        ? (mcpStatus.HttpPortListening && mcpStatus.WsPortListening ? Color.green : new Color(1f, 0.6f, 0f))
-                        : Color.gray;
-                    var prev = GUI.color;
-                    GUI.color = dotColor;
-                    GUILayout.Label("●", GUILayout.Width(18));
-                    GUI.color = prev;
-
-                    var st = mcpStatus.IsRunning
-                        ? $"运行中 · PID {mcpStatus.ProcessId}"
-                        : "已停止";
-                    EditorGUILayout.LabelField(st, EditorStyles.miniLabel);
-                }
-
-                if (mcpStatus.IsRunning)
-                {
-                    EditorGUILayout.LabelField(
-                        $"HTTP {mgr.HttpPort}：{(mcpStatus.HttpPortListening ? "正常" : "未监听")}    ·    WS {mgr.WsPort}：{(mcpStatus.WsPortListening ? "正常" : "未监听")}",
-                        EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField(
-                        $"Unity 客户端：{mcpStatus.WsClientCount}    ·    Agent 客户端：{mcpStatus.HttpClientCount}",
-                        EditorStyles.miniLabel);
-                }
-
-                if (isRunning && !string.IsNullOrEmpty(mcpStatus.ProcessCommandLine))
-                {
-                    var cmd = mcpStatus.ProcessCommandLine;
-                    if (cmd.Length > 240) cmd = cmd.Substring(0, 240) + "…";
-                    EditorGUILayout.LabelField(
-                        new GUIContent("进程命令", mcpStatus.ProcessCommandLine),
-                        EditorStyles.miniBoldLabel);
-                    EditorGUILayout.LabelField(cmd, _styleInfo);
-                }
-            }
-
-        }
-
         private void DrawAgentSetupSection(AgentMcpConfigStatus[] statuses)
         {
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
-                EditorGUILayout.LabelField("Agent 配置", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(
-                    "检测当前项目中的 Codex、Claude Code 和 Cursor MCP 配置。端口变化后会提示更新。",
-                    MessageType.None);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField("Agent", EditorStyles.boldLabel);
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("刷新", EditorStyles.miniButton, GUILayout.Width(48)))
+                    {
+                        RefreshAgentConfigSnapshot();
+                        ShowToast("Agent 配置状态已刷新");
+                    }
+                }
 
-                EditorGUILayout.LabelField("MCP 地址：" + UpilotAgentSetup.McpUrl, EditorStyles.miniLabel);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField("MCP 地址：" + UPilotAgentSetup.McpUrl, EditorStyles.miniLabel);
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("复制", EditorStyles.miniButton, GUILayout.Width(44)))
+                    {
+                        GUIUtility.systemCopyBuffer = UPilotAgentSetup.McpUrl;
+                        ShowToast("MCP 地址已复制");
+                    }
+                }
                 EditorGUILayout.Space(3);
 
                 if (statuses != null)
@@ -1355,9 +1293,14 @@ namespace codingriver.upilot
                 }
 
                 EditorGUILayout.Space(4);
-                if (GUILayout.Button("检查并写入 Agent 识别规则", GUILayout.Height(22)))
+                _showAgentOtherActions = EditorGUILayout.Foldout(
+                    _showAgentOtherActions,
+                    "其他操作",
+                    true,
+                    EditorStyles.foldoutHeader);
+                if (_showAgentOtherActions && GUILayout.Button("检查并写入 Agent 识别规则", GUILayout.Height(22)))
                 {
-                    Debug.Log("[upilot] Agent rules:\n" + UpilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+                    Debug.Log("[UPilot] Agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
                     ShowToast("Agent 识别规则已检查/写入");
                 }
             }
@@ -1381,54 +1324,59 @@ namespace codingriver.upilot
                         EditorStyles.miniLabel);
                 }
 
-                if (GUILayout.Button(status.IsConfigured ? "更新" : "写入", GUILayout.Width(54), GUILayout.Height(22)))
-                    ConfigureAgentClient(status.ClientName);
+                if (status.IsConfigured)
+                {
+                    EditorGUILayout.LabelField("正常", EditorStyles.miniLabel, GUILayout.Width(42));
+                }
+                else
+                {
+                    if (GUILayout.Button(status.FileExists && status.HasUPilotEntry ? "更新" : "写入", GUILayout.Width(54), GUILayout.Height(22)))
+                        ConfigureAgentClient(status.ClientName);
+                }
             }
         }
 
         private void ConfigureAgentClient(string clientName)
         {
             if (clientName == "Codex")
-                HandleAgentConfigResult("Codex", UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                HandleAgentConfigResult("Codex", UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
             else if (clientName == "Claude Code")
-                HandleAgentConfigResult("Claude Code", UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                HandleAgentConfigResult("Claude Code", UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
             else if (clientName == "Cursor")
-                HandleAgentConfigResult("Cursor", UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                HandleAgentConfigResult("Cursor", UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
         }
 
         private void HandleAgentConfigResult(string clientName, string result)
         {
-            Debug.Log($"[upilot] {clientName} MCP config:\n" + result);
+            Debug.Log($"[UPilot] {clientName} MCP config:\n" + result);
             RefreshAgentConfigSnapshot();
             ShowToast($"{clientName} MCP 配置已处理");
         }
 
         // ── Diagnostics ───────────────────────────────────────────────────────
 
-        private void DrawDiagnosticsSection(UpilotBridge bridge, string diagResult, bool diagRunning, long diagResultAtMs)
+        private void DrawDiagnosticsSection(UPilotBridge bridge, string diagResult, bool diagRunning, long diagResultAtMs)
         {
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
-                EditorGUILayout.LabelField("诊断 / 通信测试", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("诊断", EditorStyles.boldLabel);
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     using (new EditorGUI.DisabledScope(diagRunning))
                     {
-                        if (GUILayout.Button("测试服务器", GUILayout.Height(22)))
+                        if (GUILayout.Button("运行完整诊断", GUILayout.Height(24)))
                         {
                             var snap = bridge.GetStatus();
-                            RunDiag(() => Task.FromResult(BuildServerTestResult(snap, bridge.WsHost, bridge.WsPort)));
-                            ShowToast("已执行服务器测试");
+                            var mcpSnap = UPilotMcpServerManager.Instance.GetStatus();
+                            RunDiag(() => BuildFullDiagnosticResult(snap, mcpSnap, bridge.WsHost, bridge.WsPort));
+                            ShowToast("已开始诊断");
                         }
                     }
 
-                    using (new EditorGUI.DisabledScope(diagRunning))
+                    if (GUILayout.Button("打开日志", GUILayout.Width(76), GUILayout.Height(24)))
                     {
-                        if (GUILayout.Button("检查服务器", GUILayout.Height(22)))
-                        {
-                            RunDiag(CheckPythonMcpProcess);
-                            ShowToast("已执行服务器检查");
-                        }
+                        Logger.RevealLogFile();
+                        ShowToast("已定位到 " + Logger.LogFilePath);
                     }
                 }
 
@@ -1446,24 +1394,31 @@ namespace codingriver.upilot
                         }
                     }
 
-                    _diagScroll = EditorGUILayout.BeginScrollView(_diagScroll, GUILayout.Height(92));
+                    _diagScroll = EditorGUILayout.BeginScrollView(_diagScroll, GUILayout.Height(110));
                     DrawDiagLines(diagResult, diagResultAtMs);
                     EditorGUILayout.EndScrollView();
+
+                    _showDiagnosticDetails = EditorGUILayout.Foldout(
+                        _showDiagnosticDetails,
+                        "原始结果",
+                        true);
+                    if (_showDiagnosticDetails)
+                        EditorGUILayout.TextArea(diagResult, GUILayout.MinHeight(70));
                 }
 
                 if (diagRunning)
-                    EditorGUILayout.LabelField("正在测试…", EditorStyles.centeredGreyMiniLabel);
+                    EditorGUILayout.LabelField("正在诊断…", EditorStyles.centeredGreyMiniLabel);
 
                 EditorGUILayout.Space(6);
                 _showDangerousDiagnostics = EditorGUILayout.Foldout(
                     _showDangerousDiagnostics,
-                    "高级诊断与危险操作",
+                    "危险操作",
                     true,
                     EditorStyles.foldoutHeader);
                 if (_showDangerousDiagnostics)
                 {
                     EditorGUILayout.HelpBox(
-                        "仅在普通停止操作无效、残留进程持续占用端口时使用。该操作会结束所有疑似 upilot MCP Python 进程。",
+                        "仅在普通停止操作无效、残留进程持续占用端口时使用。该操作会结束所有疑似 UPilot MCP Python 进程。",
                         MessageType.Warning);
                     using (new EditorGUI.DisabledScope(diagRunning))
                     {
@@ -1473,7 +1428,7 @@ namespace codingriver.upilot
                         {
                             bool confirmed = _skipKillConfirm || EditorUtility.DisplayDialog(
                                 "确认结束 MCP 服务进程？",
-                                "此操作会结束所有疑似 upilot MCP Python 进程。仅在普通停止操作无效时继续。",
+                                "此操作会结束所有疑似 UPilot MCP Python 进程。仅在普通停止操作无效时继续。",
                                 "确认结束",
                                 "取消");
                             if (confirmed)
@@ -1505,13 +1460,13 @@ namespace codingriver.upilot
             }
         }
 
-        private void DrawLogToolbar(List<BridgeLogEntry> logs, UpilotBridge bridge)
+        private void DrawLogToolbar(List<BridgeLogEntry> logs, UPilotBridge bridge)
         {
             var toolbarMaxW = Mathf.Max(50f, position.width - 16f);
             float row1Min = 52 + 88 + 70 + 60 + 24;
             float row2Min = 40 * 3 + 44 * 2 + 52 + 36 + 24;
             float toolbarDesired = Mathf.Max(row1Min, row2Min);
-            UpilotWindowDiagnostics.RecordSection("logToolbar", toolbarDesired, toolbarMaxW);
+            UPilotWindowDiagnostics.RecordSection("logToolbar", toolbarDesired, toolbarMaxW);
 
             using (new EditorGUILayout.VerticalScope(GUILayout.MaxWidth(toolbarMaxW)))
             {
@@ -1705,12 +1660,39 @@ namespace codingriver.upilot
             });
         }
 
+        private static async Task<string> BuildFullDiagnosticResult(
+            BridgeStatus status,
+            McpServerStatus mcpStatus,
+            string wsHost,
+            int wsPort)
+        {
+            var sb = new StringBuilder();
+            var mcpHealthy = mcpStatus.IsRunning && mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
+
+            sb.AppendLine("运行摘要");
+            sb.AppendLine(mcpHealthy && status.IsWsOpen && status.IsAuthenticated
+                ? "✓ UPilot 已就绪"
+                : "✗ UPilot 尚未就绪");
+            sb.AppendLine($"  MCP 服务: {(mcpHealthy ? "正常" : mcpStatus.IsRunning ? "异常" : "已停止")}");
+            sb.AppendLine($"  Unity 连接: {(status.IsAuthenticated ? "已认证" : status.IsWsOpen ? "待认证" : "未连接")}");
+            sb.AppendLine($"  Agent 连接数: {mcpStatus.HttpClientCount}");
+            sb.AppendLine();
+
+            sb.AppendLine("连接测试");
+            sb.AppendLine(BuildServerTestResult(status, wsHost, wsPort));
+            sb.AppendLine();
+
+            sb.AppendLine("进程检查");
+            sb.AppendLine(await CheckPythonMcpProcess());
+            return sb.ToString().TrimEnd();
+        }
+
         private static string BuildServerTestResult(BridgeStatus status, string wsHost, int wsPort)
         {
             if (!status.IsStarted) return "✗ Unity 桥接器未启动";
             if (!status.IsWsOpen)
             {
-                var mgr = UpilotMcpServerManager.Instance;
+                var mgr = UPilotMcpServerManager.Instance;
                 var sb = new StringBuilder();
                 sb.AppendLine($"✗ WS 未连接  Unity 桥接器尝试: ws://{wsHost}:{wsPort}");
                 sb.AppendLine($"  MCP 服务 HTTP 端口: {mgr.HttpPort}  WS 端口: {mgr.WsPort}");
@@ -1764,7 +1746,7 @@ namespace codingriver.upilot
                 var detail = new StringBuilder();
 
                 summary.AppendLine($"检测到 {all.Count} 个 Python 进程（简要）:");
-                detail.AppendLine("[upilot] Python 进程诊断（详细）");
+                detail.AppendLine("[UPilot] Python 进程诊断（详细）");
 
                 foreach (var p in all)
                 {
@@ -1773,15 +1755,15 @@ namespace codingriver.upilot
                     int parentPid = SafeGetParentProcessId(p.Id);
                     string parentName = SafeGetProcessNameById(parentPid);
 
-                    bool isUpilotLike = IsUpilotMcpLike(cmdLine);
+                    bool isUPilotLike = IsUPilotMcpLike(cmdLine);
 
                     string listenPortText = "unkown";
                     if (portsFetched && portsByPid.TryGetValue(p.Id, out var listenPorts) && listenPorts.Count > 0)
                         listenPortText = string.Join(",", listenPorts);
 
-                    if (isUpilotLike) upilotLikeCount++;
+                    if (isUPilotLike) upilotLikeCount++;
 
-                    var tag = isUpilotLike ? "✓" : "?";
+                    var tag = isUPilotLike ? "✓" : "?";
                     summary.AppendLine($"[{tag}] PID={p.Id}  PPID={parentPid}({parentName})  PORT={listenPortText}");
 
                     detail.AppendLine($"[{tag}] PID={p.Id}  PPID={parentPid}({parentName})");
@@ -1795,12 +1777,12 @@ namespace codingriver.upilot
 
                 if (upilotLikeCount == 0)
                 {
-                    summary.AppendLine("✗ 未发现明显的 upilot MCP 进程特征");
+                    summary.AppendLine("✗ 未发现明显的 UPilot MCP 进程特征");
                     summary.AppendLine("  请确认命令行包含 run_upilot_mcp.py、upilot-mcp 或 upilot_mcp");
                 }
                 else
                 {
-                    summary.AppendLine($"✓ 疑似 upilot MCP 进程数量: {upilotLikeCount}");
+                    summary.AppendLine($"✓ 疑似 UPilot MCP 进程数量: {upilotLikeCount}");
                 }
 
                 summary.AppendLine("(详细命令行已输出到 Console 的 Warning 日志)");
@@ -1827,7 +1809,7 @@ namespace codingriver.upilot
                 foreach (var p in all)
                 {
                     var cmd = SafeGetCommandLine(p.Id);
-                    if (IsUpilotMcpLike(cmd))
+                    if (IsUPilotMcpLike(cmd))
                         targets.Add(p);
                 }
 
@@ -1847,7 +1829,7 @@ namespace codingriver.upilot
                         p.Kill();
                         killed++;
                         sb.AppendLine($"✓ 已终止 PID={pid}");
-                        Debug.LogWarning($"[upilot] 已终止服务器进程 PID={pid}\nCMD: {cmd}");
+                        Debug.LogWarning($"[UPilot] 已终止服务器进程 PID={pid}\nCMD: {cmd}");
                     }
                     catch (Exception ex)
                     {
@@ -1864,7 +1846,7 @@ namespace codingriver.upilot
             }
         }
 
-        private static bool IsUpilotMcpLike(string cmdLine)
+        private static bool IsUPilotMcpLike(string cmdLine)
         {
             return ContainsIgnoreCase(cmdLine, "run_upilot_mcp.py") ||
                    ContainsIgnoreCase(cmdLine, "upilot-mcp") ||

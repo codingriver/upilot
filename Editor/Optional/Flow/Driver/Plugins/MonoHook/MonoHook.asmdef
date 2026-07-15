@@ -1,0 +1,19 @@
+{
+    "name": "MonoHook",
+    "rootNamespace": "MonoHook",
+    "references": [],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "UNITY_6000_0_OR_NEWER",
+        "UPILOT_ENABLE_FLOW"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

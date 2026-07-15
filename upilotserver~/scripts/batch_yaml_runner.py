@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-UIFlow Batch YAML Runner — Agent-side batch executor via MCP HTTP.
+UPilot Flow Batch YAML Runner — Agent-side batch executor via MCP HTTP.
 
 Usage:
     python batch_yaml_runner.py --yaml-dir Assets/Examples/Yaml --batch-size 10 --report-dir Reports/AgentBatch
@@ -104,7 +104,7 @@ def run_batch(
     continue_on_step_failure = has_negative  # allow negative tests to run all steps
 
     result = client.call_tool(
-        "unity_uiflow_run_batch",
+        "unity_upilot_flow_run_batch",
         {
             "yamlPaths": yaml_paths,
             "batchSize": len(yaml_paths),
@@ -123,7 +123,7 @@ def run_batch(
 
 
 def _extract_execution_payload(result: dict) -> dict:
-    """Extract the UIFlow payload from an MCP tool result."""
+    """Extract the UPilot Flow payload from an MCP tool result."""
     text = McpHttpClient._extract_text(result)
     if not text:
         return {}
@@ -154,14 +154,14 @@ def run_batch_with_polling(
 ) -> dict[str, Any]:
     """Async batch execution with per-case progress via polling.
 
-    1. Calls uiflow.run to start the batch and get an executionId.
-    2. Polls uiflow.results every poll_interval_s.
+    1. Calls upilot_flow.run to start the batch and get an executionId.
+    2. Polls upilot_flow.results every poll_interval_s.
     3. Prints progress whenever a new case finishes.
     4. If no new case appears for event_timeout_s, prints a warning and
        triggers an extra poll (fallback).
     5. Returns the final aggregated result.
 
-    Falls back to legacy run_batch() if uiflow.run is unavailable.
+    Falls back to legacy run_batch() if upilot_flow.run is unavailable.
     """
     print(f"[Batch] Running {len(yaml_paths)} file(s) with polling -> {report_dir}")
     for yp in yaml_paths:
@@ -171,9 +171,9 @@ def run_batch_with_polling(
     has_negative = any(is_negative_test(yp) for yp in yaml_paths)
     continue_on_step_failure = has_negative
 
-    # ── 1. Start batch via unity_uiflow_run_batch ──
+    # ── 1. Start batch via unity_upilot_flow_run_batch ──
     start_result = client.call_tool(
-        "unity_uiflow_run_batch",
+        "unity_upilot_flow_run_batch",
         {
             "yamlPaths": yaml_paths,
             "batchSize": len(yaml_paths),
@@ -196,7 +196,7 @@ def run_batch_with_polling(
     if not execution_id:
         error_msg = start_payload.get("error", {}).get("message", "")
         if error_msg and ("Unknown command" in error_msg or "not found" in error_msg.lower()):
-            print("[Batch] unity_uiflow_run_batch not available, falling back to legacy unity_uiflow_run_batch")
+            print("[Batch] unity_upilot_flow_run_batch not available, falling back to legacy unity_upilot_flow_run_batch")
             legacy_result = run_batch(client, yaml_paths, report_dir, headed, stop_on_first_failure, default_timeout_ms)
             # Convert legacy result to parsed format
             return parse_batch_result(legacy_result, yaml_paths)
@@ -206,7 +206,7 @@ def run_batch_with_polling(
             for retry in range(30):
                 time.sleep(2.0)
                 start_result = client.call_tool(
-                    "unity_uiflow_run_batch",
+                    "unity_upilot_flow_run_batch",
                     {
                         "yamlPaths": yaml_paths,
                         "batchSize": len(yaml_paths),
@@ -252,7 +252,7 @@ def run_batch_with_polling(
         time.sleep(poll_interval_s)
 
         poll_result = client.call_tool(
-            "unity_uiflow_results",
+            "unity_upilot_flow_results",
             {"executionId": execution_id},
         )
         poll_payload = _extract_execution_payload(poll_result)
@@ -404,7 +404,7 @@ def save_failed_manifest(path: Path, yaml_paths: list[str], batch_idx: int, repo
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Batch YAML test runner for UIFlow")
+    parser = argparse.ArgumentParser(description="Batch YAML test runner for UPilot Flow")
     parser.add_argument("--yaml-dir", default="Assets/Examples/Yaml", help="Directory containing YAML test files")
     parser.add_argument("--batch-size", type=int, default=10, help="Files per batch")
     parser.add_argument("--report-dir", default="Reports/AgentBatch", help="Base report directory")

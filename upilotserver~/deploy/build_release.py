@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_release.py — upilot MCP 一键打包脚本
+build_release.py — UPilot MCP 一键打包脚本
 
 MCP 协议（JSON-RPC/stdio）对所有 AI 工具完全相同（Claude Code / Cursor /
 VSCode Copilot / OpenCode），无需多份服务端；但 Python 二进制依赖（pywin32、
@@ -105,7 +105,7 @@ def _make_configs(cmd: str, args: list[str], platform_name: str) -> dict[str, di
 # ── README 文本 ───────────────────────────────────────────────────────────────
 
 README_WIN = """\
-upilot MCP — Windows 离线安装包
+UPilot MCP — Windows 离线安装包
 ====================================
 
 一、安装（双击或在命令提示符中运行）
@@ -145,7 +145,7 @@ MCP 协议说明：
 """
 
 README_MAC = """\
-upilot MCP — macOS 离线安装包
+UPilot MCP — macOS 离线安装包
 ===================================
 
 一、安装
@@ -223,7 +223,7 @@ def step_write_scripts(tmp: Path, plat: str, cmd_after_install: str) -> None:
     bat = tmp / "install.bat"
     bat.write_text(
         "@echo off\n"
-        "echo Installing upilot MCP...\n"
+        "echo Installing UPilot MCP...\n"
         f'python -m pip install --find-links "%~dp0{wheels_rel}" '
         f'--no-index upilot-mcp\n'
         "if %errorlevel% neq 0 (\n"
@@ -245,7 +245,7 @@ def step_write_scripts(tmp: Path, plat: str, cmd_after_install: str) -> None:
         "#!/usr/bin/env bash\n"
         "set -e\n"
         'DIR="$(cd "$(dirname "$0")"; pwd)"\n'
-        "echo 'Installing upilot MCP...'\n"
+        "echo 'Installing UPilot MCP...'\n"
         f'python3 -m pip install --find-links "$DIR/{wheels_rel}" '
         f'--no-index upilot-mcp || \\\n'
         f'  python3 -m pip install --find-links "$DIR/{wheels_rel}" '
@@ -334,7 +334,7 @@ def ensure_build_tool() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="upilot MCP 一键打包脚本",
+        description="UPilot MCP 一键打包脚本",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

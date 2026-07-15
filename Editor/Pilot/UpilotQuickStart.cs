@@ -6,9 +6,9 @@
 using System.Text;
 using UnityEditor;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    internal enum UpilotMainState
+    internal enum UPilotMainState
     {
         SetupRequired,
         Stopped,
@@ -17,10 +17,10 @@ namespace codingriver.upilot
         NeedsRepair,
     }
 
-    internal readonly struct UpilotMainSnapshot
+    internal readonly struct UPilotMainSnapshot
     {
-        public UpilotMainSnapshot(
-            UpilotMainState state,
+        public UPilotMainSnapshot(
+            UPilotMainState state,
             string title,
             string message,
             bool bridgeActive,
@@ -33,7 +33,7 @@ namespace codingriver.upilot
             McpActive = mcpActive;
         }
 
-        public UpilotMainState State { get; }
+        public UPilotMainState State { get; }
         public string Title { get; }
         public string Message { get; }
         public bool BridgeActive { get; }
@@ -41,29 +41,29 @@ namespace codingriver.upilot
         public bool AnyServiceActive => BridgeActive || McpActive;
     }
 
-    internal static class UpilotQuickStart
+    internal static class UPilotQuickStart
     {
-        public static UpilotMainSnapshot Evaluate(
+        public static UPilotMainSnapshot Evaluate(
             BridgeStatus bridgeStatus,
             McpServerStatus mcpStatus,
             AgentMcpConfigStatus[] agentConfigs)
         {
             var configuredAgents = CountConfiguredAgents(agentConfigs);
-            if (!UpilotSetupState.IsCompleted || configuredAgents == 0)
+            if (!UPilotSetupState.IsCompleted || configuredAgents == 0)
             {
-                return new UpilotMainSnapshot(
-                    UpilotMainState.SetupRequired,
+                return new UPilotMainSnapshot(
+                    UPilotMainState.SetupRequired,
                     "完成一次简单设置",
-                    "选择你使用的 Agent，upilot 会自动完成配置并启动。",
+                    "选择你使用的 Agent，UPilot 会自动完成配置并启动。",
                     bridgeStatus.IsStarted,
                     mcpStatus.IsRunning);
             }
 
-            var manager = UpilotMcpServerManager.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             if (!manager.IsPythonEntryValid(out _))
             {
-                return new UpilotMainSnapshot(
-                    UpilotMainState.NeedsRepair,
+                return new UPilotMainSnapshot(
+                    UPilotMainState.NeedsRepair,
                     "服务文件未找到",
                     "可以尝试自动修复，无需手动设置路径。",
                     bridgeStatus.IsStarted,
@@ -72,8 +72,8 @@ namespace codingriver.upilot
 
             if (mcpStatus.IsRunning && !mcpStatus.ProcessId.HasValue)
             {
-                return new UpilotMainSnapshot(
-                    UpilotMainState.NeedsRepair,
+                return new UPilotMainSnapshot(
+                    UPilotMainState.NeedsRepair,
                     "端口被其他程序占用",
                     "自动修复会切换到新的空闲端口并更新 Agent 配置。",
                     bridgeStatus.IsStarted,
@@ -85,8 +85,8 @@ namespace codingriver.upilot
                              mcpStatus.WsPortListening;
             if (mcpStatus.IsRunning && !mcpHealthy)
             {
-                return new UpilotMainSnapshot(
-                    UpilotMainState.NeedsRepair,
+                return new UPilotMainSnapshot(
+                    UPilotMainState.NeedsRepair,
                     "服务未能正常启动",
                     "自动修复会清理当前连接并重新启动服务。",
                     bridgeStatus.IsStarted,
@@ -95,8 +95,8 @@ namespace codingriver.upilot
 
             if (mcpHealthy && bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated)
             {
-                return new UpilotMainSnapshot(
-                    UpilotMainState.Ready,
+                return new UPilotMainSnapshot(
+                    UPilotMainState.Ready,
                     "已就绪",
                     "现在可以直接让 Agent 操作 Unity。",
                     bridgeStatus.IsStarted,
@@ -105,16 +105,16 @@ namespace codingriver.upilot
 
             if (!mcpStatus.IsRunning && !bridgeStatus.IsStarted)
             {
-                return new UpilotMainSnapshot(
-                    UpilotMainState.Stopped,
-                    "upilot 当前已停止",
+                return new UPilotMainSnapshot(
+                    UPilotMainState.Stopped,
+                    "UPilot 当前已停止",
                     "启动后，Agent 才能连接并操作 Unity。",
                     false,
                     false);
             }
 
-            return new UpilotMainSnapshot(
-                UpilotMainState.Starting,
+            return new UPilotMainSnapshot(
+                UPilotMainState.Starting,
                 "正在连接 Unity",
                 "通常只需要几秒钟，请稍候。",
                 bridgeStatus.IsStarted,
@@ -129,40 +129,40 @@ namespace codingriver.upilot
             EnsureAvailablePortsWhenStopped();
 
             var result = new StringBuilder();
-            result.AppendLine(UpilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+            result.AppendLine(UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
             if (codex)
-                result.AppendLine(UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: false));
+                result.AppendLine(UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: false));
             if (claudeCode)
-                result.AppendLine(UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: false));
+                result.AppendLine(UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: false));
             if (cursor)
-                result.AppendLine(UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: false));
+                result.AppendLine(UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: false));
 
-            UpilotAgentSetup.MarkAgentRulesHandledForCurrentProject();
-            UpilotSetupState.MarkCompleted();
-            UpilotBootstrap.IsEnabled = true;
+            UPilotAgentSetup.MarkAgentRulesHandledForCurrentProject();
+            UPilotSetupState.MarkCompleted();
+            UPilotBootstrap.IsEnabled = true;
             Start();
             return result.ToString().TrimEnd();
         }
 
         public static void Start()
         {
-            var manager = UpilotMcpServerManager.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
-            UpilotBridge.Instance.EnsureStarted();
+            UPilotBridge.Instance.EnsureStarted();
             if (!manager.GetStatus().IsRunning)
                 manager.StartServer();
         }
 
         public static void Restart()
         {
-            UpilotBridge.Instance.Restart();
-            UpilotMcpServerManager.Instance.RestartServer();
+            UPilotBridge.Instance.Restart();
+            UPilotMcpServerManager.Instance.RestartServer();
         }
 
         public static void Stop()
         {
-            UpilotBridge.Instance.Stop();
-            UpilotMcpServerManager.Instance.StopServer();
+            UPilotBridge.Instance.Stop();
+            UPilotMcpServerManager.Instance.StopServer();
         }
 
         public static string AutoRepair(
@@ -170,7 +170,7 @@ namespace codingriver.upilot
             McpServerStatus mcpStatus,
             AgentMcpConfigStatus[] agentConfigs)
         {
-            var manager = UpilotMcpServerManager.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             if (!manager.IsPythonEntryValid(out _))
             {
                 manager.ValidateAndAutoFixPath();
@@ -195,7 +195,7 @@ namespace codingriver.upilot
             {
                 manager.RestartServer();
                 if (!bridgeStatus.IsStarted)
-                    UpilotBridge.Instance.EnsureStarted();
+                    UPilotBridge.Instance.EnsureStarted();
                 return "服务正在重新启动。";
             }
 
@@ -203,9 +203,9 @@ namespace codingriver.upilot
                 manager.StartServer();
 
             if (!bridgeStatus.IsStarted)
-                UpilotBridge.Instance.EnsureStarted();
+                UPilotBridge.Instance.EnsureStarted();
             else if (!bridgeStatus.IsAuthenticated)
-                UpilotBridge.Instance.Restart();
+                UPilotBridge.Instance.Restart();
 
             return "正在重新连接 Unity。";
         }
@@ -224,31 +224,31 @@ namespace codingriver.upilot
 
         private static void EnsureAvailablePortsWhenStopped()
         {
-            var bridge = UpilotBridge.Instance;
-            var manager = UpilotMcpServerManager.Instance;
+            var bridge = UPilotBridge.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             var status = manager.GetStatus();
             if (bridge.IsStarted || status.IsRunning)
                 return;
 
-            if (UpilotPortAllocator.IsPortAvailable(bridge.WsPort) &&
-                UpilotPortAllocator.IsPortAvailable(bridge.HttpPort) &&
+            if (UPilotPortAllocator.IsPortAvailable(bridge.WsPort) &&
+                UPilotPortAllocator.IsPortAvailable(bridge.HttpPort) &&
                 bridge.WsPort != bridge.HttpPort)
                 return;
 
-            var pair = UpilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
-            bridge.SetWsEndpoint(UpilotBridge.DefaultWsHost, pair.wsPort);
+            var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
+            bridge.SetWsEndpoint(UPilotBridge.DefaultWsHost, pair.wsPort);
             bridge.HttpPort = pair.httpPort;
             manager.InvalidateStatusCache();
         }
 
         private static void SwitchToAvailablePortsAndRestart(AgentMcpConfigStatus[] agentConfigs)
         {
-            var bridge = UpilotBridge.Instance;
-            var manager = UpilotMcpServerManager.Instance;
+            var bridge = UPilotBridge.Instance;
+            var manager = UPilotMcpServerManager.Instance;
             bridge.Stop();
 
-            var pair = UpilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
-            bridge.SetWsEndpoint(UpilotBridge.DefaultWsHost, pair.wsPort);
+            var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
+            bridge.SetWsEndpoint(UPilotBridge.DefaultWsHost, pair.wsPort);
             bridge.HttpPort = pair.httpPort;
             manager.InvalidateStatusCache();
 
@@ -262,15 +262,15 @@ namespace codingriver.upilot
             if (statuses == null) return;
             foreach (var status in statuses)
             {
-                if (!status.FileExists && !status.HasUpilotEntry)
+                if (!status.FileExists && !status.HasUPilotEntry)
                     continue;
 
                 if (status.ClientName == "Codex")
-                    UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: false);
+                    UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: false);
                 else if (status.ClientName == "Claude Code")
-                    UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: false);
+                    UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: false);
                 else if (status.ClientName == "Cursor")
-                    UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: false);
+                    UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: false);
             }
         }
     }

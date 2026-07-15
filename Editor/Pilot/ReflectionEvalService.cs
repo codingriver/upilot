@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -15,7 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     /*
      * reflection.eval / reflection_eval is a bounded, expression-only C# evaluator
@@ -65,9 +65,9 @@ namespace codingriver.upilot
 
     public sealed class ReflectionEvalService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public ReflectionEvalService(UpilotBridge bridge)
+        public ReflectionEvalService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -133,7 +133,7 @@ namespace codingriver.upilot
             if (mode == "type") return value?.GetType().FullName ?? "(null)";
             if (mode == "instanceid")
             {
-                return value is UnityEngine.Object obj ? UpilotEntityIds.ToWireId(obj).ToString(CultureInfo.InvariantCulture) : "";
+                return value is UnityEngine.Object obj ? UPilotEntityIds.ToWireId(obj).ToString(CultureInfo.InvariantCulture) : "";
             }
             if (mode == "json") return ToJsonLike(value, options.MaxResultItems);
             if (mode == "full")
@@ -164,7 +164,7 @@ namespace codingriver.upilot
             if (IsNumeric(value)) return Convert.ToString(value, CultureInfo.InvariantCulture);
             if (value is UnityEngine.Object obj)
             {
-                return "{\"type\":\"" + EscapeJsonString(obj.GetType().FullName) + "\",\"name\":\"" + EscapeJsonString(obj.name) + "\",\"instanceId\":" + UpilotEntityIds.ToWireId(obj).ToString(CultureInfo.InvariantCulture) + "}";
+                return "{\"type\":\"" + EscapeJsonString(obj.GetType().FullName) + "\",\"name\":\"" + EscapeJsonString(obj.name) + "\",\"instanceId\":" + UPilotEntityIds.ToWireId(obj).ToString(CultureInfo.InvariantCulture) + "}";
             }
             if (value is IDictionary dict)
             {

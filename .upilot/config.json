@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 2,
+  "mcp": {
+    "httpHost": "127.0.0.1",
+    "httpPort": 8011,
+    "wsHost": "127.0.0.1",
+    "wsPort": 8765
+  },
+  "cache": {
+    "contextStaleMs": 2000
+  },
+  "features": {
+    "flow": {
+      "enabled": false
+    }
+  }
+}

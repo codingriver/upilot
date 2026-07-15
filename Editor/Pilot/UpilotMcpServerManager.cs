@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------
 // upilot Editor — MCP Server Process Manager
-// Manages the external upilot MCP server process independently of Unity.
+// Manages the external UPilot MCP server process independently of Unity.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -16,7 +16,7 @@ using UnityEditor;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     public struct McpServerStatus
     {
@@ -30,14 +30,14 @@ namespace codingriver.upilot
         public int HttpClientCount;
     }
 
-    public sealed class UpilotMcpServerManager
+    public sealed class UPilotMcpServerManager
     {
-        public static UpilotMcpServerManager Instance { get; } = new();
+        public static UPilotMcpServerManager Instance { get; } = new();
 
         private static string DefaultPythonEntry => ResolveDefaultPythonEntry();
         private const string DefaultLogLevel = "INFO";
         private const string PackageName = "io.github.codingriver.upilot";
-        private static string HashSuffix => UpilotBridge.WsEndpointEditorPrefsKeySuffix;
+        private static string HashSuffix => UPilotBridge.WsEndpointEditorPrefsKeySuffix;
 
         private static string PythonEntryKey => $"upilot.McpMgr.PythonEntry.{HashSuffix}";
         private static string LogLevelKey => $"upilot.McpMgr.LogLevel.{HashSuffix}";
@@ -47,10 +47,10 @@ namespace codingriver.upilot
         private string _logLevel = DefaultLogLevel;
         private bool _autoStart = true;
 
-        /// <summary>HTTP port is stored and managed by UpilotBridge (single source of truth).</summary>
-        public int HttpPort => UpilotBridge.Instance?.HttpPort ?? 8011;
-        /// <summary>WS port is stored and managed by UpilotBridge (single source of truth).</summary>
-        public int WsPort => UpilotBridge.Instance?.WsPort ?? 8765;
+        /// <summary>HTTP port is stored and managed by UPilotBridge (single source of truth).</summary>
+        public int HttpPort => UPilotBridge.Instance?.HttpPort ?? 8011;
+        /// <summary>WS port is stored and managed by UPilotBridge (single source of truth).</summary>
+        public int WsPort => UPilotBridge.Instance?.WsPort ?? 8765;
         public string PythonEntryPath => _pythonEntryPath;
 
         public bool IsPythonEntryValid(out string absolutePath)
@@ -80,10 +80,10 @@ namespace codingriver.upilot
         /// </summary>
         public void ValidateAndAutoFixPath()
         {
-            Debug.Log($"[UpilotMcpServerManager] ValidateAndAutoFixPath called. Current path: {_pythonEntryPath}");
+            Debug.Log($"[UPilotMcpServerManager] ValidateAndAutoFixPath called. Current path: {_pythonEntryPath}");
             if (string.IsNullOrEmpty(_pythonEntryPath))
             {
-                Debug.Log("[UpilotMcpServerManager] Current path is null or empty, skipping validation.");
+                Debug.Log("[UPilotMcpServerManager] Current path is null or empty, skipping validation.");
                 return;
             }
 
@@ -91,33 +91,33 @@ namespace codingriver.upilot
             string fullPath = Path.IsPathRooted(_pythonEntryPath)
                 ? _pythonEntryPath
                 : Path.GetFullPath(Path.Combine(projectRoot, _pythonEntryPath));
-            Debug.Log($"[UpilotMcpServerManager] Resolved fullPath: {fullPath}, exists={File.Exists(fullPath)}");
+            Debug.Log($"[UPilotMcpServerManager] Resolved fullPath: {fullPath}, exists={File.Exists(fullPath)}");
 
             // Current path is valid — nothing to do.
             if (File.Exists(fullPath))
             {
-                Debug.Log("[UpilotMcpServerManager] Current path is valid, no action needed.");
+                Debug.Log("[UPilotMcpServerManager] Current path is valid, no action needed.");
                 return;
             }
 
             // Current path is invalid — try to discover the default.
-            Debug.Log("[UpilotMcpServerManager] Current path is invalid, attempting auto-discovery...");
+            Debug.Log("[UPilotMcpServerManager] Current path is invalid, attempting auto-discovery...");
             string discovered = ResolveDefaultPythonEntry();
             string discoveredFull = Path.IsPathRooted(discovered)
                 ? discovered
                 : Path.GetFullPath(Path.Combine(projectRoot, discovered));
-            Debug.Log($"[UpilotMcpServerManager] Discovered path: {discovered}, resolved: {discoveredFull}, exists={File.Exists(discoveredFull)}");
+            Debug.Log($"[UPilotMcpServerManager] Discovered path: {discovered}, resolved: {discoveredFull}, exists={File.Exists(discoveredFull)}");
 
             // Only overwrite if discovery actually found an existing file.
             if (File.Exists(discoveredFull))
             {
                 _pythonEntryPath = discovered;
                 SavePrefs();
-                Debug.Log($"[UpilotMcpServerManager] Auto-fixed path to: {discovered}");
+                Debug.Log($"[UPilotMcpServerManager] Auto-fixed path to: {discovered}");
             }
             else
             {
-                Debug.LogWarning("[UpilotMcpServerManager] Auto-discovery failed, keeping existing path for manual correction.");
+                Debug.LogWarning("[UPilotMcpServerManager] Auto-discovery failed, keeping existing path for manual correction.");
             }
         }
         public string LogLevel { get => _logLevel; set { if (_logLevel != value) { _logLevel = value; SavePrefs(); } } }
@@ -142,7 +142,7 @@ namespace codingriver.upilot
             try
             {
                 string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
-                Debug.Log($"[UpilotMcpServerManager] ResolveDefaultPythonEntry: projectRoot={projectRoot}");
+                Debug.Log($"[UPilotMcpServerManager] ResolveDefaultPythonEntry: projectRoot={projectRoot}");
 
                 bool TryCandidate(string candidatePath, string source, out string result)
                 {
@@ -150,11 +150,11 @@ namespace codingriver.upilot
                     if (string.IsNullOrEmpty(candidatePath)) return false;
                     if (!File.Exists(candidatePath))
                     {
-                        Debug.Log($"[UpilotMcpServerManager]   Checking candidate ({source}): {candidatePath}, exists=False");
+                        Debug.Log($"[UPilotMcpServerManager]   Checking candidate ({source}): {candidatePath}, exists=False");
                         return false;
                     }
                     result = candidatePath.Replace('\\', '/');
-                    Debug.Log($"[UpilotMcpServerManager]   -> FOUND via {source}: {result}");
+                    Debug.Log($"[UPilotMcpServerManager]   -> FOUND via {source}: {result}");
                     return true;
                 }
 
@@ -171,7 +171,7 @@ namespace codingriver.upilot
                         if (match.Success)
                         {
                             string depValue = match.Groups[1].Value;
-                            Debug.Log($"[UpilotMcpServerManager] Manifest dep value: {depValue}");
+                            Debug.Log($"[UPilotMcpServerManager] Manifest dep value: {depValue}");
 
                             if (depValue.StartsWith("file:"))
                             {
@@ -189,7 +189,7 @@ namespace codingriver.upilot
                                 if (filePath.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) || 
                                     filePath.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    Debug.LogWarning($"[UpilotMcpServerManager] Tarball installation ({depValue}) is not auto-discoverable. Please extract it or set path manually.");
+                                    Debug.LogWarning($"[UPilotMcpServerManager] Tarball installation ({depValue}) is not auto-discoverable. Please extract it or set path manually.");
                                 }
                                 else
                                 {
@@ -199,7 +199,7 @@ namespace codingriver.upilot
                                     else
                                         absPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
                                     
-                                    Debug.Log($"[UpilotMcpServerManager] Resolved file: reference to: {absPath}");
+                                    Debug.Log($"[UPilotMcpServerManager] Resolved file: reference to: {absPath}");
                                     string currentCandidate = Path.Combine(absPath, "upilotserver~", "run_upilot_mcp.py");
                                     if (TryCandidate(currentCandidate, "manifest file: ref current server", out string result))
                                         return result;
@@ -212,23 +212,23 @@ namespace codingriver.upilot
                             else
                             {
                                 // Registry version like "1.0.0" — will be in PackageCache
-                                Debug.Log($"[UpilotMcpServerManager] Registry/Git version reference: {depValue}, will search PackageCache");
+                                Debug.Log($"[UPilotMcpServerManager] Registry/Git version reference: {depValue}, will search PackageCache");
                             }
                         }
                         else
                         {
-                            Debug.Log($"[UpilotMcpServerManager] Package '{PackageName}' not found in manifest.json");
+                            Debug.Log($"[UPilotMcpServerManager] Package '{PackageName}' not found in manifest.json");
                         }
                     }
                     catch (Exception manifestEx)
                     {
-                        Debug.LogWarning($"[UpilotMcpServerManager] Failed to parse manifest.json: {manifestEx.Message}");
+                        Debug.LogWarning($"[UPilotMcpServerManager] Failed to parse manifest.json: {manifestEx.Message}");
                     }
                 }
 
                 // 1. Search local embedded packages directly under Packages/
                 string packagesDir = Path.Combine(projectRoot, "Packages");
-                Debug.Log($"[UpilotMcpServerManager] Checking Packages dir: {packagesDir}, exists={Directory.Exists(packagesDir)}");
+                Debug.Log($"[UPilotMcpServerManager] Checking Packages dir: {packagesDir}, exists={Directory.Exists(packagesDir)}");
                 if (Directory.Exists(packagesDir))
                 {
                     foreach (var dir in Directory.GetDirectories(packagesDir))
@@ -246,7 +246,7 @@ namespace codingriver.upilot
 
                 // 2. Search package cache (Git URL / registry installs)
                 string cacheDir = Path.Combine(projectRoot, "Library", "PackageCache");
-                Debug.Log($"[UpilotMcpServerManager] Checking PackageCache dir: {cacheDir}, exists={Directory.Exists(cacheDir)}");
+                Debug.Log($"[UPilotMcpServerManager] Checking PackageCache dir: {cacheDir}, exists={Directory.Exists(cacheDir)}");
                 if (Directory.Exists(cacheDir))
                 {
                     foreach (var dir in Directory.GetDirectories(cacheDir, "io.github.codingriver.upilot*"))
@@ -304,11 +304,11 @@ namespace codingriver.upilot
                 }
                 catch { /* ignore */ }
 
-                Debug.LogWarning("[UpilotMcpServerManager] No valid python entry found, falling back to ./upilotserver~/run_upilot_mcp.py");
+                Debug.LogWarning("[UPilotMcpServerManager] No valid python entry found, falling back to ./upilotserver~/run_upilot_mcp.py");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UpilotMcpServerManager] ResolveDefaultPythonEntry exception: {ex}");
+                Debug.LogError($"[UPilotMcpServerManager] ResolveDefaultPythonEntry exception: {ex}");
             }
             return "./upilotserver~/run_upilot_mcp.py";
         }
@@ -329,7 +329,7 @@ namespace codingriver.upilot
             return Path.GetFullPath(Path.Combine(projectRoot, path));
         }
 
-        private UpilotMcpServerManager()
+        private UPilotMcpServerManager()
         {
             LoadPrefs();
         }
@@ -340,8 +340,8 @@ namespace codingriver.upilot
             _pythonEntryPath = EditorPrefs.GetString(PythonEntryKey, DefaultPythonEntry);
             _logLevel = EditorPrefs.GetString(LogLevelKey, DefaultLogLevel);
             _autoStart = EditorPrefs.GetBool(AutoStartKey, true);
-            var bridge = UpilotBridge.Instance;
-            Debug.Log($"[UpilotMcpServerManager] LoadPrefs loaded: HttpPort={bridge?.HttpPort ?? 8011}, WsPort={bridge?.WsPort ?? 8765}, PythonEntryPath={_pythonEntryPath}, LogLevel={_logLevel}, AutoStart={_autoStart}");
+            var bridge = UPilotBridge.Instance;
+            Debug.Log($"[UPilotMcpServerManager] LoadPrefs loaded: HttpPort={bridge?.HttpPort ?? 8011}, WsPort={bridge?.WsPort ?? 8765}, PythonEntryPath={_pythonEntryPath}, LogLevel={_logLevel}, AutoStart={_autoStart}");
 
             // If the persisted path points to a file that no longer exists
             // (e.g. old root-level upilot/ was removed), or if the path
@@ -354,11 +354,11 @@ namespace codingriver.upilot
                     ? _pythonEntryPath
                     : Path.GetFullPath(Path.Combine(projectRoot, _pythonEntryPath));
                 bool needsRediscover = !File.Exists(fullPath);
-                Debug.Log($"[UpilotMcpServerManager] LoadPrefs validation: fullPath={fullPath}, exists={File.Exists(fullPath)}, needsRediscover={needsRediscover}");
+                Debug.Log($"[UPilotMcpServerManager] LoadPrefs validation: fullPath={fullPath}, exists={File.Exists(fullPath)}, needsRediscover={needsRediscover}");
                 if (needsRediscover)
                 {
                     string discovered = DefaultPythonEntry;
-                    Debug.Log($"[UpilotMcpServerManager] LoadPrefs rediscovering: {discovered}");
+                    Debug.Log($"[UPilotMcpServerManager] LoadPrefs rediscovering: {discovered}");
                     _pythonEntryPath = discovered;
                     SavePrefs();
                 }
@@ -424,7 +424,7 @@ namespace codingriver.upilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UpilotMcpServerManager] Status refresh failed: {ex.Message}");
+                Debug.LogError($"[UPilotMcpServerManager] Status refresh failed: {ex.Message}");
             }
             finally
             {
@@ -466,20 +466,20 @@ namespace codingriver.upilot
             var status = GetStatus();
             if (status.IsRunning)
             {
-                Debug.LogWarning("[UpilotMcpServerManager] MCP server already running.");
+                Debug.LogWarning("[UPilotMcpServerManager] MCP server already running.");
                 return;
             }
 
             // Auto-sync Bridge WS endpoint to match MCP server port before starting.
             // Bridge and MCP manager store their ports in separate EditorPrefs keys,
             // so they can drift apart after manual edits or version upgrades.
-            var bridge = UpilotBridge.Instance;
+            var bridge = UPilotBridge.Instance;
             if (bridge != null && (bridge.WsPort != WsPort || bridge.WsHost != "127.0.0.1"))
             {
                 int oldPort = bridge.WsPort;
                 string oldHost = bridge.WsHost;
                 bridge.SetWsEndpoint("127.0.0.1", WsPort);
-                Debug.LogWarning($"[UpilotMcpServerManager] Auto-synced Bridge endpoint from ws://{oldHost}:{oldPort} to ws://127.0.0.1:{WsPort} to match MCP server.");
+                Debug.LogWarning($"[UPilotMcpServerManager] Auto-synced Bridge endpoint from ws://{oldHost}:{oldPort} to ws://127.0.0.1:{WsPort} to match MCP server.");
             }
 
             string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
@@ -490,7 +490,7 @@ namespace codingriver.upilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UpilotMcpServerManager] Failed to start server: {ex.Message}");
+                Debug.LogError($"[UPilotMcpServerManager] Failed to start server: {ex.Message}");
             }
         }
 
@@ -502,14 +502,14 @@ namespace codingriver.upilot
 
             if (!File.Exists(entryFullPath))
             {
-                Debug.LogError($"[UpilotMcpServerManager] Python entry not found: {entryFullPath}");
+                Debug.LogError($"[UPilotMcpServerManager] Python entry not found: {entryFullPath}");
                 return;
             }
 
             string pythonExe = FindPythonExecutable();
             if (string.IsNullOrEmpty(pythonExe))
             {
-                Debug.LogError("[UpilotMcpServerManager] No Python interpreter found. Please install Python and ensure 'python', 'py', or 'python3' is available in PATH.");
+                Debug.LogError("[UPilotMcpServerManager] No Python interpreter found. Please install Python and ensure 'python', 'py', or 'python3' is available in PATH.");
                 return;
             }
 
@@ -528,7 +528,7 @@ namespace codingriver.upilot
             };
 
             var proc = Process.Start(psi);
-            Debug.Log($"[UpilotMcpServerManager] Started python process PID={proc?.Id} via {pythonExe} for {entryFullPath} (HTTP={HttpPort}, WS={WsPort})");
+            Debug.Log($"[UPilotMcpServerManager] Started python process PID={proc?.Id} via {pythonExe} for {entryFullPath} (HTTP={HttpPort}, WS={WsPort})");
         }
 
         private static string FindPythonExecutable()
@@ -568,7 +568,7 @@ namespace codingriver.upilot
             var (pid, cmdLine) = FindMcpProcessByPorts();
             if (!pid.HasValue)
             {
-                Debug.LogWarning("[UpilotMcpServerManager] No MCP server process found listening on configured ports.");
+                Debug.LogWarning("[UPilotMcpServerManager] No MCP server process found listening on configured ports.");
                 return;
             }
 
@@ -576,11 +576,11 @@ namespace codingriver.upilot
             {
                 var proc = Process.GetProcessById(pid.Value);
                 proc.Kill();
-                Debug.Log($"[UpilotMcpServerManager] Killed MCP server process PID={pid.Value}");
+                Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={pid.Value}");
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UpilotMcpServerManager] Failed to kill process PID={pid.Value}: {ex.Message}");
+                Debug.LogError($"[UPilotMcpServerManager] Failed to kill process PID={pid.Value}: {ex.Message}");
             }
         }
 
@@ -600,8 +600,8 @@ namespace codingriver.upilot
                     return;
                 }
 
-                var portsAvailable = UpilotPortAllocator.IsPortAvailable(HttpPort) &&
-                                     UpilotPortAllocator.IsPortAvailable(WsPort);
+                var portsAvailable = UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+                                     UPilotPortAllocator.IsPortAvailable(WsPort);
                 if (portsAvailable)
                 {
                     EditorApplication.update -= waitForPorts;
@@ -618,7 +618,7 @@ namespace codingriver.upilot
                 _restartPending = false;
                 InvalidateStatusCache();
                 Debug.LogError(
-                    $"[UpilotMcpServerManager] MCP restart timed out waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.");
+                    $"[UPilotMcpServerManager] MCP restart timed out waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.");
             };
             EditorApplication.update += waitForPorts;
         }
@@ -673,7 +673,7 @@ namespace codingriver.upilot
                 if (kv.Value.Contains(HttpPort) || kv.Value.Contains(WsPort))
                 {
                     string cmdLine = SafeGetCommandLine(kv.Key);
-                    if (IsUpilotMcpLike(cmdLine))
+                    if (IsUPilotMcpLike(cmdLine))
                         return (kv.Key, cmdLine);
                 }
             }
@@ -684,20 +684,20 @@ namespace codingriver.upilot
             foreach (var p in p1)
             {
                 string cmdLine = SafeGetCommandLine(p.Id);
-                if (IsUpilotMcpLike(cmdLine))
+                if (IsUPilotMcpLike(cmdLine))
                     return (p.Id, cmdLine);
             }
             foreach (var p in p2)
             {
                 string cmdLine = SafeGetCommandLine(p.Id);
-                if (IsUpilotMcpLike(cmdLine))
+                if (IsUPilotMcpLike(cmdLine))
                     return (p.Id, cmdLine);
             }
 
             return (null, null);
         }
 
-        private static bool IsUpilotMcpLike(string cmdLine)
+        private static bool IsUPilotMcpLike(string cmdLine)
         {
             if (string.IsNullOrWhiteSpace(cmdLine)) return false;
             return cmdLine.IndexOf("run_upilot_mcp.py", StringComparison.OrdinalIgnoreCase) >= 0

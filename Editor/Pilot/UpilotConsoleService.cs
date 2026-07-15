@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,7 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── M07 Console DTOs ──────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ namespace codingriver.upilot
         public int count = 200;
         public string logType;
         public bool includeStackTrace;
-        public bool excludeUpilot = true;
+        public bool excludeUPilot = true;
         public string[] contains;
         public bool containsAll;
         public string regex;
@@ -84,7 +84,7 @@ namespace codingriver.upilot
         public int count = 200;
         public string logType;
         public bool includeStackTrace;
-        public bool excludeUpilot = true;
+        public bool excludeUPilot = true;
         public string[] contains;
         public bool containsAll;
         public string regex;
@@ -138,7 +138,7 @@ namespace codingriver.upilot
 
     // ── M07 Console Service ───────────────────────────────────────────────────
 
-    public sealed class UpilotConsoleService
+    public sealed class UPilotConsoleService
     {
         private const int RingBufferCapacity = 500;
 
@@ -146,9 +146,9 @@ namespace codingriver.upilot
         private static readonly List<ConsoleLogEntry> _ringBuffer = new(RingBufferCapacity);
         private static bool _subscribed;
 
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotConsoleService(UpilotBridge bridge)
+        public UPilotConsoleService(UPilotBridge bridge)
         {
             _bridge = bridge;
             EnsureLogSubscription();
@@ -571,7 +571,7 @@ namespace codingriver.upilot
             FieldInfo modeField)
         {
             return TryAddLogEntryCore(
-                logs, index, payload.logType, payload.includeStackTrace, payload.excludeUpilot,
+                logs, index, payload.logType, payload.includeStackTrace, payload.excludeUPilot,
                 payload.contains, payload.containsAll, payload.regex, payload.maxMessageLength,
                 getEntryMethod, logEntryType, messageField, modeField);
         }
@@ -586,7 +586,7 @@ namespace codingriver.upilot
             FieldInfo modeField)
         {
             return TryAddLogEntryCore(
-                logs, index, payload.logType, payload.includeStackTrace, payload.excludeUpilot,
+                logs, index, payload.logType, payload.includeStackTrace, payload.excludeUPilot,
                 payload.contains, payload.containsAll, payload.regex, payload.maxMessageLength,
                 getEntryMethod, logEntryType, messageField, modeField);
         }
@@ -596,7 +596,7 @@ namespace codingriver.upilot
             int index,
             string logType,
             bool includeStackTrace,
-            bool excludeUpilot,
+            bool excludeUPilot,
             string[] contains,
             bool containsAll,
             string regex,
@@ -625,7 +625,7 @@ namespace codingriver.upilot
                 msg = msg.Substring(0, nlIndex);
             }
 
-            if (excludeUpilot && IsUpilotLog(msg, stackTrace))
+            if (excludeUPilot && IsUPilotLog(msg, stackTrace))
                 return false;
 
             if (!MatchesText(msg, stackTrace, contains, containsAll, regex))
@@ -680,16 +680,16 @@ namespace codingriver.upilot
             return true;
         }
 
-        private static bool IsUpilotLog(string message, string stackTrace)
+        private static bool IsUPilotLog(string message, string stackTrace)
         {
-            return ContainsUpilot(message) || ContainsUpilot(stackTrace);
+            return ContainsUPilot(message) || ContainsUPilot(stackTrace);
         }
 
-        private static bool ContainsUpilot(string value)
+        private static bool ContainsUPilot(string value)
         {
             if (string.IsNullOrEmpty(value)) return false;
-            return value.IndexOf("Upilot", StringComparison.OrdinalIgnoreCase) >= 0
-                || value.IndexOf("codingriver.upilot", StringComparison.OrdinalIgnoreCase) >= 0
+            return value.IndexOf("UPilot", StringComparison.OrdinalIgnoreCase) >= 0
+                || value.IndexOf("CodingRiver.UPilot", StringComparison.OrdinalIgnoreCase) >= 0
                 || value.IndexOf("[COMMAND ]", StringComparison.OrdinalIgnoreCase) >= 0
                 || value.IndexOf("upilot", StringComparison.OrdinalIgnoreCase) >= 0;
         }

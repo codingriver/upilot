@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -12,7 +12,7 @@ using UnityEditor.PackageManager;
 using UnityEditor.PackageManager.Requests;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -51,11 +51,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotPackageService
+    public class UPilotPackageService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotPackageService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotPackageService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -79,7 +79,7 @@ namespace codingriver.upilot
             }
 
             string identifier = string.IsNullOrEmpty(p.version) ? p.packageName : $"{p.packageName}@{p.version}";
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             opCtx?.Step("准备添加包", identifier);
 
             PackageAddResultPayload result;
@@ -201,7 +201,7 @@ namespace codingriver.upilot
             where TRequest : Request
         {
             var tcs = new TaskCompletionSource<TResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             TRequest request = null;
             bool started = false;
             EditorApplication.CallbackFunction tick = null;

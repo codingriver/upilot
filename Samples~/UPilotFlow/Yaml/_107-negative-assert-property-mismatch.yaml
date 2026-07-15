@@ -1,0 +1,12 @@
+schemaVersion: 2
+name: "_107-negative-assert-property-mismatch"
+description: Expects failure when assert_property expected value does not match actual.
+fixture:
+  host_window:
+    type: ExampleBasicLoginWindow
+    reopen_if_open: true
+steps:
+  - action: assert_property
+    selector: "#login-button"
+    property: "text"
+    expected: "wrong-text"

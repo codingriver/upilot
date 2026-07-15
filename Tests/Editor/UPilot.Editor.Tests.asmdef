@@ -1,0 +1,21 @@
+{
+    "name": "UPilot.Editor.Tests",
+    "rootNamespace": "CodingRiver.UPilot.Tests",
+    "references": [
+        "UPilot.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

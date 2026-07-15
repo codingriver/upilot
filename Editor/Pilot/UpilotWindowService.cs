@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     [Serializable]
     public class EditorWindowInfo
@@ -55,11 +55,11 @@ namespace codingriver.upilot
         public string titleFilter;
     }
 
-    public sealed class UpilotWindowService
+    public sealed class UPilotWindowService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotWindowService(UpilotBridge bridge) => _bridge = bridge;
+        public UPilotWindowService(UPilotBridge bridge) => _bridge = bridge;
 
         public void RegisterCommands()
         {
@@ -114,7 +114,7 @@ namespace codingriver.upilot
                 var rect = w.position;
                 result.windows.Add(new EditorWindowInfo
                 {
-                    instanceId = UpilotEntityIds.ToWireId(w),
+                    instanceId = UPilotEntityIds.ToWireId(w),
                     typeName = typeName,
                     fullTypeName = fullTypeName,
                     title = title,

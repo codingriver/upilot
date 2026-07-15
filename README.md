@@ -1,335 +1,118 @@
-# upilot
+# UPilot
 
-upilot is an open-source Unity Editor automation bridge and MCP server for AI agents such as Codex, Claude, Cursor, and other MCP clients.
+UPilot 是面向 AI Agent 的 Unity Editor MCP 自动化核心，提供连接、诊断、编译、Console、场景、对象、组件、资源、Prefab、包、测试、构建、截图、反射调用和长任务追踪能力。
 
-upilot 是一个开源 Unity Editor 自动化桥接包，面向 AI Agent 和 MCP client。
-它通过本地 MCP 服务让外部工具检查、控制和诊断 Unity Editor。
+UPilot Flow 是包内可选的 YAML EditorWindow 自动化模块。它默认关闭，不影响核心能力。
 
-UIFlow 是随包提供的可选附属工具，用 YAML 驱动 Unity EditorWindow UI 自动化。主品牌统一为小写 `upilot`。
+## Requirements
 
-Agent skill entry: this repository includes `skills/upilot-unity-mcp/SKILL.md` for agents that want to use upilot as a Unity Editor MCP server.
-Codex repo-scope skill entry is also mirrored at `.agents/skills/upilot-unity-mcp/SKILL.md` for automatic discovery when this repository is opened in Codex.
+- Unity 2022.3 或更高：支持全部 UPilot 核心能力。
+- Python 3.11 或更高：运行 MCP 服务。
+- UPilot Flow：仅支持 Unity 6+，并要求可选依赖和 `UPILOT_ENABLE_FLOW`。
 
-## 核心功能
+## Install
 
-- 通过 MCP Streamable HTTP 暴露 Unity Editor 自动化能力。
-- Python MCP server 通过 WebSocket 连接 Unity Editor bridge。
-- 支持编辑器状态、Console、编译、资源、场景、GameObject、组件、窗口、截图、包、菜单、脚本、Prefab、材质、构建、测试和诊断等操作。
-- 可选启用 UIFlow，用 YAML 自动化 UIToolkit 和部分 IMGUI EditorWindow。
-- Unity 2022.3+ 默认支持 upilot 核心桥接；UIFlow 在 Unity 6+ 显式启用。
-
-## 版本兼容
-
-| 能力 | 要求 | 说明 |
-| --- | --- | --- |
-| upilot 核心桥接 | Unity `2022.3` 或更高 | 默认编译。 |
-| upilot MCP 服务 | Python `3.11` 或更高 | 随包提供。 |
-| UIFlow YAML 自动化 | Unity `6000.0` 或更高 | 需要启用 `UPILOT_ENABLE_UIFLOW`。 |
-| 当前验证工程 | Unity `6000.6.0a2` | 见 `Tests~/UPilotTest`。 |
-
-UIFlow 还需要消费项目安装以下 Unity 包：
-
-- `com.unity.inputsystem`
-- `com.unity.ui`
-- `com.unity.ui.test-framework`
-- `com.unity.test-framework`
-
-在 Unity 2022 中不要启用 `UPILOT_ENABLE_UIFLOW`。此时 UIFlow 相关 MCP 调用会返回 `UIFLOW_UNAVAILABLE`，但 upilot 其他能力仍可用。
-
-## 安装
-
-在 **Window > Package Manager > Add package from git URL** 中添加：
-
-```text
-https://github.com/codingriver/upilot.git#v0.1.1
-```
-
-也可以直接编辑 `Packages/manifest.json`：
+在 Unity `Packages/manifest.json` 中添加：
 
 ```json
 {
   "dependencies": {
-    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.1.1"
+    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.2.0"
   }
 }
 ```
 
-首次导入 UPM 包后，upilot 会打开简化主面板。选择 Codex、Claude 或 Cursor 后点击“配置并启动”，upilot 会自动选择端口、写入项目配置并启动 Unity 桥接器和 MCP 服务。端口、进程和诊断信息仅在 `upilot/Advanced Settings` 中显示。
+Python 服务位于 `upilotserver~`：
 
-Agent 识别规则会写入 upilot 管理块。文件不存在时创建；文件已存在时追加或更新 `<!-- upilot:start -->` / `<!-- upilot:end -->` 标记块，用户其它内容会保留：
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `.cursor/rules/upilot-unity-mcp.mdc`
-- `.agents/skills/upilot-unity-mcp`
-
-MCP 客户端配置需要显式勾选或点击写入。已存在配置时，upilot 只更新 `upilot` 映射：
-
-- `.codex/config.toml`：更新 `[mcp_servers.upilot]`
-- `.mcp.json`：更新 `mcpServers.upilot`
-- `.cursor/mcp.json`：更新 `mcpServers.upilot`
-
-其它 MCP server 配置会尽量保留。需要重新执行时，打开 `upilot/Advanced Settings`，在 `Agent` 页中更新对应客户端配置。
-
-Agent 自动安装入口：
-
-```bash
-python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT>
+```powershell
+cd upilotserver~
+python -m pip install -e .
+python run_upilot_mcp.py --transport http --http-port 8011
 ```
 
-该脚本会将 upilot UPM 包写入目标 Unity 项目的 `Packages/manifest.json`，为 `upilotserver~` 创建 Python 虚拟环境并安装 MCP server，并把技能安装到目标项目的 `.agents/skills/upilot-unity-mcp`。
-
-如果目标项目需要 UIFlow：
-
-```bash
-python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT> --enable-uiflow
-```
-
-如需同时写入项目级 Codex MCP 配置：
-
-```bash
-python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_PROJECT_ROOT> --write-codex-mcp project
-```
-
-## 使用 upilot
-
-打开 Unity 主面板：
+MCP 客户端统一连接：
 
 ```text
-upilot/upilot
+http://127.0.0.1:8011/mcp
 ```
 
-主面板只展示是否可用，并提供一键配置、启动和自动修复。端口、进程、Agent 配置、日志和诊断位于 `upilot/Advanced Settings`。
+内部 WebSocket 端口只用于 Python 服务与 Unity Bridge 通信，不得配置为 MCP 客户端地址。
 
-MCP client 推荐配置：
+## Project Config
+
+项目根目录 `.upilot/config.json`：
 
 ```json
 {
-  "servers": {
-    "upilot": {
-      "type": "http",
-      "url": "http://127.0.0.1:8011/mcp"
+  "schemaVersion": 2,
+  "mcp": {
+    "httpHost": "127.0.0.1",
+    "httpPort": 8011,
+    "wsHost": "127.0.0.1",
+    "wsPort": 8765
+  },
+  "cache": {
+    "contextStaleMs": 2000
+  },
+  "features": {
+    "flow": {
+      "enabled": false
     }
   }
 }
 ```
 
-常用客户端配置示例。不同工具的配置格式不同，按实际使用的客户端复制对应片段即可。
+配置优先级为：工具调用参数 > CLI/环境变量 > 项目配置 > 内置默认值。
 
-### Codex CLI
+## Agent Workflow
 
-Codex 使用 TOML 配置文件。将下面内容加入 `~/.codex/config.toml`：
+1. 调用 `unity_mcp_status` 并校验 `connected`、`serverReady` 和项目路径。
+2. 工具是否存在不明确时调用 `unity_capabilities_get` 或 `unity_tools_find`。
+3. 修改 Editor 前调用 `unity_ensure_ready`。
+4. 一批磁盘写入后只调用一次 `unity_sync_after_disk_write`。
+5. 仅在 C# 或程序集相关内容变化后编译。
+6. 长任务通过 `unity_task_*` 与 `unity_operation_*` 查询阶段、耗时和卡住状态。
 
-```toml
-[mcp_servers.upilot]
-url = "http://127.0.0.1:8011/mcp"
-startup_timeout_sec = 10
-tool_timeout_sec = 60
-```
+服务端已注册、客户端已注入、工具实际调用成功是三个不同状态。工具列表或可选功能变化后需要刷新 MCP 客户端。
 
-### Claude Desktop
+## Core APIs
 
-Claude Desktop 使用 JSON 配置文件。
+- `unity_capabilities_get`
+- `unity_tools_find`
+- `unity_operation_list` / `unity_operation_get`
+- `unity_task_start` / `unity_task_status` / `unity_task_cancel`
+- `unity_reflection_call`
+- `reflection_eval`，仅作为一次有边界的降级表达式
 
-配置文件位置：
+所有工具使用 schema v2 响应，包含结构化错误、上下文新鲜度和分层耗时。
 
-- macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows：`%APPDATA%\Claude\claude_desktop_config.json`
+## UPilot Flow
 
-```json
-{
-  "mcpServers": {
-    "upilot": {
-      "url": "http://127.0.0.1:8011/mcp"
-    }
-  }
-}
-```
+默认安装不会加载 `UPilot.Flow`，不会注册 `unity_upilot_flow_*`，也不要求 Flow 依赖。
 
-### Claude Code
+在 Unity 6 项目中启用 Flow 前必须由用户明确确认。启用后需要安装可选包、添加 `UPILOT_ENABLE_FLOW`，并重启 MCP 客户端刷新工具列表。
 
-Claude Code 推荐使用命令行添加 MCP server。已通过 upilot 面板或命令行启动 HTTP MCP server 时，使用：
-
-```bash
-claude mcp add --transport http upilot --scope project http://127.0.0.1:8011/mcp
-```
-
-Claude Code 生成的项目级配置通常会写入 `.mcp.json`，形式类似：
-
-```json
-{
-  "mcpServers": {
-    "upilot": {
-      "type": "http",
-      "url": "http://127.0.0.1:8011/mcp"
-    }
-  }
-}
-```
-
-### Cursor
-
-Cursor 使用 `mcp.json`。项目级配置文件为 `.cursor/mcp.json`；全局配置文件为 `~/.cursor/mcp.json`。
-
-```json
-{
-  "mcpServers": {
-    "upilot": {
-      "url": "http://127.0.0.1:8011/mcp"
-    }
-  }
-}
-```
-
-使用 HTTP 配置时，需要先确认 upilot MCP server 正在运行，且 `http://127.0.0.1:8011/health` 返回 `status: ok`。
-
-## 运行时代码工具
-
-upilot 提供两类不同的 Unity 侧 C# 调用方式：
-
-- `unity_reflection_call` 调用已经编译并加载到 Unity 程序集中的现有方法。稳定自动化入口，例如 `EnterBattle`、`ExitBattle`、`GetState`，优先使用它。
-- `reflection_eval(code, variables = null, options = null)` 执行一条受限 C# 表达式语句，适合调试和自动化验收中的链式访问、索引、方法调用、运算符、赋值、三元、cast/as/is、空条件访问和 typed array 参数。它不支持 lambda/LINQ/async/await/控制流/ref-out-in/任意对象构造。
-
-旧的 `unity_csharp_execute` 和 Roslyn 动态编译工具不再暴露。稳定业务自动化和已有方法调用请优先使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`。
-
-## MCP 工具清单
-
-当前 `tools/list` 暴露 113 个 MCP 工具，覆盖连接、编译、Console、编辑器输入、场景、GameObject、组件、资源、Prefab、材质、脚本、包、测试、构建、批处理、截图、E2E、UIFlow 和反射调用等能力。维护状态、条件可用性和验收口径见 `Documentation~/ToolStatus.md`。
-
-## UIFlow 附属工具
-
-UIFlow 用 YAML 描述 Unity Editor `EditorWindow` UI 测试流程，不面向 Game View，也不是 PlayMode Runtime UI 测试框架。
-
-功能支持清单：
-
-- UIToolkit 选择器：`#name`、`.class`、类型名、`[data-role=value]` 等。
-- 指针动作：点击、双击、悬停、拖拽、滚动、上下文菜单、弹出菜单。
-- 键盘与输入：聚焦、按键、文本输入、快速文本赋值。
-- 字段与集合：赋值、选项选择、Slider、Tab、List、Tree、Table、SplitView、Breadcrumb。
-- 等待与断言：可见、不可见、文本、值、启用状态、属性、等待元素出现。
-- 截图、Markdown/JSON 报告和失败截图。
-- 通过 `imgui_*` 动作支持部分 IMGUI 工作流。
-- Headed Test Runner 可视化调试，以及 MCP 驱动的自动化验证。
-
-启用 UIFlow 需要添加脚本宏：
-
-```text
-UPILOT_ENABLE_UIFLOW
-```
-
-启用后菜单入口：
-
-```text
-upilot/UIFlow/Test Runner
-```
-
-最小 YAML 示例：
+Flow YAML 使用：
 
 ```yaml
-fixture:
-  host_window: ExampleBasicLoginWindow
+schemaVersion: 2
+name: Example
 steps:
-  - type_text_fast:
-      selector: "#username-input"
-      text: "admin"
-  - type_text_fast:
-      selector: "#password-input"
-      text: "password"
-  - click:
-      selector: "#login-button"
-  - assert_text:
-      selector: "#status-label"
-      text: "Login successful"
+  - action: wait
+    duration: 100ms
 ```
 
-复杂 UIFlow 用法、选择器规则、页面接入规范和自动化边界已经拆分到独立文档：
+先用 `unity_upilot_flow_validate` 校验；迁移旧文件时先调用 `unity_upilot_flow_migrate(dryRun=true)`。
 
-- `Documentation~/UIFlow.md`
+详细说明见 `Documentation~/UPilot-Flow.md`，升级映射见 `MIGRATION.md`。
 
-## 文档
+## Development
 
-- README：`README.md`
-- 许可证：`LICENSE.md`
-- 第三方组件声明：`NOTICE.md`
-- upilot MCP server 开发文档：`upilotserver~/DEVELOPMENT.md`
-- MCP 工具状态矩阵：`Documentation~/ToolStatus.md`
-- UIFlow 使用指南：`Documentation~/UIFlow.md`
-- Codex/agent 技能入口：`skills/upilot-unity-mcp/SKILL.md`
-- Codex repo-scope 自动发现入口：`.agents/skills/upilot-unity-mcp/SKILL.md`
-
-## MonoHook 开源组件与不安全代码
-
-本项目内置了 [MonoHook](https://github.com/Misaka-Mikoto-Tech/MonoHook) 的核心源码拷贝，用于在 Unity Editor 内对托管方法做运行时 Hook。MonoHook 为 MIT License，相关源码位于 `Editor/Plugins/MonoHook/`。
-
-- **不安全代码**：MonoHook 依赖 C# `unsafe` 代码，当前由相关 `.asmdef` 文件的 `allowUnsafeCode` 选项启用，例如 `Editor/Plugins/MonoHook/MonoHook.asmdef` 和使用该能力的编辑器程序集。
-- **原生插件**：`Editor/Plugins/MonoHook/Plugins/` 中包含 macOS 用 `libMonoHookUtils_OSX.dylib` 与 `Utils.cpp`，与上游实现保持一致。
-- **用法边界**：需要 Hook 能力的 Editor 脚本可以引用 `MonoHook` 命名空间，例如 `MethodHook`；业务代码不应与 MonoHook 强耦合，升级 Unity 小版本后也应重新验证 Hook 目标方法是否仍适用。
-
-`allowUnsafeCode` 开启后，Unity 会允许对应程序集编译指针、非托管内存访问等 `unsafe` 代码，这是 MonoHook 这类底层 Hook 能力正常工作的前提。关闭该选项可以收紧程序集的安全边界，但依赖 `unsafe` 的源码会编译失败，MonoHook 相关的 IMGUI/Editor 方法拦截能力也将不可用。因此，除非确认不再使用这些 Hook 功能，否则不要关闭相关程序集的 `allowUnsafeCode`。
-
-第三方组件声明见 `NOTICE.md`。
-
-## reflection_eval 能力边界
-
-`reflection_eval(code, variables = null, options = null)` 是一个受限的 Unity Editor 反射表达式执行工具，**不是 C# 脚本执行器，也不是 Roslyn 动态编译器**。它只适合一条表达式级诊断或调用。
-
-适合：
-
-- 读取静态属性或实例属性。
-- 调用已经编译并加载的现有方法。
-- 做一次简单赋值或索引访问。
-- 用 JSON `variables` 传入参数。
-
-不适合：
-
-- 多行脚本、局部变量、临时 helper 函数。
-- `if` / `for` / `foreach` / `while` / `switch`。
-- lambda、LINQ、`async/await`。
-- `ref` / `out` / `in` 参数。
-- 任意 `new SomeClass()`、定义新类型、动态编译。
-
-如果因为这些边界失败，不要反复改写 C# 片段继续测试；请改用专用 MCP 工具、`unity_reflection_call`，或在项目里添加一个稳定 helper 方法后再调用。
-
-示例：
-
-```csharp
-UnityEngine.Application.unityVersion
+```powershell
+cd upilotserver~
+python -m compileall -q src
+python -m pytest -q
+python ..\skills\upilot-unity-mcp\scripts\check_skill_pack.py
 ```
 
-```csharp
-UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)
-```
-
-```csharp
-new uint[]{1,2,3}[1]
-```
-
-调用已有业务入口时，传入一条标准 C# 表达式语句即可，例如：
-
-```csharp
-IGG.Game.Module.KingShotBattle.KingShotBattleModule.Inst.RequestEnterLevel(10001u, false, new uint[1]{10001u});
-```
-
-支持内容：
-
-- 一条表达式语句，可带末尾分号。
-- 静态类型路径、已有对象访问、链式成员访问、索引器、数组/List/Dictionary 索引和方法调用。
-- `variables` JSON 注入的只读参数，包括带 `{ "type": "...", "value": ... }` 的 typed value。
-- 字面量：`null`、`true/false`、字符串/字符、整数/浮点数和常见数字后缀。
-- typed array：`new uint[]{1,2}`、`new uint[2]{1,2}`、`uint[]{1,2}`。
-- 白名单值类型构造：`Vector2`、`Vector3`、`Vector4`、`Quaternion`。
-- 运算符：一元 `!`、`+`、`-`、`~`；二元 `*`、`/`、`%`、`+`、`-`、`<<`、`>>`、`<`、`<=`、`>`、`>=`、`==`、`!=`、`&`、`^`、`|`、`&&`、`||`。
-- 三元 `?:`、括号、cast、`is`、`as`、空条件访问 `?.`。
-- 对反射成员或索引器赋值：`=`、`+=`、`-=`。
-- `options`：`resultMode`、`timeoutMs`、`maxTokens`、`maxCallDepth`、`maxResultItems`、`allowNamespacePrefixes`、`denyMethods`、`allowNonPublic`、`trace`。
-
-不支持内容：
-
-- 完整 C# 语句块，只支持单条表达式语句。
-- `var`、局部变量声明、临时变量复用。
-- `if`、`for`、`foreach`、`while`、`do`、`switch` 等控制流。
-- lambda 表达式、LINQ 查询语法、`async/await`、直接 delegate 调用。
-- `ref`、`out`、`in` 参数。
-- 任意对象构造、创建不存在的类、定义新类型或动态编译代码。
-- `using`、`namespace`、方法定义、本地函数、局部变量声明。
-- 将修改写回 `variables` JSON；`variables` 只作为表达式输入。
+版本变化见 `CHANGELOG.md`。

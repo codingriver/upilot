@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 2,
+  "headed": true,
+  "reportPath": "./Reports/UPilot/Flow",
+  "screenshotOnFailure": true,
+  "defaultTimeoutMs": 10000,
+  "customActionAssemblies": [
+    "UPilot.Flow.Tests"
+  ]
+}

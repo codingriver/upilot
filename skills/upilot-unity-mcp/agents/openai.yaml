@@ -1,14 +1,14 @@
 interface:
-  display_name: "upilot Unity MCP"
+  display_name: "UPilot Unity MCP"
   short_description: "Control Unity Editor through MCP"
   brand_color: "#2563EB"
-  default_prompt: "Use $upilot-unity-mcp to inspect Unity Editor state, fix compile issues, run tests, edit scenes/assets, and automate EditorWindow UI through MCP."
+  default_prompt: "Use $upilot-unity-mcp to verify the connected Unity project, inspect Editor state, fix compile issues, run tests, edit scenes/assets, and monitor long operations through MCP."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "upilot"
-      description: "Local upilot MCP server connected to a Unity Editor bridge"
+      description: "Local UPilot MCP server connected to a Unity Editor bridge"
       transport: "streamable_http"
       url: "http://127.0.0.1:8011/mcp"
 

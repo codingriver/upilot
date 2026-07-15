@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -9,9 +9,9 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public sealed class UpilotPlayInputService
+    public sealed class UPilotPlayInputService
     {
         /// <summary>Must be called from the main thread.</summary>
         public GenericOkPayload SetPlayMode(string action)
@@ -246,7 +246,7 @@ namespace codingriver.upilot
             // 4. Instance ID (numeric string)
             if (ulong.TryParse(targetWindow, out ulong instanceId))
             {
-                var byId = all.FirstOrDefault(w => UpilotEntityIds.ToWireId(w) == instanceId);
+                var byId = all.FirstOrDefault(w => UPilotEntityIds.ToWireId(w) == instanceId);
                 if (byId != null) return byId;
             }
 

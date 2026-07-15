@@ -26,8 +26,8 @@ async def main() -> None:
         stacklevel=2,
     )
     server = WsOrchestratorServer(host="127.0.0.1", port=8765)
-    print("[upilot MCP][LEGACY] WS server listening at ws://127.0.0.1:8765")
-    print("[upilot MCP][LEGACY] Use run_upilot_mcp.py for stdio/http MCP startup.")
+    print("[UPilot MCP][LEGACY] WS server listening at ws://127.0.0.1:8765")
+    print("[UPilot MCP][LEGACY] Use run_upilot_mcp.py for stdio/http MCP startup.")
     await server.start()
 
 

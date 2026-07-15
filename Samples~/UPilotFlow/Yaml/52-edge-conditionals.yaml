@@ -1,0 +1,23 @@
+schemaVersion: 2
+name: "52-edge-conditionals"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+steps:
+  - action: assert_not_visible
+    selector: "#toast-message"
+    timeout: "500ms"
+  - action: click
+    selector: "#login-button"
+    if:
+      exists: "#login-button"
+  - action: assert_text_contains
+    selector: "#status-label"
+    expected: "Missing credentials"
+    continue_on_step_failure: true
+  - action: assert_text
+    selector: "#status-label"
+    expected: "Missing credentials"
+  - action: wait
+    duration: "50ms"

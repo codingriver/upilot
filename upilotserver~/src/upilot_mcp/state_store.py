@@ -13,6 +13,9 @@ class CommandRecord:
     status: str = "pending"
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    created_at: int = 0
+    sent_at: int = 0
+    completed_at: int = 0
 
 
 @dataclass(slots=True)
@@ -34,6 +37,7 @@ class EditorSnapshot:
     is_compiling: bool = False
     play_mode_state: str = "edit"
     active_scene: str = ""
+    updated_at: int = 0
 
 
 class StateStore:
@@ -50,6 +54,8 @@ class StateStore:
             name=name,
             payload=payload,
             status="sent",
+            created_at=_now_ms(),
+            sent_at=_now_ms(),
         )
         self.commands[command_id] = record
         return record
@@ -60,6 +66,7 @@ class StateStore:
             return
         cmd.status = "success"
         cmd.result = payload
+        cmd.completed_at = _now_ms()
 
     def mark_failed(self, command_id: str, error: dict[str, Any]) -> None:
         cmd = self.commands.get(command_id)
@@ -67,6 +74,7 @@ class StateStore:
             return
         cmd.status = "failed"
         cmd.error = error
+        cmd.completed_at = _now_ms()
 
     def update_compile_status(self, payload: dict[str, Any]) -> None:
         self.compile.compile_request_id = str(payload.get("requestId", self.compile.compile_request_id))
@@ -117,3 +125,10 @@ class StateStore:
         self.editor.is_compiling = bool(payload.get("isCompiling", self.editor.is_compiling))
         self.editor.play_mode_state = str(payload.get("playModeState", self.editor.play_mode_state))
         self.editor.active_scene = str(payload.get("activeScene", self.editor.active_scene))
+        self.editor.updated_at = _now_ms()
+
+
+def _now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)

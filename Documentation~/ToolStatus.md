@@ -1,6 +1,6 @@
-# upilot MCP 工具状态矩阵
+# UPilot MCP 工具状态矩阵
 
-本文档用于跟踪 upilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 返回的实时 schema。
+本文档用于跟踪 UPilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 和 `unity_capabilities_get` 返回的实时 schema。
 
 最近同步：2026-07-11，`tools/list` 返回 113 个工具。
 
@@ -187,9 +187,9 @@
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `unity_uiflow_run_file` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_run_suite` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_run_batch` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_force_reset` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_run_async` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_uiflow_results` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_UIFLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_run_file` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_run_suite` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_run_batch` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_force_reset` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_run_async` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_results` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |

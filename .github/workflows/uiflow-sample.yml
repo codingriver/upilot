@@ -1,29 +1,29 @@
-name: UIFlow Sample
+name: UPilotFlow Sample
 
 on:
   workflow_dispatch:
 
 jobs:
-  editmode-uiflow:
+  editmode-upilot_flow:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run UIFlow
+      - name: Run UPilotFlow
         shell: pwsh
         run: |
           $unity = "C:\Program Files\Unity\Hub\Editor\6000.6.0a2\Editor\Unity.exe"
           & $unity `
             -projectPath $PWD `
             -quit `
-            -executeMethod codingriver.upilot.UIFlow.UIFlowCliEntry.RunAllFromCommandLine `
-            -uiFlow.headed false `
-            -uiFlow.reportPath ./Reports `
-            -uiFlow.screenshotOnFailure true `
-            -uiFlow.testFilter *
+            -executeMethod CodingRiver.UPilot.Flow.UPilotFlowCliEntry.RunAllFromCommandLine `
+            -upilotFlow.headed false `
+            -upilotFlow.reportPath ./Reports `
+            -upilotFlow.screenshotOnFailure true `
+            -upilotFlow.testFilter *
 
       - name: Upload Reports
         uses: actions/upload-artifact@v4
         with:
-          name: uiflow-reports
+          name: upilot_flow-reports
           path: Reports

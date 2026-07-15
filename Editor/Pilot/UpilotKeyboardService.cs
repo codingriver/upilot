@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,15 +10,15 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public sealed class UpilotKeyboardService
+    public sealed class UPilotKeyboardService
     {
         private static readonly string[] SupportedActions = { "keydown", "keyup", "keypress", "type" };
 
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotKeyboardService(UpilotBridge bridge)
+        public UPilotKeyboardService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -78,7 +78,7 @@ namespace codingriver.upilot
 
         private static GenericOkPayload HandleKeyboardEvent(KeyboardEventPayload payload, string action, KeyCode parsedKeyCode)
         {
-            var window = UpilotPlayInputService.FindTargetWindow(payload.targetWindow);
+            var window = UPilotPlayInputService.FindTargetWindow(payload.targetWindow);
             if (window == null)
             {
                 return new GenericOkPayload
@@ -90,7 +90,7 @@ namespace codingriver.upilot
 
             window.Focus();
 
-            var mods = UpilotPlayInputService.ParseModifiers(payload.modifiers);
+            var mods = UPilotPlayInputService.ParseModifiers(payload.modifiers);
 
             // Auto-route: if the window has UIToolkit content, prefer UIToolkit synthetic events
             var root = window.rootVisualElement;

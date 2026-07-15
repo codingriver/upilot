@@ -1,0 +1,52 @@
+schemaVersion: 2
+name: "42-bound-inference"
+description: Covers set_bound_value and assert_bound_value with infer=true for unbound containers.
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBoundInferenceWindow
+    reopen_if_open: true
+steps:
+  - name: Set inferred float
+    action: set_bound_value
+    selector: "#inference-host"
+    value: "3.14"
+    infer: "true"
+  - name: Assert inferred float
+    action: assert_bound_value
+    selector: "#inference-host"
+    expected: "3.14"
+    infer: "true"
+  - name: Set inferred text
+    action: set_bound_value
+    selector: "#inference-host"
+    value: "hello"
+    infer: "true"
+  - name: Assert inferred text
+    action: assert_bound_value
+    selector: "#inference-host"
+    expected: "hello"
+    infer: "true"
+  - name: Set inferred toggle
+    action: set_bound_value
+    selector: "#inference-host"
+    value: "true"
+    infer: "true"
+  - name: Assert inferred toggle
+    action: assert_bound_value
+    selector: "#inference-host"
+    expected: "true"
+    infer: "true"
+  - name: Set inferred enum
+    action: set_bound_value
+    selector: "#inference-host"
+    value: "Friday"
+    infer: "true"
+  - name: Assert inferred enum
+    action: assert_bound_value
+    selector: "#inference-host"
+    expected: "Friday"
+    infer: "true"
+  - name: Assert status
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "F:3.14 T:hello B:True E:Friday"

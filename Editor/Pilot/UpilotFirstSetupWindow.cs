@@ -6,14 +6,14 @@
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public sealed class UpilotFirstSetupWindow : EditorWindow
+    public sealed class UPilotFirstSetupWindow : EditorWindow
     {
         private int _step;
-        private string _host = UpilotBridge.DefaultWsHost;
-        private int _wsPort = UpilotBridge.DefaultWsPort;
-        private int _httpPort = UpilotBridge.DefaultHttpPort;
+        private string _host = UPilotBridge.DefaultWsHost;
+        private int _wsPort = UPilotBridge.DefaultWsPort;
+        private int _httpPort = UPilotBridge.DefaultHttpPort;
         private bool _writeAgentRules = true;
         private bool _writeCodexConfig;
         private bool _writeClaudeConfig;
@@ -25,7 +25,7 @@ namespace codingriver.upilot
 
         public static void Open()
         {
-            var win = GetWindow<UpilotFirstSetupWindow>(true, "upilot first setup");
+            var win = GetWindow<UPilotFirstSetupWindow>(true, "UPilot First Setup");
             win.minSize = new Vector2(520, 430);
             win.InitializeFromPrefs();
             win.ShowUtility();
@@ -38,10 +38,10 @@ namespace codingriver.upilot
 
         private void InitializeFromPrefs()
         {
-            var bridge = UpilotBridge.Instance;
-            _host = string.IsNullOrWhiteSpace(bridge.WsHost) ? UpilotBridge.DefaultWsHost : bridge.WsHost;
-            _wsPort = bridge.WsPort > 0 ? bridge.WsPort : UpilotBridge.DefaultWsPort;
-            _httpPort = bridge.HttpPort > 0 ? bridge.HttpPort : UpilotBridge.DefaultHttpPort;
+            var bridge = UPilotBridge.Instance;
+            _host = string.IsNullOrWhiteSpace(bridge.WsHost) ? UPilotBridge.DefaultWsHost : bridge.WsHost;
+            _wsPort = bridge.WsPort > 0 ? bridge.WsPort : UPilotBridge.DefaultWsPort;
+            _httpPort = bridge.HttpPort > 0 ? bridge.HttpPort : UPilotBridge.DefaultHttpPort;
             if (string.IsNullOrEmpty(_portMessage))
                 DetectAndRecommendPorts();
         }
@@ -49,7 +49,7 @@ namespace codingriver.upilot
         private void OnGUI()
         {
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
-            EditorGUILayout.LabelField("upilot 首次设置", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("UPilot 首次设置", EditorStyles.boldLabel);
             EditorGUILayout.Space(4);
 
             if (_step == 0)
@@ -102,9 +102,9 @@ namespace codingriver.upilot
 
         private void DrawConfigStep()
         {
-            var mcpUrl = UpilotAgentSetup.GetMcpUrl(_httpPort);
+            var mcpUrl = UPilotAgentSetup.GetMcpUrl(_httpPort);
             EditorGUILayout.HelpBox(
-                "第二步：写入 Agent 识别规则和项目级 MCP 配置。Agent 规则会追加或更新 upilot 标记块；MCP 配置只更新 upilot 项，尽量保留其它 server。",
+                "第二步：写入 Agent 识别规则和项目级 MCP 配置。Agent 规则会追加或更新 UPilot 标记块；MCP 配置只更新名为 upilot 的服务项，尽量保留其它 server。",
                 MessageType.Info);
 
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
@@ -112,7 +112,7 @@ namespace codingriver.upilot
                 _writeAgentRules = EditorGUILayout.ToggleLeft(
                     "写入 Agent 识别规则（AGENTS.md、CLAUDE.md、Cursor rule、.agents skill）",
                     _writeAgentRules);
-                EditorGUILayout.LabelField("规则写入策略：已有文件中追加/更新 <!-- upilot:start --> 标记块，保留用户其它内容。", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("规则写入策略：已有文件中追加/更新 UPilot 管理标记块，保留用户其它内容。", EditorStyles.miniLabel);
             }
 
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
@@ -121,7 +121,7 @@ namespace codingriver.upilot
                 _writeCodexConfig = EditorGUILayout.ToggleLeft("写入 Codex 项目配置  .codex/config.toml", _writeCodexConfig);
                 _writeClaudeConfig = EditorGUILayout.ToggleLeft("写入 Claude Code 项目配置  .mcp.json", _writeClaudeConfig);
                 _writeCursorConfig = EditorGUILayout.ToggleLeft("写入 Cursor 项目配置  .cursor/mcp.json", _writeCursorConfig);
-                EditorGUILayout.LabelField("MCP 写入策略：存在配置时只更新 upilot 映射；其它 MCP server 保留。", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("MCP 写入策略：存在配置时只更新名为 upilot 的服务映射；其它 MCP server 保留。", EditorStyles.miniLabel);
             }
 
             _startAfterSetup = EditorGUILayout.ToggleLeft("完成后启动 Bridge 和 MCP Server", _startAfterSetup);
@@ -147,15 +147,15 @@ namespace codingriver.upilot
         private void DetectAndRecommendPorts()
         {
             if (_wsPort != _httpPort &&
-                UpilotPortAllocator.IsPortAvailable(_wsPort) &&
-                UpilotPortAllocator.IsPortAvailable(_httpPort))
+                UPilotPortAllocator.IsPortAvailable(_wsPort) &&
+                UPilotPortAllocator.IsPortAvailable(_httpPort))
             {
                 _portMessage = $"当前端口可用：WS {_wsPort}, HTTP {_httpPort}";
                 _portMessageType = MessageType.Info;
                 return;
             }
 
-            var pair = UpilotPortAllocator.FindAvailablePair(_wsPort, _httpPort);
+            var pair = UPilotPortAllocator.FindAvailablePair(_wsPort, _httpPort);
             _wsPort = pair.wsPort;
             _httpPort = pair.httpPort;
             _portMessage = $"检测到端口不可用，已推荐空闲端口：WS {_wsPort}, HTTP {_httpPort}";
@@ -184,8 +184,8 @@ namespace codingriver.upilot
                 return false;
             }
 
-            var wsOk = UpilotPortAllocator.IsPortAvailable(_wsPort);
-            var httpOk = UpilotPortAllocator.IsPortAvailable(_httpPort);
+            var wsOk = UPilotPortAllocator.IsPortAvailable(_wsPort);
+            var httpOk = UPilotPortAllocator.IsPortAvailable(_httpPort);
             if (showMessage)
             {
                 _portMessage = $"WS {_wsPort}: {(wsOk ? "可用" : "不可用")}；HTTP {_httpPort}: {(httpOk ? "可用" : "不可用")}";
@@ -197,9 +197,9 @@ namespace codingriver.upilot
         private void SavePorts()
         {
             if (string.IsNullOrWhiteSpace(_host))
-                _host = UpilotBridge.DefaultWsHost;
+                _host = UPilotBridge.DefaultWsHost;
 
-            var bridge = UpilotBridge.Instance;
+            var bridge = UPilotBridge.Instance;
             bridge.SetWsEndpoint(_host, _wsPort);
             bridge.HttpPort = _httpPort;
         }
@@ -209,26 +209,26 @@ namespace codingriver.upilot
             SavePorts();
 
             if (_writeAgentRules)
-                Debug.Log("[upilot] First setup agent rules:\n" + UpilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+                Debug.Log("[UPilot] First setup agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
             if (_writeCodexConfig)
-                Debug.Log("[upilot] First setup Codex MCP config:\n" + UpilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                Debug.Log("[UPilot] First setup Codex MCP config:\n" + UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
             if (_writeClaudeConfig)
-                Debug.Log("[upilot] First setup Claude MCP config:\n" + UpilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                Debug.Log("[UPilot] First setup Claude MCP config:\n" + UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
             if (_writeCursorConfig)
-                Debug.Log("[upilot] First setup Cursor MCP config:\n" + UpilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                Debug.Log("[UPilot] First setup Cursor MCP config:\n" + UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
 
-            UpilotAgentSetup.MarkAgentRulesHandledForCurrentProject();
-            UpilotSetupState.MarkCompleted();
+            UPilotAgentSetup.MarkAgentRulesHandledForCurrentProject();
+            UPilotSetupState.MarkCompleted();
 
             if (_startAfterSetup)
             {
-                UpilotBridge.Instance.EnsureStarted();
-                UpilotMcpServerManager.Instance.ValidateAndAutoFixPath();
-                UpilotMcpServerManager.Instance.StartServer();
+                UPilotBridge.Instance.EnsureStarted();
+                UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
+                UPilotMcpServerManager.Instance.StartServer();
             }
 
             Close();
-            UpilotMainWindow.Open();
+            UPilotMainWindow.Open();
         }
     }
 }

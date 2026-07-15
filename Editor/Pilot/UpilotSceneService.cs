@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -12,7 +12,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── M09 Scene DTOs ────────────────────────────────────────────────────────
 
@@ -176,11 +176,11 @@ namespace codingriver.upilot
 
     // ── M09 Scene Service ─────────────────────────────────────────────────────
 
-    public sealed class UpilotSceneService
+    public sealed class UPilotSceneService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotSceneService(UpilotBridge bridge)
+        public UPilotSceneService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }

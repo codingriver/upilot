@@ -6,9 +6,9 @@
 using System.Net;
 using System.Net.Sockets;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public static class UpilotPortAllocator
+    public static class UPilotPortAllocator
     {
         public static bool IsPortAvailable(int port)
         {
@@ -33,8 +33,8 @@ namespace codingriver.upilot
         }
 
         public static (int wsPort, int httpPort) FindAvailablePair(
-            int startWsPort = UpilotBridge.DefaultWsPort,
-            int startHttpPort = UpilotBridge.DefaultHttpPort,
+            int startWsPort = UPilotBridge.DefaultWsPort,
+            int startHttpPort = UPilotBridge.DefaultHttpPort,
             int maxAttempts = 100)
         {
             var ws = startWsPort;

@@ -1,16 +1,16 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using UnityEditor;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     [InitializeOnLoad]
-    public static class UpilotBootstrap
+    public static class UPilotBootstrap
     {
-        public const string EnabledPrefKey = "codingriver.upilot.BridgeEnabled";
+        public const string EnabledPrefKey = "CodingRiver.UPilot.BridgeEnabled";
 
         public static bool IsEnabled
         {
@@ -18,22 +18,24 @@ namespace codingriver.upilot
             set => EditorPrefs.SetBool(EnabledPrefKey, value);
         }
 
-        static UpilotBootstrap()
+        static UPilotBootstrap()
         {
-            UnityEngine.Debug.Log("[UpilotBootstrap] static constructor");
+            UnityEngine.Debug.Log("[UPilotBootstrap] static constructor");
+            UPilotProjectConfig.Reload();
+            UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
             EditorApplication.delayCall += ShowFirstSetupIfNeeded;
             EditorApplication.update += TryStartBridge;
             EditorApplication.update += TryStartMcpServer;
-            EditorApplication.quitting += () => UpilotBridge.Instance.Stop();
+            EditorApplication.quitting += () => UPilotBridge.Instance.Stop();
         }
 
         private static void ShowFirstSetupIfNeeded()
         {
-            if (!IsEnabled || UpilotSetupState.IsCompleted)
+            if (!IsEnabled || UPilotSetupState.IsCompleted)
                 return;
 
-            UnityEngine.Debug.Log("[UpilotBootstrap] First setup is not completed; opening simplified upilot setup.");
-            UpilotMainWindow.Open();
+            UnityEngine.Debug.Log("[UPilotBootstrap] First setup is not completed; opening simplified UPilot setup.");
+            UPilotMainWindow.Open();
         }
 
         private static void TryStartBridge()
@@ -41,15 +43,15 @@ namespace codingriver.upilot
             if (!IsEnabled)
                 return;
 
-            if (!UpilotSetupState.IsCompleted)
+            if (!UPilotSetupState.IsCompleted)
             {
                 EditorApplication.update -= TryStartBridge;
                 return;
             }
 
-            UnityEngine.Debug.Log("[UpilotBootstrap] TryStartBridge -> EnsureStarted");
+            UnityEngine.Debug.Log("[UPilotBootstrap] TryStartBridge -> EnsureStarted");
             EditorApplication.update -= TryStartBridge;
-            UpilotBridge.Instance.EnsureStarted();
+            UPilotBridge.Instance.EnsureStarted();
         }
 
         private static void TryStartMcpServer()
@@ -57,7 +59,7 @@ namespace codingriver.upilot
             if (EditorApplication.isPlayingOrWillChangePlaymode)
                 return;
 
-            if (!UpilotSetupState.IsCompleted)
+            if (!UPilotSetupState.IsCompleted)
             {
                 EditorApplication.update -= TryStartMcpServer;
                 return;
@@ -65,14 +67,14 @@ namespace codingriver.upilot
 
             EditorApplication.update -= TryStartMcpServer;
 
-            var mgr = UpilotMcpServerManager.Instance;
+            var mgr = UPilotMcpServerManager.Instance;
             if (!mgr.AutoStartEnabled)
             {
-                UnityEngine.Debug.Log("[UpilotBootstrap] MCP server auto start disabled.");
+                UnityEngine.Debug.Log("[UPilotBootstrap] MCP server auto start disabled.");
                 return;
             }
 
-            UnityEngine.Debug.Log("[UpilotBootstrap] TryStartMcpServer -> StartServer");
+            UnityEngine.Debug.Log("[UPilotBootstrap] TryStartMcpServer -> StartServer");
             mgr.ValidateAndAutoFixPath();
             mgr.StartServer();
         }

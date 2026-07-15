@@ -1,0 +1,31 @@
+schemaVersion: 2
+name: "82-assert-enabled-disabled-dynamic"
+description: |
+  Tests assert_enabled and assert_disabled on elements whose enabled state
+  can change dynamically.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: Assert enabled button is enabled
+    action: assert_enabled
+    selector: "#enabled-button"
+
+  - name: Assert disabled button is disabled
+    action: assert_disabled
+    selector: "#disabled-button"
+
+  - name: Click enabled button
+    action: click
+    selector: "#enabled-button"
+
+  - name: Assert enabled button still enabled after click
+    action: assert_enabled
+    selector: "#enabled-button"
+
+  - name: Assert disabled button still disabled after click
+    action: assert_disabled
+    selector: "#disabled-button"

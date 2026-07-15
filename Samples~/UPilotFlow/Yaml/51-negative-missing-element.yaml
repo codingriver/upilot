@@ -1,0 +1,16 @@
+schemaVersion: 2
+name: "51-negative-missing-element"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+steps:
+  - action: click
+    selector: "#this-does-not-exist"
+    continue_on_step_failure: true
+  - action: set_slider
+    selector: "#username-input"
+    value: "200"
+    continue_on_step_failure: true
+  - action: assert_visible
+    selector: "#login-button"

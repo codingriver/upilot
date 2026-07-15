@@ -1,8 +1,8 @@
 {
   "name": "io.github.codingriver.upilot",
-  "version": "0.1.1",
-  "displayName": "upilot",
-  "description": "Open-source Unity Editor automation bridge for AI agents and MCP clients, with optional UIFlow YAML automation.",
+  "version": "0.2.0",
+  "displayName": "UPilot",
+  "description": "Open-source Unity Editor automation bridge for AI agents and MCP clients, with optional UPilot Flow YAML automation.",
   "unity": "2022.3",
   "repository": {
     "type": "git",
@@ -35,7 +35,7 @@
     "test",
     "uitoolkit",
     "imgui",
-    "uiflow",
+    "upilot-flow",
     "yaml"
   ],
   "author": {

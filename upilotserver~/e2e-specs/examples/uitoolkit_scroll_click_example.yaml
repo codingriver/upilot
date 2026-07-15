@@ -7,7 +7,7 @@ defaults:
 
 setup:
   - action: menu
-    menuPath: "upilot/upilot"
+    menuPath: "UPilot/UPilot"
   - action: wait
     ms: 400
 

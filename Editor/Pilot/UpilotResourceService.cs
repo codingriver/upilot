@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -14,7 +14,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ namespace codingriver.upilot
     }
 
     [Serializable]
-    public class UpilotLogsTabResourcePayload
+    public class UPilotLogsTabResourcePayload
     {
         public bool   snapshotValid;
         public int    activeTab;
@@ -148,11 +148,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotResourceService
+    public class UPilotResourceService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotResourceService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotResourceService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -161,7 +161,7 @@ namespace codingriver.upilot
             _bridge.Router.Register("resource.editorState",          HandleEditorStateAsync);
             _bridge.Router.Register("resource.packages",             HandlePackagesAsync);
             _bridge.Router.Register("resource.buildStatus",          HandleBuildStatusAsync);
-            _bridge.Router.Register("resource.upilotLogsTab",        HandleUpilotLogsTabAsync);
+            _bridge.Router.Register("resource.upilotLogsTab",        HandleUPilotLogsTabAsync);
             _bridge.Router.Register("resource.windowDiagnostics",    HandleWindowDiagnosticsAsync);
             _bridge.Router.Register("resource.consoleSummary",       HandleConsoleSummaryAsync);
         }
@@ -434,32 +434,32 @@ namespace codingriver.upilot
 
         // ── resource.upilotLogsTab ──────────────────────────────────────────────
 
-        private async Task HandleUpilotLogsTabAsync(string id, string json, CancellationToken token)
+        private async Task HandleUPilotLogsTabAsync(string id, string json, CancellationToken token)
         {
-            var tcs = new TaskCompletionSource<UpilotLogsTabResourcePayload>();
+            var tcs = new TaskCompletionSource<UPilotLogsTabResourcePayload>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    var layoutOk = UpilotLogsTabDiagnostics.LabelMaxWidth <=
-                                   UpilotLogsTabDiagnostics.ScrollViewportWidth + 0.5f;
-                    var hx = Mathf.Abs(UpilotLogsTabDiagnostics.ScrollX) > 0.5f;
-                    var payload = new UpilotLogsTabResourcePayload
+                    var layoutOk = UPilotLogsTabDiagnostics.LabelMaxWidth <=
+                                   UPilotLogsTabDiagnostics.ScrollViewportWidth + 0.5f;
+                    var hx = Mathf.Abs(UPilotLogsTabDiagnostics.ScrollX) > 0.5f;
+                    var payload = new UPilotLogsTabResourcePayload
                     {
-                        snapshotValid                    = UpilotLogsTabDiagnostics.SnapshotValid,
-                        activeTab                        = UpilotLogsTabDiagnostics.ActiveTab,
-                        windowWidth                      = UpilotLogsTabDiagnostics.WindowWidth,
-                        scrollViewportWidth              = UpilotLogsTabDiagnostics.ScrollViewportWidth,
-                        labelMaxWidth                    = UpilotLogsTabDiagnostics.LabelMaxWidth,
-                        scrollX                          = UpilotLogsTabDiagnostics.ScrollX,
-                        scrollY                          = UpilotLogsTabDiagnostics.ScrollY,
-                        updatedUnixMs                    = UpilotLogsTabDiagnostics.UpdatedUnixMs,
+                        snapshotValid                    = UPilotLogsTabDiagnostics.SnapshotValid,
+                        activeTab                        = UPilotLogsTabDiagnostics.ActiveTab,
+                        windowWidth                      = UPilotLogsTabDiagnostics.WindowWidth,
+                        scrollViewportWidth              = UPilotLogsTabDiagnostics.ScrollViewportWidth,
+                        labelMaxWidth                    = UPilotLogsTabDiagnostics.LabelMaxWidth,
+                        scrollX                          = UPilotLogsTabDiagnostics.ScrollX,
+                        scrollY                          = UPilotLogsTabDiagnostics.ScrollY,
+                        updatedUnixMs                    = UPilotLogsTabDiagnostics.UpdatedUnixMs,
                         layoutConstrainsLabelToViewport  = layoutOk,
                         horizontalScrollOffsetNonZero    = hx,
                         horizontalBarRisk                = hx || !layoutOk,
                         layoutVersion                  = "toolbar-2row-scroll-hnone-2026-04",
                         note =
-                            "打开菜单 upilot/Advanced Settings，切换到「日志与诊断」页后，此处快照才有效；用于验收横向滚动风险（horizontalBarRisk=false 表示布局约束正常）。",
+                            "打开菜单 UPilot/Advanced Settings，切换到「日志与诊断」页后，此处快照才有效；用于验收横向滚动风险（horizontalBarRisk=false 表示布局约束正常）。",
                     };
                     tcs.SetResult(payload);
                 }
@@ -488,19 +488,19 @@ namespace codingriver.upilot
                 {
                     var diag = new WindowDiagnosticsPayload
                     {
-                        windowOpen        = UpilotWindowDiagnostics.WindowOpen,
-                        windowWidth       = UpilotWindowDiagnostics.WindowWidth,
-                        windowHeight      = UpilotWindowDiagnostics.WindowHeight,
-                        activeTab         = UpilotWindowDiagnostics.ActiveTab,
-                        updatedUnixMs     = UpilotWindowDiagnostics.UpdatedUnixMs,
-                        healthScore       = UpilotWindowDiagnostics.ComputeHealthScore(),
-                        codeVersion       = UpilotWindowDiagnostics.CodeVersion,
-                        domainReloadEpoch = UpilotWindowDiagnostics.DomainReloadEpoch,
+                        windowOpen        = UPilotWindowDiagnostics.WindowOpen,
+                        windowWidth       = UPilotWindowDiagnostics.WindowWidth,
+                        windowHeight      = UPilotWindowDiagnostics.WindowHeight,
+                        activeTab         = UPilotWindowDiagnostics.ActiveTab,
+                        updatedUnixMs     = UPilotWindowDiagnostics.UpdatedUnixMs,
+                        healthScore       = UPilotWindowDiagnostics.ComputeHealthScore(),
+                        codeVersion       = UPilotWindowDiagnostics.CodeVersion,
+                        domainReloadEpoch = UPilotWindowDiagnostics.DomainReloadEpoch,
                         isCompiling       = EditorApplication.isCompiling,
                         compileErrorCount = _bridge.GetStatus().LastErrorCount,
                     };
 
-                    foreach (var kv in UpilotWindowDiagnostics.Sections)
+                    foreach (var kv in UPilotWindowDiagnostics.Sections)
                     {
                         diag.sections.Add(new WindowSectionPayload
                         {
@@ -616,7 +616,7 @@ namespace codingriver.upilot
         {
             var node = new HierarchyNodePayload
             {
-                instanceId = UpilotEntityIds.ToWireId(t.gameObject),
+                instanceId = UPilotEntityIds.ToWireId(t.gameObject),
                 name       = t.gameObject.name,
                 activeSelf = t.gameObject.activeSelf,
             };

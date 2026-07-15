@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,13 +10,13 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public sealed class UpilotDragDropService
+    public sealed class UPilotDragDropService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotDragDropService(UpilotBridge bridge)
+        public UPilotDragDropService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -58,7 +58,7 @@ namespace codingriver.upilot
 
         private static DragDropResultPayload ExecuteDragDrop(DragDropPayload payload)
         {
-            var source = UpilotPlayInputService.FindTargetWindow(payload.sourceWindow);
+            var source = UPilotPlayInputService.FindTargetWindow(payload.sourceWindow);
             if (source == null)
             {
                 return new DragDropResultPayload
@@ -70,7 +70,7 @@ namespace codingriver.upilot
                 };
             }
 
-            var target = UpilotPlayInputService.FindTargetWindow(payload.targetWindow);
+            var target = UPilotPlayInputService.FindTargetWindow(payload.targetWindow);
             if (target == null)
             {
                 return new DragDropResultPayload
@@ -82,7 +82,7 @@ namespace codingriver.upilot
                 };
             }
 
-            var mods = UpilotPlayInputService.ParseModifiers(payload.modifiers);
+            var mods = UPilotPlayInputService.ParseModifiers(payload.modifiers);
             var from = new Vector2(payload.fromX, payload.fromY);
             var to = new Vector2(payload.toX, payload.toY);
 
@@ -128,7 +128,7 @@ namespace codingriver.upilot
                     var objects = new List<UnityEngine.Object>();
                     foreach (var objectId in ids)
                     {
-                        var go = UpilotEntityIds.GameObjectFromWireId(objectId);
+                        var go = UPilotEntityIds.GameObjectFromWireId(objectId);
                         if (go != null) objects.Add(go);
                     }
 

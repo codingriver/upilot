@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -40,11 +40,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotPrefabService
+    public class UPilotPrefabService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotPrefabService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotPrefabService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -73,7 +73,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotEntityIds.GameObjectFromWireId(p.sourceGameObjectId);
+                    var go = UPilotEntityIds.GameObjectFromWireId(p.sourceGameObjectId);
                     if (go == null)
                     {
                         tcs.SetException(new Exception($"GameObject not found: {p.sourceGameObjectId}"));
@@ -99,7 +99,7 @@ namespace codingriver.upilot
                     AssetDatabase.SaveAssets();
                     tcs.SetResult(new PrefabResultPayload
                     {
-                        instanceId = UpilotEntityIds.ToWireId(prefab),
+                        instanceId = UPilotEntityIds.ToWireId(prefab),
                         prefabPath = p.prefabPath,
                         name       = prefab.name,
                     });
@@ -153,7 +153,7 @@ namespace codingriver.upilot
                     // Set parent if specified
                     if (p.parentId != 0)
                     {
-                        var parent = UpilotEntityIds.GameObjectFromWireId(p.parentId);
+                        var parent = UPilotEntityIds.GameObjectFromWireId(p.parentId);
                         if (parent != null)
                             instance.transform.SetParent(parent.transform, true);
                     }
@@ -162,7 +162,7 @@ namespace codingriver.upilot
 
                     tcs.SetResult(new PrefabResultPayload
                     {
-                        instanceId = UpilotEntityIds.ToWireId(instance),
+                        instanceId = UPilotEntityIds.ToWireId(instance),
                         prefabPath = p.prefabPath,
                         name       = instance.name,
                     });

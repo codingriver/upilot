@@ -1,0 +1,74 @@
+schemaVersion: 2
+name: "13-advanced-controls"
+description: Covers advanced value fields, tree selection, tab switching, and list/dropdown/foldout actions.
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleAdvancedControlsWindow
+    reopen_if_open: true
+steps:
+  - name: Choose dropdown option
+    action: select_option
+    selector: "#choice-dropdown"
+    value: "Beta"
+  - name: Assert dropdown value
+    action: assert_value
+    selector: "#choice-dropdown"
+    expected: "Beta"
+  - name: Expand foldout
+    action: toggle_foldout
+    selector: "#settings-foldout"
+    expand: "true"
+  - name: Assert foldout expanded
+    action: assert_property
+    selector: "#settings-foldout"
+    property: "value"
+    expected: "True"
+  - name: Set slider value
+    action: set_slider
+    selector: "#volume-slider"
+    value: "6.5"
+  - name: Assert slider value
+    action: assert_property
+    selector: "#volume-slider"
+    property: "value"
+    expected: "6.5"
+  - name: Select list item
+    action: select_list_item
+    selector: "#item-list"
+    index: "2"
+  - name: Assert list selection
+    action: assert_text
+    selector: "#list-selection-status"
+    expected: "List: 2"
+  - name: Set accent color
+    action: set_value
+    selector: "#accent-color"
+    value: "#FF8040CC"
+  - name: Assert accent color
+    action: assert_value
+    selector: "#accent-color"
+    expected: "#FF8040CC"
+  - name: Set offset vector
+    action: set_value
+    selector: "#offset-vector3"
+    value: "1.5,2.5,3.5"
+  - name: Assert offset vector
+    action: assert_value
+    selector: "#offset-vector3"
+    expected: "1.5,2.5,3.5"
+  - name: Select tree item by id
+    action: select_tree_item
+    selector: "#navigation-tree"
+    id: "120"
+  - name: Assert tree selection
+    action: assert_text
+    selector: "#tree-selection-status"
+    expected: "Tree: Audio"
+  - name: Select about tab
+    action: select_tab
+    selector: "#settings-tabs"
+    label: "About"
+  - name: Assert selected tab
+    action: assert_text
+    selector: "#tab-selection-status"
+    expected: "Tab: About"

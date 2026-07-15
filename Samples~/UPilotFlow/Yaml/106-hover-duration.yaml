@@ -1,0 +1,16 @@
+schemaVersion: 2
+name: "106-hover-duration"
+description: Covers hover action with explicit duration parameter.
+fixture:
+  host_window:
+    type: ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - name: Hover over hover target with duration
+    action: hover
+    selector: "#gesture-hover-target"
+    duration: "200ms"
+  - name: Assert hover status updated
+    action: assert_text_contains
+    selector: "#gesture-status"
+    expected: "Hover"

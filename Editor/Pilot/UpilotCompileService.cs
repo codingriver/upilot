@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,13 +11,13 @@ using UnityEditor;
 using UnityEditor.Compilation;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public sealed class UpilotCompileService
+    public sealed class UPilotCompileService
     {
         private static readonly string CompileLogDir = Path.Combine(
             Directory.GetParent(Application.dataPath)?.FullName ?? ".",
-            "Logs", "upilot"
+            "Logs", "UPilot"
         );
         private static readonly string CompileErrorsPath = Path.Combine(CompileLogDir, "CompileErrors.json");
 
@@ -37,7 +37,7 @@ namespace codingriver.upilot
         public bool HasCompileErrors { get; private set; }
         public bool IsRequestCompileActive { get; private set; }
 
-        public UpilotCompileService()
+        public UPilotCompileService()
         {
             Logger.Log("COMPILE", "CompileService 初始化");
             // Always track compilation results so resource.editorState can report errors

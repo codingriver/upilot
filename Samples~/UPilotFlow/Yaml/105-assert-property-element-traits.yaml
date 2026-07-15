@@ -1,0 +1,23 @@
+schemaVersion: 2
+name: "105-assert-property-element-traits"
+description: Covers assert_property on focusable, pickingMode and tabIndex.
+fixture:
+  host_window:
+    type: ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - name: Assert integer field is focusable
+    action: assert_property
+    selector: "#integer-field"
+    property: "focusable"
+    expected: "True"
+  - name: Assert integer field picking mode
+    action: assert_property
+    selector: "#integer-field"
+    property: "pickingMode"
+    expected: "Position"
+  - name: Assert integer field tab index
+    action: assert_property
+    selector: "#integer-field"
+    property: "tabIndex"
+    expected: "0"

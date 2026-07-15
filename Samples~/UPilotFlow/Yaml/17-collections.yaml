@@ -1,0 +1,37 @@
+schemaVersion: 2
+name: "17-collections"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - action: select_list_item
+    selector: "#item-list"
+    indices: "1,3"
+  - action: assert_text
+    selector: "#list-selection-status"
+    expected: "List: 1,3"
+  - action: drag_reorder
+    selector: "#item-list"
+    from_index: "0"
+    to_index: "3"
+  - action: assert_text
+    selector: "#list-order-status"
+    expected: "Order: Beta,Gamma,Delta,Alpha,Epsilon"
+  - action: select_tree_item
+    selector: "#navigation-tree"
+    id: "120"
+  - action: assert_text
+    selector: "#tree-selection-status"
+    expected: "Tree: Audio"
+  - action: sort_column
+    selector: "#planet-list"
+    column: "planet"
+    direction: "descending"
+  - action: resize_column
+    selector: "#scene-tree"
+    index: "0"
+    width: "240"
+  - action: assert_text_contains
+    selector: "#collection-status"
+    expected: "sort=planet:Descending"

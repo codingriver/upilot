@@ -1,0 +1,16 @@
+schemaVersion: 2
+name: "_87-negative-click-popup-item-invalid"
+description: |
+  Verifies that click_popup_item fails when given an invalid value.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: click_popup_item with invalid value should fail
+    action: click_popup_item
+    selector: "#quick-popup"
+    value: "NonExistentValue"

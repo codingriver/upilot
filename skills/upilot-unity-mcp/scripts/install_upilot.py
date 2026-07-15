@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install upilot into a Unity project for agent-driven setup."""
+"""Install UPilot into a Unity project for agent-driven setup."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/codingriver/upilot.git"
 UPM_PACKAGE = "io.github.codingriver.upilot"
-DEFAULT_UPM_REF = "v0.1.1"
+DEFAULT_UPM_REF = "v0.2.0"
 SKILL_NAME = "upilot-unity-mcp"
 
-UIFLOW_DEPS = {
+FLOW_DEPS = {
     "com.unity.inputsystem": "1.19.0",
     "com.unity.ui": "2.0.0",
     "com.unity.ui.test-framework": "6.3.0",
@@ -110,10 +110,10 @@ def update_unity_manifest(args: argparse.Namespace, upilot_dir: Path) -> None:
         value = f"{args.repo_url}#{args.upm_ref}"
     deps[UPM_PACKAGE] = value
 
-    if args.enable_uiflow:
-        uiflow_deps = dict(UIFLOW_DEPS)
-        uiflow_deps.update(dict(args.upm_dep or []))
-        deps.update(uiflow_deps)
+    if args.enable_flow:
+        flow_deps = dict(FLOW_DEPS)
+        flow_deps.update(dict(args.upm_dep or []))
+        deps.update(flow_deps)
         testables = data.setdefault("testables", [])
         if isinstance(testables, list) and "com.unity.inputsystem" not in testables:
             testables.append("com.unity.inputsystem")
@@ -187,8 +187,8 @@ def write_codex_mcp(args: argparse.Namespace, upilot_dir: Path, venv_python: Pat
         "\n[mcp_servers.upilot]\n"
         f"command = {toml_string(str(venv_python))}\n"
         f"args = [{toml_string(str(server_script))}, \"--transport\", \"stdio\", \"--port\", {toml_string(args.port)}]\n"
-        "startup_timeout_sec = 10\n"
-        "tool_timeout_sec = 60\n"
+        "startup_timeout_sec = 30\n"
+        "tool_timeout_sec = 300\n"
         "\n[mcp_servers.upilot.env]\n"
         "PYTHONUTF8 = \"1\"\n"
     )
@@ -203,14 +203,14 @@ def write_codex_mcp(args: argparse.Namespace, upilot_dir: Path, venv_python: Pat
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install upilot for a Unity project.")
+    parser = argparse.ArgumentParser(description="Install UPilot for a Unity project.")
     parser.add_argument("--unity-project", help="Unity project root containing Packages/manifest.json")
     parser.add_argument("--repo-url", default=REPO_URL)
     parser.add_argument("--upm-ref", default=DEFAULT_UPM_REF)
     parser.add_argument("--upilot-dir", default=str(repo_root_from_script()))
     parser.add_argument("--clone-to", help="Clone upilot here if it is not present")
     parser.add_argument("--use-local-upm", action="store_true", help="Use file:<upilot-dir> instead of Git URL in Unity manifest")
-    parser.add_argument("--enable-uiflow", action="store_true", help="Add optional UIFlow Unity package dependencies")
+    parser.add_argument("--enable-flow", action="store_true", help="Explicitly add optional UPilot Flow Unity package dependencies")
     parser.add_argument("--upm-dep", action="append", type=parse_dep, help="Override/add a Unity package dependency as name=version")
     parser.add_argument("--no-python", action="store_true", help="Skip Python venv creation and server install")
     parser.add_argument("--python", default=sys.executable)

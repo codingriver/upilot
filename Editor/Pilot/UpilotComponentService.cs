@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── M10 Component DTOs ────────────────────────────────────────────────────
 
@@ -145,11 +145,11 @@ namespace codingriver.upilot
 
     // ── M10 Component Service ─────────────────────────────────────────────────
 
-    public sealed class UpilotComponentService
+    public sealed class UPilotComponentService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotComponentService(UpilotBridge bridge)
+        public UPilotComponentService(UPilotBridge bridge)
         {
             _bridge = bridge;
         }
@@ -182,7 +182,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotGameObjectService.FindByInstanceId(goId);
+                    var go = UPilotGameObjectService.FindByInstanceId(goId);
                     if (go == null)
                     {
                         tcs.TrySetException(new Exception($"未找到指定的 GameObject (ID: {goId})"));
@@ -244,7 +244,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotGameObjectService.FindByInstanceId(goId);
+                    var go = UPilotGameObjectService.FindByInstanceId(goId);
                     if (go == null)
                     {
                         tcs.TrySetException(new Exception($"未找到指定的 GameObject (ID: {goId})"));
@@ -307,7 +307,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotGameObjectService.FindByInstanceId(goId);
+                    var go = UPilotGameObjectService.FindByInstanceId(goId);
                     if (go == null)
                     {
                         tcs.TrySetException(new Exception($"未找到指定的 GameObject (ID: {goId})"));
@@ -361,7 +361,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotGameObjectService.FindByInstanceId(goId);
+                    var go = UPilotGameObjectService.FindByInstanceId(goId);
                     if (go == null)
                     {
                         tcs.TrySetException(new Exception($"未找到指定的 GameObject (ID: {goId})"));
@@ -410,7 +410,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotGameObjectService.FindByInstanceId(goId);
+                    var go = UPilotGameObjectService.FindByInstanceId(goId);
                     if (go == null)
                     {
                         tcs.TrySetException(new Exception($"未找到指定的 GameObject (ID: {goId})"));
@@ -617,7 +617,7 @@ namespace codingriver.upilot
                 var prop = so.FindProperty(kvp.Key);
                 if (prop == null)
                 {
-                    Debug.LogWarning($"[Upilot] 属性 {kvp.Key} 不存在或不可写入");
+                    Debug.LogWarning($"[UPilot] 属性 {kvp.Key} 不存在或不可写入");
                     continue;
                 }
 
@@ -672,7 +672,7 @@ namespace codingriver.upilot
                     if (int.TryParse(value, out var lm)) prop.intValue = lm;
                     break;
                 default:
-                    Debug.LogWarning($"[Upilot] 不支持修改属性类型: {prop.propertyType} ({prop.name})");
+                    Debug.LogWarning($"[UPilot] 不支持修改属性类型: {prop.propertyType} ({prop.name})");
                     break;
             }
         }

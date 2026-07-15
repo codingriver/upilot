@@ -6,18 +6,18 @@
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public static class UpilotMenuItems
+    public static class UPilotMenuItems
     {
-        [MenuItem("upilot/Advanced/Force Restart Unity Bridge")]
+        [MenuItem("UPilot/Advanced/Force Restart Unity Bridge")]
         public static void RestartBridge()
         {
-            Logger.Log("[Menu] Force Restart UpilotBridge triggered.");
-            UpilotBridge.Instance.Restart();
+            Logger.Log("[Menu] Force Restart UPilotBridge triggered.");
+            UPilotBridge.Instance.Restart();
         }
 
-        [MenuItem("upilot/Advanced/Force Restart Unity Bridge", true)]
+        [MenuItem("UPilot/Advanced/Force Restart Unity Bridge", true)]
         public static bool ValidateRestartBridge()
         {
             return !Application.isPlaying;

@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor - https://github.com/codingriver/upilot
+// UPilot Editor - https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 // Unity 6.3+: Object.GetInstanceID / EditorUtility.InstanceIDToObject are
@@ -9,9 +9,9 @@
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
-    public static class UpilotEntityIds
+    public static class UPilotEntityIds
     {
 #if UNITY_6000_3_OR_NEWER
         public static ulong ToWireId(Object o)

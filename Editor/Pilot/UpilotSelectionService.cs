@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -33,11 +33,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotSelectionService
+    public class UPilotSelectionService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotSelectionService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotSelectionService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -87,7 +87,7 @@ namespace codingriver.upilot
                     {
                         foreach (ulong instanceId in p.gameObjectIds)
                         {
-                            var obj = UpilotEntityIds.GameObjectFromWireId(instanceId);
+                            var obj = UPilotEntityIds.GameObjectFromWireId(instanceId);
                             if (obj != null) objects.Add(obj);
                         }
                     }
@@ -155,7 +155,7 @@ namespace codingriver.upilot
             // Game objects in scene
             foreach (var go in Selection.gameObjects)
             {
-                result.selectedGameObjectIds.Add(UpilotEntityIds.ToWireId(go));
+                result.selectedGameObjectIds.Add(UPilotEntityIds.ToWireId(go));
             }
 
             // All selected objects — check for assets
@@ -169,7 +169,7 @@ namespace codingriver.upilot
             }
 
             result.activeGameObjectId = Selection.activeGameObject != null
-                ? UpilotEntityIds.ToWireId(Selection.activeGameObject)
+                ? UPilotEntityIds.ToWireId(Selection.activeGameObject)
                 : 0;
             result.selectionCount = Selection.objects.Length;
 

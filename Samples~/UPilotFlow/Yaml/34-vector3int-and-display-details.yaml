@@ -1,0 +1,20 @@
+schemaVersion: 2
+name: "34-vector3int-and-display-details"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: set_value
+    selector: "#grid-position-vector3int"
+    value: "4,5,6"
+  - action: assert_value
+    selector: "#grid-position-vector3int"
+    expected: "4,5,6"
+  - action: assert_property
+    selector: "#progress-bar"
+    property: "title"
+    expected: "Progress"
+  - action: assert_text
+    selector: "#help-box"
+    expected: "Helpful message"

@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -13,7 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -71,11 +71,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotReflectionService
+    public class UPilotReflectionService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotReflectionService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotReflectionService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {

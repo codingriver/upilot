@@ -24,7 +24,7 @@ def extract_text(result):
     return ""
 
 def check_file(f):
-    result = call_tool('unity_uiflow_run_file', {'yamlPath': f})
+    result = call_tool('unity_upilot_flow_run_file', {'yamlPath': f})
     text = extract_text(result)
     data = json.loads(text)
     result_data = data.get('data', {}).get('result', {}) or {}

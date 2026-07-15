@@ -239,7 +239,7 @@ async def main_async() -> int:
         print(f"[ok] scene_ensure_test: {action} {path_shown}", flush=True)
 
         r_go = await facade.gameobject_create(
-            name="UpilotAcceptanceTarget", primitive_type="Cube"
+            name="UPilotAcceptanceTarget", primitive_type="Cube"
         )
         if not _ok(r_go):
             print(f"[FAIL] bootstrap GameObject for Inspector: {_err_msg(r_go)}", flush=True)
@@ -717,7 +717,7 @@ async def main_async() -> int:
             r0 = await facade.reflection_eval('UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
             if not _ok(r0):
                 return False, _err_msg(r0)
-            m = await facade.menu_execute("upilot/upilot")
+            m = await facade.menu_execute("UPilot/UPilot")
             if not _ok(m):
                 return False, _err_msg(m)
             await asyncio.sleep(0.7)
@@ -731,7 +731,7 @@ async def main_async() -> int:
             if not _ok(c2):
                 return False, _err_msg(c2)
             await asyncio.sleep(0.5)
-            m2 = await facade.menu_execute("upilot/upilot")
+            m2 = await facade.menu_execute("UPilot/UPilot")
             if not _ok(m2):
                 return False, _err_msg(m2)
             await asyncio.sleep(0.7)
@@ -817,7 +817,7 @@ async def main_async() -> int:
 
         async def t_m26_18() -> tuple[bool, str]:
             await facade.reflection_eval('UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
-            await facade.menu_execute("upilot/upilot")
+            await facade.menu_execute("UPilot/UPilot")
             await asyncio.sleep(0.6)
             rw = await facade.resource_window_diagnostics()
             rl = await facade.resource_upilot_logs_tab()

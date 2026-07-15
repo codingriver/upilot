@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -11,7 +11,7 @@ using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -50,16 +50,16 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotBuildService
+    public class UPilotBuildService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
         // Track current build state
         private BuildStatusPayload _lastBuildStatus = new BuildStatusPayload { status = "idle" };
         private volatile bool _isBuildingAsync;
         private CancellationTokenSource _buildCts;
 
-        public UpilotBuildService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotBuildService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -73,7 +73,7 @@ namespace codingriver.upilot
 
         private async Task HandleStartAsync(string id, string json, CancellationToken token)
         {
-            var opCtx = UpilotOperationTracker.Instance.GetContext(id);
+            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             var msg = JsonUtility.FromJson<BuildStartMessage>(json);
             var p   = msg?.payload ?? new BuildStartPayload();
 

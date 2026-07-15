@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -9,18 +9,18 @@ using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     /// <summary>
     /// 全窗口级布局诊断：每一区域的宽度、内容最大宽度、横向溢出检测；
     /// 供 MCP resource / tool 读取，用于自动化验收。
     /// </summary>
     [InitializeOnLoad]
-    public static class UpilotWindowDiagnostics
+    public static class UPilotWindowDiagnostics
     {
-        private const string DomainReloadTsKey = "Upilot.DomainReloadTimestamp";
+        private const string DomainReloadTsKey = "UPilot.DomainReloadTimestamp";
 
-        static UpilotWindowDiagnostics()
+        static UPilotWindowDiagnostics()
         {
             SessionState.SetInt(DomainReloadTsKey, (int)(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000));
         }
@@ -90,7 +90,7 @@ namespace codingriver.upilot
             get
             {
                 if (_cachedCodeVersion != null) return _cachedCodeVersion;
-                var asm = typeof(UpilotWindowDiagnostics).Assembly;
+                var asm = typeof(UPilotWindowDiagnostics).Assembly;
                 var name = asm.GetName();
                 _cachedCodeVersion = $"{name.Name}@{name.Version}";
                 return _cachedCodeVersion;
@@ -113,7 +113,7 @@ namespace codingriver.upilot
         {
             try
             {
-                var win = UpilotPlayInputService.FindTargetWindow(windowTitle);
+                var win = UPilotPlayInputService.FindTargetWindow(windowTitle);
                 if (win == null) return null;
 
                 win.Focus();
@@ -137,7 +137,7 @@ namespace codingriver.upilot
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[Upilot] Editor window capture failed: {ex.Message}");
+                Debug.LogWarning($"[UPilot] Editor window capture failed: {ex.Message}");
                 return null;
             }
         }

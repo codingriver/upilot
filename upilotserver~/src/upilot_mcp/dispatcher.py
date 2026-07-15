@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from .env import env_float
@@ -53,6 +54,7 @@ class CommandDispatcher:
         }
 
     async def call(self, request_id: str, name: str, payload: dict[str, Any], timeout_ms: int | None = None) -> ToolResponse:
+        started = time.monotonic()
         if not self.transport.is_ready():
             wait_s = env_float("UPILOT_CALL_WAIT_READY_S", 300.0)
             waiter = getattr(self.transport, "wait_until_ready", None)
@@ -64,9 +66,10 @@ class CommandDispatcher:
                         "UNITY_NOT_CONNECTED",
                         "Unity 未连接（等待重连超时，可增大 UPILOT_CALL_WAIT_READY_S）",
                         {"command": name, "waitReadyS": wait_s},
+                        timing={"totalMs": round((time.monotonic() - started) * 1000), "queueMs": 0, "bridgeMs": 0, "unityExecutionMs": 0},
                     )
             else:
-                return fail(request_id, "UNITY_NOT_CONNECTED", "Unity 未连接", {"command": name})
+                return fail(request_id, "UNITY_NOT_CONNECTED", "Unity 未连接", {"command": name}, timing={"totalMs": round((time.monotonic() - started) * 1000), "queueMs": 0, "bridgeMs": 0, "unityExecutionMs": 0})
 
         command_id = new_id("cmd")
         self.state.create_command(command_id=command_id, request_id=request_id, name=name, payload=payload)
@@ -79,21 +82,42 @@ class CommandDispatcher:
             result = await asyncio.wait_for(future, timeout=wait_timeout)
         except asyncio.TimeoutError:
             self.state.mark_failed(command_id, {"code": "COMMAND_TIMEOUT", "message": "命令超时"})
-            return fail(request_id, "COMMAND_TIMEOUT", "命令超时", {"command": name, "commandId": command_id})
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            return fail(request_id, "COMMAND_TIMEOUT", "命令超时", {"command": name, "commandId": command_id}, timing={"totalMs": elapsed_ms, "queueMs": 0, "bridgeMs": elapsed_ms, "unityExecutionMs": 0})
 
         if result.get("type") == "error":
             err = result.get("payload") or {}
             self.state.mark_failed(command_id, err)
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            bridge_timing = result.get("timing") if isinstance(result, dict) else None
+            timing = self._compose_timing(elapsed_ms, bridge_timing)
             return fail(
                 request_id,
                 str(err.get("code", "INTERNAL_ERROR")),
                 str(err.get("message", "命令执行失败")),
                 {"command": name, "commandId": command_id, "detail": err.get("detail", {})},
+                timing=timing,
             )
 
         payload_data = result.get("payload") or {}
         self.state.mark_success(command_id, payload_data)
-        return ok(request_id, payload_data)
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        bridge_timing = result.get("timing") if isinstance(result, dict) else None
+        timing = self._compose_timing(elapsed_ms, bridge_timing)
+        return ok(request_id, payload_data, timing=timing)
+
+    @staticmethod
+    def _compose_timing(total_ms: int, bridge_timing: dict[str, Any] | None) -> dict[str, int]:
+        bridge = bridge_timing or {}
+        bridge_ms = int(bridge.get("bridgeMs", 0))
+        return {
+            "totalMs": total_ms,
+            "queueMs": int(bridge.get("queueMs", 0)),
+            "bridgeMs": bridge_ms,
+            "unityExecutionMs": int(bridge.get("unityExecutionMs", 0)),
+            "serializationMs": int(bridge.get("serializationMs", 0)),
+            "roundTripMs": max(0, total_ms - bridge_ms),
+        }
 
 
 class WsTransport:

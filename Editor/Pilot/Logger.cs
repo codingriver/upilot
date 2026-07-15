@@ -10,10 +10,10 @@ using System.Threading;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     /// <summary>
-    /// 将 upilot 编辑器日志写入项目根目录下 <c>Logs/upilot/upilot.log</c>。
+    /// 将 upilot 编辑器日志写入项目根目录下 <c>Logs/UPilot/UPilot.log</c>。
     /// 每次打开 Unity 编辑器（新会话）首次写入前会清空并写入会话头；同一会话内脚本域重载不清空，继续追加。
     /// 所有写入均立即落盘（无缓冲），时间戳精确到毫秒（本地时区）。
     /// 支持标签、主线程帧号检测、LogLevel 过滤、日志按大小滚动，并双写到 Unity Editor Console。
@@ -34,7 +34,7 @@ namespace codingriver.upilot
             get
             {
                 var root = Path.GetDirectoryName(Application.dataPath) ?? Application.dataPath;
-                return Path.Combine(root, "Logs", "upilot");
+                return Path.Combine(root, "Logs", "UPilot");
             }
         }
 
@@ -45,7 +45,7 @@ namespace codingriver.upilot
         /// </summary>
         public static LogLevel MinLevel = LogLevel.Debug;
 
-        public const string LogToUnityConsolePrefsKey = "codingriver.upilot.Logger.LogToUnityConsole";
+        public const string LogToUnityConsolePrefsKey = "CodingRiver.UPilot.Logger.LogToUnityConsole";
 
         /// <summary>
         /// 是否同时将日志输出到 Unity Editor Console。默认开启。
@@ -133,7 +133,7 @@ namespace codingriver.upilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[upilot] 无法准备日志文件: {ex.Message}");
+                Debug.LogError($"[UPilot] 无法准备日志文件: {ex.Message}");
             }
         }
 
@@ -242,7 +242,7 @@ namespace codingriver.upilot
                 }
                 catch (Exception ex)
                 {
-                    UnityEngine.Debug.LogError($"[upilot] 无法准备日志文件: {ex.Message}");
+                    UnityEngine.Debug.LogError($"[UPilot] 无法准备日志文件: {ex.Message}");
                     _sessionPrepared = true;
                 }
             }
@@ -434,7 +434,7 @@ namespace codingriver.upilot
             }
             catch (Exception ex)
             {
-                EditorUtility.DisplayDialog("upilot", $"无法打开日志: {ex.Message}", "确定");
+                EditorUtility.DisplayDialog("UPilot", $"无法打开日志: {ex.Message}", "确定");
             }
         }
     }

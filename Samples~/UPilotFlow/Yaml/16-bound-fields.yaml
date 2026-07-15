@@ -1,0 +1,31 @@
+schemaVersion: 2
+name: "16-bound-fields"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: set_bound_value
+    selector: "#property-title-field"
+    property: "title"
+    value: "Release"
+  - action: assert_bound_value
+    selector: "#property-title-field"
+    property: "title"
+    expected: "Release"
+  - action: set_bound_value
+    selector: "#settings-inspector"
+    property: "count"
+    value: "8"
+  - action: assert_bound_value
+    selector: "#settings-inspector"
+    property: "count"
+    expected: "8"
+  - action: set_bound_value
+    selector: "#settings-inspector"
+    property: "enabled"
+    value: "false"
+  - action: assert_bound_value
+    selector: "#settings-inspector"
+    property: "enabled"
+    expected: "false"

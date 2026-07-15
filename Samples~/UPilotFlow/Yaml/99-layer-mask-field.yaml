@@ -1,0 +1,34 @@
+schemaVersion: 2
+name: "99-layer-mask-field"
+description: Covers set_value and select_option on LayerMaskField control.
+fixture:
+  host_window:
+    type: ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - name: Set layer mask by name
+    action: set_value
+    selector: "#layer-mask-selector"
+    value: "Default"
+  - name: Assert layer mask value
+    action: assert_value
+    selector: "#layer-mask-selector"
+    expected: "1"
+
+  - name: Select layer mask by index
+    action: select_option
+    selector: "#layer-mask-selector"
+    index: "0"
+  - name: Assert layer mask value after index select
+    action: assert_value
+    selector: "#layer-mask-selector"
+    expected: "1"
+
+  - name: Reset layer mask to zero
+    action: set_value
+    selector: "#layer-mask-selector"
+    value: "0"
+  - name: Assert layer mask is zero
+    action: assert_value
+    selector: "#layer-mask-selector"
+    expected: "0"

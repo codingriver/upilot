@@ -1,4 +1,4 @@
-# upilot MCP Server 开发文档
+# UPilot MCP Server 开发文档
 
 本文档面向维护 `upilot` 随包 Python MCP server 的开发者。普通用户安装与基础使用请先阅读根目录 `../README.md`。
 
@@ -11,7 +11,7 @@ Python server 负责：
 - 通过 stdio 或 Streamable HTTP 暴露 MCP tools；
 - 通过 WebSocket 接收 Unity Editor bridge 连接；
 - 转发编辑器状态、Console 日志、编译、资源、场景、GameObject、组件、窗口、截图、包、菜单、脚本、Prefab、材质、构建、测试和诊断等工具调用；
-- 当 Unity 侧启用 UIFlow 时，转发 UIFlow YAML 自动化调用。
+- 当 Unity 侧显式启用 UPilot Flow 时，转发 YAML EditorWindow 自动化调用。
 
 ## 目录结构
 
@@ -242,4 +242,4 @@ local-command client 可以设置 Python UTF-8 模式：
 
 - 根目录 README：`../README.md`
 - MCP 工具状态矩阵：`../Documentation~/ToolStatus.md`
-- UIFlow 使用指南：`../Documentation~/UIFlow.md`
+- UPilot Flow 使用指南：`../Documentation~/UPilot-Flow.md`

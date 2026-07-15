@@ -1,0 +1,77 @@
+schemaVersion: 2
+name: "93-host-window-advanced"
+description: |
+  Tests host window reopen behavior and data persistence
+  via reopen_if_open within a single window.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Enter data in login window
+    action: type_text
+    selector: "#username-input"
+    value: "window_switch_test"
+
+  - name: Enter password
+    action: type_text
+    selector: "#password-input"
+    value: "password123"
+
+  - name: Assert username entered
+    action: assert_text
+    selector: "#username-input"
+    expected: "window_switch_test"
+
+  - name: Trigger login to update status
+    action: click
+    selector: "#login-button"
+
+  - name: Assert login status
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "Welcome window_switch_test"
+
+  - name: Reopen login window
+    action: execute_command
+    command: "UPilot/Flow/Examples/Basic Login Window"
+
+  - name: Wait for login window
+    action: wait_for_element
+    selector: "#username-input"
+    timeout: "5s"
+
+  - name: Assert username persisted (reopen_if_open)
+    action: assert_text
+    selector: "#username-input"
+    expected: "window_switch_test"
+
+  - name: Focus username for cleanup
+    action: focus
+    selector: "#username-input"
+
+  - name: Select all username text
+    action: press_key_combination
+    keys: "Ctrl+A"
+
+  - name: Delete username text
+    action: press_key
+    key: Delete
+
+  - name: Focus password for cleanup
+    action: focus
+    selector: "#password-input"
+
+  - name: Select all password text
+    action: press_key_combination
+    keys: "Ctrl+A"
+
+  - name: Delete password text
+    action: press_key
+    key: Delete
+
+  - name: Final screenshot
+    action: screenshot
+    tag: "host_window_advanced_final"

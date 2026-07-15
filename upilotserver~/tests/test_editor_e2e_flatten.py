@@ -40,9 +40,9 @@ def test_flatten_merges_defaults() -> None:
             "events": [{"eventType": "wheel", "wheelDeltaY": 5}],
         }
     ]
-    defaults = {"targetWindow": "Upilot", "elementName": "sv"}
+    defaults = {"targetWindow": "UPilot", "elementName": "sv"}
     out = _flatten_pointer_sequences(items, defaults)
     assert len(out) == 1
-    assert out[0]["targetWindow"] == "Upilot"
+    assert out[0]["targetWindow"] == "UPilot"
     assert out[0]["elementName"] == "sv"
     assert out[0]["wheelDeltaY"] == 5

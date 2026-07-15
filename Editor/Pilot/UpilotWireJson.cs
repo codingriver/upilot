@@ -1,16 +1,16 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using System;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     /// <summary>
     /// 通信日志：从完整 JSON 中优先取出 payload；若无则退回原文（避免误伤嵌套字段）。
     /// </summary>
-    public static class UpilotWireJson
+    public static class UPilotWireJson
     {
         public static string StripEnvelopeForDisplay(string json)
         {

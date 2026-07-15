@@ -1,0 +1,33 @@
+schemaVersion: 2
+name: "30-layer-mask"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: select_option
+    selector: "#layer-mask-selector"
+    index: "0"
+  - action: assert_property
+    selector: "#layer-mask-selector"
+    property: "value"
+    expected: "1"
+  - action: toggle_mask_option
+    selector: "#layer-mask-selector"
+    index: "1"
+  - action: assert_property
+    selector: "#layer-mask-selector"
+    property: "value"
+    expected: "3"
+  - action: toggle_mask_option
+    selector: "#permissions-flags"
+    value: "Read"
+  - action: assert_value
+    selector: "#permissions-flags"
+    expected: "Read"
+  - action: toggle_mask_option
+    selector: "#feature-mask"
+    index: "1"
+  - action: assert_value
+    selector: "#feature-mask"
+    expected: "2"

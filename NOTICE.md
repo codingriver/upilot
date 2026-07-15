@@ -20,7 +20,7 @@ licenses.
 - Source: <https://github.com/aaubry/YamlDotNet>
 - Location: `Editor/Plugins/YamlDotNet.dll` and `Editor/Plugins/YamlDotNet.xml`
 - License: MIT
-- Use in this project: YAML parsing for UIFlow test cases and reports.
+- Use in this project: YAML parsing for UPilotFlow test cases and reports.
 
 ## Python Dependencies
 

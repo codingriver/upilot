@@ -1,0 +1,26 @@
+schemaVersion: 2
+name: "27-assertions-and-artifacts"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: assert_visible
+    selector: "#toolbar-menu"
+  - action: assert_visible
+    selector: "#keyboard-input"
+  - action: assert_enabled
+    selector: "#enabled-button"
+  - action: assert_disabled
+    selector: "#disabled-button"
+  - action: type_text_fast
+    selector: "#keyboard-input"
+    value: "artifact"
+  - action: assert_text
+    selector: "#keyboard-status"
+    expected: "Input: artifact"
+  - action: assert_text_contains
+    selector: "#keyboard-status"
+    expected: "arti"
+  - action: screenshot
+    tag: "coverage-assertions"

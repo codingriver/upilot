@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------
-// Upilot Editor — https://github.com/codingriver/upilot
+// UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace codingriver.upilot
+namespace CodingRiver.UPilot
 {
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -59,11 +59,11 @@ namespace codingriver.upilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UpilotMaterialService
+    public class UPilotMaterialService
     {
-        private readonly UpilotBridge _bridge;
+        private readonly UPilotBridge _bridge;
 
-        public UpilotMaterialService(UpilotBridge bridge) { _bridge = bridge; }
+        public UPilotMaterialService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
         {
@@ -106,7 +106,7 @@ namespace codingriver.upilot
                     tcs.SetResult(new MaterialCreateResultPayload
                     {
                         materialPath = p.materialPath,
-                        instanceId   = UpilotEntityIds.ToWireId(mat),
+                        instanceId   = UPilotEntityIds.ToWireId(mat),
                         shaderName   = shader.name,
                     });
                 }
@@ -152,7 +152,7 @@ namespace codingriver.upilot
                     // Parse properties JSON
                     if (!string.IsNullOrEmpty(p.properties))
                     {
-                        var props = UpilotComponentService.ParseSimpleJson(p.properties);
+                        var props = UPilotComponentService.ParseSimpleJson(p.properties);
                         foreach (var kv in props)
                         {
                             ApplyMaterialProperty(mat, kv.Key, kv.Value);
@@ -195,7 +195,7 @@ namespace codingriver.upilot
             {
                 try
                 {
-                    var go = UpilotEntityIds.GameObjectFromWireId(p.targetGameObjectId);
+                    var go = UPilotEntityIds.GameObjectFromWireId(p.targetGameObjectId);
                     if (go == null)
                     {
                         tcs.SetException(new Exception($"GameObject not found: {p.targetGameObjectId}"));
@@ -272,7 +272,7 @@ namespace codingriver.upilot
                     {
                         materialPath = p.materialPath,
                         shaderName   = mat.shader != null ? mat.shader.name : "Unknown",
-                        instanceId   = UpilotEntityIds.ToWireId(mat),
+                        instanceId   = UPilotEntityIds.ToWireId(mat),
                     };
 
                     // Read shader properties

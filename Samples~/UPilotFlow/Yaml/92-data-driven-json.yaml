@@ -1,0 +1,48 @@
+schemaVersion: 2
+name: "92-data-driven-json"
+description: |
+  Demonstrates data-driven testing using inline data rows.
+  Each row provides different input values for the same test flow.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+data:
+  rows:
+    - username: "inline_user_1"
+      password: "pass_1"
+      expected_status: "Welcome inline_user_1"
+    - username: "inline_user_2"
+      password: "pass_2"
+      expected_status: "Welcome inline_user_2"
+    - username: "admin"
+      password: "admin123"
+      expected_status: "Welcome admin"
+
+steps:
+  - name: Enter username from data
+    action: type_text_fast
+    selector: "#username-input"
+    value: "{{ username }}"
+
+  - name: Enter password from data
+    action: type_text_fast
+    selector: "#password-input"
+    value: "{{ password }}"
+
+  - name: Click login
+    action: click
+    selector: "#login-button"
+
+  - name: Assert expected welcome message
+    action: assert_text
+    selector: "#status-label"
+    expected: "{{ expected_status }}"
+
+  - name: Reset form for next row
+    action: click
+    selector: "#reset-button"
+    if:
+      exists: "#reset-button"
