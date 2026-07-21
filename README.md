@@ -38,6 +38,8 @@ Window > Package Manager
 
 ```text
 https://github.com/codingriver/upilot.git#v0.2.0
+#开发模式
+https://github.com/codingriver/upilot.git#main
 ```
 
 点击 **Add**，等待 Unity 完成包导入和脚本编译。
