@@ -13,8 +13,18 @@ namespace CodingRiver.UPilot
         SetupRequired,
         Stopped,
         Starting,
+        Restarting,
+        Stopping,
         Ready,
         NeedsRepair,
+    }
+
+    internal enum UPilotServiceOperation
+    {
+        None,
+        Starting,
+        Restarting,
+        Stopping,
     }
 
     internal readonly struct UPilotMainSnapshot
@@ -43,13 +53,19 @@ namespace CodingRiver.UPilot
 
     internal static class UPilotQuickStart
     {
+        private const double StartTimeoutSeconds = 15d;
+        private const double RestartTimeoutSeconds = 20d;
+        private const double StopTimeoutSeconds = 12d;
+
+        private static UPilotServiceOperation _operation;
+        private static double _operationStartedAt;
+
         public static UPilotMainSnapshot Evaluate(
             BridgeStatus bridgeStatus,
             McpServerStatus mcpStatus,
             AgentMcpConfigStatus[] agentConfigs)
         {
-            var configuredAgents = CountConfiguredAgents(agentConfigs);
-            if (!UPilotSetupState.IsCompleted || configuredAgents == 0)
+            if (!UPilotSetupState.IsCompleted)
             {
                 return new UPilotMainSnapshot(
                     UPilotMainState.SetupRequired,
@@ -58,6 +74,14 @@ namespace CodingRiver.UPilot
                     bridgeStatus.IsStarted,
                     mcpStatus.IsRunning);
             }
+
+            var mcpHealthy = mcpStatus.IsRunning &&
+                             mcpStatus.HttpPortListening &&
+                             mcpStatus.WsPortListening;
+            var ready = mcpHealthy && bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated;
+            var operationSnapshot = EvaluateOperation(bridgeStatus, mcpStatus, ready);
+            if (operationSnapshot.HasValue)
+                return operationSnapshot.Value;
 
             var manager = UPilotMcpServerManager.Instance;
             if (!manager.IsPythonEntryValid(out _))
@@ -80,9 +104,6 @@ namespace CodingRiver.UPilot
                     mcpStatus.IsRunning);
             }
 
-            var mcpHealthy = mcpStatus.IsRunning &&
-                             mcpStatus.HttpPortListening &&
-                             mcpStatus.WsPortListening;
             if (mcpStatus.IsRunning && !mcpHealthy)
             {
                 return new UPilotMainSnapshot(
@@ -93,7 +114,7 @@ namespace CodingRiver.UPilot
                     mcpStatus.IsRunning);
             }
 
-            if (mcpHealthy && bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated)
+            if (ready)
             {
                 return new UPilotMainSnapshot(
                     UPilotMainState.Ready,
@@ -146,23 +167,31 @@ namespace CodingRiver.UPilot
 
         public static void Start()
         {
+            BeginOperation(UPilotServiceOperation.Starting);
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
             UPilotBridge.Instance.EnsureStarted();
             if (!manager.GetStatus().IsRunning)
                 manager.StartServer();
+            manager.InvalidateStatusCache();
         }
 
         public static void Restart()
         {
+            BeginOperation(UPilotServiceOperation.Restarting);
             UPilotBridge.Instance.Restart();
-            UPilotMcpServerManager.Instance.RestartServer();
+            var manager = UPilotMcpServerManager.Instance;
+            manager.RestartServer();
+            manager.InvalidateStatusCache();
         }
 
         public static void Stop()
         {
+            BeginOperation(UPilotServiceOperation.Stopping);
             UPilotBridge.Instance.Stop();
-            UPilotMcpServerManager.Instance.StopServer();
+            var manager = UPilotMcpServerManager.Instance;
+            manager.StopServer();
+            manager.InvalidateStatusCache();
         }
 
         public static string AutoRepair(
@@ -186,6 +215,7 @@ namespace CodingRiver.UPilot
 
             if (mcpStatus.IsRunning && !mcpStatus.ProcessId.HasValue)
             {
+                BeginOperation(UPilotServiceOperation.Restarting);
                 SwitchToAvailablePortsAndRestart(agentConfigs);
                 return "已切换到空闲端口并重新启动。";
             }
@@ -193,11 +223,18 @@ namespace CodingRiver.UPilot
             if (mcpStatus.IsRunning &&
                 (!mcpStatus.HttpPortListening || !mcpStatus.WsPortListening))
             {
+                BeginOperation(UPilotServiceOperation.Restarting);
                 manager.RestartServer();
                 if (!bridgeStatus.IsStarted)
                     UPilotBridge.Instance.EnsureStarted();
+                manager.InvalidateStatusCache();
                 return "服务正在重新启动。";
             }
+
+            BeginOperation(
+                mcpStatus.IsRunning || bridgeStatus.IsStarted
+                    ? UPilotServiceOperation.Restarting
+                    : UPilotServiceOperation.Starting);
 
             if (!mcpStatus.IsRunning)
                 manager.StartServer();
@@ -207,19 +244,99 @@ namespace CodingRiver.UPilot
             else if (!bridgeStatus.IsAuthenticated)
                 UPilotBridge.Instance.Restart();
 
+            manager.InvalidateStatusCache();
+
             return "正在重新连接 Unity。";
         }
 
-        private static int CountConfiguredAgents(AgentMcpConfigStatus[] statuses)
+        private static UPilotMainSnapshot? EvaluateOperation(
+            BridgeStatus bridgeStatus,
+            McpServerStatus mcpStatus,
+            bool ready)
         {
-            var count = 0;
-            if (statuses == null) return count;
-            foreach (var status in statuses)
+            if (_operation == UPilotServiceOperation.None)
+                return null;
+
+            var elapsed = EditorApplication.timeSinceStartup - _operationStartedAt;
+            if (_operation == UPilotServiceOperation.Stopping)
             {
-                if (status.IsConfigured)
-                    count++;
+                if (!bridgeStatus.IsStarted && !mcpStatus.IsRunning)
+                {
+                    ClearOperation();
+                    return new UPilotMainSnapshot(
+                        UPilotMainState.Stopped,
+                        "UPilot 已停止",
+                        "Agent 当前无法操作 Unity。",
+                        false,
+                        false);
+                }
+
+                if (elapsed >= StopTimeoutSeconds)
+                {
+                    ClearOperation();
+                    return new UPilotMainSnapshot(
+                        UPilotMainState.NeedsRepair,
+                        "停止未完成",
+                        "仍有服务未能停止，可以重试或打开高级设置处理。",
+                        bridgeStatus.IsStarted,
+                        mcpStatus.IsRunning);
+                }
+
+                return new UPilotMainSnapshot(
+                    UPilotMainState.Stopping,
+                    "正在停止 UPilot",
+                    "请稍候…",
+                    bridgeStatus.IsStarted,
+                    mcpStatus.IsRunning);
             }
-            return count;
+
+            if (ready)
+            {
+                ClearOperation();
+                return new UPilotMainSnapshot(
+                    UPilotMainState.Ready,
+                    "已就绪",
+                    "现在可以直接让 Agent 操作 Unity。",
+                    bridgeStatus.IsStarted,
+                    mcpStatus.IsRunning);
+            }
+
+            var timeout = _operation == UPilotServiceOperation.Restarting
+                ? RestartTimeoutSeconds
+                : StartTimeoutSeconds;
+            if (elapsed >= timeout)
+            {
+                var wasRestarting = _operation == UPilotServiceOperation.Restarting;
+                ClearOperation();
+                return new UPilotMainSnapshot(
+                    UPilotMainState.NeedsRepair,
+                    wasRestarting ? "重启未完成" : "启动未完成",
+                    "可以自动检查并恢复服务连接。",
+                    bridgeStatus.IsStarted,
+                    mcpStatus.IsRunning);
+            }
+
+            var state = _operation == UPilotServiceOperation.Restarting
+                ? UPilotMainState.Restarting
+                : UPilotMainState.Starting;
+            return new UPilotMainSnapshot(
+                state,
+                state == UPilotMainState.Restarting ? "正在重启 UPilot" : "正在启动 UPilot",
+                "通常只需要几秒钟，请稍候。",
+                bridgeStatus.IsStarted,
+                mcpStatus.IsRunning);
+        }
+
+        private static void BeginOperation(UPilotServiceOperation operation)
+        {
+            _operation = operation;
+            _operationStartedAt = EditorApplication.timeSinceStartup;
+        }
+
+        private static void ClearOperation()
+        {
+            _operation = UPilotServiceOperation.None;
+            _operationStartedAt = 0d;
         }
 
         private static void EnsureAvailablePortsWhenStopped()

@@ -85,6 +85,31 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void AgentSetupExposesSupportedMcpAndRuleStatusesInSameOrder()
+        {
+            var mcpStatuses = UPilotAgentSetup.GetMcpConfigStatuses();
+            var ruleStatuses = UPilotAgentSetup.GetRuleConfigStatuses();
+
+            Assert.That(mcpStatuses.Length, Is.EqualTo(3));
+            Assert.That(ruleStatuses.Length, Is.EqualTo(3));
+            Assert.That(mcpStatuses[0].ClientName, Is.EqualTo("Codex"));
+            Assert.That(mcpStatuses[1].ClientName, Is.EqualTo("Claude Code"));
+            Assert.That(mcpStatuses[2].ClientName, Is.EqualTo("Cursor"));
+            Assert.That(ruleStatuses[0].ClientName, Is.EqualTo("Codex"));
+            Assert.That(ruleStatuses[1].ClientName, Is.EqualTo("Claude Code"));
+            Assert.That(ruleStatuses[2].ClientName, Is.EqualTo("Cursor"));
+        }
+
+        [Test]
+        public void MainStateDistinguishesRestartingAndStopping()
+        {
+            Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Restarting), Is.True);
+            Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Stopping), Is.True);
+            Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Restarting), Is.True);
+            Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Stopping), Is.True);
+        }
+
+        [Test]
         public void SkillInstallMetadataDetectsLocalChanges()
         {
             var directory = Path.Combine(Path.GetTempPath(), "upilot-skill-test-" + Guid.NewGuid().ToString("N"));

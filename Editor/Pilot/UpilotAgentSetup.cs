@@ -52,6 +52,51 @@ namespace CodingRiver.UPilot
         }
     }
 
+    public enum AgentRuleConfigState
+    {
+        Missing,
+        Current,
+        UpdateAvailable,
+        Customized,
+        Error,
+    }
+
+    public readonly struct AgentRuleConfigStatus
+    {
+        public AgentRuleConfigStatus(
+            string clientName,
+            string configPath,
+            AgentRuleConfigState state,
+            string errorMessage = "")
+        {
+            ClientName = clientName;
+            ConfigPath = configPath;
+            State = state;
+            ErrorMessage = errorMessage ?? "";
+        }
+
+        public string ClientName { get; }
+        public string ConfigPath { get; }
+        public AgentRuleConfigState State { get; }
+        public string ErrorMessage { get; }
+        public bool IsCurrent => State == AgentRuleConfigState.Current;
+        public bool HasLocalCustomization => State == AgentRuleConfigState.Customized;
+
+        public string StateText
+        {
+            get
+            {
+                if (State == AgentRuleConfigState.Error) return "读取失败";
+                if (State == AgentRuleConfigState.Missing)
+                    return ClientName == "Codex" ? "未安装" : "未同步";
+                if (State == AgentRuleConfigState.UpdateAvailable) return "有更新";
+                if (State == AgentRuleConfigState.Customized)
+                    return ClientName == "Codex" ? "已安装" : "已同步";
+                return ClientName == "Codex" ? "已安装" : "已同步";
+            }
+        }
+    }
+
     [InitializeOnLoad]
     public static class UPilotAgentSetup
     {
@@ -78,6 +123,17 @@ namespace CodingRiver.UPilot
                 InspectTomlConfig("Codex", Path.Combine(projectRoot, ".codex", "config.toml")),
                 InspectJsonConfig("Claude Code", Path.Combine(projectRoot, ".mcp.json")),
                 InspectJsonConfig("Cursor", Path.Combine(projectRoot, ".cursor", "mcp.json")),
+            };
+        }
+
+        public static AgentRuleConfigStatus[] GetRuleConfigStatuses()
+        {
+            var projectRoot = GetProjectRoot();
+            return new[]
+            {
+                InspectCodexRuleConfig(projectRoot),
+                InspectClaudeRuleConfig(projectRoot),
+                InspectCursorRuleConfig(projectRoot),
             };
         }
 
@@ -159,9 +215,175 @@ namespace CodingRiver.UPilot
             return WriteJsonMcpConfig(path, includeType: false, promptBeforeOverwrite);
         }
 
+        public static string WriteAgentMcpConfig(string clientName, bool promptBeforeOverwrite)
+        {
+            if (clientName == "Codex")
+                return WriteCodexMcpConfig(promptBeforeOverwrite);
+            if (clientName == "Claude Code")
+                return WriteClaudeCodeMcpConfig(promptBeforeOverwrite);
+            if (clientName == "Cursor")
+                return WriteCursorMcpConfig(promptBeforeOverwrite);
+            return "Unsupported Agent: " + clientName;
+        }
+
+        public static string UpdateAgentRules(string clientName, bool forceSkillOverwrite)
+        {
+            var projectRoot = GetProjectRoot();
+            var result = new StringBuilder();
+
+            if (clientName == "Codex")
+            {
+                WriteSharedAgentsRule(projectRoot, result);
+                CopySkillInstall(projectRoot, forceSkillOverwrite, result);
+            }
+            else if (clientName == "Claude Code")
+            {
+                WriteSharedAgentsRule(projectRoot, result);
+                WriteManagedTextFile(
+                    Path.Combine(projectRoot, "CLAUDE.md"),
+                    "@AGENTS.md\n",
+                    overwriteExisting: false,
+                    result);
+            }
+            else if (clientName == "Cursor")
+            {
+                WriteCursorRuleFile(
+                    Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc"),
+                    overwriteExisting: false,
+                    result);
+            }
+            else
+            {
+                return "Unsupported Agent: " + clientName;
+            }
+
+            MarkAgentRulesHandledForCurrentProject();
+            return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
+        }
+
+        public static string UpdateAllAgentRules(bool forceCodexSkillOverwrite)
+        {
+            var projectRoot = GetProjectRoot();
+            var result = new StringBuilder();
+            WriteSharedAgentsRule(projectRoot, result);
+            WriteManagedTextFile(
+                Path.Combine(projectRoot, "CLAUDE.md"),
+                "@AGENTS.md\n",
+                overwriteExisting: false,
+                result);
+            WriteCursorRuleFile(
+                Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc"),
+                overwriteExisting: false,
+                result);
+            CopySkillInstall(projectRoot, forceCodexSkillOverwrite, result);
+            MarkAgentRulesHandledForCurrentProject();
+            return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
+        }
+
         public static void MarkAgentRulesHandledForCurrentProject()
         {
             EditorPrefs.SetBool(GetAgentRulesSetupKey(), true);
+        }
+
+        private static void WriteSharedAgentsRule(string projectRoot, StringBuilder result)
+        {
+            WriteManagedTextFile(
+                Path.Combine(projectRoot, "AGENTS.md"),
+                BuildAgentsMd(),
+                overwriteExisting: false,
+                result);
+        }
+
+        private static AgentRuleConfigStatus InspectCodexRuleConfig(string projectRoot)
+        {
+            var skillPath = Path.Combine(projectRoot, ".agents", "skills", SkillName);
+            try
+            {
+                var agentsState = InspectManagedRuleFile(
+                    Path.Combine(projectRoot, "AGENTS.md"),
+                    BuildAgentsMd());
+                if (!Directory.Exists(skillPath))
+                    return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Missing);
+
+                if (!TryReadSkillInstallMetadata(skillPath, out var templateVersion, out var contentHash) ||
+                    !string.Equals(contentHash, ComputeSkillInstallHash(skillPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Customized);
+                }
+
+                if (templateVersion < SkillInstallTemplateVersion ||
+                    agentsState != AgentRuleConfigState.Current)
+                {
+                    return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.UpdateAvailable);
+                }
+
+                return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Current);
+            }
+            catch (Exception ex)
+            {
+                return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Error, ex.Message);
+            }
+        }
+
+        private static AgentRuleConfigStatus InspectClaudeRuleConfig(string projectRoot)
+        {
+            var path = Path.Combine(projectRoot, "CLAUDE.md");
+            try
+            {
+                var agentsState = InspectManagedRuleFile(
+                    Path.Combine(projectRoot, "AGENTS.md"),
+                    BuildAgentsMd());
+                var claudeState = InspectManagedRuleFile(path, "@AGENTS.md\n");
+                if (agentsState == AgentRuleConfigState.Missing || claudeState == AgentRuleConfigState.Missing)
+                    return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.Missing);
+                if (agentsState != AgentRuleConfigState.Current || claudeState != AgentRuleConfigState.Current)
+                    return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.UpdateAvailable);
+                return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.Current);
+            }
+            catch (Exception ex)
+            {
+                return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.Error, ex.Message);
+            }
+        }
+
+        private static AgentRuleConfigStatus InspectCursorRuleConfig(string projectRoot)
+        {
+            var path = Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc");
+            try
+            {
+                var state = InspectManagedRuleFile(path, BuildAgentsMd());
+                return new AgentRuleConfigStatus("Cursor", path, state);
+            }
+            catch (Exception ex)
+            {
+                return new AgentRuleConfigStatus("Cursor", path, AgentRuleConfigState.Error, ex.Message);
+            }
+        }
+
+        private static AgentRuleConfigState InspectManagedRuleFile(string path, string content)
+        {
+            if (!File.Exists(path))
+                return AgentRuleConfigState.Missing;
+
+            var original = File.ReadAllText(path, Encoding.UTF8);
+            var pattern = Regex.Escape(ManagedBlockStart) + ".*?" + Regex.Escape(ManagedBlockEnd);
+            var match = Regex.Match(original, pattern, RegexOptions.Singleline);
+            if (!match.Success)
+                return AgentRuleConfigState.Missing;
+
+            var expected = WrapManagedBlock(content).TrimEnd();
+            var actual = match.Value.TrimEnd();
+            return string.Equals(
+                NormalizeLineEndings(actual),
+                NormalizeLineEndings(expected),
+                StringComparison.Ordinal)
+                ? AgentRuleConfigState.Current
+                : AgentRuleConfigState.UpdateAvailable;
+        }
+
+        private static string NormalizeLineEndings(string value)
+        {
+            return (value ?? "").Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
         private static AgentMcpConfigStatus InspectTomlConfig(string clientName, string path)

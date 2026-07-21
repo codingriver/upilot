@@ -1015,10 +1015,19 @@ namespace CodingRiver.UPilot
 
                         using (new EditorGUI.DisabledScope(status.IsCompiling && mcpStatus.IsRunning))
                         {
-                            if (GUILayout.Button("停止", GUILayout.Width(72), GUILayout.Height(28)))
+                            var previousBackground = GUI.backgroundColor;
+                            GUI.backgroundColor = new Color(0.9f, 0.28f, 0.24f);
+                            var stopClicked = GUILayout.Button("停止", GUILayout.Width(72), GUILayout.Height(28));
+                            GUI.backgroundColor = previousBackground;
+
+                            if (stopClicked && EditorUtility.DisplayDialog(
+                                    "停止 UPilot？",
+                                    "停止后 Agent 将暂时无法操作 Unity。",
+                                    "停止 UPilot",
+                                    "取消"))
                             {
                                 UPilotQuickStart.Stop();
-                                ShowToast("UPilot 已停止", MessageType.Warning);
+                                ShowToast("UPilot 正在停止…", MessageType.Warning);
                             }
                         }
                     }
