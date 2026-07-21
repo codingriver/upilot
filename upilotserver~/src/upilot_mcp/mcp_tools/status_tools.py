@@ -420,6 +420,139 @@ async def unity_console_search_logs(
     return _log_tool_result("unity_console_search_logs", _payload(r))
 
 @mcp.tool(
+    description=(
+        "开始将 Unity Console 新日志持续写入独立 JSONL 会话目录。"
+        "默认目录为工程内 Log/UPilotConsole/<时间戳_标题>；同一时间只允许一个活跃会话。"
+    )
+)
+async def unity_console_capture_start(
+    title: str = "",
+    path: str = "",
+    includeStackTrace: bool = True,
+    excludeUPilot: bool = True,
+    clearUnityConsole: bool = False,
+    flushIntervalMs: int = 1000,
+    maxFileBytes: int = 50 * 1024 * 1024,
+    allowOutsideProject: bool = False,
+):
+    _log_tool_call(
+        "unity_console_capture_start",
+        {
+            "title": title,
+            "path": path,
+            "includeStackTrace": includeStackTrace,
+            "excludeUPilot": excludeUPilot,
+            "clearUnityConsole": clearUnityConsole,
+            "flushIntervalMs": flushIntervalMs,
+            "maxFileBytes": maxFileBytes,
+            "allowOutsideProject": allowOutsideProject,
+        },
+    )
+    r = await _get_facade().console_capture_start(
+        title=title,
+        path=path,
+        include_stack_trace=includeStackTrace,
+        exclude_upilot=excludeUPilot,
+        clear_unity_console=clearUnityConsole,
+        flush_interval_ms=flushIntervalMs,
+        max_file_bytes=maxFileBytes,
+        allow_outside_project=allowOutsideProject,
+    )
+    return _log_tool_result("unity_console_capture_start", _payload(r))
+
+@mcp.tool(description="获取当前或指定 Unity Console 持久化采集会话的状态、计数、路径和写入错误。")
+async def unity_console_capture_status(sessionId: str = ""):
+    _log_tool_call("unity_console_capture_status", {"sessionId": sessionId})
+    r = await _get_facade().console_capture_status(session_id=sessionId)
+    return _log_tool_result("unity_console_capture_status", _payload(r))
+
+@mcp.tool(
+    description=(
+        "按 sequence 增量读取持久化 Console JSONL 日志，支持类型和关键词过滤。"
+        "后续读取应把上次返回的 nextSequence 作为 afterSequence。"
+    )
+)
+async def unity_console_capture_read(
+    sessionId: str = "",
+    afterSequence: int = -1,
+    count: int = 200,
+    logType: str = "",
+    includeStackTrace: bool = True,
+    contains: list[str] | None = None,
+    containsAll: bool = False,
+    newestFirst: bool = False,
+):
+    _log_tool_call(
+        "unity_console_capture_read",
+        {
+            "sessionId": sessionId,
+            "afterSequence": afterSequence,
+            "count": count,
+            "logType": logType,
+            "includeStackTrace": includeStackTrace,
+            "contains": contains,
+            "containsAll": containsAll,
+            "newestFirst": newestFirst,
+        },
+    )
+    r = await _get_facade().console_capture_read(
+        session_id=sessionId,
+        after_sequence=afterSequence,
+        count=count,
+        log_type=logType,
+        include_stack_trace=includeStackTrace,
+        contains=contains,
+        contains_all=containsAll,
+        newest_first=newestFirst,
+    )
+    return _log_tool_result("unity_console_capture_read", _payload(r))
+
+@mcp.tool(description="停止当前 Unity Console 持久化采集，刷新缓冲区并生成 summary.json 与 SHA256。")
+async def unity_console_capture_stop(sessionId: str = ""):
+    _log_tool_call("unity_console_capture_stop", {"sessionId": sessionId})
+    r = await _get_facade().console_capture_stop(session_id=sessionId)
+    return _log_tool_result("unity_console_capture_stop", _payload(r))
+
+@mcp.tool(description="列出工程默认 Log/UPilotConsole 目录中的近期持久化采集会话。")
+async def unity_console_capture_list(count: int = 20, includeActive: bool = True):
+    _log_tool_call(
+        "unity_console_capture_list", {"count": count, "includeActive": includeActive}
+    )
+    r = await _get_facade().console_capture_list(
+        count=count, include_active=includeActive
+    )
+    return _log_tool_result("unity_console_capture_list", _payload(r))
+
+@mcp.tool(
+    description=(
+        "清理过期 Unity Console 采集目录。危险操作：先 dryRun=true 获取目录清单和 confirmToken，"
+        "确认后再以相同条件、dryRun=false 和 confirmToken 执行。"
+    )
+)
+async def unity_console_capture_cleanup(
+    olderThanDays: int = 14,
+    keepLatest: int = 20,
+    dryRun: bool = True,
+    confirmToken: str = "",
+):
+    _log_tool_call(
+        "unity_console_capture_cleanup",
+        {
+            "olderThanDays": olderThanDays,
+            "keepLatest": keepLatest,
+            "dryRun": dryRun,
+            "confirmToken": confirmToken,
+        },
+    )
+    r = await _get_facade().console_capture_cleanup(
+        older_than_days=olderThanDays,
+        keep_latest=keepLatest,
+        dry_run=dryRun,
+        confirm_token=confirmToken,
+    )
+    return _log_tool_result("unity_console_capture_cleanup", _payload(r))
+
+@mcp.tool(
     description="清空 Unity 控制台日志。会移除当前 Console 历史；如果需要诊断先用 tail/search 读取或保存关键日志。"
 )
 async def unity_console_clear():
@@ -487,6 +620,12 @@ _DESTRUCTIVE_TOOLS = {
     "unity_script_create", "unity_script_update", "unity_script_delete",
     "unity_package_add", "unity_package_remove", "unity_scene_save",
     "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
+    "unity_console_capture_cleanup",
+}
+_NON_IDEMPOTENT_TOOLS = {
+    "unity_console_capture_start",
+    "unity_console_capture_stop",
+    "unity_console_capture_cleanup",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
@@ -498,7 +637,7 @@ for _name, _value in list(globals().items()):
     register_public_tool(
         _name,
         destructive=_name in _DESTRUCTIVE_TOOLS,
-        idempotent=_name not in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
     )

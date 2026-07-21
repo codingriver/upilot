@@ -34,6 +34,19 @@ Use `http://127.0.0.1:8011/mcp` for MCP clients. Treat every WebSocket port as i
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
 - Retry automatically only when the operation is idempotent and non-destructive.
 
+## Persistent Console Capture
+
+Use persistent capture when logs must survive long waits, Console clears, or Agent polling gaps:
+
+1. Call `unity_console_capture_start` before the operation. Keep its `sessionId` and output directory.
+2. Run the task normally. Unity writes JSONL independently of MCP polling.
+3. Call `unity_console_capture_status` for counters and write failures. Use `unity_console_capture_read` with the previous `nextSequence` as the next `afterSequence` for incremental analysis.
+4. Always call `unity_console_capture_stop` when the task ends, including failure paths. Report the JSONL path, summary path, counts, dropped logs, and SHA256.
+5. Use `unity_console_capture_list` to find recent default-directory sessions.
+6. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
+
+Default captures belong under `Log/UPilotConsole/<timestamp>_<title>/`. Keep raw Console capture separate from domain-specific reports such as battle smoke-test reports. Prefer a project-relative custom path; do not set `allowOutsideProject=true` unless the user explicitly needs an external directory.
+
 ## Routing
 
 - Installation: read `references/installation.md`.

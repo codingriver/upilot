@@ -829,6 +829,100 @@ class StatusDomainService:
             payload["regex"] = regex
         return await self.dispatcher.call(request_id, "console.logs.search", payload)
 
+    async def console_capture_start(
+        self,
+        title: str = "",
+        path: str = "",
+        include_stack_trace: bool = True,
+        exclude_upilot: bool = True,
+        clear_unity_console: bool = False,
+        flush_interval_ms: int = 1000,
+        max_file_bytes: int = 50 * 1024 * 1024,
+        allow_outside_project: bool = False,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id,
+            "console.capture.start",
+            {
+                "title": title,
+                "path": path,
+                "includeStackTrace": include_stack_trace,
+                "excludeUPilot": exclude_upilot,
+                "clearUnityConsole": clear_unity_console,
+                "flushIntervalMs": max(100, min(flush_interval_ms, 60000)),
+                "maxFileBytes": max(1024 * 1024, max_file_bytes),
+                "allowOutsideProject": allow_outside_project,
+            },
+        )
+
+    async def console_capture_status(self, session_id: str = "") -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id, "console.capture.status", {"sessionId": session_id}
+        )
+
+    async def console_capture_read(
+        self,
+        session_id: str = "",
+        after_sequence: int = -1,
+        count: int = 200,
+        log_type: str = "",
+        include_stack_trace: bool = True,
+        contains: list[str] | None = None,
+        contains_all: bool = False,
+        newest_first: bool = False,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        payload: dict = {
+            "sessionId": session_id,
+            "afterSequence": after_sequence,
+            "count": max(1, min(count, 5000)),
+            "includeStackTrace": include_stack_trace,
+            "containsAll": contains_all,
+            "newestFirst": newest_first,
+        }
+        if log_type:
+            payload["logType"] = log_type
+        if contains:
+            payload["contains"] = contains
+        return await self.dispatcher.call(request_id, "console.capture.read", payload)
+
+    async def console_capture_stop(self, session_id: str = "") -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id, "console.capture.stop", {"sessionId": session_id}
+        )
+
+    async def console_capture_list(
+        self, count: int = 20, include_active: bool = True
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id,
+            "console.capture.list",
+            {"count": max(1, min(count, 200)), "includeActive": include_active},
+        )
+
+    async def console_capture_cleanup(
+        self,
+        older_than_days: int = 14,
+        keep_latest: int = 20,
+        dry_run: bool = True,
+        confirm_token: str = "",
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id,
+            "console.capture.cleanup",
+            {
+                "olderThanDays": max(0, older_than_days),
+                "keepLatest": max(0, keep_latest),
+                "dryRun": dry_run,
+                "confirmToken": confirm_token,
+            },
+        )
+
     async def console_clear(self) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(request_id, "console.clear", {})
@@ -903,4 +997,3 @@ class StatusDomainService:
         if in_2d_mode is not None:
             payload["in2DMode"] = 1 if in_2d_mode else 0
         return await self.dispatcher.call(request_id, "sceneview.navigate", payload)
-

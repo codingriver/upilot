@@ -182,7 +182,8 @@ namespace CodingRiver.UPilot
         private readonly int                       _mainThreadId;
 
         // Module services (initialized in constructor after Router is available)
-        private UPilotConsoleService    _consoleService;
+        private UPilotConsoleService        _consoleService;
+        private UPilotConsoleCaptureService _consoleCaptureService;
         private UPilotGameObjectService _gameObjectService;
         private UPilotSceneService      _sceneService;
         private UPilotComponentService  _componentService;
@@ -960,6 +961,9 @@ namespace CodingRiver.UPilot
         {
             _consoleService = new UPilotConsoleService(this);
             _consoleService.RegisterCommands();
+
+            _consoleCaptureService = new UPilotConsoleCaptureService(this);
+            _consoleCaptureService.RegisterCommands();
 
             _gameObjectService = new UPilotGameObjectService(this);
             _gameObjectService.RegisterCommands();

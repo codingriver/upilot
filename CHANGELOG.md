@@ -2,6 +2,7 @@
 
 ## 0.2.0
 
+- Added persistent Unity Console capture sessions with JSONL output, incremental reads, rotation, summaries, SHA256 verification, session listing, and confirm-token cleanup.
 - Renamed the core product, C# namespaces, assemblies, menus, and documentation to UPilot.
 - Added a stable tool registry, schema-v2 MCP responses, structured errors, cache freshness, operation timing, and async task tools.
 - Standardized Streamable HTTP on port 8011 and kept WebSocket ports internal to the Unity Bridge.
