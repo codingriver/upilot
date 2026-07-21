@@ -16,3 +16,5 @@ python skills/upilot-unity-mcp/scripts/install_upilot.py --unity-project <UNITY_
 The core install keeps optional features disabled. When the user explicitly requests UPilot Flow, read `flow.md` before changing packages or scripting defines.
 
 Do not overwrite an existing skill or MCP registration without checking its current content.
+
+Unity Editor Agent Setup writes `.upilot-install.json` into skill directories that it manages. Later package versions may refresh a managed skill automatically only when the recorded content hash still matches. Legacy, unmanaged, or locally customized skill directories are preserved unless the user explicitly requests overwrite.

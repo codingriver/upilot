@@ -66,14 +66,63 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void AgentTemplateUsesCapabilityAndCompileEfficiencyRules()
+        public void AgentTemplateUsesCapabilityCompileAndWorkflowRules()
         {
             var method = typeof(UPilotAgentSetup).GetMethod("BuildAgentsMd", BindingFlags.NonPublic | BindingFlags.Static);
             var text = (string)method.Invoke(null, null);
 
             Assert.That(text, Does.Contain("unity_capabilities_get"));
+            Assert.That(text, Does.Contain("prefer an available UPilot semantic tool"));
+            Assert.That(text, Does.Contain("Use `unity_tools_find` for targeted discovery"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
+            Assert.That(text, Does.Contain("authoritative compiled orchestration entry point"));
+            Assert.That(text, Does.Contain("unity_console_capture_start"));
+            Assert.That(text, Does.Contain("always call `unity_console_capture_stop`"));
+            Assert.That(text, Does.Contain("separate from domain-specific reports"));
+            Assert.That(text, Does.Contain("incremental status, log, and report APIs"));
+            Assert.That(text, Does.Contain("artifact or screenshot save tools"));
             Assert.That(text, Does.Not.Contain("## UPilot Flow"));
+        }
+
+        [Test]
+        public void SkillInstallMetadataDetectsLocalChanges()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-skill-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                File.WriteAllText(Path.Combine(directory, "SKILL.md"), "managed content");
+
+                var writeMethod = typeof(UPilotAgentSetup).GetMethod(
+                    "WriteSkillInstallMetadata",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                writeMethod.Invoke(null, new object[] { directory });
+
+                var readMethod = typeof(UPilotAgentSetup).GetMethod(
+                    "TryReadSkillInstallMetadata",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                var readArgs = new object[] { directory, 0, null };
+                var readOk = (bool)readMethod.Invoke(null, readArgs);
+
+                var hashMethod = typeof(UPilotAgentSetup).GetMethod(
+                    "ComputeSkillInstallHash",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                var originalHash = (string)hashMethod.Invoke(null, new object[] { directory });
+
+                Assert.That(readOk, Is.True);
+                Assert.That(readArgs[1], Is.EqualTo(1));
+                Assert.That(readArgs[2], Is.EqualTo(originalHash));
+
+                File.AppendAllText(Path.Combine(directory, "SKILL.md"), "\nuser change");
+                var changedHash = (string)hashMethod.Invoke(null, new object[] { directory });
+                Assert.That(changedHash, Is.Not.EqualTo(originalHash));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
         }
     }
 }

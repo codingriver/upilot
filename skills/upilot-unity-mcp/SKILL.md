@@ -24,6 +24,8 @@ Use `http://127.0.0.1:8011/mcp` for MCP clients. Treat every WebSocket port as i
 - Refresh the MCP client after tool registration or optional-feature changes.
 - Prefer the narrowest semantic tool.
 - Call existing compiled methods with `unity_reflection_call`. Fall back to one bounded `reflection_eval` expression only after an actual reflection-call failure.
+- For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
+- Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
 
 ## Writes And Validation
 
@@ -33,6 +35,11 @@ Use `http://127.0.0.1:8011/mcp` for MCP clients. Treat every WebSocket port as i
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
 - Retry automatically only when the operation is idempotent and non-destructive.
+
+## Project Workflows
+
+- When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call it and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.
+- Keep business orchestration in project code. MCP should start, poll, diagnose, capture logs, and collect artifacts.
 
 ## Persistent Console Capture
 
@@ -46,6 +53,12 @@ Use persistent capture when logs must survive long waits, Console clears, or Age
 6. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
 
 Default captures belong under `Log/UPilotConsole/<timestamp>_<title>/`. Keep raw Console capture separate from domain-specific reports such as battle smoke-test reports. Prefer a project-relative custom path; do not set `allowOutsideProject=true` unless the user explicitly needs an external directory.
+
+## Acceptance Evidence
+
+- During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
+- Prefer dedicated project-relative artifact or screenshot save tools that return metadata or hashes.
+- If capture falls back to base64, window capture, or OS-level automation, report the reason.
 
 ## Routing
 

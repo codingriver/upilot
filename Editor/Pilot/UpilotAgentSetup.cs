@@ -58,7 +58,9 @@ namespace CodingRiver.UPilot
         private const string PackageName = "io.github.codingriver.upilot";
         private const string SkillName = "upilot-unity-mcp";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
-        private const int AgentRulesTemplateVersion = 2;
+        private const int AgentRulesTemplateVersion = 3;
+        private const int SkillInstallTemplateVersion = 1;
+        private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
 
@@ -370,18 +372,49 @@ namespace CodingRiver.UPilot
         private static void CopySkillInstall(string projectRoot, bool overwriteExisting, StringBuilder result)
         {
             var target = Path.Combine(projectRoot, ".agents", "skills", SkillName);
+            var source = Path.Combine(ResolvePackageRoot(), "skills", SkillName);
             if (Directory.Exists(target) && !overwriteExisting)
             {
+                var isUnmodifiedManagedInstall = TryReadSkillInstallMetadata(
+                    target,
+                    out var installedTemplateVersion,
+                    out var installedContentHash) &&
+                    string.Equals(
+                        installedContentHash,
+                        ComputeSkillInstallHash(target),
+                        StringComparison.OrdinalIgnoreCase);
+
+                if (isUnmodifiedManagedInstall &&
+                    installedTemplateVersion < SkillInstallTemplateVersion &&
+                    Directory.Exists(source))
+                {
+                    Directory.Delete(target, recursive: true);
+                    CopyDirectoryWithoutMeta(source, target);
+                    RewriteCopiedSkillEndpoint(target);
+                    WriteSkillInstallMetadata(target);
+                    result.AppendLine("Updated managed " + NormalizePathForLog(target));
+                    return;
+                }
+
                 RewriteCopiedSkillEndpoint(target);
-                result.AppendLine("Kept existing " + NormalizePathForLog(target));
+                if (isUnmodifiedManagedInstall)
+                {
+                    WriteSkillInstallMetadata(target);
+                    result.AppendLine("Kept current managed " + NormalizePathForLog(target));
+                }
+                else
+                {
+                    result.AppendLine("Kept existing unmanaged or customized " + NormalizePathForLog(target));
+                }
                 return;
             }
 
-            var source = Path.Combine(ResolvePackageRoot(), "skills", SkillName);
             if (!Directory.Exists(source))
             {
                 Directory.CreateDirectory(target);
                 File.WriteAllText(Path.Combine(target, "SKILL.md"), BuildFallbackSkill(), new UTF8Encoding(false));
+                RewriteCopiedSkillEndpoint(target);
+                WriteSkillInstallMetadata(target);
                 result.AppendLine("Wrote fallback " + NormalizePathForLog(target));
                 return;
             }
@@ -391,7 +424,79 @@ namespace CodingRiver.UPilot
 
             CopyDirectoryWithoutMeta(source, target);
             RewriteCopiedSkillEndpoint(target);
+            WriteSkillInstallMetadata(target);
             result.AppendLine("Wrote " + NormalizePathForLog(target));
+        }
+
+        private static bool TryReadSkillInstallMetadata(
+            string target,
+            out int templateVersion,
+            out string contentHash)
+        {
+            templateVersion = 0;
+            contentHash = "";
+            var metadataPath = Path.Combine(target, SkillInstallMetadataFileName);
+            if (!File.Exists(metadataPath))
+                return false;
+
+            try
+            {
+                var json = File.ReadAllText(metadataPath, Encoding.UTF8);
+                var versionMatch = Regex.Match(json, "\"templateVersion\"\\s*:\\s*(\\d+)");
+                var hashMatch = Regex.Match(json, "\"contentSha256\"\\s*:\\s*\"([0-9a-fA-F]{64})\"");
+                if (!versionMatch.Success || !hashMatch.Success)
+                    return false;
+
+                templateVersion = int.Parse(versionMatch.Groups[1].Value);
+                contentHash = hashMatch.Groups[1].Value;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void WriteSkillInstallMetadata(string target)
+        {
+            var metadataPath = Path.Combine(target, SkillInstallMetadataFileName);
+            var contentHash = ComputeSkillInstallHash(target);
+            var json = "{\n" +
+                       $"  \"templateVersion\": {SkillInstallTemplateVersion},\n" +
+                       $"  \"contentSha256\": \"{contentHash}\"\n" +
+                       "}\n";
+            File.WriteAllText(metadataPath, json, new UTF8Encoding(false));
+        }
+
+        private static string ComputeSkillInstallHash(string target)
+        {
+            using var sha256 = SHA256.Create();
+            var files = Directory.GetFiles(target, "*", SearchOption.AllDirectories);
+            Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var file in files)
+            {
+                if (string.Equals(Path.GetFileName(file), SkillInstallMetadataFileName, StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var relativePath = file.Substring(target.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    .Replace('\\', '/');
+                var pathBytes = Encoding.UTF8.GetBytes(relativePath);
+                sha256.TransformBlock(pathBytes, 0, pathBytes.Length, pathBytes, 0);
+                var separator = new byte[] { 0 };
+                sha256.TransformBlock(separator, 0, separator.Length, separator, 0);
+
+                var contentBytes = File.ReadAllBytes(file);
+                sha256.TransformBlock(contentBytes, 0, contentBytes.Length, contentBytes, 0);
+                sha256.TransformBlock(separator, 0, separator.Length, separator, 0);
+            }
+
+            sha256.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+            var sb = new StringBuilder(sha256.Hash.Length * 2);
+            foreach (var b in sha256.Hash)
+                sb.Append(b.ToString("x2"));
+            return sb.ToString();
         }
 
         private static void RewriteCopiedSkillEndpoint(string target)
@@ -473,6 +578,8 @@ namespace CodingRiver.UPilot
             text.AppendLine("- After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.");
             text.AppendLine("- Use the narrowest dedicated semantic tool. Use `unity_reflection_call` for existing compiled entry points.");
             text.AppendLine("- Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.");
+            text.AppendLine("- For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.");
+            text.AppendLine("- Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.");
             text.AppendLine();
             text.AppendLine("## Writes And Compile");
             text.AppendLine();
@@ -481,10 +588,23 @@ namespace CodingRiver.UPilot
             text.AppendLine("- Compile only after C# or assembly-related changes. Do not compile again when no code changed.");
             text.AppendLine("- After compilation, read structured compile errors and relevant Console errors before editing again.");
             text.AppendLine();
+            text.AppendLine("## Project Workflows");
+            text.AppendLine();
+            text.AppendLine("- When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call that entry point and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.");
+            text.AppendLine("- Keep business orchestration in project code. MCP should start, poll, diagnose, capture logs, and collect artifacts.");
+            text.AppendLine();
+            text.AppendLine("## Persistent Console Capture");
+            text.AppendLine();
+            text.AppendLine("- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, use `unity_console_capture_status` and incremental `unity_console_capture_read`, and always call `unity_console_capture_stop` on success or failure.");
+            text.AppendLine("- Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.");
+            text.AppendLine("- Console capture cleanup must use dry-run, target inspection, and confirm-token execution.");
+            text.AppendLine();
             text.AppendLine("## Acceptance");
             text.AppendLine();
             text.AppendLine("- Starting a test, build, or async task is not success; poll its status until a terminal result.");
             text.AppendLine("- For long tasks, report only phase changes, errors, or suspected-stuck state from `unity_operation_*`/task status.");
+            text.AppendLine("- During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.");
+            text.AppendLine("- For acceptance work, prefer dedicated project-relative artifact or screenshot save tools that return metadata or hashes. If capture falls back to base64, window capture, or OS-level automation, report the reason.");
             text.AppendLine("- Retry automatically only when the registry marks the operation idempotent and non-destructive.");
             text.AppendLine("- On timeout, inspect status, operation timing, and last progress before choosing one bounded retry or a documented fallback.");
             return text.ToString();
