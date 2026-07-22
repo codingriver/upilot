@@ -104,6 +104,8 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         str(spec_dir),
         "--paths",
         str(SERVER_ROOT / "src"),
+        "--add-data",
+        f"{build_info}{os.pathsep}upilot_mcp",
         "--collect-all",
         "mcp",
         "--collect-all",
