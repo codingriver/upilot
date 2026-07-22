@@ -29,6 +29,8 @@ namespace CodingRiver.UPilot
     public sealed class UPilotPythonProbeResult
     {
         public bool IsUsable;
+        public bool InterpreterUsable;
+        public bool DependenciesComplete;
         public string PythonPath = "";
         public string VersionText = "";
         public int Major;
@@ -260,6 +262,7 @@ namespace CodingRiver.UPilot
             candidates.AddRange(FindExecutables("python3"));
 
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            UPilotPythonProbeResult firstUsableInterpreter = null;
             foreach (var candidate in candidates)
             {
                 if (string.IsNullOrWhiteSpace(candidate) || !seen.Add(candidate))
@@ -268,12 +271,19 @@ namespace CodingRiver.UPilot
                 var result = ProbePythonCandidate(candidate);
                 if (result.IsUsable)
                     return result;
+                if (result.InterpreterUsable && firstUsableInterpreter == null)
+                    firstUsableInterpreter = result;
             }
+
+            if (firstUsableInterpreter != null)
+                return firstUsableInterpreter;
 
             return new UPilotPythonProbeResult
             {
                 IsUsable = false,
-                Message = "未找到满足 Python 3.11+ 且依赖完整的环境。",
+                InterpreterUsable = false,
+                DependenciesComplete = false,
+                Message = "未找到满足 Python 3.11+ 的解释器。",
             };
         }
 
@@ -643,6 +653,7 @@ namespace CodingRiver.UPilot
                 result.Message = $"Python 版本过低：{versionOutput}";
                 return result;
             }
+            result.InterpreterUsable = true;
 
             const string script = "import importlib.util; mods=['mcp','websockets','yaml','PIL']; print('\\n'.join(f'{m}:{importlib.util.find_spec(m) is not None}' for m in mods))";
             var depsOutput = RunProcess(python, "-c \"" + script.Replace("\"", "\\\"") + "\"", 5000);
@@ -657,8 +668,11 @@ namespace CodingRiver.UPilot
                 if (!ok) allDeps = false;
             }
 
-            result.IsUsable = allDeps;
-            result.Message = allDeps ? "Python 环境可用。" : "Python 可用，但 MCP server 依赖不完整。";
+            result.DependenciesComplete = allDeps;
+            result.IsUsable = result.InterpreterUsable && result.DependenciesComplete;
+            result.Message = allDeps
+                ? "Python 环境可用。"
+                : "Python 3.11+ 可用，但 MCP server 依赖不完整，将自动创建 venv 并安装依赖。";
             return result;
         }
 
@@ -774,7 +788,7 @@ namespace CodingRiver.UPilot
             {
                 var probe = ProbePython();
                 var python = probe.PythonPath;
-                if (string.IsNullOrWhiteSpace(python) || !File.Exists(python))
+                if (!probe.InterpreterUsable || string.IsNullOrWhiteSpace(python) || !File.Exists(python))
                     throw new InvalidOperationException("未找到可用的 Python 解释器。");
 
                 var venvRoot = Path.Combine(RuntimeCacheRoot, "python-envs", SafePathSegment(GetProjectKey()));

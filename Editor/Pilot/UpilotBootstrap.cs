@@ -34,8 +34,8 @@ namespace CodingRiver.UPilot
             if (!IsEnabled || UPilotSetupState.IsCompleted)
                 return;
 
-            UnityEngine.Debug.Log("[UPilotBootstrap] First setup is not completed; opening simplified UPilot setup.");
-            UPilotMainWindow.Open();
+            UnityEngine.Debug.Log("[UPilotBootstrap] First setup is not completed; opening UPilot first setup wizard.");
+            UPilotFirstSetupWindow.Open();
         }
 
         private static void TryStartBridge()

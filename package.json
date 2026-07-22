@@ -1,6 +1,6 @@
 {
   "name": "io.github.codingriver.upilot",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "displayName": "UPilot",
   "description": "Open-source Unity Editor automation bridge for AI agents and MCP clients, with optional UPilot Flow YAML automation.",
   "unity": "2022.3",

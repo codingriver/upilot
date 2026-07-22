@@ -20,7 +20,7 @@ namespace CodingRiver.UPilot
 
         public static void OpenFirstSetup()
         {
-            UPilotMainWindow.Open();
+            UPilotFirstSetupWindow.Open();
         }
 
         [MenuItem("UPilot/Advanced/Reset Setup State", false, 251)]
@@ -34,7 +34,7 @@ namespace CodingRiver.UPilot
                 return;
 
             EditorPrefs.DeleteKey(SetupCompletedKey);
-            UPilotMainWindow.Open();
+            UPilotFirstSetupWindow.Open();
         }
     }
 }

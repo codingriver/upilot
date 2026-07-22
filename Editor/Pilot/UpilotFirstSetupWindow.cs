@@ -25,6 +25,8 @@ namespace CodingRiver.UPilot
         private string _portMessage = "";
         private MessageType _portMessageType = MessageType.None;
         private UPilotPythonProbeResult _pythonProbe;
+        private bool _runtimeAutoStarted;
+        private string _runtimeAutoMessage = "";
         private Vector2 _scroll;
 
         public static void Open()
@@ -114,23 +116,32 @@ namespace CodingRiver.UPilot
                 MessageType.Info);
 
             _pythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
+            EnsureRuntimeAutoSelection();
 
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
                 EditorGUILayout.LabelField("Python 环境", EditorStyles.boldLabel);
                 var envState = UPilotServerRuntimeService.Instance.PythonEnvironmentState;
-                var messageType = _pythonProbe.IsUsable ? MessageType.Info : MessageType.Warning;
+                var messageType = _pythonProbe.InterpreterUsable ? MessageType.Info : MessageType.Warning;
                 EditorGUILayout.HelpBox(_pythonProbe.Message, messageType);
+                if (!string.IsNullOrEmpty(_runtimeAutoMessage))
+                    EditorGUILayout.HelpBox(_runtimeAutoMessage, MessageType.Info);
                 if (!string.IsNullOrEmpty(_pythonProbe.PythonPath))
                     EditorGUILayout.SelectableLabel(_pythonProbe.PythonPath, EditorStyles.textField, GUILayout.Height(EditorGUIUtility.singleLineHeight));
                 if (!string.IsNullOrEmpty(_pythonProbe.VersionText))
                     EditorGUILayout.LabelField(_pythonProbe.VersionText, EditorStyles.miniLabel);
+                if (_pythonProbe.Dependencies.Count > 0)
+                {
+                    foreach (var dependency in _pythonProbe.Dependencies)
+                        EditorGUILayout.LabelField(dependency.Key, dependency.Value ? "已安装" : "缺失", EditorStyles.miniLabel);
+                }
                 if (UPilotServerRuntimeService.Instance.IsPythonRuntimeConfigured(out var configuredPython))
                     EditorGUILayout.HelpBox("已配置 Python 运行时：" + configuredPython, MessageType.Info);
                 if (envState.IsRunning || envState.IsComplete || !string.IsNullOrEmpty(envState.ErrorMessage))
                 {
                     var phase = string.IsNullOrEmpty(envState.Phase) ? "准备中" : envState.Phase;
                     EditorGUILayout.LabelField("自动配置", phase, EditorStyles.miniLabel);
+                    EditorGUI.ProgressBar(EditorGUILayout.GetControlRect(false, 18), GetPythonEnvironmentProgress(envState), phase);
                     if (!string.IsNullOrEmpty(envState.VenvPath))
                         EditorGUILayout.SelectableLabel(envState.VenvPath, EditorStyles.textField, GUILayout.Height(EditorGUIUtility.singleLineHeight));
                     if (!string.IsNullOrEmpty(envState.ErrorMessage))
@@ -140,8 +151,12 @@ namespace CodingRiver.UPilot
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     if (GUILayout.Button("重新检测", GUILayout.Width(90)))
+                    {
                         RefreshPythonProbe();
-                    using (new EditorGUI.DisabledScope(!_pythonProbe.IsUsable))
+                        _runtimeAutoStarted = false;
+                        _runtimeAutoMessage = "";
+                    }
+                    using (new EditorGUI.DisabledScope(!_pythonProbe.IsUsable || envState.IsRunning))
                     {
                         if (GUILayout.Button("使用 Python 环境"))
                         {
@@ -149,7 +164,7 @@ namespace CodingRiver.UPilot
                             _step = 2;
                         }
                     }
-                    using (new EditorGUI.DisabledScope(!_pythonProbe.IsUsable || envState.IsRunning))
+                    using (new EditorGUI.DisabledScope(!_pythonProbe.InterpreterUsable || envState.IsRunning))
                     {
                         if (GUILayout.Button("自动配置环境"))
                             UPilotServerRuntimeService.Instance.StartAutoConfigurePythonEnvironment();
@@ -368,6 +383,50 @@ namespace CodingRiver.UPilot
         private void RefreshPythonProbe()
         {
             _pythonProbe = UPilotServerRuntimeService.Instance.ProbePython();
+        }
+
+        private void EnsureRuntimeAutoSelection()
+        {
+            if (_runtimeAutoStarted)
+                return;
+            if (RuntimeReady())
+                return;
+
+            var runtime = UPilotServerRuntimeService.Instance;
+            var envState = runtime.PythonEnvironmentState;
+            var downloadState = runtime.DownloadState;
+            if (envState.IsRunning || downloadState.IsRunning)
+                return;
+
+            _runtimeAutoStarted = true;
+            if (_pythonProbe != null && _pythonProbe.IsUsable)
+            {
+                runtime.SetPythonRuntime(_pythonProbe.PythonPath);
+                _runtimeAutoMessage = "已自动选择 Python 源码运行时。";
+                return;
+            }
+
+            if (_pythonProbe != null && _pythonProbe.InterpreterUsable)
+            {
+                runtime.StartAutoConfigurePythonEnvironment();
+                _runtimeAutoMessage = "已自动选择 Python 源码运行时，正在创建 venv 并安装依赖。";
+                return;
+            }
+
+            runtime.StartDownloadLatestServerExe();
+            _runtimeAutoMessage = "未找到 Python 3.11+，已自动选择独立 exe 并开始下载。";
+        }
+
+        private static float GetPythonEnvironmentProgress(UPilotPythonEnvironmentState state)
+        {
+            if (state.IsComplete) return 1f;
+            if (state.IsCancelled || !string.IsNullOrEmpty(state.ErrorMessage)) return 0f;
+            var phase = state.Phase ?? "";
+            if (phase.IndexOf("检测", StringComparison.OrdinalIgnoreCase) >= 0) return 0.1f;
+            if (phase.IndexOf("创建", StringComparison.OrdinalIgnoreCase) >= 0) return 0.3f;
+            if (phase.IndexOf("升级", StringComparison.OrdinalIgnoreCase) >= 0) return 0.55f;
+            if (phase.IndexOf("安装", StringComparison.OrdinalIgnoreCase) >= 0) return 0.8f;
+            return state.IsRunning ? 0.2f : 0f;
         }
 
         private bool RuntimeReady()
