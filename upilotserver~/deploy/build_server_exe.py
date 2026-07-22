@@ -54,6 +54,10 @@ def ensure_pyinstaller() -> None:
         )
     except Exception:
         run([sys.executable, "-m", "pip", "install", "pyinstaller"])
+    try:
+        __import__("typer")
+    except Exception:
+        run([sys.executable, "-m", "pip", "install", "mcp[cli]"])
 
 
 def build_exe(version: str, channel: str, commit: str) -> Path:
