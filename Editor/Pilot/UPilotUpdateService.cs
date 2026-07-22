@@ -24,7 +24,10 @@ namespace CodingRiver.UPilot
             _notice = notice;
             try
             {
-                var manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync();
+                var channel = UPilotServerRuntimeService.ResolveUpdateChannel();
+                var manifestUrl = UPilotServerRuntimeService.ResolveManifestUrl();
+                Debug.Log($"[UPilot] CheckForUpdates channel={channel}, manifestUrl={manifestUrl}");
+                var manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync(manifestUrl);
                 var compatibility = UPilotServerRuntimeService.Instance.EvaluateManifestCompatibility(manifest);
                 var message =
                     $"UPM {UPilotServerRuntimeService.UpmVersion} -> {manifest.UpmVersion}\n" +

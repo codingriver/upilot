@@ -68,7 +68,7 @@ namespace CodingRiver.UPilot
     public sealed class UPilotUpdateConfig
     {
         public string manifestUrl = "";
-        public string channel = "main";
+        public string channel = "auto";
     }
 
     public static class UPilotProjectConfig

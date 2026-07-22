@@ -303,10 +303,54 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrWhiteSpace(updates.manifestUrl))
                 return updates.manifestUrl;
 
-            var channel = string.IsNullOrWhiteSpace(updates.channel)
-                ? "main"
-                : updates.channel.Trim();
+            var channel = ResolveUpdateChannel();
             return IsMainChannel(channel) ? MainManifestUrl : ReleaseManifestUrl;
+        }
+
+        public static string ResolveUpdateChannel()
+        {
+            var updates = UPilotProjectConfig.Current.updates ?? new UPilotUpdateConfig();
+            var configured = (updates.channel ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(configured) &&
+                !string.Equals(configured, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                return IsReleaseChannel(configured) ? "release" : configured;
+            }
+
+            return InferDefaultUpdateChannel();
+        }
+
+        private static string InferDefaultUpdateChannel()
+        {
+            if (IsLocalOrMainPackageInstall())
+                return "main";
+
+            var version = UpmVersion;
+            if (IsMainChannel(version) || version.IndexOf("+", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "main";
+
+            return IsStrictSemver(version) ? "release" : "main";
+        }
+
+        private static bool IsLocalOrMainPackageInstall()
+        {
+            try
+            {
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
+                if (package == null)
+                    return false;
+
+                if (package.source == PackageSource.Local || package.source == PackageSource.Embedded)
+                    return true;
+
+                var packageId = package.packageId ?? "";
+                if (packageId.IndexOf("#main", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    packageId.IndexOf("main-nightly", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            catch { }
+
+            return false;
         }
 
         public void StartDownloadLatestServerExe()
@@ -839,6 +883,21 @@ namespace CodingRiver.UPilot
         private static bool IsMainChannel(string value)
         {
             return !string.IsNullOrWhiteSpace(value) && value.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsReleaseChannel(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+            return string.Equals(value, "release", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "latest", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(value, "stable", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsStrictSemver(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   Regex.IsMatch(value.Trim(), @"^v?\d+\.\d+\.\d+$");
         }
 
         private static bool CanFallbackToLegacyManifest(string url)
