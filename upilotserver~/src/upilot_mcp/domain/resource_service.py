@@ -53,6 +53,16 @@ class ResourceDomainService:
             return Path(session.project_path).expanduser().resolve()
         return None
 
+    def _reject_write_if_unapproved(self, request_id: str, tool_name: str) -> ToolResponse | None:
+        if CONFIG.write_access_approved:
+            return None
+        return fail(
+            request_id,
+            "WRITE_ACCESS_NOT_APPROVED",
+            "UPilot is in safe mode. Enable project write access in the Unity UPilot first setup or .upilot/config.json before using this tool.",
+            {"tool": tool_name, "configKey": "safety.writeAccessApproved"},
+        )
+
     async def asset_find(self, query: str, asset_type: str = "") -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {"query": query}
@@ -64,6 +74,9 @@ class ResourceDomainService:
         self, parent_folder: str, new_folder_name: str
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_asset_create_folder")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "asset.createFolder",
@@ -75,6 +88,9 @@ class ResourceDomainService:
 
     async def asset_copy(self, source_path: str, destination_path: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_asset_copy")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "asset.copy",
@@ -86,6 +102,9 @@ class ResourceDomainService:
 
     async def asset_move(self, source_path: str, destination_path: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_asset_move")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "asset.move",
@@ -97,6 +116,9 @@ class ResourceDomainService:
 
     async def asset_delete(self, asset_path: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_asset_delete")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id, "asset.delete", {"assetPath": asset_path}
         )
@@ -191,6 +213,9 @@ class ResourceDomainService:
         component_index: int = 0,
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_asset_modify_data")
+        if rejected is not None:
+            return rejected
         payload: dict = {"properties": properties}
         if asset_path:
             payload["assetPath"] = asset_path
@@ -206,6 +231,9 @@ class ResourceDomainService:
         self, source_game_object_id: int, prefab_path: str
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_prefab_create")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "prefab.create",
@@ -219,6 +247,9 @@ class ResourceDomainService:
         self, prefab_path: str, parent_id: int = 0
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_prefab_instantiate")
+        if rejected is not None:
+            return rejected
         payload: dict = {"prefabPath": prefab_path}
         if parent_id:
             payload["parentId"] = parent_id
@@ -236,12 +267,18 @@ class ResourceDomainService:
 
     async def prefab_save(self) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_prefab_save")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(request_id, "prefab.save", {})
 
     async def material_create(
         self, material_path: str, shader_name: str = "Standard"
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_material_create")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "material.create",
@@ -255,6 +292,9 @@ class ResourceDomainService:
         self, material_path: str, properties: dict
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_material_modify")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "material.modify",
@@ -268,6 +308,9 @@ class ResourceDomainService:
         self, target_game_object_id: int, material_path: str, material_index: int = 0
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_material_assign")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "material.assign",
@@ -290,6 +333,9 @@ class ResourceDomainService:
 
     async def menu_execute(self, menu_path: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_menu_execute")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id, "menu.execute", {"menuPath": menu_path}
         )
@@ -300,6 +346,9 @@ class ResourceDomainService:
 
     async def package_add(self, package_name: str, version: str = "") -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_package_add")
+        if rejected is not None:
+            return rejected
         payload: dict = {"packageName": package_name}
         if version:
             payload["version"] = version
@@ -309,6 +358,9 @@ class ResourceDomainService:
 
     async def package_remove(self, package_name: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_package_remove")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "package.remove",
@@ -334,6 +386,9 @@ class ResourceDomainService:
 
     async def script_create(self, script_path: str, content: str = "") -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_script_create")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "script.create",
@@ -345,6 +400,9 @@ class ResourceDomainService:
 
     async def script_update(self, script_path: str, content: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_script_update")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "script.update",
@@ -356,6 +414,9 @@ class ResourceDomainService:
 
     async def script_delete(self, script_path: str) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_script_delete")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id, "script.delete", {"scriptPath": script_path}
         )
@@ -404,6 +465,9 @@ class ResourceDomainService:
         self, name: str = "New GameObject", parent_id: int = 0, primitive_type: str = ""
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_gameobject_create")
+        if rejected is not None:
+            return rejected
         payload: dict = {"name": name}
         if parent_id:
             payload["parentId"] = parent_id
@@ -435,6 +499,9 @@ class ResourceDomainService:
         parent_id: int | None = None,
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_gameobject_modify")
+        if rejected is not None:
+            return rejected
         payload: dict = {"instanceId": instance_id}
         if name is not None:
             payload["name"] = name
@@ -452,6 +519,9 @@ class ResourceDomainService:
 
     async def gameobject_delete(self, instance_id: int) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_gameobject_delete")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id, "gameobject.delete", {"instanceId": instance_id}
         )
@@ -464,6 +534,9 @@ class ResourceDomainService:
         scale: dict | None = None,
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_gameobject_move")
+        if rejected is not None:
+            return rejected
         payload: dict = {"instanceId": instance_id}
         if position is not None:
             payload["position"] = position
@@ -475,12 +548,18 @@ class ResourceDomainService:
 
     async def gameobject_duplicate(self, instance_id: int) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_gameobject_duplicate")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id, "gameobject.duplicate", {"instanceId": instance_id}
         )
 
     async def scene_create(self, scene_name: str = "") -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_scene_create")
+        if rejected is not None:
+            return rejected
         payload: dict = {}
         if scene_name:
             payload["sceneName"] = scene_name
@@ -497,6 +576,9 @@ class ResourceDomainService:
 
     async def scene_save(self, scene_path: str = "") -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_scene_save")
+        if rejected is not None:
+            return rejected
         payload: dict = {}
         if scene_path:
             payload["scenePath"] = scene_path
@@ -525,6 +607,9 @@ class ResourceDomainService:
         self, scene_path: str, remove_scene: bool = False
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_scene_unload")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "scene.unload",
@@ -546,6 +631,9 @@ class ResourceDomainService:
         Use for automation / acceptance without touching project business scenes.
         """
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_scene_ensure_test")
+        if rejected is not None:
+            return rejected
         payload: dict[str, str] = {}
         if scene_path:
             payload["scenePath"] = scene_path
@@ -559,6 +647,9 @@ class ResourceDomainService:
         self, game_object_id: int, component_type: str
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_component_add")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "component.add",
@@ -572,6 +663,9 @@ class ResourceDomainService:
         self, game_object_id: int, component_type: str, component_index: int = 0
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_component_remove")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "component.remove",
@@ -604,6 +698,9 @@ class ResourceDomainService:
         component_index: int = 0,
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_component_modify")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "component.modify",
@@ -625,6 +722,9 @@ class ResourceDomainService:
         self, operations: list, mode: str = "sequential", stop_on_error: bool = True
     ) -> ToolResponse:
         request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_batch_execute")
+        if rejected is not None:
+            return rejected
         return await self.dispatcher.call(
             request_id,
             "batch.execute",
@@ -647,4 +747,3 @@ class ResourceDomainService:
         return await self.dispatcher.call(
             request_id, "batch.results", {"batchId": batch_id}
         )
-

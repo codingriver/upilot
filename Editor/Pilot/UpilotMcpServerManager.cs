@@ -28,6 +28,11 @@ namespace CodingRiver.UPilot
         public string ErrorMessage;
         public int WsClientCount;
         public int HttpClientCount;
+        public string ServerVersion;
+        public string ProtocolVersion;
+        public string BuildCommit;
+        public string BuildChannel;
+        public string RuntimeMode;
     }
 
     public sealed class UPilotMcpServerManager
@@ -415,10 +420,15 @@ namespace CodingRiver.UPilot
                         status.ProcessId = pid;
                         status.ProcessCommandLine = cmdLine;
                     }
-                    var (wsCount, httpCount) = await FetchServerStatsAsync();
+                    var (wsCount, httpCount, version, protocol, commit, channel) = await FetchServerStatsAsync();
                     status.WsClientCount = wsCount;
                     status.HttpClientCount = httpCount;
+                    status.ServerVersion = version;
+                    status.ProtocolVersion = protocol;
+                    status.BuildCommit = commit;
+                    status.BuildChannel = channel;
                 }
+                status.RuntimeMode = UPilotServerRuntimeService.Instance.RuntimeModeLabel;
 
                 lock (_statusLock) { _cachedStatus = status; }
             }
@@ -433,22 +443,51 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task<(int wsCount, int httpCount)> FetchServerStatsAsync()
+        private async Task<(int wsCount, int httpCount, string version, string protocol, string commit, string channel)> FetchServerStatsAsync()
         {
+            int wsCount = 0;
+            int httpCount = 0;
+            string version = "";
+            string protocol = "";
+            string commit = "";
+            string channel = "";
             try
             {
                 var url = $"http://127.0.0.1:{HttpPort}/stats";
                 var response = await _httpClient.GetAsync(url);
-                if (!response.IsSuccessStatusCode) return (0, 0);
-                var json = await response.Content.ReadAsStringAsync();
-                int wsCount = ParseIntFromJson(json, "ws_connections");
-                int httpCount = ParseIntFromJson(json, "http_sessions");
-                return (wsCount, httpCount);
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadAsStringAsync();
+                    wsCount = ParseIntFromJson(json, "ws_connections");
+                    httpCount = ParseIntFromJson(json, "http_sessions");
+                    version = ParseStringFromJson(json, "server_version");
+                    protocol = ParseStringFromJson(json, "protocol_version");
+                    commit = ParseStringFromJson(json, "build_commit");
+                    channel = ParseStringFromJson(json, "build_channel");
+                }
             }
             catch
             {
-                return (0, 0);
             }
+
+            try
+            {
+                var url = $"http://127.0.0.1:{HttpPort}/health";
+                var response = await _httpClient.GetAsync(url);
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadAsStringAsync();
+                    if (string.IsNullOrEmpty(version)) version = ParseStringFromJson(json, "server_version");
+                    if (string.IsNullOrEmpty(protocol)) protocol = ParseStringFromJson(json, "protocol_version");
+                    if (string.IsNullOrEmpty(commit)) commit = ParseStringFromJson(json, "build_commit");
+                    if (string.IsNullOrEmpty(channel)) channel = ParseStringFromJson(json, "build_channel");
+                }
+            }
+            catch
+            {
+            }
+
+            return (wsCount, httpCount, version, protocol, commit, channel);
         }
 
         private static int ParseIntFromJson(string json, string key)
@@ -457,6 +496,14 @@ namespace CodingRiver.UPilot
             var pattern = $"\"{key}\"\\s*:\\s*(\\d+)";
             var match = System.Text.RegularExpressions.Regex.Match(json, pattern);
             return match.Success && int.TryParse(match.Groups[1].Value, out var val) ? val : 0;
+        }
+
+        private static string ParseStringFromJson(string json, string key)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return "";
+            var pattern = $"\"{Regex.Escape(key)}\"\\s*:\\s*\"([^\"]*)\"";
+            var match = Regex.Match(json, pattern);
+            return match.Success ? Regex.Unescape(match.Groups[1].Value) : "";
         }
 
         // ── Start ───────────────────────────────────────────────────────────
@@ -486,7 +533,10 @@ namespace CodingRiver.UPilot
 
             try
             {
-                StartViaDirectPython(projectRoot);
+                if (UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe)
+                    StartViaStandaloneExe(projectRoot);
+                else
+                    StartViaDirectPython(projectRoot);
             }
             catch (Exception ex)
             {
@@ -506,7 +556,9 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            string pythonExe = FindPythonExecutable();
+            string pythonExe = UPilotProjectConfig.Current.runtime?.pythonPath ?? "";
+            if (string.IsNullOrWhiteSpace(pythonExe) || !File.Exists(pythonExe))
+                pythonExe = FindPythonExecutable();
             if (string.IsNullOrEmpty(pythonExe))
             {
                 Debug.LogError("[UPilotMcpServerManager] No Python interpreter found. Please install Python and ensure 'python', 'py', or 'python3' is available in PATH.");
@@ -529,6 +581,32 @@ namespace CodingRiver.UPilot
 
             var proc = Process.Start(psi);
             Debug.Log($"[UPilotMcpServerManager] Started python process PID={proc?.Id} via {pythonExe} for {entryFullPath} (HTTP={HttpPort}, WS={WsPort})");
+        }
+
+        private void StartViaStandaloneExe(string projectRoot)
+        {
+            if (!UPilotServerRuntimeService.Instance.IsStandaloneExeConfigured(out var exePath))
+            {
+                Debug.LogError("[UPilotMcpServerManager] Standalone MCP server exe is not configured. Run UPilot first setup or select a local exe.");
+                return;
+            }
+
+            string logDir = Path.Combine(projectRoot, "log");
+            if (!Directory.Exists(logDir))
+                Directory.CreateDirectory(logDir);
+            string logFile = Path.Combine(logDir, "mcp-server.log");
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = $"--transport http --http-port {HttpPort} --port {WsPort} --log-file \"{logFile}\" --log-level {_logLevel}",
+                WorkingDirectory = projectRoot,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            var proc = Process.Start(psi);
+            Debug.Log($"[UPilotMcpServerManager] Started standalone server PID={proc?.Id} via {exePath} (HTTP={HttpPort}, WS={WsPort})");
         }
 
         private static string FindPythonExecutable()
@@ -702,7 +780,8 @@ namespace CodingRiver.UPilot
             if (string.IsNullOrWhiteSpace(cmdLine)) return false;
             return cmdLine.IndexOf("run_upilot_mcp.py", StringComparison.OrdinalIgnoreCase) >= 0
                 || cmdLine.IndexOf("upilot-mcp", StringComparison.OrdinalIgnoreCase) >= 0
-                || cmdLine.IndexOf("upilot_mcp", StringComparison.OrdinalIgnoreCase) >= 0;
+                || cmdLine.IndexOf("upilot_mcp", StringComparison.OrdinalIgnoreCase) >= 0
+                || cmdLine.IndexOf("upilot-mcp-server", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static Dictionary<int, List<int>> SafeGetListeningPortsByPid(out bool success)

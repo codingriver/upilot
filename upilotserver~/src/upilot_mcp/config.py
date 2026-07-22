@@ -17,6 +17,7 @@ class UPilotConfig:
     ws_port: int = 8765
     context_stale_ms: int = 2000
     flow_enabled: bool = False
+    write_access_approved: bool = False
 
 
 def _project_config_path() -> Path:
@@ -41,6 +42,7 @@ def load_config() -> UPilotConfig:
     cache = raw.get("cache") if isinstance(raw.get("cache"), dict) else {}
     features = raw.get("features") if isinstance(raw.get("features"), dict) else {}
     flow = features.get("flow") if isinstance(features.get("flow"), dict) else {}
+    safety = raw.get("safety") if isinstance(raw.get("safety"), dict) else {}
 
     def env_int(name: str, fallback: int) -> int:
         value = os.getenv(name, "").strip()
@@ -59,6 +61,7 @@ def load_config() -> UPilotConfig:
         ws_port=env_int("UPILOT_PORT", int(mcp.get("wsPort") or 8765)),
         context_stale_ms=max(250, int(cache.get("contextStaleMs") or 2000)),
         flow_enabled=bool(flow.get("enabled", False)),
+        write_access_approved=bool(safety.get("writeAccessApproved", False)),
     )
 
 

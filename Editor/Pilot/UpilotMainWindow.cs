@@ -222,6 +222,8 @@ namespace CodingRiver.UPilot
         {
             DrawServiceControls(snapshot);
             EditorGUILayout.Space(10);
+            DrawVersionSection();
+            EditorGUILayout.Space(10);
             DrawMcpEndpoint();
             EditorGUILayout.Space(10);
             using (new EditorGUI.DisabledScope(IsServiceTransitioning(snapshot.State)))
@@ -292,6 +294,42 @@ namespace CodingRiver.UPilot
                 {
                     EditorGUIUtility.systemCopyBuffer = mcpUrl;
                     ShowNotice("已复制 MCP 地址");
+                }
+            }
+        }
+
+        private void DrawVersionSection()
+        {
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                EditorGUILayout.LabelField("版本与运行时", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("UPM/Bridge", UPilotServerRuntimeService.UpmVersion, EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("MCP Server", string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动或旧版本未上报" : _mcpStatus.ServerVersion, EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("运行模式", string.IsNullOrEmpty(_mcpStatus.RuntimeMode) ? UPilotServerRuntimeService.Instance.RuntimeModeLabel : _mcpStatus.RuntimeMode, EditorStyles.miniLabel);
+                var channel = string.IsNullOrEmpty(_mcpStatus.BuildChannel) ? "release" : _mcpStatus.BuildChannel;
+                var compatibility = channel.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0
+                    ? "main 分支：按 protocol/registry 兼容"
+                    : "release：按版本清单兼容";
+                EditorGUILayout.LabelField("兼容策略", compatibility, EditorStyles.miniLabel);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField("写入授权", UPilotProjectConfig.Current.safety?.writeAccessApproved == true ? "已允许非 safe 模式" : "safe 模式（拒绝项目写入工具）", EditorStyles.miniLabel);
+                    GUILayout.FlexibleSpace();
+                    if (UPilotProjectConfig.Current.safety?.writeAccessApproved == true)
+                    {
+                        if (GUILayout.Button("撤销", EditorStyles.miniButton, GUILayout.Width(52)))
+                        {
+                            if (EditorUtility.DisplayDialog(
+                                "撤销写入授权？",
+                                "撤销后，MCP 将回到 safe 模式并拒绝修改项目的工具。此操作会写入 .upilot/config.json。",
+                                "撤销",
+                                "取消"))
+                            {
+                                UPilotProjectConfig.RevokeProjectWriteAccess();
+                                ShowNotice("已撤销写入授权");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -457,11 +495,7 @@ namespace CodingRiver.UPilot
 
         private void ConfigureAndStart()
         {
-            var result = UPilotQuickStart.ConfigureAndStart(_useCodex, _useClaudeCode, _useCursor);
-            Debug.Log("[UPilot] Quick setup:\n" + result);
-            RefreshAgentConfigs(force: true);
-            _stateChangedAt = EditorApplication.timeSinceStartup;
-            ShowNotice("配置完成，UPilot 正在启动…");
+            UPilotFirstSetupWindow.Open();
         }
 
         private void StartUPilot()
@@ -502,6 +536,19 @@ namespace CodingRiver.UPilot
             else
                 menu.AddDisabledItem(new GUIContent("重新启动"));
 
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("检查更新"), false, () =>
+            {
+                UPilotUpdateService.Instance.CheckForUpdates(ShowNotice);
+            });
+            menu.AddItem(new GUIContent("更新 MCP Server exe"), false, () =>
+            {
+                UPilotUpdateService.Instance.UpdateServerExeAndRestart(ShowNotice);
+            });
+            menu.AddItem(new GUIContent("更新 UPM 包"), false, () =>
+            {
+                UPilotUpdateService.Instance.UpdateUpmFromManifest(ShowNotice);
+            });
             menu.AddSeparator("");
             menu.AddItem(new GUIContent("高级设置"), false, UPilotStatusWindow.Open);
             menu.ShowAsContext();

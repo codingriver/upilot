@@ -29,6 +29,7 @@ from .protocol import new_id
 from .responses import fail, ok
 from .config import CONFIG
 from .tool_registry import REGISTRY, REGISTRY_VERSION, register_public_tool
+from .version import version_payload
 
 logger = logging.getLogger("upilot.mcp")
 stdio_logger = logging.getLogger("upilot.stdio")
@@ -326,7 +327,7 @@ async def _run_http_server(
         session = _orchestrator.session_manager.active if _orchestrator else None
         now_ms = int(time.time() * 1000)
         heartbeat_at = int(session.last_heartbeat_at) if session else 0
-        return JSONResponse({
+        payload = {
             "status": "ok",
             "unity_connected": _orchestrator.is_ready() if _orchestrator else False,
             "project_path": session.project_path if session else "",
@@ -338,8 +339,11 @@ async def _run_http_server(
             "http_port": http_port,
             "ws_port": _orchestrator.port if _orchestrator else CONFIG.ws_port,
             "flow_enabled": CONFIG.flow_enabled,
+            "write_access_approved": CONFIG.write_access_approved,
             "timestamp": time.time(),
-        })
+        }
+        payload.update(version_payload())
+        return JSONResponse(payload)
 
     # Stats endpoint for the upilot status window
     async def stats_endpoint(request):
@@ -352,7 +356,7 @@ async def _run_http_server(
                 http_sessions = len(getattr(sm, "_sessions", {}))
         except Exception:
             pass
-        return JSONResponse({
+        payload = {
             "ws_connections": ws_count,
             "http_sessions": http_sessions,
             "tool_count": len([item for item in REGISTRY.list() if item.feature == "core" or CONFIG.flow_enabled]),
@@ -360,7 +364,9 @@ async def _run_http_server(
             "server_uptime_ms": max(0, int((time.time() - _SERVER_STARTED_AT) * 1000)),
             "project_path": (_orchestrator.session_manager.active.project_path
                              if _orchestrator and _orchestrator.session_manager.active else ""),
-        })
+        }
+        payload.update(version_payload())
+        return JSONResponse(payload)
 
     wrapped_app.router.routes.insert(
         0,
@@ -569,6 +575,22 @@ async def _reject_compile_in_playmode(tool_name: str):
                 "EDITOR_IN_PLAY_MODE",
                 "Unity 正在 PlayMode 或暂停状态，MCP 不允许触发 Unity 编译。",
                 {"tool": tool_name},
+            )
+        ),
+    )
+
+
+def _reject_write_if_unapproved(tool_name: str):
+    if CONFIG.write_access_approved:
+        return None
+    return _log_tool_result(
+        tool_name,
+        _payload(
+            fail(
+                new_id("req"),
+                "WRITE_ACCESS_NOT_APPROVED",
+                "UPilot is in safe mode. Enable project write access in the Unity UPilot first setup or .upilot/config.json before using this tool.",
+                {"tool": tool_name, "configKey": "safety.writeAccessApproved"},
             )
         ),
     )
@@ -947,9 +969,19 @@ mcp._mcp_server.list_tools()(_list_tools_stable)
 
 _DESTRUCTIVE_TOOLS = {
     "unity_asset_delete", "unity_asset_move", "unity_asset_modify_data",
+    "unity_asset_create_folder", "unity_asset_copy",
+    "unity_prefab_create", "unity_prefab_instantiate", "unity_prefab_save",
+    "unity_material_create", "unity_material_modify", "unity_material_assign",
+    "unity_menu_execute",
     "unity_script_create", "unity_script_update", "unity_script_delete",
-    "unity_package_add", "unity_package_remove", "unity_scene_save",
-    "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
+    "unity_package_add", "unity_package_remove", "unity_scene_create",
+    "unity_scene_save", "unity_scene_unload", "unity_scene_ensure_test",
+    "unity_gameobject_create", "unity_gameobject_modify",
+    "unity_gameobject_delete", "unity_gameobject_move",
+    "unity_gameobject_duplicate", "unity_component_add",
+    "unity_component_remove", "unity_component_modify",
+    "unity_batch_execute", "unity_mouse_event", "unity_drag_drop",
+    "unity_keyboard_event", "reflection_eval",
 }
 
 for _tool_name, _value in list(globals().items()):

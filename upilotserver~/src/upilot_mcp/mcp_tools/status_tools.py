@@ -21,6 +21,7 @@ _payload = runtime._payload
 _log_tool_call = runtime._log_tool_call
 _log_tool_result = runtime._log_tool_result
 _reject_compile_in_playmode = runtime._reject_compile_in_playmode
+_reject_write_if_unapproved = runtime._reject_write_if_unapproved
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
@@ -229,6 +230,9 @@ async def unity_mouse_event(
             "elementIndex": elementIndex,
         },
     )
+    rejected = _reject_write_if_unapproved("unity_mouse_event")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().mouse_event(
         action=action,
         button=button,
@@ -275,6 +279,9 @@ async def unity_drag_drop(
             "modifiers": modifiers,
         },
     )
+    rejected = _reject_write_if_unapproved("unity_drag_drop")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().drag_drop(
         source_window=sourceWindow,
         target_window=targetWindow,
@@ -312,6 +319,9 @@ async def unity_keyboard_event(
             "modifiers": modifiers,
         },
     )
+    rejected = _reject_write_if_unapproved("unity_keyboard_event")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().keyboard_event(
         action=action,
         target_window=targetWindow,
@@ -617,9 +627,19 @@ async def unity_sceneview_navigate(
 
 _DESTRUCTIVE_TOOLS = {
     "unity_asset_delete", "unity_asset_move", "unity_asset_modify_data",
+    "unity_asset_create_folder", "unity_asset_copy",
+    "unity_prefab_create", "unity_prefab_instantiate", "unity_prefab_save",
+    "unity_material_create", "unity_material_modify", "unity_material_assign",
+    "unity_menu_execute",
     "unity_script_create", "unity_script_update", "unity_script_delete",
-    "unity_package_add", "unity_package_remove", "unity_scene_save",
-    "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
+    "unity_package_add", "unity_package_remove", "unity_scene_create",
+    "unity_scene_save", "unity_scene_unload", "unity_scene_ensure_test",
+    "unity_gameobject_create", "unity_gameobject_modify",
+    "unity_gameobject_delete", "unity_gameobject_move",
+    "unity_gameobject_duplicate", "unity_component_add",
+    "unity_component_remove", "unity_component_modify",
+    "unity_batch_execute", "unity_mouse_event", "unity_drag_drop",
+    "unity_keyboard_event",
     "unity_console_capture_cleanup",
 }
 _NON_IDEMPOTENT_TOOLS = {

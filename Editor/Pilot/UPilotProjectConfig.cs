@@ -16,6 +16,9 @@ namespace CodingRiver.UPilot
         public UPilotMcpConfig mcp = new();
         public UPilotCacheConfig cache = new();
         public UPilotFeaturesConfig features = new();
+        public UPilotRuntimeConfig runtime = new();
+        public UPilotSafetyConfig safety = new();
+        public UPilotUpdateConfig updates = new();
     }
 
     [Serializable]
@@ -43,6 +46,29 @@ namespace CodingRiver.UPilot
     public sealed class UPilotFlowFeatureConfig
     {
         public bool enabled;
+    }
+
+    [Serializable]
+    public sealed class UPilotRuntimeConfig
+    {
+        public string mode = "python";
+        public string pythonPath = "";
+        public string serverExePath = "";
+        public string serverVersion = "";
+    }
+
+    [Serializable]
+    public sealed class UPilotSafetyConfig
+    {
+        public bool writeAccessApproved;
+        public string writeAccessApprovedAtUtc = "";
+    }
+
+    [Serializable]
+    public sealed class UPilotUpdateConfig
+    {
+        public string manifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/upilot-release-manifest.json";
+        public string channel = "release";
     }
 
     public static class UPilotProjectConfig
@@ -82,6 +108,24 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
             File.WriteAllText(ConfigPath, JsonUtility.ToJson(config, true));
             _cached = config;
+        }
+
+        public static void ApproveProjectWriteAccess()
+        {
+            var config = Current;
+            config.safety ??= new UPilotSafetyConfig();
+            config.safety.writeAccessApproved = true;
+            config.safety.writeAccessApprovedAtUtc = DateTimeOffset.UtcNow.ToString("O");
+            Save(config);
+        }
+
+        public static void RevokeProjectWriteAccess()
+        {
+            var config = Current;
+            config.safety ??= new UPilotSafetyConfig();
+            config.safety.writeAccessApproved = false;
+            config.safety.writeAccessApprovedAtUtc = "";
+            Save(config);
         }
 
         public static void ApplyEndpoints(UPilotBridge bridge)

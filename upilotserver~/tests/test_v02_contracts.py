@@ -10,6 +10,7 @@ from upilot_mcp.models import ToolResponse
 from upilot_mcp.responses import fail
 from upilot_mcp.state_store import StateStore
 from upilot_mcp.tool_registry import ToolDescriptor, ToolRegistry, dispatch_public_tool, register_public_tool
+from upilot_mcp.config import CONFIG
 
 
 class _Facade:
@@ -56,6 +57,25 @@ def test_public_tool_route_and_unknown_tool_are_real_failures() -> None:
     assert result.ok and result.data == {"value": "ok"}
     assert not missing.ok
     assert missing.error and missing.error.code == "UNKNOWN_TOOL"
+
+
+def test_public_tool_route_rejects_destructive_tools_in_safe_mode() -> None:
+    register_public_tool(
+        "unity_contract_write",
+        facade_method="echo",
+        category="test",
+        destructive=True,
+    )
+    facade = _Facade()
+    previous = CONFIG.write_access_approved
+    object.__setattr__(CONFIG, "write_access_approved", False)
+    try:
+        result = asyncio.run(dispatch_public_tool(facade, "unity_contract_write", {"value": "nope"}))
+    finally:
+        object.__setattr__(CONFIG, "write_access_approved", previous)
+
+    assert not result.ok
+    assert result.error and result.error.code == "WRITE_ACCESS_NOT_APPROVED"
 
 
 def test_structured_error_sets_is_error() -> None:

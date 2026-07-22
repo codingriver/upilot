@@ -84,7 +84,9 @@ namespace CodingRiver.UPilot
                 return operationSnapshot.Value;
 
             var manager = UPilotMcpServerManager.Instance;
-            if (!manager.IsPythonEntryValid(out _))
+            var runtime = UPilotServerRuntimeService.Instance;
+            var needsPythonEntry = runtime.GetConfiguredMode() == UPilotServerRuntimeMode.Python;
+            if (needsPythonEntry && !manager.IsPythonEntryValid(out _))
             {
                 return new UPilotMainSnapshot(
                     UPilotMainState.NeedsRepair,
@@ -200,7 +202,12 @@ namespace CodingRiver.UPilot
             AgentMcpConfigStatus[] agentConfigs)
         {
             var manager = UPilotMcpServerManager.Instance;
-            if (!manager.IsPythonEntryValid(out _))
+            var runtime = UPilotServerRuntimeService.Instance;
+            var needsPythonEntry = runtime.GetConfiguredMode() == UPilotServerRuntimeMode.Python;
+            if (!needsPythonEntry && !runtime.IsStandaloneExeConfigured(out _))
+                return "独立 MCP Server exe 未配置，请打开首次向导下载或选择本地 exe。";
+
+            if (needsPythonEntry && !manager.IsPythonEntryValid(out _))
             {
                 manager.ValidateAndAutoFixPath();
                 if (!manager.IsPythonEntryValid(out _))

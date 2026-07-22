@@ -1,0 +1,115 @@
+name: Build UPilot MCP Server EXE
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override server version"
+        required: false
+        type: string
+
+jobs:
+  build-win-x64:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $script = @'
+          import pathlib
+          for raw in pathlib.Path('upilotserver~/pyproject.toml').read_text(encoding='utf-8').splitlines():
+              line = raw.strip()
+              if line.startswith('version') and '=' in line:
+                  print(line.split('=', 1)[1].strip().strip('"').strip("'"))
+                  raise SystemExit
+          print('0.0.0')
+          '@
+          $pyVersion = $script | python -
+          if ('${{ github.event.inputs.version }}') {
+            $version = '${{ github.event.inputs.version }}'
+          } elseif ('${{ github.ref_type }}' -eq 'tag') {
+            $version = '${{ github.ref_name }}'.TrimStart('v')
+          } elseif ('${{ github.ref_name }}' -eq 'main') {
+            $short = '${{ github.sha }}'.Substring(0, 7)
+            $version = "$pyVersion-main.${{ github.run_number }}+$short"
+          } else {
+            $version = $pyVersion
+          }
+          $channel = if ('${{ github.ref_name }}' -eq 'main') { 'main' } else { 'release' }
+          "server_version=$version" >> $env:GITHUB_OUTPUT
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r upilotserver~/requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build standalone exe
+        shell: pwsh
+        run: |
+          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          if ('${{ steps.version.outputs.channel }}' -eq 'main') {
+            $baseUrl = "https://github.com/${{ github.repository }}/releases/download/main-nightly"
+          }
+          python upilotserver~/deploy/build_server_exe.py `
+            --version "${{ steps.version.outputs.server_version }}" `
+            --channel "${{ steps.version.outputs.channel }}" `
+            --commit "${{ github.sha }}" `
+            --base-url "$baseUrl"
+
+      - name: Verify exe version
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem upilotserver~/dist/upilot-mcp-server-*-win-x64.exe | Select-Object -First 1
+          & $exe.FullName --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upilot-mcp-server-win-x64
+          path: |
+            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
+            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
+            upilotserver~/dist/upilot-release-manifest.json
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          overwrite_files: true
+          files: |
+            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
+            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
+            upilotserver~/dist/upilot-release-manifest.json
+
+      - name: Publish main nightly assets
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: main-nightly
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: |
+            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
+            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
+            upilotserver~/dist/upilot-release-manifest.json

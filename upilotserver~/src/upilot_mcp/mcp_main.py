@@ -7,6 +7,7 @@ import sys
 
 from .env import getenv
 from .mcp_stdio_server import main
+from .version import version_payload
 
 
 def _setup_logging() -> None:
@@ -42,6 +43,15 @@ def _setup_logging() -> None:
 
 def _cli() -> None:
     """Console script entry point (used by pip install / uvx)."""
+    if "--version" in sys.argv[1:]:
+        payload = version_payload()
+        print(
+            f"upilot-mcp {payload['server_version']} "
+            f"channel={payload['build_channel']} "
+            f"commit={payload['build_commit'] or 'unknown'} "
+            f"protocol={payload['protocol_version']}"
+        )
+        return
     _setup_logging()
     asyncio.run(main())
 

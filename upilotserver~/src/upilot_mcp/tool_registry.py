@@ -124,6 +124,13 @@ async def dispatch_public_tool(facade: Any, public_name: str, args: dict[str, An
     descriptor = REGISTRY.resolve(public_name)
     if descriptor is None:
         return fail(new_id("req"), "UNKNOWN_TOOL", f"Unknown MCP tool: {public_name}", {"tool": public_name})
+    if descriptor.destructive and not CONFIG.write_access_approved:
+        return fail(
+            new_id("req"),
+            "WRITE_ACCESS_NOT_APPROVED",
+            "UPilot is in safe mode. Enable project write access in the Unity UPilot first setup or .upilot/config.json before using this tool.",
+            {"tool": public_name, "configKey": "safety.writeAccessApproved"},
+        )
     if descriptor.feature == "flow" and not CONFIG.flow_enabled:
         return fail(
             new_id("req"),
