@@ -89,17 +89,18 @@ jobs:
           path: |
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
-            upilotserver~/dist/upilot-release-manifest.json
+            upilotserver~/dist/manifest.json
 
       - name: Publish release assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          make_latest: true
           overwrite_files: true
           files: |
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
-            upilotserver~/dist/upilot-release-manifest.json
+            upilotserver~/dist/manifest.json
 
       - name: Prune old main nightly assets
         if: github.ref == 'refs/heads/main'
@@ -116,7 +117,7 @@ jobs:
             exit 0
           }
           foreach ($asset in $assets) {
-            if ($asset -like 'upilot-mcp-server-*-win-x64.exe' -or $asset -like 'upilot-mcp-server-*-win-x64.exe.sha256') {
+            if ($asset -like 'upilot-mcp-server-*-win-x64.exe' -or $asset -like 'upilot-mcp-server-*-win-x64.exe.sha256' -or $asset -eq 'upilot-release-manifest.json') {
               Write-Host "Deleting old nightly asset: $asset"
               gh release delete-asset main-nightly "$asset" --repo "${{ github.repository }}" -y
             }
@@ -133,4 +134,4 @@ jobs:
           files: |
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
-            upilotserver~/dist/upilot-release-manifest.json
+            upilotserver~/dist/manifest.json

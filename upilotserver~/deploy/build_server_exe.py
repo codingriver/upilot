@@ -157,7 +157,7 @@ def write_manifest(
             }
         ],
     }
-    manifest_path = DIST / "upilot-release-manifest.json"
+    manifest_path = DIST / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest_path
 

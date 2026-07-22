@@ -67,8 +67,8 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class UPilotUpdateConfig
     {
-        public string manifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/upilot-release-manifest.json";
-        public string channel = "release";
+        public string manifestUrl = "";
+        public string channel = "main";
     }
 
     public static class UPilotProjectConfig

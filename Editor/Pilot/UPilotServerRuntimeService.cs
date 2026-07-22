@@ -119,6 +119,10 @@ namespace CodingRiver.UPilot
         public static UPilotServerRuntimeService Instance { get; } = new();
 
         private const string PackageName = "io.github.codingriver.upilot";
+        private const string ManifestFileName = "manifest.json";
+        private const string LegacyManifestFileName = "upilot-release-manifest.json";
+        private const string ReleaseManifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/manifest.json";
+        private const string MainManifestUrl = "https://github.com/codingriver/upilot/releases/download/main-nightly/manifest.json";
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
         private CancellationTokenSource _downloadCts;
@@ -275,16 +279,34 @@ namespace CodingRiver.UPilot
 
         public Task<UPilotReleaseManifest> FetchReleaseManifestAsync()
         {
-            var url = UPilotProjectConfig.Current.updates?.manifestUrl;
-            if (string.IsNullOrWhiteSpace(url))
-                url = new UPilotUpdateConfig().manifestUrl;
-            return FetchReleaseManifestAsync(url);
+            return FetchReleaseManifestAsync(ResolveManifestUrl());
         }
 
         public async Task<UPilotReleaseManifest> FetchReleaseManifestAsync(string url)
         {
-            var json = await Http.GetStringAsync(url);
-            return ParseManifest(json);
+            var resolvedUrl = string.IsNullOrWhiteSpace(url) ? ResolveManifestUrl() : url;
+            try
+            {
+                var json = await Http.GetStringAsync(resolvedUrl);
+                return ParseManifest(json);
+            }
+            catch when (CanFallbackToLegacyManifest(resolvedUrl))
+            {
+                var json = await Http.GetStringAsync(ToLegacyManifestUrl(resolvedUrl));
+                return ParseManifest(json);
+            }
+        }
+
+        public static string ResolveManifestUrl()
+        {
+            var updates = UPilotProjectConfig.Current.updates ?? new UPilotUpdateConfig();
+            if (!string.IsNullOrWhiteSpace(updates.manifestUrl))
+                return updates.manifestUrl;
+
+            var channel = string.IsNullOrWhiteSpace(updates.channel)
+                ? "main"
+                : updates.channel.Trim();
+            return IsMainChannel(channel) ? MainManifestUrl : ReleaseManifestUrl;
         }
 
         public void StartDownloadLatestServerExe()
@@ -817,6 +839,17 @@ namespace CodingRiver.UPilot
         private static bool IsMainChannel(string value)
         {
             return !string.IsNullOrWhiteSpace(value) && value.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool CanFallbackToLegacyManifest(string url)
+        {
+            return !string.IsNullOrWhiteSpace(url) &&
+                   url.EndsWith("/" + ManifestFileName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ToLegacyManifestUrl(string url)
+        {
+            return url.Substring(0, url.Length - ManifestFileName.Length) + LegacyManifestFileName;
         }
 
         private static bool IsVersionAtLeast(string current, string minimum)
