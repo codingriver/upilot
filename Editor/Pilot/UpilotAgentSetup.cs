@@ -91,7 +91,7 @@ namespace CodingRiver.UPilot
                     return ClientName == "Codex" ? "未安装" : "未同步";
                 if (State == AgentRuleConfigState.UpdateAvailable) return "有更新";
                 if (State == AgentRuleConfigState.Customized)
-                    return ClientName == "Codex" ? "已安装" : "已同步";
+                    return "有本地修改";
                 return ClientName == "Codex" ? "已安装" : "已同步";
             }
         }
@@ -103,7 +103,7 @@ namespace CodingRiver.UPilot
         private const string PackageName = "io.github.codingriver.upilot";
         private const string SkillName = "upilot-unity-mcp";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
-        private const int AgentRulesTemplateVersion = 3;
+        private const int AgentRulesTemplateVersion = 4;
         private const int SkillInstallTemplateVersion = 1;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
@@ -374,11 +374,17 @@ namespace CodingRiver.UPilot
             var expected = WrapManagedBlock(content).TrimEnd();
             var actual = match.Value.TrimEnd();
             return string.Equals(
-                NormalizeLineEndings(actual),
-                NormalizeLineEndings(expected),
+                NormalizeRuleForComparison(actual),
+                NormalizeRuleForComparison(expected),
                 StringComparison.Ordinal)
                 ? AgentRuleConfigState.Current
                 : AgentRuleConfigState.UpdateAvailable;
+        }
+
+        private static string NormalizeRuleForComparison(string value)
+        {
+            var normalized = NormalizeLineEndings(value);
+            return Regex.Replace(normalized, "(?m)^generatedAt: .*$", "generatedAt: <ignored>");
         }
 
         private static string NormalizeLineEndings(string value)
@@ -478,9 +484,18 @@ namespace CodingRiver.UPilot
             }
         }
 
+        internal static string[] GetAgentRulesPreferenceKeysForCurrentProject()
+        {
+            var keys = new string[AgentRulesTemplateVersion];
+            string projectHash = StableHash(GetProjectRoot());
+            for (int version = 1; version <= AgentRulesTemplateVersion; version++)
+                keys[version - 1] = AutoSetupKeyPrefix + projectHash + ".v" + version;
+            return keys;
+        }
+
         private static string GetAgentRulesSetupKey()
         {
-            return AutoSetupKeyPrefix + StableHash(GetProjectRoot()) + ".v" + AgentRulesTemplateVersion;
+            return GetAgentRulesPreferenceKeysForCurrentProject()[AgentRulesTemplateVersion - 1];
         }
 
         private static string WriteJsonMcpConfig(string path, bool includeType, bool promptBeforeOverwrite)
@@ -778,10 +793,19 @@ namespace CodingRiver.UPilot
             var mcpUrl = McpUrl;
             var healthUrl = HealthUrl;
             var projectRoot = GetProjectRoot();
+            var packageVersion = string.IsNullOrEmpty(UPilotServerRuntimeService.UpmVersion)
+                ? "unknown"
+                : UPilotServerRuntimeService.UpmVersion;
             var text = new StringBuilder();
             text.AppendLine("# UPilot Unity MCP");
             text.AppendLine();
+            text.AppendLine($"rulesVersion: {AgentRulesTemplateVersion}");
+            text.AppendLine($"upilotPackageVersion: {packageVersion}");
+            text.AppendLine($"projectPath: {projectRoot}");
+            text.AppendLine($"generatedAt: {DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ}");
+            text.AppendLine();
             text.AppendLine("This Unity project has the `io.github.codingriver.upilot` UPM package installed.");
+            text.AppendLine("Project-specific business rules outside this controlled UPilot block take precedence.");
             text.AppendLine();
             text.AppendLine("## Connection");
             text.AppendLine();
@@ -807,13 +831,22 @@ namespace CodingRiver.UPilot
             text.AppendLine();
             text.AppendLine("- Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.");
             text.AppendLine("- After one batch of disk writes, call `unity_sync_after_disk_write` once.");
+            text.AppendLine("- Prefer `unity_compile_wait` plus `unity_compile_errors`; `unity_compile_errors_get` is a compatibility alias.");
             text.AppendLine("- Compile only after C# or assembly-related changes. Do not compile again when no code changed.");
             text.AppendLine("- After compilation, read structured compile errors and relevant Console errors before editing again.");
             text.AppendLine();
-            text.AppendLine("## Project Workflows");
+            text.AppendLine("## Long Operations");
             text.AppendLine();
-            text.AppendLine("- When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call that entry point and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.");
-            text.AppendLine("- Keep business orchestration in project code. MCP should start, poll, diagnose, capture logs, and collect artifacts.");
+            text.AppendLine("- For tests, builds, smoke runs, and other long workflows, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.");
+            text.AppendLine("- Starting an operation is not success; poll until a terminal status.");
+            text.AppendLine("- Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.");
+            text.AppendLine("- Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.");
+            text.AppendLine("- Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.");
+            text.AppendLine();
+            text.AppendLine("## Operation Status Contract");
+            text.AppendLine();
+            text.AppendLine("- Project bridge status JSON should use generic fields where possible: `ok`, `operationId`, `status`, `phase`, `error`, `detail`, `elapsedSec`, `phaseElapsedSec`, `progress`, `failureSignature`, `artifacts`, `metrics`, and `domain`.");
+            text.AppendLine("- UPilot parses only generic fields. Business fields belong in `domain` and are passed through unchanged.");
             text.AppendLine();
             text.AppendLine("## Persistent Console Capture");
             text.AppendLine();
@@ -821,14 +854,19 @@ namespace CodingRiver.UPilot
             text.AppendLine("- Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.");
             text.AppendLine("- Console capture cleanup must use dry-run, target inspection, and confirm-token execution.");
             text.AppendLine();
+            text.AppendLine("## Artifacts And Screenshots");
+            text.AppendLine();
+            text.AppendLine("- Prefer project-relative artifact paths returned by the project bridge.");
+            text.AppendLine("- Prefer `unity_screenshot_save` for screenshots.");
+            text.AppendLine("- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`.");
+            text.AppendLine("- UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.");
+            text.AppendLine();
             text.AppendLine("## Acceptance");
             text.AppendLine();
-            text.AppendLine("- Starting a test, build, or async task is not success; poll its status until a terminal result.");
-            text.AppendLine("- For long tasks, report only phase changes, errors, or suspected-stuck state from `unity_operation_*`/task status.");
             text.AppendLine("- During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.");
-            text.AppendLine("- For acceptance work, prefer dedicated project-relative artifact or screenshot save tools that return metadata or hashes. If capture falls back to base64, window capture, or OS-level automation, report the reason.");
             text.AppendLine("- Retry automatically only when the registry marks the operation idempotent and non-destructive.");
-            text.AppendLine("- On timeout, inspect status, operation timing, and last progress before choosing one bounded retry or a documented fallback.");
+            text.AppendLine("- If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.");
+            text.AppendLine("- On timeout, inspect status, operation timing, Console capture, artifact summary, and last progress before choosing one bounded retry or a documented fallback.");
             return text.ToString();
         }
 

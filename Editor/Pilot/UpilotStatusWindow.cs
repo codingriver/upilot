@@ -276,7 +276,7 @@ namespace CodingRiver.UPilot
             {
                 DrawConnectionSection(status);
                 EditorGUILayout.Space(4);
-                DrawDiagnosticsSection(bridge, diagResult, diagRunning, diagResultAtMs);
+                DrawDiagnosticsSection(bridge, status, mcpStatus, diagResult, diagRunning, diagResultAtMs);
                 EditorGUILayout.Space(4);
                 DrawLogFileSection();
             }
@@ -1364,7 +1364,13 @@ namespace CodingRiver.UPilot
 
         // ── Diagnostics ───────────────────────────────────────────────────────
 
-        private void DrawDiagnosticsSection(UPilotBridge bridge, string diagResult, bool diagRunning, long diagResultAtMs)
+        private void DrawDiagnosticsSection(
+            UPilotBridge bridge,
+            BridgeStatus status,
+            McpServerStatus mcpStatus,
+            string diagResult,
+            bool diagRunning,
+            long diagResultAtMs)
         {
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
@@ -1427,8 +1433,32 @@ namespace CodingRiver.UPilot
                 if (_showDangerousDiagnostics)
                 {
                     EditorGUILayout.HelpBox(
-                        "仅在普通停止操作无效、残留进程持续占用端口时使用。该操作会结束所有疑似 UPilot MCP Python 进程。",
+                        "这些操作用于故障排查。重置偏好不会修改 .upilot/config.json，也不会删除 Agent 配置文件。",
                         MessageType.Warning);
+
+                    bool serviceRunning = status.IsStarted || mcpStatus.IsRunning;
+                    using (new EditorGUI.DisabledScope(diagRunning || serviceRunning))
+                    {
+                        if (GUILayout.Button("重置当前工程偏好", GUILayout.Height(24)))
+                        {
+                            bool confirmed = EditorUtility.DisplayDialog(
+                                "确认重置当前工程偏好？",
+                                "将清除 UPilot 为当前工程保存的 MCP、界面和初始化状态。\n\n" +
+                                "不会修改 .upilot/config.json，也不会删除 Agent 配置文件。",
+                                "重置并重新初始化",
+                                "取消");
+                            if (confirmed)
+                            {
+                                int deletedCount = UPilotPreferences.ResetCurrentProject();
+                                ShowToast($"已重置当前工程偏好（清除 {deletedCount} 项）", MessageType.Warning, 4d);
+                            }
+                        }
+                    }
+                    if (serviceRunning)
+                        EditorGUILayout.LabelField("请先停止 UPilot，再重置当前工程偏好。", EditorStyles.miniLabel);
+
+                    EditorGUILayout.Space(4);
+                    EditorGUILayout.LabelField("仅在普通停止无效、残留进程持续占用端口时结束进程。", EditorStyles.miniLabel);
                     using (new EditorGUI.DisabledScope(diagRunning))
                     {
                         var prev = GUI.backgroundColor;

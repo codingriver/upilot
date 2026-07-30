@@ -9,13 +9,11 @@ namespace CodingRiver.UPilot
 {
     public static class UPilotSetupState
     {
-        private static string SetupCompletedKey => $"upilot.SetupCompleted.{UPilotBridge.WsEndpointEditorPrefsKeySuffix}";
-
-        public static bool IsCompleted => EditorPrefs.GetBool(SetupCompletedKey, false);
+        public static bool IsCompleted => EditorPrefs.GetBool(UPilotPreferences.SetupCompletedKey, false);
 
         public static void MarkCompleted()
         {
-            EditorPrefs.SetBool(SetupCompletedKey, true);
+            EditorPrefs.SetBool(UPilotPreferences.SetupCompletedKey, true);
         }
 
         public static void OpenFirstSetup()
@@ -33,7 +31,7 @@ namespace CodingRiver.UPilot
                     "Cancel"))
                 return;
 
-            EditorPrefs.DeleteKey(SetupCompletedKey);
+            EditorPrefs.DeleteKey(UPilotPreferences.SetupCompletedKey);
             UPilotFirstSetupWindow.Open();
         }
     }

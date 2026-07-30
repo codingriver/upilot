@@ -2,7 +2,7 @@
 
 本文档用于跟踪 UPilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 和 `unity_capabilities_get` 返回的实时 schema。
 
-最近同步：2026-07-11，`tools/list` 返回 113 个工具。
+最近同步：2026-07-29，`tools/list` 以当前 MCP 实时返回为准；本表新增长作业编排与 Agent 规则工具记录。
 
 ## 状态口径
 
@@ -182,6 +182,21 @@
 | `unity_auto_fix_stop` | 是 | 是 | 是 | 2026-06-30 自动验收通过：对运行中自动修复 loopId 调用停止接口成功；调用时会按 loopId 停止自动修复循环，建议人工监督使用。 |
 | `unity_auto_fix_status` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功查询 idle/running/success 状态；调用时会查询自动修复 loop 状态，建议人工监督使用。 |
 | `unity_editor_e2e_run` | 是 | 是 | 是 | 2026-06-30 自动验收通过：执行 `smoke_editor_state.yaml` 成功，stepCount=2，passed=true。 |
+
+### 长作业编排与 Agent 规则
+
+| 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
+| --- | --- | --- | --- | --- |
+| `unity_operation_list` | 是 | 是 | 是 | 列出 Unity Bridge 最近操作，保留原有诊断用途。 |
+| `unity_operation_get` | 是 | 是 | 是 | 按 commandId 读取 Unity Bridge 操作步骤，保留原有诊断用途。 |
+| `unity_operation_start` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖 JobSpec 启动；支持 reflection、MCP tool、menu、native route 调用。 |
+| `unity_operation_status` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖状态归一化；解析通用 status/phase/error/failureSignature/artifacts。 |
+| `unity_operation_wait` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖终态等待、artifact 收集和 repeatFailure；正式 smoke 需 Unity 连接后验收。 |
+| `unity_operation_cancel` | 是 | 待 Unity 联机验收 | 是 | 调用 JobSpec cancelCall；无 cancelCall 时返回 CANCEL_UNSUPPORTED。 |
+| `unity_operation_collect_artifacts` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖报告 tail、metadata、sha256；业务含义由项目桥接判断。 |
+| `unity_agent_rules_check` | 是 | 是 | 是 | Python 单测覆盖只读检查；返回 recommendedBlock 和 diffSummary，不写文件。 |
+| `unity_agent_rules_install` | 是 | 是 | 是 | Python 单测覆盖 dry-run 与 apply；仅替换 upilot:start/end 受控块，apply=true 需要写权限。 |
+| `unity_compile_errors_get` | 是 | 待补充 | 是 | `unity_compile_errors` 兼容别名，用于旧规则和旧客户端过渡。 |
 
 ### 界面流程自动化
 

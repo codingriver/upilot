@@ -42,12 +42,6 @@ namespace CodingRiver.UPilot
         private static string DefaultPythonEntry => ResolveDefaultPythonEntry();
         private const string DefaultLogLevel = "INFO";
         private const string PackageName = "io.github.codingriver.upilot";
-        private static string HashSuffix => UPilotBridge.WsEndpointEditorPrefsKeySuffix;
-
-        private static string PythonEntryKey => $"upilot.McpMgr.PythonEntry.{HashSuffix}";
-        private static string LogLevelKey => $"upilot.McpMgr.LogLevel.{HashSuffix}";
-        private static string AutoStartKey => $"upilot.McpMgr.AutoStart.{HashSuffix}";
-
         private string _pythonEntryPath = DefaultPythonEntry;
         private string _logLevel = DefaultLogLevel;
         private bool _autoStart = true;
@@ -127,6 +121,13 @@ namespace CodingRiver.UPilot
         }
         public string LogLevel { get => _logLevel; set { if (_logLevel != value) { _logLevel = value; SavePrefs(); } } }
         public bool AutoStartEnabled { get => _autoStart; set { if (_autoStart != value) { _autoStart = value; SavePrefs(); } } }
+
+        internal void ResetPreferencesToDefaultsInMemory()
+        {
+            _pythonEntryPath = DefaultPythonEntry;
+            _logLevel = DefaultLogLevel;
+            _autoStart = true;
+        }
 
         // ── Cached status (background refresh) ────────────────────────────────
 
@@ -342,9 +343,9 @@ namespace CodingRiver.UPilot
         private void LoadPrefs()
         {
 
-            _pythonEntryPath = EditorPrefs.GetString(PythonEntryKey, DefaultPythonEntry);
-            _logLevel = EditorPrefs.GetString(LogLevelKey, DefaultLogLevel);
-            _autoStart = EditorPrefs.GetBool(AutoStartKey, true);
+            _pythonEntryPath = EditorPrefs.GetString(UPilotPreferences.McpPythonEntryKey, DefaultPythonEntry);
+            _logLevel = EditorPrefs.GetString(UPilotPreferences.McpLogLevelKey, DefaultLogLevel);
+            _autoStart = EditorPrefs.GetBool(UPilotPreferences.McpAutoStartKey, true);
             var bridge = UPilotBridge.Instance;
             Debug.Log($"[UPilotMcpServerManager] LoadPrefs loaded: HttpPort={bridge?.HttpPort ?? 8011}, WsPort={bridge?.WsPort ?? 8765}, PythonEntryPath={_pythonEntryPath}, LogLevel={_logLevel}, AutoStart={_autoStart}");
 
@@ -372,9 +373,9 @@ namespace CodingRiver.UPilot
         
         private void SavePrefs()
         {
-            EditorPrefs.SetString(PythonEntryKey, _pythonEntryPath ?? DefaultPythonEntry);
-            EditorPrefs.SetString(LogLevelKey, _logLevel ?? DefaultLogLevel);
-            EditorPrefs.SetBool(AutoStartKey, _autoStart);
+            EditorPrefs.SetString(UPilotPreferences.McpPythonEntryKey, _pythonEntryPath ?? DefaultPythonEntry);
+            EditorPrefs.SetString(UPilotPreferences.McpLogLevelKey, _logLevel ?? DefaultLogLevel);
+            EditorPrefs.SetBool(UPilotPreferences.McpAutoStartKey, _autoStart);
         }
 
         // ── Status ──────────────────────────────────────────────────────────

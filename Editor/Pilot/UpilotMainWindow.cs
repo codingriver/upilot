@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Text;
 using UnityEditor;
 using UnityEngine;
 
@@ -25,11 +26,13 @@ namespace CodingRiver.UPilot
         private bool _useClaudeCode;
         private bool _useCursor;
         private bool _selectionInitialized;
+        private bool _agentAdviceNoticeShown;
 
         private string _notice = "";
         private MessageType _noticeType = MessageType.Info;
         private double _noticeUntil;
         private bool _restartRequested;
+        private Vector2 _mainScroll;
 
         private GUIStyle _cardStyle;
         private GUIStyle _titleStyle;
@@ -76,11 +79,26 @@ namespace CodingRiver.UPilot
 
             var displaySnapshot = GetDisplaySnapshot();
             DrawHeader(displaySnapshot);
-            DrawNotice();
-            EditorGUILayout.Space(8);
-            DrawMainCard(displaySnapshot);
-            EditorGUILayout.Space(8);
-            DrawAdvancedEntry();
+            _mainScroll = EditorGUILayout.BeginScrollView(
+                _mainScroll,
+                false,
+                true,
+                GUIStyle.none,
+                GUI.skin.verticalScrollbar,
+                GUI.skin.scrollView);
+            try
+            {
+                DrawNotice();
+                EditorGUILayout.Space(8);
+                DrawMainCard(displaySnapshot);
+                EditorGUILayout.Space(8);
+                DrawAdvancedEntry();
+                EditorGUILayout.Space(8);
+            }
+            finally
+            {
+                EditorGUILayout.EndScrollView();
+            }
         }
 
         private void InitializeStyles()
@@ -149,6 +167,13 @@ namespace CodingRiver.UPilot
             _lastAgentRefresh = EditorApplication.timeSinceStartup;
             _agentConfigs = UPilotAgentSetup.GetMcpConfigStatuses();
             _ruleConfigs = UPilotAgentSetup.GetRuleConfigStatuses();
+
+            if (force && !_agentAdviceNoticeShown && HasAgentIntegrationIssues())
+            {
+                _agentAdviceNoticeShown = true;
+                ShowNotice("检测到 Agent/MCP/Skill 配置不一致，可在 Agent 配置区域更新。", MessageType.Warning);
+            }
+
             if (_selectionInitialized)
                 return;
 
@@ -340,12 +365,111 @@ namespace CodingRiver.UPilot
             {
                 EditorGUILayout.LabelField("Agent 配置", EditorStyles.boldLabel);
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button("更新全部", EditorStyles.miniButton, GUILayout.Width(76)))
+                if (GUILayout.Button("检查", EditorStyles.miniButton, GUILayout.Width(48)))
+                {
+                    RefreshAgentConfigs(force: true);
+                    ShowNotice("Agent 配置状态已刷新");
+                }
+
+                var updateLabel = HasAgentIntegrationIssues() ? "更新建议项" : "更新全部";
+                if (GUILayout.Button(updateLabel, EditorStyles.miniButton, GUILayout.Width(86)))
                     UpdateAllAgentIntegrations();
             }
 
+            DrawAgentIntegrationAdvice();
+
             foreach (var mcpStatus in _agentConfigs)
                 DrawAgentConfigurationRow(mcpStatus, FindRuleStatus(mcpStatus.ClientName));
+        }
+
+        private void DrawAgentIntegrationAdvice()
+        {
+            var messageType = BuildAgentIntegrationAdvice(out var message);
+            EditorGUILayout.HelpBox(message, messageType);
+        }
+
+        private MessageType BuildAgentIntegrationAdvice(out string message)
+        {
+            var mcpIssues = 0;
+            var ruleIssues = 0;
+            var hasErrors = false;
+            var hasCustomizedRules = false;
+            var details = new StringBuilder();
+
+            foreach (var status in _agentConfigs)
+            {
+                if (!NeedsMcpUpdate(status))
+                    continue;
+
+                mcpIssues++;
+                if (!string.IsNullOrEmpty(status.ErrorMessage))
+                    hasErrors = true;
+                AppendAdviceDetail(details, $"{status.ClientName} MCP：{status.StateText}");
+            }
+
+            foreach (var status in _ruleConfigs)
+            {
+                if (!NeedsRuleUpdate(status))
+                    continue;
+
+                ruleIssues++;
+                if (status.State == AgentRuleConfigState.Error)
+                    hasErrors = true;
+                if (status.HasLocalCustomization)
+                    hasCustomizedRules = true;
+                AppendAdviceDetail(details, $"{status.ClientName} {GetRuleLabel(status.ClientName)}：{status.StateText}");
+            }
+
+            if (mcpIssues == 0 && ruleIssues == 0)
+            {
+                message = "打开 UPilot 时已完成 Agent/MCP/Skill 一致性检查：当前配置已同步。";
+                return MessageType.Info;
+            }
+
+            var summary = $"打开 UPilot 时已完成一致性检查：{mcpIssues} 个 MCP 配置、{ruleIssues} 个 Skill/规则需要处理。";
+            var action = hasCustomizedRules
+                ? "建议先确认本地修改来源，再点击“更新建议项”；UPilot 会在覆盖管理内容前二次确认。"
+                : "建议点击“更新建议项”同步 MCP 地址、Agent 规则和 Codex Skill。";
+            message = summary + "\n" + action + "\n" + details.ToString().TrimEnd();
+            return hasErrors ? MessageType.Error : MessageType.Warning;
+        }
+
+        private bool HasAgentIntegrationIssues()
+        {
+            foreach (var status in _agentConfigs)
+            {
+                if (NeedsMcpUpdate(status))
+                    return true;
+            }
+
+            foreach (var status in _ruleConfigs)
+            {
+                if (NeedsRuleUpdate(status))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool NeedsMcpUpdate(AgentMcpConfigStatus status)
+        {
+            if (!string.IsNullOrEmpty(status.ErrorMessage))
+                return true;
+            if (!status.FileExists)
+                return false;
+            return !status.HasUPilotEntry || !status.UsesCurrentUrl;
+        }
+
+        private static bool NeedsRuleUpdate(AgentRuleConfigStatus status)
+        {
+            return status.State != AgentRuleConfigState.Current;
+        }
+
+        private static void AppendAdviceDetail(StringBuilder builder, string detail)
+        {
+            if (builder.Length > 0)
+                builder.AppendLine();
+            builder.Append("- ").Append(detail);
         }
 
         private void DrawAgentConfigurationRow(

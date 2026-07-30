@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 
 namespace CodingRiver.UPilot.Tests
@@ -107,6 +109,47 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Stopping), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Restarting), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Stopping), Is.True);
+        }
+
+        [Test]
+        public void PreferenceResetDeletesOnlyRegisteredKeys()
+        {
+            string prefix = "CodingRiver.UPilot.Tests." + Guid.NewGuid().ToString("N");
+            string first = prefix + ".First";
+            string second = prefix + ".Second";
+            string unrelated = prefix + ".Unrelated";
+            EditorPrefs.SetString(first, "one");
+            EditorPrefs.SetInt(second, 2);
+            EditorPrefs.SetBool(unrelated, true);
+
+            try
+            {
+                int deleted = UPilotPreferences.DeleteKeys(new[] { first, second });
+
+                Assert.That(deleted, Is.EqualTo(2));
+                Assert.That(EditorPrefs.HasKey(first), Is.False);
+                Assert.That(EditorPrefs.HasKey(second), Is.False);
+                Assert.That(EditorPrefs.GetBool(unrelated), Is.True);
+            }
+            finally
+            {
+                EditorPrefs.DeleteKey(first);
+                EditorPrefs.DeleteKey(second);
+                EditorPrefs.DeleteKey(unrelated);
+            }
+        }
+
+        [Test]
+        public void CurrentProjectPreferenceListExcludesGlobalAndProjectConfigSettings()
+        {
+            var keys = UPilotPreferences.CurrentProjectKeys;
+
+            Assert.That(keys, Does.Contain(UPilotPreferences.McpPythonEntryKey));
+            Assert.That(keys, Does.Contain(UPilotPreferences.SetupCompletedKey));
+            Assert.That(keys.Distinct().Count(), Is.EqualTo(keys.Count));
+            Assert.That(keys, Does.Not.Contain(UPilotBootstrap.EnabledPrefKey));
+            Assert.That(keys, Does.Not.Contain(Logger.LogToUnityConsolePrefsKey));
+            Assert.That(keys.Any(key => key.Contains("config.json")), Is.False);
         }
 
         [Test]

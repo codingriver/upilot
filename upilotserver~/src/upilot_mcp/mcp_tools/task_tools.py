@@ -21,6 +21,7 @@ _payload = runtime._payload
 _log_tool_call = runtime._log_tool_call
 _log_tool_result = runtime._log_tool_result
 _reject_compile_in_playmode = runtime._reject_compile_in_playmode
+_reject_write_if_unapproved = runtime._reject_write_if_unapproved
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
@@ -111,6 +112,81 @@ async def unity_operation_get(commandId: str):
 
 @mcp.tool(
     description=(
+        "启动一个通用长作业编排。jobSpec 包含 displayName、startCall、statusCall、cancelCall、"
+        "timeoutSec、pollIntervalSec、terminalStatusMapping、artifactRules、consoleCapture、retryPolicy。"
+        "UPilot 只调用并轮询项目暴露入口，不解析业务 domain 字段。"
+    )
+)
+async def unity_operation_start(jobSpec: dict):
+    _log_tool_call("unity_operation_start", {"jobSpec": jobSpec})
+    r = await _get_facade().operation_start(job_spec=jobSpec)
+    return _log_tool_result("unity_operation_start", _payload(r))
+
+@mcp.tool(description="读取并刷新一个通用长作业状态；会调用 jobSpec.statusCall 并归一化通用状态字段。")
+async def unity_operation_status(operationId: str):
+    _log_tool_call("unity_operation_status", {"operationId": operationId})
+    r = await _get_facade().operation_status(operation_id=operationId)
+    return _log_tool_result("unity_operation_status", _payload(r))
+
+@mcp.tool(
+    description=(
+        "等待一个通用长作业直到终态、超时或疑似卡住。只返回 phase/status/error/"
+        "failureSignature/artifact 变化摘要，并在终态收集 artifacts。"
+    )
+)
+async def unity_operation_wait(
+    operationId: str,
+    timeoutSec: float | None = None,
+    pollIntervalSec: float | None = None,
+    returnOnSuspectedStuck: bool = True,
+):
+    _log_tool_call(
+        "unity_operation_wait",
+        {
+            "operationId": operationId,
+            "timeoutSec": timeoutSec,
+            "pollIntervalSec": pollIntervalSec,
+            "returnOnSuspectedStuck": returnOnSuspectedStuck,
+        },
+    )
+    r = await _get_facade().operation_wait(
+        operation_id=operationId,
+        timeout_s=timeoutSec,
+        poll_interval_s=pollIntervalSec,
+        return_on_suspected_stuck=returnOnSuspectedStuck,
+    )
+    return _log_tool_result("unity_operation_wait", _payload(r))
+
+@mcp.tool(description="取消一个通用长作业；仅在 JobSpec 提供 cancelCall 时可用。")
+async def unity_operation_cancel(operationId: str):
+    _log_tool_call("unity_operation_cancel", {"operationId": operationId})
+    r = await _get_facade().operation_cancel(operation_id=operationId)
+    return _log_tool_result("unity_operation_cancel", _payload(r))
+
+@mcp.tool(description="按作业状态 JSON 和 artifactRules 收集报告、summary、timing、截图等 artifact 元数据与 hash。")
+async def unity_operation_collect_artifacts(operationId: str):
+    _log_tool_call("unity_operation_collect_artifacts", {"operationId": operationId})
+    r = await _get_facade().operation_collect_artifacts(operation_id=operationId)
+    return _log_tool_result("unity_operation_collect_artifacts", _payload(r))
+
+@mcp.tool(description="只读检查项目根 AGENTS.md 的 UPilot 受控规则块，返回 diff 摘要和 recommendedBlock，不写文件。")
+async def unity_agent_rules_check():
+    _log_tool_call("unity_agent_rules_check", {})
+    r = await _get_facade().agent_rules_check()
+    return _log_tool_result("unity_agent_rules_check", _payload(r))
+
+@mcp.tool(description="安装或更新项目根 AGENTS.md 的 UPilot 受控规则块。默认 dry-run；只有 apply=true 才写文件。")
+async def unity_agent_rules_install(apply: bool = False):
+    _log_tool_call("unity_agent_rules_install", {"apply": apply})
+    if apply:
+        rejected = _reject_write_if_unapproved("unity_agent_rules_install")
+        if rejected is not None:
+            return rejected
+    r = await _get_facade().agent_rules_install(apply=apply)
+    return _log_tool_result("unity_agent_rules_install", _payload(r))
+
+@mcp.tool(
+    description=(
         "在 Unity 主线程延迟指定毫秒（不阻塞 Python）。用于等待编辑器布局；"
         "delayMs 最大 120000。"
     ),
@@ -125,6 +201,13 @@ _DESTRUCTIVE_TOOLS = {
     "unity_script_create", "unity_script_update", "unity_script_delete",
     "unity_package_add", "unity_package_remove", "unity_scene_save",
     "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
+    "unity_agent_rules_install",
+}
+_NON_IDEMPOTENT_TOOLS = {
+    "unity_operation_start",
+    "unity_operation_wait",
+    "unity_operation_cancel",
+    "unity_agent_rules_install",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
@@ -136,7 +219,7 @@ for _name, _value in list(globals().items()):
     register_public_tool(
         _name,
         destructive=_name in _DESTRUCTIVE_TOOLS,
-        idempotent=_name not in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
     )

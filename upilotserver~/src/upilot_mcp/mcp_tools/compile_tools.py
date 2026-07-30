@@ -47,6 +47,12 @@ async def unity_compile_errors(compileRequestId: str = ""):
     r = await _get_facade().compile_errors(compile_request_id=compileRequestId)
     return _log_tool_result("unity_compile_errors", _payload(r))
 
+@mcp.tool(description="兼容别名：获取最近一次结构化编译错误。请优先使用 unity_compile_errors。")
+async def unity_compile_errors_get(compileRequestId: str = ""):
+    _log_tool_call("unity_compile_errors_get", {"compileRequestId": compileRequestId})
+    r = await _get_facade().compile_errors(compile_request_id=compileRequestId)
+    return _log_tool_result("unity_compile_errors_get", _payload(r))
+
 @mcp.tool(
     description="启动自动修复循环。会反复读取编译错误并尝试修复代码，可能写文件并触发编译；适合明确要求自动修复时使用，不要用于普通查询或小改动。"
 )

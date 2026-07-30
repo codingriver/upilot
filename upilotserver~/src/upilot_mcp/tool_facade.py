@@ -48,3 +48,5 @@ class McpToolFacade(
         )
         self._async_tasks: dict[str, dict] = {}
         self._async_task_handles: dict[str, asyncio.Task] = {}
+        self._operations: dict[str, dict] = {}
+        self._operation_failure_history: dict[str, int] = {}
