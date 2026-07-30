@@ -89,9 +89,9 @@ namespace CodingRiver.UPilot
                 if (State == AgentRuleConfigState.Error) return "读取失败";
                 if (State == AgentRuleConfigState.Missing)
                     return ClientName == "Codex" ? "未安装" : "未同步";
-                if (State == AgentRuleConfigState.UpdateAvailable) return "有更新";
+                if (State == AgentRuleConfigState.UpdateAvailable) return "有新版本";
                 if (State == AgentRuleConfigState.Customized)
-                    return "有本地修改";
+                    return "需要确认";
                 return ClientName == "Codex" ? "已安装" : "已同步";
             }
         }

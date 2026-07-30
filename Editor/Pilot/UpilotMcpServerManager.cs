@@ -137,6 +137,9 @@ namespace CodingRiver.UPilot
         private volatile bool _refreshRunning;
         private long _lastRefreshMs;
         private bool _restartPending;
+        private bool _startInProgress;
+        private int? _trackedProcessId;
+        private EditorApplication.CallbackFunction _restartWaitCallback;
 
         private static readonly System.Net.Http.HttpClient _httpClient = new()
         {
@@ -491,6 +494,29 @@ namespace CodingRiver.UPilot
             return (wsCount, httpCount, version, protocol, commit, channel);
         }
 
+        public async Task<string> WaitForServerVersionAsync(string expectedVersion, int timeoutMs = 10000)
+        {
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + timeoutMs;
+            string latestVersion = "";
+            while (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < deadline)
+            {
+                var stats = await FetchServerStatsAsync();
+                latestVersion = stats.version;
+                if (!string.IsNullOrWhiteSpace(latestVersion) &&
+                    (string.IsNullOrWhiteSpace(expectedVersion) ||
+                     UPilotServerRuntimeService.CompareVersions(latestVersion, expectedVersion) >= 0))
+                {
+                    InvalidateStatusCache();
+                    return latestVersion;
+                }
+
+                await Task.Delay(250);
+            }
+
+            InvalidateStatusCache();
+            return latestVersion;
+        }
+
         private static int ParseIntFromJson(string json, string key)
         {
             if (string.IsNullOrWhiteSpace(json)) return 0;
@@ -511,12 +537,27 @@ namespace CodingRiver.UPilot
 
         public void StartServer()
         {
-            var status = GetStatus();
-            if (status.IsRunning)
+            if (_restartPending)
             {
-                Debug.LogWarning("[UPilotMcpServerManager] MCP server already running.");
+                Debug.Log("[UPilotMcpServerManager] MCP server restart is already pending; start request merged.");
                 return;
             }
+
+            if (_startInProgress || IsTrackedProcessAlive() || FindCurrentProjectMcpProcesses().Count > 0)
+            {
+                Debug.Log("[UPilotMcpServerManager] MCP server start is already in progress or the project service is running; start request merged.");
+                return;
+            }
+
+            if (!UPilotPortAllocator.IsPortAvailable(HttpPort) ||
+                !UPilotPortAllocator.IsPortAvailable(WsPort))
+            {
+                Debug.LogError(
+                    $"[UPilotMcpServerManager] Cannot start MCP server because HTTP={HttpPort} or WS={WsPort} is already in use by another process.");
+                return;
+            }
+
+            _startInProgress = true;
 
             // Auto-sync Bridge WS endpoint to match MCP server port before starting.
             // Bridge and MCP manager store their ports in separate EditorPrefs keys,
@@ -542,6 +583,11 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 Debug.LogError($"[UPilotMcpServerManager] Failed to start server: {ex.Message}");
+            }
+            finally
+            {
+                _startInProgress = false;
+                InvalidateStatusCache();
             }
         }
 
@@ -581,6 +627,7 @@ namespace CodingRiver.UPilot
             };
 
             var proc = Process.Start(psi);
+            _trackedProcessId = proc?.Id;
             Debug.Log($"[UPilotMcpServerManager] Started python process PID={proc?.Id} via {pythonExe} for {entryFullPath} (HTTP={HttpPort}, WS={WsPort})");
         }
 
@@ -607,6 +654,7 @@ namespace CodingRiver.UPilot
             };
 
             var proc = Process.Start(psi);
+            _trackedProcessId = proc?.Id;
             Debug.Log($"[UPilotMcpServerManager] Started standalone server PID={proc?.Id} via {exePath} (HTTP={HttpPort}, WS={WsPort})");
         }
 
@@ -643,24 +691,41 @@ namespace CodingRiver.UPilot
 
         public void StopServer()
         {
-            _restartPending = false;
-            var (pid, cmdLine) = FindMcpProcessByPorts();
-            if (!pid.HasValue)
+            CancelPendingRestart();
+            StopCurrentProjectProcesses();
+        }
+
+        private void StopCurrentProjectProcesses()
+        {
+            _startInProgress = false;
+            var processes = FindCurrentProjectMcpProcesses();
+            if (processes.Count == 0)
             {
-                Debug.LogWarning("[UPilotMcpServerManager] No MCP server process found listening on configured ports.");
+                _trackedProcessId = null;
+                Debug.LogWarning("[UPilotMcpServerManager] No MCP server process found for the current project ports.");
                 return;
             }
 
-            try
+            foreach (var process in processes)
             {
-                var proc = Process.GetProcessById(pid.Value);
-                proc.Kill();
-                Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={pid.Value}");
+                try
+                {
+                    var proc = Process.GetProcessById(process.pid);
+                    proc.Kill();
+                    Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={process.pid}");
+                }
+                catch (ArgumentException)
+                {
+                    // The process exited between discovery and termination.
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[UPilotMcpServerManager] Failed to kill process PID={process.pid}: {ex.Message}");
+                }
             }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[UPilotMcpServerManager] Failed to kill process PID={pid.Value}: {ex.Message}");
-            }
+
+            _trackedProcessId = null;
+            InvalidateStatusCache();
         }
 
         public bool StopServerAndWaitForExit(int timeoutMs = 3000)
@@ -686,17 +751,23 @@ namespace CodingRiver.UPilot
 
         public void RestartServer()
         {
-            StopServer();
+            if (_restartPending)
+            {
+                Debug.Log("[UPilotMcpServerManager] MCP server restart is already pending; restart request merged.");
+                return;
+            }
+
+            CancelPendingRestart();
+            StopCurrentProjectProcesses();
             InvalidateStatusCache();
 
             _restartPending = true;
             var deadline = EditorApplication.timeSinceStartup + 4d;
-            EditorApplication.CallbackFunction waitForPorts = null;
-            waitForPorts = () =>
+            _restartWaitCallback = () =>
             {
                 if (!_restartPending)
                 {
-                    EditorApplication.update -= waitForPorts;
+                    CancelPendingRestart();
                     return;
                 }
 
@@ -704,7 +775,10 @@ namespace CodingRiver.UPilot
                                      UPilotPortAllocator.IsPortAvailable(WsPort);
                 if (portsAvailable)
                 {
-                    EditorApplication.update -= waitForPorts;
+                    var callback = _restartWaitCallback;
+                    if (callback != null)
+                        EditorApplication.update -= callback;
+                    _restartWaitCallback = null;
                     _restartPending = false;
                     InvalidateStatusCache();
                     StartServer();
@@ -714,13 +788,26 @@ namespace CodingRiver.UPilot
                 if (EditorApplication.timeSinceStartup < deadline)
                     return;
 
-                EditorApplication.update -= waitForPorts;
+                var timedOutCallback = _restartWaitCallback;
+                if (timedOutCallback != null)
+                    EditorApplication.update -= timedOutCallback;
+                _restartWaitCallback = null;
                 _restartPending = false;
                 InvalidateStatusCache();
                 Debug.LogError(
                     $"[UPilotMcpServerManager] MCP restart timed out waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.");
             };
-            EditorApplication.update += waitForPorts;
+            EditorApplication.update += _restartWaitCallback;
+        }
+
+        private void CancelPendingRestart()
+        {
+            _restartPending = false;
+            if (_restartWaitCallback == null)
+                return;
+
+            EditorApplication.update -= _restartWaitCallback;
+            _restartWaitCallback = null;
         }
 
         // ── Port & Process Helpers ─────────────────────────────────────────
@@ -764,37 +851,105 @@ namespace CodingRiver.UPilot
 
         private (int? pid, string cmdLine) FindMcpProcessByPorts()
         {
-            var portsByPid = SafeGetListeningPortsByPid(out bool success);
-            if (!success) return (null, null);
+            var processes = FindCurrentProjectMcpProcesses();
+            if (processes.Count > 0)
+                return processes[0];
+            return (null, null);
+        }
 
-            // First try: look for PID listening on HTTP port
-            foreach (var kv in portsByPid)
+        private List<(int pid, string cmdLine)> FindCurrentProjectMcpProcesses()
+        {
+            var result = new List<(int pid, string cmdLine)>();
+            var candidatePids = new HashSet<int>();
+
+            if (_trackedProcessId.HasValue)
+                candidatePids.Add(_trackedProcessId.Value);
+
+            var portsByPid = SafeGetListeningPortsByPid(out _);
+            foreach (var entry in portsByPid)
             {
-                if (kv.Value.Contains(HttpPort) || kv.Value.Contains(WsPort))
+                if (entry.Value.Contains(HttpPort) || entry.Value.Contains(WsPort))
+                    candidatePids.Add(entry.Key);
+            }
+
+            AddProcessIdsByName(candidatePids, "python");
+            AddProcessIdsByName(candidatePids, "python3");
+            AddProcessIdsByName(candidatePids, "py");
+
+            foreach (var process in Process.GetProcesses())
+            {
+                try
                 {
-                    string cmdLine = SafeGetCommandLine(kv.Key);
-                    if (IsUPilotMcpLike(cmdLine))
-                        return (kv.Key, cmdLine);
+                    if (process.ProcessName.IndexOf("upilot", StringComparison.OrdinalIgnoreCase) >= 0)
+                        candidatePids.Add(process.Id);
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    process.Dispose();
                 }
             }
 
-            // Second try: scan all python processes for command line match
-            var p1 = Process.GetProcessesByName("python");
-            var p2 = Process.GetProcessesByName("python3");
-            foreach (var p in p1)
+            foreach (var pid in candidatePids)
             {
-                string cmdLine = SafeGetCommandLine(p.Id);
-                if (IsUPilotMcpLike(cmdLine))
-                    return (p.Id, cmdLine);
-            }
-            foreach (var p in p2)
-            {
-                string cmdLine = SafeGetCommandLine(p.Id);
-                if (IsUPilotMcpLike(cmdLine))
-                    return (p.Id, cmdLine);
+                string cmdLine = SafeGetCommandLine(pid);
+                if (IsCurrentProjectMcpCommandLine(cmdLine, HttpPort, WsPort))
+                    result.Add((pid, cmdLine));
             }
 
-            return (null, null);
+            return result;
+        }
+
+        private static void AddProcessIdsByName(HashSet<int> target, string processName)
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    target.Add(process.Id);
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        private bool IsTrackedProcessAlive()
+        {
+            if (!_trackedProcessId.HasValue)
+                return false;
+
+            try
+            {
+                using var process = Process.GetProcessById(_trackedProcessId.Value);
+                if (!process.HasExited)
+                    return true;
+            }
+            catch
+            {
+            }
+
+            _trackedProcessId = null;
+            return false;
+        }
+
+        private static bool IsCurrentProjectMcpCommandLine(string cmdLine, int httpPort, int wsPort)
+        {
+            return IsUPilotMcpLike(cmdLine) &&
+                   HasCommandLinePort(cmdLine, "--http-port", httpPort) &&
+                   HasCommandLinePort(cmdLine, "--port", wsPort);
+        }
+
+        private static bool HasCommandLinePort(string cmdLine, string argument, int port)
+        {
+            if (string.IsNullOrWhiteSpace(cmdLine))
+                return false;
+
+            var pattern = $@"(?:^|\s){Regex.Escape(argument)}(?:\s+|=){port}(?=\s|$)";
+            return Regex.IsMatch(cmdLine, pattern, RegexOptions.IgnoreCase);
         }
 
         private static bool IsUPilotMcpLike(string cmdLine)

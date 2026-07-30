@@ -7,7 +7,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -87,8 +90,11 @@ namespace CodingRiver.UPilot
         public string DownloadUrl = "";
         public string Sha256 = "";
         public string TargetPath = "";
+        public string PlatformDisplayName = "";
         public long BytesReceived;
         public long TotalBytes;
+        public int SegmentCount;
+        public int CompletedSegments;
         public double StartedAt;
         public double FinishedAt;
 
@@ -125,7 +131,10 @@ namespace CodingRiver.UPilot
         private const string LegacyManifestFileName = "upilot-release-manifest.json";
         private const string ReleaseManifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/manifest.json";
         private const string MainManifestUrl = "https://github.com/codingriver/upilot/releases/download/main-nightly/manifest.json";
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+        private const int ParallelDownloadThresholdBytes = 8 * 1024 * 1024;
+        private const int ParallelDownloadSegments = 4;
+        private const int SegmentRetryCount = 2;
+        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
 
         private CancellationTokenSource _downloadCts;
         private CancellationTokenSource _pythonEnvCts;
@@ -173,6 +182,13 @@ namespace CodingRiver.UPilot
                     : "本机 Python";
             }
         }
+
+        public static string CurrentPlatformDisplayName => BuildPlatformDisplayName(
+            GetCurrentPlatformKey(),
+            GetCurrentArchitectureKey());
+
+        public static string CurrentPlatformFileExtension =>
+            string.Equals(GetCurrentPlatformKey(), "windows", StringComparison.OrdinalIgnoreCase) ? "exe" : "";
 
         public static string UpmVersion
         {
@@ -372,7 +388,8 @@ namespace CodingRiver.UPilot
                 _downloadState = new UPilotDownloadState
                 {
                     IsRunning = true,
-                    Phase = "读取发布清单",
+                    Phase = "正在获取服务",
+                    PlatformDisplayName = CurrentPlatformDisplayName,
                     StartedAt = EditorApplication.timeSinceStartup,
                 };
             }
@@ -472,12 +489,13 @@ namespace CodingRiver.UPilot
 
         private async Task DownloadLatestServerExeAsync(CancellationToken token)
         {
+            string activeTmpPath = null;
             try
             {
                 var manifest = await FetchReleaseManifestAsync();
-                var download = PickWindowsDownload(manifest);
+                var download = PickCurrentPlatformDownload(manifest);
                 if (download == null)
-                    throw new InvalidOperationException("发布清单中没有适用于当前平台的 MCP 服务。");
+                    throw new InvalidOperationException($"没有找到适用于 {CurrentPlatformDisplayName} 的服务。");
 
                 UpdateState(state =>
                 {
@@ -485,39 +503,30 @@ namespace CodingRiver.UPilot
                     state.DownloadUrl = download.Url;
                     state.Sha256 = download.Sha256;
                     state.TotalBytes = download.SizeBytes;
-                    state.Phase = "下载 MCP 服务";
+                    state.PlatformDisplayName = CurrentPlatformDisplayName;
+                    state.Phase = "正在下载安装";
                 });
 
                 var versionDir = Path.Combine(RuntimeCacheRoot, SafePathSegment(manifest.ServerVersion));
                 Directory.CreateDirectory(versionDir);
                 var fileName = string.IsNullOrWhiteSpace(download.FileName)
-                    ? $"upilot-mcp-server-{manifest.ServerVersion}-win-x64.exe"
+                    ? BuildDefaultServerFileName(manifest.ServerVersion)
                     : download.FileName;
                 var finalPath = Path.Combine(versionDir, fileName);
                 var tmpPath = finalPath + ".download";
-                if (File.Exists(tmpPath))
-                    File.Delete(tmpPath);
+                activeTmpPath = tmpPath;
+                CleanupDownloadFiles(tmpPath, ParallelDownloadSegments);
 
-                using (var response = await Http.GetAsync(download.Url, HttpCompletionOption.ResponseHeadersRead, token))
-                {
-                    response.EnsureSuccessStatusCode();
-                    var total = response.Content.Headers.ContentLength ?? download.SizeBytes;
-                    UpdateState(state => state.TotalBytes = total);
-                    using var input = await response.Content.ReadAsStreamAsync();
-                    using var output = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                    var buffer = new byte[128 * 1024];
-                    while (true)
-                    {
-                        var read = await input.ReadAsync(buffer, 0, buffer.Length, token);
-                        if (read <= 0)
-                            break;
-                        await output.WriteAsync(buffer, 0, read, token);
-                        UpdateState(state => state.BytesReceived += read);
-                    }
-                }
+                var totalBytes = download.SizeBytes;
+                var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
+                                     await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
+                if (supportsRanges)
+                    await DownloadInSegmentsAsync(download.Url, tmpPath, totalBytes, token);
+                else
+                    await DownloadSingleStreamAsync(download.Url, tmpPath, totalBytes, token);
 
                 token.ThrowIfCancellationRequested();
-                UpdateState(state => state.Phase = "校验 SHA256");
+                UpdateState(state => state.Phase = "正在验证文件");
                 var actualSha = ComputeSha256(tmpPath);
                 if (!string.IsNullOrWhiteSpace(download.Sha256) &&
                     !string.Equals(actualSha, download.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -526,9 +535,8 @@ namespace CodingRiver.UPilot
                     throw new InvalidOperationException($"SHA256 校验失败：期望 {download.Sha256}，实际 {actualSha}");
                 }
 
-                if (File.Exists(finalPath))
-                    File.Delete(finalPath);
-                File.Move(tmpPath, finalPath);
+                ReplaceVerifiedDownload(tmpPath, finalPath);
+                EnsureExecutablePermission(finalPath);
                 SetStandaloneExeRuntime(finalPath, manifest.ServerVersion);
 
                 UpdateState(state =>
@@ -537,6 +545,8 @@ namespace CodingRiver.UPilot
                     state.IsComplete = true;
                     state.Phase = "安装完成";
                     state.TargetPath = finalPath;
+                    state.BytesReceived = state.TotalBytes;
+                    state.CompletedSegments = state.SegmentCount;
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
             }
@@ -560,6 +570,220 @@ namespace CodingRiver.UPilot
                     state.Phase = "下载失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
+            }
+            finally
+            {
+                if (!string.IsNullOrWhiteSpace(activeTmpPath))
+                    CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments);
+            }
+        }
+
+        private async Task DownloadSingleStreamAsync(
+            string url,
+            string targetPath,
+            long expectedBytes,
+            CancellationToken token)
+        {
+            UpdateState(state =>
+            {
+                state.BytesReceived = 0;
+                state.TotalBytes = expectedBytes;
+                state.SegmentCount = 1;
+                state.CompletedSegments = 0;
+            });
+
+            using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
+            response.EnsureSuccessStatusCode();
+            var total = response.Content.Headers.ContentLength ?? expectedBytes;
+            UpdateState(state => state.TotalBytes = total);
+            using var input = await response.Content.ReadAsStreamAsync();
+            using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            await CopyDownloadStreamAsync(input, output, token);
+            UpdateState(state => state.CompletedSegments = 1);
+        }
+
+        private async Task DownloadInSegmentsAsync(
+            string url,
+            string targetPath,
+            long totalBytes,
+            CancellationToken token)
+        {
+            UpdateState(state =>
+            {
+                state.BytesReceived = 0;
+                state.TotalBytes = totalBytes;
+                state.SegmentCount = ParallelDownloadSegments;
+                state.CompletedSegments = 0;
+            });
+
+            var tasks = new List<Task>(ParallelDownloadSegments);
+            var segmentSize = totalBytes / ParallelDownloadSegments;
+            for (var index = 0; index < ParallelDownloadSegments; index++)
+            {
+                var start = index * segmentSize;
+                var end = index == ParallelDownloadSegments - 1
+                    ? totalBytes - 1
+                    : start + segmentSize - 1;
+                var segmentPath = targetPath + ".part" + index;
+                tasks.Add(DownloadSegmentWithRetryAsync(url, segmentPath, start, end, token));
+            }
+
+            try
+            {
+                await Task.WhenAll(tasks);
+                using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                for (var index = 0; index < ParallelDownloadSegments; index++)
+                {
+                    var segmentPath = targetPath + ".part" + index;
+                    using var input = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    await input.CopyToAsync(output, 128 * 1024, token);
+                }
+            }
+            finally
+            {
+                CleanupSegmentFiles(targetPath, ParallelDownloadSegments);
+            }
+        }
+
+        private async Task DownloadSegmentWithRetryAsync(
+            string url,
+            string segmentPath,
+            long start,
+            long end,
+            CancellationToken token)
+        {
+            Exception lastError = null;
+            for (var attempt = 0; attempt <= SegmentRetryCount; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    if (File.Exists(segmentPath))
+                        File.Delete(segmentPath);
+
+                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                    request.Headers.Range = new RangeHeaderValue(start, end);
+                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                    if (response.StatusCode != HttpStatusCode.PartialContent)
+                        throw new InvalidOperationException("下载源未返回分片内容。");
+
+                    using var input = await response.Content.ReadAsStreamAsync();
+                    using var output = new FileStream(segmentPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                    await CopyDownloadStreamAsync(input, output, token);
+                    UpdateState(state => state.CompletedSegments++);
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    if (File.Exists(segmentPath))
+                    {
+                        var partialBytes = new FileInfo(segmentPath).Length;
+                        UpdateState(state => state.BytesReceived = Math.Max(0, state.BytesReceived - partialBytes));
+                        File.Delete(segmentPath);
+                    }
+                    lastError = ex;
+                    if (attempt < SegmentRetryCount)
+                        await Task.Delay(350 * (attempt + 1), token);
+                }
+            }
+
+            throw new InvalidOperationException("服务分片下载失败。", lastError);
+        }
+
+        private async Task CopyDownloadStreamAsync(Stream input, Stream output, CancellationToken token)
+        {
+            var buffer = new byte[128 * 1024];
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer, 0, buffer.Length, token);
+                if (read <= 0)
+                    break;
+                await output.WriteAsync(buffer, 0, read, token);
+                UpdateState(state => state.BytesReceived += read);
+            }
+        }
+
+        private static async Task<bool> SupportsRangeDownloadAsync(
+            string url,
+            long expectedBytes,
+            CancellationToken token)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Range = new RangeHeaderValue(0, 0);
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                var rangeLength = response.Content.Headers.ContentRange?.Length ?? expectedBytes;
+                return response.StatusCode == HttpStatusCode.PartialContent && rangeLength > 0;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void CleanupDownloadFiles(string targetPath, int segmentCount)
+        {
+            if (File.Exists(targetPath))
+                File.Delete(targetPath);
+            CleanupSegmentFiles(targetPath, segmentCount);
+        }
+
+        private static void CleanupSegmentFiles(string targetPath, int segmentCount)
+        {
+            for (var index = 0; index < segmentCount; index++)
+            {
+                var segmentPath = targetPath + ".part" + index;
+                if (File.Exists(segmentPath))
+                    File.Delete(segmentPath);
+            }
+        }
+
+        private static void EnsureExecutablePermission(string path)
+        {
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
+            try
+            {
+                RunProcess("chmod", $"+x \"{path}\"", 5000);
+            }
+            catch
+            {
+            }
+#endif
+        }
+
+        private static void ReplaceVerifiedDownload(string verifiedPath, string finalPath)
+        {
+            if (!File.Exists(finalPath))
+            {
+                File.Move(verifiedPath, finalPath);
+                return;
+            }
+
+            var backupPath = finalPath + ".backup";
+            if (File.Exists(backupPath))
+                File.Delete(backupPath);
+            File.Move(finalPath, backupPath);
+            try
+            {
+                File.Move(verifiedPath, finalPath);
+                File.Delete(backupPath);
+            }
+            catch
+            {
+                if (File.Exists(finalPath))
+                    File.Delete(finalPath);
+                if (File.Exists(backupPath))
+                    File.Move(backupPath, finalPath);
+                throw;
             }
         }
 
@@ -617,17 +841,105 @@ namespace CodingRiver.UPilot
             return manifest;
         }
 
-        private static UPilotServerDownloadInfo PickWindowsDownload(UPilotReleaseManifest manifest)
+        private static UPilotServerDownloadInfo PickCurrentPlatformDownload(UPilotReleaseManifest manifest)
         {
+            return PickDownloadForPlatform(
+                manifest,
+                GetCurrentPlatformKey(),
+                GetCurrentArchitectureKey());
+        }
+
+        private static UPilotServerDownloadInfo PickDownloadForPlatform(
+            UPilotReleaseManifest manifest,
+            string platform,
+            string architecture)
+        {
+            if (manifest == null)
+                return null;
+            UPilotServerDownloadInfo best = null;
+            var bestScore = -1;
             foreach (var item in manifest.Downloads)
             {
-                if (item.Url.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
-                    (string.IsNullOrEmpty(item.Platform) || item.Platform.IndexOf("win", StringComparison.OrdinalIgnoreCase) >= 0) &&
-                    (string.IsNullOrEmpty(item.Architecture) || item.Architecture.IndexOf("64", StringComparison.OrdinalIgnoreCase) >= 0))
-                    return item;
+                if (PlatformMatches(item.Platform, platform) &&
+                    ArchitectureMatches(item.Architecture, architecture))
+                {
+                    var score = (string.IsNullOrWhiteSpace(item.Platform) ? 0 : 2) +
+                                (string.IsNullOrWhiteSpace(item.Architecture) ? 0 : 2);
+                    if (score > bestScore)
+                    {
+                        best = item;
+                        bestScore = score;
+                    }
+                }
             }
 
-            return null;
+            return best;
+        }
+
+        private static string GetCurrentPlatformKey()
+        {
+#if UNITY_EDITOR_WIN
+            return "windows";
+#elif UNITY_EDITOR_OSX
+            return "macos";
+#elif UNITY_EDITOR_LINUX
+            return "linux";
+#else
+            return "unknown";
+#endif
+        }
+
+        private static string GetCurrentArchitectureKey()
+        {
+            switch (RuntimeInformation.ProcessArchitecture)
+            {
+                case Architecture.Arm64:
+                    return "arm64";
+                case Architecture.X86:
+                    return "x86";
+                case Architecture.Arm:
+                    return "arm";
+                default:
+                    return "x64";
+            }
+        }
+
+        private static bool PlatformMatches(string candidate, string current)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+                return true;
+            candidate = candidate.ToLowerInvariant();
+            if (current == "windows") return candidate.Contains("win");
+            if (current == "macos") return candidate.Contains("mac") || candidate.Contains("osx") || candidate.Contains("darwin");
+            if (current == "linux") return candidate.Contains("linux");
+            return candidate.Contains(current);
+        }
+
+        private static bool ArchitectureMatches(string candidate, string current)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+                return true;
+            candidate = candidate.ToLowerInvariant().Replace("-", "").Replace("_", "");
+            if (current == "x64") return candidate.Contains("x64") || candidate.Contains("amd64") || candidate.Contains("win64");
+            if (current == "arm64") return candidate.Contains("arm64") || candidate.Contains("aarch64") || candidate.Contains("applesilicon");
+            return candidate.Contains(current);
+        }
+
+        private static string BuildPlatformDisplayName(string platform, string architecture)
+        {
+            var platformName = platform == "windows" ? "Windows" : platform == "macos" ? "macOS" : platform == "linux" ? "Linux" : "当前平台";
+            var architectureName = architecture == "arm64" && platform == "macos"
+                ? "Apple Silicon"
+                : architecture == "x64" ? "x64" : architecture.ToUpperInvariant();
+            return platformName + " " + architectureName;
+        }
+
+        private static string BuildDefaultServerFileName(string version)
+        {
+            var platform = GetCurrentPlatformKey();
+            var architecture = GetCurrentArchitectureKey();
+            var extension = platform == "windows" ? ".exe" : "";
+            return $"upilot-mcp-server-{version}-{platform}-{architecture}{extension}";
         }
 
         private static UPilotPythonProbeResult ProbePythonCandidate(string python)
@@ -758,8 +1070,11 @@ namespace CodingRiver.UPilot
                 DownloadUrl = source.DownloadUrl,
                 Sha256 = source.Sha256,
                 TargetPath = source.TargetPath,
+                PlatformDisplayName = source.PlatformDisplayName,
                 BytesReceived = source.BytesReceived,
                 TotalBytes = source.TotalBytes,
+                SegmentCount = source.SegmentCount,
+                CompletedSegments = source.CompletedSegments,
                 StartedAt = source.StartedAt,
                 FinishedAt = source.FinishedAt,
             };

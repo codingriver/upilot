@@ -122,6 +122,93 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void McpProcessMatchingRequiresBothCurrentProjectPorts()
+        {
+            var method = typeof(UPilotMcpServerManager).GetMethod(
+                "IsCurrentProjectMcpCommandLine",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.That(method, Is.Not.Null);
+            Assert.That(
+                method.Invoke(null, new object[]
+                {
+                    "upilot-mcp-server.exe --transport http --http-port 8012 --port 8766",
+                    8012,
+                    8766,
+                }),
+                Is.True);
+            Assert.That(
+                method.Invoke(null, new object[]
+                {
+                    "python run_upilot_mcp.py --transport http --http-port 8011 --port 8769",
+                    8012,
+                    8766,
+                }),
+                Is.False);
+            Assert.That(
+                method.Invoke(null, new object[]
+                {
+                    "upilot-mcp-server.exe --transport http --http-port=8012 --port=8766",
+                    8012,
+                    8766,
+                }),
+                Is.True);
+        }
+
+        [Test]
+        public void FirstSetupEntryIsHostedByMainWindow()
+        {
+            Assert.That(typeof(EditorWindow).IsAssignableFrom(typeof(UPilotFirstSetupWindow)), Is.False);
+            Assert.That(
+                typeof(UPilotMainWindow).GetMethod("OpenSetup", BindingFlags.Public | BindingFlags.Static),
+                Is.Not.Null);
+        }
+
+        [Test]
+        public void ManagedServerDownloadSelectsMatchingPlatformAndArchitecture()
+        {
+            var manifest = new UPilotReleaseManifest();
+            var windows = new UPilotServerDownloadInfo
+            {
+                Platform = "windows",
+                Architecture = "x64",
+                Url = "https://example.test/windows",
+            };
+            var mac = new UPilotServerDownloadInfo
+            {
+                Platform = "macos",
+                Architecture = "arm64",
+                Url = "https://example.test/macos",
+            };
+            manifest.Downloads.Add(windows);
+            manifest.Downloads.Add(mac);
+
+            var method = typeof(UPilotServerRuntimeService).GetMethod(
+                "PickDownloadForPlatform",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.That(method, Is.Not.Null);
+            Assert.That(method.Invoke(null, new object[] { manifest, "windows", "x64" }), Is.SameAs(windows));
+            Assert.That(method.Invoke(null, new object[] { manifest, "macos", "arm64" }), Is.SameAs(mac));
+            Assert.That(method.Invoke(null, new object[] { manifest, "linux", "x64" }), Is.Null);
+        }
+
+        [Test]
+        public void DownloadStateExposesSegmentProgress()
+        {
+            var state = new UPilotDownloadState
+            {
+                SegmentCount = 4,
+                CompletedSegments = 2,
+                PlatformDisplayName = "Windows x64",
+            };
+
+            Assert.That(state.SegmentCount, Is.EqualTo(4));
+            Assert.That(state.CompletedSegments, Is.EqualTo(2));
+            Assert.That(state.PlatformDisplayName, Is.EqualTo("Windows x64"));
+        }
+
+        [Test]
         public void PreferenceResetDeletesOnlyRegisteredKeys()
         {
             string prefix = "CodingRiver.UPilot.Tests." + Guid.NewGuid().ToString("N");

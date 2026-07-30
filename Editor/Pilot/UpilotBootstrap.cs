@@ -35,7 +35,7 @@ namespace CodingRiver.UPilot
                 return;
 
             UnityEngine.Debug.Log("[UPilotBootstrap] First setup is not completed; opening UPilot first setup wizard.");
-            UPilotFirstSetupWindow.Open();
+            UPilotMainWindow.OpenSetup();
         }
 
         private static void TryStartBridge()

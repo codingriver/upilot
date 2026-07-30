@@ -4,13 +4,12 @@
 // -----------------------------------------------------------------------
 
 using System;
-using System.Text;
 using UnityEditor;
 using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
-    public sealed class UPilotMainWindow : EditorWindow
+    public sealed partial class UPilotMainWindow : EditorWindow
     {
         private BridgeStatus _bridgeStatus;
         private McpServerStatus _mcpStatus;
@@ -22,10 +21,6 @@ namespace CodingRiver.UPilot
         private double _lastAgentRefresh;
         private double _lastRepaint;
 
-        private bool _useCodex = true;
-        private bool _useClaudeCode;
-        private bool _useCursor;
-        private bool _selectionInitialized;
         private bool _agentAdviceNoticeShown;
 
         private string _notice = "";
@@ -49,6 +44,15 @@ namespace CodingRiver.UPilot
             var window = GetWindow<UPilotMainWindow>("UPilot");
             window.minSize = new Vector2(440, 400);
             window.Show();
+        }
+
+        public static void OpenSetup()
+        {
+            var window = GetWindow<UPilotMainWindow>("UPilot");
+            window.minSize = new Vector2(440, 400);
+            window.EnterSetupView();
+            window.Show();
+            window.Focus();
         }
 
         private void OnEnable()
@@ -76,6 +80,12 @@ namespace CodingRiver.UPilot
         private void OnGUI()
         {
             InitializeStyles();
+            if (_mainView == UPilotMainView.Setup)
+            {
+                DrawSetupView();
+                return;
+            }
+
             if (Event.current.type == EventType.Layout)
             {
                 RefreshAgentConfigs(force: false);
@@ -208,26 +218,6 @@ namespace CodingRiver.UPilot
                 ShowNotice("检测到 Agent/MCP/Skill 配置不一致，可在 Agent 配置区域更新。", MessageType.Warning);
             }
 
-            if (_selectionInitialized)
-                return;
-
-            _selectionInitialized = true;
-            _useCodex = ShouldSelectClient("Codex");
-            _useClaudeCode = ShouldSelectClient("Claude Code");
-            _useCursor = ShouldSelectClient("Cursor");
-            if (!_useCodex && !_useClaudeCode && !_useCursor)
-                _useCodex = true;
-        }
-
-        private bool ShouldSelectClient(string clientName)
-        {
-            foreach (var config in _agentConfigs)
-            {
-                if (config.ClientName == clientName &&
-                    (config.IsConfigured || config.HasUPilotEntry))
-                    return true;
-            }
-            return false;
         }
 
         private void DrawMainCard(UPilotMainSnapshot snapshot)
@@ -253,15 +243,9 @@ namespace CodingRiver.UPilot
 
         private void DrawSetupControls()
         {
-            EditorGUILayout.LabelField("你使用哪个 Agent？", EditorStyles.centeredGreyMiniLabel);
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                _useCodex = GUILayout.Toggle(_useCodex, "Codex", EditorStyles.miniButtonLeft);
-                _useClaudeCode = GUILayout.Toggle(_useClaudeCode, "Claude", EditorStyles.miniButtonMid);
-                _useCursor = GUILayout.Toggle(_useCursor, "Cursor", EditorStyles.miniButtonRight);
-            }
-            EditorGUILayout.Space(5);
-            DrawPrimaryButton("配置并启动", ConfigureAndStart);
+            EditorGUILayout.LabelField("完成端口、服务和 Agent 配置后即可开始使用。", EditorStyles.centeredGreyMiniLabel);
+            EditorGUILayout.Space(8);
+            DrawColoredButton("配置并启动", SetupReadyColor, 48f, ConfigureAndStart);
         }
 
         private void DrawOperationsDashboard(UPilotMainSnapshot snapshot)
@@ -485,18 +469,24 @@ namespace CodingRiver.UPilot
             if (GUI.Button(checkRect, "检查配置"))
             {
                 RefreshAgentConfigs(force: true);
-                var issueCount = CountAgentIntegrationIssues();
-                if (issueCount == 0)
+                var checkedIssueCount = CountAgentIntegrationIssues();
+                if (checkedIssueCount == 0)
                 {
                     ShowNotice("检查完成，所有 Agent 配置已是最新");
                 }
                 else
                 {
-                    ShowNotice($"检查完成，有{issueCount}项配置需要更新", MessageType.Warning);
+                    var confirmationCount = CountCustomizedRuleConfigs();
+                    ShowNotice(
+                        confirmationCount == checkedIssueCount
+                            ? $"检查完成，有 {checkedIssueCount} 项内容需要确认"
+                            : $"检查完成，有 {checkedIssueCount} 项配置需要处理",
+                        MessageType.Warning);
                 }
             }
 
-            var updateLabel = HasAgentIntegrationIssues() ? "更新建议项" : "更新全部";
+            var issueCount = CountAgentIntegrationIssues();
+            var updateLabel = issueCount > 0 ? $"处理 {issueCount} 项" : "更新全部";
             if (GUI.Button(updateRect, updateLabel))
                 UpdateAllAgentIntegrations();
 
@@ -533,21 +523,20 @@ namespace CodingRiver.UPilot
 
         private MessageType BuildAgentIntegrationAdvice(out string message)
         {
-            var mcpIssues = 0;
-            var ruleIssues = 0;
+            AgentMcpConfigStatus? firstMcpIssue = null;
+            AgentRuleConfigStatus? firstRuleIssue = null;
+            var issueCount = 0;
             var hasErrors = false;
-            var hasCustomizedRules = false;
-            var details = new StringBuilder();
 
             foreach (var status in _agentConfigs)
             {
                 if (!NeedsMcpUpdate(status))
                     continue;
 
-                mcpIssues++;
+                issueCount++;
+                firstMcpIssue ??= status;
                 if (!string.IsNullOrEmpty(status.ErrorMessage))
                     hasErrors = true;
-                AppendAdviceDetail(details, $"{status.ClientName} MCP：{status.StateText}");
             }
 
             foreach (var status in _ruleConfigs)
@@ -555,26 +544,55 @@ namespace CodingRiver.UPilot
                 if (!NeedsRuleUpdate(status))
                     continue;
 
-                ruleIssues++;
+                issueCount++;
+                firstRuleIssue ??= status;
                 if (status.State == AgentRuleConfigState.Error)
                     hasErrors = true;
-                if (status.HasLocalCustomization)
-                    hasCustomizedRules = true;
-                AppendAdviceDetail(details, $"{status.ClientName} {GetRuleLabel(status.ClientName)}：{status.StateText}");
             }
 
-            if (mcpIssues == 0 && ruleIssues == 0)
+            if (issueCount == 0)
             {
-                message = "打开 UPilot 时已完成 Agent/MCP/Skill 一致性检查：当前配置已同步。";
+                message = "所有 Agent 配置已是最新";
                 return MessageType.Info;
             }
 
-            var summary = $"打开 UPilot 时已完成一致性检查：{mcpIssues} 个 MCP 配置、{ruleIssues} 个 Skill/规则需要处理。";
-            var action = hasCustomizedRules
-                ? "建议先确认本地修改来源，再点击“更新建议项”；UPilot 会在覆盖管理内容前二次确认。"
-                : "建议点击“更新建议项”同步 MCP 地址、Agent 规则和 Codex Skill。";
-            message = summary + "\n" + action + "\n" + details.ToString().TrimEnd();
-            return hasErrors ? MessageType.Error : MessageType.Warning;
+            if (hasErrors)
+            {
+                message = "部分 Agent 配置无法读取\n请在下方列表中查看异常项目。";
+                return MessageType.Error;
+            }
+
+            if (issueCount == 1 && firstRuleIssue.HasValue)
+            {
+                var status = firstRuleIssue.Value;
+                if (status.State == AgentRuleConfigState.Customized)
+                {
+                    message = $"{status.ClientName} 内容需要确认\n" +
+                              $"检测到 {status.ClientName} 的 UPilot {GetRuleLabel(status.ClientName)} 有本地修改。" +
+                              "当前仍可正常使用，更新时可以选择保留或替换。";
+                    return MessageType.Warning;
+                }
+
+                if (status.State == AgentRuleConfigState.Missing)
+                {
+                    message = $"{status.ClientName} 尚未安装 UPilot {GetRuleLabel(status.ClientName)}\n" +
+                              "完成安装后即可使用最新的 Agent 配置。";
+                    return MessageType.Warning;
+                }
+
+                message = $"{status.ClientName} 有新内容可用\n更新后可使用最新的 UPilot {GetRuleLabel(status.ClientName)}。";
+                return MessageType.Warning;
+            }
+
+            if (issueCount == 1 && firstMcpIssue.HasValue)
+            {
+                var status = firstMcpIssue.Value;
+                message = $"{status.ClientName} 连接地址需要更新\n当前连接可能无法使用，处理后会同步到最新地址。";
+                return MessageType.Warning;
+            }
+
+            message = $"有 {issueCount} 项 Agent 配置需要处理\n请查看下方标记的项目，处理时会先确认可能覆盖的内容。";
+            return MessageType.Warning;
         }
 
         private bool HasAgentIntegrationIssues()
@@ -600,6 +618,18 @@ namespace CodingRiver.UPilot
             return issueCount;
         }
 
+        private int CountCustomizedRuleConfigs()
+        {
+            var count = 0;
+            foreach (var status in _ruleConfigs)
+            {
+                if (status.HasLocalCustomization)
+                    count++;
+            }
+
+            return count;
+        }
+
         private static bool NeedsMcpUpdate(AgentMcpConfigStatus status)
         {
             if (!string.IsNullOrEmpty(status.ErrorMessage))
@@ -614,13 +644,6 @@ namespace CodingRiver.UPilot
             return status.State != AgentRuleConfigState.Current;
         }
 
-        private static void AppendAdviceDetail(StringBuilder builder, string detail)
-        {
-            if (builder.Length > 0)
-                builder.AppendLine();
-            builder.Append("- ").Append(detail);
-        }
-
         private void DrawAgentConfigurationRow(
             AgentMcpConfigStatus mcpStatus,
             AgentRuleConfigStatus ruleStatus)
@@ -632,7 +655,7 @@ namespace CodingRiver.UPilot
 
             EditorGUI.LabelField(agentRect, mcpStatus.ClientName, EditorStyles.boldLabel);
             DrawStatusCell(mcpRect, GetCompactMcpState(mcpStatus), mcpStatus.IsConfigured);
-            DrawStatusCell(ruleRect, ruleStatus.StateText, ruleStatus.State == AgentRuleConfigState.Current);
+            DrawStatusCell(ruleRect, GetRuleStateText(ruleStatus), ruleStatus.State == AgentRuleConfigState.Current);
 
             if (expandedActions)
             {
@@ -750,9 +773,16 @@ namespace CodingRiver.UPilot
         private static string GetCompactMcpState(AgentMcpConfigStatus status)
         {
             if (status.IsConfigured) return "已配置";
-            if (status.HasUPilotEntry && !status.UsesCurrentUrl) return "需更新";
+            if (status.HasUPilotEntry && !status.UsesCurrentUrl) return "需要更新";
             if (!string.IsNullOrEmpty(status.ErrorMessage)) return "异常";
             return "未配置";
+        }
+
+        private static string GetRuleStateText(AgentRuleConfigStatus status)
+        {
+            if (status.State == AgentRuleConfigState.Customized) return "需要确认";
+            if (status.State == AgentRuleConfigState.UpdateAvailable) return "有新版本";
+            return status.StateText;
         }
 
         private static string GetRuleLabel(string clientName)
@@ -765,9 +795,9 @@ namespace CodingRiver.UPilot
             if (status.HasUPilotEntry)
             {
                 var confirmed = EditorUtility.DisplayDialog(
-                    "强制更新 Agent 配置？",
-                    $"将更新 {status.ClientName} 的 UPilot MCP 配置项，不影响其他 MCP 服务。",
-                    "强制更新",
+                    $"更新 {status.ClientName} 连接配置？",
+                    "将连接地址更新为当前 UPilot 使用的地址，不影响其他服务。",
+                    "更新",
                     "取消");
                 if (!confirmed)
                     return;
@@ -784,15 +814,23 @@ namespace CodingRiver.UPilot
         {
             var force = status.State == AgentRuleConfigState.Customized ||
                         status.State == AgentRuleConfigState.Current;
-            if (status.State != AgentRuleConfigState.Missing)
+            if (status.State == AgentRuleConfigState.Customized)
             {
-                var message = status.State == AgentRuleConfigState.Customized
-                    ? $"{status.ClientName} 的 UPilot Skill/规则包含本地修改。强制更新会覆盖 UPilot 管理的内容，是否继续？"
-                    : $"是否更新 {status.ClientName} 的 UPilot Skill/规则？";
+                var choice = EditorUtility.DisplayDialogComplex(
+                    $"如何处理 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
+                    $"当前内容经过本地修改。更新为 UPilot 最新版本会替换这些修改。",
+                    "更新为最新版本",
+                    "取消",
+                    "保留当前内容");
+                if (choice != 0)
+                    return;
+            }
+            else if (status.State != AgentRuleConfigState.Missing)
+            {
                 var confirmed = EditorUtility.DisplayDialog(
-                    force ? "强制更新 Skill/规则？" : "更新 Skill/规则？",
-                    message,
-                    force ? "强制更新" : "更新",
+                    $"更新 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
+                    $"将更新为 UPilot 提供的最新内容。",
+                    "更新",
                     "取消");
                 if (!confirmed)
                     return;
@@ -816,16 +854,27 @@ namespace CodingRiver.UPilot
                 }
             }
 
-            var message = hasCustomizedRules
-                ? "检测到本地修改。将更新已有的 UPilot MCP 连接条目，重新同步全部 UPilot Skill/AGENT规则，并覆盖 UPilot 管理的内容。"
-                : "将更新已有的 UPilot MCP 连接条目，重新同步全部 UPilot Skill/AGENT规则。";
-            var confirmed = EditorUtility.DisplayDialog(
-                "更新全部 UPilot 配置？",
-                message,
-                "确认更新",
-                "取消");
-            if (!confirmed)
+            var overwriteCustomizedRules = true;
+            if (hasCustomizedRules)
+            {
+                var choice = EditorUtility.DisplayDialogComplex(
+                    "如何处理本地修改？",
+                    "检测到 Codex 的 UPilot Skill 有本地修改。你可以保留这些修改并处理其他配置，也可以替换为最新版本。",
+                    "更新为最新版本",
+                    "取消",
+                    "保留本地修改");
+                if (choice == 1)
+                    return;
+                overwriteCustomizedRules = choice == 0;
+            }
+            else if (!EditorUtility.DisplayDialog(
+                         "处理 Agent 配置？",
+                         "将处理下方标记的连接和内容更新。",
+                         "继续",
+                         "取消"))
+            {
                 return;
+            }
 
             var result = "";
             foreach (var status in _agentConfigs)
@@ -834,22 +883,34 @@ namespace CodingRiver.UPilot
                     continue;
                 result += UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false) + "\n";
             }
-            result += UPilotAgentSetup.UpdateAllAgentRules(forceCodexSkillOverwrite: true);
+            result += UPilotAgentSetup.UpdateAllAgentRules(overwriteCustomizedRules);
             Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
             RefreshAgentConfigs(force: true);
             RefreshSnapshot();
-            ShowNotice("全部已配置项已更新");
+            ShowNotice(
+                hasCustomizedRules && !overwriteCustomizedRules
+                    ? "其他配置已处理，本地修改已保留"
+                    : "Agent 配置已更新");
         }
 
-        private static void DrawPrimaryButton(string label, Action action)
+        private static void DrawColoredButton(string label, Color color, float height, Action action)
         {
-            if (GUILayout.Button(label, GUILayout.Height(24)))
-                action();
+            var previous = GUI.backgroundColor;
+            try
+            {
+                GUI.backgroundColor = color;
+                if (GUILayout.Button(label, GUILayout.Height(height)))
+                    action?.Invoke();
+            }
+            finally
+            {
+                GUI.backgroundColor = previous;
+            }
         }
 
         private void ConfigureAndStart()
         {
-            UPilotFirstSetupWindow.Open();
+            EnterSetupView();
         }
 
         private void StartUPilot()

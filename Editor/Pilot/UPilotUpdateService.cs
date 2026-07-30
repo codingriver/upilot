@@ -45,18 +45,47 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            var manager = UPilotMcpServerManager.Instance;
+            var shouldRestart = UPilotSetupState.IsCompleted;
+            notice?.Invoke("正在停止 MCP 服务…", MessageType.Info);
+            if (!manager.StopServerAndWaitForExit())
+            {
+                notice?.Invoke("无法停止 MCP 服务，已取消更新以避免文件占用", MessageType.Error);
+                return;
+            }
+
             UPilotServerRuntimeService.Instance.StartDownloadLatestServerExe();
             notice?.Invoke("正在更新 MCP 服务…", MessageType.Info);
             await WaitForDownloadAsync();
             var state = UPilotServerRuntimeService.Instance.DownloadState;
             if (!state.IsComplete)
             {
+                if (shouldRestart)
+                    manager.StartServer();
                 notice?.Invoke(string.IsNullOrEmpty(state.ErrorMessage) ? "MCP 服务更新未完成" : state.ErrorMessage, MessageType.Error);
                 return;
             }
 
-            UPilotMcpServerManager.Instance.RestartServer();
-            notice?.Invoke("MCP 服务已更新并重启", MessageType.Info);
+            if (!shouldRestart)
+            {
+                notice?.Invoke("MCP 服务已更新，将在完成首次设置后启动", MessageType.Info);
+                return;
+            }
+
+            notice?.Invoke("MCP 服务已更新，正在重新启动…", MessageType.Info);
+            manager.StartServer();
+            var runningVersion = await manager.WaitForServerVersionAsync(manifest.ServerVersion);
+            if (string.IsNullOrWhiteSpace(runningVersion) ||
+                UPilotServerRuntimeService.CompareVersions(runningVersion, manifest.ServerVersion) < 0)
+            {
+                var versionText = string.IsNullOrWhiteSpace(runningVersion) ? "未能读取版本" : runningVersion;
+                notice?.Invoke(
+                    $"MCP 服务已更新，但启动确认失败（当前：{versionText}，期望：{manifest.ServerVersion}），请检查服务日志",
+                    MessageType.Error);
+                return;
+            }
+
+            notice?.Invoke($"MCP 服务已更新并启动，当前版本 {runningVersion}", MessageType.Info);
         }
 
         public async void UpdateUpmFromManifest(Action<string, MessageType> notice)

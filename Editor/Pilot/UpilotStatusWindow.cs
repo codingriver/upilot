@@ -697,7 +697,7 @@ namespace CodingRiver.UPilot
                 if (!UPilotSetupState.IsCompleted)
                 {
                     if (GUILayout.Button("打开首次设置向导", GUILayout.Height(24)))
-                        UPilotFirstSetupWindow.Open();
+                        UPilotMainWindow.OpenSetup();
                 }
                 else
                 {
