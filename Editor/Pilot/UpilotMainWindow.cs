@@ -43,7 +43,7 @@ namespace CodingRiver.UPilot
         public static void Open()
         {
             var window = GetWindow<UPilotMainWindow>("UPilot");
-            window.minSize = new Vector2(360, 460);
+            window.minSize = new Vector2(360, 380);
             window.Show();
         }
 
@@ -89,11 +89,11 @@ namespace CodingRiver.UPilot
             try
             {
                 DrawNotice();
-                EditorGUILayout.Space(8);
+                EditorGUILayout.Space(4);
                 DrawMainCard(displaySnapshot);
-                EditorGUILayout.Space(8);
+                EditorGUILayout.Space(6);
                 DrawAdvancedEntry();
-                EditorGUILayout.Space(8);
+                EditorGUILayout.Space(4);
             }
             finally
             {
@@ -108,19 +108,19 @@ namespace CodingRiver.UPilot
 
             _cardStyle = new GUIStyle(GUI.skin.box)
             {
-                padding = new RectOffset(16, 16, 14, 14),
-                margin = new RectOffset(8, 8, 2, 2),
+                padding = new RectOffset(10, 10, 8, 8),
+                margin = new RectOffset(6, 6, 1, 1),
             };
             _titleStyle = new GUIStyle(EditorStyles.boldLabel)
             {
-                alignment = TextAnchor.MiddleCenter,
-                fontSize = 16,
-                wordWrap = true,
+                alignment = TextAnchor.MiddleLeft,
+                fontSize = 13,
+                wordWrap = false,
             };
-            _messageStyle = new GUIStyle(EditorStyles.label)
+            _messageStyle = new GUIStyle(EditorStyles.miniLabel)
             {
-                alignment = TextAnchor.MiddleCenter,
-                wordWrap = true,
+                alignment = TextAnchor.MiddleLeft,
+                wordWrap = false,
                 normal =
                 {
                     textColor = EditorGUIUtility.isProSkin
@@ -218,10 +218,8 @@ namespace CodingRiver.UPilot
         {
             using (new EditorGUILayout.VerticalScope(_cardStyle))
             {
-                EditorGUILayout.LabelField(snapshot.Title, _titleStyle, GUILayout.Height(28));
-                EditorGUILayout.Space(2);
-                EditorGUILayout.LabelField(snapshot.Message, _messageStyle, GUILayout.MinHeight(34));
-                EditorGUILayout.Space(8);
+                DrawCompactStatusSummary(snapshot);
+                EditorGUILayout.Space(5);
 
                 if (snapshot.State == UPilotMainState.SetupRequired)
                     DrawSetupControls();
@@ -239,20 +237,34 @@ namespace CodingRiver.UPilot
                 _useClaudeCode = GUILayout.Toggle(_useClaudeCode, "Claude", EditorStyles.miniButtonMid);
                 _useCursor = GUILayout.Toggle(_useCursor, "Cursor", EditorStyles.miniButtonRight);
             }
-            EditorGUILayout.Space(8);
+            EditorGUILayout.Space(5);
             DrawPrimaryButton("配置并启动", ConfigureAndStart);
         }
 
         private void DrawOperationsDashboard(UPilotMainSnapshot snapshot)
         {
             DrawServiceControls(snapshot);
-            EditorGUILayout.Space(10);
+            EditorGUILayout.Space(6);
             DrawVersionSection();
-            EditorGUILayout.Space(10);
+            EditorGUILayout.Space(6);
             DrawMcpEndpoint();
-            EditorGUILayout.Space(10);
+            EditorGUILayout.Space(6);
             using (new EditorGUI.DisabledScope(IsServiceTransitioning(snapshot.State)))
                 DrawAgentConfigurationList();
+        }
+
+        private void DrawCompactStatusSummary(UPilotMainSnapshot snapshot)
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                var previous = GUI.color;
+                GUI.color = GetStateColor(snapshot.State);
+                GUILayout.Label("●", GUILayout.Width(14));
+                GUI.color = previous;
+
+                EditorGUILayout.LabelField(snapshot.Title, _titleStyle, GUILayout.Width(58));
+                EditorGUILayout.LabelField(snapshot.Message, _messageStyle, GUILayout.MinWidth(0));
+            }
         }
 
         private void DrawServiceControls(UPilotMainSnapshot snapshot)
@@ -273,12 +285,12 @@ namespace CodingRiver.UPilot
                         ? "正在停止…"
                         : "正在启动…";
                 using (new EditorGUI.DisabledScope(true))
-                    GUILayout.Button(label, GUILayout.Height(30));
+                    GUILayout.Button(label, GUILayout.Height(24));
                 return;
             }
 
             var primaryLabel = snapshot.State == UPilotMainState.Ready ? "重启 UPilot" : "自动修复";
-            if (GUILayout.Button(primaryLabel, GUILayout.Height(30)))
+            if (GUILayout.Button(primaryLabel, GUILayout.Height(24)))
             {
                 if (snapshot.State == UPilotMainState.Ready)
                 {
@@ -310,9 +322,9 @@ namespace CodingRiver.UPilot
         {
             var mcpUrl = UPilotAgentSetup.McpUrl;
 
-            EditorGUILayout.LabelField("MCP 地址", EditorStyles.boldLabel);
             using (new EditorGUILayout.HorizontalScope())
             {
+                EditorGUILayout.LabelField("MCP 地址", EditorStyles.miniBoldLabel, GUILayout.Width(58));
                 EditorGUILayout.SelectableLabel(mcpUrl, EditorStyles.textField,
                     GUILayout.Height(EditorGUIUtility.singleLineHeight));
                 if (GUILayout.Button("复制", EditorStyles.miniButton, GUILayout.Width(44)))
@@ -327,18 +339,29 @@ namespace CodingRiver.UPilot
         {
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                EditorGUILayout.LabelField("版本与运行时", EditorStyles.boldLabel);
-                EditorGUILayout.LabelField("UPM/Bridge", UPilotServerRuntimeService.UpmVersion, EditorStyles.miniLabel);
-                EditorGUILayout.LabelField("MCP Server", string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动或旧版本未上报" : _mcpStatus.ServerVersion, EditorStyles.miniLabel);
-                EditorGUILayout.LabelField("运行模式", string.IsNullOrEmpty(_mcpStatus.RuntimeMode) ? UPilotServerRuntimeService.Instance.RuntimeModeLabel : _mcpStatus.RuntimeMode, EditorStyles.miniLabel);
+                var serverVersion = string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动/旧版" : _mcpStatus.ServerVersion;
+                var runtimeMode = string.IsNullOrEmpty(_mcpStatus.RuntimeMode) ? UPilotServerRuntimeService.Instance.RuntimeModeLabel : _mcpStatus.RuntimeMode;
                 var channel = string.IsNullOrEmpty(_mcpStatus.BuildChannel) ? "release" : _mcpStatus.BuildChannel;
                 var compatibility = channel.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0
-                    ? "main 分支：按 protocol/registry 兼容"
-                    : "release：按版本清单兼容";
-                EditorGUILayout.LabelField("兼容策略", compatibility, EditorStyles.miniLabel);
+                    ? "main protocol/registry"
+                    : "release 清单兼容";
+
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    EditorGUILayout.LabelField("写入授权", UPilotProjectConfig.Current.safety?.writeAccessApproved == true ? "已允许非 safe 模式" : "safe 模式（拒绝项目写入工具）", EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField("版本与运行时", EditorStyles.miniBoldLabel, GUILayout.Width(72));
+                    DrawInlineInfo("UPM", UPilotServerRuntimeService.UpmVersion, 70);
+                    DrawInlineInfo("Server", serverVersion, 92);
+                    DrawInlineInfo("模式", runtimeMode, 78);
+                    GUILayout.FlexibleSpace();
+                }
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    DrawInlineInfo("兼容", compatibility, 178);
+                    DrawInlineInfo(
+                        "授权",
+                        UPilotProjectConfig.Current.safety?.writeAccessApproved == true ? "非 safe 已允许" : "safe 模式",
+                        126);
                     GUILayout.FlexibleSpace();
                     if (UPilotProjectConfig.Current.safety?.writeAccessApproved == true)
                     {
@@ -357,6 +380,11 @@ namespace CodingRiver.UPilot
                     }
                 }
             }
+        }
+
+        private static void DrawInlineInfo(string label, string value, float width)
+        {
+            EditorGUILayout.LabelField(label + " " + value, EditorStyles.miniLabel, GUILayout.Width(width));
         }
 
         private void DrawAgentConfigurationList()
@@ -478,32 +506,46 @@ namespace CodingRiver.UPilot
         {
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
+                var singleLine = position.width >= 430f;
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     EditorGUILayout.LabelField(mcpStatus.ClientName, EditorStyles.boldLabel, GUILayout.Width(84));
-                    GUILayout.FlexibleSpace();
                     EditorGUILayout.LabelField(
                         "MCP " + GetCompactMcpState(mcpStatus),
                         EditorStyles.miniLabel,
-                        GUILayout.Width(86));
+                        GUILayout.Width(78));
                     EditorGUILayout.LabelField(
                         GetRuleLabel(mcpStatus.ClientName) + " " + ruleStatus.StateText,
                         EditorStyles.miniLabel,
-                        GUILayout.Width(92));
+                        GUILayout.Width(88));
+                    GUILayout.FlexibleSpace();
+
+                    if (singleLine)
+                        DrawAgentConfigurationButtons(mcpStatus, ruleStatus);
                 }
 
-                using (new EditorGUILayout.HorizontalScope())
+                if (!singleLine)
                 {
-                    GUILayout.FlexibleSpace();
-                    var configLabel = mcpStatus.HasUPilotEntry ? "更新配置" : "配置";
-                    if (GUILayout.Button(configLabel, EditorStyles.miniButton, GUILayout.Width(76)))
-                        UpdateAgentMcpConfig(mcpStatus);
-
-                    var ruleLabel = mcpStatus.ClientName == "Codex" ? "更新 Skill" : "更新规则";
-                    if (GUILayout.Button(ruleLabel, EditorStyles.miniButton, GUILayout.Width(82)))
-                        UpdateAgentRuleConfig(ruleStatus);
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.FlexibleSpace();
+                        DrawAgentConfigurationButtons(mcpStatus, ruleStatus);
+                    }
                 }
             }
+        }
+
+        private void DrawAgentConfigurationButtons(
+            AgentMcpConfigStatus mcpStatus,
+            AgentRuleConfigStatus ruleStatus)
+        {
+            var configLabel = mcpStatus.HasUPilotEntry ? "更新配置" : "配置";
+            if (GUILayout.Button(configLabel, EditorStyles.miniButton, GUILayout.Width(70)))
+                UpdateAgentMcpConfig(mcpStatus);
+
+            var ruleLabel = mcpStatus.ClientName == "Codex" ? "更新 Skill" : "更新规则";
+            if (GUILayout.Button(ruleLabel, EditorStyles.miniButton, GUILayout.Width(76)))
+                UpdateAgentRuleConfig(ruleStatus);
         }
 
         private AgentRuleConfigStatus FindRuleStatus(string clientName)
@@ -613,7 +655,7 @@ namespace CodingRiver.UPilot
 
         private static void DrawPrimaryButton(string label, Action action)
         {
-            if (GUILayout.Button(label, GUILayout.Height(30)))
+            if (GUILayout.Button(label, GUILayout.Height(24)))
                 action();
         }
 
