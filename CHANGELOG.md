@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+- Added a unified update center that clearly separates release and Main builds, package updates, and managed MCP service updates.
+- Corrected local-development and Python runtime update guidance so bundled services are not compared with remote managed builds.
+- Refined the main UPilot window with narrower responsive layout, clearer status hierarchy, and aligned Agent configuration controls.
+
 ## 0.3.2
 
 - Refined the UPilot main window into a denser status dashboard with compact runtime details and table-style Agent configuration controls.
