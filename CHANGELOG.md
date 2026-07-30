@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- Refined the UPilot main window into a denser status dashboard with compact runtime details and table-style Agent configuration controls.
+- Improved Agent MCP and Skill/rule consistency checks, update guidance, and preferences handling.
+- Expanded long-running task operations, compile tooling, and related automated coverage.
+- Constrained the Python MCP SDK to the compatible 1.x series so standalone server builds remain runnable.
+
 ## 0.2.0
 
 - Added persistent Unity Console capture sessions with JSONL output, incremental reads, rotation, summaries, SHA256 verification, session listing, and confirm-token cleanup.

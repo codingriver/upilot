@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "upilot-mcp"
-version = "0.3.1"
+version = "0.3.2"
 description = "upilot MCP bridge — lets AI tools control the Unity Editor via WebSocket"
 readme = "DEVELOPMENT.md"
 requires-python = ">=3.11"
 license = "MIT"
 keywords = ["unity", "unity-editor", "mcp", "mcp-server", "model-context-protocol", "codex", "openai", "claude", "cursor", "ai-agent", "editor-automation", "game-dev", "upilot"]
 dependencies = [
-    "mcp>=1.26.0",
+    "mcp>=1.26.0,<2",
     "websockets>=12.0",
     "PyYAML>=6.0",
     "pillow>=10.0",

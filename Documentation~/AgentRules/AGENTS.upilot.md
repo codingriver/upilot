@@ -1,7 +1,7 @@
 # UPilot Unity MCP Agent Rules Template
 
 rulesVersion: 2
-upilotPackageVersion: 0.3.1
+upilotPackageVersion: 0.3.2
 
 This template is the generic UPilot rule source for Unity projects that install
 `io.github.codingriver.upilot`. Project-specific business rules outside the
