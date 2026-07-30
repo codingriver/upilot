@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.7
+
+- Add release CI validation so tag, UPM package, and MCP server versions must match before publishing release assets.
+- Keep update manifests aligned across UPilot package and managed MCP service releases.
+
 ## 0.3.5
 
 - Stop the MCP service before UPilot package updates initiated from either the update center or Unity Package Manager, then restore it after package registration and assembly reload.
