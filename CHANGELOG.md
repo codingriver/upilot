@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5
+
+- Stop the MCP service before UPilot package updates initiated from either the update center or Unity Package Manager, then restore it after package registration and assembly reload.
+- Preserve update restart intent across domain reloads while avoiding automatic service startup during first installation.
+- Prefer the current source package version over stale installed Python distribution metadata when reporting the MCP server version.
+
 ## 0.3.3
 
 - Added a unified update center that clearly separates release and Main builds, package updates, and managed MCP service updates.
