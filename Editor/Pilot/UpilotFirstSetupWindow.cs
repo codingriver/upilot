@@ -112,7 +112,7 @@ namespace CodingRiver.UPilot
         private void DrawRuntimeStep()
         {
             EditorGUILayout.HelpBox(
-                "第二步：检查 MCP Server 运行环境。Python 3.11+ 可用时优先使用 Python；不可用时下载完整独立 exe。",
+                "第二步：检查 MCP 服务运行环境。Python 3.11+ 可用时优先使用本机 Python；不可用时由 UPilot 自动管理服务。",
                 MessageType.Info);
 
             _pythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
@@ -199,7 +199,7 @@ namespace CodingRiver.UPilot
             var state = runtime.DownloadState;
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                EditorGUILayout.LabelField("独立 MCP Server exe", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("自动管理（推荐）", EditorStyles.boldLabel);
                 EditorGUILayout.LabelField("缓存目录", runtime.RuntimeCacheRoot, EditorStyles.miniLabel);
 
                 if (runtime.IsStandaloneExeConfigured(out var exePath))
@@ -237,7 +237,7 @@ namespace CodingRiver.UPilot
                     }
                     if (GUILayout.Button("选择本地 exe", GUILayout.Width(100)))
                     {
-                        var selected = EditorUtility.OpenFilePanel("选择 UPilot MCP Server exe", "", "exe");
+                        var selected = EditorUtility.OpenFilePanel("选择 UPilot MCP 服务文件", "", "exe");
                         if (!string.IsNullOrEmpty(selected) && File.Exists(selected))
                             runtime.SetStandaloneExeRuntime(selected);
                     }
@@ -414,7 +414,7 @@ namespace CodingRiver.UPilot
             }
 
             runtime.StartDownloadLatestServerExe();
-            _runtimeAutoMessage = "未找到 Python 3.11+，已自动选择独立 exe 并开始下载。";
+            _runtimeAutoMessage = "未找到 Python 3.11+，已切换为自动管理并开始安装服务。";
         }
 
         private static float GetPythonEnvironmentProgress(UPilotPythonEnvironmentState state)

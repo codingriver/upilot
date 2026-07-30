@@ -205,7 +205,7 @@ namespace CodingRiver.UPilot
             var runtime = UPilotServerRuntimeService.Instance;
             var needsPythonEntry = runtime.GetConfiguredMode() == UPilotServerRuntimeMode.Python;
             if (!needsPythonEntry && !runtime.IsStandaloneExeConfigured(out _))
-                return "独立 MCP Server exe 未配置，请打开首次向导下载或选择本地 exe。";
+                return "自动管理的 MCP 服务尚未安装，请打开首次向导完成设置。";
 
             if (needsPythonEntry && !manager.IsPythonEntryValid(out _))
             {

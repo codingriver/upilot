@@ -19,30 +19,12 @@ namespace CodingRiver.UPilot
         private AddRequest _upmRequest;
         private Action<string, MessageType> _notice;
 
-        public async void CheckForUpdates(Action<string, MessageType> notice)
+        public void CheckForUpdates(Action<string, MessageType> notice)
         {
-            _notice = notice;
-            try
-            {
-                var channel = UPilotServerRuntimeService.ResolveUpdateChannel();
-                var manifestUrl = UPilotServerRuntimeService.ResolveManifestUrl();
-                Debug.Log($"[UPilot] CheckForUpdates channel={channel}, manifestUrl={manifestUrl}");
-                var manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync(manifestUrl);
-                var compatibility = UPilotServerRuntimeService.Instance.EvaluateManifestCompatibility(manifest);
-                var message =
-                    $"UPM {UPilotServerRuntimeService.UpmVersion} -> {manifest.UpmVersion}\n" +
-                    $"MCP Server {(string.IsNullOrEmpty(UPilotMcpServerManager.Instance.GetStatus().ServerVersion) ? "unknown" : UPilotMcpServerManager.Instance.GetStatus().ServerVersion)} -> {manifest.ServerVersion}\n" +
-                    $"Channel: {manifest.Channel}\n" +
-                    $"Compatibility: {(compatibility.IsCompatible ? "OK" : "Blocked")} - {compatibility.Reason}";
-                EditorUtility.DisplayDialog("UPilot 更新信息", message, "OK");
-            }
-            catch (Exception ex)
-            {
-                notice?.Invoke("检查更新失败：" + ex.Message, MessageType.Error);
-            }
+            UPilotUpdateWindow.Open(notice);
         }
 
-        public async void UpdateServerExeAndRestart(Action<string, MessageType> notice)
+        public async void UpdateManagedServerAndRestart(Action<string, MessageType> notice)
         {
             _notice = notice;
             UPilotReleaseManifest manifest;
@@ -56,25 +38,25 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var compatibility = UPilotServerRuntimeService.Instance.EvaluateManifestCompatibility(manifest);
-            if (!compatibility.IsCompatible)
+            var currentUpm = UPilotServerRuntimeService.UpmVersion;
+            if (!UPilotServerRuntimeService.IsVersionAtLeast(currentUpm, manifest.MinCompatibleUpm))
             {
-                notice?.Invoke("Server 更新被兼容校验阻止：" + compatibility.Reason, MessageType.Error);
+                notice?.Invoke($"请先将 UPilot 包更新到 {manifest.MinCompatibleUpm} 或更高版本", MessageType.Warning);
                 return;
             }
 
             UPilotServerRuntimeService.Instance.StartDownloadLatestServerExe();
-            notice?.Invoke("正在下载 MCP Server exe…", MessageType.Info);
+            notice?.Invoke("正在更新 MCP 服务…", MessageType.Info);
             await WaitForDownloadAsync();
             var state = UPilotServerRuntimeService.Instance.DownloadState;
             if (!state.IsComplete)
             {
-                notice?.Invoke(string.IsNullOrEmpty(state.ErrorMessage) ? "Server 更新未完成" : state.ErrorMessage, MessageType.Error);
+                notice?.Invoke(string.IsNullOrEmpty(state.ErrorMessage) ? "MCP 服务更新未完成" : state.ErrorMessage, MessageType.Error);
                 return;
             }
 
             UPilotMcpServerManager.Instance.RestartServer();
-            notice?.Invoke("MCP Server 已更新并重启", MessageType.Info);
+            notice?.Invoke("MCP 服务已更新并重启", MessageType.Info);
         }
 
         public async void UpdateUpmFromManifest(Action<string, MessageType> notice)
@@ -97,13 +79,6 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var compatibility = UPilotServerRuntimeService.Instance.EvaluateManifestCompatibility(manifest);
-            if (!compatibility.IsCompatible)
-            {
-                notice?.Invoke("UPM 更新被兼容校验阻止：" + compatibility.Reason, MessageType.Error);
-                return;
-            }
-
             var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
             if (package != null && package.source == PackageSource.Local)
             {
@@ -113,13 +88,22 @@ namespace CodingRiver.UPilot
                     "尝试更新",
                     "取消");
                 if (!confirmed)
+                {
+                    notice?.Invoke("已取消 UPilot 包更新", MessageType.Info);
                     return;
+                }
             }
 
-            var identifier = $"https://github.com/codingriver/upilot.git#v{manifest.UpmVersion}";
+            var channel = string.IsNullOrWhiteSpace(manifest.Channel)
+                ? UPilotServerRuntimeService.ResolveUpdateChannel()
+                : manifest.Channel;
+            var revision = channel.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0
+                ? "main"
+                : "v" + manifest.UpmVersion;
+            var identifier = $"https://github.com/codingriver/upilot.git#{revision}";
             _upmRequest = Client.Add(identifier);
             EditorApplication.update += PollUpmUpdate;
-            notice?.Invoke("正在更新 UPilot UPM 包…", MessageType.Info);
+            notice?.Invoke("正在更新 UPilot 包…", MessageType.Info);
         }
 
         private static async Task WaitForDownloadAsync()
@@ -136,12 +120,12 @@ namespace CodingRiver.UPilot
             EditorApplication.update -= PollUpmUpdate;
             if (_upmRequest.Status == StatusCode.Failure)
             {
-                _notice?.Invoke("UPM 更新失败：" + (_upmRequest.Error?.message ?? "unknown"), MessageType.Error);
+                _notice?.Invoke("UPilot 包更新失败：" + (_upmRequest.Error?.message ?? "unknown"), MessageType.Error);
                 _upmRequest = null;
                 return;
             }
 
-            _notice?.Invoke("UPM 已更新，等待 Unity Domain Reload 后重启 Bridge", MessageType.Info);
+            _notice?.Invoke("UPilot 包已更新，Unity 重载后将重新启动服务", MessageType.Info);
             _upmRequest = null;
             EditorApplication.delayCall += () =>
             {

@@ -112,6 +112,16 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UpdateVersionComparisonHandlesReleaseAndMainBuilds()
+        {
+            Assert.That(UPilotServerRuntimeService.IsVersionNewer("0.3.2", "0.3.1"), Is.True);
+            Assert.That(UPilotServerRuntimeService.IsVersionNewer("0.3.2-main.12+abc", "0.3.2-main.7+def"), Is.True);
+            Assert.That(UPilotServerRuntimeService.IsVersionNewer("0.3.2-main.7+abc", "0.3.2-main.12+def"), Is.False);
+            Assert.That(UPilotServerRuntimeService.IsVersionAtLeast("0.3.2", "0.3.2-main.12+abc"), Is.True);
+            Assert.That(UPilotServerRuntimeService.IsVersionAtLeast("0.3.2-main.12+abc", "0.3.2"), Is.False);
+        }
+
+        [Test]
         public void PreferenceResetDeletesOnlyRegisteredKeys()
         {
             string prefix = "CodingRiver.UPilot.Tests." + Guid.NewGuid().ToString("N");

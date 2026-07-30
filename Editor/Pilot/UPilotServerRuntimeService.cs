@@ -169,8 +169,8 @@ namespace CodingRiver.UPilot
             {
                 var mode = UPilotProjectConfig.Current.runtime?.mode ?? "python";
                 return string.Equals(mode, "exe", StringComparison.OrdinalIgnoreCase)
-                    ? "Standalone exe"
-                    : "Python";
+                    ? "自动管理"
+                    : "本机 Python";
             }
         }
 
@@ -477,7 +477,7 @@ namespace CodingRiver.UPilot
                 var manifest = await FetchReleaseManifestAsync();
                 var download = PickWindowsDownload(manifest);
                 if (download == null)
-                    throw new InvalidOperationException("发布清单中没有 Windows x64 server exe。");
+                    throw new InvalidOperationException("发布清单中没有适用于当前平台的 MCP 服务。");
 
                 UpdateState(state =>
                 {
@@ -485,7 +485,7 @@ namespace CodingRiver.UPilot
                     state.DownloadUrl = download.Url;
                     state.Sha256 = download.Sha256;
                     state.TotalBytes = download.SizeBytes;
-                    state.Phase = "下载 MCP Server";
+                    state.Phase = "下载 MCP 服务";
                 });
 
                 var versionDir = Path.Combine(RuntimeCacheRoot, SafePathSegment(manifest.ServerVersion));
@@ -925,19 +925,61 @@ namespace CodingRiver.UPilot
             return url.Substring(0, url.Length - ManifestFileName.Length) + LegacyManifestFileName;
         }
 
-        private static bool IsVersionAtLeast(string current, string minimum)
+        public static bool IsVersionAtLeast(string current, string minimum)
         {
             if (string.IsNullOrWhiteSpace(minimum))
                 return true;
             if (string.IsNullOrWhiteSpace(current))
                 return false;
-            if (!TryParseVersionParts(current, out var cMajor, out var cMinor, out var cPatch))
+            if (!TryParseVersionParts(current, out _, out _, out _) ||
+                !TryParseVersionParts(minimum, out _, out _, out _))
                 return false;
-            if (!TryParseVersionParts(minimum, out var mMajor, out var mMinor, out var mPatch))
+            return CompareVersions(current, minimum) >= 0;
+        }
+
+        public static bool IsVersionNewer(string candidate, string current)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
                 return false;
-            if (cMajor != mMajor) return cMajor > mMajor;
-            if (cMinor != mMinor) return cMinor > mMinor;
-            return cPatch >= mPatch;
+            if (string.IsNullOrWhiteSpace(current))
+                return true;
+            if (!TryParseVersionParts(candidate, out _, out _, out _))
+                return false;
+            if (!TryParseVersionParts(current, out _, out _, out _))
+                return true;
+            return CompareVersions(candidate, current) > 0;
+        }
+
+        public static int CompareVersions(string left, string right)
+        {
+            if (!TryParseVersionParts(left, out var leftMajor, out var leftMinor, out var leftPatch))
+                return string.Compare(left ?? "", right ?? "", StringComparison.OrdinalIgnoreCase);
+            if (!TryParseVersionParts(right, out var rightMajor, out var rightMinor, out var rightPatch))
+                return string.Compare(left ?? "", right ?? "", StringComparison.OrdinalIgnoreCase);
+
+            var result = leftMajor.CompareTo(rightMajor);
+            if (result != 0) return result;
+            result = leftMinor.CompareTo(rightMinor);
+            if (result != 0) return result;
+            result = leftPatch.CompareTo(rightPatch);
+            if (result != 0) return result;
+
+            var leftIsMain = TryParseMainBuild(left, out var leftMainBuild);
+            var rightIsMain = TryParseMainBuild(right, out var rightMainBuild);
+            if (leftIsMain && rightIsMain)
+                return leftMainBuild.CompareTo(rightMainBuild);
+            if (leftIsMain != rightIsMain)
+                return leftIsMain ? -1 : 1;
+            return 0;
+        }
+
+        private static bool TryParseMainBuild(string value, out int build)
+        {
+            build = 0;
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+            var match = Regex.Match(value, @"-main\.(\d+)", RegexOptions.IgnoreCase);
+            return match.Success && int.TryParse(match.Groups[1].Value, out build);
         }
 
         private static bool TryParseVersionParts(string value, out int major, out int minor, out int patch)
