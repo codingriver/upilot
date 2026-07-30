@@ -47,13 +47,13 @@ namespace CodingRiver.UPilot
         public static void Open()
         {
             var window = GetWindow<UPilotMainWindow>("UPilot");
-            window.minSize = new Vector2(500, 400);
+            window.minSize = new Vector2(440, 400);
             window.Show();
         }
 
         private void OnEnable()
         {
-            minSize = new Vector2(500, 400);
+            minSize = new Vector2(440, 400);
             RefreshAgentConfigs(force: true);
             RefreshSnapshot();
             EditorApplication.update += OnEditorUpdate;
@@ -110,7 +110,7 @@ namespace CodingRiver.UPilot
 
             _cardStyle = new GUIStyle(GUI.skin.box)
             {
-                padding = new RectOffset(14, 14, 12, 10),
+                padding = new RectOffset(10, 10, 10, 10),
                 margin = new RectOffset(8, 8, 1, 1),
             };
             _titleStyle = new GUIStyle(EditorStyles.boldLabel)
@@ -267,43 +267,53 @@ namespace CodingRiver.UPilot
         private void DrawOperationsDashboard(UPilotMainSnapshot snapshot)
         {
             DrawVersionSection();
-            EditorGUILayout.Space(10);
+            EditorGUILayout.Space(8);
+            DrawSectionTitleBar("MCP 连接");
+            EditorGUILayout.Space(4);
             DrawMcpEndpoint();
-            EditorGUILayout.Space(12);
+            EditorGUILayout.Space(10);
             using (new EditorGUI.DisabledScope(IsServiceTransitioning(snapshot.State)))
                 DrawAgentConfigurationList();
         }
 
         private void DrawStatusActionBar(UPilotMainSnapshot snapshot)
         {
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                EditorGUILayout.LabelField("UPilot", _titleStyle, GUILayout.Width(58), GUILayout.Height(24));
+            var rect = EditorGUILayout.GetControlRect(false, 54f);
+            DrawBandBackground(rect);
 
-                var previous = GUI.color;
-                GUI.color = GetStateColor(snapshot.State);
-                GUILayout.Label("●", GUILayout.Width(14), GUILayout.Height(24));
-                GUI.color = previous;
+            const float horizontalPadding = 10f;
+            const float buttonGap = 6f;
+            var menuRect = new Rect(rect.xMax - horizontalPadding - 28f, rect.y + 6f, 28f, 24f);
+            var actionRect = new Rect(menuRect.x - buttonGap - 82f, rect.y + 6f, 82f, 24f);
+            var titleRect = new Rect(rect.x + horizontalPadding, rect.y + 6f, 58f, 24f);
+            var dotRect = new Rect(titleRect.xMax, titleRect.y, 14f, titleRect.height);
+            var stateRect = new Rect(dotRect.xMax, titleRect.y, 62f, titleRect.height);
 
-                EditorGUILayout.LabelField(GetStateLabel(snapshot.State), EditorStyles.boldLabel, GUILayout.Width(62), GUILayout.Height(24));
-                GUILayout.FlexibleSpace();
+            EditorGUI.LabelField(titleRect, "UPilot", _titleStyle);
+            var previous = GUI.color;
+            GUI.color = GetStateColor(snapshot.State);
+            EditorGUI.LabelField(dotRect, "●");
+            GUI.color = previous;
+            EditorGUI.LabelField(stateRect, GetStateLabel(snapshot.State), EditorStyles.boldLabel);
 
-                if (snapshot.State != UPilotMainState.SetupRequired)
-                    DrawServiceAction(snapshot);
+            if (snapshot.State != UPilotMainState.SetupRequired)
+                DrawServiceAction(actionRect, snapshot);
+            if (GUI.Button(menuRect, "⋮"))
+                ShowMoreMenu(snapshot);
 
-                if (GUILayout.Button("⋮", GUILayout.Width(28), GUILayout.Height(24)))
-                    ShowMoreMenu(snapshot);
-            }
-
-            EditorGUILayout.Space(3);
-            EditorGUILayout.LabelField(snapshot.Message, _messageStyle, GUILayout.MinHeight(18));
+            var messageRect = new Rect(
+                rect.x + horizontalPadding,
+                rect.y + 32f,
+                rect.width - horizontalPadding * 2f,
+                18f);
+            EditorGUI.LabelField(messageRect, snapshot.Message, _messageStyle);
         }
 
-        private void DrawServiceAction(UPilotMainSnapshot snapshot)
+        private void DrawServiceAction(Rect rect, UPilotMainSnapshot snapshot)
         {
             if (snapshot.State == UPilotMainState.Stopped)
             {
-                if (GUILayout.Button("启动", GUILayout.Width(76), GUILayout.Height(24)))
+                if (GUI.Button(rect, "启动"))
                     StartUPilot();
                 return;
             }
@@ -318,12 +328,12 @@ namespace CodingRiver.UPilot
                         ? "停止中…"
                         : "启动中…";
                 using (new EditorGUI.DisabledScope(true))
-                    GUILayout.Button(label, GUILayout.Width(82), GUILayout.Height(24));
+                    GUI.Button(rect, label);
                 return;
             }
 
             var primaryLabel = snapshot.State == UPilotMainState.Ready ? "重启" : "自动修复";
-            if (GUILayout.Button(primaryLabel, GUILayout.Width(82), GUILayout.Height(24)))
+            if (GUI.Button(rect, primaryLabel))
             {
                 if (snapshot.State == UPilotMainState.Ready)
                 {
@@ -387,9 +397,9 @@ namespace CodingRiver.UPilot
                 : "release 清单兼容";
             var writeApproved = UPilotProjectConfig.Current.safety?.writeAccessApproved == true;
 
-            EditorGUILayout.LabelField("运行信息", _sectionTitleStyle, GUILayout.Height(20));
-            EditorGUILayout.Space(2);
-            if (position.width >= 700f)
+            DrawSectionTitleBar("运行信息");
+            EditorGUILayout.Space(4);
+            if (position.width >= 620f)
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -461,13 +471,15 @@ namespace CodingRiver.UPilot
 
         private void DrawAgentConfigurationList()
         {
-            var toolbarRect = EditorGUILayout.GetControlRect(false, 24f);
+            var toolbarRect = EditorGUILayout.GetControlRect(false, 30f);
             const float checkWidth = 82f;
             const float updateWidth = 96f;
             const float gap = 6f;
-            var updateRect = new Rect(toolbarRect.xMax - updateWidth, toolbarRect.y, updateWidth, toolbarRect.height);
-            var checkRect = new Rect(updateRect.x - gap - checkWidth, toolbarRect.y, checkWidth, toolbarRect.height);
-            var titleRect = new Rect(toolbarRect.x, toolbarRect.y, Mathf.Max(80f, checkRect.x - toolbarRect.x - gap), toolbarRect.height);
+            DrawBandBackground(toolbarRect);
+            DrawBandAccent(toolbarRect);
+            var updateRect = new Rect(toolbarRect.xMax - 6f - updateWidth, toolbarRect.y + 3f, updateWidth, 24f);
+            var checkRect = new Rect(updateRect.x - gap - checkWidth, toolbarRect.y + 3f, checkWidth, 24f);
+            var titleRect = new Rect(toolbarRect.x + 10f, toolbarRect.y + 3f, Mathf.Max(70f, checkRect.x - toolbarRect.x - 16f), 24f);
 
             EditorGUI.LabelField(titleRect, "Agent 配置", _sectionTitleStyle);
             if (GUI.Button(checkRect, "检查配置"))
@@ -697,6 +709,33 @@ namespace CodingRiver.UPilot
             EditorGUI.DrawRect(rect, color);
         }
 
+        private void DrawSectionTitleBar(string title)
+        {
+            var rect = EditorGUILayout.GetControlRect(false, 26f);
+            DrawBandBackground(rect);
+            DrawBandAccent(rect);
+            var labelRect = new Rect(rect.x + 10f, rect.y + 2f, rect.width - 16f, 22f);
+            EditorGUI.LabelField(labelRect, title, _sectionTitleStyle);
+        }
+
+        private static void DrawBandBackground(Rect rect)
+        {
+            EditorGUI.DrawRect(
+                rect,
+                EditorGUIUtility.isProSkin
+                    ? new Color(1f, 1f, 1f, 0.035f)
+                    : new Color(0f, 0f, 0f, 0.045f));
+        }
+
+        private static void DrawBandAccent(Rect rect)
+        {
+            EditorGUI.DrawRect(
+                new Rect(rect.x, rect.y, 3f, rect.height),
+                EditorGUIUtility.isProSkin
+                    ? new Color(0.28f, 0.58f, 0.92f, 0.85f)
+                    : new Color(0.16f, 0.42f, 0.76f, 0.9f));
+        }
+
         private AgentRuleConfigStatus FindRuleStatus(string clientName)
         {
             foreach (var status in _ruleConfigs)
@@ -830,9 +869,7 @@ namespace CodingRiver.UPilot
 
         private void DrawAdvancedEntry()
         {
-            EditorGUILayout.Space(10);
-            DrawTableSeparator();
-            EditorGUILayout.Space(8);
+            EditorGUILayout.Space(12);
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (GUILayout.Button("高级设置", GUILayout.Width(104), GUILayout.Height(24)))
