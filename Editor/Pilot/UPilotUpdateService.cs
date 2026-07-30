@@ -101,7 +101,21 @@ namespace CodingRiver.UPilot
                 ? "main"
                 : "v" + manifest.UpmVersion;
             var identifier = $"https://github.com/codingriver/upilot.git#{revision}";
-            _upmRequest = Client.Add(identifier);
+
+            if (!UPilotPackageUpdateLifecycle.PrepareForPackageUpdate(manifest.UpmVersion, notice))
+                return;
+
+            try
+            {
+                _upmRequest = Client.Add(identifier);
+            }
+            catch (Exception ex)
+            {
+                UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
+                notice?.Invoke("无法启动 UPilot 包更新：" + ex.Message, MessageType.Error);
+                return;
+            }
+
             EditorApplication.update += PollUpmUpdate;
             notice?.Invoke("正在更新 UPilot 包…", MessageType.Info);
         }
@@ -122,16 +136,13 @@ namespace CodingRiver.UPilot
             {
                 _notice?.Invoke("UPilot 包更新失败：" + (_upmRequest.Error?.message ?? "unknown"), MessageType.Error);
                 _upmRequest = null;
+                UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
                 return;
             }
 
-            _notice?.Invoke("UPilot 包已更新，Unity 重载后将重新启动服务", MessageType.Info);
+            _notice?.Invoke("UPilot 包已更新，Unity 重载后将自动恢复服务", MessageType.Info);
             _upmRequest = null;
-            EditorApplication.delayCall += () =>
-            {
-                UPilotBridge.Instance.Restart();
-                UPilotMcpServerManager.Instance.RestartServer();
-            };
+            UPilotPackageUpdateLifecycle.MarkPackageUpdateCompleted();
         }
     }
 }

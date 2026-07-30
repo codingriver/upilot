@@ -663,6 +663,27 @@ namespace CodingRiver.UPilot
             }
         }
 
+        public bool StopServerAndWaitForExit(int timeoutMs = 3000)
+        {
+            StopServer();
+            var stopwatch = Stopwatch.StartNew();
+            while (stopwatch.ElapsedMilliseconds < timeoutMs)
+            {
+                if (UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+                    UPilotPortAllocator.IsPortAvailable(WsPort))
+                {
+                    InvalidateStatusCache();
+                    return true;
+                }
+
+                System.Threading.Thread.Sleep(50);
+            }
+
+            InvalidateStatusCache();
+            return UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+                   UPilotPortAllocator.IsPortAvailable(WsPort);
+        }
+
         public void RestartServer()
         {
             StopServer();

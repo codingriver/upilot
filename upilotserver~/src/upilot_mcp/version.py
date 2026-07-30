@@ -32,7 +32,7 @@ def _read_pyproject_version() -> str:
             line = raw.strip()
             if line.startswith("version") and "=" in line:
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return "0.0.0"
+    return ""
 
 
 def server_version() -> str:
@@ -42,10 +42,13 @@ def server_version() -> str:
     value = _build_info().get("server_version", "").strip()
     if value:
         return value
+    value = _read_pyproject_version().strip()
+    if value:
+        return value
     try:
         return metadata.version("upilot-mcp")
     except metadata.PackageNotFoundError:
-        return _read_pyproject_version()
+        return "0.0.0"
 
 
 def build_commit() -> str:
