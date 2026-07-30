@@ -46,7 +46,12 @@ namespace CodingRiver.UPilot
 
         private void OnEditorUpdate()
         {
-            if (_operationRunning || UPilotServerRuntimeService.Instance.DownloadState.IsRunning)
+            var status = UPilotUpdateService.Instance.GetOperationStatus();
+            var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
+            if (_operationRunning && !status.IsRunning && !downloadRunning)
+                _operationRunning = false;
+
+            if (_operationRunning || status.IsRunning || downloadRunning)
                 Repaint();
         }
 
@@ -58,7 +63,7 @@ namespace CodingRiver.UPilot
                 GUILayout.Space(10);
                 EditorGUILayout.LabelField("UPilot 更新中心", EditorStyles.boldLabel);
                 GUILayout.FlexibleSpace();
-                using (new EditorGUI.DisabledScope(_isChecking || _operationRunning))
+                using (new EditorGUI.DisabledScope(_isChecking || IsUpdateBusy()))
                 {
                     if (GUILayout.Button("重新检查", EditorStyles.miniButton, GUILayout.Width(72)))
                         CheckForUpdates();
@@ -97,6 +102,7 @@ namespace CodingRiver.UPilot
         private void DrawUpdateContent()
         {
             var runtime = UPilotServerRuntimeService.Instance;
+            var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
             var mode = runtime.GetConfiguredMode();
             var package = PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
             var currentUpm = UPilotServerRuntimeService.UpmVersion;
@@ -114,11 +120,17 @@ namespace CodingRiver.UPilot
                                          !UPilotServerRuntimeService.IsVersionAtLeast(
                                              currentUpm,
                                              _manifest.MinCompatibleUpm);
+            var managedServerNeedsAction = managedRuntime && (serverNeedsUpdate || serverVersionUnknown);
+            var includeManagedServerInPrimaryAction = managedServerNeedsAction &&
+                                                      (!serverBlockedByPackage || upmNeedsUpdate);
+            var primaryActionAvailable = upmNeedsUpdate || includeManagedServerInPrimaryAction;
+            var primaryActionBlocked = managedServerNeedsAction && serverBlockedByPackage && !upmNeedsUpdate;
+            var updateBusy = IsUpdateBusy() || operationStatus.IsRunning;
 
             DrawInfoRow("更新通道", mainChannel ? "Main 分支版" : "正式版");
             EditorGUILayout.Space(4);
 
-            var hasAction = upmNeedsUpdate || managedRuntime && (serverNeedsUpdate || serverVersionUnknown);
+            var hasAction = primaryActionAvailable || primaryActionBlocked;
             if (localPackage && !managedRuntime)
             {
                 EditorGUILayout.HelpBox("当前使用本地开发包，未执行远程版本比较", MessageType.Info);
@@ -126,7 +138,11 @@ namespace CodingRiver.UPilot
             else
             {
                 var summary = hasAction
-                    ? BuildSummary(upmNeedsUpdate, serverBlockedByPackage, serverVersionUnknown)
+                    ? BuildSummary(
+                        upmNeedsUpdate,
+                        managedServerNeedsAction,
+                        serverBlockedByPackage,
+                        serverVersionUnknown)
                     : localPackage
                         ? "当前使用本地开发包，MCP 服务已是最新"
                         : "已是最新版本";
@@ -148,9 +164,9 @@ namespace CodingRiver.UPilot
                     DrawStatusAction(
                         "状态",
                         mainChannel ? "可同步 Main 分支最新版本" : "有新版本可用",
-                        mainChannel ? "同步 Main 分支" : "更新包",
-                        UpdatePackage,
-                        !_operationRunning);
+                        null,
+                        null,
+                        false);
                 }
                 else
                 {
@@ -180,11 +196,11 @@ namespace CodingRiver.UPilot
                 }
                 else if (serverNeedsUpdate)
                 {
-                    DrawStatusAction("状态", "有新版本可用", "更新服务", UpdateManagedService, !_operationRunning);
+                    DrawStatusAction("状态", "有新版本可用", null, null, false);
                 }
                 else if (serverVersionUnknown)
                 {
-                    DrawStatusAction("状态", "暂无法确认当前版本", "安装最新服务", UpdateManagedService, !_operationRunning);
+                    DrawStatusAction("状态", "暂无法确认当前版本", null, null, false);
                 }
                 else
                 {
@@ -192,6 +208,13 @@ namespace CodingRiver.UPilot
                 }
             }
 
+            DrawPrimaryUpdateAction(
+                upmNeedsUpdate,
+                includeManagedServerInPrimaryAction,
+                primaryActionBlocked,
+                mainChannel,
+                updateBusy);
+            DrawOperationStatus(operationStatus);
             DrawDownloadProgress();
 
             if (!string.IsNullOrWhiteSpace(_notice))
@@ -220,7 +243,8 @@ namespace CodingRiver.UPilot
 
             EditorGUILayout.Space(4);
             var rect = EditorGUILayout.GetControlRect(false, 18);
-            EditorGUI.ProgressBar(rect, state.Progress, string.IsNullOrWhiteSpace(state.Phase) ? "正在更新服务" : state.Phase);
+            EditorGUI.ProgressBar(rect, state.Progress, UPilotUpdateService.FormatDownloadProgressLabel(state));
+            EditorGUILayout.LabelField(UPilotUpdateService.FormatDownloadProgressDetail(state), EditorStyles.miniLabel);
         }
 
         private void DrawFooter()
@@ -273,14 +297,26 @@ namespace CodingRiver.UPilot
             UPilotUpdateService.Instance.UpdateManagedServerAndRestart(HandleOperationNotice);
         }
 
+        private void UpdateSelected(bool updatePackage, bool updateManagedServer)
+        {
+            _operationRunning = true;
+            UPilotUpdateService.Instance.UpdateFromManifest(
+                updatePackage,
+                updateManagedServer,
+                HandleOperationNotice);
+        }
+
         private void HandleOperationNotice(string message, MessageType type)
         {
             _notice = message ?? "";
             _noticeType = type;
             _externalNotice?.Invoke(message, type);
 
-            if (type == MessageType.Error || type == MessageType.Warning ||
+            var status = UPilotUpdateService.Instance.GetOperationStatus();
+            if (type == MessageType.Error ||
+                (type == MessageType.Warning && !status.IsRunning) ||
                 (!string.IsNullOrWhiteSpace(message) &&
+                 !status.IsRunning &&
                  (message.IndexOf("已更新", StringComparison.Ordinal) >= 0 ||
                   message.IndexOf("已取消", StringComparison.Ordinal) >= 0)))
             {
@@ -343,9 +379,12 @@ namespace CodingRiver.UPilot
 
         private static string BuildSummary(
             bool packageUpdate,
+            bool managedServerAction,
             bool serverBlocked,
             bool serverVersionUnknown)
         {
+            if (packageUpdate && managedServerAction)
+                return "检查完成，UPilot 包和 MCP 服务都有新版本可更新";
             if (serverBlocked)
                 return "有新版本可用，请先更新 UPilot 包";
             if (packageUpdate)
@@ -353,6 +392,74 @@ namespace CodingRiver.UPilot
             if (serverVersionUnknown)
                 return "暂无法确认 MCP 服务版本，可安装最新服务";
             return "MCP 服务有新版本可用";
+        }
+
+        private void DrawPrimaryUpdateAction(
+            bool updatePackage,
+            bool updateManagedServer,
+            bool blocked,
+            bool mainChannel,
+            bool busy)
+        {
+            if (!updatePackage && !updateManagedServer && !blocked)
+                return;
+
+            EditorGUILayout.Space(10);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                var label = BuildPrimaryUpdateLabel(updatePackage, updateManagedServer, mainChannel);
+                var enabled = !busy && !blocked;
+                var previous = GUI.backgroundColor;
+                try
+                {
+                    GUI.backgroundColor = enabled
+                        ? new Color(0.22f, 0.62f, 0.28f)
+                        : new Color(0.45f, 0.45f, 0.45f);
+                    using (new EditorGUI.DisabledScope(!enabled))
+                    {
+                        if (GUILayout.Button(label, GUILayout.Width(178), GUILayout.Height(48)))
+                            UpdateSelected(updatePackage, updateManagedServer);
+                    }
+                }
+                finally
+                {
+                    GUI.backgroundColor = previous;
+                }
+            }
+
+            if (blocked)
+                EditorGUILayout.HelpBox("当前 UPilot 包版本过低，请先更新 UPilot 包后再更新 MCP 服务。", MessageType.Warning);
+        }
+
+        private static string BuildPrimaryUpdateLabel(bool updatePackage, bool updateManagedServer, bool mainChannel)
+        {
+            if (updatePackage && updateManagedServer)
+                return "更新 UPilot 和服务";
+            if (updatePackage)
+                return mainChannel ? "同步 Main 分支" : "更新 UPilot";
+            if (updateManagedServer)
+                return "更新服务";
+            return "已是最新";
+        }
+
+        private static void DrawOperationStatus(UPilotUpdateOperationStatus status)
+        {
+            if (!status.IsRunning)
+                return;
+
+            var message = string.IsNullOrWhiteSpace(status.Message)
+                ? "请等待更新完成…"
+                : status.Message;
+            EditorGUILayout.Space(6);
+            EditorGUILayout.HelpBox(message, MessageType.Info);
+        }
+
+        private bool IsUpdateBusy()
+        {
+            return _operationRunning ||
+                   UPilotUpdateService.Instance.GetOperationStatus().IsRunning ||
+                   UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
         }
 
         private void DrawCopyableAddressRow()

@@ -19,6 +19,8 @@ namespace CodingRiver.UPilot
         private const string RestartPendingKey = "CodingRiver.UPilot.PackageUpdate.RestartPending";
         private const string UpdateCompletedKey = "CodingRiver.UPilot.PackageUpdate.Completed";
         private const string TargetVersionKey = "CodingRiver.UPilot.PackageUpdate.TargetVersion";
+        private const string ManagedServerPendingKey = "CodingRiver.UPilot.PackageUpdate.ManagedServerPending";
+        private const string TargetServerVersionKey = "CodingRiver.UPilot.PackageUpdate.TargetServerVersion";
 
         private static bool _restartScheduled;
 
@@ -33,10 +35,21 @@ namespace CodingRiver.UPilot
 
         public static bool PrepareForPackageUpdate(
             string targetVersion,
-            Action<string, MessageType> notice = null)
+            Action<string, MessageType> notice = null,
+            bool installManagedServerAfterUpdate = false,
+            string targetServerVersion = "")
         {
             if (SessionState.GetBool(UpdateInProgressKey, false))
+            {
+                if (installManagedServerAfterUpdate)
+                {
+                    SessionState.SetBool(ManagedServerPendingKey, true);
+                    if (!string.IsNullOrWhiteSpace(targetServerVersion))
+                        SessionState.SetString(TargetServerVersionKey, targetServerVersion);
+                }
+
                 return true;
+            }
 
             var manager = UPilotMcpServerManager.Instance;
             var status = manager.GetStatus();
@@ -49,6 +62,15 @@ namespace CodingRiver.UPilot
             SessionState.SetBool(RestartPendingKey, shouldRestart);
             SessionState.SetBool(UpdateCompletedKey, false);
             SessionState.SetString(TargetVersionKey, targetVersion ?? "");
+            SessionState.SetBool(ManagedServerPendingKey, installManagedServerAfterUpdate);
+            SessionState.SetString(TargetServerVersionKey, targetServerVersion ?? "");
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.StoppingService,
+                installManagedServerAfterUpdate
+                    ? "正在停止服务，准备更新 UPilot 和 MCP 服务…"
+                    : "正在停止服务，准备更新 UPilot 包…",
+                targetVersion,
+                targetServerVersion);
 
             if (!wasRunning)
                 return true;
@@ -61,6 +83,7 @@ namespace CodingRiver.UPilot
             ClearUpdateState();
             UPilotBridge.Instance.EnsureStarted();
             manager.StartServer();
+            UPilotUpdateService.SetOperationFailed("无法停止 MCP 服务，已取消包更新以避免文件占用");
             notice?.Invoke("无法停止 MCP 服务，已取消包更新以避免文件占用", MessageType.Error);
             return false;
         }
@@ -71,13 +94,23 @@ namespace CodingRiver.UPilot
                 return;
 
             SessionState.SetBool(UpdateCompletedKey, true);
+            var managedPending = SessionState.GetBool(ManagedServerPendingKey, false);
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.WaitingForReload,
+                managedPending
+                    ? "UPilot 包已更新，等待 Unity 重载后继续更新 MCP 服务…"
+                    : "UPilot 包已更新，等待 Unity 重载后恢复服务…");
             ScheduleRestore();
         }
+
+        public static bool IsManagedServerUpdatePending =>
+            SessionState.GetBool(ManagedServerPendingKey, false);
 
         public static void RestoreAfterFailedUpdate()
         {
             var shouldRestart = SessionState.GetBool(RestartPendingKey, false);
             ClearUpdateState();
+            UPilotUpdateService.SetOperationFailed("UPilot 包更新失败，已恢复服务");
             if (!shouldRestart || !UPilotSetupState.IsCompleted)
                 return;
 
@@ -93,7 +126,11 @@ namespace CodingRiver.UPilot
                 return;
 
             var targetVersion = FindUPilotVersion(args.changedTo);
-            if (!PrepareForPackageUpdate(targetVersion))
+            var installManagedServer = ShouldInstallManagedServerAfterPackageUpdate();
+            if (!PrepareForPackageUpdate(
+                    targetVersion,
+                    installManagedServerAfterUpdate: installManagedServer,
+                    targetServerVersion: ""))
             {
                 Debug.LogError(
                     "[UPilot] Package Manager is updating UPilot, but the MCP service could not be stopped before package registration.");
@@ -168,17 +205,72 @@ namespace CodingRiver.UPilot
 
             var shouldRestart = SessionState.GetBool(RestartPendingKey, false);
             var targetVersion = SessionState.GetString(TargetVersionKey, "");
-            ClearUpdateState();
+            var installManagedServer = SessionState.GetBool(ManagedServerPendingKey, false);
+            var targetServerVersion = SessionState.GetString(TargetServerVersionKey, "");
             if (!shouldRestart || !UPilotSetupState.IsCompleted)
+            {
+                ClearUpdateState();
+                UPilotUpdateService.SetOperationCompleted("UPilot 包已更新");
                 return;
+            }
 
             UPilotProjectConfig.Reload();
             UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
+            if (installManagedServer && UPilotServerRuntimeService.Instance.GetConfiguredMode() ==
+                UPilotServerRuntimeMode.StandaloneExe)
+            {
+                ContinueManagedServerUpdateAfterPackage(targetVersion, targetServerVersion, shouldRestart);
+                return;
+            }
+
+            ClearUpdateState();
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
             manager.RestartServer();
             UPilotBridge.Instance.EnsureStarted();
+            UPilotUpdateService.SetOperationCompleted("UPilot 包已更新并已恢复服务");
             Debug.Log($"[UPilot] Package update completed ({targetVersion}); MCP service restart scheduled.");
+        }
+
+        private static async void ContinueManagedServerUpdateAfterPackage(
+            string targetVersion,
+            string targetServerVersion,
+            bool shouldRestart)
+        {
+            try
+            {
+                UPilotUpdateService.SetOperationPhase(
+                    UPilotUpdateOperationPhase.DownloadingService,
+                    "UPilot 包已更新，正在下载匹配的 MCP 服务…",
+                    targetVersion,
+                    targetServerVersion);
+                var updated = await UPilotUpdateService.Instance.InstallManagedServerAfterPackageUpdateAsync(
+                    targetServerVersion,
+                    shouldRestart);
+                ClearUpdateState();
+                if (updated)
+                    Debug.Log($"[UPilot] Package update completed ({targetVersion}); managed MCP service updated.");
+            }
+            catch (Exception ex)
+            {
+                ClearUpdateState();
+                UPilotUpdateService.SetOperationFailed("MCP 服务更新失败：" + ex.Message);
+                Debug.LogError("[UPilot] Managed MCP service update after package update failed: " + ex);
+                if (!shouldRestart || !UPilotSetupState.IsCompleted)
+                    return;
+
+                UPilotProjectConfig.Reload();
+                UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
+                UPilotBridge.Instance.EnsureStarted();
+                UPilotMcpServerManager.Instance.RestartServer();
+            }
+        }
+
+        private static bool ShouldInstallManagedServerAfterPackageUpdate()
+        {
+            return UPilotSetupState.IsCompleted &&
+                   UPilotServerRuntimeService.Instance.GetConfiguredMode() ==
+                   UPilotServerRuntimeMode.StandaloneExe;
         }
 
         private static void ClearUpdateState()
@@ -187,6 +279,8 @@ namespace CodingRiver.UPilot
             SessionState.EraseBool(RestartPendingKey);
             SessionState.EraseBool(UpdateCompletedKey);
             SessionState.EraseString(TargetVersionKey);
+            SessionState.EraseBool(ManagedServerPendingKey);
+            SessionState.EraseString(TargetServerVersionKey);
         }
     }
 }

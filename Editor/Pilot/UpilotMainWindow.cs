@@ -200,6 +200,19 @@ namespace CodingRiver.UPilot
 
         private UPilotMainSnapshot GetDisplaySnapshot()
         {
+            var updateStatus = UPilotUpdateService.Instance.GetOperationStatus();
+            if (updateStatus.IsRunning)
+            {
+                return new UPilotMainSnapshot(
+                    UPilotMainState.Updating,
+                    string.IsNullOrWhiteSpace(updateStatus.Label) ? "等待更新完成" : updateStatus.Label,
+                    string.IsNullOrWhiteSpace(updateStatus.Message)
+                        ? "正在更新 UPilot，完成后会自动恢复服务。"
+                        : updateStatus.Message,
+                    _bridgeStatus.IsStarted,
+                    _mcpStatus.IsRunning);
+            }
+
             return _snapshot;
         }
 
@@ -268,7 +281,8 @@ namespace CodingRiver.UPilot
             const float horizontalPadding = 10f;
             const float buttonGap = 6f;
             var menuRect = new Rect(rect.xMax - horizontalPadding - 28f, rect.y + 6f, 28f, 24f);
-            var actionRect = new Rect(menuRect.x - buttonGap - 82f, rect.y + 6f, 82f, 24f);
+            var actionWidth = snapshot.State == UPilotMainState.Updating ? 116f : 82f;
+            var actionRect = new Rect(menuRect.x - buttonGap - actionWidth, rect.y + 6f, actionWidth, 24f);
             var titleRect = new Rect(rect.x + horizontalPadding, rect.y + 6f, 58f, 24f);
             var dotRect = new Rect(titleRect.xMax, titleRect.y, 14f, titleRect.height);
             var stateRect = new Rect(dotRect.xMax, titleRect.y, 62f, titleRect.height);
@@ -304,13 +318,16 @@ namespace CodingRiver.UPilot
 
             if (snapshot.State == UPilotMainState.Starting ||
                 snapshot.State == UPilotMainState.Restarting ||
-                snapshot.State == UPilotMainState.Stopping)
+                snapshot.State == UPilotMainState.Stopping ||
+                snapshot.State == UPilotMainState.Updating)
             {
-                var label = snapshot.State == UPilotMainState.Restarting
-                    ? "重启中…"
-                    : snapshot.State == UPilotMainState.Stopping
-                        ? "停止中…"
-                        : "启动中…";
+                var label = snapshot.State switch
+                {
+                    UPilotMainState.Restarting => "重启中…",
+                    UPilotMainState.Stopping => "停止中…",
+                    UPilotMainState.Updating => "等待更新完成",
+                    _ => "启动中…",
+                };
                 using (new EditorGUI.DisabledScope(true))
                     GUI.Button(rect, label);
                 return;
@@ -342,7 +359,8 @@ namespace CodingRiver.UPilot
         {
             return state == UPilotMainState.Starting ||
                    state == UPilotMainState.Restarting ||
-                   state == UPilotMainState.Stopping;
+                   state == UPilotMainState.Stopping ||
+                   state == UPilotMainState.Updating;
         }
 
         private void DrawMcpEndpoint()
@@ -984,7 +1002,8 @@ namespace CodingRiver.UPilot
             if (state == UPilotMainState.Ready) return Color.green;
             if (state == UPilotMainState.Starting ||
                 state == UPilotMainState.Restarting ||
-                state == UPilotMainState.Stopping)
+                state == UPilotMainState.Stopping ||
+                state == UPilotMainState.Updating)
                 return new Color(1f, 0.65f, 0.1f);
             if (state == UPilotMainState.NeedsRepair) return new Color(1f, 0.35f, 0.2f);
             return Color.gray;
@@ -996,6 +1015,7 @@ namespace CodingRiver.UPilot
             if (state == UPilotMainState.Starting) return "启动中";
             if (state == UPilotMainState.Restarting) return "重启中";
             if (state == UPilotMainState.Stopping) return "停止中";
+            if (state == UPilotMainState.Updating) return "更新中";
             if (state == UPilotMainState.NeedsRepair) return "需修复";
             if (state == UPilotMainState.SetupRequired) return "待配置";
             return "已停止";

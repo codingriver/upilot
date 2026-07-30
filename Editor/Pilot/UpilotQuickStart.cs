@@ -15,6 +15,7 @@ namespace CodingRiver.UPilot
         Starting,
         Restarting,
         Stopping,
+        Updating,
         Ready,
         NeedsRepair,
     }

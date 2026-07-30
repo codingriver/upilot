@@ -107,8 +107,36 @@ namespace CodingRiver.UPilot.Tests
         {
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Restarting), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Stopping), Is.True);
+            Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Updating), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Restarting), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Stopping), Is.True);
+        }
+
+        [Test]
+        public void UpdateOperationStatusTreatsOnlyActivePhasesAsRunning()
+        {
+            var running = new UPilotUpdateOperationStatus(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "正在更新服务",
+                "正在下载安装",
+                "0.3.7",
+                "0.3.7");
+            var completed = new UPilotUpdateOperationStatus(
+                UPilotUpdateOperationPhase.Completed,
+                "更新完成",
+                "已完成",
+                "0.3.7",
+                "0.3.7");
+            var failed = new UPilotUpdateOperationStatus(
+                UPilotUpdateOperationPhase.Failed,
+                "更新失败",
+                "失败",
+                "0.3.7",
+                "0.3.7");
+
+            Assert.That(running.IsRunning, Is.True);
+            Assert.That(completed.IsRunning, Is.False);
+            Assert.That(failed.IsRunning, Is.False);
         }
 
         [Test]
@@ -206,6 +234,49 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(state.SegmentCount, Is.EqualTo(4));
             Assert.That(state.CompletedSegments, Is.EqualTo(2));
             Assert.That(state.PlatformDisplayName, Is.EqualTo("Windows x64"));
+        }
+
+        [Test]
+        public void UpdateDownloadProgressLabelShowsThreadCount()
+        {
+            var multiThread = new UPilotDownloadState
+            {
+                Phase = "正在下载安装",
+                SegmentCount = 4,
+                CompletedSegments = 2,
+                BytesReceived = 10 * 1024 * 1024,
+                TotalBytes = 20 * 1024 * 1024,
+            };
+            var singleThread = new UPilotDownloadState
+            {
+                Phase = "正在下载安装",
+                SegmentCount = 1,
+                BytesReceived = 512 * 1024,
+                TotalBytes = 1024 * 1024,
+            };
+
+            Assert.That(
+                UPilotUpdateService.FormatDownloadProgressLabel(multiThread),
+                Is.EqualTo("正在下载安装（4 线程，已完成 2/4）"));
+            Assert.That(
+                UPilotUpdateService.FormatDownloadProgressDetail(multiThread),
+                Does.Contain("4 线程下载"));
+            Assert.That(
+                UPilotUpdateService.FormatDownloadProgressLabel(singleThread),
+                Is.EqualTo("正在下载安装（单线程）"));
+            Assert.That(
+                UPilotUpdateService.FormatDownloadProgressDetail(singleThread),
+                Does.Contain("单线程下载"));
+
+            var verifying = new UPilotDownloadState
+            {
+                Phase = "正在验证文件",
+                SegmentCount = 4,
+                CompletedSegments = 4,
+            };
+            Assert.That(
+                UPilotUpdateService.FormatDownloadProgressLabel(verifying),
+                Is.EqualTo("正在验证文件"));
         }
 
         [Test]
