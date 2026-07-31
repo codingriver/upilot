@@ -14,8 +14,8 @@ namespace CodingRiver.UPilot
 
         public static bool IsEnabled
         {
-            get => EditorPrefs.GetBool(EnabledPrefKey, true);
-            set => EditorPrefs.SetBool(EnabledPrefKey, value);
+            get => EditorPrefs.GetBool(UPilotPreferences.BridgeEnabledKey, true);
+            set => EditorPrefs.SetBool(UPilotPreferences.BridgeEnabledKey, value);
         }
 
         static UPilotBootstrap()

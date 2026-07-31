@@ -47,15 +47,15 @@ namespace CodingRiver.UPilot
             string targetServerVersion = "",
             string preparedServerPath = "")
         {
-            if (SessionState.GetBool(UpdateInProgressKey, false))
+            if (GetSessionBool(UpdateInProgressKey, false))
             {
                 if (installManagedServerAfterUpdate)
                 {
-                    SessionState.SetBool(ManagedServerPendingKey, true);
+                    SetSessionBool(ManagedServerPendingKey, true);
                     if (!string.IsNullOrWhiteSpace(targetServerVersion))
-                        SessionState.SetString(TargetServerVersionKey, targetServerVersion);
+                        SetSessionString(TargetServerVersionKey, targetServerVersion);
                     if (!string.IsNullOrWhiteSpace(preparedServerPath))
-                        SessionState.SetString(PreparedServerPathKey, preparedServerPath);
+                        SetSessionString(PreparedServerPathKey, preparedServerPath);
                 }
 
                 return true;
@@ -68,13 +68,13 @@ namespace CodingRiver.UPilot
                              !UPilotPortAllocator.IsPortAvailable(manager.WsPort);
             var shouldRestart = UPilotSetupState.IsCompleted;
 
-            SessionState.SetBool(UpdateInProgressKey, true);
-            SessionState.SetBool(RestartPendingKey, shouldRestart);
-            SessionState.SetBool(UpdateCompletedKey, false);
-            SessionState.SetString(TargetVersionKey, targetVersion ?? "");
-            SessionState.SetBool(ManagedServerPendingKey, installManagedServerAfterUpdate);
-            SessionState.SetString(TargetServerVersionKey, targetServerVersion ?? "");
-            SessionState.SetString(PreparedServerPathKey, preparedServerPath ?? "");
+            SetSessionBool(UpdateInProgressKey, true);
+            SetSessionBool(RestartPendingKey, shouldRestart);
+            SetSessionBool(UpdateCompletedKey, false);
+            SetSessionString(TargetVersionKey, targetVersion ?? "");
+            SetSessionBool(ManagedServerPendingKey, installManagedServerAfterUpdate);
+            SetSessionString(TargetServerVersionKey, targetServerVersion ?? "");
+            SetSessionString(PreparedServerPathKey, preparedServerPath ?? "");
             UPilotUpdateService.SetOperationPhase(
                 UPilotUpdateOperationPhase.StoppingService,
                 installManagedServerAfterUpdate
@@ -101,11 +101,11 @@ namespace CodingRiver.UPilot
 
         public static void MarkPackageUpdateCompleted()
         {
-            if (!SessionState.GetBool(UpdateInProgressKey, false))
+            if (!GetSessionBool(UpdateInProgressKey, false))
                 return;
 
-            SessionState.SetBool(UpdateCompletedKey, true);
-            var managedPending = SessionState.GetBool(ManagedServerPendingKey, false);
+            SetSessionBool(UpdateCompletedKey, true);
+            var managedPending = GetSessionBool(ManagedServerPendingKey, false);
             UPilotUpdateService.SetOperationPhase(
                 UPilotUpdateOperationPhase.WaitingForReload,
                 managedPending
@@ -115,10 +115,23 @@ namespace CodingRiver.UPilot
         }
 
         public static bool IsManagedServerUpdatePending =>
-            SessionState.GetBool(ManagedServerPendingKey, false);
+            GetSessionBool(ManagedServerPendingKey, false);
 
         public static bool HasPendingManagedPackageUpdate =>
             EditorPrefs.GetBool(ProjectPersistentKey(PendingPackageRetryKey), false);
+
+        public static string[] GetPreferenceKeysForCurrentProject()
+        {
+            return new[]
+            {
+                ProjectPersistentKey(PendingPackageRetryKey),
+                ProjectPersistentKey(PendingTargetVersionKey),
+                ProjectPersistentKey(PendingTargetServerVersionKey),
+                ProjectPersistentKey(PendingNewServerPathKey),
+                ProjectPersistentKey(PendingOldServerPathKey),
+                ProjectPersistentKey(PendingOldServerVersionKey),
+            };
+        }
 
         public static void MarkManagedPackageUpdatePending(
             string targetVersion,
@@ -169,7 +182,7 @@ namespace CodingRiver.UPilot
 
         public static void RestoreAfterFailedUpdate()
         {
-            var shouldRestart = SessionState.GetBool(RestartPendingKey, false);
+            var shouldRestart = GetSessionBool(RestartPendingKey, false);
             var hasPendingManagedPackageUpdate = HasPendingManagedPackageUpdate;
             ClearUpdateState();
             if (hasPendingManagedPackageUpdate)
@@ -268,7 +281,7 @@ namespace CodingRiver.UPilot
 
         private static void TryRestoreAfterUpdate()
         {
-            if (!SessionState.GetBool(UpdateCompletedKey, false))
+            if (!GetSessionBool(UpdateCompletedKey, false))
                 return;
 
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
@@ -277,11 +290,11 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var shouldRestart = SessionState.GetBool(RestartPendingKey, false);
-            var targetVersion = SessionState.GetString(TargetVersionKey, "");
-            var installManagedServer = SessionState.GetBool(ManagedServerPendingKey, false);
-            var targetServerVersion = SessionState.GetString(TargetServerVersionKey, "");
-            var preparedServerPath = SessionState.GetString(PreparedServerPathKey, "");
+            var shouldRestart = GetSessionBool(RestartPendingKey, false);
+            var targetVersion = GetSessionString(TargetVersionKey, "");
+            var installManagedServer = GetSessionBool(ManagedServerPendingKey, false);
+            var targetServerVersion = GetSessionString(TargetServerVersionKey, "");
+            var preparedServerPath = GetSessionString(PreparedServerPathKey, "");
             if (!shouldRestart || !UPilotSetupState.IsCompleted)
             {
                 ClearUpdateState();
@@ -365,18 +378,53 @@ namespace CodingRiver.UPilot
 
         private static void ClearUpdateState()
         {
-            SessionState.EraseBool(UpdateInProgressKey);
-            SessionState.EraseBool(RestartPendingKey);
-            SessionState.EraseBool(UpdateCompletedKey);
-            SessionState.EraseString(TargetVersionKey);
-            SessionState.EraseBool(ManagedServerPendingKey);
-            SessionState.EraseString(TargetServerVersionKey);
-            SessionState.EraseString(PreparedServerPathKey);
+            EraseSessionBool(UpdateInProgressKey);
+            EraseSessionBool(RestartPendingKey);
+            EraseSessionBool(UpdateCompletedKey);
+            EraseSessionString(TargetVersionKey);
+            EraseSessionBool(ManagedServerPendingKey);
+            EraseSessionString(TargetServerVersionKey);
+            EraseSessionString(PreparedServerPathKey);
         }
 
         private static string ProjectPersistentKey(string key)
         {
-            return key + "." + UPilotBridge.WsEndpointEditorPrefsKeySuffix;
+            return UPilotPreferences.ProjectKey(key);
+        }
+
+        private static bool GetSessionBool(string key, bool defaultValue)
+        {
+            return SessionState.GetBool(ProjectSessionKey(key), defaultValue);
+        }
+
+        private static void SetSessionBool(string key, bool value)
+        {
+            SessionState.SetBool(ProjectSessionKey(key), value);
+        }
+
+        private static void EraseSessionBool(string key)
+        {
+            SessionState.EraseBool(ProjectSessionKey(key));
+        }
+
+        private static string GetSessionString(string key, string defaultValue)
+        {
+            return SessionState.GetString(ProjectSessionKey(key), defaultValue);
+        }
+
+        private static void SetSessionString(string key, string value)
+        {
+            SessionState.SetString(ProjectSessionKey(key), value);
+        }
+
+        private static void EraseSessionString(string key)
+        {
+            SessionState.EraseString(ProjectSessionKey(key));
+        }
+
+        private static string ProjectSessionKey(string key)
+        {
+            return UPilotPreferences.ProjectKey(key);
         }
     }
 }

@@ -623,7 +623,11 @@ namespace CodingRiver.UPilot
                     state.Phase = "正在下载安装";
                 });
 
-                var versionDir = Path.Combine(RuntimeCacheRoot, SafePathSegment(manifest.ServerVersion));
+                var versionDir = Path.Combine(
+                    RuntimeCacheRoot,
+                    "managed-servers",
+                    SafePathSegment(GetProjectKey()),
+                    SafePathSegment(manifest.ServerVersion));
                 Directory.CreateDirectory(versionDir);
                 var fileName = string.IsNullOrWhiteSpace(download.FileName)
                     ? BuildDefaultServerFileName(manifest.ServerVersion)

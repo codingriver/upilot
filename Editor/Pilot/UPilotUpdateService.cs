@@ -80,6 +80,11 @@ namespace CodingRiver.UPilot
         private bool _releaseCheckCompleted;
         private UPilotReleaseUpdateCheckStatus _releaseCheckStatus = new();
 
+        internal static string[] GetPreferenceKeysForCurrentProject()
+        {
+            return new[] { ProjectKey(SkipReleaseReminderVersionKey) };
+        }
+
         public void CheckForUpdates(Action<string, MessageType> notice)
         {
             UPilotUpdateWindow.Open(notice);
@@ -115,7 +120,7 @@ namespace CodingRiver.UPilot
             if (string.IsNullOrWhiteSpace(version))
                 return;
 
-            EditorPrefs.SetString(SkipReleaseReminderVersionKey, version.Trim());
+            EditorPrefs.SetString(ProjectKey(SkipReleaseReminderVersionKey), version.Trim());
             if (string.Equals(_releaseCheckStatus.LatestVersion, version.Trim(), StringComparison.OrdinalIgnoreCase))
                 _releaseCheckStatus.IsSuppressed = true;
         }
@@ -127,7 +132,7 @@ namespace CodingRiver.UPilot
             if (downloadState.IsRunning)
                 phase = UPilotUpdateOperationPhase.DownloadingService;
 
-            var message = SessionState.GetString(OperationMessageKey, "");
+            var message = SessionState.GetString(ProjectKey(OperationMessageKey), "");
             if (downloadState.IsRunning)
                 message = FormatDownloadProgressLabel(downloadState);
 
@@ -135,8 +140,8 @@ namespace CodingRiver.UPilot
                 phase,
                 BuildOperationLabel(phase),
                 message,
-                SessionState.GetString(OperationTargetUpmKey, ""),
-                SessionState.GetString(OperationTargetServerKey, ""));
+                SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
+                SessionState.GetString(ProjectKey(OperationTargetServerKey), ""));
         }
 
         private async Task CheckLatestReleaseSilentlyAsync()
@@ -210,7 +215,7 @@ namespace CodingRiver.UPilot
         {
             if (string.IsNullOrWhiteSpace(version))
                 return false;
-            var skipped = EditorPrefs.GetString(SkipReleaseReminderVersionKey, "");
+            var skipped = EditorPrefs.GetString(ProjectKey(SkipReleaseReminderVersionKey), "");
             return string.Equals(skipped, version.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
@@ -508,20 +513,20 @@ namespace CodingRiver.UPilot
             string targetUpmVersion = null,
             string targetServerVersion = null)
         {
-            SessionState.SetString(OperationPhaseKey, phase.ToString());
-            SessionState.SetString(OperationMessageKey, message ?? "");
+            SessionState.SetString(ProjectKey(OperationPhaseKey), phase.ToString());
+            SessionState.SetString(ProjectKey(OperationMessageKey), message ?? "");
             if (targetUpmVersion != null)
-                SessionState.SetString(OperationTargetUpmKey, targetUpmVersion);
+                SessionState.SetString(ProjectKey(OperationTargetUpmKey), targetUpmVersion);
             if (targetServerVersion != null)
-                SessionState.SetString(OperationTargetServerKey, targetServerVersion);
+                SessionState.SetString(ProjectKey(OperationTargetServerKey), targetServerVersion);
         }
 
         internal static void SetOperationTargets(string targetUpmVersion, string targetServerVersion)
         {
             if (targetUpmVersion != null)
-                SessionState.SetString(OperationTargetUpmKey, targetUpmVersion);
+                SessionState.SetString(ProjectKey(OperationTargetUpmKey), targetUpmVersion);
             if (targetServerVersion != null)
-                SessionState.SetString(OperationTargetServerKey, targetServerVersion);
+                SessionState.SetString(ProjectKey(OperationTargetServerKey), targetServerVersion);
         }
 
         internal static void SetOperationCompleted(string message)
@@ -536,10 +541,10 @@ namespace CodingRiver.UPilot
 
         internal static void ClearOperationStatus()
         {
-            SessionState.EraseString(OperationPhaseKey);
-            SessionState.EraseString(OperationMessageKey);
-            SessionState.EraseString(OperationTargetUpmKey);
-            SessionState.EraseString(OperationTargetServerKey);
+            SessionState.EraseString(ProjectKey(OperationPhaseKey));
+            SessionState.EraseString(ProjectKey(OperationMessageKey));
+            SessionState.EraseString(ProjectKey(OperationTargetUpmKey));
+            SessionState.EraseString(ProjectKey(OperationTargetServerKey));
         }
 
         internal static string FormatDownloadProgressLabel(UPilotDownloadState state)
@@ -815,10 +820,15 @@ namespace CodingRiver.UPilot
 
         private static UPilotUpdateOperationPhase ReadOperationPhase()
         {
-            var raw = SessionState.GetString(OperationPhaseKey, UPilotUpdateOperationPhase.None.ToString());
+            var raw = SessionState.GetString(ProjectKey(OperationPhaseKey), UPilotUpdateOperationPhase.None.ToString());
             return Enum.TryParse(raw, out UPilotUpdateOperationPhase phase)
                 ? phase
                 : UPilotUpdateOperationPhase.None;
+        }
+
+        private static string ProjectKey(string key)
+        {
+            return UPilotPreferences.ProjectKey(key);
         }
 
         private static string BuildOperationLabel(UPilotUpdateOperationPhase phase)

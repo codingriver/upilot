@@ -47,7 +47,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 2
+_UPILOT_RULES_VERSION = 4
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _DEFAULT_OPERATION_SUCCESS = {"succeeded", "success", "complete", "completed", "passed", "ok"}
@@ -114,6 +114,12 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _normalize_agent_rules_block(block: str) -> str:
+    lines = block.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    normalized = ["generatedAt: <ignored>" if line.startswith("generatedAt: ") else line for line in lines]
+    return "\n".join(normalized).strip()
+
+
 def _read_text_tail(path: Path, lines: int) -> str:
     if lines <= 0:
         return ""
@@ -165,7 +171,7 @@ projectPath: {project_path}
 generatedAt: {_utc_iso()}
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
-Project-specific business rules outside this block take precedence over these generic UPilot rules.
+Project-specific business rules outside this controlled UPilot block take precedence.
 
 ## Connection
 
@@ -181,45 +187,53 @@ Project-specific business rules outside this block take precedence over these ge
 
 - Distinguish server registration, client tool-list injection, and a successful real call; they are different states.
 - If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable.
+- After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.
 - Use the narrowest dedicated semantic tool. Use `unity_reflection_call` for existing compiled entry points.
 - Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.
+- For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
 
 ## Writes And Compile
 
 - Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.
 - After one batch of disk writes, call `unity_sync_after_disk_write` once.
+- Prefer `unity_compile_wait` plus `unity_compile_errors`; `unity_compile_errors_get` is a compatibility alias.
 - Compile only after C# or assembly-related changes.
-- Use `unity_compile_wait` and `unity_compile_errors`; `unity_compile_errors_get` is only a compatibility alias.
+- Do not compile again when no code changed.
 - After compilation, read structured compile errors and relevant Console errors before editing again.
 
-## Project Workflows
+## Long Operations
 
-- When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call that entry point.
-- Keep business orchestration in project code. MCP should start, poll, diagnose, capture logs, and collect artifacts.
-- For long jobs, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.
-- Starting a job is not success; poll until a terminal result.
-- During polling, report only phase, status, error, failureSignature, suspected-stuck, or important artifact changes.
-- Do not reconstruct project workflows with shell commands, temporary scripts, menu calls, or UI automation when a bridge entry point exists.
+- For tests, builds, smoke runs, and other long workflows, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.
+- Starting an operation is not success; poll until a terminal status.
+- Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.
+- Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.
+- Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.
+
+## Operation Status Contract
+
+- Project bridge status JSON should use generic fields where possible: `ok`, `operationId`, `status`, `phase`, `error`, `detail`, `elapsedSec`, `phaseElapsedSec`, `progress`, `failureSignature`, `artifacts`, `metrics`, and `domain`.
+- UPilot parses only generic fields. Business fields belong in `domain` and are passed through unchanged.
 
 ## Persistent Console Capture
 
-- For long-running or audit-sensitive operations, enable operation Console capture or call `unity_console_capture_start` before the operation.
-- Use incremental reads with `nextSequence`; avoid repeatedly reading full Console output.
-- Always stop capture on success, failure, timeout, or cancel.
-- Keep raw Console capture separate from domain-specific reports.
+- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, use `unity_console_capture_status` and incremental `unity_console_capture_read`, and always call `unity_console_capture_stop` on success or failure.
+- Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
+- Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
 
 ## Artifacts And Screenshots
 
-- Prefer dedicated project-relative artifact paths returned by the project bridge.
-- Prefer `unity_screenshot_save` for screenshots and report `path`, `bytes`, `width`, `height`, and `sha256`.
-- UPilot records artifact metadata and hashes; business code decides whether an artifact proves the workflow passed.
+- Prefer project-relative artifact paths returned by the project bridge.
+- Prefer `unity_screenshot_save` for screenshots.
+- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`.
+- UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.
 
-## Retry And Failure Protection
+## Acceptance
 
-- Retry automatically only when the operation is idempotent and non-destructive.
+- During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
+- Retry automatically only when the registry marks the operation idempotent and non-destructive.
 - If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.
-- On timeout, inspect operation timing, phase elapsed time, last progress, Console capture, and artifact summary before choosing one bounded retry.
+- On timeout, inspect status, operation timing, Console capture, artifact summary, and last progress before choosing one bounded retry or a documented fallback.
 <!-- upilot:end -->"""
 
     def _parse_rules_metadata(self, block: str) -> dict[str, str]:
@@ -273,7 +287,7 @@ Project-specific business rules outside this block take precedence over these ge
                 diff_summary.append("operation runner rules missing")
             if "unity_compile_errors" not in current_block:
                 diff_summary.append("compile error tool guidance missing")
-            if current_block.strip() != recommended_block.strip():
+            if _normalize_agent_rules_block(current_block) != _normalize_agent_rules_block(recommended_block):
                 diff_summary.append("upilot controlled block differs from recommended template")
 
         needs_import = not has_block

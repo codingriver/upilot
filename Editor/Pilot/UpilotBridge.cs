@@ -163,9 +163,6 @@ namespace CodingRiver.UPilot
         private static string HttpPortPrefsKey => $"upilot.HttpPort.{ProjectPathHashSuffix}";
         private const int    HeartbeatIntervalMs = 2000;
         private const int    MaxLogEntries    = 1000;
-        private const string DebugLogPrefsKey = "upilot.DebugWireLogs";
-        private const string VerboseLogPrefsKey = "upilot.VerboseLogs";
-        private const string AutoRestartPrefsKey = "upilot.AutoRestartOnStuck";
 
         private static readonly Lazy<UPilotBridge> Lazy = new(() => new UPilotBridge());
         public static UPilotBridge Instance => Lazy.Value;
@@ -239,9 +236,9 @@ namespace CodingRiver.UPilot
         {
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             LoadDefaultEndpoints();
-            _debugWireLogsEnabled = EditorPrefs.GetBool(DebugLogPrefsKey, false);
-            _verboseLogsEnabled = EditorPrefs.GetBool(VerboseLogPrefsKey, false);
-            _autoRestartOnCriticalStuck = EditorPrefs.GetBool(AutoRestartPrefsKey, false);
+            _debugWireLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.DebugWireLogsKey, false);
+            _verboseLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.VerboseLogsKey, false);
+            _autoRestartOnCriticalStuck = EditorPrefs.GetBool(UPilotPreferences.AutoRestartOnStuckKey, false);
             RegisterLegacyCommands();
             RegisterModuleServices();
         }
@@ -284,7 +281,7 @@ namespace CodingRiver.UPilot
             {
                 if (_debugWireLogsEnabled == value) return;
                 _debugWireLogsEnabled = value;
-                EditorPrefs.SetBool(DebugLogPrefsKey, value);
+                EditorPrefs.SetBool(UPilotPreferences.DebugWireLogsKey, value);
                 Logger.Log("SYSTEM", value ? "调试日志已开启（通信命令收发可见）" : "调试日志已关闭");
             }
         }
@@ -296,7 +293,7 @@ namespace CodingRiver.UPilot
             {
                 if (_verboseLogsEnabled == value) return;
                 _verboseLogsEnabled = value;
-                EditorPrefs.SetBool(VerboseLogPrefsKey, value);
+                EditorPrefs.SetBool(UPilotPreferences.VerboseLogsKey, value);
                 Logger.Log("SYSTEM", value ? "详细日志已开启（心跳、连接、请求状态）" : "详细日志已关闭");
             }
         }
@@ -308,7 +305,7 @@ namespace CodingRiver.UPilot
             {
                 if (_autoRestartOnCriticalStuck == value) return;
                 _autoRestartOnCriticalStuck = value;
-                EditorPrefs.SetBool(AutoRestartPrefsKey, value);
+                EditorPrefs.SetBool(UPilotPreferences.AutoRestartOnStuckKey, value);
                 Logger.Log("SYSTEM", value ? "临界超时自动重启已开启" : "临界超时自动重启已关闭");
             }
         }

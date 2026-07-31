@@ -43,6 +43,15 @@ class _OperationService(TaskDomainService):
         return ok("req-tool", {})
 
 
+def _replace_line(text: str, prefix: str, replacement: str) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = replacement
+            return "\n".join(lines) + "\n"
+    raise AssertionError(f"line prefix not found: {prefix}")
+
+
 def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path: Path) -> None:
     agents = tmp_path / "AGENTS.md"
     agents.write_text("# Project Rules\n\nbusiness rule stays\n", encoding="utf-8")
@@ -57,10 +66,51 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 2" in text
+    assert "rulesVersion: 4" in text
     assert "<!-- upilot:start -->" in text
     assert "<!-- upilot:end -->" in text
     assert applied.data["fileSha256"]
+
+
+def test_agent_rules_check_ignores_generated_timestamp_only(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    service = _OperationService(tmp_path, [])
+
+    applied = asyncio.run(service.agent_rules_install(apply=True))
+    assert applied.ok and applied.data["applied"] is True
+
+    text = agents.read_text(encoding="utf-8")
+    agents.write_text(
+        _replace_line(text, "generatedAt: ", "generatedAt: 2000-01-01T00:00:00Z"),
+        encoding="utf-8",
+    )
+
+    checked = asyncio.run(service.agent_rules_check())
+
+    assert checked.ok and checked.data
+    assert checked.data["needsUpdate"] is False
+    assert checked.data["diffSummary"] == []
+
+
+def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    service = _OperationService(tmp_path, [])
+
+    applied = asyncio.run(service.agent_rules_install(apply=True))
+    assert applied.ok and applied.data["applied"] is True
+
+    text = agents.read_text(encoding="utf-8")
+    agents.write_text(
+        _replace_line(text, "rulesVersion: ", "rulesVersion: 3"),
+        encoding="utf-8",
+    )
+
+    checked = asyncio.run(service.agent_rules_check())
+
+    assert checked.ok and checked.data
+    assert checked.data["needsUpdate"] is True
+    assert checked.data["recommendedRulesVersion"] == "4"
+    assert "rulesVersion differs" in checked.data["diffSummary"]
 
 
 def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:

@@ -14,12 +14,22 @@ namespace CodingRiver.UPilot
         private const string McpManagerPrefix = "upilot.McpMgr.";
         private const string SetupCompletedPrefix = "upilot.SetupCompleted.";
 
-        private static string ProjectSuffix => UPilotBridge.WsEndpointEditorPrefsKeySuffix;
+        internal static string ProjectSuffix => UPilotBridge.WsEndpointEditorPrefsKeySuffix;
 
         public static string McpPythonEntryKey => $"{McpManagerPrefix}PythonEntry.{ProjectSuffix}";
         public static string McpLogLevelKey => $"{McpManagerPrefix}LogLevel.{ProjectSuffix}";
         public static string McpAutoStartKey => $"{McpManagerPrefix}AutoStart.{ProjectSuffix}";
         public static string SetupCompletedKey => SetupCompletedPrefix + ProjectSuffix;
+        public static string BridgeEnabledKey => ProjectKey("CodingRiver.UPilot.BridgeEnabled");
+        public static string DebugWireLogsKey => ProjectKey("upilot.DebugWireLogs");
+        public static string VerboseLogsKey => ProjectKey("upilot.VerboseLogs");
+        public static string AutoRestartOnStuckKey => ProjectKey("upilot.AutoRestartOnStuck");
+        public static string LogToUnityConsoleKey => ProjectKey("CodingRiver.UPilot.Logger.LogToUnityConsole");
+
+        internal static string ProjectKey(string key)
+        {
+            return $"{key}.{ProjectSuffix}";
+        }
 
         public static IReadOnlyList<string> CurrentProjectKeys
         {
@@ -31,6 +41,11 @@ namespace CodingRiver.UPilot
                     McpLogLevelKey,
                     McpAutoStartKey,
                     SetupCompletedKey,
+                    BridgeEnabledKey,
+                    DebugWireLogsKey,
+                    VerboseLogsKey,
+                    AutoRestartOnStuckKey,
+                    LogToUnityConsoleKey,
 
                     // Retained for cleanup of preferences written by older package versions.
                     $"upilot.WsHost.{ProjectSuffix}",
@@ -38,6 +53,8 @@ namespace CodingRiver.UPilot
                     $"upilot.HttpPort.{ProjectSuffix}",
                 };
                 keys.AddRange(UPilotAgentSetup.GetAgentRulesPreferenceKeysForCurrentProject());
+                keys.AddRange(UPilotUpdateService.GetPreferenceKeysForCurrentProject());
+                keys.AddRange(UPilotPackageUpdateLifecycle.GetPreferenceKeysForCurrentProject());
                 return keys;
             }
         }

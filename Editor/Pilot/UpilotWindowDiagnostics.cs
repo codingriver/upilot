@@ -22,10 +22,10 @@ namespace CodingRiver.UPilot
 
         static UPilotWindowDiagnostics()
         {
-            SessionState.SetInt(DomainReloadTsKey, (int)(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000));
+            SessionState.SetInt(ProjectSessionKey(DomainReloadTsKey), (int)(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000));
         }
 
-        public static int DomainReloadEpoch => SessionState.GetInt(DomainReloadTsKey, 0);
+        public static int DomainReloadEpoch => SessionState.GetInt(ProjectSessionKey(DomainReloadTsKey), 0);
 
         // ── Per-section snapshots ────────────────────────────────────────────
 
@@ -84,6 +84,11 @@ namespace CodingRiver.UPilot
         // ── Code version (assembly) ──────────────────────────────────────────
 
         private static string _cachedCodeVersion;
+
+        private static string ProjectSessionKey(string key)
+        {
+            return UPilotPreferences.ProjectKey(key);
+        }
 
         public static string CodeVersion
         {

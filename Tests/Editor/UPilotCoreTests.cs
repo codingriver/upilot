@@ -87,6 +87,88 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void ManagedAgentRuleComparisonIgnoresGeneratedTimestamp()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-rule-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                var currentText = BuildAgentRulesText();
+                var installedText = ReplaceLine(
+                    currentText,
+                    "generatedAt: ",
+                    "generatedAt: 2000-01-01T00:00:00Z");
+                var path = Path.Combine(directory, "AGENTS.md");
+                File.WriteAllText(path, WrapManagedRule(installedText));
+
+                var state = InspectManagedRuleState(path, currentText);
+
+                Assert.That(state, Is.EqualTo(AgentRuleConfigState.Current));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ManagedAgentRuleComparisonDetectsRuleTemplateVersionChange()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-rule-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                var currentText = BuildAgentRulesText();
+                var currentVersion = GetAgentRulesTemplateVersion();
+                var installedText = ReplaceLine(
+                    currentText,
+                    "rulesVersion: ",
+                    "rulesVersion: " + Math.Max(0, currentVersion - 1));
+                var path = Path.Combine(directory, "AGENTS.md");
+                File.WriteAllText(path, WrapManagedRule(installedText));
+
+                var state = InspectManagedRuleState(path, currentText);
+
+                Assert.That(state, Is.EqualTo(AgentRuleConfigState.UpdateAvailable));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ManagedAgentRuleComparisonDetectsPackageVersionChange()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-rule-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                var currentText = BuildAgentRulesText();
+                var installedText = ReplaceLine(
+                    currentText,
+                    "upilotPackageVersion: ",
+                    "upilotPackageVersion: 0.0.0-test");
+                var path = Path.Combine(directory, "AGENTS.md");
+                File.WriteAllText(path, WrapManagedRule(installedText));
+
+                var state = InspectManagedRuleState(path, currentText);
+
+                Assert.That(state, Is.EqualTo(AgentRuleConfigState.UpdateAvailable));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
         public void AgentSetupExposesSupportedMcpAndRuleStatusesInSameOrder()
         {
             var mcpStatuses = UPilotAgentSetup.GetMcpConfigStatuses();
@@ -462,6 +544,53 @@ namespace CodingRiver.UPilot.Tests
                 if (Directory.Exists(directory))
                     Directory.Delete(directory, recursive: true);
             }
+        }
+
+        private static string BuildAgentRulesText()
+        {
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "BuildAgentsMd",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)method.Invoke(null, null);
+        }
+
+        private static string WrapManagedRule(string content)
+        {
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "WrapManagedBlock",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)method.Invoke(null, new object[] { content });
+        }
+
+        private static AgentRuleConfigState InspectManagedRuleState(string path, string expectedContent)
+        {
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "InspectManagedRuleFile",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (AgentRuleConfigState)method.Invoke(null, new object[] { path, expectedContent });
+        }
+
+        private static int GetAgentRulesTemplateVersion()
+        {
+            var field = typeof(UPilotAgentSetup).GetField(
+                "AgentRulesTemplateVersion",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (int)field.GetRawConstantValue();
+        }
+
+        private static string ReplaceLine(string text, string prefix, string replacement)
+        {
+            var lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (!lines[i].StartsWith(prefix, StringComparison.Ordinal))
+                    continue;
+
+                lines[i] = replacement;
+                return string.Join("\n", lines);
+            }
+
+            throw new InvalidOperationException("Line prefix not found: " + prefix);
         }
     }
 }

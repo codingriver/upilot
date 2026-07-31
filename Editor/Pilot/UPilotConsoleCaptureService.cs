@@ -436,7 +436,7 @@ namespace CodingRiver.UPilot
             {
                 s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
             }
-            SessionState.SetString(ActiveDirectorySessionKey, directory);
+            SessionState.SetString(ProjectSessionKey(ActiveDirectorySessionKey), directory);
             WriteManifest(manifest);
             RegisterCustomSession(manifest);
             if (payload.clearUnityConsole)
@@ -531,7 +531,7 @@ namespace CodingRiver.UPilot
                 File.WriteAllText(active.Manifest.summaryPath, JsonUtility.ToJson(active.Manifest, true), Utf8NoBom);
                 var result = CloneManifest(active.Manifest);
                 s_active = null;
-                SessionState.EraseString(ActiveDirectorySessionKey);
+                SessionState.EraseString(ProjectSessionKey(ActiveDirectorySessionKey));
                 return Result(true, "StopCapture", string.Empty, result);
             }
         }
@@ -572,8 +572,8 @@ namespace CodingRiver.UPilot
 
             if (payload.dryRun)
             {
-                SessionState.SetString(CleanupTokenSessionKey, token);
-                SessionState.SetString(CleanupTargetsSessionKey, string.Join("\n", targets));
+                SessionState.SetString(ProjectSessionKey(CleanupTokenSessionKey), token);
+                SessionState.SetString(ProjectSessionKey(CleanupTargetsSessionKey), string.Join("\n", targets));
                 return new ConsoleCaptureCleanupResult
                 {
                     ok = true, action = "CleanupCaptures", dryRun = true, confirmToken = token,
@@ -581,8 +581,8 @@ namespace CodingRiver.UPilot
                 };
             }
 
-            string expectedToken = SessionState.GetString(CleanupTokenSessionKey, string.Empty);
-            string expectedTargets = SessionState.GetString(CleanupTargetsSessionKey, string.Empty);
+            string expectedToken = SessionState.GetString(ProjectSessionKey(CleanupTokenSessionKey), string.Empty);
+            string expectedTargets = SessionState.GetString(ProjectSessionKey(CleanupTargetsSessionKey), string.Empty);
             if (string.IsNullOrEmpty(payload.confirmToken) || payload.confirmToken != expectedToken || expectedTargets != string.Join("\n", targets))
             {
                 return new ConsoleCaptureCleanupResult
@@ -601,8 +601,8 @@ namespace CodingRiver.UPilot
                 Directory.Delete(full, true);
                 deleted++;
             }
-            SessionState.EraseString(CleanupTokenSessionKey);
-            SessionState.EraseString(CleanupTargetsSessionKey);
+            SessionState.EraseString(ProjectSessionKey(CleanupTokenSessionKey));
+            SessionState.EraseString(ProjectSessionKey(CleanupTargetsSessionKey));
             return new ConsoleCaptureCleanupResult
             {
                 ok = true, action = "CleanupCaptures", dryRun = false, confirmToken = token,
@@ -615,13 +615,13 @@ namespace CodingRiver.UPilot
             lock (CaptureLock)
             {
                 if (s_active != null) return;
-                string directory = SessionState.GetString(ActiveDirectorySessionKey, string.Empty);
+                string directory = SessionState.GetString(ProjectSessionKey(ActiveDirectorySessionKey), string.Empty);
                 if (string.IsNullOrEmpty(directory)) return;
                 string manifestPath = Path.Combine(directory, "session.json");
                 var manifest = LoadManifest(manifestPath);
                 if (manifest == null || !manifest.active)
                 {
-                    SessionState.EraseString(ActiveDirectorySessionKey);
+                    SessionState.EraseString(ProjectSessionKey(ActiveDirectorySessionKey));
                     return;
                 }
                 s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
@@ -852,6 +852,11 @@ namespace CodingRiver.UPilot
         private static string GetProjectRoot() => Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
         private static string GetDefaultCaptureRoot() => Path.Combine(GetProjectRoot(), CaptureRootRelative);
         private static string GetCustomSessionIndexPath() => Path.Combine(GetDefaultCaptureRoot(), SessionIndexFileName);
+
+        private static string ProjectSessionKey(string key)
+        {
+            return UPilotPreferences.ProjectKey(key);
+        }
 
         private static string ResolveDirectory(string path, string projectRoot)
         {

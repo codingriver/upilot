@@ -50,7 +50,7 @@ namespace CodingRiver.UPilot
         /// <summary>
         /// 是否同时将日志输出到 Unity Editor Console。默认开启。
         /// </summary>
-        public static bool LogToUnityConsole = EditorPrefs.GetBool(LogToUnityConsolePrefsKey, true);
+        public static bool LogToUnityConsole = EditorPrefs.GetBool(UPilotPreferences.LogToUnityConsoleKey, true);
 
         /// <summary>
         /// 当前线程是否为主线程。
@@ -59,7 +59,7 @@ namespace CodingRiver.UPilot
 
         static Logger()
         {
-            LogToUnityConsole = EditorPrefs.GetBool(LogToUnityConsolePrefsKey, true);
+            LogToUnityConsole = EditorPrefs.GetBool(UPilotPreferences.LogToUnityConsoleKey, true);
 
             MainThreadId = Thread.CurrentThread.ManagedThreadId;
 
@@ -82,7 +82,7 @@ namespace CodingRiver.UPilot
         public static void SetLogToUnityConsole(bool enabled)
         {
             LogToUnityConsole = enabled;
-            EditorPrefs.SetBool(LogToUnityConsolePrefsKey, enabled);
+            EditorPrefs.SetBool(UPilotPreferences.LogToUnityConsoleKey, enabled);
         }
 
         // ── 会话检测与初始化 ──────────────────────────────────────────────────
