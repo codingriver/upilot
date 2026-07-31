@@ -5,6 +5,7 @@
 
 using UnityEditor;
 using UnityEngine;
+using System;
 
 namespace CodingRiver.UPilot
 {
@@ -13,8 +14,21 @@ namespace CodingRiver.UPilot
         [MenuItem("UPilot/Advanced/Force Restart Unity Bridge")]
         public static void RestartBridge()
         {
-            Logger.Log("[Menu] Force Restart UPilotBridge triggered.");
-            UPilotBridge.Instance.Restart();
+            try
+            {
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
+                    return;
+                }
+
+                Logger.Log("[Menu] Force Restart UPilotBridge triggered.");
+                UPilotBridge.Instance.Restart();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[UPilot] 菜单重启 Unity 桥接器失败：" + ex.Message + "\n" + ex);
+            }
         }
 
         [MenuItem("UPilot/Advanced/Force Restart Unity Bridge", true)]

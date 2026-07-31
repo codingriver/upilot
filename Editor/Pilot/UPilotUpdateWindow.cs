@@ -24,6 +24,7 @@ namespace CodingRiver.UPilot
         private string _error = "";
         private string _notice = "";
         private MessageType _noticeType = MessageType.Info;
+        private static bool _packageRevisionReflectionErrorLogged;
 
         public static void Open(Action<string, MessageType> notice = null)
         {
@@ -71,7 +72,7 @@ namespace CodingRiver.UPilot
         private static void ReportOpenError(string message, Exception ex, Action<string, MessageType> notice)
         {
             var fullMessage = message + "：" + ex.Message;
-            Debug.LogError("[UPilot] " + fullMessage + "\n" + ex);
+            ReportUpdateWindowException(fullMessage, ex);
             try
             {
                 notice?.Invoke(fullMessage, MessageType.Error);
@@ -79,6 +80,23 @@ namespace CodingRiver.UPilot
             catch (Exception noticeEx)
             {
                 Debug.LogError("[UPilot] 更新错误通知失败：" + noticeEx);
+            }
+        }
+
+        private static void ReportUpdateWindowException(string context, Exception ex)
+        {
+            Debug.LogError("[UPilot] " + context + "\n" + ex);
+        }
+
+        private static void DrawExceptionFallback(string context, Exception ex)
+        {
+            try
+            {
+                EditorGUILayout.HelpBox(context + "：" + ex.Message, MessageType.Error);
+            }
+            catch (Exception fallbackEx)
+            {
+                Debug.LogError("[UPilot] 更新中心错误提示绘制失败：" + fallbackEx.Message + "\n" + fallbackEx);
             }
         }
 
@@ -102,16 +120,37 @@ namespace CodingRiver.UPilot
 
         private void OnEditorUpdate()
         {
-            var status = UPilotUpdateService.Instance.GetOperationStatus();
-            var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
-            if (_operationRunning && !status.IsRunning && !downloadRunning)
-                _operationRunning = false;
+            try
+            {
+                var status = UPilotUpdateService.Instance.GetOperationStatus();
+                var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
+                if (_operationRunning && !status.IsRunning && !downloadRunning)
+                    _operationRunning = false;
 
-            if (_operationRunning || status.IsRunning || downloadRunning)
-                Repaint();
+                if (_operationRunning || status.IsRunning || downloadRunning)
+                    Repaint();
+            }
+            catch (Exception ex)
+            {
+                EditorApplication.update -= OnEditorUpdate;
+                ReportUpdateWindowException("UPilot 更新中心刷新回调失败：" + ex.Message, ex);
+            }
         }
 
         private void OnGUI()
+        {
+            try
+            {
+                DrawUpdateWindowGui();
+            }
+            catch (Exception ex)
+            {
+                ReportUpdateWindowException("UPilot 更新中心绘制失败：" + ex.Message, ex);
+                DrawExceptionFallback("UPilot 更新中心绘制失败", ex);
+            }
+        }
+
+        private void DrawUpdateWindowGui()
         {
             EditorGUILayout.Space(8);
             using (new EditorGUILayout.HorizontalScope())
@@ -434,6 +473,7 @@ namespace CodingRiver.UPilot
             {
                 _manifest = null;
                 _error = ex.Message;
+                ReportUpdateWindowException("检查 UPilot 更新失败：" + ex.Message, ex);
             }
             finally
             {
@@ -444,30 +484,67 @@ namespace CodingRiver.UPilot
 
         private void UpdatePackage()
         {
-            _operationRunning = true;
-            UPilotUpdateService.Instance.UpdateUpmFromManifest(HandleOperationNotice);
+            try
+            {
+                _operationRunning = true;
+                UPilotUpdateService.Instance.UpdateUpmFromManifest(HandleOperationNotice);
+            }
+            catch (Exception ex)
+            {
+                _operationRunning = false;
+                _notice = "UPilot 包更新启动失败：" + ex.Message;
+                _noticeType = MessageType.Error;
+                ReportUpdateWindowException(_notice, ex);
+            }
         }
 
         private void UpdateManagedService()
         {
-            _operationRunning = true;
-            UPilotUpdateService.Instance.UpdateManagedServerAndRestart(HandleOperationNotice);
+            try
+            {
+                _operationRunning = true;
+                UPilotUpdateService.Instance.UpdateManagedServerAndRestart(HandleOperationNotice);
+            }
+            catch (Exception ex)
+            {
+                _operationRunning = false;
+                _notice = "MCP 服务更新启动失败：" + ex.Message;
+                _noticeType = MessageType.Error;
+                ReportUpdateWindowException(_notice, ex);
+            }
         }
 
         private void UpdateSelected(bool updatePackage, bool updateManagedServer)
         {
-            _operationRunning = true;
-            UPilotUpdateService.Instance.UpdateFromManifest(
-                updatePackage,
-                updateManagedServer,
-                HandleOperationNotice);
+            try
+            {
+                _operationRunning = true;
+                UPilotUpdateService.Instance.UpdateFromManifest(
+                    updatePackage,
+                    updateManagedServer,
+                    HandleOperationNotice);
+            }
+            catch (Exception ex)
+            {
+                _operationRunning = false;
+                _notice = "UPilot 更新启动失败：" + ex.Message;
+                _noticeType = MessageType.Error;
+                ReportUpdateWindowException(_notice, ex);
+            }
         }
 
         private void HandleOperationNotice(string message, MessageType type)
         {
             _notice = message ?? "";
             _noticeType = type;
-            _externalNotice?.Invoke(message, type);
+            try
+            {
+                _externalNotice?.Invoke(message, type);
+            }
+            catch (Exception ex)
+            {
+                ReportUpdateWindowException("更新中心外部通知失败：" + ex.Message, ex);
+            }
 
             var status = UPilotUpdateService.Instance.GetOperationStatus();
             if (type == MessageType.Error ||
@@ -703,8 +780,13 @@ namespace CodingRiver.UPilot
                 var git = package.GetType().GetProperty("git", BindingFlags.Instance | BindingFlags.Public)?.GetValue(package);
                 return git?.GetType().GetProperty("hash", BindingFlags.Instance | BindingFlags.Public)?.GetValue(git) as string ?? "";
             }
-            catch
+            catch (Exception ex)
             {
+                if (!_packageRevisionReflectionErrorLogged)
+                {
+                    _packageRevisionReflectionErrorLogged = true;
+                    ReportUpdateWindowException("读取 UPilot 包 Git revision 失败：" + ex.Message, ex);
+                }
                 return "";
             }
         }

@@ -47,19 +47,33 @@ namespace CodingRiver.UPilot
         [MenuItem("UPilot/UPilot", false, 200)]
         public static void Open()
         {
-            var window = GetWindow<UPilotMainWindow>("UPilot");
-            window.minSize = new Vector2(440, 400);
-            window.Show();
-            UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
+            try
+            {
+                var window = GetWindow<UPilotMainWindow>("UPilot");
+                window.minSize = new Vector2(440, 400);
+                window.Show();
+                UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("打开 UPilot 主界面失败", ex);
+            }
         }
 
         public static void OpenSetup()
         {
-            var window = GetWindow<UPilotMainWindow>("UPilot");
-            window.minSize = new Vector2(440, 400);
-            window.EnterSetupView();
-            window.Show();
-            window.Focus();
+            try
+            {
+                var window = GetWindow<UPilotMainWindow>("UPilot");
+                window.minSize = new Vector2(440, 400);
+                window.EnterSetupView();
+                window.Show();
+                window.Focus();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("打开 UPilot 首次设置失败", ex);
+            }
         }
 
         public static void OpenWithNotice(
@@ -67,41 +81,85 @@ namespace CodingRiver.UPilot
             MessageType type = MessageType.Warning,
             double durationSeconds = 12d)
         {
-            var window = GetWindow<UPilotMainWindow>("UPilot");
-            window.minSize = new Vector2(440, 400);
-            window._mainView = UPilotMainView.Dashboard;
-            window.ShowNoticeForDuration(message, type, durationSeconds);
-            window.Show();
-            window.Focus();
+            try
+            {
+                var window = GetWindow<UPilotMainWindow>("UPilot");
+                window.minSize = new Vector2(440, 400);
+                window._mainView = UPilotMainView.Dashboard;
+                window.ShowNoticeForDuration(message, type, durationSeconds);
+                window.Show();
+                window.Focus();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("打开 UPilot 主界面提示失败", ex);
+            }
         }
 
         private void OnEnable()
         {
-            minSize = new Vector2(440, 400);
-            RefreshAgentConfigs(force: true);
-            RefreshSnapshot();
-            EnforceUpdateMaintenanceStop();
-            if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingUpdateNotice))
-                ShowNoticeForDuration(pendingUpdateNotice, MessageType.Warning, 12d);
-            UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
+            try
+            {
+                minSize = new Vector2(440, 400);
+                RefreshAgentConfigs(force: true);
+                RefreshSnapshot();
+                EnforceUpdateMaintenanceStop();
+                if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingUpdateNotice))
+                    ShowNoticeForDuration(pendingUpdateNotice, MessageType.Warning, 12d);
+                UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("UPilot 主界面初始化失败", ex);
+                ShowExceptionNotice("UPilot 主界面初始化失败", ex);
+            }
+            EditorApplication.update -= OnEditorUpdate;
             EditorApplication.update += OnEditorUpdate;
         }
 
         private void OnDisable()
         {
-            EditorApplication.update -= OnEditorUpdate;
+            try
+            {
+                EditorApplication.update -= OnEditorUpdate;
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("UPilot 主界面关闭处理失败", ex);
+            }
         }
 
         private void OnEditorUpdate()
         {
-            if (EditorApplication.timeSinceStartup - _lastRepaint < 0.4d)
-                return;
+            try
+            {
+                if (EditorApplication.timeSinceStartup - _lastRepaint < 0.4d)
+                    return;
 
-            _lastRepaint = EditorApplication.timeSinceStartup;
-            Repaint();
+                _lastRepaint = EditorApplication.timeSinceStartup;
+                Repaint();
+            }
+            catch (Exception ex)
+            {
+                EditorApplication.update -= OnEditorUpdate;
+                ReportMainWindowException("UPilot 主界面刷新回调失败", ex);
+            }
         }
 
         private void OnGUI()
+        {
+            try
+            {
+                DrawMainWindowGui();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("UPilot 主界面绘制失败", ex);
+                DrawExceptionFallback("UPilot 主界面绘制失败", ex);
+            }
+        }
+
+        private void DrawMainWindowGui()
         {
             InitializeStyles();
             if (_mainView == UPilotMainView.Setup)
@@ -301,7 +359,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[UPilot] Failed to force-stop service during update: " + ex.Message);
+                Debug.LogError("[UPilot] 更新期间强制停止服务失败：" + ex.Message + "\n" + ex);
             }
 
             _updateStopInProgress = false;
@@ -561,16 +619,24 @@ namespace CodingRiver.UPilot
 
         private void RequestRestart()
         {
-            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            try
             {
-                ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
-                return;
-            }
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                    return;
+                }
 
-            _restartRequested = true;
-            UPilotQuickStart.Restart();
-            _stateChangedAt = EditorApplication.timeSinceStartup;
-            RefreshSnapshot();
+                _restartRequested = true;
+                UPilotQuickStart.Restart();
+                _stateChangedAt = EditorApplication.timeSinceStartup;
+                RefreshSnapshot();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("重启 UPilot 失败", ex);
+                ShowExceptionNotice("重启 UPilot 失败", ex);
+            }
         }
 
         private static bool IsServiceTransitioning(UPilotMainState state)
@@ -1028,105 +1094,129 @@ namespace CodingRiver.UPilot
 
         private void UpdateAgentMcpConfig(AgentMcpConfigStatus status)
         {
-            if (status.HasUPilotEntry)
+            try
             {
-                var confirmed = EditorUtility.DisplayDialog(
-                    $"更新 {status.ClientName} 连接配置？",
-                    "将连接地址更新为当前 UPilot 使用的地址，不影响其他服务。",
-                    "更新",
-                    "取消");
-                if (!confirmed)
-                    return;
-            }
+                if (status.HasUPilotEntry)
+                {
+                    var confirmed = EditorUtility.DisplayDialog(
+                        $"更新 {status.ClientName} 连接配置？",
+                        "将连接地址更新为当前 UPilot 使用的地址，不影响其他服务。",
+                        "更新",
+                        "取消");
+                    if (!confirmed)
+                        return;
+                }
 
-            var result = UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false);
-            Debug.Log($"[UPilot] {status.ClientName} MCP config:\n{result}");
-            RefreshAgentConfigs(force: true);
-            RefreshSnapshot();
-            ShowNotice(status.HasUPilotEntry ? "Agent 配置已更新" : "Agent 配置已写入");
+                var result = UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false);
+                Debug.Log($"[UPilot] {status.ClientName} MCP config:\n{result}");
+                RefreshAgentConfigs(force: true);
+                RefreshSnapshot();
+                ShowNotice(status.HasUPilotEntry ? "Agent 配置已更新" : "Agent 配置已写入");
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException(status.ClientName + " MCP 配置更新失败", ex);
+                ShowExceptionNotice(status.ClientName + " MCP 配置更新失败", ex);
+            }
         }
 
         private void UpdateAgentRuleConfig(AgentRuleConfigStatus status)
         {
-            var force = status.State == AgentRuleConfigState.Customized ||
-                        status.State == AgentRuleConfigState.Current;
-            if (status.State == AgentRuleConfigState.Customized)
+            try
             {
-                var choice = EditorUtility.DisplayDialogComplex(
-                    $"如何处理 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
-                    $"当前内容经过本地修改。更新为 UPilot 最新版本会替换这些修改。",
-                    "更新为最新版本",
-                    "取消",
-                    "保留当前内容");
-                if (choice != 0)
-                    return;
-            }
-            else if (status.State != AgentRuleConfigState.Missing)
-            {
-                var confirmed = EditorUtility.DisplayDialog(
-                    $"更新 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
-                    $"将更新为 UPilot 提供的最新内容。",
-                    "更新",
-                    "取消");
-                if (!confirmed)
-                    return;
-            }
+                var force = status.State == AgentRuleConfigState.Customized ||
+                            status.State == AgentRuleConfigState.Current;
+                if (status.State == AgentRuleConfigState.Customized)
+                {
+                    var choice = EditorUtility.DisplayDialogComplex(
+                        $"如何处理 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
+                        $"当前内容经过本地修改。更新为 UPilot 最新版本会替换这些修改。",
+                        "更新为最新版本",
+                        "取消",
+                        "保留当前内容");
+                    if (choice != 0)
+                        return;
+                }
+                else if (status.State != AgentRuleConfigState.Missing)
+                {
+                    var confirmed = EditorUtility.DisplayDialog(
+                        $"更新 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
+                        $"将更新为 UPilot 提供的最新内容。",
+                        "更新",
+                        "取消");
+                    if (!confirmed)
+                        return;
+                }
 
-            var result = UPilotAgentSetup.UpdateAgentRules(status.ClientName, force);
-            Debug.Log($"[UPilot] {status.ClientName} rules:\n{result}");
-            RefreshAgentConfigs(force: true);
-            ShowNotice(status.ClientName == "Codex" ? "Skill 已更新" : "规则已更新");
+                var result = UPilotAgentSetup.UpdateAgentRules(status.ClientName, force);
+                Debug.Log($"[UPilot] {status.ClientName} rules:\n{result}");
+                RefreshAgentConfigs(force: true);
+                ShowNotice(status.ClientName == "Codex" ? "Skill 已更新" : "规则已更新");
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException(status.ClientName + " 规则更新失败", ex);
+                ShowExceptionNotice(status.ClientName + " 规则更新失败", ex);
+            }
         }
 
         private void UpdateAllAgentIntegrations()
         {
-            var hasCustomizedRules = false;
-            foreach (var status in _ruleConfigs)
+            try
             {
-                if (status.HasLocalCustomization)
+                var hasCustomizedRules = false;
+                foreach (var status in _ruleConfigs)
                 {
-                    hasCustomizedRules = true;
-                    break;
+                    if (status.HasLocalCustomization)
+                    {
+                        hasCustomizedRules = true;
+                        break;
+                    }
                 }
-            }
 
-            var overwriteCustomizedRules = true;
-            if (hasCustomizedRules)
-            {
-                var choice = EditorUtility.DisplayDialogComplex(
-                    "如何处理本地修改？",
-                    "检测到 Codex 的 UPilot Skill 有本地修改。你可以保留这些修改并处理其他配置，也可以替换为最新版本。",
-                    "更新为最新版本",
-                    "取消",
-                    "保留本地修改");
-                if (choice == 1)
+                var overwriteCustomizedRules = true;
+                if (hasCustomizedRules)
+                {
+                    var choice = EditorUtility.DisplayDialogComplex(
+                        "如何处理本地修改？",
+                        "检测到 Codex 的 UPilot Skill 有本地修改。你可以保留这些修改并处理其他配置，也可以替换为最新版本。",
+                        "更新为最新版本",
+                        "取消",
+                        "保留本地修改");
+                    if (choice == 1)
+                        return;
+                    overwriteCustomizedRules = choice == 0;
+                }
+                else if (!EditorUtility.DisplayDialog(
+                             "处理 Agent 配置？",
+                             "将处理下方标记的连接和内容更新。",
+                             "继续",
+                             "取消"))
+                {
                     return;
-                overwriteCustomizedRules = choice == 0;
-            }
-            else if (!EditorUtility.DisplayDialog(
-                         "处理 Agent 配置？",
-                         "将处理下方标记的连接和内容更新。",
-                         "继续",
-                         "取消"))
-            {
-                return;
-            }
+                }
 
-            var result = "";
-            foreach (var status in _agentConfigs)
-            {
-                if (!status.HasUPilotEntry)
-                    continue;
-                result += UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false) + "\n";
+                var result = "";
+                foreach (var status in _agentConfigs)
+                {
+                    if (!status.HasUPilotEntry)
+                        continue;
+                    result += UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false) + "\n";
+                }
+                result += UPilotAgentSetup.UpdateAllAgentRules(overwriteCustomizedRules);
+                Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
+                RefreshAgentConfigs(force: true);
+                RefreshSnapshot();
+                ShowNotice(
+                    hasCustomizedRules && !overwriteCustomizedRules
+                        ? "其他配置已处理，本地修改已保留"
+                        : "Agent 配置已更新");
             }
-            result += UPilotAgentSetup.UpdateAllAgentRules(overwriteCustomizedRules);
-            Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
-            RefreshAgentConfigs(force: true);
-            RefreshSnapshot();
-            ShowNotice(
-                hasCustomizedRules && !overwriteCustomizedRules
-                    ? "其他配置已处理，本地修改已保留"
-                    : "Agent 配置已更新");
+            catch (Exception ex)
+            {
+                ReportMainWindowException("批量更新 Agent 配置失败", ex);
+                ShowExceptionNotice("批量更新 Agent 配置失败", ex);
+            }
         }
 
         private static void DrawColoredButton(string label, Color color, float height, Action action)
@@ -1146,34 +1236,58 @@ namespace CodingRiver.UPilot
 
         private void ConfigureAndStart()
         {
-            EnterSetupView();
+            try
+            {
+                EnterSetupView();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("进入 UPilot 设置流程失败", ex);
+                ShowExceptionNotice("进入 UPilot 设置流程失败", ex);
+            }
         }
 
         private void StartUPilot()
         {
-            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            try
             {
-                ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
-                return;
-            }
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                    return;
+                }
 
-            UPilotQuickStart.Start();
-            _stateChangedAt = EditorApplication.timeSinceStartup;
-            ShowNotice("UPilot 正在启动…");
+                UPilotQuickStart.Start();
+                _stateChangedAt = EditorApplication.timeSinceStartup;
+                ShowNotice("UPilot 正在启动…");
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("启动 UPilot 失败", ex);
+                ShowExceptionNotice("启动 UPilot 失败", ex);
+            }
         }
 
         private void RepairUPilot()
         {
-            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            try
             {
-                ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
-                return;
-            }
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                    return;
+                }
 
-            var message = UPilotQuickStart.AutoRepair(_bridgeStatus, _mcpStatus, _agentConfigs);
-            RefreshAgentConfigs(force: true);
-            _stateChangedAt = EditorApplication.timeSinceStartup;
-            ShowNotice(message);
+                var message = UPilotQuickStart.AutoRepair(_bridgeStatus, _mcpStatus, _agentConfigs);
+                RefreshAgentConfigs(force: true);
+                _stateChangedAt = EditorApplication.timeSinceStartup;
+                ShowNotice(message);
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("自动修复 UPilot 失败", ex);
+                ShowExceptionNotice("自动修复 UPilot 失败", ex);
+            }
         }
 
         private void DrawAdvancedEntry()
@@ -1238,6 +1352,35 @@ namespace CodingRiver.UPilot
             _notice = message;
             _noticeType = type;
             _noticeUntil = EditorApplication.timeSinceStartup + durationSeconds;
+        }
+
+        private void ShowExceptionNotice(string context, Exception ex)
+        {
+            try
+            {
+                ShowNoticeForDuration(context + "：" + ex.Message, MessageType.Error, 8d);
+            }
+            catch (Exception noticeEx)
+            {
+                Debug.LogError("[UPilot] 主界面错误提示失败：" + noticeEx.Message + "\n" + noticeEx);
+            }
+        }
+
+        private static void ReportMainWindowException(string context, Exception ex)
+        {
+            Debug.LogError("[UPilot] " + context + "：" + ex.Message + "\n" + ex);
+        }
+
+        private static void DrawExceptionFallback(string context, Exception ex)
+        {
+            try
+            {
+                EditorGUILayout.HelpBox(context + "：" + ex.Message, MessageType.Error);
+            }
+            catch (Exception fallbackEx)
+            {
+                Debug.LogError("[UPilot] 主界面错误提示绘制失败：" + fallbackEx.Message + "\n" + fallbackEx);
+            }
         }
 
         private static Color GetStateColor(UPilotMainState state)

@@ -209,27 +209,41 @@ namespace CodingRiver.UPilot
 
         private static void OnRegisteringPackages(PackageRegistrationEventArgs args)
         {
-            if (!ContainsUPilot(args.changedFrom))
-                return;
-
-            var targetVersion = FindUPilotVersion(args.changedTo);
-            var installManagedServer = ShouldInstallManagedServerAfterPackageUpdate();
-            if (!PrepareForPackageUpdate(
-                    targetVersion,
-                    installManagedServerAfterUpdate: installManagedServer,
-                    targetServerVersion: ""))
+            try
             {
-                Debug.LogError(
-                    "[UPilot] Package Manager is updating UPilot, but the MCP service could not be stopped before package registration.");
+                if (!ContainsUPilot(args.changedFrom))
+                    return;
+
+                var targetVersion = FindUPilotVersion(args.changedTo);
+                var installManagedServer = ShouldInstallManagedServerAfterPackageUpdate();
+                if (!PrepareForPackageUpdate(
+                        targetVersion,
+                        installManagedServerAfterUpdate: installManagedServer,
+                        targetServerVersion: ""))
+                {
+                    Debug.LogError(
+                        "[UPilot] Package Manager is updating UPilot, but the MCP service could not be stopped before package registration.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ReportLifecycleError("UPilot 包注册前处理失败", ex);
             }
         }
 
         private static void OnRegisteredPackages(PackageRegistrationEventArgs args)
         {
-            if (!ContainsUPilot(args.changedTo))
-                return;
+            try
+            {
+                if (!ContainsUPilot(args.changedTo))
+                    return;
 
-            MarkPackageUpdateCompleted();
+                MarkPackageUpdateCompleted();
+            }
+            catch (Exception ex)
+            {
+                ReportLifecycleError("UPilot 包注册完成处理失败", ex);
+            }
         }
 
         private static bool ContainsUPilot(System.Collections.Generic.IEnumerable<PackageInfo> packages)
@@ -281,6 +295,19 @@ namespace CodingRiver.UPilot
 
         private static void TryRestoreAfterUpdate()
         {
+            try
+            {
+                TryRestoreAfterUpdateCore();
+            }
+            catch (Exception ex)
+            {
+                ClearUpdateState();
+                ReportLifecycleError("UPilot 包更新恢复失败", ex);
+            }
+        }
+
+        private static void TryRestoreAfterUpdateCore()
+        {
             if (!GetSessionBool(UpdateCompletedKey, false))
                 return;
 
@@ -324,6 +351,13 @@ namespace CodingRiver.UPilot
             UPilotBridge.Instance.EnsureStarted();
             UPilotUpdateService.SetOperationCompleted("UPilot 包已更新并已恢复服务");
             Debug.Log($"[UPilot] Package update completed ({targetVersion}); MCP service restart scheduled.");
+        }
+
+        private static void ReportLifecycleError(string context, Exception ex)
+        {
+            var message = context + "：" + ex.Message;
+            UPilotUpdateService.SetOperationFailed(message);
+            Debug.LogError("[UPilot] " + message + "\n" + ex);
         }
 
         private static async void ContinueManagedServerUpdateAfterPackage(

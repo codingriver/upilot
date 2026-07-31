@@ -230,6 +230,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                LogUpdateError("自动检查更新失败：" + ex.Message, ex);
                 _releaseCheckStatus = new UPilotReleaseUpdateCheckStatus
                 {
                     ErrorMessage = ex.Message,
@@ -289,7 +290,42 @@ namespace CodingRiver.UPilot
             return true;
         }
 
+        private static void HandleUnexpectedUpdateException(
+            string context,
+            Exception ex,
+            Action<string, MessageType> notice)
+        {
+            var message = context + "：" + ex.Message;
+            SetOperationFailed(message);
+            LogUpdateError(message, ex);
+            try
+            {
+                notice?.Invoke(message, MessageType.Error);
+            }
+            catch (Exception noticeEx)
+            {
+                Debug.LogError("[UPilot] 更新错误通知失败：" + noticeEx);
+            }
+        }
+
+        private static void LogUpdateError(string message, Exception ex)
+        {
+            Debug.LogError("[UPilot] " + message + "\n" + ex);
+        }
+
         public async void UpdateManagedServerAndRestart(Action<string, MessageType> notice)
+        {
+            try
+            {
+                await UpdateManagedServerAndRestartAsync(notice);
+            }
+            catch (Exception ex)
+            {
+                HandleUnexpectedUpdateException("更新 MCP 服务失败", ex, notice);
+            }
+        }
+
+        private async Task UpdateManagedServerAndRestartAsync(Action<string, MessageType> notice)
         {
             _notice = notice;
             if (CompleteIfSourceUpdateChannel(notice))
@@ -303,8 +339,10 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                SetOperationFailed("读取发布清单失败：" + ex.Message);
-                notice?.Invoke("读取发布清单失败：" + ex.Message, MessageType.Error);
+                var message = "读取发布清单失败：" + ex.Message;
+                SetOperationFailed(message);
+                LogUpdateError(message, ex);
+                notice?.Invoke(message, MessageType.Error);
                 return;
             }
 
@@ -329,6 +367,21 @@ namespace CodingRiver.UPilot
             bool updateManagedServer,
             Action<string, MessageType> notice)
         {
+            try
+            {
+                await UpdateFromManifestAsync(updatePackage, updateManagedServer, notice);
+            }
+            catch (Exception ex)
+            {
+                HandleUnexpectedUpdateException("更新失败", ex, notice);
+            }
+        }
+
+        private async Task UpdateFromManifestAsync(
+            bool updatePackage,
+            bool updateManagedServer,
+            Action<string, MessageType> notice)
+        {
             _notice = notice;
             if (CompleteIfSourceUpdateChannel(notice))
                 return;
@@ -341,8 +394,10 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                SetOperationFailed("读取发布清单失败：" + ex.Message);
-                notice?.Invoke("读取发布清单失败：" + ex.Message, MessageType.Error);
+                var message = "读取发布清单失败：" + ex.Message;
+                SetOperationFailed(message);
+                LogUpdateError(message, ex);
+                notice?.Invoke(message, MessageType.Error);
                 return;
             }
 
@@ -403,8 +458,10 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    SetOperationFailed("读取发布清单失败：" + ex.Message);
-                    notice?.Invoke("读取发布清单失败：" + ex.Message, MessageType.Error);
+                    var message = "读取发布清单失败：" + ex.Message;
+                    SetOperationFailed(message);
+                    LogUpdateError(message, ex);
+                    notice?.Invoke(message, MessageType.Error);
                     return false;
                 }
             }
@@ -437,6 +494,7 @@ namespace CodingRiver.UPilot
                 {
                     var message = "读取发布清单失败：" + ex.Message;
                     SetOperationFailed(message);
+                    LogUpdateError(message, ex);
                     notice?.Invoke(message, MessageType.Error);
                     UPilotMainWindow.OpenWithNotice(
                         "UPilot 包已更新，但服务版本确认失败。请在主窗口手动启动或重启服务。",
@@ -539,6 +597,7 @@ namespace CodingRiver.UPilot
             {
                 var message = "MCP 服务更新失败：" + ex.Message;
                 SetOperationFailed(message);
+                LogUpdateError(message, ex);
                 notice?.Invoke(message, MessageType.Error);
                 return null;
             }
@@ -720,7 +779,14 @@ namespace CodingRiver.UPilot
 
         public async void UpdateUpmFromManifest(Action<string, MessageType> notice)
         {
-            await UpdateUpmFromManifestAsync(notice);
+            try
+            {
+                await UpdateUpmFromManifestAsync(notice);
+            }
+            catch (Exception ex)
+            {
+                HandleUnexpectedUpdateException("更新 UPilot 包失败", ex, notice);
+            }
         }
 
         private async Task UpdateUpmFromManifestAsync(Action<string, MessageType> notice)
@@ -737,8 +803,10 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                SetOperationFailed("读取发布清单失败：" + ex.Message);
-                notice?.Invoke("读取发布清单失败：" + ex.Message, MessageType.Error);
+                var message = "读取发布清单失败：" + ex.Message;
+                SetOperationFailed(message);
+                LogUpdateError(message, ex);
+                notice?.Invoke(message, MessageType.Error);
                 return;
             }
 
@@ -815,8 +883,10 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
-                SetOperationFailed("无法启动 UPilot 包更新：" + ex.Message);
-                notice?.Invoke("无法启动 UPilot 包更新：" + ex.Message, MessageType.Error);
+                var message = "无法启动 UPilot 包更新：" + ex.Message;
+                SetOperationFailed(message);
+                LogUpdateError(message, ex);
+                notice?.Invoke(message, MessageType.Error);
                 return;
             }
 

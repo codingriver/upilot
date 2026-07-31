@@ -81,32 +81,61 @@ namespace CodingRiver.UPilot
         private GUIStyle _styleBoxConnection;
         private GUIStyle _styleLogCard;
         private bool     _stylesInit;
+        private static bool _tcpProbeErrorLogged;
+        private static bool _processExePathErrorLogged;
+        private static bool _parentProcessErrorLogged;
+        private static bool _processNameErrorLogged;
+        private static bool _commandLineErrorLogged;
+        private static bool _listeningPortsErrorLogged;
 
         [MenuItem("UPilot/Advanced Settings", false, 210)]
         public static void Open()
         {
-            var win = GetWindow<UPilotStatusWindow>("UPilot 高级设置");
-            win.minSize = new Vector2(500, 540);
-            win.Show();
+            try
+            {
+                var win = GetWindow<UPilotStatusWindow>("UPilot 高级设置");
+                win.minSize = new Vector2(500, 540);
+                win.Show();
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException("打开 UPilot 高级设置失败", ex);
+            }
         }
 
         private void OnEnable()
         {
-            var bridge = UPilotBridge.Instance;
-            _wsHostInput = bridge.WsHost;
-            _wsPortInput = bridge.WsPort;
-            _httpPortInput = bridge.HttpPort;
-            EditorApplication.update += OnEditorUpdate;
+            try
+            {
+                var bridge = UPilotBridge.Instance;
+                _wsHostInput = bridge.WsHost;
+                _wsPortInput = bridge.WsPort;
+                _httpPortInput = bridge.HttpPort;
 
-            // Validate MCP server path once when the window is opened.
-            UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
+                // Validate MCP server path once when the window is opened.
+                UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException("UPilot 高级设置初始化失败", ex);
+                ShowExceptionToast("UPilot 高级设置初始化失败", ex);
+            }
+            EditorApplication.update -= OnEditorUpdate;
+            EditorApplication.update += OnEditorUpdate;
         }
 
         private void OnDisable()
         {
             EditorApplication.update -= OnEditorUpdate;
-            PersistEndpointInputsIfIdle();
-            UPilotWindowDiagnostics.OnWindowClosed();
+            try
+            {
+                PersistEndpointInputsIfIdle();
+                UPilotWindowDiagnostics.OnWindowClosed();
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException("UPilot 高级设置关闭处理失败", ex);
+            }
         }
 
         /// <summary>
@@ -130,10 +159,18 @@ namespace CodingRiver.UPilot
 
         private void OnEditorUpdate()
         {
-            if (EditorApplication.timeSinceStartup - _lastRepaint > 0.3)
+            try
             {
-                _lastRepaint = EditorApplication.timeSinceStartup;
-                Repaint();
+                if (EditorApplication.timeSinceStartup - _lastRepaint > 0.3)
+                {
+                    _lastRepaint = EditorApplication.timeSinceStartup;
+                    Repaint();
+                }
+            }
+            catch (Exception ex)
+            {
+                EditorApplication.update -= OnEditorUpdate;
+                ReportStatusWindowException("UPilot 高级设置刷新回调失败", ex);
             }
         }
 
@@ -186,6 +223,19 @@ namespace CodingRiver.UPilot
         // so the Layout pass and Repaint pass see identical control counts.
 
         private void OnGUI()
+        {
+            try
+            {
+                DrawStatusWindowGui();
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException("UPilot 高级设置绘制失败", ex);
+                DrawExceptionFallback("UPilot 高级设置绘制失败", ex);
+            }
+        }
+
+        private void DrawStatusWindowGui()
         {
             InitStyles();
 
@@ -424,8 +474,11 @@ namespace CodingRiver.UPilot
 
                 if (GUILayout.Button("打开日志文件", EditorStyles.miniButton, GUILayout.Width(88)))
                 {
-                    tracker.RevealLogFile();
-                    ShowToast("已定位到 " + Logger.LogFilePath);
+                    RunStatusAction("打开操作日志失败", () =>
+                    {
+                        tracker.RevealLogFile();
+                        ShowToast("已定位到 " + Logger.LogFilePath);
+                    });
                 }
 
 
@@ -433,8 +486,11 @@ namespace CodingRiver.UPilot
 
                 if (GUILayout.Button("清除", EditorStyles.miniButton, GUILayout.Width(36)))
                 {
-                    tracker.ClearEntries();
-                    ShowToast("操作日志已清除");
+                    RunStatusAction("清除操作日志失败", () =>
+                    {
+                        tracker.ClearEntries();
+                        ShowToast("操作日志已清除");
+                    });
                 }
             }
 
@@ -455,7 +511,7 @@ namespace CodingRiver.UPilot
                 {
                     if (EditorUtility.DisplayDialog("确认操作", "确定要强制关闭并重启当前 Unity 项目吗？\n未保存的更改将丢失！", "确定", "取消"))
                     {
-                        UPilotBridge.ForceRestartUnityEditor();
+                        RunStatusAction("强制重启 Unity 失败", UPilotBridge.ForceRestartUnityEditor);
                     }
                 }
                 GUI.color = prevColor;
@@ -900,7 +956,7 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.LabelField(title, EditorStyles.miniBoldLabel);
                 EditorGUILayout.LabelField(detail, _styleInfo);
                 if (GUILayout.Button(actionLabel, GUILayout.Height(22)))
-                    action();
+                    RunStatusAction(actionLabel + "失败", action);
             }
         }
 
@@ -989,6 +1045,57 @@ namespace CodingRiver.UPilot
             _toastExpireAt = EditorApplication.timeSinceStartup + seconds;
         }
 
+        private void ShowExceptionToast(string context, Exception ex)
+        {
+            try
+            {
+                ShowToast(context + "：" + ex.Message, MessageType.Error, 8d);
+            }
+            catch (Exception toastEx)
+            {
+                Debug.LogError("[UPilot] 高级设置错误提示失败：" + toastEx.Message + "\n" + toastEx);
+            }
+        }
+
+        private void RunStatusAction(string context, Action action)
+        {
+            try
+            {
+                action?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException(context, ex);
+                ShowExceptionToast(context, ex);
+            }
+        }
+
+        private static void ReportStatusWindowException(string context, Exception ex)
+        {
+            Debug.LogError("[UPilot] " + context + "：" + ex.Message + "\n" + ex);
+        }
+
+        private static void LogStatusProbeErrorOnce(ref bool logged, string context, Exception ex)
+        {
+            if (logged)
+                return;
+
+            logged = true;
+            Debug.LogError("[UPilot] " + context + "：" + ex.Message + "\n" + ex);
+        }
+
+        private static void DrawExceptionFallback(string context, Exception ex)
+        {
+            try
+            {
+                EditorGUILayout.HelpBox(context + "：" + ex.Message, MessageType.Error);
+            }
+            catch (Exception fallbackEx)
+            {
+                Debug.LogError("[UPilot] 高级设置错误提示绘制失败：" + fallbackEx.Message + "\n" + fallbackEx);
+            }
+        }
+
         private void DrawServiceSection(UPilotBridge bridge, BridgeStatus status, McpServerStatus mcpStatus)
         {
             var manager = UPilotMcpServerManager.Instance;
@@ -1028,8 +1135,11 @@ namespace CodingRiver.UPilot
                     {
                         if (GUILayout.Button("启动 UPilot", GUILayout.Height(28)))
                         {
-                            UPilotQuickStart.Start();
-                            ShowToast("UPilot 启动中…");
+                            RunStatusAction("启动 UPilot 失败", () =>
+                            {
+                                UPilotQuickStart.Start();
+                                ShowToast("UPilot 启动中…");
+                            });
                         }
                     }
                 }
@@ -1042,8 +1152,11 @@ namespace CodingRiver.UPilot
                         {
                             if (GUILayout.Button(primaryLabel, GUILayout.Height(28)))
                             {
-                                UPilotQuickStart.Restart();
-                                ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
+                                RunStatusAction("重启 UPilot 失败", () =>
+                                {
+                                    UPilotQuickStart.Restart();
+                                    ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
+                                });
                             }
                         }
 
@@ -1060,8 +1173,11 @@ namespace CodingRiver.UPilot
                                     "停止 UPilot",
                                     "取消"))
                             {
-                                UPilotQuickStart.Stop();
-                                ShowToast("UPilot 正在停止…", MessageType.Warning);
+                                RunStatusAction("停止 UPilot 失败", () =>
+                                {
+                                    UPilotQuickStart.Stop();
+                                    ShowToast("UPilot 正在停止…", MessageType.Warning);
+                                });
                             }
                         }
                     }
@@ -1312,8 +1428,11 @@ namespace CodingRiver.UPilot
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button("刷新", EditorStyles.miniButton, GUILayout.Width(48)))
                     {
-                        RefreshAgentConfigSnapshot();
-                        ShowToast("Agent 配置状态已刷新");
+                        RunStatusAction("刷新 Agent 配置状态失败", () =>
+                        {
+                            RefreshAgentConfigSnapshot();
+                            ShowToast("Agent 配置状态已刷新");
+                        });
                     }
                 }
 
@@ -1323,8 +1442,11 @@ namespace CodingRiver.UPilot
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button("复制", EditorStyles.miniButton, GUILayout.Width(44)))
                     {
-                        GUIUtility.systemCopyBuffer = UPilotAgentSetup.McpUrl;
-                        ShowToast("MCP 地址已复制");
+                        RunStatusAction("复制 MCP 地址失败", () =>
+                        {
+                            GUIUtility.systemCopyBuffer = UPilotAgentSetup.McpUrl;
+                            ShowToast("MCP 地址已复制");
+                        });
                     }
                 }
                 EditorGUILayout.Space(3);
@@ -1374,19 +1496,27 @@ namespace CodingRiver.UPilot
                 else
                 {
                     if (GUILayout.Button(status.FileExists && status.HasUPilotEntry ? "更新" : "写入", GUILayout.Width(54), GUILayout.Height(22)))
-                        ConfigureAgentClient(status.ClientName);
+                        RunStatusAction(status.ClientName + " MCP 配置处理失败", () => ConfigureAgentClient(status.ClientName));
                 }
             }
         }
 
         private void ConfigureAgentClient(string clientName)
         {
-            if (clientName == "Codex")
-                HandleAgentConfigResult("Codex", UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
-            else if (clientName == "Claude Code")
-                HandleAgentConfigResult("Claude Code", UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
-            else if (clientName == "Cursor")
-                HandleAgentConfigResult("Cursor", UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+            try
+            {
+                if (clientName == "Codex")
+                    HandleAgentConfigResult("Codex", UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                else if (clientName == "Claude Code")
+                    HandleAgentConfigResult("Claude Code", UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                else if (clientName == "Cursor")
+                    HandleAgentConfigResult("Cursor", UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException(clientName + " MCP 配置处理失败", ex);
+                ShowExceptionToast(clientName + " MCP 配置处理失败", ex);
+            }
         }
 
         private void HandleAgentConfigResult(string clientName, string result)
@@ -1415,17 +1545,23 @@ namespace CodingRiver.UPilot
                     {
                         if (GUILayout.Button("运行完整诊断", GUILayout.Height(24)))
                         {
-                            var snap = bridge.GetStatus();
-                            var mcpSnap = UPilotMcpServerManager.Instance.GetStatus();
-                            RunDiag(() => BuildFullDiagnosticResult(snap, mcpSnap, bridge.WsHost, bridge.WsPort));
-                            ShowToast("已开始诊断");
+                            RunStatusAction("运行完整诊断失败", () =>
+                            {
+                                var snap = bridge.GetStatus();
+                                var mcpSnap = UPilotMcpServerManager.Instance.GetStatus();
+                                RunDiag(() => BuildFullDiagnosticResult(snap, mcpSnap, bridge.WsHost, bridge.WsPort));
+                                ShowToast("已开始诊断");
+                            });
                         }
                     }
 
                     if (GUILayout.Button("打开日志", GUILayout.Width(76), GUILayout.Height(24)))
                     {
-                        Logger.RevealLogFile();
-                        ShowToast("已定位到 " + Logger.LogFilePath);
+                        RunStatusAction("打开 UPilot 日志失败", () =>
+                        {
+                            Logger.RevealLogFile();
+                            ShowToast("已定位到 " + Logger.LogFilePath);
+                        });
                     }
                 }
 
@@ -1438,8 +1574,11 @@ namespace CodingRiver.UPilot
                         GUILayout.FlexibleSpace();
                         if (GUILayout.Button("复制", EditorStyles.miniButton, GUILayout.Width(36)))
                         {
-                            GUIUtility.systemCopyBuffer = diagResult;
-                            ShowToast("已复制诊断结果");
+                            RunStatusAction("复制诊断结果失败", () =>
+                            {
+                                GUIUtility.systemCopyBuffer = diagResult;
+                                ShowToast("已复制诊断结果");
+                            });
                         }
                     }
 
@@ -1483,8 +1622,11 @@ namespace CodingRiver.UPilot
                                 "取消");
                             if (confirmed)
                             {
-                                int deletedCount = UPilotPreferences.ResetCurrentProject();
-                                ShowToast($"已重置当前工程偏好（清除 {deletedCount} 项）", MessageType.Warning, 4d);
+                                RunStatusAction("重置当前工程偏好失败", () =>
+                                {
+                                    int deletedCount = UPilotPreferences.ResetCurrentProject();
+                                    ShowToast($"已重置当前工程偏好（清除 {deletedCount} 项）", MessageType.Warning, 4d);
+                                });
                             }
                         }
                     }
@@ -1506,8 +1648,11 @@ namespace CodingRiver.UPilot
                                 "取消");
                             if (confirmed)
                             {
-                                RunDiag(KillPythonMcpProcesses);
-                                ShowToast("已执行进程清理", MessageType.Warning);
+                                RunStatusAction("执行 MCP 进程清理失败", () =>
+                                {
+                                    RunDiag(KillPythonMcpProcesses);
+                                    ShowToast("已执行进程清理", MessageType.Warning);
+                                });
                             }
                         }
                         GUI.backgroundColor = prev;
@@ -1526,8 +1671,11 @@ namespace CodingRiver.UPilot
                 {
                     if (GUILayout.Button("打开日志文件", GUILayout.Height(22)))
                     {
-                        Logger.RevealLogFile();
-                        ShowToast("已定位到 " + Logger.LogFilePath);
+                        RunStatusAction("打开 UPilot 日志文件失败", () =>
+                        {
+                            Logger.RevealLogFile();
+                            ShowToast("已定位到 " + Logger.LogFilePath);
+                        });
                     }
                 }
             }
@@ -1550,8 +1698,11 @@ namespace CodingRiver.UPilot
 
                     if (GUILayout.Button("打开日志文件", EditorStyles.miniButton, GUILayout.Width(88)))
                     {
-                        Logger.RevealLogFile();
-                        ShowToast("已定位到 " + Logger.LogFilePath);
+                        RunStatusAction("打开 UPilot 日志文件失败", () =>
+                        {
+                            Logger.RevealLogFile();
+                            ShowToast("已定位到 " + Logger.LogFilePath);
+                        });
                     }
 
                     var debugWire = bridge.DebugWireLogsEnabled;
@@ -1578,14 +1729,20 @@ namespace CodingRiver.UPilot
 
                     if (GUILayout.Button("复制全部", EditorStyles.miniButton, GUILayout.Width(52)))
                     {
-                        CopyFilteredLogs(logs);
-                        ShowToast("已复制过滤后的日志");
+                        RunStatusAction("复制过滤日志失败", () =>
+                        {
+                            CopyFilteredLogs(logs);
+                            ShowToast("已复制过滤后的日志");
+                        });
                     }
 
                     if (GUILayout.Button("清除", EditorStyles.miniButton, GUILayout.Width(36)))
                     {
-                        bridge.ClearLogs();
-                        ShowToast("日志已清除");
+                        RunStatusAction("清除通信日志失败", () =>
+                        {
+                            bridge.ClearLogs();
+                            ShowToast("日志已清除");
+                        });
                     }
                 }
             }
@@ -1726,6 +1883,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
+                    Debug.LogError("[UPilot] 后台诊断任务失败：" + ex.Message + "\n" + ex);
                     _diagResult = $"异常: {ex.Message}";
                     _diagResultAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
@@ -1775,8 +1933,9 @@ namespace CodingRiver.UPilot
                     client.Connect("127.0.0.1", mgr.WsPort);
                     sb.AppendLine($"  MCP WS 端口 {mgr.WsPort} 可连通 → 服务正在监听，但 Unity 桥接器未完成连接");
                 }
-                catch
+                catch (Exception ex)
                 {
+                    LogStatusProbeErrorOnce(ref _tcpProbeErrorLogged, "诊断 TCP 端口探测失败", ex);
                     sb.AppendLine($"  MCP WS 端口 {mgr.WsPort} 无法连通 → 服务未监听该端口，请检查 MCP 服务是否已启动");
                 }
                 return sb.ToString().TrimEnd();
@@ -1864,6 +2023,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                Debug.LogError("[UPilot] Python MCP 进程检查失败：" + ex.Message + "\n" + ex);
                 return Task.FromResult($"检查失败: {ex.Message}");
             }
         }
@@ -1907,6 +2067,7 @@ namespace CodingRiver.UPilot
                     catch (Exception ex)
                     {
                         sb.AppendLine($"✗ 终止失败 PID={p.Id}: {ex.Message}");
+                        Debug.LogError("[UPilot] 终止 MCP 服务进程失败 PID=" + p.Id + "：" + ex.Message + "\n" + ex);
                     }
                 }
 
@@ -1915,6 +2076,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                Debug.LogError("[UPilot] 终止 MCP 服务进程失败：" + ex.Message + "\n" + ex);
                 return Task.FromResult($"终止进程失败: {ex.Message}");
             }
         }
@@ -1932,8 +2094,9 @@ namespace CodingRiver.UPilot
             {
                 return process.MainModule?.FileName ?? "(未知)";
             }
-            catch
+            catch (Exception ex)
             {
+                LogStatusProbeErrorOnce(ref _processExePathErrorLogged, "读取进程路径失败", ex);
                 return "(无权限或不可读取)";
             }
         }
@@ -1964,8 +2127,9 @@ namespace CodingRiver.UPilot
                 var value = output.Substring(idx + marker.Length).Trim();
                 return int.TryParse(value, out var ppid) ? ppid : -1;
             }
-            catch
+            catch (Exception ex)
             {
+                LogStatusProbeErrorOnce(ref _parentProcessErrorLogged, "读取进程父 PID 失败", ex);
                 return -1;
             }
 #else
@@ -1981,8 +2145,9 @@ namespace CodingRiver.UPilot
                 var proc = System.Diagnostics.Process.GetProcessById(pid);
                 return proc.ProcessName;
             }
-            catch
+            catch (Exception ex)
             {
+                LogStatusProbeErrorOnce(ref _processNameErrorLogged, "读取进程名称失败", ex);
                 return "unknown";
             }
         }
@@ -2015,8 +2180,9 @@ namespace CodingRiver.UPilot
                 var cmd = output.Substring(idx + marker.Length).Trim();
                 return string.IsNullOrWhiteSpace(cmd) ? "(空)" : cmd;
             }
-            catch
+            catch (Exception ex)
             {
+                LogStatusProbeErrorOnce(ref _commandLineErrorLogged, "读取进程命令行失败", ex);
                 return "(读取命令行失败)";
             }
 #else
@@ -2086,8 +2252,9 @@ namespace CodingRiver.UPilot
 
                 success = true;
             }
-            catch
+            catch (Exception ex)
             {
+                LogStatusProbeErrorOnce(ref _listeningPortsErrorLogged, "读取监听端口失败", ex);
                 success = false;
             }
 #endif

@@ -75,6 +75,19 @@ namespace CodingRiver.UPilot
         [MenuItem("UPilot/Optional Flow/Enable", false, 400)]
         private static void EnableFlow()
         {
+            try
+            {
+                EnableFlowCore();
+            }
+            catch (Exception ex)
+            {
+                ClearFlowInstallState();
+                ReportFeatureError("启用 UPilot Flow 失败", ex);
+            }
+        }
+
+        private static void EnableFlowCore()
+        {
             if (!IsUnity6OrNewer)
             {
                 EditorUtility.DisplayDialog("UPilot Flow", "UPilot Flow requires Unity 6 or newer.", "OK");
@@ -100,6 +113,18 @@ namespace CodingRiver.UPilot
         [MenuItem("UPilot/Optional Flow/Disable", false, 401)]
         private static void DisableFlow()
         {
+            try
+            {
+                DisableFlowCore();
+            }
+            catch (Exception ex)
+            {
+                ReportFeatureError("禁用 UPilot Flow 失败", ex);
+            }
+        }
+
+        private static void DisableFlowCore()
+        {
             if (!EditorUtility.DisplayDialog(
                     "Disable UPilot Flow?",
                     $"This removes {FlowDefine} and stops registering Flow commands. Existing YAML and reports are preserved.",
@@ -111,13 +136,26 @@ namespace CodingRiver.UPilot
 
         private static void InstallNextFlowPackage()
         {
+            try
+            {
+                InstallNextFlowPackageCore();
+            }
+            catch (Exception ex)
+            {
+                ClearFlowInstallState();
+                ReportFeatureError("安装 UPilot Flow 依赖包失败", ex);
+            }
+        }
+
+        private static void InstallNextFlowPackageCore()
+        {
             if (_addRequest != null && !_addRequest.IsCompleted) return;
             if (_addRequest != null && _addRequest.Status == StatusCode.Failure)
             {
-                EditorApplication.update -= InstallNextFlowPackage;
-                EditorUtility.DisplayDialog("UPilot Flow", $"Package installation failed: {_addRequest.Error?.message}", "OK");
-                _addRequest = null;
-                _pendingPackages = null;
+                var message = _addRequest.Error?.message ?? "Unknown Package Manager error";
+                ClearFlowInstallState();
+                Debug.LogError("[UPilot] 安装 UPilot Flow 依赖包失败：" + message);
+                EditorUtility.DisplayDialog("UPilot Flow", $"Package installation failed: {message}", "OK");
                 return;
             }
             _addRequest = null;
@@ -152,6 +190,26 @@ namespace CodingRiver.UPilot
             if (enabled)
                 defines.Add(FlowDefine);
             PlayerSettings.SetScriptingDefineSymbolsForGroup(group, string.Join(";", defines.Distinct()));
+        }
+
+        private static void ClearFlowInstallState()
+        {
+            EditorApplication.update -= InstallNextFlowPackage;
+            _addRequest = null;
+            _pendingPackages = null;
+        }
+
+        private static void ReportFeatureError(string context, Exception ex)
+        {
+            Debug.LogError("[UPilot] " + context + "：" + ex.Message + "\n" + ex);
+            try
+            {
+                EditorUtility.DisplayDialog("UPilot Flow", context + "：" + ex.Message, "OK");
+            }
+            catch (Exception dialogEx)
+            {
+                Debug.LogError("[UPilot] UPilot Flow 错误弹窗显示失败：" + dialogEx.Message + "\n" + dialogEx);
+            }
         }
     }
 }

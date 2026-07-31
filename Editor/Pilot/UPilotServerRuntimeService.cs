@@ -142,6 +142,9 @@ namespace CodingRiver.UPilot
         private const int ParallelDownloadSegments = 4;
         private const int SegmentRetryCount = 2;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
+        private static bool _verifiedServerHashErrorLogged;
+        private static bool _chmodErrorLogged;
+        private static bool _projectKeyErrorLogged;
 
         private CancellationTokenSource _downloadCts;
         private CancellationTokenSource _pythonEnvCts;
@@ -157,6 +160,15 @@ namespace CodingRiver.UPilot
                 lock (_stateLock)
                     return CopyState(_downloadState);
             }
+        }
+
+        private static void LogRuntimeProbeErrorOnce(ref bool logged, string context, Exception ex)
+        {
+            if (logged)
+                return;
+
+            logged = true;
+            Debug.LogError("[UPilot] " + context + "：" + ex.Message + "\n" + ex);
         }
 
         public UPilotPythonEnvironmentState PythonEnvironmentState
@@ -501,6 +513,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 error = "启用服务文件失败：" + ex.Message;
+                Debug.LogError("[UPilot] " + error + "\n" + ex);
                 return false;
             }
         }
@@ -595,8 +608,19 @@ namespace CodingRiver.UPilot
             {
                 await DownloadLatestServerExeAsync(manifest, activateOnComplete, token);
             }
-            catch
+            catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[UPilot] MCP server exe background download failed: " + ex.Message + "\n" + ex);
+                UpdateState(state =>
+                {
+                    state.IsRunning = false;
+                    state.ErrorMessage = ex.Message;
+                    state.Phase = "下载失败";
+                    state.FinishedAt = EditorApplication.timeSinceStartup;
+                });
             }
         }
 
@@ -706,7 +730,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UPilot] MCP server exe download failed: {ex.Message}");
+                Debug.LogError("[UPilot] MCP server exe download failed: " + ex.Message + "\n" + ex);
                 UpdateState(state =>
                 {
                     state.IsRunning = false;
@@ -734,8 +758,9 @@ namespace CodingRiver.UPilot
                 var actual = ComputeSha256(path);
                 return string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase);
             }
-            catch
+            catch (Exception ex)
             {
+                LogRuntimeProbeErrorOnce(ref _verifiedServerHashErrorLogged, "校验已下载 MCP 服务文件失败", ex);
                 return false;
             }
         }
@@ -916,8 +941,9 @@ namespace CodingRiver.UPilot
             {
                 RunProcess("chmod", $"+x \"{path}\"", 5000);
             }
-            catch
+            catch (Exception ex)
             {
+                LogRuntimeProbeErrorOnce(ref _chmodErrorLogged, "设置 MCP 服务可执行权限失败", ex);
             }
 #endif
         }
@@ -1347,8 +1373,9 @@ namespace CodingRiver.UPilot
                     sb.Append(hash[i].ToString("x2"));
                 return sb.ToString();
             }
-            catch
+            catch (Exception ex)
             {
+                LogRuntimeProbeErrorOnce(ref _projectKeyErrorLogged, "计算当前项目更新缓存 key 失败", ex);
                 return "default";
             }
         }
