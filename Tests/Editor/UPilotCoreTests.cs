@@ -212,6 +212,22 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void MainWindowHidesConfiguredRuntimeModeDuringTransientStates()
+        {
+            var method = typeof(UPilotMainWindow).GetMethod(
+                "GetRuntimeModeLabel",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.That(method, Is.Not.Null);
+            Assert.That(
+                method.Invoke(null, new object[] { UPilotMainState.Updating }),
+                Is.EqualTo("正在更新"));
+            Assert.That(
+                method.Invoke(null, new object[] { UPilotMainState.CheckingStatus }),
+                Is.EqualTo("获取状态中"));
+        }
+
+        [Test]
         public void UpdateOperationStatusTreatsOnlyActivePhasesAsRunning()
         {
             var running = new UPilotUpdateOperationStatus(

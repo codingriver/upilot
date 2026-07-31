@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.14
+
+- Keep the main-window runtime mode accurate across update, status refresh, and restart transitions.
+- Resolve managed runtime mode on the Unity main thread instead of caching a source/Python fallback from background status polling.
+
 ## 0.3.11
 
 - Add a non-blocking main-window release reminder with per-version skip support.

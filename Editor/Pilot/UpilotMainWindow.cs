@@ -533,7 +533,7 @@ namespace CodingRiver.UPilot
 
         private void DrawOperationsDashboard(UPilotMainSnapshot snapshot)
         {
-            DrawVersionSection();
+            DrawVersionSection(snapshot);
             EditorGUILayout.Space(8);
             DrawSectionTitleBar("MCP 连接");
             EditorGUILayout.Space(4);
@@ -678,12 +678,10 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void DrawVersionSection()
+        private void DrawVersionSection(UPilotMainSnapshot snapshot)
         {
             var serverVersion = string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动/旧版" : _mcpStatus.ServerVersion;
-            var runtimeMode = string.IsNullOrEmpty(_mcpStatus.RuntimeMode)
-                ? UPilotServerRuntimeService.Instance.RuntimeModeLabel
-                : _mcpStatus.RuntimeMode;
+            var runtimeMode = GetRuntimeModeLabel(snapshot.State);
             var channel = string.IsNullOrEmpty(_mcpStatus.BuildChannel) ? "release" : _mcpStatus.BuildChannel;
             var compatibility = UPilotServerRuntimeService.IsSourceChannel(channel)
                 ? "source / 本机 Python"
@@ -729,6 +727,15 @@ namespace CodingRiver.UPilot
                     DrawRevokeWriteAccessButton(writeApproved);
                 }
             }
+        }
+
+        private static string GetRuntimeModeLabel(UPilotMainState state)
+        {
+            if (state == UPilotMainState.Updating)
+                return "正在更新";
+            if (state == UPilotMainState.CheckingStatus)
+                return "获取状态中";
+            return UPilotServerRuntimeService.Instance.RuntimeModeLabel;
         }
 
         private void DrawInfoColumn(string label, string value, float width)

@@ -432,7 +432,8 @@ namespace CodingRiver.UPilot
                     status.BuildCommit = commit;
                     status.BuildChannel = channel;
                 }
-                status.RuntimeMode = UPilotServerRuntimeService.Instance.RuntimeModeLabel;
+                // Runtime mode depends on Unity package metadata. The UI resolves it on
+                // the main thread instead of caching a fallback from this worker thread.
 
                 lock (_statusLock) { _cachedStatus = status; }
             }
