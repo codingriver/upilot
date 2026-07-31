@@ -34,15 +34,30 @@ namespace CodingRiver.UPilot
             window.Focus();
             if (window.HasActiveUpdate())
             {
-                window._isChecking = false;
-                window._error = "";
-                window._operationRunning = true;
-                window.Repaint();
+                window.ShowActiveUpdate();
             }
             else
             {
                 window.CheckForUpdates();
             }
+        }
+
+        internal static void OpenActiveUpdate(Action<string, MessageType> notice = null)
+        {
+            var window = GetWindow<UPilotUpdateWindow>(true, "UPilot 更新中心", true);
+            window.minSize = new Vector2(440, 360);
+            window._externalNotice = notice;
+            window.Show();
+            window.Focus();
+            window.ShowActiveUpdate();
+        }
+
+        private void ShowActiveUpdate()
+        {
+            _isChecking = false;
+            _error = "";
+            _operationRunning = true;
+            Repaint();
         }
 
         private void OnEnable()
@@ -442,7 +457,7 @@ namespace CodingRiver.UPilot
 
         private async Task RefreshAfterOperationAsync()
         {
-            await Task.Delay(500);
+            await Task.Delay(10000);
             CheckForUpdates();
         }
 
