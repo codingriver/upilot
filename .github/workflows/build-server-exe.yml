@@ -11,6 +11,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: build-server-exe-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-win-x64:
     runs-on: windows-latest
@@ -25,71 +29,50 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            upilotserver~/requirements.txt
+            upilotserver~/pyproject.toml
 
       - name: Resolve version
         id: version
         shell: pwsh
         run: |
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $script = @'
-          import pathlib
-          for raw in pathlib.Path('upilotserver~/pyproject.toml').read_text(encoding='utf-8').splitlines():
-              line = raw.strip()
-              if line.startswith('version') and '=' in line:
-                  print(line.split('=', 1)[1].strip().strip('"').strip("'"))
-                  raise SystemExit
-          print('0.0.0')
-          '@
-          $pyVersion = $script | python -
           if ('${{ github.event.inputs.version }}') {
             $version = '${{ github.event.inputs.version }}'
           } elseif ('${{ github.ref_type }}' -eq 'tag') {
             $version = '${{ github.ref_name }}'.TrimStart('v')
           } else {
-            $version = $pyVersion
+            $version = $packageVersion
+          }
+          $version = $version.TrimStart('v')
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$') {
+            Write-Error "Release version must use MAJOR.MINOR.PATCH format. Current version: $version"
+            exit 1
           }
           $channel = 'release'
           "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
-          "py_version=$pyVersion" >> $env:GITHUB_OUTPUT
           "server_version=$version" >> $env:GITHUB_OUTPUT
+          "upm_version=$version" >> $env:GITHUB_OUTPUT
           "channel=$channel" >> $env:GITHUB_OUTPUT
 
       - name: Validate release versions
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
-          $packageVersion = '${{ steps.version.outputs.package_version }}'
-          $pyVersion = '${{ steps.version.outputs.py_version }}'
-          $serverVersion = '${{ steps.version.outputs.server_version }}'
-          $errors = @()
-
           if ('${{ github.ref_name }}' -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$') {
-            $errors += "Release tags must use vMAJOR.MINOR.PATCH format. Current tag: ${{ github.ref_name }}"
-          }
-          if ($packageVersion -ne $tagVersion) {
-            $errors += "package.json version ($packageVersion) must match tag version ($tagVersion)."
-          }
-          if ($pyVersion -ne $tagVersion) {
-            $errors += "upilotserver~/pyproject.toml version ($pyVersion) must match tag version ($tagVersion)."
-          }
-          if ($serverVersion -ne $tagVersion) {
-            $errors += "Resolved server version ($serverVersion) must match tag version ($tagVersion)."
-          }
-
-          if ($errors.Count -gt 0) {
-            Write-Error ("Release version validation failed:" + [Environment]::NewLine + ($errors -join [Environment]::NewLine))
+            Write-Error "Release tags must use vMAJOR.MINOR.PATCH format. Current tag: ${{ github.ref_name }}"
             exit 1
           }
-
+          $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
+          python upilotserver~/deploy/sync_release_version.py $tagVersion --check
           Write-Host "Release versions validated: tag/package/server = $tagVersion"
 
       - name: Install build dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r upilotserver~/requirements.txt
-          python -m pip install "mcp[cli]>=1.26.0,<2" pyinstaller
+          python -m pip install -r upilotserver~/requirements.txt pyinstaller
 
       - name: Build standalone exe
         shell: pwsh
@@ -100,6 +83,7 @@ jobs:
           }
           python upilotserver~/deploy/build_server_exe.py `
             --version "${{ steps.version.outputs.server_version }}" `
+            --upm-version "${{ steps.version.outputs.upm_version }}" `
             --channel "${{ steps.version.outputs.channel }}" `
             --commit "${{ github.sha }}" `
             --base-url "$baseUrl"
@@ -111,6 +95,7 @@ jobs:
           & $exe.FullName --version
 
       - name: Upload artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
           name: upilot-mcp-server-win-x64

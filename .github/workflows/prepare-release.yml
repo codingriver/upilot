@@ -1,0 +1,72 @@
+name: Prepare UPilot Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.3.12 or v0.3.12"
+        required: true
+        type: string
+
+concurrency:
+  group: prepare-release-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve release version
+        id: release
+        shell: bash
+        run: |
+          raw="${{ github.event.inputs.version }}"
+          version="${raw#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release version must use MAJOR.MINOR.PATCH format. Current version: $raw" >&2
+            exit 1
+          fi
+          tag="v$version"
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists. Delete/recreate it intentionally or choose a new version." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Synchronize version files
+        run: python upilotserver~/deploy/sync_release_version.py "${{ steps.release.outputs.version }}"
+
+      - name: Commit release version
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json upilotserver~/pyproject.toml
+          if git diff --cached --quiet; then
+            echo "Version files already match ${{ steps.release.outputs.version }}."
+          else
+            git commit -m "release: prepare ${{ steps.release.outputs.tag }}"
+          fi
+
+      - name: Push release commit and tag
+        shell: bash
+        run: |
+          git tag "${{ steps.release.outputs.tag }}"
+          git push origin HEAD:main
+          git push origin "${{ steps.release.outputs.tag }}"
