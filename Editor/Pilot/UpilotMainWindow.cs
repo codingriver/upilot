@@ -551,11 +551,15 @@ namespace CodingRiver.UPilot
             const float horizontalPadding = 10f;
             const float buttonGap = 6f;
             var menuRect = new Rect(rect.xMax - horizontalPadding - 28f, rect.y + 6f, 28f, 24f);
-            var actionWidth = snapshot.State == UPilotMainState.Updating ? 116f : 82f;
+            var actionWidth = 82f;
+            if (snapshot.State == UPilotMainState.Updating)
+                actionWidth = 116f;
+            else if (snapshot.State == UPilotMainState.CheckingStatus)
+                actionWidth = 102f;
             var actionRect = new Rect(menuRect.x - buttonGap - actionWidth, rect.y + 6f, actionWidth, 24f);
             var titleRect = new Rect(rect.x + horizontalPadding, rect.y + 6f, 58f, 24f);
             var dotRect = new Rect(titleRect.xMax, titleRect.y, 14f, titleRect.height);
-            var stateRect = new Rect(dotRect.xMax, titleRect.y, 62f, titleRect.height);
+            var stateRect = new Rect(dotRect.xMax, titleRect.y, 78f, titleRect.height);
 
             EditorGUI.LabelField(titleRect, "UPilot", _titleStyle);
             var previous = GUI.color;
@@ -586,13 +590,15 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            if (snapshot.State == UPilotMainState.Starting ||
+            if (snapshot.State == UPilotMainState.CheckingStatus ||
+                snapshot.State == UPilotMainState.Starting ||
                 snapshot.State == UPilotMainState.Restarting ||
                 snapshot.State == UPilotMainState.Stopping ||
                 snapshot.State == UPilotMainState.Updating)
             {
                 var label = snapshot.State switch
                 {
+                    UPilotMainState.CheckingStatus => "获取状态中…",
                     UPilotMainState.Restarting => "重启中…",
                     UPilotMainState.Stopping => "停止中…",
                     UPilotMainState.Updating => "等待更新完成",
@@ -641,7 +647,8 @@ namespace CodingRiver.UPilot
 
         private static bool IsServiceTransitioning(UPilotMainState state)
         {
-            return state == UPilotMainState.Starting ||
+            return state == UPilotMainState.CheckingStatus ||
+                   state == UPilotMainState.Starting ||
                    state == UPilotMainState.Restarting ||
                    state == UPilotMainState.Stopping ||
                    state == UPilotMainState.Updating;
@@ -1386,7 +1393,8 @@ namespace CodingRiver.UPilot
         private static Color GetStateColor(UPilotMainState state)
         {
             if (state == UPilotMainState.Ready) return Color.green;
-            if (state == UPilotMainState.Starting ||
+            if (state == UPilotMainState.CheckingStatus ||
+                state == UPilotMainState.Starting ||
                 state == UPilotMainState.Restarting ||
                 state == UPilotMainState.Stopping ||
                 state == UPilotMainState.Updating)
@@ -1398,6 +1406,7 @@ namespace CodingRiver.UPilot
         private static string GetStateLabel(UPilotMainState state)
         {
             if (state == UPilotMainState.Ready) return "已就绪";
+            if (state == UPilotMainState.CheckingStatus) return "获取状态中";
             if (state == UPilotMainState.Starting) return "启动中";
             if (state == UPilotMainState.Restarting) return "重启中";
             if (state == UPilotMainState.Stopping) return "停止中";

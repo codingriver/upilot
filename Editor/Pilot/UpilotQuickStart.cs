@@ -12,6 +12,7 @@ namespace CodingRiver.UPilot
     {
         SetupRequired,
         Stopped,
+        CheckingStatus,
         Starting,
         Restarting,
         Stopping,
@@ -138,9 +139,9 @@ namespace CodingRiver.UPilot
             }
 
             return new UPilotMainSnapshot(
-                UPilotMainState.Starting,
-                "正在连接 Unity",
-                "通常只需要几秒钟，请稍候。",
+                UPilotMainState.CheckingStatus,
+                "正在获取状态",
+                "正在读取 UPilot 服务状态，请稍候。",
                 bridgeStatus.IsStarted,
                 mcpStatus.IsRunning);
         }

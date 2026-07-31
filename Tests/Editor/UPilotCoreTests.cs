@@ -187,11 +187,28 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void MainStateDistinguishesRestartingAndStopping()
         {
+            Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.CheckingStatus), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Restarting), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Stopping), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Updating), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Restarting), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Stopping), Is.True);
+        }
+
+        [Test]
+        public void MainWindowUsesNeutralLabelWhileFetchingStatus()
+        {
+            var method = typeof(UPilotMainWindow).GetMethod(
+                "GetStateLabel",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.That(method, Is.Not.Null);
+            Assert.That(
+                method.Invoke(null, new object[] { UPilotMainState.CheckingStatus }),
+                Is.EqualTo("获取状态中"));
+            Assert.That(
+                method.Invoke(null, new object[] { UPilotMainState.Starting }),
+                Is.EqualTo("启动中"));
         }
 
         [Test]
