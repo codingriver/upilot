@@ -138,7 +138,6 @@ namespace CodingRiver.UPilot
         private const string ManifestFileName = "manifest.json";
         private const string LegacyManifestFileName = "upilot-release-manifest.json";
         private const string ReleaseManifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/manifest.json";
-        private const string MainManifestUrl = "https://github.com/codingriver/upilot/releases/download/main-nightly/manifest.json";
         private const int ParallelDownloadThresholdBytes = 8 * 1024 * 1024;
         private const int ParallelDownloadSegments = 4;
         private const int SegmentRetryCount = 2;
@@ -184,8 +183,7 @@ namespace CodingRiver.UPilot
         {
             get
             {
-                var mode = UPilotProjectConfig.Current.runtime?.mode ?? "python";
-                return string.Equals(mode, "exe", StringComparison.OrdinalIgnoreCase)
+                return GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
                     ? "自动管理"
                     : "本机 Python";
             }
@@ -237,6 +235,9 @@ namespace CodingRiver.UPilot
 
         public UPilotServerRuntimeMode GetConfiguredMode()
         {
+            if (IsSourceUpdateChannel())
+                return UPilotServerRuntimeMode.Python;
+
             var mode = UPilotProjectConfig.Current.runtime?.mode ?? "python";
             return string.Equals(mode, "exe", StringComparison.OrdinalIgnoreCase)
                 ? UPilotServerRuntimeMode.StandaloneExe
@@ -249,6 +250,11 @@ namespace CodingRiver.UPilot
             config.runtime ??= new UPilotRuntimeConfig();
             config.runtime.mode = "python";
             config.runtime.pythonPath = pythonPath ?? "";
+            if (IsSourceUpdateChannel())
+            {
+                config.runtime.serverExePath = "";
+                config.runtime.serverVersion = "";
+            }
             UPilotProjectConfig.Save(config);
         }
 
@@ -256,6 +262,15 @@ namespace CodingRiver.UPilot
         {
             var config = UPilotProjectConfig.Current;
             config.runtime ??= new UPilotRuntimeConfig();
+            if (IsSourceUpdateChannel())
+            {
+                config.runtime.mode = "python";
+                config.runtime.serverExePath = "";
+                config.runtime.serverVersion = "";
+                UPilotProjectConfig.Save(config);
+                return;
+            }
+
             config.runtime.mode = "exe";
             config.runtime.serverExePath = exePath ?? "";
             if (!string.IsNullOrWhiteSpace(serverVersion))
@@ -344,18 +359,24 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrWhiteSpace(updates.manifestUrl))
                 return updates.manifestUrl;
 
-            var channel = ResolveUpdateChannel();
-            return IsMainChannel(channel) ? MainManifestUrl : ReleaseManifestUrl;
+            return ReleaseManifestUrl;
         }
 
         public static string ResolveUpdateChannel()
         {
             var updates = UPilotProjectConfig.Current.updates ?? new UPilotUpdateConfig();
+            if (IsDevelopmentPackageInstall())
+                return "source";
+
             var configured = (updates.channel ?? "").Trim();
             if (!string.IsNullOrWhiteSpace(configured) &&
                 !string.Equals(configured, "auto", StringComparison.OrdinalIgnoreCase))
             {
-                return IsReleaseChannel(configured) ? "release" : configured;
+                if (IsReleaseChannel(configured))
+                    return "release";
+                if (IsSourceChannel(configured))
+                    return "source";
+                return configured;
             }
 
             return InferDefaultUpdateChannel();
@@ -363,17 +384,17 @@ namespace CodingRiver.UPilot
 
         private static string InferDefaultUpdateChannel()
         {
-            if (IsLocalOrMainPackageInstall())
-                return "main";
+            if (IsDevelopmentPackageInstall())
+                return "source";
 
             var version = UpmVersion;
             if (IsMainChannel(version) || version.IndexOf("+", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "main";
+                return "source";
 
-            return IsStrictSemver(version) ? "release" : "main";
+            return IsStrictSemver(version) ? "release" : "source";
         }
 
-        private static bool IsLocalOrMainPackageInstall()
+        public static bool IsDevelopmentPackageInstall()
         {
             try
             {
@@ -396,6 +417,22 @@ namespace CodingRiver.UPilot
 
         public void StartDownloadLatestServerExe()
         {
+            if (IsSourceUpdateChannel())
+            {
+                lock (_stateLock)
+                {
+                    _downloadState = new UPilotDownloadState
+                    {
+                        IsRunning = false,
+                        Phase = "已跳过",
+                        ErrorMessage = "开发版仅支持本机 Python，不下载自动管理 MCP 服务。",
+                        PlatformDisplayName = CurrentPlatformDisplayName,
+                        FinishedAt = EditorApplication.timeSinceStartup,
+                    };
+                }
+                return;
+            }
+
             lock (_stateLock)
             {
                 if (_downloadState.IsRunning)
@@ -417,6 +454,8 @@ namespace CodingRiver.UPilot
         {
             if (manifest == null)
                 throw new ArgumentNullException(nameof(manifest));
+            if (IsSourceUpdateChannel() || IsSourceChannel(manifest.Channel) || IsSourceChannel(manifest.ServerVersion))
+                throw new InvalidOperationException("开发版仅支持本机 Python，不准备自动管理 MCP 服务。");
 
             lock (_stateLock)
             {
@@ -515,17 +554,9 @@ namespace CodingRiver.UPilot
                 return status;
             }
 
-            if (IsMainChannel(manifest.Channel) || IsMainChannel(manifest.ServerVersion))
+            if (IsSourceChannel(manifest.Channel) || IsSourceChannel(manifest.ServerVersion))
             {
-                if (!string.IsNullOrWhiteSpace(manifest.ProtocolVersion) &&
-                    !string.Equals(manifest.ProtocolVersion, status.CurrentProtocolVersion, StringComparison.OrdinalIgnoreCase))
-                {
-                    status.Reason = $"main 分支协议版本不匹配：manifest {manifest.ProtocolVersion} / current {status.CurrentProtocolVersion}";
-                    return status;
-                }
-
-                status.IsCompatible = true;
-                status.Reason = "main 分支按协议兼容。";
+                status.Reason = "开发/source 通道不提供自动管理 MCP 服务清单。";
                 return status;
             }
 
@@ -1339,6 +1370,23 @@ namespace CodingRiver.UPilot
         private static bool IsMainChannel(string value)
         {
             return !string.IsNullOrWhiteSpace(value) && value.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static bool IsSourceUpdateChannel()
+        {
+            return IsSourceChannel(ResolveUpdateChannel());
+        }
+
+        public static bool IsSourceChannel(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+            var normalized = value.Trim();
+            return string.Equals(normalized, "source", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(normalized, "python", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(normalized, "dev", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(normalized, "development", StringComparison.OrdinalIgnoreCase) ||
+                   IsMainChannel(normalized);
         }
 
         private static bool IsReleaseChannel(string value)

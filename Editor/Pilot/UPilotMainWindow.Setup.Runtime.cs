@@ -15,6 +15,16 @@ namespace CodingRiver.UPilot
         private async void BeginRuntimeInspection()
         {
             _setupPythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            {
+                _setupRuntimeChoice = SetupRuntimeChoice.Python;
+                _showPythonAdvanced = true;
+                _setupManifest = null;
+                _setupManifestError = "";
+                _setupManifestLoading = false;
+                return;
+            }
+
             if (_setupManifestLoading || _setupManifest != null || !string.IsNullOrWhiteSpace(_setupManifestError))
                 return;
 
@@ -37,14 +47,27 @@ namespace CodingRiver.UPilot
 
         private void DrawSetupRuntimeStep()
         {
+            var sourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
             BeginRuntimeInspection();
-            EditorGUILayout.HelpBox(
-                "推荐由 UPilot 管理 MCP 服务。UPilot 会安装与当前版本匹配的服务，并在后续更新时保持版本一致。",
-                MessageType.Info);
+            if (sourceChannel)
+            {
+                EditorGUILayout.HelpBox(
+                    "当前是开发/source 安装，UPilot 将使用本机 Python 运行 MCP 服务；自动管理服务只随正式 tag 版本发布。",
+                    MessageType.Info);
+                _setupRuntimeChoice = SetupRuntimeChoice.Python;
+                _showPythonAdvanced = true;
+                DrawPythonRuntimeSetup();
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "推荐由 UPilot 管理 MCP 服务。UPilot 会安装与当前版本匹配的服务，并在后续更新时保持版本一致。",
+                    MessageType.Info);
 
-            DrawManagedRuntimeSetup();
-            EditorGUILayout.Space(6);
-            DrawPythonRuntimeSetup();
+                DrawManagedRuntimeSetup();
+                EditorGUILayout.Space(6);
+                DrawPythonRuntimeSetup();
+            }
             EditorGUILayout.Space(12);
 
             var ready = SetupRuntimeReady(out _);
@@ -64,6 +87,9 @@ namespace CodingRiver.UPilot
 
         private void DrawManagedRuntimeSetup()
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                return;
+
             var runtime = UPilotServerRuntimeService.Instance;
             var state = runtime.DownloadState;
             var ready = ManagedRuntimeReady(out var statusMessage);
@@ -144,12 +170,20 @@ namespace CodingRiver.UPilot
 
         private void DrawPythonRuntimeSetup()
         {
-            _showPythonAdvanced = EditorGUILayout.Foldout(
-                _showPythonAdvanced,
-                "高级：使用本机 Python",
-                true);
-            if (!_showPythonAdvanced)
-                return;
+            var sourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
+            if (sourceChannel)
+            {
+                EditorGUILayout.LabelField("使用本机 Python", EditorStyles.boldLabel);
+            }
+            else
+            {
+                _showPythonAdvanced = EditorGUILayout.Foldout(
+                    _showPythonAdvanced,
+                    "高级：使用本机 Python",
+                    true);
+                if (!_showPythonAdvanced)
+                    return;
+            }
 
             _setupPythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
             var runtime = UPilotServerRuntimeService.Instance;
@@ -286,6 +320,12 @@ namespace CodingRiver.UPilot
 
         private bool ManagedRuntimeReady(out string reason)
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            {
+                reason = "开发/source 安装仅支持本机 Python。";
+                return false;
+            }
+
             if (_setupManifest == null)
             {
                 reason = _setupManifestLoading ? "正在获取服务信息…" : "尚未获取服务信息。";

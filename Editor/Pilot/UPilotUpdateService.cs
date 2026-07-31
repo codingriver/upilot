@@ -88,9 +88,23 @@ namespace CodingRiver.UPilot
                 SessionState.GetString(OperationTargetServerKey, ""));
         }
 
+        private static bool CompleteIfSourceUpdateChannel(Action<string, MessageType> notice)
+        {
+            if (!UPilotServerRuntimeService.IsSourceUpdateChannel())
+                return false;
+
+            var message = "开发/source 通道仅使用本机 Python，不执行自动管理服务或包更新。正式对外版本请通过 v* tag 发布。";
+            SetOperationCompleted(message);
+            notice?.Invoke(message, MessageType.Info);
+            return true;
+        }
+
         public async void UpdateManagedServerAndRestart(Action<string, MessageType> notice)
         {
             _notice = notice;
+            if (CompleteIfSourceUpdateChannel(notice))
+                return;
+
             SetOperationPhase(UPilotUpdateOperationPhase.StoppingService, "正在准备更新 MCP 服务…");
             UPilotReleaseManifest manifest;
             try
@@ -126,6 +140,9 @@ namespace CodingRiver.UPilot
             Action<string, MessageType> notice)
         {
             _notice = notice;
+            if (CompleteIfSourceUpdateChannel(notice))
+                return;
+
             SetOperationPhase(UPilotUpdateOperationPhase.StoppingService, "正在读取更新信息…");
             UPilotReleaseManifest manifest;
             try
@@ -183,6 +200,9 @@ namespace CodingRiver.UPilot
             bool shouldRestart,
             Action<string, MessageType> notice = null)
         {
+            if (CompleteIfSourceUpdateChannel(notice))
+                return false;
+
             if (string.IsNullOrWhiteSpace(expectedServerVersion))
             {
                 try
@@ -212,6 +232,9 @@ namespace CodingRiver.UPilot
             bool shouldRestart,
             Action<string, MessageType> notice = null)
         {
+            if (CompleteIfSourceUpdateChannel(notice))
+                return false;
+
             if (string.IsNullOrWhiteSpace(expectedServerVersion))
             {
                 try
@@ -269,6 +292,9 @@ namespace CodingRiver.UPilot
             UPilotReleaseManifest manifest,
             Action<string, MessageType> notice)
         {
+            if (CompleteIfSourceUpdateChannel(notice))
+                return null;
+
             SetOperationPhase(
                 UPilotUpdateOperationPhase.DownloadingService,
                 "正在下载并验证 MCP 服务，完成后将更新 UPilot 包…",
@@ -405,6 +431,9 @@ namespace CodingRiver.UPilot
             bool stopFirst,
             Action<string, MessageType> notice)
         {
+            if (CompleteIfSourceUpdateChannel(notice))
+                return false;
+
             var manager = UPilotMcpServerManager.Instance;
             if (stopFirst)
             {
@@ -493,6 +522,9 @@ namespace CodingRiver.UPilot
         private async Task UpdateUpmFromManifestAsync(Action<string, MessageType> notice)
         {
             _notice = notice;
+            if (CompleteIfSourceUpdateChannel(notice))
+                return;
+
             SetOperationPhase(UPilotUpdateOperationPhase.StoppingService, "正在读取更新信息…");
             UPilotReleaseManifest manifest;
             try
@@ -542,12 +574,7 @@ namespace CodingRiver.UPilot
                 }
             }
 
-            var channel = string.IsNullOrWhiteSpace(manifest.Channel)
-                ? UPilotServerRuntimeService.ResolveUpdateChannel()
-                : manifest.Channel;
-            var revision = channel.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0
-                ? "main"
-                : "v" + manifest.UpmVersion;
+            var revision = "v" + manifest.UpmVersion;
             var identifier = $"https://github.com/codingriver/upilot.git#{revision}";
 
             SetOperationPhase(

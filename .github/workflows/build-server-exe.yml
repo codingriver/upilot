@@ -2,8 +2,6 @@ name: Build UPilot MCP Server EXE
 
 on:
   push:
-    branches:
-      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -47,13 +45,10 @@ jobs:
             $version = '${{ github.event.inputs.version }}'
           } elseif ('${{ github.ref_type }}' -eq 'tag') {
             $version = '${{ github.ref_name }}'.TrimStart('v')
-          } elseif ('${{ github.ref_name }}' -eq 'main') {
-            $short = '${{ github.sha }}'.Substring(0, 7)
-            $version = "$pyVersion-main.${{ github.run_number }}+$short"
           } else {
             $version = $pyVersion
           }
-          $channel = if ('${{ github.ref_name }}' -eq 'main') { 'main' } else { 'release' }
+          $channel = 'release'
           "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
           "py_version=$pyVersion" >> $env:GITHUB_OUTPUT
           "server_version=$version" >> $env:GITHUB_OUTPUT
@@ -99,9 +94,9 @@ jobs:
       - name: Build standalone exe
         shell: pwsh
         run: |
-          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
-          if ('${{ steps.version.outputs.channel }}' -eq 'main') {
-            $baseUrl = "https://github.com/${{ github.repository }}/releases/download/main-nightly"
+          $baseUrl = ""
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $baseUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
           }
           python upilotserver~/deploy/build_server_exe.py `
             --version "${{ steps.version.outputs.server_version }}" `
@@ -129,40 +124,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           make_latest: true
-          overwrite_files: true
-          files: |
-            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
-            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
-            upilotserver~/dist/manifest.json
-
-      - name: Prune old main nightly assets
-        if: github.ref == 'refs/heads/main'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $assets = gh release view main-nightly `
-            --repo "${{ github.repository }}" `
-            --json assets `
-            --jq '.assets[].name' 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "main-nightly release does not exist yet; nothing to prune."
-            exit 0
-          }
-          foreach ($asset in $assets) {
-            if ($asset -like 'upilot-mcp-server-*-win-x64.exe' -or $asset -like 'upilot-mcp-server-*-win-x64.exe.sha256' -or $asset -eq 'upilot-release-manifest.json') {
-              Write-Host "Deleting old nightly asset: $asset"
-              gh release delete-asset main-nightly "$asset" --repo "${{ github.repository }}" -y
-            }
-          }
-
-      - name: Publish main nightly assets
-        if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: main-nightly
-          prerelease: true
-          make_latest: false
           overwrite_files: true
           files: |
             upilotserver~/dist/upilot-mcp-server-*-win-x64.exe

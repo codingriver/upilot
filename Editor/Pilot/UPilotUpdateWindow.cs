@@ -20,6 +20,7 @@ namespace CodingRiver.UPilot
         private bool _isChecking;
         private bool _operationRunning;
         private bool _showDetails;
+        private bool _sourceChannel;
         private string _error = "";
         private string _notice = "";
         private MessageType _noticeType = MessageType.Info;
@@ -87,6 +88,13 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
+                if (_sourceChannel)
+                {
+                    DrawSourceUpdateContent();
+                    DrawFooter();
+                    return;
+                }
+
                 if (_manifest == null)
                 {
                     EditorGUILayout.HelpBox("尚未获取更新信息。", MessageType.Info);
@@ -99,6 +107,38 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private void DrawSourceUpdateContent()
+        {
+            var runtime = UPilotServerRuntimeService.Instance;
+            var package = PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
+            var currentUpm = UPilotServerRuntimeService.UpmVersion;
+            var pythonConfigured = runtime.IsPythonRuntimeConfigured(out var pythonPath);
+
+            DrawInfoRow("更新通道", "开发版（本机 Python）");
+            EditorGUILayout.Space(4);
+            EditorGUILayout.HelpBox(
+                "当前安装来源是本地、嵌入或 main/source。开发版不下载自动管理 MCP 服务，也不执行远程版本比较；正式对外版本通过 v* tag 发布。",
+                MessageType.Info);
+
+            DrawSectionTitle("UPilot 包");
+            DrawInfoRow("当前版本", currentUpm + BuildSourcePackageSuffix(package));
+            DrawStatusAction("更新状态", "开发版不自动检查", null, null, false);
+
+            DrawSeparator();
+            DrawSectionTitle("MCP 服务");
+            DrawInfoRow("运行方式", "本机 Python");
+            DrawInfoRow("Python", pythonConfigured ? pythonPath : "尚未配置");
+            DrawStatusAction(
+                "状态",
+                pythonConfigured ? "已按开发模式配置" : "请在首次设置中配置 Python 3.11+",
+                null,
+                null,
+                false);
+
+            if (!string.IsNullOrWhiteSpace(_notice))
+                EditorGUILayout.HelpBox(_notice, _noticeType);
+        }
+
         private void DrawUpdateContent()
         {
             var runtime = UPilotServerRuntimeService.Instance;
@@ -108,8 +148,7 @@ namespace CodingRiver.UPilot
             var currentUpm = UPilotServerRuntimeService.UpmVersion;
             var managedRuntime = mode == UPilotServerRuntimeMode.StandaloneExe;
             var currentServer = managedRuntime ? GetCurrentServerVersion(mode) : currentUpm;
-            var mainChannel = IsMainChannel(_manifest.Channel) ||
-                              IsMainChannel(UPilotServerRuntimeService.ResolveUpdateChannel());
+            var mainChannel = false;
             var localPackage = package != null &&
                                (package.source == PackageSource.Local || package.source == PackageSource.Embedded);
             var upmNeedsUpdate = NeedsPackageUpdate(package, currentUpm, mainChannel, localPackage);
@@ -127,7 +166,7 @@ namespace CodingRiver.UPilot
             var primaryActionBlocked = managedServerNeedsAction && serverBlockedByPackage && !upmNeedsUpdate;
             var updateBusy = IsUpdateBusy() || operationStatus.IsRunning;
 
-            DrawInfoRow("更新通道", mainChannel ? "Main 分支版" : "正式版");
+            DrawInfoRow("更新通道", "正式版");
             EditorGUILayout.Space(4);
 
             var hasAction = primaryActionAvailable || primaryActionBlocked;
@@ -163,7 +202,7 @@ namespace CodingRiver.UPilot
                 {
                     DrawStatusAction(
                         "状态",
-                        mainChannel ? "可同步 Main 分支最新版本" : "有新版本可用",
+                        "有新版本可用",
                         null,
                         null,
                         false);
@@ -266,11 +305,21 @@ namespace CodingRiver.UPilot
             _isChecking = true;
             _error = "";
             _notice = "";
+            _sourceChannel = false;
             Repaint();
             try
             {
+                var channel = UPilotServerRuntimeService.ResolveUpdateChannel();
+                if (UPilotServerRuntimeService.IsSourceChannel(channel))
+                {
+                    Debug.Log($"[UPilot] CheckForUpdates channel={channel}, source mode uses local Python.");
+                    _manifest = null;
+                    _sourceChannel = true;
+                    return;
+                }
+
                 var manifestUrl = UPilotServerRuntimeService.ResolveManifestUrl();
-                Debug.Log($"[UPilot] CheckForUpdates channel={UPilotServerRuntimeService.ResolveUpdateChannel()}, manifestUrl={manifestUrl}");
+                Debug.Log($"[UPilot] CheckForUpdates channel={channel}, manifestUrl={manifestUrl}");
                 _manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync(manifestUrl);
             }
             catch (Exception ex)
@@ -364,17 +413,24 @@ namespace CodingRiver.UPilot
 
         private string BuildPackageVersion(string version, PackageInfo package, bool mainChannel)
         {
-            if (!mainChannel)
-                return version;
+            return version;
+        }
+
+        private static string BuildSourcePackageSuffix(PackageInfo package)
+        {
+            if (package == null)
+                return "（source）";
+            if (package.source == PackageSource.Local)
+                return "（本地开发）";
+            if (package.source == PackageSource.Embedded)
+                return "（嵌入开发）";
             var revision = GetPackageRevision(package);
-            return string.IsNullOrWhiteSpace(revision) ? version + "（Main 分支）" : version + " · " + ShortCommit(revision);
+            return string.IsNullOrWhiteSpace(revision) ? "（source）" : " · " + ShortCommit(revision);
         }
 
         private string BuildLatestPackageVersion(bool mainChannel)
         {
-            if (!mainChannel)
-                return _manifest.UpmVersion;
-            return _manifest.UpmVersion + " · " + ShortCommit(_manifest.CommitSha);
+            return _manifest.UpmVersion;
         }
 
         private static string BuildSummary(
@@ -437,7 +493,7 @@ namespace CodingRiver.UPilot
             if (updatePackage && updateManagedServer)
                 return "更新 UPilot 和服务";
             if (updatePackage)
-                return mainChannel ? "同步 Main 分支" : "更新 UPilot";
+                return "更新 UPilot";
             if (updateManagedServer)
                 return "更新服务";
             return "已是最新";
@@ -545,12 +601,6 @@ namespace CodingRiver.UPilot
         {
             return left.StartsWith(right, StringComparison.OrdinalIgnoreCase) ||
                    right.StartsWith(left, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsMainChannel(string value)
-        {
-            return !string.IsNullOrWhiteSpace(value) &&
-                   value.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string ShortCommit(string value)

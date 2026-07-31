@@ -70,7 +70,10 @@ namespace CodingRiver.UPilot
         {
             _setupInitialized = true;
             _setupStep = 0;
-            _setupRuntimeChoice = SetupRuntimeChoice.Managed;
+            _setupRuntimeChoice = UPilotServerRuntimeService.IsSourceUpdateChannel()
+                ? SetupRuntimeChoice.Python
+                : SetupRuntimeChoice.Managed;
+            _showPythonAdvanced = _setupRuntimeChoice == SetupRuntimeChoice.Python;
             _setupCompletionMessage = "";
             _setupCompletionMessageType = MessageType.None;
 

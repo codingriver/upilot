@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.10
+
+- Treat main/source installs as Python-only development builds.
+- Publish managed MCP server binaries only from tagged release builds.
+
 ## 0.3.7
 
 - Add release CI validation so tag, UPM package, and MCP server versions must match before publishing release assets.

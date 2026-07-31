@@ -409,8 +409,8 @@ namespace CodingRiver.UPilot
                 ? UPilotServerRuntimeService.Instance.RuntimeModeLabel
                 : _mcpStatus.RuntimeMode;
             var channel = string.IsNullOrEmpty(_mcpStatus.BuildChannel) ? "release" : _mcpStatus.BuildChannel;
-            var compatibility = channel.IndexOf("main", StringComparison.OrdinalIgnoreCase) >= 0
-                ? "main protocol/registry"
+            var compatibility = UPilotServerRuntimeService.IsSourceChannel(channel)
+                ? "source / 本机 Python"
                 : "release 清单兼容";
             var writeApproved = UPilotProjectConfig.Current.safety?.writeAccessApproved == true;
 
