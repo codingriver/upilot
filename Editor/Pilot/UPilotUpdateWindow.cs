@@ -27,29 +27,59 @@ namespace CodingRiver.UPilot
 
         public static void Open(Action<string, MessageType> notice = null)
         {
-            var window = GetWindow<UPilotUpdateWindow>(true, "UPilot 更新中心", true);
-            window.minSize = new Vector2(440, 360);
-            window._externalNotice = notice;
-            window.Show();
-            window.Focus();
-            if (window.HasActiveUpdate())
+            try
             {
-                window.ShowActiveUpdate();
+                var window = GetWindow<UPilotUpdateWindow>(true, "UPilot 更新中心", true);
+                window.minSize = new Vector2(440, 360);
+                window._externalNotice = notice;
+                window.Show();
+                window.Focus();
+                if (window.HasActiveUpdate())
+                {
+                    window.ShowActiveUpdate();
+                }
+                else
+                {
+                    window.CheckForUpdates();
+                }
             }
-            else
+            catch (Exception ex)
             {
-                window.CheckForUpdates();
+                ReportOpenError("打开 UPilot 更新中心失败", ex, notice);
             }
         }
 
-        internal static void OpenActiveUpdate(Action<string, MessageType> notice = null)
+        internal static bool OpenActiveUpdate(Action<string, MessageType> notice = null)
         {
-            var window = GetWindow<UPilotUpdateWindow>(true, "UPilot 更新中心", true);
-            window.minSize = new Vector2(440, 360);
-            window._externalNotice = notice;
-            window.Show();
-            window.Focus();
-            window.ShowActiveUpdate();
+            try
+            {
+                var window = GetWindow<UPilotUpdateWindow>(true, "UPilot 更新中心", true);
+                window.minSize = new Vector2(440, 360);
+                window._externalNotice = notice;
+                window.Show();
+                window.Focus();
+                window.ShowActiveUpdate();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ReportOpenError("打开 UPilot 更新进度失败", ex, notice);
+                return false;
+            }
+        }
+
+        private static void ReportOpenError(string message, Exception ex, Action<string, MessageType> notice)
+        {
+            var fullMessage = message + "：" + ex.Message;
+            Debug.LogError("[UPilot] " + fullMessage + "\n" + ex);
+            try
+            {
+                notice?.Invoke(fullMessage, MessageType.Error);
+            }
+            catch (Exception noticeEx)
+            {
+                Debug.LogError("[UPilot] 更新错误通知失败：" + noticeEx);
+            }
         }
 
         private void ShowActiveUpdate()

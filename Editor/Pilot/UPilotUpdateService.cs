@@ -94,15 +94,31 @@ namespace CodingRiver.UPilot
 
         public void CheckForUpdates(Action<string, MessageType> notice)
         {
-            if (IsUpdateRunning)
+            try
             {
-                // Do not start a release manifest check while an update is active; show progress only.
-                UPilotUpdateWindow.OpenActiveUpdate(notice);
-                notice?.Invoke("UPilot 正在更新，已显示当前进度，未重新检查更新。", MessageType.Info);
-                return;
-            }
+                if (IsUpdateRunning)
+                {
+                    // Do not start a release manifest check while an update is active; show progress only.
+                    if (UPilotUpdateWindow.OpenActiveUpdate(notice))
+                        notice?.Invoke("UPilot 正在更新，已显示当前进度，未重新检查更新。", MessageType.Info);
+                    return;
+                }
 
-            UPilotUpdateWindow.Open(notice);
+                UPilotUpdateWindow.Open(notice);
+            }
+            catch (Exception ex)
+            {
+                var message = "打开更新中心失败：" + ex.Message;
+                Debug.LogError("[UPilot] " + message + "\n" + ex);
+                try
+                {
+                    notice?.Invoke(message, MessageType.Error);
+                }
+                catch (Exception noticeEx)
+                {
+                    Debug.LogError("[UPilot] 更新错误通知失败：" + noticeEx);
+                }
+            }
         }
 
         internal bool IsUpdateRunning => GetOperationStatus().IsRunning;
