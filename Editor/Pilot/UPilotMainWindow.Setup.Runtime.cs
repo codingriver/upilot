@@ -128,6 +128,8 @@ namespace CodingRiver.UPilot
                         ? $" · {state.CompletedSegments}/{state.SegmentCount} 个下载任务"
                         : "";
                     EditorGUILayout.LabelField(sizeText + segmentText, EditorStyles.miniLabel);
+                    if (!string.IsNullOrEmpty(state.WarningMessage))
+                        EditorGUILayout.HelpBox(state.WarningMessage, MessageType.Warning);
                     if (!string.IsNullOrEmpty(state.ErrorMessage))
                         EditorGUILayout.HelpBox(state.ErrorMessage, MessageType.Error);
                 }

@@ -497,6 +497,8 @@ namespace CodingRiver.UPilot
                 EditorGUI.ProgressBar(rect, progress, label);
                 if (!string.IsNullOrWhiteSpace(detail))
                     EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
+                if (!string.IsNullOrWhiteSpace(download.WarningMessage))
+                    EditorGUILayout.HelpBox(download.WarningMessage, MessageType.Warning);
 
                 var targetText = BuildUpdateTargetText(status);
                 if (!string.IsNullOrWhiteSpace(targetText))

@@ -230,6 +230,8 @@ namespace CodingRiver.UPilot
             EditorGUI.ProgressBar(rect, progress, label);
             if (!string.IsNullOrWhiteSpace(detail))
                 EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
+            if (!string.IsNullOrWhiteSpace(download.WarningMessage))
+                EditorGUILayout.HelpBox(download.WarningMessage, MessageType.Warning);
 
             var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
             if (!string.IsNullOrWhiteSpace(operationStatus.TargetUpmVersion) ||
@@ -423,6 +425,8 @@ namespace CodingRiver.UPilot
             var rect = EditorGUILayout.GetControlRect(false, 18);
             EditorGUI.ProgressBar(rect, state.Progress, UPilotUpdateService.FormatDownloadProgressLabel(state));
             EditorGUILayout.LabelField(UPilotUpdateService.FormatDownloadProgressDetail(state), EditorStyles.miniLabel);
+            if (!string.IsNullOrWhiteSpace(state.WarningMessage))
+                EditorGUILayout.HelpBox(state.WarningMessage, MessageType.Warning);
         }
 
         private void DrawFooter()

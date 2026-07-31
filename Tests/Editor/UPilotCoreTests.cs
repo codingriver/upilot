@@ -477,9 +477,10 @@ namespace CodingRiver.UPilot.Tests
                     BindingFlags.NonPublic | BindingFlags.Static);
 
                 Assert.That(method, Is.Not.Null);
+                var expectedSha256 = UPilotServerRuntimeService.ComputeSha256(downloadPath);
                 var moveTask = (Task<bool>)method.Invoke(
                     null,
-                    new object[] { downloadPath, finalPath, CancellationToken.None });
+                    new object[] { downloadPath, finalPath, expectedSha256, CancellationToken.None });
                 await Task.Delay(600);
                 heldStream.Dispose();
                 heldStream = null;
@@ -491,6 +492,39 @@ namespace CodingRiver.UPilot.Tests
             finally
             {
                 heldStream?.Dispose();
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task VerifiedDownloadCopyFallbackRevalidatesTarget()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-copy-fallback-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var downloadPath = Path.Combine(directory, "server.exe.download");
+            var finalPath = Path.Combine(directory, "server.exe");
+            File.WriteAllText(downloadPath, "verified-copy");
+
+            try
+            {
+                var expectedSha256 = UPilotServerRuntimeService.ComputeSha256(downloadPath);
+                var method = typeof(UPilotServerRuntimeService).GetMethod(
+                    "CopyVerifiedDownloadWithRetryAsync",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                Assert.That(method, Is.Not.Null);
+                var copyTask = (Task)method.Invoke(
+                    null,
+                    new object[] { downloadPath, finalPath, expectedSha256, CancellationToken.None });
+                await copyTask;
+
+                Assert.That(File.Exists(finalPath), Is.True);
+                Assert.That(UPilotServerRuntimeService.ComputeSha256(finalPath), Is.EqualTo(expectedSha256));
+                Assert.That(File.Exists(downloadPath), Is.True);
+            }
+            finally
+            {
                 if (Directory.Exists(directory))
                     Directory.Delete(directory, recursive: true);
             }

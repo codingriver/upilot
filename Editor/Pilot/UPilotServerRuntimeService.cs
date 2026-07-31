@@ -85,6 +85,7 @@ namespace CodingRiver.UPilot
         public bool IsComplete;
         public bool IsCancelled;
         public string Phase = "";
+        public string WarningMessage = "";
         public string ErrorMessage = "";
         public string Version = "";
         public string DownloadUrl = "";
@@ -141,12 +142,22 @@ namespace CodingRiver.UPilot
         private const int ParallelDownloadThresholdBytes = 8 * 1024 * 1024;
         private const int ParallelDownloadSegments = 4;
         private const int SegmentRetryCount = 2;
-        private const int FileOperationRetryCount = 8;
-        private const int FileOperationRetryDelayMs = 250;
+        private const int FileOperationRetryCount = 3;
+        private const int FileOperationRetryDelayMs = 2000;
+        private const long DiskSpaceSafetyMarginBytes = 64L * 1024 * 1024;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
         private static bool _verifiedServerHashErrorLogged;
         private static bool _chmodErrorLogged;
         private static bool _projectKeyErrorLogged;
+        private static bool _downloadErrorDialogPending;
+
+        private sealed class UPilotDownloadUserActionException : IOException
+        {
+            public UPilotDownloadUserActionException(string message, Exception innerException = null)
+                : base(message, innerException)
+            {
+            }
+        }
 
         private CancellationTokenSource _downloadCts;
         private CancellationTokenSource _pythonEnvCts;
@@ -632,6 +643,7 @@ namespace CodingRiver.UPilot
             CancellationToken token)
         {
             string activeTmpPath = null;
+            var preserveVerifiedDownload = false;
             try
             {
                 manifest ??= await FetchReleaseManifestAsync();
@@ -670,9 +682,11 @@ namespace CodingRiver.UPilot
                         await RetryFileOperationAsync(
                             () => CleanupDownloadFiles(tmpPath, ParallelDownloadSegments),
                             "清理旧的服务下载文件",
-                            token);
+                            token,
+                            updateProgress: false);
 
                         var totalBytes = download.SizeBytes;
+                        EnsureSufficientDiskSpace(versionDir, totalBytes, includeWorkingCopy: true);
                         var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
                                              await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
                         if (supportsRanges)
@@ -690,12 +704,16 @@ namespace CodingRiver.UPilot
                                 () => File.Delete(tmpPath),
                                 "删除校验失败的服务文件",
                                 CancellationToken.None,
-                                throwOnFailure: false);
-                            throw new InvalidOperationException($"SHA256 校验失败：期望 {download.Sha256}，实际 {actualSha}");
+                                throwOnFailure: false,
+                                updateProgress: false);
+                            throw new UPilotDownloadUserActionException(
+                                $"下载的 MCP 服务文件未通过完整性校验，请重新执行更新。期望 {download.Sha256}，实际 {actualSha}");
                         }
+                        preserveVerifiedDownload = true;
                     }
                     else
                     {
+                        preserveVerifiedDownload = true;
                         UpdateState(state =>
                         {
                             state.BytesReceived = state.TotalBytes;
@@ -704,7 +722,8 @@ namespace CodingRiver.UPilot
                         });
                     }
 
-                    await ReplaceVerifiedDownloadAsync(tmpPath, finalPath, token);
+                    await ReplaceVerifiedDownloadAsync(tmpPath, finalPath, download.Sha256, token);
+                    preserveVerifiedDownload = false;
                 }
                 else
                 {
@@ -752,25 +771,62 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError("[UPilot] MCP server exe download failed: " + ex.Message + "\n" + ex);
+                Exception reportedException = ex;
+                if (IsDiskFullException(ex))
+                {
+                    reportedException = new UPilotDownloadUserActionException(
+                        "磁盘空间不足，MCP 服务下载或合并未完成。请释放磁盘空间后重新更新。",
+                        ex);
+                }
+                else if (ex is UnauthorizedAccessException)
+                {
+                    reportedException = new UPilotDownloadUserActionException(
+                        "没有权限写入 MCP 服务目录。请检查目录权限或安全软件设置后重新更新。",
+                        ex);
+                }
+                else if (ex is DirectoryNotFoundException || ex is PathTooLongException || ex is NotSupportedException)
+                {
+                    reportedException = new UPilotDownloadUserActionException(
+                        "MCP 服务目标路径不可用。请检查路径和磁盘状态后重新更新。",
+                        ex);
+                }
+                Debug.LogError("[UPilot] MCP server exe download failed: " + reportedException.Message +
+                               "\n" + reportedException);
                 UpdateState(state =>
                 {
                     state.IsRunning = false;
-                    state.ErrorMessage = ex.Message;
+                    state.ErrorMessage = reportedException.Message;
                     state.Phase = "下载失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
-                throw;
+                if (reportedException is UPilotDownloadUserActionException)
+                    ScheduleDownloadErrorDialog(reportedException.Message);
+                throw reportedException;
             }
             finally
             {
                 if (!string.IsNullOrWhiteSpace(activeTmpPath))
                 {
-                    await RetryFileOperationAsync(
-                        () => CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments),
-                        "清理服务下载临时文件",
-                        CancellationToken.None,
-                        throwOnFailure: false);
+                    if (preserveVerifiedDownload && File.Exists(activeTmpPath))
+                    {
+                        Debug.LogWarning("[UPilot] 已保留通过 SHA256 校验的下载文件，后续更新可直接复用。" +
+                                         "\nPath=" + activeTmpPath);
+                        await RetryFileOperationAsync(
+                            () => CleanupSegmentFiles(activeTmpPath, ParallelDownloadSegments),
+                            "清理服务下载分片文件",
+                            CancellationToken.None,
+                            throwOnFailure: false,
+                            updateProgress: false);
+                    }
+                    else
+                    {
+                        await RetryFileOperationAsync(
+                            () => CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments),
+                            "清理服务下载临时文件",
+                            CancellationToken.None,
+                            throwOnFailure: false,
+                            updateProgress: false);
+                    }
                 }
             }
         }
@@ -968,6 +1024,139 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private static async Task<bool> CleanupOrQuarantineFailedTargetAsync(
+            string targetPath,
+            CancellationToken token)
+        {
+            if (!File.Exists(targetPath))
+                return true;
+
+            try
+            {
+                File.Delete(targetPath);
+                Debug.LogWarning("[UPilot] 已删除不完整的 MCP 服务目标文件。\nTarget=" + targetPath);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                LogFileOperationFailure("Delete failed target", 0, ex, null, targetPath, IsDiskFullException(ex));
+            }
+
+            token.ThrowIfCancellationRequested();
+            var quarantinePath = targetPath + ".failed-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+            try
+            {
+                File.Move(targetPath, quarantinePath);
+                Debug.LogWarning("[UPilot] 无法删除不完整目标文件，已将其隔离。" +
+                                 $"\nTarget={targetPath}\nQuarantine={quarantinePath}");
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                LogFileOperationFailure("Quarantine failed target", 0, ex, targetPath, quarantinePath, false);
+                Debug.LogError("[UPilot] 删除和隔离不完整目标文件均失败，已停止更新。" +
+                               $"\nTarget={targetPath}\nException={ex}");
+                return false;
+            }
+        }
+
+        private static void EnsureSufficientDiskSpace(
+            string directoryPath,
+            long expectedBytes,
+            bool includeWorkingCopy)
+        {
+            if (expectedBytes <= 0 || string.IsNullOrWhiteSpace(directoryPath))
+                return;
+
+            try
+            {
+                var root = Path.GetPathRoot(Path.GetFullPath(directoryPath));
+                if (string.IsNullOrWhiteSpace(root))
+                    return;
+
+                var drive = new DriveInfo(root);
+                var multiplier = includeWorkingCopy ? 2L : 1L;
+                var payloadBytes = expectedBytes > (long.MaxValue - DiskSpaceSafetyMarginBytes) / multiplier
+                    ? long.MaxValue
+                    : expectedBytes * multiplier;
+                var requiredBytes = payloadBytes == long.MaxValue
+                    ? long.MaxValue
+                    : payloadBytes + DiskSpaceSafetyMarginBytes;
+                if (drive.AvailableFreeSpace >= requiredBytes)
+                    return;
+
+                var message =
+                    $"磁盘空间不足，MCP 服务更新至少需要 {FormatFileSize(requiredBytes)} 可用空间，" +
+                    $"当前仅剩 {FormatFileSize(drive.AvailableFreeSpace)}。请释放磁盘空间后重新更新。";
+                Debug.LogError("[UPilot] " + message + $"\nDirectory={directoryPath}");
+                throw new UPilotDownloadUserActionException(message);
+            }
+            catch (UPilotDownloadUserActionException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[UPilot] 无法预检查 MCP 服务下载磁盘空间，将继续并依赖写入错误检测。" +
+                                 $"\nDirectory={directoryPath}\nException={ex}");
+            }
+        }
+
+        private static bool IsDiskFullException(Exception ex)
+        {
+            if (!(ex is IOException))
+                return false;
+            var errorCode = ex.HResult & 0xFFFF;
+            return errorCode == 0x27 || errorCode == 0x70;
+        }
+
+        private static void LogFileOperationFailure(
+            string operation,
+            int attempt,
+            Exception ex,
+            string sourcePath,
+            string targetPath,
+            bool hardError)
+        {
+            var message =
+                $"[UPilot] 文件操作失败。\nOperation={operation}" +
+                $"\nAttempt={attempt + 1}/{FileOperationRetryCount + 1}" +
+                (string.IsNullOrWhiteSpace(sourcePath) ? "" : "\nSource=" + sourcePath) +
+                (string.IsNullOrWhiteSpace(targetPath) ? "" : "\nTarget=" + targetPath) +
+                $"\nException={ex.GetType().Name}" +
+                $"\nHResult=0x{ex.HResult:X8}" +
+                $"\nMessage={ex.Message}";
+            if (hardError)
+                Debug.LogError(message + "\n" + ex);
+            else
+                Debug.LogWarning(message);
+        }
+
+        private static string FormatFileSize(long bytes)
+        {
+            if (bytes >= 1024L * 1024 * 1024)
+                return (bytes / (1024d * 1024 * 1024)).ToString("0.##") + " GB";
+            if (bytes >= 1024L * 1024)
+                return (bytes / (1024d * 1024)).ToString("0.##") + " MB";
+            return (bytes / 1024d).ToString("0.##") + " KB";
+        }
+
+        private static void ScheduleDownloadErrorDialog(string message)
+        {
+            if (_downloadErrorDialogPending)
+                return;
+
+            _downloadErrorDialogPending = true;
+            EditorApplication.delayCall += () =>
+            {
+                _downloadErrorDialogPending = false;
+                EditorUtility.DisplayDialog(
+                    "UPilot 更新失败",
+                    message + "\n\n请检查磁盘空间、目录权限和文件占用情况后重新更新。",
+                    "确定");
+            };
+        }
+
         private static void EnsureExecutablePermission(string path)
         {
 #if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
@@ -982,22 +1171,165 @@ namespace CodingRiver.UPilot
 #endif
         }
 
-        private static Task<bool> ReplaceVerifiedDownloadAsync(
+        private static async Task<bool> ReplaceVerifiedDownloadAsync(
             string verifiedPath,
             string finalPath,
+            string expectedSha256,
             CancellationToken token = default)
         {
-            return RetryFileOperationAsync(
+            var moved = await RetryFileOperationAsync(
                 () => ReplaceVerifiedDownload(verifiedPath, finalPath),
-                "启用已验证的 MCP 服务文件",
-                token);
+                "移动已验证的 MCP 服务文件",
+                token,
+                throwOnFailure: false,
+                sourcePath: verifiedPath,
+                targetPath: finalPath);
+            if (moved)
+                return true;
+
+            const string fallbackWarning = "服务文件持续被系统占用，正在使用兼容复制方式完成更新。";
+            Instance.UpdateState(state =>
+            {
+                state.Phase = "正在使用兼容复制方式";
+                state.WarningMessage = fallbackWarning;
+            });
+            Debug.LogWarning("[UPilot] Move 重试已耗尽，正在使用兼容复制方式完成更新。" +
+                             $"\nSource={verifiedPath}\nTarget={finalPath}");
+
+            await CopyVerifiedDownloadWithRetryAsync(verifiedPath, finalPath, expectedSha256, token);
+            Instance.UpdateState(state =>
+            {
+                state.Phase = "兼容复制已完成";
+                state.WarningMessage = "服务文件已通过兼容复制方式安装，并完成完整性校验。";
+            });
+            return true;
+        }
+
+        private static async Task CopyVerifiedDownloadWithRetryAsync(
+            string verifiedPath,
+            string finalPath,
+            string expectedSha256,
+            CancellationToken token = default)
+        {
+            Exception lastError = null;
+            for (var attempt = 0; attempt <= FileOperationRetryCount; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    if (File.Exists(finalPath) &&
+                        !await CleanupOrQuarantineFailedTargetAsync(finalPath, token))
+                    {
+                        throw new UPilotDownloadUserActionException(
+                            "无法删除或隔离不完整的 MCP 服务文件。请关闭占用该文件的程序后重新更新。");
+                    }
+
+                    EnsureSufficientDiskSpace(
+                        Path.GetDirectoryName(finalPath),
+                        new FileInfo(verifiedPath).Length,
+                        includeWorkingCopy: false);
+                    Instance.UpdateState(state => state.Phase = "正在复制服务文件");
+                    File.Copy(verifiedPath, finalPath, overwrite: false);
+
+                    Instance.UpdateState(state => state.Phase = "正在校验复制文件");
+                    var actualSha256 = await ComputeSha256WithRetryAsync(finalPath, token);
+                    if (!string.IsNullOrWhiteSpace(expectedSha256) &&
+                        !string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            $"复制后的文件 SHA256 不一致：期望 {expectedSha256}，实际 {actualSha256}");
+                    }
+
+                    Debug.LogWarning("[UPilot] MCP 服务文件已通过兼容复制方式安装并完成 SHA256 校验。" +
+                                     $"\nSource={verifiedPath}\nTarget={finalPath}");
+                    return;
+                }
+                catch (UPilotDownloadUserActionException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    lastError = ex;
+                    var hardError = IsDiskFullException(ex);
+                    LogFileOperationFailure("Copy", attempt, ex, verifiedPath, finalPath, hardError);
+                    if (File.Exists(finalPath) &&
+                        !await CleanupOrQuarantineFailedTargetAsync(finalPath, token))
+                    {
+                        throw new UPilotDownloadUserActionException(
+                            "复制失败后无法删除或隔离不完整的 MCP 服务文件。请关闭占用该文件的程序后重新更新。",
+                            ex);
+                    }
+
+                    if (hardError)
+                    {
+                        throw new UPilotDownloadUserActionException(
+                            "磁盘空间不足，无法复制 MCP 服务文件。请释放磁盘空间后重新更新。",
+                            ex);
+                    }
+
+                    if (attempt >= FileOperationRetryCount)
+                        break;
+
+                    var delayMs = FileOperationRetryDelayMs * (attempt + 1);
+                    var retryNumber = attempt + 1;
+                    Instance.UpdateState(state =>
+                        state.Phase = $"复制失败，{delayMs / 1000} 秒后重试（{retryNumber}/{FileOperationRetryCount}）");
+                    Debug.LogWarning(
+                        $"[UPilot] Copy 失败，已清理或隔离不完整目标文件，{delayMs / 1000} 秒后进行第 {retryNumber}/{FileOperationRetryCount} 次重试。" +
+                        $"\nSource={verifiedPath}\nTarget={finalPath}");
+                    await Task.Delay(delayMs, token);
+                }
+            }
+
+            throw new UPilotDownloadUserActionException(
+                "兼容复制重试仍然失败。请检查磁盘空间、目录权限及文件占用情况后重新更新。",
+                lastError);
+        }
+
+        private static async Task<string> ComputeSha256WithRetryAsync(
+            string path,
+            CancellationToken token)
+        {
+            Exception lastError = null;
+            for (var attempt = 0; attempt <= FileOperationRetryCount; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    return ComputeSha256(path);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    lastError = ex;
+                    LogFileOperationFailure("Verify copied file", attempt, ex, path, null, false);
+                    if (attempt >= FileOperationRetryCount)
+                        break;
+
+                    var delayMs = FileOperationRetryDelayMs * (attempt + 1);
+                    var retryNumber = attempt + 1;
+                    Instance.UpdateState(state =>
+                        state.Phase = $"校验文件暂时被占用，{delayMs / 1000} 秒后重试（{retryNumber}/{FileOperationRetryCount}）");
+                    Debug.LogWarning(
+                        $"[UPilot] 复制文件校验暂时失败，{delayMs / 1000} 秒后进行第 {retryNumber}/{FileOperationRetryCount} 次重试。" +
+                        $"\nPath={path}");
+                    await Task.Delay(delayMs, token);
+                }
+            }
+
+            throw new UPilotDownloadUserActionException(
+                "无法读取复制后的 MCP 服务文件进行完整性校验。请关闭占用该文件的程序后重新更新。",
+                lastError);
         }
 
         private static async Task<bool> RetryFileOperationAsync(
             Action operation,
             string description,
             CancellationToken token,
-            bool throwOnFailure = true)
+            bool throwOnFailure = true,
+            string sourcePath = null,
+            string targetPath = null,
+            bool updateProgress = true)
         {
             Exception lastError = null;
             for (var attempt = 0; attempt <= FileOperationRetryCount; attempt++)
@@ -1011,9 +1343,26 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
                 {
                     lastError = ex;
+                    var hardError = IsDiskFullException(ex);
+                    LogFileOperationFailure(description, attempt, ex, sourcePath, targetPath, hardError);
+                    if (hardError)
+                    {
+                        throw new UPilotDownloadUserActionException(
+                            "磁盘空间不足，无法完成 MCP 服务更新。请释放磁盘空间后重新更新。",
+                            ex);
+                    }
+
                     if (attempt < FileOperationRetryCount)
                     {
-                        var delayMs = Math.Min(FileOperationRetryDelayMs * (attempt + 1), 1000);
+                        var delayMs = FileOperationRetryDelayMs * (attempt + 1);
+                        var retryNumber = attempt + 1;
+                        if (updateProgress)
+                        {
+                            Instance.UpdateState(state =>
+                                state.Phase = $"{description}失败，{delayMs / 1000} 秒后重试（{retryNumber}/{FileOperationRetryCount}）");
+                        }
+                        Debug.LogWarning(
+                            $"[UPilot] {description}失败，{delayMs / 1000} 秒后进行第 {retryNumber}/{FileOperationRetryCount} 次重试。");
                         await Task.Delay(delayMs, token);
                         continue;
                     }
@@ -1021,9 +1370,9 @@ namespace CodingRiver.UPilot
             }
 
             if (throwOnFailure)
-                throw new IOException(description + "失败：" + lastError?.Message, lastError);
+                throw new UPilotDownloadUserActionException(description + "失败：" + lastError?.Message, lastError);
 
-            Debug.LogWarning("[UPilot] " + description + "失败，稍后会在下次下载前继续清理：" + lastError?.Message);
+            Debug.LogWarning("[UPilot] " + description + "重试已耗尽：" + lastError?.Message);
             return false;
         }
 
@@ -1332,6 +1681,7 @@ namespace CodingRiver.UPilot
                 IsComplete = source.IsComplete,
                 IsCancelled = source.IsCancelled,
                 Phase = source.Phase,
+                WarningMessage = source.WarningMessage,
                 ErrorMessage = source.ErrorMessage,
                 Version = source.Version,
                 DownloadUrl = source.DownloadUrl,
