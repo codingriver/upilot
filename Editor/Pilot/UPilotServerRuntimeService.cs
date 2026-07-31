@@ -141,6 +141,8 @@ namespace CodingRiver.UPilot
         private const int ParallelDownloadThresholdBytes = 8 * 1024 * 1024;
         private const int ParallelDownloadSegments = 4;
         private const int SegmentRetryCount = 2;
+        private const int FileOperationRetryCount = 8;
+        private const int FileOperationRetryDelayMs = 250;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
         private static bool _verifiedServerHashErrorLogged;
         private static bool _chmodErrorLogged;
@@ -659,30 +661,50 @@ namespace CodingRiver.UPilot
                 var finalPath = Path.Combine(versionDir, fileName);
                 var tmpPath = finalPath + ".download";
                 activeTmpPath = tmpPath;
-                CleanupDownloadFiles(tmpPath, ParallelDownloadSegments);
-
                 var alreadyReady = IsVerifiedServerFileReady(finalPath, download.Sha256);
+                var reusableDownload = !alreadyReady && IsVerifiedServerFileReady(tmpPath, download.Sha256);
                 if (!alreadyReady)
                 {
-                    var totalBytes = download.SizeBytes;
-                    var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
-                                         await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
-                    if (supportsRanges)
-                        await DownloadInSegmentsAsync(download.Url, tmpPath, totalBytes, token);
-                    else
-                        await DownloadSingleStreamAsync(download.Url, tmpPath, totalBytes, token);
-
-                    token.ThrowIfCancellationRequested();
-                    UpdateState(state => state.Phase = "正在验证文件");
-                    var actualSha = ComputeSha256(tmpPath);
-                    if (!string.IsNullOrWhiteSpace(download.Sha256) &&
-                        !string.Equals(actualSha, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                    if (!reusableDownload)
                     {
-                        File.Delete(tmpPath);
-                        throw new InvalidOperationException($"SHA256 校验失败：期望 {download.Sha256}，实际 {actualSha}");
+                        await RetryFileOperationAsync(
+                            () => CleanupDownloadFiles(tmpPath, ParallelDownloadSegments),
+                            "清理旧的服务下载文件",
+                            token);
+
+                        var totalBytes = download.SizeBytes;
+                        var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
+                                             await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
+                        if (supportsRanges)
+                            await DownloadInSegmentsAsync(download.Url, tmpPath, totalBytes, token);
+                        else
+                            await DownloadSingleStreamAsync(download.Url, tmpPath, totalBytes, token);
+
+                        token.ThrowIfCancellationRequested();
+                        UpdateState(state => state.Phase = "正在验证文件");
+                        var actualSha = ComputeSha256(tmpPath);
+                        if (!string.IsNullOrWhiteSpace(download.Sha256) &&
+                            !string.Equals(actualSha, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await RetryFileOperationAsync(
+                                () => File.Delete(tmpPath),
+                                "删除校验失败的服务文件",
+                                CancellationToken.None,
+                                throwOnFailure: false);
+                            throw new InvalidOperationException($"SHA256 校验失败：期望 {download.Sha256}，实际 {actualSha}");
+                        }
+                    }
+                    else
+                    {
+                        UpdateState(state =>
+                        {
+                            state.BytesReceived = state.TotalBytes;
+                            state.CompletedSegments = state.SegmentCount;
+                            state.Phase = "正在恢复已下载文件";
+                        });
                     }
 
-                    ReplaceVerifiedDownload(tmpPath, finalPath);
+                    await ReplaceVerifiedDownloadAsync(tmpPath, finalPath, token);
                 }
                 else
                 {
@@ -743,7 +765,13 @@ namespace CodingRiver.UPilot
             finally
             {
                 if (!string.IsNullOrWhiteSpace(activeTmpPath))
-                    CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments);
+                {
+                    await RetryFileOperationAsync(
+                        () => CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments),
+                        "清理服务下载临时文件",
+                        CancellationToken.None,
+                        throwOnFailure: false);
+                }
             }
         }
 
@@ -784,8 +812,11 @@ namespace CodingRiver.UPilot
             var total = response.Content.Headers.ContentLength ?? expectedBytes;
             UpdateState(state => state.TotalBytes = total);
             using var input = await response.Content.ReadAsStreamAsync();
-            using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            await CopyDownloadStreamAsync(input, output, token);
+            using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                await CopyDownloadStreamAsync(input, output, token);
+                output.Flush();
+            }
             UpdateState(state => state.CompletedSegments = 1);
         }
 
@@ -818,12 +849,15 @@ namespace CodingRiver.UPilot
             try
             {
                 await Task.WhenAll(tasks);
-                using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                for (var index = 0; index < ParallelDownloadSegments; index++)
+                using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    var segmentPath = targetPath + ".part" + index;
-                    using var input = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                    await input.CopyToAsync(output, 128 * 1024, token);
+                    for (var index = 0; index < ParallelDownloadSegments; index++)
+                    {
+                        var segmentPath = targetPath + ".part" + index;
+                        using (var input = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                            await input.CopyToAsync(output, 128 * 1024, token);
+                    }
+                    output.Flush();
                 }
             }
             finally
@@ -946,6 +980,51 @@ namespace CodingRiver.UPilot
                 LogRuntimeProbeErrorOnce(ref _chmodErrorLogged, "设置 MCP 服务可执行权限失败", ex);
             }
 #endif
+        }
+
+        private static Task<bool> ReplaceVerifiedDownloadAsync(
+            string verifiedPath,
+            string finalPath,
+            CancellationToken token = default)
+        {
+            return RetryFileOperationAsync(
+                () => ReplaceVerifiedDownload(verifiedPath, finalPath),
+                "启用已验证的 MCP 服务文件",
+                token);
+        }
+
+        private static async Task<bool> RetryFileOperationAsync(
+            Action operation,
+            string description,
+            CancellationToken token,
+            bool throwOnFailure = true)
+        {
+            Exception lastError = null;
+            for (var attempt = 0; attempt <= FileOperationRetryCount; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    operation();
+                    return true;
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    lastError = ex;
+                    if (attempt < FileOperationRetryCount)
+                    {
+                        var delayMs = Math.Min(FileOperationRetryDelayMs * (attempt + 1), 1000);
+                        await Task.Delay(delayMs, token);
+                        continue;
+                    }
+                }
+            }
+
+            if (throwOnFailure)
+                throw new IOException(description + "失败：" + lastError?.Message, lastError);
+
+            Debug.LogWarning("[UPilot] " + description + "失败，稍后会在下次下载前继续清理：" + lastError?.Message);
+            return false;
         }
 
         private static void ReplaceVerifiedDownload(string verifiedPath, string finalPath)

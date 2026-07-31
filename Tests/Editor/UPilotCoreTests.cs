@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -452,6 +454,46 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 prepareMethod.GetParameters().Any(parameter => parameter.Name == "preparedServerPath"),
                 Is.True);
+        }
+
+        [Test]
+        public async Task VerifiedDownloadMoveRetriesTransientFileLocks()
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("File sharing behavior is Windows-specific.");
+
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-file-retry-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var downloadPath = Path.Combine(directory, "server.exe.download");
+            var finalPath = Path.Combine(directory, "server.exe");
+            File.WriteAllText(downloadPath, "verified");
+
+            FileStream heldStream = null;
+            try
+            {
+                heldStream = new FileStream(downloadPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                var method = typeof(UPilotServerRuntimeService).GetMethod(
+                    "ReplaceVerifiedDownloadAsync",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                Assert.That(method, Is.Not.Null);
+                var moveTask = (Task<bool>)method.Invoke(
+                    null,
+                    new object[] { downloadPath, finalPath, CancellationToken.None });
+                await Task.Delay(600);
+                heldStream.Dispose();
+                heldStream = null;
+
+                Assert.That(await moveTask, Is.True);
+                Assert.That(File.Exists(finalPath), Is.True);
+                Assert.That(File.Exists(downloadPath), Is.False);
+            }
+            finally
+            {
+                heldStream?.Dispose();
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
         }
 
         [Test]
