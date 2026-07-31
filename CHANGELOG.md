@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.11
+
+- Add a non-blocking main-window release reminder with per-version skip support.
+- Surface update progress in the main window and open the update center directly into the active update state.
+
 ## 0.3.10
 
 - Treat main/source installs as Python-only development builds.

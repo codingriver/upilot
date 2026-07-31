@@ -44,6 +44,7 @@ namespace CodingRiver.UPilot
             var window = GetWindow<UPilotMainWindow>("UPilot");
             window.minSize = new Vector2(440, 400);
             window.Show();
+            UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
         }
 
         public static void OpenSetup()
@@ -75,6 +76,7 @@ namespace CodingRiver.UPilot
             RefreshSnapshot();
             if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingUpdateNotice))
                 ShowNoticeForDuration(pendingUpdateNotice, MessageType.Warning, 12d);
+            UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
             EditorApplication.update += OnEditorUpdate;
         }
 
@@ -118,6 +120,7 @@ namespace CodingRiver.UPilot
             try
             {
                 DrawNotice();
+                DrawReleaseUpdateReminder(displaySnapshot);
                 EditorGUILayout.Space(4);
                 DrawMainCard(displaySnapshot);
                 EditorGUILayout.Space(4);
@@ -248,11 +251,53 @@ namespace CodingRiver.UPilot
 
         }
 
+        private void DrawReleaseUpdateReminder(UPilotMainSnapshot snapshot)
+        {
+            if (snapshot.State == UPilotMainState.Updating)
+                return;
+
+            var status = UPilotUpdateService.Instance.GetLatestReleaseCheckStatus();
+            if (!status.HasUpdate ||
+                status.IsSuppressed ||
+                string.IsNullOrWhiteSpace(status.LatestVersion))
+            {
+                return;
+            }
+
+            EditorGUILayout.Space(4);
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    using (new EditorGUILayout.VerticalScope(GUILayout.MinWidth(160f)))
+                    {
+                        EditorGUILayout.LabelField("发现新版本 " + status.LatestVersion, EditorStyles.boldLabel);
+                        if (!string.IsNullOrWhiteSpace(status.Message))
+                            EditorGUILayout.LabelField(status.Message, _messageStyle);
+                    }
+
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("更新中心", GUILayout.Width(76f), GUILayout.Height(28f)))
+                        UPilotUpdateWindow.Open(ShowNotice);
+
+                    var skip = EditorGUILayout.ToggleLeft("本版本不再提醒", false, GUILayout.Width(126f));
+                    if (skip)
+                    {
+                        UPilotUpdateService.Instance.SuppressLatestReleaseReminder(status.LatestVersion);
+                        ShowNoticeForDuration("已跳过 " + status.LatestVersion + " 更新提醒", MessageType.Info, 3.5d);
+                        Repaint();
+                    }
+                }
+            }
+        }
+
         private void DrawMainCard(UPilotMainSnapshot snapshot)
         {
             using (new EditorGUILayout.VerticalScope(_cardStyle))
             {
                 DrawStatusActionBar(snapshot);
+                if (snapshot.State == UPilotMainState.Updating)
+                    DrawUpdateProgressPanel();
 
                 if (snapshot.State == UPilotMainState.SetupRequired)
                 {
@@ -266,6 +311,33 @@ namespace CodingRiver.UPilot
                 }
 
                 DrawAdvancedEntry();
+            }
+        }
+
+        private void DrawUpdateProgressPanel()
+        {
+            var status = UPilotUpdateService.Instance.GetOperationStatus();
+            if (!status.IsRunning)
+                return;
+
+            var download = UPilotServerRuntimeService.Instance.DownloadState;
+            var progress = download.IsRunning && download.TotalBytes > 0
+                ? download.Progress
+                : UPilotUpdateService.EstimateOperationProgress(status.Phase);
+            var label = download.IsRunning
+                ? UPilotUpdateService.FormatDownloadProgressLabel(download)
+                : string.IsNullOrWhiteSpace(status.Label) ? "正在更新" : status.Label;
+            var detail = download.IsRunning
+                ? UPilotUpdateService.FormatDownloadProgressDetail(download)
+                : status.Message;
+
+            EditorGUILayout.Space(6);
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                var rect = EditorGUILayout.GetControlRect(false, 18f);
+                EditorGUI.ProgressBar(rect, progress, label);
+                if (!string.IsNullOrWhiteSpace(detail))
+                    EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
             }
         }
 

@@ -52,6 +52,18 @@ namespace CodingRiver.UPilot
             Phase != UPilotUpdateOperationPhase.Failed;
     }
 
+    internal sealed class UPilotReleaseUpdateCheckStatus
+    {
+        public bool IsChecking;
+        public bool HasUpdate;
+        public bool IsSuppressed;
+        public string LatestVersion = "";
+        public string CurrentUpmVersion = "";
+        public string CurrentServerVersion = "";
+        public string Message = "";
+        public string ErrorMessage = "";
+    }
+
     public sealed class UPilotUpdateService
     {
         public static UPilotUpdateService Instance { get; } = new();
@@ -60,13 +72,52 @@ namespace CodingRiver.UPilot
         private const string OperationMessageKey = "CodingRiver.UPilot.UpdateService.Message";
         private const string OperationTargetUpmKey = "CodingRiver.UPilot.UpdateService.TargetUpm";
         private const string OperationTargetServerKey = "CodingRiver.UPilot.UpdateService.TargetServer";
+        private const string SkipReleaseReminderVersionKey = "CodingRiver.UPilot.UpdateService.SkipReleaseReminderVersion";
 
         private AddRequest _upmRequest;
         private Action<string, MessageType> _notice;
+        private bool _releaseCheckRunning;
+        private bool _releaseCheckCompleted;
+        private UPilotReleaseUpdateCheckStatus _releaseCheckStatus = new();
 
         public void CheckForUpdates(Action<string, MessageType> notice)
         {
             UPilotUpdateWindow.Open(notice);
+        }
+
+        internal void EnsureLatestReleaseCheck(bool force = false)
+        {
+            if (!force && (_releaseCheckRunning || _releaseCheckCompleted))
+                return;
+            if (GetOperationStatus().IsRunning || UPilotServerRuntimeService.Instance.DownloadState.IsRunning)
+                return;
+
+            _ = CheckLatestReleaseSilentlyAsync();
+        }
+
+        internal UPilotReleaseUpdateCheckStatus GetLatestReleaseCheckStatus()
+        {
+            return new UPilotReleaseUpdateCheckStatus
+            {
+                IsChecking = _releaseCheckStatus.IsChecking,
+                HasUpdate = _releaseCheckStatus.HasUpdate,
+                IsSuppressed = IsReleaseReminderSuppressed(_releaseCheckStatus.LatestVersion),
+                LatestVersion = _releaseCheckStatus.LatestVersion,
+                CurrentUpmVersion = _releaseCheckStatus.CurrentUpmVersion,
+                CurrentServerVersion = _releaseCheckStatus.CurrentServerVersion,
+                Message = _releaseCheckStatus.Message,
+                ErrorMessage = _releaseCheckStatus.ErrorMessage,
+            };
+        }
+
+        internal void SuppressLatestReleaseReminder(string version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return;
+
+            EditorPrefs.SetString(SkipReleaseReminderVersionKey, version.Trim());
+            if (string.Equals(_releaseCheckStatus.LatestVersion, version.Trim(), StringComparison.OrdinalIgnoreCase))
+                _releaseCheckStatus.IsSuppressed = true;
         }
 
         internal UPilotUpdateOperationStatus GetOperationStatus()
@@ -86,6 +137,97 @@ namespace CodingRiver.UPilot
                 message,
                 SessionState.GetString(OperationTargetUpmKey, ""),
                 SessionState.GetString(OperationTargetServerKey, ""));
+        }
+
+        private async Task CheckLatestReleaseSilentlyAsync()
+        {
+            if (_releaseCheckRunning)
+                return;
+
+            _releaseCheckRunning = true;
+            _releaseCheckStatus = new UPilotReleaseUpdateCheckStatus { IsChecking = true };
+            try
+            {
+                if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                {
+                    _releaseCheckStatus = new UPilotReleaseUpdateCheckStatus();
+                    return;
+                }
+
+                var manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync();
+                var currentUpm = UPilotServerRuntimeService.UpmVersion;
+                var mode = UPilotServerRuntimeService.Instance.GetConfiguredMode();
+                var currentServer = GetCurrentServerVersion(mode);
+                var packageNeedsUpdate = UPilotServerRuntimeService.IsVersionNewer(manifest.UpmVersion, currentUpm);
+                var serverNeedsUpdate = mode == UPilotServerRuntimeMode.StandaloneExe &&
+                                        UPilotServerRuntimeService.IsVersionNewer(manifest.ServerVersion, currentServer);
+                var latestVersion = packageNeedsUpdate && !string.IsNullOrWhiteSpace(manifest.UpmVersion)
+                    ? manifest.UpmVersion
+                    : manifest.ServerVersion;
+
+                _releaseCheckStatus = new UPilotReleaseUpdateCheckStatus
+                {
+                    HasUpdate = packageNeedsUpdate || serverNeedsUpdate,
+                    IsSuppressed = IsReleaseReminderSuppressed(latestVersion),
+                    LatestVersion = latestVersion,
+                    CurrentUpmVersion = currentUpm,
+                    CurrentServerVersion = currentServer,
+                    Message = BuildReleaseReminderMessage(
+                        latestVersion,
+                        currentUpm,
+                        currentServer,
+                        packageNeedsUpdate,
+                        serverNeedsUpdate),
+                };
+            }
+            catch (Exception ex)
+            {
+                _releaseCheckStatus = new UPilotReleaseUpdateCheckStatus
+                {
+                    ErrorMessage = ex.Message,
+                };
+            }
+            finally
+            {
+                _releaseCheckStatus.IsChecking = false;
+                _releaseCheckRunning = false;
+                _releaseCheckCompleted = true;
+            }
+        }
+
+        private static string GetCurrentServerVersion(UPilotServerRuntimeMode mode)
+        {
+            var statusVersion = UPilotMcpServerManager.Instance.GetStatus().ServerVersion;
+            if (!string.IsNullOrWhiteSpace(statusVersion))
+                return statusVersion;
+
+            if (mode == UPilotServerRuntimeMode.StandaloneExe)
+                return UPilotProjectConfig.Current.runtime?.serverVersion ?? "";
+            return UPilotServerRuntimeService.UpmVersion;
+        }
+
+        private static bool IsReleaseReminderSuppressed(string version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return false;
+            var skipped = EditorPrefs.GetString(SkipReleaseReminderVersionKey, "");
+            return string.Equals(skipped, version.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildReleaseReminderMessage(
+            string latestVersion,
+            string currentUpm,
+            string currentServer,
+            bool packageNeedsUpdate,
+            bool serverNeedsUpdate)
+        {
+            if (packageNeedsUpdate && serverNeedsUpdate)
+                return $"当前 {currentUpm}，最新 {latestVersion}，UPilot 包和 MCP 服务都有更新。";
+            if (packageNeedsUpdate)
+                return $"当前 {currentUpm}，最新 {latestVersion}，正式版可用。";
+            if (serverNeedsUpdate)
+                return $"当前服务 {currentServer}，最新 {latestVersion}，MCP 服务可更新。";
+            return "";
         }
 
         private static bool CompleteIfSourceUpdateChannel(Action<string, MessageType> notice)
@@ -423,6 +565,20 @@ namespace CodingRiver.UPilot
             if (state.SegmentCount == 1)
                 return $"{sizeText} · 单线程下载";
             return sizeText;
+        }
+
+        internal static float EstimateOperationProgress(UPilotUpdateOperationPhase phase)
+        {
+            return phase switch
+            {
+                UPilotUpdateOperationPhase.StoppingService => 0.12f,
+                UPilotUpdateOperationPhase.DownloadingService => 0.35f,
+                UPilotUpdateOperationPhase.UpdatingPackage => 0.58f,
+                UPilotUpdateOperationPhase.WaitingForReload => 0.78f,
+                UPilotUpdateOperationPhase.RestartingService => 0.9f,
+                UPilotUpdateOperationPhase.Completed => 1f,
+                _ => 0.05f,
+            };
         }
 
         private async Task<bool> InstallManagedServerAndRestartAsync(

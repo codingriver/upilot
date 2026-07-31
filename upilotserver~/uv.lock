@@ -855,7 +855,7 @@ wheels = [
 
 [[package]]
 name = "upilot-mcp"
-version = "0.3.10"
+version = "0.3.11"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

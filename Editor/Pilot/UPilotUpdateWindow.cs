@@ -32,7 +32,17 @@ namespace CodingRiver.UPilot
             window._externalNotice = notice;
             window.Show();
             window.Focus();
-            window.CheckForUpdates();
+            if (window.HasActiveUpdate())
+            {
+                window._isChecking = false;
+                window._error = "";
+                window._operationRunning = true;
+                window.Repaint();
+            }
+            else
+            {
+                window.CheckForUpdates();
+            }
         }
 
         private void OnEnable()
@@ -75,6 +85,15 @@ namespace CodingRiver.UPilot
             EditorGUILayout.Space(4);
             using (new EditorGUILayout.VerticalScope(new GUIStyle { padding = new RectOffset(12, 12, 0, 8) }))
             {
+                if (HasActiveUpdate())
+                {
+                    _isChecking = false;
+                    _error = "";
+                    DrawActiveUpdateContent();
+                    DrawFooter();
+                    return;
+                }
+
                 if (_isChecking)
                 {
                     EditorGUILayout.HelpBox("正在检查更新…", MessageType.Info);
@@ -105,6 +124,42 @@ namespace CodingRiver.UPilot
                 DrawUpdateContent();
                 DrawFooter();
             }
+        }
+
+        private void DrawActiveUpdateContent()
+        {
+            var status = UPilotUpdateService.Instance.GetOperationStatus();
+            var download = UPilotServerRuntimeService.Instance.DownloadState;
+            var label = download.IsRunning
+                ? UPilotUpdateService.FormatDownloadProgressLabel(download)
+                : string.IsNullOrWhiteSpace(status.Label) ? "正在准备更新" : status.Label;
+            var detail = download.IsRunning
+                ? UPilotUpdateService.FormatDownloadProgressDetail(download)
+                : status.Message;
+            var progress = download.IsRunning && download.TotalBytes > 0
+                ? download.Progress
+                : UPilotUpdateService.EstimateOperationProgress(status.Phase);
+
+            DrawInfoRow("更新状态", label);
+            EditorGUILayout.Space(4);
+            var rect = EditorGUILayout.GetControlRect(false, 18f);
+            EditorGUI.ProgressBar(rect, progress, label);
+            if (!string.IsNullOrWhiteSpace(detail))
+                EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
+
+            var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
+            if (!string.IsNullOrWhiteSpace(operationStatus.TargetUpmVersion) ||
+                !string.IsNullOrWhiteSpace(operationStatus.TargetServerVersion))
+            {
+                EditorGUILayout.Space(6);
+                if (!string.IsNullOrWhiteSpace(operationStatus.TargetUpmVersion))
+                    DrawInfoRow("目标包", operationStatus.TargetUpmVersion);
+                if (!string.IsNullOrWhiteSpace(operationStatus.TargetServerVersion))
+                    DrawInfoRow("目标服务", operationStatus.TargetServerVersion);
+            }
+
+            if (!string.IsNullOrWhiteSpace(_notice))
+                EditorGUILayout.HelpBox(_notice, _noticeType);
         }
 
         private void DrawSourceUpdateContent()
@@ -301,6 +356,14 @@ namespace CodingRiver.UPilot
         {
             if (_isChecking)
                 return;
+            if (HasActiveUpdate())
+            {
+                _isChecking = false;
+                _error = "";
+                _operationRunning = true;
+                Repaint();
+                return;
+            }
 
             _isChecking = true;
             _error = "";
@@ -513,8 +576,12 @@ namespace CodingRiver.UPilot
 
         private bool IsUpdateBusy()
         {
-            return _operationRunning ||
-                   UPilotUpdateService.Instance.GetOperationStatus().IsRunning ||
+            return _operationRunning || HasActiveUpdate();
+        }
+
+        private bool HasActiveUpdate()
+        {
+            return UPilotUpdateService.Instance.GetOperationStatus().IsRunning ||
                    UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
         }
 
