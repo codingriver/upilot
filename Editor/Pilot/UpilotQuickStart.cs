@@ -147,6 +147,9 @@ namespace CodingRiver.UPilot
 
         public static string ConfigureAndStart(bool codex, bool claudeCode, bool cursor)
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                return UPilotUpdateService.ServiceStartBlockedMessage;
+
             if (!codex && !claudeCode && !cursor)
                 codex = true;
 
@@ -170,6 +173,12 @@ namespace CodingRiver.UPilot
 
         public static void Start()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
+                return;
+            }
+
             BeginOperation(UPilotServiceOperation.Starting);
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
@@ -181,6 +190,12 @@ namespace CodingRiver.UPilot
 
         public static void Restart()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
+                return;
+            }
+
             BeginOperation(UPilotServiceOperation.Restarting);
             UPilotBridge.Instance.Restart();
             var manager = UPilotMcpServerManager.Instance;
@@ -202,6 +217,9 @@ namespace CodingRiver.UPilot
             McpServerStatus mcpStatus,
             AgentMcpConfigStatus[] agentConfigs)
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                return UPilotUpdateService.ServiceStartBlockedMessage;
+
             var manager = UPilotMcpServerManager.Instance;
             var runtime = UPilotServerRuntimeService.Instance;
             var needsPythonEntry = runtime.GetConfiguredMode() == UPilotServerRuntimeMode.Python;

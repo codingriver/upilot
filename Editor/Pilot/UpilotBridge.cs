@@ -405,6 +405,12 @@ namespace CodingRiver.UPilot
 
         public void EnsureStarted()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
+                return;
+            }
+
             if (_started)
             {
                 if (IsConnectLoopAlive()) return;

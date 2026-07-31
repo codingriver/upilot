@@ -537,6 +537,12 @@ namespace CodingRiver.UPilot
 
         public void StartServer()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);
+                return;
+            }
+
             if (_restartPending)
             {
                 Debug.Log("[UPilotMcpServerManager] MCP server restart is already pending; start request merged.");
@@ -751,6 +757,12 @@ namespace CodingRiver.UPilot
 
         public void RestartServer()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);
+                return;
+            }
+
             if (_restartPending)
             {
                 Debug.Log("[UPilotMcpServerManager] MCP server restart is already pending; restart request merged.");

@@ -27,6 +27,10 @@ namespace CodingRiver.UPilot
         private MessageType _noticeType = MessageType.Info;
         private double _noticeUntil;
         private bool _restartRequested;
+        private bool _updateStopScheduled;
+        private bool _updateStopInProgress;
+        private bool _updateStopFailed;
+        private double _lastUpdateStopAttempt;
         private Vector2 _mainScroll;
 
         private GUIStyle _cardStyle;
@@ -37,6 +41,8 @@ namespace CodingRiver.UPilot
         private GUIStyle _infoLabelStyle;
         private GUIStyle _infoValueStyle;
         private bool _stylesInitialized;
+
+        private const double UpdateStopRetryCooldownSeconds = 2d;
 
         [MenuItem("UPilot/UPilot", false, 200)]
         public static void Open()
@@ -74,6 +80,7 @@ namespace CodingRiver.UPilot
             minSize = new Vector2(440, 400);
             RefreshAgentConfigs(force: true);
             RefreshSnapshot();
+            EnforceUpdateMaintenanceStop();
             if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingUpdateNotice))
                 ShowNoticeForDuration(pendingUpdateNotice, MessageType.Warning, 12d);
             UPilotUpdateService.Instance.EnsureLatestReleaseCheck();
@@ -107,6 +114,7 @@ namespace CodingRiver.UPilot
             {
                 RefreshAgentConfigs(force: false);
                 RefreshSnapshot();
+                EnforceUpdateMaintenanceStop();
             }
 
             var displaySnapshot = GetDisplaySnapshot();
@@ -221,17 +229,108 @@ namespace CodingRiver.UPilot
             var updateStatus = UPilotUpdateService.Instance.GetOperationStatus();
             if (updateStatus.IsRunning)
             {
+                var title = (_updateStopScheduled || _updateStopInProgress)
+                    ? "正在强制停止服务"
+                    : string.IsNullOrWhiteSpace(updateStatus.Label) ? "等待更新完成" : updateStatus.Label;
                 return new UPilotMainSnapshot(
                     UPilotMainState.Updating,
-                    string.IsNullOrWhiteSpace(updateStatus.Label) ? "等待更新完成" : updateStatus.Label,
-                    string.IsNullOrWhiteSpace(updateStatus.Message)
-                        ? "正在更新 UPilot，完成后会自动恢复服务。"
-                        : updateStatus.Message,
+                    title,
+                    BuildUpdateSnapshotMessage(updateStatus),
                     _bridgeStatus.IsStarted,
                     _mcpStatus.IsRunning);
             }
 
             return _snapshot;
+        }
+
+        private void EnforceUpdateMaintenanceStop()
+        {
+            var updateService = UPilotUpdateService.Instance;
+            if (!updateService.IsServiceStartBlocked)
+            {
+                _updateStopScheduled = false;
+                _updateStopInProgress = false;
+                _updateStopFailed = false;
+                return;
+            }
+
+            if (!IsServiceActive(_bridgeStatus, _mcpStatus))
+            {
+                _updateStopScheduled = false;
+                _updateStopInProgress = false;
+                _updateStopFailed = false;
+                return;
+            }
+
+            if (_updateStopScheduled || _updateStopInProgress)
+                return;
+
+            var now = EditorApplication.timeSinceStartup;
+            if (now - _lastUpdateStopAttempt < UpdateStopRetryCooldownSeconds)
+                return;
+
+            _lastUpdateStopAttempt = now;
+            _updateStopScheduled = true;
+            _updateStopInProgress = true;
+            _updateStopFailed = false;
+            ShowNoticeForDuration(UPilotUpdateService.ForceStoppingServiceMessage, MessageType.Warning, 4d);
+            EditorApplication.delayCall += ForceStopServicesForUpdate;
+        }
+
+        private void ForceStopServicesForUpdate()
+        {
+            _updateStopScheduled = false;
+            if (!UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                _updateStopInProgress = false;
+                _updateStopFailed = false;
+                Repaint();
+                return;
+            }
+
+            var stopped = false;
+            try
+            {
+                UPilotBridge.Instance.Stop();
+                var portsReleased = UPilotMcpServerManager.Instance.StopServerAndWaitForExit();
+                UPilotMcpServerManager.Instance.InvalidateStatusCache();
+                RefreshSnapshot();
+                stopped = !IsServiceActive(_bridgeStatus, _mcpStatus);
+                if (!portsReleased && stopped)
+                    Debug.LogWarning("[UPilot] Service was stopped during update, but configured ports are still unavailable.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[UPilot] Failed to force-stop service during update: " + ex.Message);
+            }
+
+            _updateStopInProgress = false;
+            _updateStopFailed = !stopped;
+            ShowNoticeForDuration(
+                stopped
+                    ? UPilotUpdateService.ServicePausedForUpdateMessage
+                    : UPilotUpdateService.ForceStopFailedMessage,
+                stopped ? MessageType.Info : MessageType.Error,
+                stopped ? 3.5d : 6d);
+            Repaint();
+        }
+
+        private string BuildUpdateSnapshotMessage(UPilotUpdateOperationStatus status)
+        {
+            if (_updateStopScheduled || _updateStopInProgress)
+                return UPilotUpdateService.ForceStoppingServiceMessage;
+            if (_updateStopFailed)
+                return UPilotUpdateService.ForceStopFailedMessage;
+            if (status.BlocksServiceStart)
+                return UPilotUpdateService.ServicePausedForUpdateMessage;
+            return string.IsNullOrWhiteSpace(status.Message)
+                ? "正在更新 UPilot，完成后会自动恢复服务。"
+                : status.Message;
+        }
+
+        private static bool IsServiceActive(BridgeStatus bridgeStatus, McpServerStatus mcpStatus)
+        {
+            return bridgeStatus.IsStarted || mcpStatus.IsRunning;
         }
 
         private void RefreshAgentConfigs(bool force)
@@ -327,7 +426,9 @@ namespace CodingRiver.UPilot
             var label = download.IsRunning
                 ? UPilotUpdateService.FormatDownloadProgressLabel(download)
                 : string.IsNullOrWhiteSpace(status.Label) ? "正在更新" : status.Label;
-            var detail = download.IsRunning
+            var detail = (_updateStopScheduled || _updateStopInProgress || _updateStopFailed)
+                ? BuildUpdateSnapshotMessage(status)
+                : download.IsRunning
                 ? UPilotUpdateService.FormatDownloadProgressDetail(download)
                 : status.Message;
 
@@ -338,7 +439,31 @@ namespace CodingRiver.UPilot
                 EditorGUI.ProgressBar(rect, progress, label);
                 if (!string.IsNullOrWhiteSpace(detail))
                     EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
+
+                var targetText = BuildUpdateTargetText(status);
+                if (!string.IsNullOrWhiteSpace(targetText))
+                    EditorGUILayout.LabelField(targetText, EditorStyles.miniLabel);
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("查看更新详情", GUILayout.Width(108f), GUILayout.Height(24f)))
+                        UPilotUpdateWindow.Open(ShowNotice);
+                }
             }
+        }
+
+        private static string BuildUpdateTargetText(UPilotUpdateOperationStatus status)
+        {
+            var hasUpm = !string.IsNullOrWhiteSpace(status.TargetUpmVersion);
+            var hasServer = !string.IsNullOrWhiteSpace(status.TargetServerVersion);
+            if (hasUpm && hasServer)
+                return $"目标版本：UPilot {status.TargetUpmVersion} · MCP {status.TargetServerVersion}";
+            if (hasUpm)
+                return "目标版本：UPilot " + status.TargetUpmVersion;
+            if (hasServer)
+                return "目标版本：MCP " + status.TargetServerVersion;
+            return "";
         }
 
         private void DrawSetupControls()
@@ -436,6 +561,12 @@ namespace CodingRiver.UPilot
 
         private void RequestRestart()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                return;
+            }
+
             _restartRequested = true;
             UPilotQuickStart.Restart();
             _stateChangedAt = EditorApplication.timeSinceStartup;
@@ -1020,6 +1151,12 @@ namespace CodingRiver.UPilot
 
         private void StartUPilot()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                return;
+            }
+
             UPilotQuickStart.Start();
             _stateChangedAt = EditorApplication.timeSinceStartup;
             ShowNotice("UPilot 正在启动…");
@@ -1027,6 +1164,12 @@ namespace CodingRiver.UPilot
 
         private void RepairUPilot()
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                return;
+            }
+
             var message = UPilotQuickStart.AutoRepair(_bridgeStatus, _mcpStatus, _agentConfigs);
             RefreshAgentConfigs(force: true);
             _stateChangedAt = EditorApplication.timeSinceStartup;

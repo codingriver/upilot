@@ -50,6 +50,8 @@ namespace CodingRiver.UPilot
             Phase != UPilotUpdateOperationPhase.None &&
             Phase != UPilotUpdateOperationPhase.Completed &&
             Phase != UPilotUpdateOperationPhase.Failed;
+
+        public bool BlocksServiceStart => UPilotUpdateService.IsServiceStartBlockedPhase(Phase);
     }
 
     internal sealed class UPilotReleaseUpdateCheckStatus
@@ -67,6 +69,11 @@ namespace CodingRiver.UPilot
     public sealed class UPilotUpdateService
     {
         public static UPilotUpdateService Instance { get; } = new();
+
+        internal const string ServiceStartBlockedMessage = "UPilot 正在更新，服务暂不可启动";
+        internal const string ServicePausedForUpdateMessage = "UPilot 正在更新，MCP 服务已临时暂停，完成后会自动恢复。";
+        internal const string ForceStoppingServiceMessage = "UPilot 正在更新，检测到服务仍在运行，正在强制停止服务…";
+        internal const string ForceStopFailedMessage = "更新期间服务未能停止，请稍候或查看更新中心。";
 
         private const string OperationPhaseKey = "CodingRiver.UPilot.UpdateService.Phase";
         private const string OperationMessageKey = "CodingRiver.UPilot.UpdateService.Message";
@@ -89,6 +96,10 @@ namespace CodingRiver.UPilot
         {
             UPilotUpdateWindow.Open(notice);
         }
+
+        internal bool IsUpdateRunning => GetOperationStatus().IsRunning;
+
+        internal bool IsServiceStartBlocked => GetOperationStatus().BlocksServiceStart;
 
         internal void EnsureLatestReleaseCheck(bool force = false)
         {
@@ -142,6 +153,14 @@ namespace CodingRiver.UPilot
                 message,
                 SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
                 SessionState.GetString(ProjectKey(OperationTargetServerKey), ""));
+        }
+
+        internal static bool IsServiceStartBlockedPhase(UPilotUpdateOperationPhase phase)
+        {
+            return phase == UPilotUpdateOperationPhase.StoppingService ||
+                   phase == UPilotUpdateOperationPhase.DownloadingService ||
+                   phase == UPilotUpdateOperationPhase.UpdatingPackage ||
+                   phase == UPilotUpdateOperationPhase.WaitingForReload;
         }
 
         private async Task CheckLatestReleaseSilentlyAsync()
@@ -622,10 +641,10 @@ namespace CodingRiver.UPilot
             var state = UPilotServerRuntimeService.Instance.DownloadState;
             if (!state.IsComplete)
             {
-                if (shouldRestart)
-                    manager.StartServer();
                 var message = string.IsNullOrEmpty(state.ErrorMessage) ? "MCP 服务更新未完成" : state.ErrorMessage;
                 SetOperationFailed(message);
+                if (shouldRestart)
+                    manager.StartServer();
                 notice?.Invoke(message, MessageType.Error);
                 return false;
             }

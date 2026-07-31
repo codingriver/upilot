@@ -832,6 +832,12 @@ namespace CodingRiver.UPilot
                         "重启 MCP 服务",
                         () =>
                         {
+                            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                            {
+                                ShowToast(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                                return;
+                            }
+
                             manager.RestartServer();
                             ShowToast("MCP 服务正在重启…");
                         });
@@ -846,6 +852,12 @@ namespace CodingRiver.UPilot
                         "重新连接 Unity",
                         () =>
                         {
+                            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                            {
+                                ShowToast(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                                return;
+                            }
+
                             bridge.Restart();
                             ShowToast("Unity 桥接器正在重新连接…");
                         });
@@ -859,6 +871,12 @@ namespace CodingRiver.UPilot
                         "重新连接 Unity",
                         () =>
                         {
+                            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                            {
+                                ShowToast(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                                return;
+                            }
+
                             bridge.Restart();
                             ShowToast("Unity 桥接器正在重新连接…");
                         });
@@ -906,6 +924,12 @@ namespace CodingRiver.UPilot
 
         private void RepairPortsAndRestart(UPilotBridge bridge, McpServerStatus mcpStatus)
         {
+            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+            {
+                ShowToast(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
+                return;
+            }
+
             var manager = UPilotMcpServerManager.Instance;
             if (mcpStatus.ProcessId.HasValue)
                 manager.StopServer();
@@ -971,6 +995,7 @@ namespace CodingRiver.UPilot
             var mcpHealthy = mcpStatus.IsRunning && mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
             var ready = mcpHealthy && status.IsWsOpen && status.IsAuthenticated;
             var active = mcpStatus.IsRunning || status.IsStarted;
+            var serviceStartBlocked = UPilotUpdateService.Instance.IsServiceStartBlocked;
 
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
@@ -994,12 +1019,18 @@ namespace CodingRiver.UPilot
                 }
 
                 EditorGUILayout.Space(4);
+                if (serviceStartBlocked)
+                    EditorGUILayout.HelpBox(UPilotUpdateService.ServicePausedForUpdateMessage, MessageType.Info);
+
                 if (!active)
                 {
-                    if (GUILayout.Button("启动 UPilot", GUILayout.Height(28)))
+                    using (new EditorGUI.DisabledScope(serviceStartBlocked))
                     {
-                        UPilotQuickStart.Start();
-                        ShowToast("UPilot 启动中…");
+                        if (GUILayout.Button("启动 UPilot", GUILayout.Height(28)))
+                        {
+                            UPilotQuickStart.Start();
+                            ShowToast("UPilot 启动中…");
+                        }
                     }
                 }
                 else
@@ -1007,10 +1038,13 @@ namespace CodingRiver.UPilot
                     using (new EditorGUILayout.HorizontalScope())
                     {
                         var primaryLabel = ready ? "重启 UPilot" : "重新连接";
-                        if (GUILayout.Button(primaryLabel, GUILayout.Height(28)))
+                        using (new EditorGUI.DisabledScope(serviceStartBlocked))
                         {
-                            UPilotQuickStart.Restart();
-                            ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
+                            if (GUILayout.Button(primaryLabel, GUILayout.Height(28)))
+                            {
+                                UPilotQuickStart.Restart();
+                                ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
+                            }
                         }
 
                         using (new EditorGUI.DisabledScope(status.IsCompiling && mcpStatus.IsRunning))

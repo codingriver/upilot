@@ -92,6 +92,13 @@ namespace CodingRiver.UPilot
             _setupCompletionMessageType = MessageType.Info;
             try
             {
+                if (_setupStartAfterSetup && UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    _setupCompletionMessage = UPilotUpdateService.ServiceStartBlockedMessage;
+                    _setupCompletionMessageType = MessageType.Warning;
+                    return;
+                }
+
                 SaveSetupPorts();
                 if (_setupApproveProjectWrites)
                 {
