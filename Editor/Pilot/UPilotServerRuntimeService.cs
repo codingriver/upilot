@@ -108,6 +108,14 @@ namespace CodingRiver.UPilot
         }
     }
 
+    public sealed class UPilotPreparedServerDownload
+    {
+        public string Version = "";
+        public string TargetPath = "";
+        public string Sha256 = "";
+        public string PlatformDisplayName = "";
+    }
+
     public sealed class UPilotPythonEnvironmentState
     {
         public bool IsRunning;
@@ -261,6 +269,13 @@ namespace CodingRiver.UPilot
             return !string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath);
         }
 
+        public void GetConfiguredStandaloneRuntime(out string exePath, out string serverVersion)
+        {
+            var runtime = UPilotProjectConfig.Current.runtime;
+            exePath = runtime?.serverExePath ?? "";
+            serverVersion = runtime?.serverVersion ?? "";
+        }
+
         public bool IsPythonRuntimeConfigured(out string pythonPath)
         {
             pythonPath = UPilotProjectConfig.Current.runtime?.pythonPath ?? "";
@@ -395,7 +410,60 @@ namespace CodingRiver.UPilot
             }
 
             _downloadCts = new CancellationTokenSource();
-            _ = DownloadLatestServerExeAsync(_downloadCts.Token);
+            _ = RunDownloadLatestServerExeAsync(activateOnComplete: true, manifest: null, _downloadCts.Token);
+        }
+
+        public async Task<UPilotPreparedServerDownload> PrepareLatestServerExeAsync(UPilotReleaseManifest manifest)
+        {
+            if (manifest == null)
+                throw new ArgumentNullException(nameof(manifest));
+
+            lock (_stateLock)
+            {
+                if (_downloadState.IsRunning)
+                    throw new InvalidOperationException("已有服务下载任务正在进行。");
+                _downloadState = new UPilotDownloadState
+                {
+                    IsRunning = true,
+                    Phase = "正在准备服务文件",
+                    PlatformDisplayName = CurrentPlatformDisplayName,
+                    StartedAt = EditorApplication.timeSinceStartup,
+                };
+            }
+
+            _downloadCts = new CancellationTokenSource();
+            return await DownloadLatestServerExeAsync(manifest, activateOnComplete: false, _downloadCts.Token);
+        }
+
+        public bool ActivatePreparedStandaloneExe(
+            string exePath,
+            string serverVersion,
+            out string error)
+        {
+            error = "";
+            if (string.IsNullOrWhiteSpace(exePath))
+            {
+                error = "未找到已准备好的服务文件。";
+                return false;
+            }
+
+            if (!File.Exists(exePath))
+            {
+                error = "已准备好的服务文件不存在：" + exePath;
+                return false;
+            }
+
+            try
+            {
+                EnsureExecutablePermission(exePath);
+                SetStandaloneExeRuntime(exePath, serverVersion);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = "启用服务文件失败：" + ex.Message;
+                return false;
+            }
         }
 
         public void CancelDownload()
@@ -487,12 +555,29 @@ namespace CodingRiver.UPilot
             return status;
         }
 
-        private async Task DownloadLatestServerExeAsync(CancellationToken token)
+        private async Task RunDownloadLatestServerExeAsync(
+            bool activateOnComplete,
+            UPilotReleaseManifest manifest,
+            CancellationToken token)
+        {
+            try
+            {
+                await DownloadLatestServerExeAsync(manifest, activateOnComplete, token);
+            }
+            catch
+            {
+            }
+        }
+
+        private async Task<UPilotPreparedServerDownload> DownloadLatestServerExeAsync(
+            UPilotReleaseManifest manifest,
+            bool activateOnComplete,
+            CancellationToken token)
         {
             string activeTmpPath = null;
             try
             {
-                var manifest = await FetchReleaseManifestAsync();
+                manifest ??= await FetchReleaseManifestAsync();
                 var download = PickCurrentPlatformDownload(manifest);
                 if (download == null)
                     throw new InvalidOperationException($"没有找到适用于 {CurrentPlatformDisplayName} 的服务。");
@@ -517,38 +602,61 @@ namespace CodingRiver.UPilot
                 activeTmpPath = tmpPath;
                 CleanupDownloadFiles(tmpPath, ParallelDownloadSegments);
 
-                var totalBytes = download.SizeBytes;
-                var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
-                                     await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
-                if (supportsRanges)
-                    await DownloadInSegmentsAsync(download.Url, tmpPath, totalBytes, token);
-                else
-                    await DownloadSingleStreamAsync(download.Url, tmpPath, totalBytes, token);
-
-                token.ThrowIfCancellationRequested();
-                UpdateState(state => state.Phase = "正在验证文件");
-                var actualSha = ComputeSha256(tmpPath);
-                if (!string.IsNullOrWhiteSpace(download.Sha256) &&
-                    !string.Equals(actualSha, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                var alreadyReady = IsVerifiedServerFileReady(finalPath, download.Sha256);
+                if (!alreadyReady)
                 {
-                    File.Delete(tmpPath);
-                    throw new InvalidOperationException($"SHA256 校验失败：期望 {download.Sha256}，实际 {actualSha}");
+                    var totalBytes = download.SizeBytes;
+                    var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
+                                         await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
+                    if (supportsRanges)
+                        await DownloadInSegmentsAsync(download.Url, tmpPath, totalBytes, token);
+                    else
+                        await DownloadSingleStreamAsync(download.Url, tmpPath, totalBytes, token);
+
+                    token.ThrowIfCancellationRequested();
+                    UpdateState(state => state.Phase = "正在验证文件");
+                    var actualSha = ComputeSha256(tmpPath);
+                    if (!string.IsNullOrWhiteSpace(download.Sha256) &&
+                        !string.Equals(actualSha, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        File.Delete(tmpPath);
+                        throw new InvalidOperationException($"SHA256 校验失败：期望 {download.Sha256}，实际 {actualSha}");
+                    }
+
+                    ReplaceVerifiedDownload(tmpPath, finalPath);
+                }
+                else
+                {
+                    UpdateState(state =>
+                    {
+                        state.BytesReceived = state.TotalBytes;
+                        state.CompletedSegments = state.SegmentCount;
+                        state.Phase = activateOnComplete ? "正在启用服务" : "服务文件已准备";
+                    });
                 }
 
-                ReplaceVerifiedDownload(tmpPath, finalPath);
                 EnsureExecutablePermission(finalPath);
-                SetStandaloneExeRuntime(finalPath, manifest.ServerVersion);
+                if (activateOnComplete)
+                    SetStandaloneExeRuntime(finalPath, manifest.ServerVersion);
 
                 UpdateState(state =>
                 {
                     state.IsRunning = false;
                     state.IsComplete = true;
-                    state.Phase = "安装完成";
+                    state.Phase = activateOnComplete ? "安装完成" : "服务文件已准备";
                     state.TargetPath = finalPath;
                     state.BytesReceived = state.TotalBytes;
                     state.CompletedSegments = state.SegmentCount;
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
+
+                return new UPilotPreparedServerDownload
+                {
+                    Version = manifest.ServerVersion,
+                    TargetPath = finalPath,
+                    Sha256 = download.Sha256,
+                    PlatformDisplayName = CurrentPlatformDisplayName,
+                };
             }
             catch (OperationCanceledException)
             {
@@ -559,6 +667,7 @@ namespace CodingRiver.UPilot
                     state.Phase = "已取消";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
+                throw;
             }
             catch (Exception ex)
             {
@@ -570,11 +679,29 @@ namespace CodingRiver.UPilot
                     state.Phase = "下载失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
+                throw;
             }
             finally
             {
                 if (!string.IsNullOrWhiteSpace(activeTmpPath))
                     CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments);
+            }
+        }
+
+        private static bool IsVerifiedServerFileReady(string path, string expectedSha256)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
+            if (string.IsNullOrWhiteSpace(expectedSha256))
+                return true;
+            try
+            {
+                var actual = ComputeSha256(path);
+                return string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
             }
         }
 

@@ -21,6 +21,13 @@ namespace CodingRiver.UPilot
         private const string TargetVersionKey = "CodingRiver.UPilot.PackageUpdate.TargetVersion";
         private const string ManagedServerPendingKey = "CodingRiver.UPilot.PackageUpdate.ManagedServerPending";
         private const string TargetServerVersionKey = "CodingRiver.UPilot.PackageUpdate.TargetServerVersion";
+        private const string PreparedServerPathKey = "CodingRiver.UPilot.PackageUpdate.PreparedServerPath";
+        private const string PendingPackageRetryKey = "CodingRiver.UPilot.PackageUpdate.PendingPackageRetry";
+        private const string PendingTargetVersionKey = "CodingRiver.UPilot.PackageUpdate.PendingTargetVersion";
+        private const string PendingTargetServerVersionKey = "CodingRiver.UPilot.PackageUpdate.PendingTargetServerVersion";
+        private const string PendingNewServerPathKey = "CodingRiver.UPilot.PackageUpdate.PendingNewServerPath";
+        private const string PendingOldServerPathKey = "CodingRiver.UPilot.PackageUpdate.PendingOldServerPath";
+        private const string PendingOldServerVersionKey = "CodingRiver.UPilot.PackageUpdate.PendingOldServerVersion";
 
         private static bool _restartScheduled;
 
@@ -37,7 +44,8 @@ namespace CodingRiver.UPilot
             string targetVersion,
             Action<string, MessageType> notice = null,
             bool installManagedServerAfterUpdate = false,
-            string targetServerVersion = "")
+            string targetServerVersion = "",
+            string preparedServerPath = "")
         {
             if (SessionState.GetBool(UpdateInProgressKey, false))
             {
@@ -46,6 +54,8 @@ namespace CodingRiver.UPilot
                     SessionState.SetBool(ManagedServerPendingKey, true);
                     if (!string.IsNullOrWhiteSpace(targetServerVersion))
                         SessionState.SetString(TargetServerVersionKey, targetServerVersion);
+                    if (!string.IsNullOrWhiteSpace(preparedServerPath))
+                        SessionState.SetString(PreparedServerPathKey, preparedServerPath);
                 }
 
                 return true;
@@ -64,6 +74,7 @@ namespace CodingRiver.UPilot
             SessionState.SetString(TargetVersionKey, targetVersion ?? "");
             SessionState.SetBool(ManagedServerPendingKey, installManagedServerAfterUpdate);
             SessionState.SetString(TargetServerVersionKey, targetServerVersion ?? "");
+            SessionState.SetString(PreparedServerPathKey, preparedServerPath ?? "");
             UPilotUpdateService.SetOperationPhase(
                 UPilotUpdateOperationPhase.StoppingService,
                 installManagedServerAfterUpdate
@@ -106,11 +117,74 @@ namespace CodingRiver.UPilot
         public static bool IsManagedServerUpdatePending =>
             SessionState.GetBool(ManagedServerPendingKey, false);
 
+        public static bool HasPendingManagedPackageUpdate =>
+            EditorPrefs.GetBool(ProjectPersistentKey(PendingPackageRetryKey), false);
+
+        public static void MarkManagedPackageUpdatePending(
+            string targetVersion,
+            string targetServerVersion,
+            string newServerPath,
+            string oldServerPath,
+            string oldServerVersion)
+        {
+            EditorPrefs.SetBool(ProjectPersistentKey(PendingPackageRetryKey), true);
+            EditorPrefs.SetString(ProjectPersistentKey(PendingTargetVersionKey), targetVersion ?? "");
+            EditorPrefs.SetString(ProjectPersistentKey(PendingTargetServerVersionKey), targetServerVersion ?? "");
+            EditorPrefs.SetString(ProjectPersistentKey(PendingNewServerPathKey), newServerPath ?? "");
+            EditorPrefs.SetString(ProjectPersistentKey(PendingOldServerPathKey), oldServerPath ?? "");
+            EditorPrefs.SetString(ProjectPersistentKey(PendingOldServerVersionKey), oldServerVersion ?? "");
+        }
+
+        public static void ClearPendingManagedPackageUpdate()
+        {
+            EditorPrefs.DeleteKey(ProjectPersistentKey(PendingPackageRetryKey));
+            EditorPrefs.DeleteKey(ProjectPersistentKey(PendingTargetVersionKey));
+            EditorPrefs.DeleteKey(ProjectPersistentKey(PendingTargetServerVersionKey));
+            EditorPrefs.DeleteKey(ProjectPersistentKey(PendingNewServerPathKey));
+            EditorPrefs.DeleteKey(ProjectPersistentKey(PendingOldServerPathKey));
+            EditorPrefs.DeleteKey(ProjectPersistentKey(PendingOldServerVersionKey));
+        }
+
+        public static bool TryGetPendingPackageUpdateNotice(out string message)
+        {
+            message = "";
+            if (!HasPendingManagedPackageUpdate)
+                return false;
+
+            var targetVersion = EditorPrefs.GetString(ProjectPersistentKey(PendingTargetVersionKey), "");
+            var targetServerVersion = EditorPrefs.GetString(ProjectPersistentKey(PendingTargetServerVersionKey), "");
+            var currentUpm = UPilotServerRuntimeService.UpmVersion;
+            if (!string.IsNullOrWhiteSpace(targetVersion) &&
+                UPilotServerRuntimeService.IsVersionAtLeast(currentUpm, targetVersion))
+            {
+                ClearPendingManagedPackageUpdate();
+                return false;
+            }
+
+            var versionText = string.IsNullOrWhiteSpace(targetVersion) ? "最新版本" : targetVersion;
+            var serverText = string.IsNullOrWhiteSpace(targetServerVersion) ? "新版本" : targetServerVersion;
+            message = $"自动管理服务已更新到 {serverText}，但 UPilot 包还未完成更新。请打开更新中心继续更新到 {versionText}。";
+            return true;
+        }
+
         public static void RestoreAfterFailedUpdate()
         {
             var shouldRestart = SessionState.GetBool(RestartPendingKey, false);
+            var hasPendingManagedPackageUpdate = HasPendingManagedPackageUpdate;
             ClearUpdateState();
-            UPilotUpdateService.SetOperationFailed("UPilot 包更新失败，已恢复服务");
+            if (hasPendingManagedPackageUpdate)
+            {
+                var message = TryGetPendingPackageUpdateNotice(out var notice)
+                    ? notice
+                    : "UPilot 包更新未完成，请在更新中心重新执行更新。";
+                UPilotUpdateService.SetOperationFailed("UPilot 包更新未完成，请继续更新");
+                UPilotMainWindow.OpenWithNotice(message, MessageType.Warning);
+            }
+            else
+            {
+                UPilotUpdateService.SetOperationFailed("UPilot 包更新失败，已恢复服务");
+            }
+
             if (!shouldRestart || !UPilotSetupState.IsCompleted)
                 return;
 
@@ -207,9 +281,11 @@ namespace CodingRiver.UPilot
             var targetVersion = SessionState.GetString(TargetVersionKey, "");
             var installManagedServer = SessionState.GetBool(ManagedServerPendingKey, false);
             var targetServerVersion = SessionState.GetString(TargetServerVersionKey, "");
+            var preparedServerPath = SessionState.GetString(PreparedServerPathKey, "");
             if (!shouldRestart || !UPilotSetupState.IsCompleted)
             {
                 ClearUpdateState();
+                ClearPendingManagedPackageUpdate();
                 UPilotUpdateService.SetOperationCompleted("UPilot 包已更新");
                 return;
             }
@@ -219,11 +295,16 @@ namespace CodingRiver.UPilot
             if (installManagedServer && UPilotServerRuntimeService.Instance.GetConfiguredMode() ==
                 UPilotServerRuntimeMode.StandaloneExe)
             {
-                ContinueManagedServerUpdateAfterPackage(targetVersion, targetServerVersion, shouldRestart);
+                ContinueManagedServerUpdateAfterPackage(
+                    targetVersion,
+                    targetServerVersion,
+                    preparedServerPath,
+                    shouldRestart);
                 return;
             }
 
             ClearUpdateState();
+            ClearPendingManagedPackageUpdate();
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
             manager.RestartServer();
@@ -235,19 +316,28 @@ namespace CodingRiver.UPilot
         private static async void ContinueManagedServerUpdateAfterPackage(
             string targetVersion,
             string targetServerVersion,
+            string preparedServerPath,
             bool shouldRestart)
         {
             try
             {
                 UPilotUpdateService.SetOperationPhase(
                     UPilotUpdateOperationPhase.DownloadingService,
-                    "UPilot 包已更新，正在下载匹配的 MCP 服务…",
+                    string.IsNullOrWhiteSpace(preparedServerPath)
+                        ? "UPilot 包已更新，正在下载匹配的 MCP 服务…"
+                        : "UPilot 包已更新，正在启用已准备好的 MCP 服务…",
                     targetVersion,
                     targetServerVersion);
-                var updated = await UPilotUpdateService.Instance.InstallManagedServerAfterPackageUpdateAsync(
-                    targetServerVersion,
-                    shouldRestart);
+                var updated = string.IsNullOrWhiteSpace(preparedServerPath)
+                    ? await UPilotUpdateService.Instance.InstallManagedServerAfterPackageUpdateAsync(
+                        targetServerVersion,
+                        shouldRestart)
+                    : await UPilotUpdateService.Instance.ActivatePreparedManagedServerAfterPackageUpdateAsync(
+                        preparedServerPath,
+                        targetServerVersion,
+                        shouldRestart);
                 ClearUpdateState();
+                ClearPendingManagedPackageUpdate();
                 if (updated)
                     Debug.Log($"[UPilot] Package update completed ({targetVersion}); managed MCP service updated.");
             }
@@ -281,6 +371,12 @@ namespace CodingRiver.UPilot
             SessionState.EraseString(TargetVersionKey);
             SessionState.EraseBool(ManagedServerPendingKey);
             SessionState.EraseString(TargetServerVersionKey);
+            SessionState.EraseString(PreparedServerPathKey);
+        }
+
+        private static string ProjectPersistentKey(string key)
+        {
+            return key + "." + UPilotBridge.WsEndpointEditorPrefsKeySuffix;
         }
     }
 }

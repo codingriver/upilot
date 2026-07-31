@@ -55,11 +55,26 @@ namespace CodingRiver.UPilot
             window.Focus();
         }
 
+        public static void OpenWithNotice(
+            string message,
+            MessageType type = MessageType.Warning,
+            double durationSeconds = 12d)
+        {
+            var window = GetWindow<UPilotMainWindow>("UPilot");
+            window.minSize = new Vector2(440, 400);
+            window._mainView = UPilotMainView.Dashboard;
+            window.ShowNoticeForDuration(message, type, durationSeconds);
+            window.Show();
+            window.Focus();
+        }
+
         private void OnEnable()
         {
             minSize = new Vector2(440, 400);
             RefreshAgentConfigs(force: true);
             RefreshSnapshot();
+            if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingUpdateNotice))
+                ShowNoticeForDuration(pendingUpdateNotice, MessageType.Warning, 12d);
             EditorApplication.update += OnEditorUpdate;
         }
 
@@ -990,11 +1005,24 @@ namespace CodingRiver.UPilot
             EditorGUILayout.HelpBox(_notice, _noticeType);
         }
 
-        private void ShowNotice(string message, MessageType type = MessageType.Info)
+        private void ShowNotice(string message)
+        {
+            ShowNotice(message, MessageType.Info);
+        }
+
+        private void ShowNotice(string message, MessageType type)
+        {
+            ShowNoticeForDuration(message, type, 3.5d);
+        }
+
+        private void ShowNoticeForDuration(
+            string message,
+            MessageType type,
+            double durationSeconds)
         {
             _notice = message;
             _noticeType = type;
-            _noticeUntil = EditorApplication.timeSinceStartup + 3.5d;
+            _noticeUntil = EditorApplication.timeSinceStartup + durationSeconds;
         }
 
         private static Color GetStateColor(UPilotMainState state)

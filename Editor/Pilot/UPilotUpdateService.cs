@@ -142,7 +142,16 @@ namespace CodingRiver.UPilot
             SetOperationTargets(manifest.UpmVersion, manifest.ServerVersion);
             if (updatePackage)
             {
-                StartPackageUpdate(manifest, updateManagedServer, notice);
+                var preparedServerPath = "";
+                if (updateManagedServer)
+                {
+                    var prepared = await InstallManagedServerBeforePackageUpdateAsync(manifest, notice);
+                    if (prepared == null)
+                        return;
+                    preparedServerPath = prepared.TargetPath;
+                }
+
+                StartPackageUpdate(manifest, updateManagedServer, notice, preparedServerPath);
                 return;
             }
 
@@ -195,6 +204,128 @@ namespace CodingRiver.UPilot
                 shouldRestart,
                 stopFirst: false,
                 notice: notice);
+        }
+
+        internal async Task<bool> ActivatePreparedManagedServerAfterPackageUpdateAsync(
+            string preparedServerPath,
+            string expectedServerVersion,
+            bool shouldRestart,
+            Action<string, MessageType> notice = null)
+        {
+            if (string.IsNullOrWhiteSpace(expectedServerVersion))
+            {
+                try
+                {
+                    var manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync();
+                    expectedServerVersion = manifest.ServerVersion;
+                    SetOperationTargets(UPilotServerRuntimeService.UpmVersion, manifest.ServerVersion);
+                }
+                catch (Exception ex)
+                {
+                    var message = "读取发布清单失败：" + ex.Message;
+                    SetOperationFailed(message);
+                    notice?.Invoke(message, MessageType.Error);
+                    UPilotMainWindow.OpenWithNotice(
+                        "UPilot 包已更新，但服务版本确认失败。请在主窗口手动启动或重启服务。",
+                        MessageType.Warning);
+                    return false;
+                }
+            }
+
+            SetOperationPhase(
+                UPilotUpdateOperationPhase.RestartingService,
+                "正在启用已准备好的 MCP 服务…",
+                targetServerVersion: expectedServerVersion);
+
+            if (!UPilotServerRuntimeService.Instance.ActivatePreparedStandaloneExe(
+                    preparedServerPath,
+                    expectedServerVersion,
+                    out var activationError))
+            {
+                var message = activationError;
+                SetOperationFailed(message);
+                notice?.Invoke(message, MessageType.Error);
+                UPilotMainWindow.OpenWithNotice(
+                    "UPilot 包已更新，但服务文件启用失败。请在主窗口手动启动或重启服务。",
+                    MessageType.Error);
+                return false;
+            }
+
+            if (!shouldRestart)
+            {
+                var message = "MCP 服务文件已准备好，将在完成首次设置后启动";
+                SetOperationCompleted(message);
+                notice?.Invoke(message, MessageType.Info);
+                return true;
+            }
+
+            return await RestartAndConfirmManagedServerAsync(
+                expectedServerVersion,
+                notice,
+                failureNotice: "UPilot 包已更新，但服务未能自动启动。请在主窗口点击启动或重启服务。");
+        }
+
+        private async Task<UPilotPreparedServerDownload> InstallManagedServerBeforePackageUpdateAsync(
+            UPilotReleaseManifest manifest,
+            Action<string, MessageType> notice)
+        {
+            SetOperationPhase(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "正在下载并验证 MCP 服务，完成后将更新 UPilot 包…",
+                manifest.UpmVersion,
+                manifest.ServerVersion);
+            notice?.Invoke("正在下载 MCP 服务…", MessageType.Info);
+
+            try
+            {
+                UPilotServerRuntimeService.Instance.GetConfiguredStandaloneRuntime(
+                    out var oldServerPath,
+                    out var oldServerVersion);
+                var prepared = await UPilotServerRuntimeService.Instance.PrepareLatestServerExeAsync(manifest);
+                if (prepared == null || string.IsNullOrWhiteSpace(prepared.TargetPath))
+                    throw new InvalidOperationException("MCP 服务文件未准备完成。");
+
+                SetOperationPhase(
+                    UPilotUpdateOperationPhase.RestartingService,
+                    "MCP 服务已下载，正在切换到新服务…",
+                    manifest.UpmVersion,
+                    manifest.ServerVersion);
+                if (!UPilotServerRuntimeService.Instance.ActivatePreparedStandaloneExe(
+                        prepared.TargetPath,
+                        manifest.ServerVersion,
+                        out var activationError))
+                {
+                    throw new InvalidOperationException(activationError);
+                }
+
+                UPilotPackageUpdateLifecycle.MarkManagedPackageUpdatePending(
+                    manifest.UpmVersion,
+                    manifest.ServerVersion,
+                    prepared.TargetPath,
+                    oldServerPath,
+                    oldServerVersion);
+
+                SetOperationPhase(
+                    UPilotUpdateOperationPhase.StoppingService,
+                    "MCP 服务已更新，正在准备更新 UPilot 包…",
+                    manifest.UpmVersion,
+                    manifest.ServerVersion);
+                notice?.Invoke("MCP 服务已更新，正在更新 UPilot 包…", MessageType.Info);
+                return prepared;
+            }
+            catch (OperationCanceledException)
+            {
+                SetOperationCompleted("已取消 MCP 服务下载");
+                notice?.Invoke("已取消 MCP 服务下载", MessageType.Info);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                var message = "MCP 服务更新失败：" + ex.Message;
+                SetOperationFailed(message);
+                notice?.Invoke(message, MessageType.Error);
+                return null;
+            }
         }
 
         internal static async Task WaitForDownloadCompletionAsync()
@@ -322,6 +453,18 @@ namespace CodingRiver.UPilot
                 "MCP 服务已更新，正在自动重启…",
                 targetServerVersion: expectedServerVersion);
             notice?.Invoke("MCP 服务已更新，正在重新启动…", MessageType.Info);
+            return await RestartAndConfirmManagedServerAsync(
+                expectedServerVersion,
+                notice,
+                failureNotice: "MCP 服务已更新，但未能自动启动。请在主窗口点击启动或重启服务。");
+        }
+
+        private static async Task<bool> RestartAndConfirmManagedServerAsync(
+            string expectedServerVersion,
+            Action<string, MessageType> notice,
+            string failureNotice)
+        {
+            var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
             manager.StartServer();
             UPilotBridge.Instance.EnsureStarted();
@@ -333,6 +476,7 @@ namespace CodingRiver.UPilot
                 var message = $"MCP 服务已更新，但启动确认失败（当前：{versionText}，期望：{expectedServerVersion}），请检查服务日志";
                 SetOperationFailed(message);
                 notice?.Invoke(message, MessageType.Error);
+                UPilotMainWindow.OpenWithNotice(failureNotice, MessageType.Warning);
                 return false;
             }
 
@@ -362,13 +506,18 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            StartPackageUpdate(manifest, installManagedServerAfterUpdate: false, notice);
+            StartPackageUpdate(
+                manifest,
+                installManagedServerAfterUpdate: false,
+                notice,
+                preparedServerPath: "");
         }
 
         private void StartPackageUpdate(
             UPilotReleaseManifest manifest,
             bool installManagedServerAfterUpdate,
-            Action<string, MessageType> notice)
+            Action<string, MessageType> notice,
+            string preparedServerPath)
         {
             if (string.IsNullOrWhiteSpace(manifest.UpmVersion))
             {
@@ -412,9 +561,19 @@ namespace CodingRiver.UPilot
                     manifest.UpmVersion,
                     notice,
                     installManagedServerAfterUpdate,
-                    manifest.ServerVersion))
+                    manifest.ServerVersion,
+                    preparedServerPath))
             {
-                SetOperationFailed("无法停止 MCP 服务，已取消更新");
+                if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingNotice))
+                {
+                    SetOperationFailed("UPilot 包更新未完成，请继续更新");
+                    UPilotMainWindow.OpenWithNotice(pendingNotice, MessageType.Warning);
+                }
+                else
+                {
+                    SetOperationFailed("无法停止 MCP 服务，已取消更新");
+                }
+
                 return;
             }
 

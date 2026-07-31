@@ -140,6 +140,31 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UpdateOperationStatusUsesWaitingCopyDuringPackageReload()
+        {
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.WaitingForReload,
+                "UPilot 包已更新，等待 Unity 重载后继续更新 MCP 服务…",
+                "0.3.9",
+                "0.3.9");
+
+            try
+            {
+                var status = UPilotUpdateService.Instance.GetOperationStatus();
+
+                Assert.That(status.IsRunning, Is.True);
+                Assert.That(status.Label, Is.EqualTo("等待更新完成"));
+                Assert.That(status.Message, Does.Contain("等待 Unity 重载后继续更新 MCP 服务"));
+                Assert.That(status.Label, Does.Not.Contain("启动"));
+                Assert.That(status.Message, Does.Not.Contain("启动中"));
+            }
+            finally
+            {
+                UPilotUpdateService.ClearOperationStatus();
+            }
+        }
+
+        [Test]
         public void UpdateVersionComparisonHandlesReleaseAndMainBuilds()
         {
             Assert.That(UPilotServerRuntimeService.IsVersionNewer("0.3.2", "0.3.1"), Is.True);
@@ -277,6 +302,84 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(verifying),
                 Is.EqualTo("正在验证文件"));
+        }
+
+        [Test]
+        public void ManagedServerPackageUpdateSupportsPreparedServerContinuation()
+        {
+            Assert.That(typeof(UPilotPreparedServerDownload).GetField("TargetPath"), Is.Not.Null);
+            Assert.That(typeof(UPilotPreparedServerDownload).GetField("Version"), Is.Not.Null);
+            Assert.That(
+                typeof(UPilotServerRuntimeService).GetMethod(
+                    "PrepareLatestServerExeAsync",
+                    new[] { typeof(UPilotReleaseManifest) }),
+                Is.Not.Null);
+            Assert.That(
+                typeof(UPilotServerRuntimeService).GetMethod(
+                    "ActivatePreparedStandaloneExe",
+                    new[] { typeof(string), typeof(string), typeof(string).MakeByRefType() }),
+                Is.Not.Null);
+            Assert.That(
+                typeof(UPilotServerRuntimeService).GetMethod(
+                    "GetConfiguredStandaloneRuntime",
+                    new[] { typeof(string).MakeByRefType(), typeof(string).MakeByRefType() }),
+                Is.Not.Null);
+            Assert.That(
+                typeof(UPilotUpdateService).GetMethod(
+                    "ActivatePreparedManagedServerAfterPackageUpdateAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic),
+                Is.Not.Null);
+
+            var prepareMethod = typeof(UPilotPackageUpdateLifecycle).GetMethod(
+                "PrepareForPackageUpdate",
+                BindingFlags.Public | BindingFlags.Static);
+            Assert.That(prepareMethod, Is.Not.Null);
+            Assert.That(
+                prepareMethod.GetParameters().Any(parameter => parameter.Name == "preparedServerPath"),
+                Is.True);
+        }
+
+        [Test]
+        public void PendingManagedPackageUpdateNoticeSurvivesUntilUpmCompletes()
+        {
+            UPilotPackageUpdateLifecycle.ClearPendingManagedPackageUpdate();
+            try
+            {
+                UPilotPackageUpdateLifecycle.MarkManagedPackageUpdatePending(
+                    "99.9.1",
+                    "99.9.1",
+                    "new-server",
+                    "old-server",
+                    "99.9.0");
+
+                Assert.That(UPilotPackageUpdateLifecycle.HasPendingManagedPackageUpdate, Is.True);
+                Assert.That(
+                    UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var message),
+                    Is.True);
+                Assert.That(message, Does.Contain("自动管理服务已更新到 99.9.1"));
+                Assert.That(message, Does.Contain("UPilot 包还未完成更新"));
+                Assert.That(message, Does.Contain("继续更新"));
+
+                UPilotPackageUpdateLifecycle.ClearPendingManagedPackageUpdate();
+                Assert.That(UPilotPackageUpdateLifecycle.HasPendingManagedPackageUpdate, Is.False);
+            }
+            finally
+            {
+                UPilotPackageUpdateLifecycle.ClearPendingManagedPackageUpdate();
+            }
+        }
+
+        [Test]
+        public void MainWindowCanOpenWithLongLivedUpdateNotice()
+        {
+            var method = typeof(UPilotMainWindow).GetMethod(
+                "OpenWithNotice",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(string), typeof(MessageType), typeof(double) },
+                null);
+
+            Assert.That(method, Is.Not.Null);
         }
 
         [Test]
