@@ -57,6 +57,11 @@ jobs:
           "upm_version=$version" >> $env:GITHUB_OUTPUT
           "channel=$channel" >> $env:GITHUB_OUTPUT
 
+      - name: Synchronize release versions
+        shell: pwsh
+        run: |
+          python upilotserver~/deploy/sync_release_version.py "${{ steps.version.outputs.server_version }}"
+
       - name: Validate release versions
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh

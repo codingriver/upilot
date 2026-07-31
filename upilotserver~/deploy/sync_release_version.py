@@ -61,8 +61,8 @@ def sync_release_version(repo_root: Path, raw_version: str, *, check: bool = Fal
             raise RuntimeError("Release versions are not synchronized:\n" + "\n".join(changes))
         return []
 
-    package_path.write_text(package_text, encoding="utf-8")
-    pyproject_path.write_text(pyproject_text, encoding="utf-8")
+    package_path.write_text(package_text, encoding="utf-8", newline="\n")
+    pyproject_path.write_text(pyproject_text, encoding="utf-8", newline="\n")
     return changes
 
 
