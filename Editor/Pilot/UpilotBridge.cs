@@ -448,10 +448,12 @@ namespace CodingRiver.UPilot
         {
             var wasAuthenticated = _isAuthenticated;
             var wasWsOpen = _ws?.State == WebSocketState.Open;
+            var wsToClose = _ws;
+            _ws = null;
             try
             {
+                AbortAndDisposeWebSocket(wsToClose);
                 _cts?.Cancel();
-                _ws?.Dispose();
             }
             finally
             {
@@ -469,9 +471,21 @@ namespace CodingRiver.UPilot
                 ClearMcpServerDisplayState();
                 UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.stop", "Bridge停止",
-                    $"原因=手动停止 连接状态={(wasWsOpen ? "已连接" : "未连接")} 认证状态={(wasAuthenticated ? "已认证" : "未认证")}",
+                    $"原因=手动停止 连接状态={(wasWsOpen ? "已连接" : "未连接")} 认证状态={(wasAuthenticated ? "已认证" : "未认证")} socket=abort",
                     "stopped");
             }
+        }
+
+        private static void AbortAndDisposeWebSocket(ClientWebSocket ws)
+        {
+            if (ws == null)
+                return;
+
+            try { ws.Abort(); } catch { }
+            _ = Task.Run(() =>
+            {
+                try { ws.Dispose(); } catch { }
+            });
         }
 
         private double _lastWatchdogCheck;
@@ -582,6 +596,7 @@ namespace CodingRiver.UPilot
         }
         private const int ConnectTimeoutMs = 3000;  // 连接超时 3s
         private const int ReconnectDelayMs  = 1000;  // 失败后等待 1s 再重连
+        private const int SocketTaskDrainTimeoutMs = 250;
 
         private async Task ConnectLoopAsync(CancellationToken token)
         {
@@ -660,15 +675,15 @@ namespace CodingRiver.UPilot
                 }
                 finally
                 {
-                    cycleCts.Cancel();
-                    try { await Task.WhenAll(recvTask, hbTask); } catch { }
-
                     var wsToClose = _ws;
                     _ws = null;
-                    if (wsToClose != null)
+                    AbortAndDisposeWebSocket(wsToClose);
+                    cycleCts.Cancel();
+
+                    var drainTask = Task.WhenAll(recvTask, hbTask);
+                    if (await Task.WhenAny(drainTask, Task.Delay(SocketTaskDrainTimeoutMs)).ConfigureAwait(false) == drainTask)
                     {
-                        try { wsToClose.Abort(); } catch { }
-                        _ = Task.Run(() => { try { wsToClose.Dispose(); } catch { } });
+                        try { await drainTask.ConfigureAwait(false); } catch { }
                     }
                 }
 

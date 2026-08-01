@@ -840,8 +840,8 @@ namespace CodingRiver.UPilot
                     UPilotProjectConfig.Reload();
                     UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
                     UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
-                    UPilotBridge.Instance.EnsureStarted();
                     UPilotMcpServerManager.Instance.StartServer();
+                    UPilotBridge.Instance.EnsureStarted();
                 }
                 catch (Exception ex)
                 {
@@ -913,10 +913,13 @@ namespace CodingRiver.UPilot
                     "正在停止 MCP 服务，避免更新时文件被占用…",
                     targetServerVersion: expectedServerVersion);
                 notice?.Invoke("正在停止 MCP 服务…", MessageType.Info);
+                UPilotBridge.Instance.Stop();
                 if (!manager.StopServerAndWaitForExit())
                 {
                     var message = "无法停止 MCP 服务，已取消更新以避免文件占用";
                     SetOperationFailed(message);
+                    manager.StartServer();
+                    UPilotBridge.Instance.EnsureStarted();
                     notice?.Invoke(message, MessageType.Error);
                     return false;
                 }

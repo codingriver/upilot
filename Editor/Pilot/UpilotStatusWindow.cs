@@ -894,7 +894,8 @@ namespace CodingRiver.UPilot
                                 return;
                             }
 
-                            manager.RestartServer();
+                            UPilotBridge.Instance.Stop();
+                            manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
                             ShowToast("MCP 服务正在重启…");
                         });
                 }
@@ -999,8 +1000,11 @@ namespace CodingRiver.UPilot
             bridge.HttpPort = _httpPortInput;
 
             manager.InvalidateStatusCache();
-            bridge.EnsureStarted();
-            EditorApplication.delayCall += manager.StartServer;
+            EditorApplication.delayCall += () =>
+            {
+                manager.StartServer();
+                bridge.EnsureStarted();
+            };
             RefreshAgentConfigSnapshot();
             ShowToast($"已切换到 WS {_wsPortInput} / HTTP {_httpPortInput}，服务正在重启…", MessageType.Info, 4d);
         }

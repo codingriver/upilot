@@ -578,6 +578,11 @@ namespace CodingRiver.UPilot.Tests
                     "ActivatePreparedManagedServerAfterPackageUpdateAsync",
                     BindingFlags.Instance | BindingFlags.NonPublic),
                 Is.Not.Null);
+            Assert.That(
+                typeof(UPilotMcpServerManager).GetMethod(
+                    "RestartServer",
+                    new[] { typeof(Action) }),
+                Is.Not.Null);
 
             var prepareMethod = typeof(UPilotPackageUpdateLifecycle).GetMethod(
                 "PrepareForPackageUpdate",

@@ -92,8 +92,8 @@ namespace CodingRiver.UPilot
                 return true;
 
             ClearUpdateState();
-            UPilotBridge.Instance.EnsureStarted();
             manager.StartServer();
+            UPilotBridge.Instance.EnsureStarted();
             UPilotUpdateService.SetOperationFailed("无法停止 MCP 服务，已取消包更新以避免文件占用");
             notice?.Invoke("无法停止 MCP 服务，已取消包更新以避免文件占用", MessageType.Error);
             return false;
@@ -214,8 +214,8 @@ namespace CodingRiver.UPilot
 
             UPilotProjectConfig.Reload();
             UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
-            UPilotBridge.Instance.EnsureStarted();
-            UPilotMcpServerManager.Instance.RestartServer();
+            UPilotBridge.Instance.Stop();
+            UPilotMcpServerManager.Instance.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
         }
 
         private static void OnRegisteringPackages(PackageRegistrationEventArgs args)
@@ -380,8 +380,8 @@ namespace CodingRiver.UPilot
             UPilotUpdateService.ClearExternalPackageManagerAbort();
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
-            manager.RestartServer();
-            UPilotBridge.Instance.EnsureStarted();
+            UPilotBridge.Instance.Stop();
+            manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
             UPilotUpdateService.SetOperationCompleted("UPilot 包已更新并已恢复服务");
             Debug.Log($"[UPilot] Package update completed ({targetVersion}); MCP service restart scheduled.");
         }
@@ -433,8 +433,8 @@ namespace CodingRiver.UPilot
 
                 UPilotProjectConfig.Reload();
                 UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
-                UPilotBridge.Instance.EnsureStarted();
-                UPilotMcpServerManager.Instance.RestartServer();
+                UPilotBridge.Instance.Stop();
+                UPilotMcpServerManager.Instance.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
             }
         }
 

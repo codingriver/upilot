@@ -1,4 +1,4 @@
-name: Prepare UPilot Release
+name: 发布版本
 
 on:
   workflow_dispatch:
@@ -52,6 +52,9 @@ jobs:
 
       - name: Synchronize version files
         run: python upilotserver~/deploy/sync_release_version.py "${{ steps.release.outputs.version }}"
+
+      - name: Validate version files
+        run: python upilotserver~/deploy/sync_release_version.py "${{ steps.release.outputs.version }}" --check
 
       - name: Commit release version
         shell: bash

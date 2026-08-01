@@ -21,7 +21,7 @@ from uvicorn import Config, Server
 from anyio import ClosedResourceError
 from mcp.types import CallToolResult, TextContent
 
-from .env import getenv
+from .env import env_float, getenv
 from .server import WsOrchestratorServer
 from .tool_facade import McpToolFacade
 from .models import ToolResponse
@@ -236,6 +236,33 @@ async def _wait_for_ws_listener(
     )
 
 
+async def _stop_ws_task_fast(
+    server: WsOrchestratorServer | None,
+    task: asyncio.Task[None],
+    *,
+    context: str,
+) -> None:
+    if server is not None:
+        server.stop()
+
+    if task.done():
+        await task
+        return
+
+    timeout_s = max(0.1, env_float("UPILOT_WS_TASK_STOP_TIMEOUT_S", 0.75))
+    try:
+        await asyncio.wait_for(task, timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out waiting %.2fs for Unity bridge WebSocket task during %s; cancelling",
+            timeout_s,
+            context,
+        )
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def _run_http_server(
     http_host: str, http_port: int, ws_task: asyncio.Task[None]
 ) -> None:
@@ -260,9 +287,12 @@ async def _run_http_server(
             finally:
                 if _http_server is not None:
                     _http_server.should_exit = True
-                _orchestrator.stop()
                 try:
-                    await ws_task
+                    await _stop_ws_task_fast(
+                        _orchestrator,
+                        ws_task,
+                        context="HTTP shutdown",
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -424,9 +454,8 @@ async def _lifespan(app: FastMCP):
         logger.exception(
             "Failed to start Unity bridge WebSocket listener  ws=%s:%s", host, port
         )
-        _orchestrator.stop()
         try:
-            await task
+            await _stop_ws_task_fast(_orchestrator, task, context="startup failure")
         except Exception:
             logger.exception(
                 "Unity bridge WebSocket task terminated with error during startup"
@@ -437,9 +466,8 @@ async def _lifespan(app: FastMCP):
     try:
         yield
     finally:
-        _orchestrator.stop()
         try:
-            await task
+            await _stop_ws_task_fast(_orchestrator, task, context="stdio shutdown")
         except asyncio.CancelledError:
             raise
         except Exception:

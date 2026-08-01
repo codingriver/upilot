@@ -198,9 +198,9 @@ namespace CodingRiver.UPilot
             }
 
             BeginOperation(UPilotServiceOperation.Restarting);
-            UPilotBridge.Instance.Restart();
+            UPilotBridge.Instance.Stop();
             var manager = UPilotMcpServerManager.Instance;
-            manager.RestartServer();
+            manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
             manager.InvalidateStatusCache();
         }
 
@@ -251,9 +251,8 @@ namespace CodingRiver.UPilot
                 (!mcpStatus.HttpPortListening || !mcpStatus.WsPortListening))
             {
                 BeginOperation(UPilotServiceOperation.Restarting);
-                manager.RestartServer();
-                if (!bridgeStatus.IsStarted)
-                    UPilotBridge.Instance.EnsureStarted();
+                UPilotBridge.Instance.Stop();
+                manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
                 manager.InvalidateStatusCache();
                 return "服务正在重新启动。";
             }
@@ -397,8 +396,11 @@ namespace CodingRiver.UPilot
             manager.InvalidateStatusCache();
 
             RewriteExistingAgentConfigs(agentConfigs);
-            bridge.EnsureStarted();
-            EditorApplication.delayCall += manager.StartServer;
+            EditorApplication.delayCall += () =>
+            {
+                manager.StartServer();
+                bridge.EnsureStarted();
+            };
         }
 
         private static void RewriteExistingAgentConfigs(AgentMcpConfigStatus[] statuses)

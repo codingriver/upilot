@@ -140,6 +140,7 @@ namespace CodingRiver.UPilot
         private bool _startInProgress;
         private int? _trackedProcessId;
         private EditorApplication.CallbackFunction _restartWaitCallback;
+        private Action _afterRestartStarted;
 
         private static readonly System.Net.Http.HttpClient _httpClient = new()
         {
@@ -756,7 +757,7 @@ namespace CodingRiver.UPilot
                    UPilotPortAllocator.IsPortAvailable(WsPort);
         }
 
-        public void RestartServer()
+        public void RestartServer(Action afterStart = null)
         {
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
@@ -766,11 +767,15 @@ namespace CodingRiver.UPilot
 
             if (_restartPending)
             {
+                if (afterStart != null)
+                    _afterRestartStarted += afterStart;
                 Debug.Log("[UPilotMcpServerManager] MCP server restart is already pending; restart request merged.");
                 return;
             }
 
             CancelPendingRestart();
+            if (afterStart != null)
+                _afterRestartStarted += afterStart;
             StopCurrentProjectProcesses();
             InvalidateStatusCache();
 
@@ -795,6 +800,7 @@ namespace CodingRiver.UPilot
                     _restartPending = false;
                     InvalidateStatusCache();
                     StartServer();
+                    InvokeAfterRestartStarted();
                     return;
                 }
 
@@ -806,6 +812,7 @@ namespace CodingRiver.UPilot
                     EditorApplication.update -= timedOutCallback;
                 _restartWaitCallback = null;
                 _restartPending = false;
+                _afterRestartStarted = null;
                 InvalidateStatusCache();
                 Debug.LogError(
                     $"[UPilotMcpServerManager] MCP restart timed out waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.");
@@ -816,11 +823,29 @@ namespace CodingRiver.UPilot
         private void CancelPendingRestart()
         {
             _restartPending = false;
+            _afterRestartStarted = null;
             if (_restartWaitCallback == null)
                 return;
 
             EditorApplication.update -= _restartWaitCallback;
             _restartWaitCallback = null;
+        }
+
+        private void InvokeAfterRestartStarted()
+        {
+            var callback = _afterRestartStarted;
+            _afterRestartStarted = null;
+            if (callback == null)
+                return;
+
+            try
+            {
+                callback.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[UPilotMcpServerManager] Restart callback failed: " + ex);
+            }
         }
 
         // ── Port & Process Helpers ─────────────────────────────────────────

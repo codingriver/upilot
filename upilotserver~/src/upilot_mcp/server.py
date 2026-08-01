@@ -82,33 +82,15 @@ class WsOrchestratorServer(WsTransport):
         return struct.pack("ii", 1, 0)
 
     @staticmethod
-    def _close_timeout_seconds() -> float:
-        return max(0.1, env_float("UPILOT_SOCKET_CLOSE_TIMEOUT_S", 1.5))
+    def _server_close_timeout_seconds() -> float:
+        return max(0.1, env_float("UPILOT_SERVER_CLOSE_TIMEOUT_S", 0.5))
 
     async def _close_websocket(self, websocket: WebSocketServerProtocol | None, *, reason: str) -> None:
         if websocket is None:
             return
 
-        remote = getattr(websocket, "remote_address", None)
-        close_fn = getattr(websocket, "close", None)
-        wait_closed_fn = getattr(websocket, "wait_closed", None)
-
-        if callable(close_fn):
-            try:
-                await asyncio.wait_for(
-                    close_fn(code=1001, reason=reason[:120]),
-                    timeout=self._close_timeout_seconds(),
-                )
-                if callable(wait_closed_fn):
-                    await asyncio.wait_for(wait_closed_fn(), timeout=self._close_timeout_seconds())
-                logger.info("Closed WebSocket to %s gracefully (%s)", remote, reason)
-                return
-            except asyncio.TimeoutError:
-                logger.warning("Graceful WebSocket close timed out for %s (%s); falling back to abort", remote, reason)
-            except Exception as ex:
-                logger.warning("Graceful WebSocket close failed for %s (%s): %s", remote, reason, ex)
-
         self._force_disconnect_websocket(websocket, reason=reason)
+        await asyncio.sleep(0)
 
     def _force_disconnect_websocket(self, websocket: WebSocketServerProtocol | None, *, reason: str) -> None:
         if websocket is None:
@@ -162,12 +144,21 @@ class WsOrchestratorServer(WsTransport):
             logger.info("WebSocket server shutting down on %s:%s", self.host, self.port)
             self._shutting_down = True
             self._cancel_reconnect_grace()
-            active_ws = self._ws
+            active_connections = list(self._active_ws_connections)
             self._ws = None
-            await self._close_websocket(active_ws, reason="server shutdown")
+            for websocket in active_connections:
+                self._force_disconnect_websocket(websocket, reason="server shutdown")
             if self._server is not None:
                 self._server.close()
-                await self._server.wait_closed()
+                try:
+                    await asyncio.wait_for(
+                        self._server.wait_closed(),
+                        timeout=self._server_close_timeout_seconds(),
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out waiting for WebSocket server socket to close; continuing shutdown"
+                    )
                 self._server = None
             self.session_manager.disconnect(force=True)
             self._fail_all_pending_and_suspended("SERVER_STOPPED", "MCP 服务器已关闭")

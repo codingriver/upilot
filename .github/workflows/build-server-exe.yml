@@ -39,10 +39,17 @@ jobs:
         shell: pwsh
         run: |
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ('${{ github.event.inputs.version }}') {
-            $version = '${{ github.event.inputs.version }}'
-          } elseif ('${{ github.ref_type }}' -eq 'tag') {
-            $version = '${{ github.ref_name }}'.TrimStart('v')
+          $inputVersion = '${{ github.event.inputs.version }}'.TrimStart('v')
+          $isTag = '${{ github.ref_type }}' -eq 'tag'
+          if ($isTag) {
+            $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
+            if ($inputVersion -and $inputVersion -ne $tagVersion) {
+              Write-Error "Workflow input version ($inputVersion) must match tag version ($tagVersion)."
+              exit 1
+            }
+            $version = $tagVersion
+          } elseif ($inputVersion) {
+            $version = $inputVersion
           } else {
             $version = $packageVersion
           }
@@ -57,22 +64,33 @@ jobs:
           "upm_version=$version" >> $env:GITHUB_OUTPUT
           "channel=$channel" >> $env:GITHUB_OUTPUT
 
-      - name: Synchronize release versions
+      - name: Validate tag source versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$') {
+            Write-Error "Release tags must use vMAJOR.MINOR.PATCH format. Current tag: ${{ github.ref_name }}"
+            exit 1
+          }
+          $tagVersion = $tag.TrimStart('v')
+          python upilotserver~/deploy/sync_release_version.py $tagVersion --check
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Tag $tag points to source files with mismatched versions. Use the 发布版本 workflow so CI commits package.json and upilotserver~/pyproject.toml before tagging."
+            exit $LASTEXITCODE
+          }
+          Write-Host "Release versions validated: tag/package/server = $tagVersion"
+
+      - name: Synchronize artifact versions
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         shell: pwsh
         run: |
           python upilotserver~/deploy/sync_release_version.py "${{ steps.version.outputs.server_version }}"
 
-      - name: Validate release versions
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Validate resolved release versions
         shell: pwsh
         run: |
-          if ('${{ github.ref_name }}' -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$') {
-            Write-Error "Release tags must use vMAJOR.MINOR.PATCH format. Current tag: ${{ github.ref_name }}"
-            exit 1
-          }
-          $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
-          python upilotserver~/deploy/sync_release_version.py $tagVersion --check
-          Write-Host "Release versions validated: tag/package/server = $tagVersion"
+          python upilotserver~/deploy/sync_release_version.py "${{ steps.version.outputs.server_version }}" --check
 
       - name: Install build dependencies
         shell: pwsh

@@ -128,10 +128,10 @@ namespace CodingRiver.UPilot
                 if (_setupStartAfterSetup)
                 {
                     _setupCompletionMessage = "配置已写入，正在启动服务…";
-                    UPilotBridge.Instance.EnsureStarted();
                     var manager = UPilotMcpServerManager.Instance;
                     manager.ValidateAndAutoFixPath();
-                    manager.RestartServer();
+                    UPilotBridge.Instance.Stop();
+                    manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
 
                     var expectedVersion = _setupRuntimeChoice == SetupRuntimeChoice.Managed
                         ? UPilotProjectConfig.Current.runtime?.serverVersion ?? ""
