@@ -72,6 +72,7 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         path.mkdir(parents=True, exist_ok=True)
 
     build_info = SERVER_ROOT / "src" / "upilot_mcp" / "upilot_build_info.json"
+    agent_rules_template = REPO_ROOT / "skills" / "upilot-unity-mcp" / "AGENTS.md.template"
     build_info.write_text(
         json.dumps(
             {
@@ -101,6 +102,8 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         str(SERVER_ROOT / "src"),
         "--add-data",
         f"{build_info}{os.pathsep}upilot_mcp",
+        "--add-data",
+        f"{agent_rules_template}{os.pathsep}skills/upilot-unity-mcp",
         "--copy-metadata",
         "mcp",
         "--collect-data",

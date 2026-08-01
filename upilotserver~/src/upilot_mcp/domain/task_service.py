@@ -50,6 +50,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
 _UPILOT_RULES_VERSION = 4
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
+_AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
 _DEFAULT_OPERATION_SUCCESS = {"succeeded", "success", "complete", "completed", "passed", "ok"}
 _DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "timeout", "timedout", "error"}
 _TERMINAL_STATUSES = _DEFAULT_OPERATION_SUCCESS | _DEFAULT_OPERATION_FAILURE
@@ -159,82 +160,38 @@ class TaskDomainService:
         except (OSError, json.JSONDecodeError):
             return "unknown"
 
+    @staticmethod
+    def _read_agent_rules_template() -> str:
+        candidates = []
+        bundle_root = getattr(sys, "_MEIPASS", "")
+        if bundle_root:
+            candidates.append(Path(bundle_root) / _AGENT_RULES_TEMPLATE_RELATIVE)
+        candidates.append(Path(__file__).resolve().parents[4] / _AGENT_RULES_TEMPLATE_RELATIVE)
+        candidates.append(Path.cwd() / _AGENT_RULES_TEMPLATE_RELATIVE)
+
+        for path in candidates:
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+        raise FileNotFoundError(f"UPilot Agent rules template is missing: {_AGENT_RULES_TEMPLATE_RELATIVE}")
+
     def _build_agent_rules_block(self, project_root: Path) -> str:
         project_path = str(project_root)
         version = self._upilot_package_version()
-        return f"""<!-- upilot:start -->
-# UPilot Unity MCP
-
-rulesVersion: {_UPILOT_RULES_VERSION}
-upilotPackageVersion: {version}
-projectPath: {project_path}
-generatedAt: {_utc_iso()}
-
-This Unity project has the `io.github.codingriver.upilot` UPM package installed.
-Project-specific business rules outside this controlled UPilot block take precedence.
-
-## Connection
-
-- Streamable HTTP: `http://127.0.0.1:8011/mcp`
-- Health check: `http://127.0.0.1:8011/health`
-- Never configure an MCP client with the internal Unity Bridge WebSocket port.
-1. Call `unity_mcp_status`.
-2. Require `connected: true` and `serverReady: true`.
-3. Verify `paths.unityProjectAbsolute` matches `{project_path}` (allow equivalent slash normalization).
-4. Stop and report the mismatch if another Unity project is connected.
-
-## Capabilities
-
-- Distinguish server registration, client tool-list injection, and a successful real call; they are different states.
-- If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable.
-- After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.
-- Use the narrowest dedicated semantic tool. Use `unity_reflection_call` for existing compiled entry points.
-- Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.
-- For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
-- Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
-
-## Writes And Compile
-
-- Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.
-- After one batch of disk writes, call `unity_sync_after_disk_write` once.
-- Prefer `unity_compile_wait` plus `unity_compile_errors`; `unity_compile_errors_get` is a compatibility alias.
-- Compile only after C# or assembly-related changes.
-- Do not compile again when no code changed.
-- After compilation, read structured compile errors and relevant Console errors before editing again.
-
-## Long Operations
-
-- For tests, builds, smoke runs, and other long workflows, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.
-- Starting an operation is not success; poll until a terminal status.
-- Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.
-- Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.
-- Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.
-
-## Operation Status Contract
-
-- Project bridge status JSON should use generic fields where possible: `ok`, `operationId`, `status`, `phase`, `error`, `detail`, `elapsedSec`, `phaseElapsedSec`, `progress`, `failureSignature`, `artifacts`, `metrics`, and `domain`.
-- UPilot parses only generic fields. Business fields belong in `domain` and are passed through unchanged.
-
-## Persistent Console Capture
-
-- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, use `unity_console_capture_status` and incremental `unity_console_capture_read`, and always call `unity_console_capture_stop` on success or failure.
-- Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
-- Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
-
-## Artifacts And Screenshots
-
-- Prefer project-relative artifact paths returned by the project bridge.
-- Prefer `unity_screenshot_save` for screenshots.
-- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`.
-- UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.
-
-## Acceptance
-
-- During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
-- Retry automatically only when the registry marks the operation idempotent and non-destructive.
-- If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.
-- On timeout, inspect status, operation timing, Console capture, artifact summary, and last progress before choosing one bounded retry or a documented fallback.
-<!-- upilot:end -->"""
+        rendered = (
+            self._read_agent_rules_template()
+            .replace("{{rulesVersion}}", str(_UPILOT_RULES_VERSION))
+            .replace("{{upilotPackageVersion}}", version)
+            .replace("{{projectPath}}", project_path)
+            .replace("{{generatedAt}}", _utc_iso())
+            .replace("{{mcpUrl}}", "http://127.0.0.1:8011/mcp")
+            .replace("{{healthUrl}}", "http://127.0.0.1:8011/health")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .strip()
+        )
+        return f"{_UPILOT_BLOCK_START}\n{rendered}\n{_UPILOT_BLOCK_END}"
 
     def _parse_rules_metadata(self, block: str) -> dict[str, str]:
         metadata: dict[str, str] = {}

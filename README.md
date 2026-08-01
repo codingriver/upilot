@@ -402,6 +402,35 @@ http://127.0.0.1:8011/health
 
 如果 Skill/规则包含本地修改，强制更新可能覆盖 UPilot 管理的内容。确认前请先保存需要保留的自定义内容。
 
+### Skill/规则模板维护
+
+UPilot 的 Agent 规则只维护一份源模板：
+
+```text
+skills/upilot-unity-mcp/AGENTS.md.template
+```
+
+正式版和 `main` 分支都使用这同一份模板。安装或更新规则时，UPilot 会读取包内模板并渲染动态字段，包括工程路径、MCP 地址、健康检查地址、规则版本、UPilot 包版本和生成时间。
+
+模板会部署到这些目标位置：
+
+```text
+AGENTS.md
+CLAUDE.md
+.cursor/rules/upilot-unity-mcp.mdc
+.agents/skills/upilot-unity-mcp/AGENTS.md.template
+```
+
+`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter；Codex Skill 目录会复制 `skills/upilot-unity-mcp/`，因此也会带上 `AGENTS.md.template`。
+
+main 分支维护规则：
+
+- 修改规则内容时，只改 `skills/upilot-unity-mcp/AGENTS.md.template`。
+- 规则语义变化时递增 `AgentRulesTemplateVersion`。
+- Skill 目录结构变化时递增 `SkillInstallTemplateVersion`。
+- 纯重构、读取方式变化或文案不影响 Agent 行为时，不需要递增 `AgentRulesTemplateVersion`。
+- `main` / source 安装仍按 source 通道运行本机 Python，不使用自动管理 EXE；正式 tag 发布时由 Action 写入 tag 版本。
+
 ## 高级设置、停止与诊断
 
 普通使用不需要进入高级设置。需要停止服务、修改端口或查看详细诊断时，点击主界面的 **高级设置…**，或选择：

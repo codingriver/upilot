@@ -79,12 +79,13 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("prefer an available UPilot semantic tool"));
             Assert.That(text, Does.Contain("Use `unity_tools_find` for targeted discovery"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
-            Assert.That(text, Does.Contain("authoritative compiled orchestration entry point"));
+            Assert.That(text, Does.Contain("project-provided bridge entry points"));
             Assert.That(text, Does.Contain("unity_console_capture_start"));
             Assert.That(text, Does.Contain("always call `unity_console_capture_stop`"));
             Assert.That(text, Does.Contain("separate from domain-specific reports"));
             Assert.That(text, Does.Contain("incremental status, log, and report APIs"));
-            Assert.That(text, Does.Contain("artifact or screenshot save tools"));
+            Assert.That(text, Does.Contain("project-relative artifact paths"));
+            Assert.That(text, Does.Not.Contain("{{"));
             Assert.That(text, Does.Not.Contain("## UPilot Flow"));
         }
 
@@ -641,7 +642,7 @@ namespace CodingRiver.UPilot.Tests
                 var originalHash = (string)hashMethod.Invoke(null, new object[] { directory });
 
                 Assert.That(readOk, Is.True);
-                Assert.That(readArgs[1], Is.EqualTo(1));
+                Assert.That(readArgs[1], Is.EqualTo(GetSkillInstallTemplateVersion()));
                 Assert.That(readArgs[2], Is.EqualTo(originalHash));
 
                 File.AppendAllText(Path.Combine(directory, "SKILL.md"), "\nuser change");
@@ -651,8 +652,25 @@ namespace CodingRiver.UPilot.Tests
             finally
             {
                 if (Directory.Exists(directory))
-                    Directory.Delete(directory, recursive: true);
+                Directory.Delete(directory, recursive: true);
             }
+        }
+
+        [Test]
+        public void SkillSourceIncludesAgentsTemplateForManagedUpdates()
+        {
+            var resolveMethod = typeof(UPilotAgentSetup).GetMethod(
+                "ResolvePackageRoot",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var packageRoot = (string)resolveMethod.Invoke(null, null);
+            var source = Path.Combine(
+                packageRoot,
+                "skills",
+                "upilot-unity-mcp",
+                "AGENTS.md.template");
+
+            Assert.That(File.Exists(source), Is.True);
+            Assert.That(File.ReadAllText(source), Does.Contain("{{projectPath}}"));
         }
 
         private static string BuildAgentRulesText()
@@ -683,6 +701,14 @@ namespace CodingRiver.UPilot.Tests
         {
             var field = typeof(UPilotAgentSetup).GetField(
                 "AgentRulesTemplateVersion",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (int)field.GetRawConstantValue();
+        }
+
+        private static int GetSkillInstallTemplateVersion()
+        {
+            var field = typeof(UPilotAgentSetup).GetField(
+                "SkillInstallTemplateVersion",
                 BindingFlags.NonPublic | BindingFlags.Static);
             return (int)field.GetRawConstantValue();
         }

@@ -102,9 +102,10 @@ namespace CodingRiver.UPilot
     {
         private const string PackageName = "io.github.codingriver.upilot";
         private const string SkillName = "upilot-unity-mcp";
+        private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
         private const int AgentRulesTemplateVersion = 4;
-        private const int SkillInstallTemplateVersion = 1;
+        private const int SkillInstallTemplateVersion = 2;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
@@ -790,84 +791,44 @@ namespace CodingRiver.UPilot
 
         private static string BuildAgentsMd()
         {
-            var mcpUrl = McpUrl;
-            var healthUrl = HealthUrl;
             var projectRoot = GetProjectRoot();
             var packageVersion = string.IsNullOrEmpty(UPilotServerRuntimeService.UpmVersion)
                 ? "unknown"
                 : UPilotServerRuntimeService.UpmVersion;
-            var text = new StringBuilder();
-            text.AppendLine("# UPilot Unity MCP");
-            text.AppendLine();
-            text.AppendLine($"rulesVersion: {AgentRulesTemplateVersion}");
-            text.AppendLine($"upilotPackageVersion: {packageVersion}");
-            text.AppendLine($"projectPath: {projectRoot}");
-            text.AppendLine($"generatedAt: {DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ}");
-            text.AppendLine();
-            text.AppendLine("This Unity project has the `io.github.codingriver.upilot` UPM package installed.");
-            text.AppendLine("Project-specific business rules outside this controlled UPilot block take precedence.");
-            text.AppendLine();
-            text.AppendLine("## Connection");
-            text.AppendLine();
-            text.AppendLine($"- Streamable HTTP: `{mcpUrl}`");
-            text.AppendLine($"- Health check: `{healthUrl}`");
-            text.AppendLine("- Never configure an MCP client with the internal Unity Bridge WebSocket port.");
-            text.AppendLine("1. Call `unity_mcp_status`.");
-            text.AppendLine("2. Require `connected: true` and `serverReady: true`.");
-            text.AppendLine($"3. Verify `paths.unityProjectAbsolute` matches `{projectRoot}` (allow equivalent slash normalization).");
-            text.AppendLine("4. Stop and report the mismatch if another Unity project is connected.");
-            text.AppendLine();
-            text.AppendLine("## Capabilities");
-            text.AppendLine();
-            text.AppendLine("- Distinguish server registration, client tool-list injection, and a successful real call; they are different states.");
-            text.AppendLine("- If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable.");
-            text.AppendLine("- After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.");
-            text.AppendLine("- Use the narrowest dedicated semantic tool. Use `unity_reflection_call` for existing compiled entry points.");
-            text.AppendLine("- Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.");
-            text.AppendLine("- For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.");
-            text.AppendLine("- Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.");
-            text.AppendLine();
-            text.AppendLine("## Writes And Compile");
-            text.AppendLine();
-            text.AppendLine("- Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.");
-            text.AppendLine("- After one batch of disk writes, call `unity_sync_after_disk_write` once.");
-            text.AppendLine("- Prefer `unity_compile_wait` plus `unity_compile_errors`; `unity_compile_errors_get` is a compatibility alias.");
-            text.AppendLine("- Compile only after C# or assembly-related changes. Do not compile again when no code changed.");
-            text.AppendLine("- After compilation, read structured compile errors and relevant Console errors before editing again.");
-            text.AppendLine();
-            text.AppendLine("## Long Operations");
-            text.AppendLine();
-            text.AppendLine("- For tests, builds, smoke runs, and other long workflows, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.");
-            text.AppendLine("- Starting an operation is not success; poll until a terminal status.");
-            text.AppendLine("- Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.");
-            text.AppendLine("- Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.");
-            text.AppendLine("- Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.");
-            text.AppendLine();
-            text.AppendLine("## Operation Status Contract");
-            text.AppendLine();
-            text.AppendLine("- Project bridge status JSON should use generic fields where possible: `ok`, `operationId`, `status`, `phase`, `error`, `detail`, `elapsedSec`, `phaseElapsedSec`, `progress`, `failureSignature`, `artifacts`, `metrics`, and `domain`.");
-            text.AppendLine("- UPilot parses only generic fields. Business fields belong in `domain` and are passed through unchanged.");
-            text.AppendLine();
-            text.AppendLine("## Persistent Console Capture");
-            text.AppendLine();
-            text.AppendLine("- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, use `unity_console_capture_status` and incremental `unity_console_capture_read`, and always call `unity_console_capture_stop` on success or failure.");
-            text.AppendLine("- Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.");
-            text.AppendLine("- Console capture cleanup must use dry-run, target inspection, and confirm-token execution.");
-            text.AppendLine();
-            text.AppendLine("## Artifacts And Screenshots");
-            text.AppendLine();
-            text.AppendLine("- Prefer project-relative artifact paths returned by the project bridge.");
-            text.AppendLine("- Prefer `unity_screenshot_save` for screenshots.");
-            text.AppendLine("- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`.");
-            text.AppendLine("- UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.");
-            text.AppendLine();
-            text.AppendLine("## Acceptance");
-            text.AppendLine();
-            text.AppendLine("- During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.");
-            text.AppendLine("- Retry automatically only when the registry marks the operation idempotent and non-destructive.");
-            text.AppendLine("- If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.");
-            text.AppendLine("- On timeout, inspect status, operation timing, Console capture, artifact summary, and last progress before choosing one bounded retry or a documented fallback.");
-            return text.ToString();
+            return RenderAgentRulesTemplate(
+                LoadAgentRulesTemplate(),
+                projectRoot,
+                packageVersion);
+        }
+
+        private static string LoadAgentRulesTemplate()
+        {
+            var templatePath = Path.Combine(
+                ResolvePackageRoot(),
+                "skills",
+                SkillName,
+                AgentRulesTemplateFileName);
+            if (!File.Exists(templatePath))
+                throw new FileNotFoundException("UPilot Agent rules template is missing.", templatePath);
+
+            return File.ReadAllText(templatePath, Encoding.UTF8);
+        }
+
+        private static string RenderAgentRulesTemplate(
+            string template,
+            string projectRoot,
+            string packageVersion)
+        {
+            return template
+                .Replace("{{rulesVersion}}", AgentRulesTemplateVersion.ToString())
+                .Replace("{{upilotPackageVersion}}", packageVersion)
+                .Replace("{{projectPath}}", projectRoot)
+                .Replace("{{generatedAt}}", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+                .Replace("{{mcpUrl}}", McpUrl)
+                .Replace("{{healthUrl}}", HealthUrl)
+                .Replace("\r\n", "\n")
+                .Replace("\r", "\n")
+                .TrimEnd() + "\n";
         }
 
         private static string BuildCursorRule()

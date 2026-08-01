@@ -67,6 +67,8 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
     assert "rulesVersion: 4" in text
+    assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
+    assert "{{" not in text
     assert "<!-- upilot:start -->" in text
     assert "<!-- upilot:end -->" in text
     assert applied.data["fileSha256"]
