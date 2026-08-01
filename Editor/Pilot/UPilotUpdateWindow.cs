@@ -19,6 +19,9 @@ namespace CodingRiver.UPilot
         private Action<string, MessageType> _externalNotice;
         private bool _isChecking;
         private bool _operationRunning;
+        private bool _pendingUpdateAfterPlayModeExit;
+        private bool _pendingUpdatePackage;
+        private bool _pendingUpdateManagedServer;
         private bool _showDetails;
         private bool _sourceChannel;
         private string _error = "";
@@ -122,6 +125,13 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                if (_pendingUpdateAfterPlayModeExit)
+                {
+                    TryStartPendingUpdateAfterPlayModeExit();
+                    Repaint();
+                    return;
+                }
+
                 var status = UPilotUpdateService.Instance.GetOperationStatus();
                 var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
                 if (_operationRunning && !status.IsRunning && !downloadRunning)
@@ -488,6 +498,9 @@ namespace CodingRiver.UPilot
 
         private void UpdatePackage()
         {
+            if (!PrepareUpdateInEditMode(updatePackage: true, updateManagedServer: false))
+                return;
+
             try
             {
                 _operationRunning = true;
@@ -504,6 +517,9 @@ namespace CodingRiver.UPilot
 
         private void UpdateManagedService()
         {
+            if (!PrepareUpdateInEditMode(updatePackage: false, updateManagedServer: true))
+                return;
+
             try
             {
                 _operationRunning = true;
@@ -520,6 +536,14 @@ namespace CodingRiver.UPilot
 
         private void UpdateSelected(bool updatePackage, bool updateManagedServer)
         {
+            if (!PrepareUpdateInEditMode(updatePackage, updateManagedServer))
+                return;
+
+            StartUpdateSelected(updatePackage, updateManagedServer);
+        }
+
+        private void StartUpdateSelected(bool updatePackage, bool updateManagedServer)
+        {
             try
             {
                 _operationRunning = true;
@@ -535,6 +559,49 @@ namespace CodingRiver.UPilot
                 _noticeType = MessageType.Error;
                 ReportUpdateWindowException(_notice, ex);
             }
+        }
+
+        private bool PrepareUpdateInEditMode(bool updatePackage, bool updateManagedServer)
+        {
+            if (!EditorApplication.isPlayingOrWillChangePlaymode)
+                return true;
+
+            var confirmed = EditorUtility.DisplayDialog(
+                "退出 Play Mode 后更新？",
+                "Unity 当前正在 Play Mode 或正在切换 Play Mode。UPilot 更新需要在 Edit Mode 下执行，将先退出 Play Mode，退出完成后自动开始更新。",
+                "退出并更新",
+                "取消");
+            if (!confirmed)
+            {
+                _notice = "已取消更新：Unity 仍在 Play Mode。";
+                _noticeType = MessageType.Info;
+                return false;
+            }
+
+            _pendingUpdateAfterPlayModeExit = true;
+            _pendingUpdatePackage = updatePackage;
+            _pendingUpdateManagedServer = updateManagedServer;
+            _operationRunning = true;
+            _notice = "正在退出 Unity Play Mode，退出后开始更新…";
+            _noticeType = MessageType.Warning;
+            Debug.LogWarning("[UPilot] Unity is in Play Mode or changing Play Mode. Exiting Play Mode before starting update.");
+            EditorApplication.isPlaying = false;
+            Repaint();
+            return false;
+        }
+
+        private void TryStartPendingUpdateAfterPlayModeExit()
+        {
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                return;
+
+            var updatePackage = _pendingUpdatePackage;
+            var updateManagedServer = _pendingUpdateManagedServer;
+            _pendingUpdateAfterPlayModeExit = false;
+            _pendingUpdatePackage = false;
+            _pendingUpdateManagedServer = false;
+            Debug.Log("[UPilot] Unity returned to Edit Mode. Starting pending update.");
+            StartUpdateSelected(updatePackage, updateManagedServer);
         }
 
         private void HandleOperationNotice(string message, MessageType type)
@@ -659,7 +726,7 @@ namespace CodingRiver.UPilot
                 try
                 {
                     GUI.backgroundColor = enabled
-                        ? new Color(0.22f, 0.62f, 0.28f)
+                        ? new Color(0.32f, 0.78f, 0.36f)
                         : new Color(0.45f, 0.45f, 0.45f);
                     using (new EditorGUI.DisabledScope(!enabled))
                     {
@@ -679,12 +746,8 @@ namespace CodingRiver.UPilot
 
         private static string BuildPrimaryUpdateLabel(bool updatePackage, bool updateManagedServer, bool mainChannel)
         {
-            if (updatePackage && updateManagedServer)
-                return "更新 UPilot 和服务";
-            if (updatePackage)
-                return "更新 UPilot";
-            if (updateManagedServer)
-                return "更新服务";
+            if (updatePackage || updateManagedServer)
+                return "更新";
             return "已是最新";
         }
 
@@ -702,7 +765,7 @@ namespace CodingRiver.UPilot
 
         private bool IsUpdateBusy()
         {
-            return _operationRunning || HasActiveUpdate();
+            return _pendingUpdateAfterPlayModeExit || _operationRunning || HasActiveUpdate();
         }
 
         private bool HasActiveUpdate()

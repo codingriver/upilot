@@ -185,7 +185,7 @@ namespace CodingRiver.UPilot
                 GUI.skin.scrollView);
             try
             {
-                DrawNotice();
+                DrawNotice(displaySnapshot.State);
                 DrawReleaseUpdateReminder(displaySnapshot);
                 EditorGUILayout.Space(4);
                 DrawMainCard(displaySnapshot);
@@ -1321,7 +1321,7 @@ namespace CodingRiver.UPilot
             menu.ShowAsContext();
         }
 
-        private void DrawNotice()
+        private void DrawNotice(UPilotMainState state)
         {
             if (string.IsNullOrEmpty(_notice)) return;
             if (EditorApplication.timeSinceStartup > _noticeUntil)
@@ -1329,6 +1329,10 @@ namespace CodingRiver.UPilot
                 _notice = "";
                 return;
             }
+
+            if (state == UPilotMainState.Updating && _noticeType != MessageType.Error)
+                return;
+
             EditorGUILayout.HelpBox(_notice, _noticeType);
         }
 
