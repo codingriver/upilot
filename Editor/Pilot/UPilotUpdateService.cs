@@ -79,7 +79,9 @@ namespace CodingRiver.UPilot
         private const string OperationMessageKey = "CodingRiver.UPilot.UpdateService.Message";
         private const string OperationTargetUpmKey = "CodingRiver.UPilot.UpdateService.TargetUpm";
         private const string OperationTargetServerKey = "CodingRiver.UPilot.UpdateService.TargetServer";
+        private const string OperationRuntimeIdKey = "CodingRiver.UPilot.UpdateService.RuntimeId";
         private const string SkipReleaseReminderVersionKey = "CodingRiver.UPilot.UpdateService.SkipReleaseReminderVersion";
+        private static readonly string RuntimeId = Guid.NewGuid().ToString("N");
 
         private AddRequest _upmRequest;
         private Action<string, MessageType> _notice;
@@ -166,6 +168,13 @@ namespace CodingRiver.UPilot
             var downloadState = UPilotServerRuntimeService.Instance.DownloadState;
             if (downloadState.IsRunning)
                 phase = UPilotUpdateOperationPhase.DownloadingService;
+            else if (IsMemoryBoundUpdatePhase(phase) && IsOperationFromPreviousRuntime())
+            {
+                var message = "更新任务被 Unity 脚本重载中断，请重新打开更新中心后再次更新。";
+                SetOperationFailed(message);
+                Debug.LogWarning("[UPilot] " + message);
+                phase = UPilotUpdateOperationPhase.Failed;
+            }
 
             var message = SessionState.GetString(ProjectKey(OperationMessageKey), "");
             if (downloadState.IsRunning)
@@ -621,6 +630,8 @@ namespace CodingRiver.UPilot
                 SessionState.SetString(ProjectKey(OperationTargetUpmKey), targetUpmVersion);
             if (targetServerVersion != null)
                 SessionState.SetString(ProjectKey(OperationTargetServerKey), targetServerVersion);
+            if (IsMemoryBoundUpdatePhase(phase))
+                SessionState.SetString(ProjectKey(OperationRuntimeIdKey), RuntimeId);
         }
 
         internal static void SetOperationTargets(string targetUpmVersion, string targetServerVersion)
@@ -647,6 +658,7 @@ namespace CodingRiver.UPilot
             SessionState.EraseString(ProjectKey(OperationMessageKey));
             SessionState.EraseString(ProjectKey(OperationTargetUpmKey));
             SessionState.EraseString(ProjectKey(OperationTargetServerKey));
+            SessionState.EraseString(ProjectKey(OperationRuntimeIdKey));
         }
 
         internal static string FormatDownloadProgressLabel(UPilotDownloadState state)
@@ -937,6 +949,21 @@ namespace CodingRiver.UPilot
             return Enum.TryParse(raw, out UPilotUpdateOperationPhase phase)
                 ? phase
                 : UPilotUpdateOperationPhase.None;
+        }
+
+        private static bool IsMemoryBoundUpdatePhase(UPilotUpdateOperationPhase phase)
+        {
+            return phase == UPilotUpdateOperationPhase.StoppingService ||
+                   phase == UPilotUpdateOperationPhase.DownloadingService ||
+                   phase == UPilotUpdateOperationPhase.UpdatingPackage ||
+                   phase == UPilotUpdateOperationPhase.RestartingService;
+        }
+
+        private static bool IsOperationFromPreviousRuntime()
+        {
+            var runtimeId = SessionState.GetString(ProjectKey(OperationRuntimeIdKey), "");
+            return string.IsNullOrWhiteSpace(runtimeId) ||
+                   !string.Equals(runtimeId, RuntimeId, StringComparison.Ordinal);
         }
 
         private static string ProjectKey(string key)

@@ -295,6 +295,31 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UpdateOperationStatusFailsStaleMemoryBoundPhaseAfterDomainReload()
+        {
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "正在下载并验证 MCP 服务…",
+                "0.3.18",
+                "0.3.18");
+
+            try
+            {
+                SessionState.SetString(GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.RuntimeId"), "previous-runtime");
+
+                var status = UPilotUpdateService.Instance.GetOperationStatus();
+
+                Assert.That(status.Phase, Is.EqualTo(UPilotUpdateOperationPhase.Failed));
+                Assert.That(status.IsRunning, Is.False);
+                Assert.That(status.Message, Does.Contain("脚本重载中断"));
+            }
+            finally
+            {
+                UPilotUpdateService.ClearOperationStatus();
+            }
+        }
+
+        [Test]
         public void UpdateVersionComparisonHandlesReleaseAndMainBuilds()
         {
             Assert.That(UPilotServerRuntimeService.IsVersionNewer("0.3.2", "0.3.1"), Is.True);
@@ -723,6 +748,14 @@ namespace CodingRiver.UPilot.Tests
                 "SkillInstallTemplateVersion",
                 BindingFlags.NonPublic | BindingFlags.Static);
             return (int)field.GetRawConstantValue();
+        }
+
+        private static string GetUpdateServiceProjectKey(string key)
+        {
+            var method = typeof(UPilotUpdateService).GetMethod(
+                "ProjectKey",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)method.Invoke(null, new object[] { key });
         }
 
         private static string ReplaceLine(string text, string prefix, string replacement)
