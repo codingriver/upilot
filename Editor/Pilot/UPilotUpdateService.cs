@@ -54,6 +54,31 @@ namespace CodingRiver.UPilot
         public bool BlocksServiceStart => UPilotUpdateService.IsServiceStartBlockedPhase(Phase);
     }
 
+    internal readonly struct UPilotUpdateReloadGuardStatus
+    {
+        public UPilotUpdateReloadGuardStatus(
+            bool isActive,
+            bool isCurrentRuntime,
+            string phase,
+            string failureMessage,
+            long sinceUnixMs)
+        {
+            IsActive = isActive;
+            IsCurrentRuntime = isCurrentRuntime;
+            Phase = phase ?? "";
+            FailureMessage = failureMessage ?? "";
+            SinceUnixMs = sinceUnixMs;
+        }
+
+        public bool IsActive { get; }
+        public bool IsCurrentRuntime { get; }
+        public string Phase { get; }
+        public string FailureMessage { get; }
+        public long SinceUnixMs { get; }
+        public bool HasFailure => !string.IsNullOrWhiteSpace(FailureMessage);
+        public bool NeedsRepair => HasFailure || (IsActive && !IsCurrentRuntime);
+    }
+
     internal sealed class UPilotReleaseUpdateCheckStatus
     {
         public bool IsChecking;
@@ -80,14 +105,30 @@ namespace CodingRiver.UPilot
         private const string OperationTargetUpmKey = "CodingRiver.UPilot.UpdateService.TargetUpm";
         private const string OperationTargetServerKey = "CodingRiver.UPilot.UpdateService.TargetServer";
         private const string OperationRuntimeIdKey = "CodingRiver.UPilot.UpdateService.RuntimeId";
+        private const string ReloadGuardActiveKey = "CodingRiver.UPilot.UpdateService.ReloadGuardActive";
+        private const string ReloadGuardRuntimeIdKey = "CodingRiver.UPilot.UpdateService.ReloadGuardRuntimeId";
+        private const string ReloadGuardPhaseKey = "CodingRiver.UPilot.UpdateService.ReloadGuardPhase";
+        private const string ReloadGuardSinceUnixMsKey = "CodingRiver.UPilot.UpdateService.ReloadGuardSinceUnixMs";
+        private const string ReloadGuardFailureKey = "CodingRiver.UPilot.UpdateService.ReloadGuardFailure";
+        private const string ReloadGuardAutoRefreshBlockedKey = "CodingRiver.UPilot.UpdateService.ReloadGuardAutoRefreshBlocked";
+        private const string ReloadGuardAssemblyReloadLockedKey = "CodingRiver.UPilot.UpdateService.ReloadGuardAssemblyReloadLocked";
         private const string SkipReleaseReminderVersionKey = "CodingRiver.UPilot.UpdateService.SkipReleaseReminderVersion";
         private static readonly string RuntimeId = Guid.NewGuid().ToString("N");
+        private static bool _reloadGuardActive;
+        private static bool _reloadGuardAutoRefreshBlocked;
+        private static bool _reloadGuardAssemblyReloadLocked;
 
         private AddRequest _upmRequest;
         private Action<string, MessageType> _notice;
         private bool _releaseCheckRunning;
         private bool _releaseCheckCompleted;
         private UPilotReleaseUpdateCheckStatus _releaseCheckStatus = new();
+
+        static UPilotUpdateService()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+        }
 
         internal static string[] GetPreferenceKeysForCurrentProject()
         {
@@ -165,14 +206,13 @@ namespace CodingRiver.UPilot
         internal UPilotUpdateOperationStatus GetOperationStatus()
         {
             var phase = ReadOperationPhase();
+            RecoverInterruptedReloadGuardIfNeeded(phase);
             var downloadState = UPilotServerRuntimeService.Instance.DownloadState;
             if (downloadState.IsRunning)
                 phase = UPilotUpdateOperationPhase.DownloadingService;
             else if (IsMemoryBoundUpdatePhase(phase) && IsOperationFromPreviousRuntime())
             {
-                var message = "更新任务被 Unity 脚本重载中断，请重新打开更新中心后再次更新。";
-                SetOperationFailed(message);
-                Debug.LogWarning("[UPilot] " + message);
+                var message = FailStaleMemoryBoundOperation(phase);
                 phase = UPilotUpdateOperationPhase.Failed;
             }
 
@@ -186,6 +226,44 @@ namespace CodingRiver.UPilot
                 message,
                 SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
                 SessionState.GetString(ProjectKey(OperationTargetServerKey), ""));
+        }
+
+        internal static UPilotUpdateReloadGuardStatus GetReloadGuardStatus()
+        {
+            var active = _reloadGuardActive || SessionState.GetBool(ProjectKey(ReloadGuardActiveKey), false);
+            var runtimeId = SessionState.GetString(ProjectKey(ReloadGuardRuntimeIdKey), "");
+            var phase = SessionState.GetString(ProjectKey(ReloadGuardPhaseKey), "");
+            var failure = SessionState.GetString(ProjectKey(ReloadGuardFailureKey), "");
+            var sinceText = SessionState.GetString(ProjectKey(ReloadGuardSinceUnixMsKey), "0");
+            long.TryParse(sinceText, out var sinceUnixMs);
+            return new UPilotUpdateReloadGuardStatus(
+                active,
+                !string.IsNullOrWhiteSpace(runtimeId) &&
+                string.Equals(runtimeId, RuntimeId, StringComparison.Ordinal),
+                phase,
+                failure,
+                sinceUnixMs);
+        }
+
+        internal static string GetReloadGuardNotice(UPilotUpdateReloadGuardStatus status, bool compact)
+        {
+            if (status.HasFailure)
+                return status.FailureMessage;
+            if (!status.IsActive)
+                return "";
+            return compact
+                ? "正在保护更新流程：Unity 自动刷新/脚本重载已暂时拦截，更新完成后会自动恢复。"
+                : "正在保护更新流程：Unity 自动刷新/脚本重载已暂时拦截。修改代码会在更新完成后自动刷新/重载，请暂时不要手动刷新。";
+        }
+
+        internal static bool ShouldShowRepairUpdateStateButton(
+            UPilotUpdateOperationStatus status,
+            UPilotUpdateReloadGuardStatus guardStatus)
+        {
+            if (guardStatus.NeedsRepair)
+                return true;
+            return status.Phase == UPilotUpdateOperationPhase.Failed &&
+                   status.Message.IndexOf("重载", StringComparison.Ordinal) >= 0;
         }
 
         internal static bool IsServiceStartBlockedPhase(UPilotUpdateOperationPhase phase)
@@ -624,6 +702,16 @@ namespace CodingRiver.UPilot
             string targetUpmVersion = null,
             string targetServerVersion = null)
         {
+            SetOperationPhaseCore(phase, message, targetUpmVersion, targetServerVersion, applyReloadGuard: true);
+        }
+
+        private static void SetOperationPhaseCore(
+            UPilotUpdateOperationPhase phase,
+            string message,
+            string targetUpmVersion,
+            string targetServerVersion,
+            bool applyReloadGuard)
+        {
             SessionState.SetString(ProjectKey(OperationPhaseKey), phase.ToString());
             SessionState.SetString(ProjectKey(OperationMessageKey), message ?? "");
             if (targetUpmVersion != null)
@@ -632,6 +720,25 @@ namespace CodingRiver.UPilot
                 SessionState.SetString(ProjectKey(OperationTargetServerKey), targetServerVersion);
             if (IsMemoryBoundUpdatePhase(phase))
                 SessionState.SetString(ProjectKey(OperationRuntimeIdKey), RuntimeId);
+
+            if (!applyReloadGuard)
+                return;
+
+            var guardError = ApplyReloadGuardForPhase(phase);
+            if (string.IsNullOrWhiteSpace(guardError))
+                return;
+
+            var failure = "拦截 Unity 脚本重载失败：" + guardError + "。已取消更新，请重新更新。";
+            SetReloadGuardFailure(failure);
+            Debug.LogError("[UPilot] " + failure);
+            UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
+            EndUpdateReloadGuard("guard enable failed", force: true, clearFailure: false);
+            SetOperationPhaseCore(
+                UPilotUpdateOperationPhase.Failed,
+                failure,
+                targetUpmVersion,
+                targetServerVersion,
+                applyReloadGuard: false);
         }
 
         internal static void SetOperationTargets(string targetUpmVersion, string targetServerVersion)
@@ -659,6 +766,39 @@ namespace CodingRiver.UPilot
             SessionState.EraseString(ProjectKey(OperationTargetUpmKey));
             SessionState.EraseString(ProjectKey(OperationTargetServerKey));
             SessionState.EraseString(ProjectKey(OperationRuntimeIdKey));
+            EndUpdateReloadGuard("operation status cleared", force: false, clearFailure: true);
+        }
+
+        internal string RepairUpdateState(Action<string, MessageType> notice = null)
+        {
+            Debug.LogWarning("[UPilot] Repairing update state and reload guard.");
+            EndUpdateReloadGuard("manual repair", force: true, clearFailure: true);
+            ClearOperationStatus();
+            UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: true);
+            _upmRequest = null;
+
+            if (UPilotSetupState.IsCompleted)
+            {
+                try
+                {
+                    UPilotProjectConfig.Reload();
+                    UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
+                    UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
+                    UPilotBridge.Instance.EnsureStarted();
+                    UPilotMcpServerManager.Instance.StartServer();
+                }
+                catch (Exception ex)
+                {
+                    var warning = "更新状态已修复，但服务恢复失败：" + ex.Message;
+                    Debug.LogWarning("[UPilot] " + warning + "\n" + ex);
+                    notice?.Invoke(warning, MessageType.Warning);
+                    return warning;
+                }
+            }
+
+            var message = "更新状态已修复，请重新检查更新后再次更新。";
+            notice?.Invoke(message, MessageType.Info);
+            return message;
         }
 
         internal static string FormatDownloadProgressLabel(UPilotDownloadState state)
@@ -959,11 +1099,245 @@ namespace CodingRiver.UPilot
                    phase == UPilotUpdateOperationPhase.RestartingService;
         }
 
+        private static bool IsReloadGuardedPhase(UPilotUpdateOperationPhase phase)
+        {
+            return phase == UPilotUpdateOperationPhase.StoppingService ||
+                   phase == UPilotUpdateOperationPhase.DownloadingService ||
+                   phase == UPilotUpdateOperationPhase.RestartingService;
+        }
+
+        private static string ApplyReloadGuardForPhase(UPilotUpdateOperationPhase phase)
+        {
+            if (IsReloadGuardedPhase(phase))
+            {
+                return BeginUpdateReloadGuard(phase.ToString());
+            }
+
+            EndUpdateReloadGuard(
+                phase.ToString(),
+                force: phase == UPilotUpdateOperationPhase.Completed ||
+                       phase == UPilotUpdateOperationPhase.Failed,
+                clearFailure: phase != UPilotUpdateOperationPhase.Failed);
+            return "";
+        }
+
+        private static string BeginUpdateReloadGuard(string reason)
+        {
+            SessionState.SetBool(ProjectKey(ReloadGuardActiveKey), true);
+            SessionState.SetString(ProjectKey(ReloadGuardRuntimeIdKey), RuntimeId);
+            SessionState.SetString(ProjectKey(ReloadGuardPhaseKey), reason ?? "");
+            if (SessionState.GetString(ProjectKey(ReloadGuardSinceUnixMsKey), "").Length == 0)
+            {
+                SessionState.SetString(
+                    ProjectKey(ReloadGuardSinceUnixMsKey),
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString());
+            }
+            SessionState.EraseString(ProjectKey(ReloadGuardFailureKey));
+
+            if (_reloadGuardActive)
+            {
+                Debug.Log(
+                    "[UPilot] Update reload guard still active." +
+                    $" phase={reason}; runtime={RuntimeId}");
+                return "";
+            }
+
+            var autoRefreshBlocked = false;
+            var reloadLocked = false;
+            try
+            {
+                AssetDatabase.DisallowAutoRefresh();
+                autoRefreshBlocked = true;
+                SessionState.SetBool(ProjectKey(ReloadGuardAutoRefreshBlockedKey), true);
+                EditorApplication.LockReloadAssemblies();
+                reloadLocked = true;
+                SessionState.SetBool(ProjectKey(ReloadGuardAssemblyReloadLockedKey), true);
+                _reloadGuardActive = true;
+                _reloadGuardAutoRefreshBlocked = true;
+                _reloadGuardAssemblyReloadLocked = true;
+                Debug.Log(
+                    "[UPilot] Update reload guard enabled." +
+                    $" phase={reason}; runtime={RuntimeId}; autoRefresh=blocked; assemblyReload=locked");
+                return "";
+            }
+            catch (Exception ex)
+            {
+                var message = ex.Message;
+                Debug.LogError(
+                    "[UPilot] Failed to enable update reload guard." +
+                    $" autoRefreshBlocked={autoRefreshBlocked}; assemblyReloadLocked={reloadLocked}\n" + ex);
+                SetReloadGuardFailure(message);
+                ReleaseReloadGuardHandles(
+                    "guard enable failed cleanup",
+                    autoRefreshBlocked,
+                    reloadLocked);
+                _reloadGuardActive = false;
+                _reloadGuardAutoRefreshBlocked = false;
+                _reloadGuardAssemblyReloadLocked = false;
+                ClearReloadGuardActiveState(clearFailure: false);
+                return message;
+            }
+        }
+
+        private static void EndUpdateReloadGuard(string reason, bool force, bool clearFailure)
+        {
+            var persistedActive = SessionState.GetBool(ProjectKey(ReloadGuardActiveKey), false);
+            var persistedAutoRefreshBlocked =
+                SessionState.GetBool(ProjectKey(ReloadGuardAutoRefreshBlockedKey), false);
+            var persistedAssemblyReloadLocked =
+                SessionState.GetBool(ProjectKey(ReloadGuardAssemblyReloadLockedKey), false);
+            if (!_reloadGuardActive && !force && !persistedActive &&
+                !persistedAutoRefreshBlocked && !persistedAssemblyReloadLocked)
+                return;
+
+            var legacyPersistedGuard = persistedActive &&
+                                       !persistedAutoRefreshBlocked &&
+                                       !persistedAssemblyReloadLocked;
+            var releaseAssemblyReload = _reloadGuardAssemblyReloadLocked ||
+                                        persistedAssemblyReloadLocked ||
+                                        (force && legacyPersistedGuard);
+            var releaseAutoRefresh = _reloadGuardAutoRefreshBlocked ||
+                                     persistedAutoRefreshBlocked ||
+                                     (force && legacyPersistedGuard);
+
+            ReleaseReloadGuardHandles(reason, releaseAutoRefresh, releaseAssemblyReload);
+
+            Debug.Log(
+                "[UPilot] Update reload guard disabled." +
+                $" reason={reason}; runtime={RuntimeId}; force={force}; persistedActive={persistedActive}" +
+                $"; autoRefreshReleased={releaseAutoRefresh}; assemblyReloadReleased={releaseAssemblyReload}");
+            _reloadGuardActive = false;
+            _reloadGuardAutoRefreshBlocked = false;
+            _reloadGuardAssemblyReloadLocked = false;
+            ClearReloadGuardActiveState(clearFailure);
+        }
+
+        private static void ReleaseReloadGuardHandles(
+            string reason,
+            bool releaseAutoRefresh,
+            bool releaseAssemblyReload)
+        {
+            if (releaseAssemblyReload)
+            {
+                try
+                {
+                    EditorApplication.UnlockReloadAssemblies();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning(
+                        "[UPilot] Failed to unlock assemblies after update guard." +
+                        $" reason={reason}; error={ex.Message}");
+                }
+            }
+
+            if (!releaseAutoRefresh)
+                return;
+
+            try
+            {
+                AssetDatabase.AllowAutoRefresh();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning(
+                    "[UPilot] Failed to allow auto refresh after update guard." +
+                    $" reason={reason}; error={ex.Message}");
+            }
+        }
+
+        private static void ClearReloadGuardActiveState(bool clearFailure)
+        {
+            SessionState.EraseBool(ProjectKey(ReloadGuardActiveKey));
+            SessionState.EraseString(ProjectKey(ReloadGuardRuntimeIdKey));
+            SessionState.EraseString(ProjectKey(ReloadGuardPhaseKey));
+            SessionState.EraseString(ProjectKey(ReloadGuardSinceUnixMsKey));
+            SessionState.EraseBool(ProjectKey(ReloadGuardAutoRefreshBlockedKey));
+            SessionState.EraseBool(ProjectKey(ReloadGuardAssemblyReloadLockedKey));
+            if (clearFailure)
+                SessionState.EraseString(ProjectKey(ReloadGuardFailureKey));
+        }
+
+        private static void RecoverInterruptedReloadGuardIfNeeded(UPilotUpdateOperationPhase phase)
+        {
+            var guard = GetReloadGuardStatus();
+            if (!guard.IsActive || guard.IsCurrentRuntime)
+                return;
+
+            var phaseText = BuildOperationPhaseText(phase);
+            var message = guard.HasFailure
+                ? guard.FailureMessage
+                : $"更新任务在 {phaseText} 阶段被 Unity 脚本重载中断，已解除更新保护，请修复更新状态后重新更新。";
+            SetReloadGuardFailure(message);
+            Debug.LogError(
+                "[UPilot] Recovering stale update reload guard after domain reload." +
+                $"\nphase={phase}; guardPhase={guard.Phase}; runtime={RuntimeId}; sinceUnixMs={guard.SinceUnixMs}" +
+                "\n" + message);
+            EndUpdateReloadGuard("domain reload recovery", force: true, clearFailure: false);
+        }
+
+        private static string FailStaleMemoryBoundOperation(UPilotUpdateOperationPhase phase)
+        {
+            var guard = GetReloadGuardStatus();
+            var phaseText = BuildOperationPhaseText(phase);
+            var message = guard.HasFailure
+                ? guard.FailureMessage
+                : $"更新任务在 {phaseText} 阶段被 Unity 脚本重载中断，请修复更新状态后重新更新。";
+            SetReloadGuardFailure(message);
+            Debug.LogError(
+                "[UPilot] " + message +
+                $"\nphase={phase}; guardActive={guard.IsActive}; guardPhase={guard.Phase}; guardRuntimeCurrent={guard.IsCurrentRuntime}");
+            UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
+            EndUpdateReloadGuard("stale memory-bound update", force: true, clearFailure: false);
+            SetOperationPhaseCore(
+                UPilotUpdateOperationPhase.Failed,
+                message,
+                SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
+                SessionState.GetString(ProjectKey(OperationTargetServerKey), ""),
+                applyReloadGuard: false);
+            return message;
+        }
+
+        private static void OnBeforeAssemblyReload()
+        {
+            var guard = GetReloadGuardStatus();
+            if (!guard.IsActive)
+                return;
+
+            var message =
+                "检测到 Unity 在 UPilot 更新保护期间执行脚本重载。更新已中断，请修复更新状态后重新更新。";
+            SetReloadGuardFailure(message);
+            SetOperationPhaseCore(
+                UPilotUpdateOperationPhase.Failed,
+                message,
+                SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
+                SessionState.GetString(ProjectKey(OperationTargetServerKey), ""),
+                applyReloadGuard: false);
+            Debug.LogError(
+                "[UPilot] Domain reload occurred while update reload guard was active." +
+                $"\nphase={guard.Phase}; runtime={RuntimeId}; guardRuntimeCurrent={guard.IsCurrentRuntime}" +
+                "\n" + message);
+        }
+
+        private static void SetReloadGuardFailure(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return;
+
+            SessionState.SetString(ProjectKey(ReloadGuardFailureKey), message);
+        }
+
         private static bool IsOperationFromPreviousRuntime()
         {
             var runtimeId = SessionState.GetString(ProjectKey(OperationRuntimeIdKey), "");
             return string.IsNullOrWhiteSpace(runtimeId) ||
                    !string.Equals(runtimeId, RuntimeId, StringComparison.Ordinal);
+        }
+
+        private static string BuildOperationPhaseText(UPilotUpdateOperationPhase phase)
+        {
+            var label = BuildOperationLabel(phase);
+            return string.IsNullOrWhiteSpace(label) ? phase.ToString() : label;
         }
 
         private static string ProjectKey(string key)

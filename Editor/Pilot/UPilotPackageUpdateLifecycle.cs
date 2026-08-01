@@ -158,6 +158,16 @@ namespace CodingRiver.UPilot
             EditorPrefs.DeleteKey(ProjectPersistentKey(PendingOldServerVersionKey));
         }
 
+        public static void ResetUpdateStateForRepair(bool clearPendingPackageRetry)
+        {
+            ClearUpdateState();
+            if (clearPendingPackageRetry)
+                ClearPendingManagedPackageUpdate();
+            Debug.Log(
+                "[UPilot] Package update lifecycle state reset for repair." +
+                $" clearPendingPackageRetry={clearPendingPackageRetry}");
+        }
+
         public static bool TryGetPendingPackageUpdateNotice(out string message)
         {
             message = "";

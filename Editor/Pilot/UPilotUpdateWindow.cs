@@ -254,6 +254,8 @@ namespace CodingRiver.UPilot
                     DrawInfoRow("目标服务", operationStatus.TargetServerVersion);
             }
 
+            DrawReloadGuardNotice(operationStatus);
+
             if (!string.IsNullOrWhiteSpace(_notice))
                 EditorGUILayout.HelpBox(_notice, _noticeType);
         }
@@ -406,6 +408,7 @@ namespace CodingRiver.UPilot
                 updateBusy);
             DrawOperationStatus(operationStatus);
             DrawDownloadProgress();
+            DrawReloadGuardNotice(operationStatus);
 
             if (!string.IsNullOrWhiteSpace(_notice))
                 EditorGUILayout.HelpBox(_notice, _noticeType);
@@ -753,14 +756,61 @@ namespace CodingRiver.UPilot
 
         private static void DrawOperationStatus(UPilotUpdateOperationStatus status)
         {
-            if (!status.IsRunning)
+            if (!status.IsRunning && status.Phase != UPilotUpdateOperationPhase.Failed)
                 return;
 
             var message = string.IsNullOrWhiteSpace(status.Message)
                 ? "请等待更新完成…"
                 : status.Message;
             EditorGUILayout.Space(6);
-            EditorGUILayout.HelpBox(message, MessageType.Info);
+            EditorGUILayout.HelpBox(
+                message,
+                status.Phase == UPilotUpdateOperationPhase.Failed ? MessageType.Error : MessageType.Info);
+        }
+
+        private void DrawReloadGuardNotice(UPilotUpdateOperationStatus status)
+        {
+            var guardStatus = UPilotUpdateService.GetReloadGuardStatus();
+            var message = UPilotUpdateService.GetReloadGuardNotice(guardStatus, compact: false);
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.HelpBox(
+                    message,
+                    guardStatus.HasFailure ? MessageType.Error : MessageType.Warning);
+            }
+
+            if (!UPilotUpdateService.ShouldShowRepairUpdateStateButton(status, guardStatus))
+                return;
+
+            EditorGUILayout.Space(4);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("修复更新状态", GUILayout.Width(128f), GUILayout.Height(26f)))
+                    RepairUpdateState();
+            }
+        }
+
+        private void RepairUpdateState()
+        {
+            try
+            {
+                _operationRunning = false;
+                _pendingUpdateAfterPlayModeExit = false;
+                _pendingUpdatePackage = false;
+                _pendingUpdateManagedServer = false;
+                var message = UPilotUpdateService.Instance.RepairUpdateState(HandleOperationNotice);
+                _notice = message;
+                _noticeType = MessageType.Info;
+                Repaint();
+            }
+            catch (Exception ex)
+            {
+                _notice = "修复更新状态失败：" + ex.Message;
+                _noticeType = MessageType.Error;
+                ReportUpdateWindowException(_notice, ex);
+            }
         }
 
         private bool IsUpdateBusy()

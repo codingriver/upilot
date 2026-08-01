@@ -312,6 +312,70 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(status.Phase, Is.EqualTo(UPilotUpdateOperationPhase.Failed));
                 Assert.That(status.IsRunning, Is.False);
                 Assert.That(status.Message, Does.Contain("脚本重载中断"));
+                Assert.That(
+                    UPilotUpdateService.ShouldShowRepairUpdateStateButton(
+                        status,
+                        UPilotUpdateService.GetReloadGuardStatus()),
+                    Is.True);
+            }
+            finally
+            {
+                UPilotUpdateService.ClearOperationStatus();
+            }
+        }
+
+        [Test]
+        public void UpdateReloadGuardIsVisibleAndReleasedOnCompletion()
+        {
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "正在下载并验证 MCP 服务…",
+                "0.3.18",
+                "0.3.18");
+
+            try
+            {
+                var activeGuard = UPilotUpdateService.GetReloadGuardStatus();
+                Assert.That(activeGuard.IsActive, Is.True);
+                Assert.That(activeGuard.IsCurrentRuntime, Is.True);
+                Assert.That(
+                    UPilotUpdateService.GetReloadGuardNotice(activeGuard, compact: false),
+                    Does.Contain("自动刷新/脚本重载已暂时拦截"));
+
+                UPilotUpdateService.SetOperationCompleted("更新完成");
+
+                var clearedGuard = UPilotUpdateService.GetReloadGuardStatus();
+                Assert.That(clearedGuard.IsActive, Is.False);
+                Assert.That(UPilotUpdateService.GetReloadGuardNotice(clearedGuard, compact: false), Is.Empty);
+            }
+            finally
+            {
+                UPilotUpdateService.ClearOperationStatus();
+            }
+        }
+
+        [Test]
+        public void UpdateReloadGuardRecoveryReleasesPreviousRuntimeGuard()
+        {
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "正在下载并验证 MCP 服务…",
+                "0.3.18",
+                "0.3.18");
+
+            try
+            {
+                SessionState.SetString(GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.RuntimeId"), "previous-runtime");
+                SessionState.SetString(GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.ReloadGuardRuntimeId"), "previous-runtime");
+
+                var status = UPilotUpdateService.Instance.GetOperationStatus();
+                var guard = UPilotUpdateService.GetReloadGuardStatus();
+
+                Assert.That(status.Phase, Is.EqualTo(UPilotUpdateOperationPhase.Failed));
+                Assert.That(status.Message, Does.Contain("脚本重载中断"));
+                Assert.That(guard.IsActive, Is.False);
+                Assert.That(guard.HasFailure, Is.True);
+                Assert.That(UPilotUpdateService.GetReloadGuardNotice(guard, compact: true), Does.Contain("脚本重载中断"));
             }
             finally
             {

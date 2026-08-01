@@ -504,6 +504,13 @@ namespace CodingRiver.UPilot
                 if (!string.IsNullOrWhiteSpace(targetText))
                     EditorGUILayout.LabelField(targetText, EditorStyles.miniLabel);
 
+                var guardStatus = UPilotUpdateService.GetReloadGuardStatus();
+                var guardMessage = UPilotUpdateService.GetReloadGuardNotice(guardStatus, compact: true);
+                if (!string.IsNullOrWhiteSpace(guardMessage))
+                    EditorGUILayout.HelpBox(
+                        guardMessage,
+                        guardStatus.HasFailure ? MessageType.Error : MessageType.Warning);
+
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     GUILayout.FlexibleSpace();
