@@ -172,6 +172,18 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void AgentRulesAutoSetupKeyTracksRulesAndSkillTemplateVersions()
+        {
+            var rulesVersion = GetAgentRulesTemplateVersion();
+            var skillVersion = GetSkillInstallTemplateVersion();
+
+            var keys = UPilotAgentSetup.GetAgentRulesPreferenceKeysForCurrentProject();
+
+            Assert.That(keys, Has.Some.EndsWith($".rules.v{rulesVersion}.skill.v{skillVersion}"));
+            Assert.That(keys, Has.Some.EndsWith($".v{rulesVersion}"));
+        }
+
+        [Test]
         public void AgentSetupExposesSupportedMcpAndRuleStatusesInSameOrder()
         {
             var mcpStatuses = UPilotAgentSetup.GetMcpConfigStatuses();

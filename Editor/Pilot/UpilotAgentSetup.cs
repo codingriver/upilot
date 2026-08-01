@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -175,21 +176,24 @@ namespace CodingRiver.UPilot
         {
             var projectRoot = GetProjectRoot();
             var result = new StringBuilder();
+            var agentsPath = Path.Combine(projectRoot, "AGENTS.md");
+            var claudePath = Path.Combine(projectRoot, "CLAUDE.md");
+            var cursorPath = Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc");
 
             WriteManagedTextFile(
-                Path.Combine(projectRoot, "AGENTS.md"),
-                BuildAgentsMd(),
+                agentsPath,
+                BuildAgentsMd(agentsPath, logRender: true),
                 overwriteExisting,
                 result);
 
             WriteManagedTextFile(
-                Path.Combine(projectRoot, "CLAUDE.md"),
+                claudePath,
                 "@AGENTS.md\n",
                 overwriteExisting,
                 result);
 
             WriteCursorRuleFile(
-                Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc"),
+                cursorPath,
                 overwriteExisting,
                 result);
 
@@ -288,9 +292,10 @@ namespace CodingRiver.UPilot
 
         private static void WriteSharedAgentsRule(string projectRoot, StringBuilder result)
         {
+            var agentsPath = Path.Combine(projectRoot, "AGENTS.md");
             WriteManagedTextFile(
-                Path.Combine(projectRoot, "AGENTS.md"),
-                BuildAgentsMd(),
+                agentsPath,
+                BuildAgentsMd(agentsPath, logRender: true),
                 overwriteExisting: false,
                 result);
         }
@@ -487,16 +492,33 @@ namespace CodingRiver.UPilot
 
         internal static string[] GetAgentRulesPreferenceKeysForCurrentProject()
         {
-            var keys = new string[AgentRulesTemplateVersion];
             string projectHash = StableHash(GetProjectRoot());
+            var keys = new List<string>();
+
+            // Legacy keys are retained so the Preferences reset action can clean markers written by older versions.
             for (int version = 1; version <= AgentRulesTemplateVersion; version++)
-                keys[version - 1] = AutoSetupKeyPrefix + projectHash + ".v" + version;
-            return keys;
+                keys.Add(AutoSetupKeyPrefix + projectHash + ".v" + version);
+
+            for (int rulesVersion = 1; rulesVersion <= AgentRulesTemplateVersion; rulesVersion++)
+            {
+                for (int skillVersion = 1; skillVersion <= SkillInstallTemplateVersion; skillVersion++)
+                    keys.Add(BuildAgentRulesSetupKey(projectHash, rulesVersion, skillVersion));
+            }
+
+            return keys.ToArray();
         }
 
         private static string GetAgentRulesSetupKey()
         {
-            return GetAgentRulesPreferenceKeysForCurrentProject()[AgentRulesTemplateVersion - 1];
+            return BuildAgentRulesSetupKey(
+                StableHash(GetProjectRoot()),
+                AgentRulesTemplateVersion,
+                SkillInstallTemplateVersion);
+        }
+
+        private static string BuildAgentRulesSetupKey(string projectHash, int rulesVersion, int skillVersion)
+        {
+            return AutoSetupKeyPrefix + projectHash + ".rules.v" + rulesVersion + ".skill.v" + skillVersion;
         }
 
         private static string WriteJsonMcpConfig(string path, bool includeType, bool promptBeforeOverwrite)
@@ -556,10 +578,17 @@ namespace CodingRiver.UPilot
         private static void WriteManagedTextFile(string path, string content, bool overwriteExisting, StringBuilder result)
         {
             var managedContent = WrapManagedBlock(content);
+            var existed = File.Exists(path);
+            LogAgentRulesFileProcessing(
+                "Begin managed text file",
+                path,
+                sourcePath: "",
+                $"exists={existed}; overwriteExisting={overwriteExisting}; managedBytes={Encoding.UTF8.GetByteCount(managedContent)}");
             if (!File.Exists(path))
             {
                 EnsureParentDirectory(path);
                 File.WriteAllText(path, managedContent, new UTF8Encoding(false));
+                LogAgentRulesFileProcessing("Wrote managed text file", path, sourcePath: "");
                 result.AppendLine("Wrote " + NormalizePathForLog(path));
                 return;
             }
@@ -568,6 +597,11 @@ namespace CodingRiver.UPilot
             if (overwriteExisting)
             {
                 File.WriteAllText(path, managedContent, new UTF8Encoding(false));
+                LogAgentRulesFileProcessing(
+                    "Replaced managed text file",
+                    path,
+                    sourcePath: "",
+                    $"oldBytes={Encoding.UTF8.GetByteCount(original)}; newBytes={Encoding.UTF8.GetByteCount(managedContent)}");
                 result.AppendLine("Replaced " + NormalizePathForLog(path));
                 return;
             }
@@ -575,35 +609,56 @@ namespace CodingRiver.UPilot
             var updated = UpsertManagedBlock(original, content);
             if (string.Equals(original, updated, StringComparison.Ordinal))
             {
+                LogAgentRulesFileProcessing("Kept managed text file", path, sourcePath: "", "reason=no-change");
                 result.AppendLine("Kept existing " + NormalizePathForLog(path));
                 return;
             }
 
             File.WriteAllText(path, updated, new UTF8Encoding(false));
+            LogAgentRulesFileProcessing(
+                "Updated managed text file",
+                path,
+                sourcePath: "",
+                $"oldBytes={Encoding.UTF8.GetByteCount(original)}; newBytes={Encoding.UTF8.GetByteCount(updated)}");
             result.AppendLine("Updated UPilot block in " + NormalizePathForLog(path));
         }
 
         private static void WriteCursorRuleFile(string path, bool overwriteExisting, StringBuilder result)
         {
-            var content = BuildCursorRule();
+            var content = BuildCursorRule(path, logRender: true);
             var existed = File.Exists(path);
+            LogAgentRulesFileProcessing(
+                "Begin Cursor rule file",
+                path,
+                sourcePath: "",
+                $"exists={existed}; overwriteExisting={overwriteExisting}; bytes={Encoding.UTF8.GetByteCount(content)}");
             if (!existed || overwriteExisting)
             {
                 EnsureParentDirectory(path);
                 File.WriteAllText(path, content, new UTF8Encoding(false));
+                LogAgentRulesFileProcessing(
+                    existed && overwriteExisting ? "Replaced Cursor rule file" : "Wrote Cursor rule file",
+                    path,
+                    sourcePath: "");
                 result.AppendLine((existed && overwriteExisting ? "Replaced " : "Wrote ") + NormalizePathForLog(path));
                 return;
             }
 
             var original = File.ReadAllText(path, Encoding.UTF8);
-            var updated = UpsertManagedBlock(original, BuildAgentsMd());
+            var updated = UpsertManagedBlock(original, BuildAgentsMd(path, logRender: true));
             if (string.Equals(original, updated, StringComparison.Ordinal))
             {
+                LogAgentRulesFileProcessing("Kept Cursor rule file", path, sourcePath: "", "reason=no-change");
                 result.AppendLine("Kept existing " + NormalizePathForLog(path));
                 return;
             }
 
             File.WriteAllText(path, updated, new UTF8Encoding(false));
+            LogAgentRulesFileProcessing(
+                "Updated Cursor rule file",
+                path,
+                sourcePath: "",
+                $"oldBytes={Encoding.UTF8.GetByteCount(original)}; newBytes={Encoding.UTF8.GetByteCount(updated)}");
             result.AppendLine("Updated UPilot block in " + NormalizePathForLog(path));
         }
 
@@ -611,6 +666,11 @@ namespace CodingRiver.UPilot
         {
             var target = Path.Combine(projectRoot, ".agents", "skills", SkillName);
             var source = Path.Combine(ResolvePackageRoot(), "skills", SkillName);
+            LogAgentRulesFileProcessing(
+                "Begin Skill install",
+                target,
+                source,
+                $"targetExists={Directory.Exists(target)}; sourceExists={Directory.Exists(source)}; overwriteExisting={overwriteExisting}; templateVersion={SkillInstallTemplateVersion}");
             if (Directory.Exists(target) && !overwriteExisting)
             {
                 var isUnmodifiedManagedInstall = TryReadSkillInstallMetadata(
@@ -621,15 +681,22 @@ namespace CodingRiver.UPilot
                         installedContentHash,
                         ComputeSkillInstallHash(target),
                         StringComparison.OrdinalIgnoreCase);
+                LogAgentRulesFileProcessing(
+                    "Inspected existing Skill install",
+                    target,
+                    source,
+                    $"managed={isUnmodifiedManagedInstall}; installedTemplateVersion={installedTemplateVersion}; expectedTemplateVersion={SkillInstallTemplateVersion}; installedHash={installedContentHash}");
 
                 if (isUnmodifiedManagedInstall &&
                     installedTemplateVersion < SkillInstallTemplateVersion &&
                     Directory.Exists(source))
                 {
+                    LogAgentRulesFileProcessing("Deleting old managed Skill install", target, source);
                     Directory.Delete(target, recursive: true);
                     CopyDirectoryWithoutMeta(source, target);
                     RewriteCopiedSkillEndpoint(target);
                     WriteSkillInstallMetadata(target);
+                    LogAgentRulesFileProcessing("Updated managed Skill install", target, source);
                     result.AppendLine("Updated managed " + NormalizePathForLog(target));
                     return;
                 }
@@ -638,10 +705,12 @@ namespace CodingRiver.UPilot
                 if (isUnmodifiedManagedInstall)
                 {
                     WriteSkillInstallMetadata(target);
+                    LogAgentRulesFileProcessing("Kept current managed Skill install", target, source);
                     result.AppendLine("Kept current managed " + NormalizePathForLog(target));
                 }
                 else
                 {
+                    LogAgentRulesFileProcessing("Kept customized Skill install", target, source);
                     result.AppendLine("Kept existing unmanaged or customized " + NormalizePathForLog(target));
                 }
                 return;
@@ -650,19 +719,29 @@ namespace CodingRiver.UPilot
             if (!Directory.Exists(source))
             {
                 Directory.CreateDirectory(target);
-                File.WriteAllText(Path.Combine(target, "SKILL.md"), BuildFallbackSkill(), new UTF8Encoding(false));
+                var fallbackSkillPath = Path.Combine(target, "SKILL.md");
+                File.WriteAllText(
+                    fallbackSkillPath,
+                    BuildFallbackSkill(fallbackSkillPath, logRender: true),
+                    new UTF8Encoding(false));
+                LogAgentRulesFileProcessing("Wrote fallback Skill file", fallbackSkillPath, sourcePath: "");
                 RewriteCopiedSkillEndpoint(target);
                 WriteSkillInstallMetadata(target);
+                LogAgentRulesFileProcessing("Wrote fallback Skill install", target, source);
                 result.AppendLine("Wrote fallback " + NormalizePathForLog(target));
                 return;
             }
 
             if (Directory.Exists(target))
+            {
+                LogAgentRulesFileProcessing("Deleting Skill install before overwrite", target, source);
                 Directory.Delete(target, recursive: true);
+            }
 
             CopyDirectoryWithoutMeta(source, target);
             RewriteCopiedSkillEndpoint(target);
             WriteSkillInstallMetadata(target);
+            LogAgentRulesFileProcessing("Wrote Skill install", target, source);
             result.AppendLine("Wrote " + NormalizePathForLog(target));
         }
 
@@ -704,6 +783,11 @@ namespace CodingRiver.UPilot
                        $"  \"contentSha256\": \"{contentHash}\"\n" +
                        "}\n";
             File.WriteAllText(metadataPath, json, new UTF8Encoding(false));
+            LogAgentRulesFileProcessing(
+                "Wrote Skill install metadata",
+                metadataPath,
+                sourcePath: "",
+                $"templateVersion={SkillInstallTemplateVersion}; contentSha256={contentHash}");
         }
 
         private static string ComputeSkillInstallHash(string target)
@@ -747,6 +831,11 @@ namespace CodingRiver.UPilot
             text = Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/mcp", McpUrl);
             text = Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/health", HealthUrl);
             File.WriteAllText(skillPath, text, new UTF8Encoding(false));
+            LogAgentRulesFileProcessing(
+                "Rewrote Skill endpoint",
+                skillPath,
+                sourcePath: "",
+                $"mcpUrl={McpUrl}; healthUrl={HealthUrl}");
         }
 
         private static void CopyDirectoryWithoutMeta(string source, string target)
@@ -759,6 +848,7 @@ namespace CodingRiver.UPilot
 
                 var dest = Path.Combine(target, Path.GetFileName(file));
                 File.Copy(file, dest, overwrite: true);
+                LogAgentRulesFileProcessing("Copied Skill file", dest, file);
             }
 
             foreach (var dir in Directory.GetDirectories(source))
@@ -791,19 +881,29 @@ namespace CodingRiver.UPilot
 
         private static string BuildAgentsMd()
         {
+            return BuildAgentsMd(targetPath: "", logRender: false);
+        }
+
+        private static string BuildAgentsMd(string targetPath, bool logRender)
+        {
             var projectRoot = GetProjectRoot();
             var packageVersion = string.IsNullOrEmpty(UPilotServerRuntimeService.UpmVersion)
                 ? "unknown"
                 : UPilotServerRuntimeService.UpmVersion;
+            var template = LoadAgentRulesTemplate(out var templatePath);
+            var generatedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            if (logRender)
+                LogAgentRulesTemplateRender(templatePath, targetPath, projectRoot, packageVersion, generatedAt);
             return RenderAgentRulesTemplate(
-                LoadAgentRulesTemplate(),
+                template,
                 projectRoot,
-                packageVersion);
+                packageVersion,
+                generatedAt);
         }
 
-        private static string LoadAgentRulesTemplate()
+        private static string LoadAgentRulesTemplate(out string templatePath)
         {
-            var templatePath = Path.Combine(
+            templatePath = Path.Combine(
                 ResolvePackageRoot(),
                 "skills",
                 SkillName,
@@ -817,13 +917,14 @@ namespace CodingRiver.UPilot
         private static string RenderAgentRulesTemplate(
             string template,
             string projectRoot,
-            string packageVersion)
+            string packageVersion,
+            string generatedAt)
         {
             return template
                 .Replace("{{rulesVersion}}", AgentRulesTemplateVersion.ToString())
                 .Replace("{{upilotPackageVersion}}", packageVersion)
                 .Replace("{{projectPath}}", projectRoot)
-                .Replace("{{generatedAt}}", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+                .Replace("{{generatedAt}}", generatedAt)
                 .Replace("{{mcpUrl}}", McpUrl)
                 .Replace("{{healthUrl}}", HealthUrl)
                 .Replace("\r\n", "\n")
@@ -831,22 +932,66 @@ namespace CodingRiver.UPilot
                 .TrimEnd() + "\n";
         }
 
+        private static void LogAgentRulesTemplateRender(
+            string templatePath,
+            string targetPath,
+            string projectRoot,
+            string packageVersion,
+            string generatedAt)
+        {
+            Debug.Log(
+                "[UPilot] Rendering Agent rules template." +
+                "\nTemplate=" + NormalizePathForLog(templatePath) +
+                "\nTarget=" + (string.IsNullOrWhiteSpace(targetPath) ? "(none)" : NormalizePathForLog(targetPath)) +
+                "\nParameters:" +
+                $"\n  rulesVersion={AgentRulesTemplateVersion}" +
+                $"\n  skillInstallTemplateVersion={SkillInstallTemplateVersion}" +
+                "\n  upilotPackageVersion=" + packageVersion +
+                "\n  projectPath=" + NormalizePathForLog(projectRoot) +
+                "\n  generatedAt=" + generatedAt +
+                "\n  mcpUrl=" + McpUrl +
+                "\n  healthUrl=" + HealthUrl);
+        }
+
+        private static void LogAgentRulesFileProcessing(
+            string action,
+            string targetPath,
+            string sourcePath,
+            string detail = "")
+        {
+            Debug.Log(
+                "[UPilot] Agent rules file processing: " + action +
+                "\nTarget=" + (string.IsNullOrWhiteSpace(targetPath) ? "(none)" : NormalizePathForLog(targetPath)) +
+                "\nSource=" + (string.IsNullOrWhiteSpace(sourcePath) ? "(none)" : NormalizePathForLog(sourcePath)) +
+                (string.IsNullOrWhiteSpace(detail) ? "" : "\n" + detail));
+        }
+
         private static string BuildCursorRule()
+        {
+            return BuildCursorRule(targetPath: "", logRender: false);
+        }
+
+        private static string BuildCursorRule(string targetPath, bool logRender)
         {
             return "---\n" +
                    "description: Use UPilot MCP for Unity Editor automation\n" +
                    "alwaysApply: true\n" +
                    "---\n\n" +
-                   WrapManagedBlock(BuildAgentsMd());
+                   WrapManagedBlock(BuildAgentsMd(targetPath, logRender));
         }
 
         private static string BuildFallbackSkill()
+        {
+            return BuildFallbackSkill(targetPath: "", logRender: false);
+        }
+
+        private static string BuildFallbackSkill(string targetPath, bool logRender)
         {
             return "---\n" +
                    "name: upilot-unity-mcp\n" +
                    "description: Unity Editor automation through the UPilot MCP server.\n" +
                    "---\n\n" +
-                   BuildAgentsMd();
+                   BuildAgentsMd(targetPath, logRender);
         }
 
         private static string BuildCodexConfig()

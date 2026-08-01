@@ -161,7 +161,7 @@ class TaskDomainService:
             return "unknown"
 
     @staticmethod
-    def _read_agent_rules_template() -> str:
+    def _read_agent_rules_template() -> tuple[str, Path]:
         candidates = []
         bundle_root = getattr(sys, "_MEIPASS", "")
         if bundle_root:
@@ -171,7 +171,9 @@ class TaskDomainService:
 
         for path in candidates:
             try:
-                return path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8")
+                logger.info("UPilot Agent rules template loaded: template=%s", path)
+                return text, path
             except OSError:
                 continue
         raise FileNotFoundError(f"UPilot Agent rules template is missing: {_AGENT_RULES_TEMPLATE_RELATIVE}")
@@ -179,12 +181,26 @@ class TaskDomainService:
     def _build_agent_rules_block(self, project_root: Path) -> str:
         project_path = str(project_root)
         version = self._upilot_package_version()
+        generated_at = _utc_iso()
+        template, template_path = self._read_agent_rules_template()
+        logger.info(
+            "Rendering UPilot Agent rules template: template=%s target=%s rulesVersion=%s "
+            "upilotPackageVersion=%s projectPath=%s generatedAt=%s mcpUrl=%s healthUrl=%s",
+            template_path,
+            project_root / "AGENTS.md",
+            _UPILOT_RULES_VERSION,
+            version,
+            project_path,
+            generated_at,
+            "http://127.0.0.1:8011/mcp",
+            "http://127.0.0.1:8011/health",
+        )
         rendered = (
-            self._read_agent_rules_template()
+            template
             .replace("{{rulesVersion}}", str(_UPILOT_RULES_VERSION))
             .replace("{{upilotPackageVersion}}", version)
             .replace("{{projectPath}}", project_path)
-            .replace("{{generatedAt}}", _utc_iso())
+            .replace("{{generatedAt}}", generated_at)
             .replace("{{mcpUrl}}", "http://127.0.0.1:8011/mcp")
             .replace("{{healthUrl}}", "http://127.0.0.1:8011/health")
             .replace("\r\n", "\n")
@@ -208,6 +224,7 @@ class TaskDomainService:
         request_id = new_id("req")
         project_root = self._project_root()
         rules_path = project_root / "AGENTS.md"
+        logger.info("Checking UPilot Agent rules: target=%s", rules_path)
         recommended_block = self._build_agent_rules_block(project_root)
         diff_summary: list[str] = []
         current_block = ""
@@ -249,6 +266,15 @@ class TaskDomainService:
 
         needs_import = not has_block
         needs_update = bool(diff_summary) and not marker_error
+        logger.info(
+            "Checked UPilot Agent rules: target=%s hasBlock=%s needsImport=%s needsUpdate=%s markerError=%s diffs=%s",
+            rules_path,
+            has_block,
+            needs_import,
+            needs_update,
+            marker_error or "",
+            "; ".join(diff_summary) if diff_summary else "(none)",
+        )
         return ok(
             request_id,
             {
@@ -276,6 +302,13 @@ class TaskDomainService:
         data = dict(check.data)
         data["dryRun"] = not apply
         data["applied"] = False
+        logger.info(
+            "Preparing UPilot Agent rules install: target=%s dryRun=%s needsImport=%s needsUpdate=%s",
+            data.get("rulesPath", ""),
+            not apply,
+            data.get("needsImport", False),
+            data.get("needsUpdate", False),
+        )
         if not apply:
             return ok(request_id, data)
         if data.get("markerError"):
@@ -289,17 +322,27 @@ class TaskDomainService:
                 start = text.index(_UPILOT_BLOCK_START)
                 end = text.index(_UPILOT_BLOCK_END) + len(_UPILOT_BLOCK_END)
                 text = text[:start] + recommended_block + text[end:]
+                logger.info("Updating UPilot Agent rules block: target=%s", rules_path)
             else:
                 text = text.rstrip() + "\n\n" + recommended_block + "\n"
+                logger.info("Appending UPilot Agent rules block: target=%s", rules_path)
         else:
             rules_path.parent.mkdir(parents=True, exist_ok=True)
             text = recommended_block + "\n"
+            logger.info("Creating UPilot Agent rules file: target=%s", rules_path)
 
         rules_path.write_text(text, encoding="utf-8", newline="\n")
         data["applied"] = True
         data["fileSha256"] = _sha256_file(rules_path)
         data["installedRulesVersion"] = str(_UPILOT_RULES_VERSION)
         data["installedUpilotPackageVersion"] = self._upilot_package_version()
+        logger.info(
+            "Installed UPilot Agent rules: target=%s sha256=%s rulesVersion=%s upilotPackageVersion=%s",
+            rules_path,
+            data["fileSha256"],
+            data["installedRulesVersion"],
+            data["installedUpilotPackageVersion"],
+        )
         return ok(request_id, data)
 
     async def operation_start(self, job_spec: dict | None) -> ToolResponse:
