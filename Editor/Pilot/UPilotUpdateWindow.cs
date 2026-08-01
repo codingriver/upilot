@@ -24,6 +24,7 @@ namespace CodingRiver.UPilot
         private bool _pendingUpdateManagedServer;
         private bool _showDetails;
         private bool _sourceChannel;
+        private UPilotUpdateOperationPhase _lastObservedOperationPhase = UPilotUpdateOperationPhase.None;
         private string _error = "";
         private string _notice = "";
         private MessageType _noticeType = MessageType.Info;
@@ -41,6 +42,11 @@ namespace CodingRiver.UPilot
                 if (window.HasActiveUpdate())
                 {
                     window.ShowActiveUpdate();
+                }
+                else if (UPilotUpdateService.Instance.GetOperationStatus().Phase ==
+                         UPilotUpdateOperationPhase.Completed)
+                {
+                    window.ShowCompletedUpdate();
                 }
                 else
                 {
@@ -111,6 +117,14 @@ namespace CodingRiver.UPilot
             Repaint();
         }
 
+        private void ShowCompletedUpdate()
+        {
+            _isChecking = false;
+            _error = "";
+            _operationRunning = false;
+            Repaint();
+        }
+
         private void OnEnable()
         {
             EditorApplication.update += OnEditorUpdate;
@@ -134,10 +148,28 @@ namespace CodingRiver.UPilot
 
                 var status = UPilotUpdateService.Instance.GetOperationStatus();
                 var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
+                var previousPhase = _lastObservedOperationPhase;
+                var operationWasRunning = _operationRunning;
+                _lastObservedOperationPhase = status.Phase;
                 if (_operationRunning && !status.IsRunning && !downloadRunning)
                     _operationRunning = false;
 
-                if (_operationRunning || status.IsRunning || downloadRunning)
+                if (status.Phase == UPilotUpdateOperationPhase.Completed &&
+                    previousPhase != UPilotUpdateOperationPhase.Completed)
+                {
+                    _isChecking = false;
+                    _error = "";
+                    _notice = string.IsNullOrWhiteSpace(status.Message) ? "更新成功" : status.Message;
+                    _noticeType = MessageType.Info;
+                }
+
+                if (ShouldRefreshForOperationStatus(
+                        previousPhase,
+                        status.Phase,
+                        operationWasRunning,
+                        _operationRunning,
+                        status.IsRunning,
+                        downloadRunning))
                     Repaint();
             }
             catch (Exception ex)
@@ -171,7 +203,7 @@ namespace CodingRiver.UPilot
                 using (new EditorGUI.DisabledScope(_isChecking || IsUpdateBusy()))
                 {
                     if (GUILayout.Button("重新检查", EditorStyles.miniButton, GUILayout.Width(72)))
-                        CheckForUpdates();
+                        RecheckForUpdates();
                 }
                 GUILayout.Space(10);
             }
@@ -184,6 +216,16 @@ namespace CodingRiver.UPilot
                     _isChecking = false;
                     _error = "";
                     DrawActiveUpdateContent();
+                    DrawFooter();
+                    return;
+                }
+
+                var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
+                if (operationStatus.Phase == UPilotUpdateOperationPhase.Completed)
+                {
+                    _isChecking = false;
+                    _error = "";
+                    DrawCompletedUpdateContent(operationStatus);
                     DrawFooter();
                     return;
                 }
@@ -257,6 +299,45 @@ namespace CodingRiver.UPilot
             DrawReloadGuardNotice(operationStatus);
 
             if (!string.IsNullOrWhiteSpace(_notice))
+                EditorGUILayout.HelpBox(_notice, _noticeType);
+        }
+
+        private void DrawCompletedUpdateContent(UPilotUpdateOperationStatus status)
+        {
+            EditorGUILayout.Space(16);
+            var successStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 24,
+            };
+            successStyle.normal.textColor = EditorGUIUtility.isProSkin
+                ? new Color(0.38f, 0.9f, 0.46f)
+                : new Color(0.08f, 0.5f, 0.16f);
+            EditorGUILayout.LabelField("更新成功", successStyle, GUILayout.Height(36f));
+
+            var messageStyle = new GUIStyle(EditorStyles.wordWrappedLabel)
+            {
+                alignment = TextAnchor.MiddleCenter,
+            };
+            var message = string.IsNullOrWhiteSpace(status.Message)
+                ? "UPilot 和 MCP 服务已完成更新。"
+                : status.Message;
+            EditorGUILayout.LabelField(message, messageStyle, GUILayout.MinHeight(32f));
+
+            EditorGUILayout.Space(8);
+            var progressRect = EditorGUILayout.GetControlRect(false, 18f);
+            EditorGUI.ProgressBar(progressRect, 1f, "更新成功");
+
+            EditorGUILayout.Space(10);
+            var mode = UPilotServerRuntimeService.Instance.GetConfiguredMode();
+            var currentUpm = UPilotServerRuntimeService.UpmVersion;
+            var currentServer = GetCurrentServerVersion(mode);
+            DrawInfoRow("当前包", currentUpm);
+            DrawInfoRow(
+                "当前服务",
+                string.IsNullOrWhiteSpace(currentServer) ? status.TargetServerVersion : currentServer);
+
+            if (_noticeType == MessageType.Warning || _noticeType == MessageType.Error)
                 EditorGUILayout.HelpBox(_notice, _noticeType);
         }
 
@@ -497,6 +578,33 @@ namespace CodingRiver.UPilot
                 _isChecking = false;
                 Repaint();
             }
+        }
+
+        private void RecheckForUpdates()
+        {
+            if (UPilotUpdateService.Instance.GetOperationStatus().Phase ==
+                UPilotUpdateOperationPhase.Completed)
+            {
+                UPilotUpdateService.ClearOperationStatus();
+                _lastObservedOperationPhase = UPilotUpdateOperationPhase.None;
+            }
+
+            CheckForUpdates();
+        }
+
+        internal static bool ShouldRefreshForOperationStatus(
+            UPilotUpdateOperationPhase previousPhase,
+            UPilotUpdateOperationPhase currentPhase,
+            bool operationWasRunning,
+            bool operationRunning,
+            bool statusIsRunning,
+            bool downloadRunning)
+        {
+            return previousPhase != currentPhase ||
+                   operationWasRunning != operationRunning ||
+                   operationRunning ||
+                   statusIsRunning ||
+                   downloadRunning;
         }
 
         private void UpdatePackage()

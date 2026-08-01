@@ -270,6 +270,29 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UpdateWindowRefreshesWhenRestartTransitionsToCompleted()
+        {
+            Assert.That(
+                UPilotUpdateWindow.ShouldRefreshForOperationStatus(
+                    UPilotUpdateOperationPhase.RestartingService,
+                    UPilotUpdateOperationPhase.Completed,
+                    operationWasRunning: false,
+                    operationRunning: false,
+                    statusIsRunning: false,
+                    downloadRunning: false),
+                Is.True);
+            Assert.That(
+                UPilotUpdateWindow.ShouldRefreshForOperationStatus(
+                    UPilotUpdateOperationPhase.Completed,
+                    UPilotUpdateOperationPhase.Completed,
+                    operationWasRunning: false,
+                    operationRunning: false,
+                    statusIsRunning: false,
+                    downloadRunning: false),
+                Is.False);
+        }
+
+        [Test]
         public void UpdateOperationStatusUsesWaitingCopyDuringPackageReload()
         {
             UPilotUpdateService.SetOperationPhase(
