@@ -37,7 +37,18 @@ namespace CodingRiver.UPilot
             Events.registeringPackages += OnRegisteringPackages;
             Events.registeredPackages -= OnRegisteredPackages;
             Events.registeredPackages += OnRegisteredPackages;
-            EditorApplication.delayCall += TryRestoreAfterUpdate;
+            EditorApplication.delayCall += RestoreReleaseOrResetSourceState;
+        }
+
+        private static void RestoreReleaseOrResetSourceState()
+        {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            {
+                UPilotUpdateService.ResetSourceChannelState();
+                return;
+            }
+
+            TryRestoreAfterUpdate();
         }
 
         public static bool PrepareForPackageUpdate(
@@ -168,6 +179,23 @@ namespace CodingRiver.UPilot
                 $" clearPendingPackageRetry={clearPendingPackageRetry}");
         }
 
+        internal static void ResetUpdateStateForSourceChannel()
+        {
+            var hadSessionState = GetSessionBool(UpdateInProgressKey, false) ||
+                                  GetSessionBool(RestartPendingKey, false) ||
+                                  GetSessionBool(UpdateCompletedKey, false) ||
+                                  GetSessionBool(ManagedServerPendingKey, false);
+            var hadPersistentState = HasPendingManagedPackageUpdate;
+            ClearUpdateState();
+            ClearPendingManagedPackageUpdate();
+            if (hadSessionState || hadPersistentState)
+            {
+                Debug.Log(
+                    "[UPilot] Cleared package update lifecycle state for source channel." +
+                    $" sessionState={hadSessionState}; persistentState={hadPersistentState}");
+            }
+        }
+
         public static bool TryGetPendingPackageUpdateNotice(out string message)
         {
             message = "";
@@ -222,10 +250,18 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                if (!ContainsUPilot(args.changedFrom))
+                var currentPackage = FindUPilotPackage(args.changedFrom);
+                var targetPackage = FindUPilotPackage(args.changedTo);
+                if (currentPackage == null || targetPackage == null)
                     return;
 
-                var targetVersion = FindUPilotVersion(args.changedTo);
+                if (!ShouldManagePackageUpdate(targetPackage))
+                {
+                    UPilotUpdateService.ResetSourceChannelState();
+                    return;
+                }
+
+                var targetVersion = targetPackage.version ?? "";
                 var externalConflictMessage = "";
                 if (ShouldHandleExternalPackageManagerConflict())
                 {
@@ -258,8 +294,15 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                if (!ContainsUPilot(args.changedTo))
+                var targetPackage = FindUPilotPackage(args.changedTo);
+                if (targetPackage == null)
                     return;
+
+                if (!ShouldManagePackageUpdate(targetPackage))
+                {
+                    UPilotUpdateService.ResetSourceChannelState();
+                    return;
+                }
 
                 MarkPackageUpdateCompleted();
             }
@@ -277,32 +320,30 @@ namespace CodingRiver.UPilot
             return UPilotUpdateService.Instance.HasActiveUpdateWorkForExternalPackageManagerUpdate();
         }
 
-        private static bool ContainsUPilot(System.Collections.Generic.IEnumerable<PackageInfo> packages)
+        internal static bool ShouldManagePackageUpdate(PackageInfo targetPackage)
         {
-            if (packages == null)
-                return false;
-
-            foreach (var package in packages)
-            {
-                if (string.Equals(package?.name, PackageName, StringComparison.Ordinal))
-                    return true;
-            }
-
-            return false;
+            return targetPackage != null &&
+                   !UPilotServerRuntimeService.IsSourcePackage(targetPackage);
         }
 
-        private static string FindUPilotVersion(System.Collections.Generic.IEnumerable<PackageInfo> packages)
+        internal static bool ShouldManagePackageUpdate(PackageSource source, string packageId)
+        {
+            return !UPilotServerRuntimeService.IsSourcePackage(source, packageId);
+        }
+
+        private static PackageInfo FindUPilotPackage(
+            System.Collections.Generic.IEnumerable<PackageInfo> packages)
         {
             if (packages == null)
-                return "";
+                return null;
 
             foreach (var package in packages)
             {
                 if (string.Equals(package?.name, PackageName, StringComparison.Ordinal))
-                    return package.version ?? "";
+                    return package;
             }
 
-            return "";
+            return null;
         }
 
         private static void ScheduleRestore()

@@ -101,6 +101,8 @@ namespace CodingRiver.UPilot
             try
             {
                 minSize = new Vector2(440, 400);
+                if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                    UPilotUpdateService.ResetSourceChannelState();
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
                 EnforceUpdateMaintenanceStop();
@@ -285,7 +287,7 @@ namespace CodingRiver.UPilot
         private UPilotMainSnapshot GetDisplaySnapshot()
         {
             var updateStatus = UPilotUpdateService.Instance.GetOperationStatus();
-            if (updateStatus.IsRunning)
+            if (!UPilotServerRuntimeService.IsSourceUpdateChannel() && updateStatus.IsRunning)
             {
                 var title = (_updateStopScheduled || _updateStopInProgress)
                     ? "正在强制停止服务"
@@ -691,10 +693,15 @@ namespace CodingRiver.UPilot
         {
             var serverVersion = string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动/旧版" : _mcpStatus.ServerVersion;
             var runtimeMode = GetRuntimeModeLabel(snapshot.State);
-            var channel = string.IsNullOrEmpty(_mcpStatus.BuildChannel) ? "release" : _mcpStatus.BuildChannel;
+            var channel = UPilotServerRuntimeService.ResolveUpdateChannel();
             var compatibility = UPilotServerRuntimeService.IsSourceChannel(channel)
                 ? "source / 本机 Python"
                 : "release 清单兼容";
+            if (!string.IsNullOrWhiteSpace(_mcpStatus.BuildChannel) &&
+                !string.Equals(_mcpStatus.BuildChannel, channel, StringComparison.OrdinalIgnoreCase))
+            {
+                compatibility += "；服务上报通道：" + _mcpStatus.BuildChannel;
+            }
             var writeApproved = UPilotProjectConfig.Current.safety?.writeAccessApproved == true;
 
             DrawSectionTitleBar("运行信息");

@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEditor.PackageManager;
 using UnityEngine;
 
 namespace CodingRiver.UPilot.Tests
@@ -267,6 +268,91 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(running.IsRunning, Is.True);
             Assert.That(completed.IsRunning, Is.False);
             Assert.That(failed.IsRunning, Is.False);
+        }
+
+        [Test]
+        public void SourcePackageClassificationKeepsReleaseTargetsManaged()
+        {
+            Assert.That(
+                UPilotServerRuntimeService.IsSourcePackage(PackageSource.Local, "io.github.codingriver.upilot@file:D:/upilot"),
+                Is.True);
+            Assert.That(
+                UPilotServerRuntimeService.IsSourcePackage(PackageSource.Embedded, "io.github.codingriver.upilot@file:Packages/upilot"),
+                Is.True);
+            Assert.That(
+                UPilotServerRuntimeService.IsSourcePackage(PackageSource.Git, "io.github.codingriver.upilot@https://github.com/codingriver/upilot.git#main"),
+                Is.True);
+            Assert.That(
+                UPilotPackageUpdateLifecycle.ShouldManagePackageUpdate(
+                    PackageSource.Git,
+                    "io.github.codingriver.upilot@https://github.com/codingriver/upilot.git#v0.3.23"),
+                Is.True);
+            Assert.That(
+                UPilotPackageUpdateLifecycle.ShouldManagePackageUpdate(
+                    PackageSource.Local,
+                    "io.github.codingriver.upilot@file:D:/upilot"),
+                Is.False);
+        }
+
+        [Test]
+        public void SourceChannelDoesNotBlockServiceStartFromReleaseOperationState()
+        {
+            if (!UPilotServerRuntimeService.IsSourceUpdateChannel())
+                Assert.Ignore("This assertion requires a source/local package installation.");
+
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.WaitingForReload,
+                "stale source update state",
+                "0.3.23",
+                "0.3.23");
+
+            try
+            {
+                Assert.That(UPilotUpdateService.Instance.GetOperationStatus().BlocksServiceStart, Is.True);
+                Assert.That(UPilotUpdateService.Instance.IsServiceStartBlocked, Is.False);
+                Assert.That(UPilotUpdateService.Instance.IsUpdateRunning, Is.False);
+            }
+            finally
+            {
+                UPilotUpdateService.ResetSourceChannelState();
+            }
+        }
+
+        [Test]
+        public void SourceChannelResetClearsOperationLifecycleAndReloadGuardState()
+        {
+            if (!UPilotServerRuntimeService.IsSourceUpdateChannel())
+                Assert.Ignore("This assertion requires a source/local package installation.");
+
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "stale source download state",
+                "0.3.23",
+                "0.3.23");
+            SessionState.SetBool(
+                GetPackageLifecycleSessionKey("CodingRiver.UPilot.PackageUpdate.InProgress"),
+                true);
+
+            try
+            {
+                Assert.That(UPilotUpdateService.GetReloadGuardStatus().IsActive, Is.True);
+
+                UPilotUpdateService.ResetSourceChannelState();
+
+                Assert.That(
+                    UPilotUpdateService.Instance.GetOperationStatus().Phase,
+                    Is.EqualTo(UPilotUpdateOperationPhase.None));
+                Assert.That(UPilotUpdateService.GetReloadGuardStatus().IsActive, Is.False);
+                Assert.That(
+                    SessionState.GetBool(
+                        GetPackageLifecycleSessionKey("CodingRiver.UPilot.PackageUpdate.InProgress"),
+                        false),
+                    Is.False);
+            }
+            finally
+            {
+                UPilotUpdateService.ResetSourceChannelState();
+            }
         }
 
         [Test]

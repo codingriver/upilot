@@ -424,20 +424,26 @@ namespace CodingRiver.UPilot
             try
             {
                 var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
-                if (package == null)
-                    return false;
-
-                if (package.source == PackageSource.Local || package.source == PackageSource.Embedded)
-                    return true;
-
-                var packageId = package.packageId ?? "";
-                if (packageId.IndexOf("#main", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    packageId.IndexOf("main-nightly", StringComparison.OrdinalIgnoreCase) >= 0)
-                    return true;
+                return IsSourcePackage(package);
             }
             catch { }
 
             return false;
+        }
+
+        internal static bool IsSourcePackage(UnityEditor.PackageManager.PackageInfo package)
+        {
+            return package != null && IsSourcePackage(package.source, package.packageId);
+        }
+
+        internal static bool IsSourcePackage(PackageSource source, string packageId)
+        {
+            if (source == PackageSource.Local || source == PackageSource.Embedded)
+                return true;
+
+            var normalizedPackageId = packageId ?? "";
+            return normalizedPackageId.IndexOf("#main", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   normalizedPackageId.IndexOf("main-nightly", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public void StartDownloadLatestServerExe()

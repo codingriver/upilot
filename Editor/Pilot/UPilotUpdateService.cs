@@ -140,6 +140,9 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                    ResetSourceChannelState();
+
                 if (IsUpdateRunning)
                 {
                     // Do not start a release manifest check while an update is active; show progress only.
@@ -165,12 +168,19 @@ namespace CodingRiver.UPilot
             }
         }
 
-        internal bool IsUpdateRunning => GetOperationStatus().IsRunning;
+        internal bool IsUpdateRunning =>
+            !UPilotServerRuntimeService.IsSourceUpdateChannel() &&
+            GetOperationStatus().IsRunning;
 
-        internal bool IsServiceStartBlocked => GetOperationStatus().BlocksServiceStart;
+        internal bool IsServiceStartBlocked =>
+            !UPilotServerRuntimeService.IsSourceUpdateChannel() &&
+            GetOperationStatus().BlocksServiceStart;
 
         internal bool HasActiveUpdateWorkForExternalPackageManagerUpdate()
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                return false;
+
             var status = GetOperationStatus();
             var guard = GetReloadGuardStatus();
             var downloadState = UPilotServerRuntimeService.Instance.DownloadState;
@@ -218,6 +228,12 @@ namespace CodingRiver.UPilot
 
         internal void EnsureLatestReleaseCheck(bool force = false)
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            {
+                ResetSourceChannelState();
+                return;
+            }
+
             if (!force && (_releaseCheckRunning || _releaseCheckCompleted))
                 return;
             if (GetOperationStatus().IsRunning || UPilotServerRuntimeService.Instance.DownloadState.IsRunning)
@@ -420,7 +436,7 @@ namespace CodingRiver.UPilot
                 return false;
 
             var message = "开发/source 通道仅使用本机 Python，不执行自动管理服务或包更新。正式对外版本请通过 v* tag 发布。";
-            SetOperationCompleted(message);
+            ResetSourceChannelState();
             notice?.Invoke(message, MessageType.Info);
             return true;
         }
@@ -823,6 +839,37 @@ namespace CodingRiver.UPilot
             SessionState.EraseString(ProjectKey(OperationRuntimeIdKey));
             SessionState.EraseBool(ProjectKey(ExternalPackageManagerAbortKey));
             EndUpdateReloadGuard("operation status cleared", force: false, clearFailure: true);
+        }
+
+        internal static void ResetSourceChannelState()
+        {
+            var phase = ReadOperationPhase();
+            var guard = GetReloadGuardStatus();
+            var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
+            var hadState = phase != UPilotUpdateOperationPhase.None ||
+                           guard.IsActive ||
+                           guard.HasFailure ||
+                           downloadRunning ||
+                           IsExternalPackageManagerAbortActive();
+
+            if (downloadRunning)
+                UPilotServerRuntimeService.Instance.CancelDownload();
+
+            Instance._upmRequest = null;
+            Instance._releaseCheckRunning = false;
+            Instance._releaseCheckCompleted = false;
+            Instance._releaseCheckStatus = new UPilotReleaseUpdateCheckStatus();
+            if (guard.IsActive || guard.HasFailure)
+                EndUpdateReloadGuard("source channel reset", force: true, clearFailure: true);
+            ClearOperationStatus();
+            UPilotPackageUpdateLifecycle.ResetUpdateStateForSourceChannel();
+
+            if (hadState)
+            {
+                Debug.Log(
+                    "[UPilot] Cleared update operation state for source channel." +
+                    $" phase={phase}; guardActive={guard.IsActive}; downloadRunning={downloadRunning}");
+            }
         }
 
         internal string RepairUpdateState(Action<string, MessageType> notice = null)
@@ -1319,6 +1366,9 @@ namespace CodingRiver.UPilot
 
         private static void RecoverInterruptedReloadGuardIfNeeded(UPilotUpdateOperationPhase phase)
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                return;
+
             var guard = GetReloadGuardStatus();
             if (!guard.IsActive || guard.IsCurrentRuntime)
                 return;
@@ -1359,6 +1409,9 @@ namespace CodingRiver.UPilot
 
         private static void OnBeforeAssemblyReload()
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                return;
+
             var guard = GetReloadGuardStatus();
             if (!guard.IsActive)
                 return;

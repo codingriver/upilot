@@ -39,7 +39,12 @@ namespace CodingRiver.UPilot
                 window._externalNotice = notice;
                 window.Show();
                 window.Focus();
-                if (window.HasActiveUpdate())
+                if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                {
+                    UPilotUpdateService.ResetSourceChannelState();
+                    window.CheckForUpdates();
+                }
+                else if (window.HasActiveUpdate())
                 {
                     window.ShowActiveUpdate();
                 }
@@ -127,6 +132,9 @@ namespace CodingRiver.UPilot
 
         private void OnEnable()
         {
+            _sourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
+            if (_sourceChannel)
+                UPilotUpdateService.ResetSourceChannelState();
             EditorApplication.update += OnEditorUpdate;
         }
 
@@ -211,6 +219,17 @@ namespace CodingRiver.UPilot
             EditorGUILayout.Space(4);
             using (new EditorGUILayout.VerticalScope(new GUIStyle { padding = new RectOffset(12, 12, 0, 8) }))
             {
+                if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                {
+                    _isChecking = false;
+                    _operationRunning = false;
+                    _error = "";
+                    _sourceChannel = true;
+                    DrawSourceUpdateContent();
+                    DrawFooter();
+                    return;
+                }
+
                 if (HasActiveUpdate())
                 {
                     _isChecking = false;
