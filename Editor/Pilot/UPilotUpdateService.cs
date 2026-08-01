@@ -212,7 +212,7 @@ namespace CodingRiver.UPilot
                 phase = UPilotUpdateOperationPhase.DownloadingService;
             else if (IsMemoryBoundUpdatePhase(phase) && IsOperationFromPreviousRuntime())
             {
-                var message = FailStaleMemoryBoundOperation(phase);
+                FailStaleMemoryBoundOperation(phase);
                 phase = UPilotUpdateOperationPhase.Failed;
             }
 
