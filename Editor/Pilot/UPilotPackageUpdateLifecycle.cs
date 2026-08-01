@@ -195,6 +195,7 @@ namespace CodingRiver.UPilot
             var shouldRestart = GetSessionBool(RestartPendingKey, false);
             var hasPendingManagedPackageUpdate = HasPendingManagedPackageUpdate;
             ClearUpdateState();
+            UPilotUpdateService.ClearExternalPackageManagerAbort();
             if (hasPendingManagedPackageUpdate)
             {
                 var message = TryGetPendingPackageUpdateNotice(out var notice)
@@ -225,14 +226,26 @@ namespace CodingRiver.UPilot
                     return;
 
                 var targetVersion = FindUPilotVersion(args.changedTo);
+                var externalConflictMessage = "";
+                if (ShouldHandleExternalPackageManagerConflict())
+                {
+                    externalConflictMessage =
+                        UPilotUpdateService.Instance.AbortForExternalPackageManagerUpdate(targetVersion);
+                    UPilotMainWindow.OpenWithNotice(externalConflictMessage, MessageType.Warning);
+                }
+
                 var installManagedServer = ShouldInstallManagedServerAfterPackageUpdate();
                 if (!PrepareForPackageUpdate(
                         targetVersion,
                         installManagedServerAfterUpdate: installManagedServer,
                         targetServerVersion: ""))
                 {
-                    Debug.LogError(
-                        "[UPilot] Package Manager is updating UPilot, but the MCP service could not be stopped before package registration.");
+                    var message =
+                        "Package Manager 正在更新 UPilot，但 MCP 服务无法在包注册前停止。请等待 Package Manager 完成后打开 UPilot 更新中心修复状态。";
+                    if (!string.IsNullOrWhiteSpace(externalConflictMessage))
+                        message = externalConflictMessage + "\n" + message;
+                    Debug.LogError("[UPilot] " + message);
+                    UPilotMainWindow.OpenWithNotice(message, MessageType.Error);
                 }
             }
             catch (Exception ex)
@@ -254,6 +267,14 @@ namespace CodingRiver.UPilot
             {
                 ReportLifecycleError("UPilot 包注册完成处理失败", ex);
             }
+        }
+
+        private static bool ShouldHandleExternalPackageManagerConflict()
+        {
+            if (GetSessionBool(UpdateInProgressKey, false))
+                return false;
+
+            return UPilotUpdateService.Instance.HasActiveUpdateWorkForExternalPackageManagerUpdate();
         }
 
         private static bool ContainsUPilot(System.Collections.Generic.IEnumerable<PackageInfo> packages)
@@ -336,6 +357,7 @@ namespace CodingRiver.UPilot
             {
                 ClearUpdateState();
                 ClearPendingManagedPackageUpdate();
+                UPilotUpdateService.ClearExternalPackageManagerAbort();
                 UPilotUpdateService.SetOperationCompleted("UPilot 包已更新");
                 return;
             }
@@ -355,6 +377,7 @@ namespace CodingRiver.UPilot
 
             ClearUpdateState();
             ClearPendingManagedPackageUpdate();
+            UPilotUpdateService.ClearExternalPackageManagerAbort();
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
             manager.RestartServer();
@@ -395,12 +418,14 @@ namespace CodingRiver.UPilot
                         shouldRestart);
                 ClearUpdateState();
                 ClearPendingManagedPackageUpdate();
+                UPilotUpdateService.ClearExternalPackageManagerAbort();
                 if (updated)
                     Debug.Log($"[UPilot] Package update completed ({targetVersion}); managed MCP service updated.");
             }
             catch (Exception ex)
             {
                 ClearUpdateState();
+                UPilotUpdateService.ClearExternalPackageManagerAbort();
                 UPilotUpdateService.SetOperationFailed("MCP 服务更新失败：" + ex.Message);
                 Debug.LogError("[UPilot] Managed MCP service update after package update failed: " + ex);
                 if (!shouldRestart || !UPilotSetupState.IsCompleted)

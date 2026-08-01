@@ -112,6 +112,7 @@ namespace CodingRiver.UPilot
         private const string ReloadGuardFailureKey = "CodingRiver.UPilot.UpdateService.ReloadGuardFailure";
         private const string ReloadGuardAutoRefreshBlockedKey = "CodingRiver.UPilot.UpdateService.ReloadGuardAutoRefreshBlocked";
         private const string ReloadGuardAssemblyReloadLockedKey = "CodingRiver.UPilot.UpdateService.ReloadGuardAssemblyReloadLocked";
+        private const string ExternalPackageManagerAbortKey = "CodingRiver.UPilot.UpdateService.ExternalPackageManagerAbort";
         private const string SkipReleaseReminderVersionKey = "CodingRiver.UPilot.UpdateService.SkipReleaseReminderVersion";
         private static readonly string RuntimeId = Guid.NewGuid().ToString("N");
         private static bool _reloadGuardActive;
@@ -167,6 +168,53 @@ namespace CodingRiver.UPilot
         internal bool IsUpdateRunning => GetOperationStatus().IsRunning;
 
         internal bool IsServiceStartBlocked => GetOperationStatus().BlocksServiceStart;
+
+        internal bool HasActiveUpdateWorkForExternalPackageManagerUpdate()
+        {
+            var status = GetOperationStatus();
+            var guard = GetReloadGuardStatus();
+            var downloadState = UPilotServerRuntimeService.Instance.DownloadState;
+            return status.IsRunning ||
+                   downloadState.IsRunning ||
+                   guard.IsActive ||
+                   guard.NeedsRepair;
+        }
+
+        internal string AbortForExternalPackageManagerUpdate(string targetVersion)
+        {
+            var status = GetOperationStatus();
+            var guard = GetReloadGuardStatus();
+            var downloadState = UPilotServerRuntimeService.Instance.DownloadState;
+            var targetText = string.IsNullOrWhiteSpace(targetVersion) ? "未知版本" : targetVersion;
+            var message =
+                $"检测到你在 UPilot 更新过程中通过 Unity Package Manager 更新 UPilot 包（目标：{targetText}）。" +
+                "已取消当前 UPilot 更新任务并释放更新保护，正在尝试切换为 Package Manager 更新恢复流程。";
+
+            SessionState.SetBool(ProjectKey(ExternalPackageManagerAbortKey), true);
+            if (downloadState.IsRunning)
+            {
+                Debug.LogWarning("[UPilot] Cancelling active MCP download because Package Manager started an UPilot package update.");
+                UPilotServerRuntimeService.Instance.CancelDownload();
+            }
+
+            Debug.LogError(
+                "[UPilot] External Package Manager update started during an active UPilot update." +
+                $"\nTargetVersion={targetText}; phase={status.Phase}; label={status.Label}; downloadRunning={downloadState.IsRunning}" +
+                $"\nreloadGuardActive={guard.IsActive}; reloadGuardCurrentRuntime={guard.IsCurrentRuntime}; reloadGuardPhase={guard.Phase}" +
+                "\n" + message);
+            SetOperationFailed(message);
+            return message;
+        }
+
+        internal static bool IsExternalPackageManagerAbortActive()
+        {
+            return SessionState.GetBool(ProjectKey(ExternalPackageManagerAbortKey), false);
+        }
+
+        internal static void ClearExternalPackageManagerAbort()
+        {
+            SessionState.EraseBool(ProjectKey(ExternalPackageManagerAbortKey));
+        }
 
         internal void EnsureLatestReleaseCheck(bool force = false)
         {
@@ -676,6 +724,13 @@ namespace CodingRiver.UPilot
             }
             catch (OperationCanceledException)
             {
+                if (IsExternalPackageManagerAbortActive())
+                {
+                    Debug.LogWarning("[UPilot] MCP 服务下载已因 Package Manager 外部包更新而取消。");
+                    notice?.Invoke("已取消 MCP 服务下载，转由 Package Manager 更新 UPilot 包。", MessageType.Warning);
+                    return null;
+                }
+
                 SetOperationCompleted("已取消 MCP 服务下载");
                 notice?.Invoke("已取消 MCP 服务下载", MessageType.Info);
                 return null;
@@ -766,6 +821,7 @@ namespace CodingRiver.UPilot
             SessionState.EraseString(ProjectKey(OperationTargetUpmKey));
             SessionState.EraseString(ProjectKey(OperationTargetServerKey));
             SessionState.EraseString(ProjectKey(OperationRuntimeIdKey));
+            SessionState.EraseBool(ProjectKey(ExternalPackageManagerAbortKey));
             EndUpdateReloadGuard("operation status cleared", force: false, clearFailure: true);
         }
 

@@ -384,6 +384,36 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void PackageManagerConflictIsDetectedOnlyBeforeLifecycleTakesOver()
+        {
+            var method = typeof(UPilotPackageUpdateLifecycle).GetMethod(
+                "ShouldHandleExternalPackageManagerConflict",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(method, Is.Not.Null);
+
+            UPilotUpdateService.SetOperationPhase(
+                UPilotUpdateOperationPhase.DownloadingService,
+                "正在下载并验证 MCP 服务…",
+                "0.3.20",
+                "0.3.20");
+
+            try
+            {
+                Assert.That((bool)method.Invoke(null, null), Is.True);
+
+                SessionState.SetBool(
+                    GetPackageLifecycleSessionKey("CodingRiver.UPilot.PackageUpdate.InProgress"),
+                    true);
+                Assert.That((bool)method.Invoke(null, null), Is.False);
+            }
+            finally
+            {
+                UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: true);
+                UPilotUpdateService.ClearOperationStatus();
+            }
+        }
+
+        [Test]
         public void UpdateVersionComparisonHandlesReleaseAndMainBuilds()
         {
             Assert.That(UPilotServerRuntimeService.IsVersionNewer("0.3.2", "0.3.1"), Is.True);
@@ -818,6 +848,14 @@ namespace CodingRiver.UPilot.Tests
         {
             var method = typeof(UPilotUpdateService).GetMethod(
                 "ProjectKey",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            return (string)method.Invoke(null, new object[] { key });
+        }
+
+        private static string GetPackageLifecycleSessionKey(string key)
+        {
+            var method = typeof(UPilotPackageUpdateLifecycle).GetMethod(
+                "ProjectSessionKey",
                 BindingFlags.NonPublic | BindingFlags.Static);
             return (string)method.Invoke(null, new object[] { key });
         }
