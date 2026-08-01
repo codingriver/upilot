@@ -692,33 +692,15 @@ namespace CodingRiver.UPilot
 
             DrawSectionTitleBar("运行信息");
             EditorGUILayout.Space(4);
-            if (position.width >= 620f)
+            var compact = position.width < 620f;
+            using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    DrawInfoColumn("UPM", UPilotServerRuntimeService.UpmVersion, 82);
-                    DrawInfoColumn("服务", serverVersion, 100);
-                    DrawInfoColumn("运行方式", runtimeMode, 130);
-                    DrawInfoColumn(new GUIContent("通道", compatibility), channel, 92);
-                    DrawInfoColumn("授权", writeApproved ? "已允许" : "Safe", 76);
-                    GUILayout.FlexibleSpace();
-                }
-            }
-            else
-            {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    DrawInfoColumn("UPM", UPilotServerRuntimeService.UpmVersion, 86);
-                    DrawInfoColumn("服务", serverVersion, 112);
-                    DrawInfoColumn("运行方式", runtimeMode, 145);
-                    GUILayout.FlexibleSpace();
-                }
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    DrawInfoColumn(new GUIContent("通道", compatibility), channel, 112);
-                    DrawInfoColumn("授权", writeApproved ? "已允许" : "Safe", 90);
-                    GUILayout.FlexibleSpace();
-                }
+                DrawInfoColumn("UPM", UPilotServerRuntimeService.UpmVersion, compact ? 62 : 82);
+                DrawInfoColumn("服务", serverVersion, compact ? 84 : 100);
+                DrawInfoColumn("运行方式", runtimeMode, compact ? 96 : 130);
+                DrawInfoColumn(new GUIContent("通道", compatibility), channel, compact ? 72 : 92);
+                DrawInfoColumn("授权", writeApproved ? "已允许" : "Safe", compact ? 56 : 76);
+                GUILayout.FlexibleSpace();
             }
 
             if (writeApproved)
