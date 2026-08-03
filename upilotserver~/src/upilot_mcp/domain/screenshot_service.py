@@ -297,6 +297,12 @@ class ScreenshotDomainService:
         img = resp.data.get("imageData") or resp.data.get("image_data")
         return bool(img and len(str(img)) > 48)
 
+    @staticmethod
+    def _screenshot_error_detail(resp: ToolResponse) -> tuple[str, str]:
+        if resp.error:
+            return resp.error.code or "", resp.error.message or resp.error.code or ""
+        return "", "empty_or_missing_imageData"
+
     async def screenshot_editor_window(
         self,
         window_title: str = "upilot",
@@ -324,9 +330,14 @@ class ScreenshotDomainService:
             return primary
 
         if self._response_has_screenshot_payload(primary):
-            return primary
+            data = dict(primary.data or {})
+            data.setdefault("source", "editorWindow")
+            data.setdefault("degraded", False)
+            data.setdefault("degradeLevel", "")
+            data.setdefault("degradeReason", "")
+            return ok(primary.request_id, data)
 
-        err_code = primary.error.code if primary.error else ""
+        err_code, err_detail = self._screenshot_error_detail(primary)
         if err_code == "WINDOW_NOT_FOUND":
             return primary
 
@@ -343,19 +354,19 @@ class ScreenshotDomainService:
                         "width": d.get("width", 320),
                         "height": d.get("height", 180),
                         "format": d.get("format", "png"),
+                        "source": "sceneView",
                         "degraded": True,
                         "degradeLevel": "scene_view_fallback",
+                        "degradeReason": err_code or "EDITOR_WINDOW_CAPTURE_EMPTY",
                         "requestedWindowTitle": window_title,
                         "note": "Editor window capture missing; substituted Scene view.",
+                        "originalError": err_detail,
                     },
                 )
             if mode == "scene":
                 return sv
 
         if mode in ("auto", "minimal"):
-            detail = ""
-            if primary.error:
-                detail = primary.error.message or primary.error.code
             return ok(
                 request_id,
                 {
@@ -363,11 +374,13 @@ class ScreenshotDomainService:
                     "width": 1,
                     "height": 1,
                     "format": "png",
+                    "source": "minimalPlaceholder",
                     "degraded": True,
                     "degradeLevel": "minimal_placeholder",
+                    "degradeReason": err_code or "EDITOR_WINDOW_CAPTURE_EMPTY",
                     "requestedWindowTitle": window_title,
                     "note": "Placeholder PNG; set UPILOT_SCREENSHOT_DEGRADE=none for strict errors only.",
-                    "originalError": detail or "empty_or_missing_imageData",
+                    "originalError": err_detail,
                 },
             )
 

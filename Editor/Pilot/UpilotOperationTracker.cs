@@ -455,6 +455,7 @@ namespace CodingRiver.UPilot
             // prefab
             { "prefab.create",         "创建预制体" },
             { "prefab.instantiate",    "实例化预制体" },
+            { "prefab.queryComponents", "查询预制体组件" },
             { "prefab.open",           "打开预制体" },
             { "prefab.close",          "关闭预制体" },
             { "prefab.save",           "保存预制体" },

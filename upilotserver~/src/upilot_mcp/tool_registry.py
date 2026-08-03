@@ -11,7 +11,7 @@ from .config import CONFIG
 
 
 ToolHandler = Callable[..., Awaitable[ToolResponse]]
-REGISTRY_VERSION = 2
+REGISTRY_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,13 +21,22 @@ class ToolDescriptor:
     category: str
     idempotent: bool = True
     destructive: bool = False
+    requires_unity_connection: bool = True
+    requires_write_access: bool = False
     play_mode_policy: str = "allowed"
     feature: str = "core"
     timeout_ms: int = 30000
     capability_requirements: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["registered"] = True
+        data["requiresUnityConnection"] = data.pop("requires_unity_connection")
+        data["requiresWriteAccess"] = data.pop("requires_write_access")
+        data["capabilityRequirements"] = list(data.pop("capability_requirements"))
+        data["aliases"] = list(data["aliases"])
+        return data
 
 
 class ToolRegistry:
@@ -51,28 +60,64 @@ class ToolRegistry:
         limit: int = 20,
         *,
         flow_enabled: bool = False,
+        connected: bool | None = None,
+        server_ready: bool | None = None,
+        write_access_approved: bool | None = None,
     ) -> list[dict[str, Any]]:
-        query_key = query.strip().lower()
+        query_tokens = _tokenize(query)
         category_key = category.strip().lower()
-        results: list[dict[str, Any]] = []
+        scored_results: list[tuple[int, dict[str, Any]]] = []
         for item in self.list():
             available = item.feature == "core" or flow_enabled
+            callable_now = available
+            unavailable_reason = ""
+            next_action = ""
+
+            if not available and item.feature == "flow":
+                unavailable_reason = "FEATURE_DISABLED"
+                next_action = "Enable UPilot Flow in project configuration, then restart the MCP client."
+
+            if available and item.requires_unity_connection:
+                connected_now = bool(connected)
+                ready_now = bool(server_ready)
+                if connected is not None and server_ready is not None and not (connected_now and ready_now):
+                    callable_now = False
+                    unavailable_reason = "UNITY_NOT_CONNECTED" if not connected_now else "UNITY_NOT_READY"
+                    next_action = "Open the Unity project and wait for the UPilot Bridge connection."
+
+            if available and item.requires_write_access and write_access_approved is not None and not write_access_approved:
+                callable_now = False
+                unavailable_reason = "WRITE_ACCESS_NOT_APPROVED"
+                next_action = "Enable project write access in the Unity UPilot setup or .upilot/config.json."
+
             if availability == "available" and not available:
                 continue
             if availability == "unavailable" and available:
                 continue
+            if availability == "callable" and not callable_now:
+                continue
+            if availability == "blocked" and callable_now:
+                continue
             if category_key and item.category.lower() != category_key:
                 continue
-            if query_key and query_key not in item.name.lower() and query_key not in item.category.lower():
+
+            score = _match_score(item, query_tokens)
+            if query_tokens and score <= 0:
                 continue
             data = item.to_dict()
             data["available"] = available
-            if not available:
-                data["unavailableReason"] = "UPilot Flow is disabled"
-            results.append(data)
-            if len(results) >= max(1, min(limit, 200)):
+            data["callableNow"] = callable_now
+            if unavailable_reason:
+                data["unavailableReason"] = unavailable_reason
+            if next_action:
+                data["nextAction"] = next_action
+            if score:
+                data["matchScore"] = score
+            scored_results.append((score, data))
+            if len(scored_results) >= max(1, min(limit, 200)) and not query_tokens:
                 break
-        return results
+        scored_results.sort(key=lambda pair: (-pair[0], pair[1]["name"]))
+        return [data for _, data in scored_results[: max(1, min(limit, 200))]]
 
 
 REGISTRY = ToolRegistry()
@@ -93,6 +138,51 @@ def infer_category(public_name: str) -> str:
     return key.split("_", 1)[0]
 
 
+def infer_requires_unity_connection(public_name: str) -> bool:
+    return public_name not in {
+        "unity_open_editor",
+        "unity_mcp_status",
+        "unity_capabilities_get",
+        "unity_tools_find",
+        "unity_client_config_diagnose",
+    }
+
+
+def _tokenize(value: str) -> list[str]:
+    return [
+        token
+        for token in re.split(r"[^a-z0-9]+", value.strip().lower().replace("_", " "))
+        if token
+    ]
+
+
+def _match_score(item: ToolDescriptor, query_tokens: list[str]) -> int:
+    if not query_tokens:
+        return 0
+    haystack_values = [
+        item.name,
+        item.facade_method,
+        item.category,
+        *item.capability_requirements,
+        *item.aliases,
+    ]
+    haystack_tokens: set[str] = set()
+    haystack_strings: list[str] = []
+    for value in haystack_values:
+        if not value:
+            continue
+        lowered = value.lower()
+        haystack_strings.append(lowered)
+        haystack_tokens.update(_tokenize(lowered))
+    score = 0
+    for token in query_tokens:
+        if token in haystack_tokens:
+            score += 3
+        elif any(token in value for value in haystack_strings):
+            score += 1
+    return score
+
+
 def register_public_tool(
     name: str,
     *,
@@ -100,10 +190,13 @@ def register_public_tool(
     category: str | None = None,
     idempotent: bool = True,
     destructive: bool = False,
+    requires_unity_connection: bool | None = None,
+    requires_write_access: bool | None = None,
     play_mode_policy: str = "allowed",
     feature: str = "core",
     timeout_ms: int = 30000,
     capability_requirements: tuple[str, ...] = (),
+    aliases: tuple[str, ...] = (),
 ) -> None:
     REGISTRY.register(
         ToolDescriptor(
@@ -112,10 +205,17 @@ def register_public_tool(
             category=category or infer_category(name),
             idempotent=idempotent,
             destructive=destructive,
+            requires_unity_connection=(
+                infer_requires_unity_connection(name)
+                if requires_unity_connection is None
+                else requires_unity_connection
+            ),
+            requires_write_access=destructive if requires_write_access is None else requires_write_access,
             play_mode_policy=play_mode_policy,
             feature=feature,
             timeout_ms=timeout_ms,
             capability_requirements=capability_requirements,
+            aliases=aliases,
         )
     )
 

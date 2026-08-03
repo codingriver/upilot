@@ -54,6 +54,14 @@ namespace CodingRiver.UPilot
         public int    width;
         public int    height;
         public string format;
+        public string source;
+        public bool   degraded;
+        public string degradeLevel;
+        public string degradeReason;
+        public string matchedTitle;
+        public string matchedTypeName;
+        public string matchedFullTypeName;
+        public bool   multipleMatches;
     }
 
     [Serializable]
@@ -129,13 +137,42 @@ namespace CodingRiver.UPilot
             var msg = JsonUtility.FromJson<EditorWindowScreenshotMessage>(json);
             var title = msg?.payload?.windowTitle ?? "UPilot";
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<EditorWindowCaptureResult>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(title);
-                    tcs.SetResult(base64);
+                    var match = UPilotWindowService.ResolveWindow(title, "contains");
+                    if (match.window == null)
+                    {
+                        tcs.SetResult(new EditorWindowCaptureResult
+                        {
+                            Found = false,
+                            FailureReason = "WINDOW_NOT_FOUND",
+                        });
+                        return;
+                    }
+
+                    var info = match.info ?? UPilotWindowService.BuildWindowInfo(match.window);
+                    string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(match.window);
+                    if (string.IsNullOrEmpty(base64))
+                    {
+                        tcs.SetResult(new EditorWindowCaptureResult
+                        {
+                            Found = true,
+                            Captured = false,
+                            FailureReason = "EDITOR_WINDOW_CAPTURE_UNAVAILABLE",
+                            Payload = BuildEditorWindowScreenshotPayload("", info, match.multipleMatches),
+                        });
+                        return;
+                    }
+
+                    tcs.SetResult(new EditorWindowCaptureResult
+                    {
+                        Found = true,
+                        Captured = true,
+                        Payload = BuildEditorWindowScreenshotPayload(base64, info, match.multipleMatches),
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -143,7 +180,7 @@ namespace CodingRiver.UPilot
                 }
             });
 
-            string result;
+            EditorWindowCaptureResult result;
             try
             {
                 result = await tcs.Task;
@@ -154,7 +191,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            if (result == null)
+            if (result == null || !result.Found)
             {
                 await _bridge.SendErrorAsync(id, "WINDOW_NOT_FOUND",
                     $"Editor window '{title}' not found or capture not supported on this platform.",
@@ -162,8 +199,45 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var payload = new ScreenshotResultPayload { imageData = result, width = 0, height = 0, format = "png" };
-            await _bridge.SendResultAsync(id, "screenshot.editorWindow", payload, token);
+            if (!result.Captured)
+            {
+                await _bridge.SendErrorAsync(id, result.FailureReason ?? "SCREENSHOT_UNAVAILABLE",
+                    $"Editor window '{title}' was found but could not be captured.",
+                    token, "screenshot.editorWindow");
+                return;
+            }
+
+            await _bridge.SendResultAsync(id, "screenshot.editorWindow", result.Payload, token);
+        }
+
+        private sealed class EditorWindowCaptureResult
+        {
+            public bool Found;
+            public bool Captured;
+            public string FailureReason;
+            public ScreenshotResultPayload Payload;
+        }
+
+        private static ScreenshotResultPayload BuildEditorWindowScreenshotPayload(
+            string imageData,
+            EditorWindowInfo info,
+            bool multipleMatches)
+        {
+            return new ScreenshotResultPayload
+            {
+                imageData = imageData,
+                width = info == null ? 0 : Mathf.Max(1, Mathf.RoundToInt(info.width)),
+                height = info == null ? 0 : Mathf.Max(1, Mathf.RoundToInt(info.height)),
+                format = "png",
+                source = "editorWindow",
+                degraded = false,
+                degradeLevel = "",
+                degradeReason = "",
+                matchedTitle = info?.title ?? "",
+                matchedTypeName = info?.typeName ?? "",
+                matchedFullTypeName = info?.fullTypeName ?? "",
+                multipleMatches = multipleMatches,
+            };
         }
 
         // ── screenshot.gameView ─────────────────────────────────────────────────

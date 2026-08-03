@@ -29,6 +29,13 @@ namespace CodingRiver.UPilot
         public bool hasUIToolkit;
     }
 
+    public class EditorWindowResolveResult
+    {
+        public EditorWindow window;
+        public EditorWindowInfo info;
+        public bool multipleMatches;
+    }
+
     [Serializable]
     public class EditorWindowsListPayload
     {
@@ -111,21 +118,7 @@ namespace CodingRiver.UPilot
                     title.IndexOf(filter.titleFilter, StringComparison.OrdinalIgnoreCase) < 0)
                     continue;
 
-                var rect = w.position;
-                result.windows.Add(new EditorWindowInfo
-                {
-                    instanceId = UPilotEntityIds.ToWireId(w),
-                    typeName = typeName,
-                    fullTypeName = fullTypeName,
-                    title = title,
-                    posX = rect.x,
-                    posY = rect.y,
-                    width = rect.width,
-                    height = rect.height,
-                    hasFocus = w.hasFocus,
-                    docked = w.docked,
-                    hasUIToolkit = w.rootVisualElement != null,
-                });
+                result.windows.Add(BuildWindowInfo(w));
             }
 
             result.total = result.windows.Count;
@@ -156,8 +149,9 @@ namespace CodingRiver.UPilot
                     }
 
                     var window = result.window;
-                    var typeName = window.GetType().Name;
-                    var title = window.titleContent?.text ?? "";
+                    var info = result.info ?? BuildWindowInfo(window);
+                    var typeName = info.typeName;
+                    var title = info.title;
                     if (window.docked)
                     {
                         tcs.TrySetResult(new EditorWindowCloseResultPayload
@@ -167,6 +161,9 @@ namespace CodingRiver.UPilot
                             deniedReason = "WINDOW_DOCKED",
                             matchedTitle = title,
                             matchedTypeName = typeName,
+                            matchedFullTypeName = info.fullTypeName,
+                            windowWidth = info.width,
+                            windowHeight = info.height,
                             multipleMatches = result.multipleMatches,
                         });
                         return;
@@ -179,6 +176,9 @@ namespace CodingRiver.UPilot
                         state = "closed",
                         matchedTitle = title,
                         matchedTypeName = typeName,
+                        matchedFullTypeName = info.fullTypeName,
+                        windowWidth = info.width,
+                        windowHeight = info.height,
                         multipleMatches = result.multipleMatches,
                     });
                 }
@@ -219,8 +219,9 @@ namespace CodingRiver.UPilot
                     }
 
                     var window = result.window;
-                    var typeName = window.GetType().Name;
-                    var title = window.titleContent?.text ?? "";
+                    var info = result.info ?? BuildWindowInfo(window);
+                    var typeName = info.typeName;
+                    var title = info.title;
                     if (window.docked)
                     {
                         tcs.TrySetResult(new EditorWindowCloseResultPayload
@@ -230,6 +231,9 @@ namespace CodingRiver.UPilot
                             deniedReason = "WINDOW_DOCKED",
                             matchedTitle = title,
                             matchedTypeName = typeName,
+                            matchedFullTypeName = info.fullTypeName,
+                            windowWidth = info.width,
+                            windowHeight = info.height,
                             multipleMatches = result.multipleMatches,
                         });
                         return;
@@ -237,12 +241,16 @@ namespace CodingRiver.UPilot
 
                     window.position = new Rect(payload.x, payload.y, Mathf.Max(100, payload.width), Mathf.Max(80, payload.height));
                     window.Repaint();
+                    info = BuildWindowInfo(window);
                     tcs.TrySetResult(new EditorWindowCloseResultPayload
                     {
                         ok = true,
                         state = "rect_set",
                         matchedTitle = title,
                         matchedTypeName = typeName,
+                        matchedFullTypeName = info.fullTypeName,
+                        windowWidth = info.width,
+                        windowHeight = info.height,
                         multipleMatches = result.multipleMatches,
                     });
                 }
@@ -259,22 +267,56 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static (EditorWindow window, bool multipleMatches) ResolveWindow(string title, string matchMode)
+        public static EditorWindowResolveResult ResolveWindow(string titleOrType, string matchMode)
         {
-            if (string.IsNullOrWhiteSpace(title))
-                return (null, false);
+            if (string.IsNullOrWhiteSpace(titleOrType))
+                return new EditorWindowResolveResult { window = null, info = null, multipleMatches = false };
 
             var windows = Resources.FindObjectsOfTypeAll<EditorWindow>();
             var exact = string.Equals(matchMode, "exact", StringComparison.OrdinalIgnoreCase);
             var matches = windows.Where(w =>
             {
                 var t = w.titleContent?.text ?? "";
+                var typeName = w.GetType().Name;
+                var fullTypeName = w.GetType().FullName ?? typeName;
                 return exact
-                    ? string.Equals(t, title, StringComparison.Ordinal)
-                    : t.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0;
+                    ? string.Equals(t, titleOrType, StringComparison.Ordinal) ||
+                      string.Equals(typeName, titleOrType, StringComparison.Ordinal) ||
+                      string.Equals(fullTypeName, titleOrType, StringComparison.Ordinal)
+                    : t.IndexOf(titleOrType, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                      typeName.IndexOf(titleOrType, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                      fullTypeName.IndexOf(titleOrType, StringComparison.OrdinalIgnoreCase) >= 0;
             }).ToList();
 
-            return (matches.FirstOrDefault(), matches.Count > 1);
+            var window = matches.FirstOrDefault();
+            return new EditorWindowResolveResult
+            {
+                window = window,
+                info = window == null ? null : BuildWindowInfo(window),
+                multipleMatches = matches.Count > 1,
+            };
+        }
+
+        public static EditorWindowInfo BuildWindowInfo(EditorWindow window)
+        {
+            if (window == null) return null;
+            var typeName = window.GetType().Name;
+            var fullTypeName = window.GetType().FullName ?? typeName;
+            var rect = window.position;
+            return new EditorWindowInfo
+            {
+                instanceId = UPilotEntityIds.ToWireId(window),
+                typeName = typeName,
+                fullTypeName = fullTypeName,
+                title = window.titleContent?.text ?? "",
+                posX = rect.x,
+                posY = rect.y,
+                width = rect.width,
+                height = rect.height,
+                hasFocus = window.hasFocus,
+                docked = window.docked,
+                hasUIToolkit = window.rootVisualElement != null,
+            };
         }
     }
 }

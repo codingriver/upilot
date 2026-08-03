@@ -220,15 +220,19 @@ class StatusDomainService:
                 },
             }
         if include_capabilities:
+            tools = self._registry_tools_snapshot(limit=200)
             data["capabilities"] = {
                 "registryVersion": REGISTRY_VERSION,
-                "toolCount": len([item for item in REGISTRY.list() if item.feature == "core" or CONFIG.flow_enabled]),
+                "toolCount": len([item for item in tools if item.get("available")]),
+                "registeredToolCount": len(REGISTRY.list()),
                 "reflectionCallAvailable": REGISTRY.resolve("unity_reflection_call") is not None,
                 "screenshotSaveAvailable": REGISTRY.resolve("unity_screenshot_save") is not None,
                 "asyncTaskAvailable": REGISTRY.resolve("unity_task_start") is not None,
                 "states": {
                     "serviceRegistered": True,
                     "clientToolListInjected": None,
+                    "serverReady": self.server.is_ready(),
+                    "connected": self.server.session_manager.is_connected(),
                     "actualCallSucceeded": self._last_command_succeeded("reflection.call"),
                     "note": "Client injection is client-owned; refresh the MCP client after the server tool list changes.",
                 },
@@ -248,11 +252,12 @@ class StatusDomainService:
         if not status.ok:
             return status
         data = status.data or {}
+        tools = self._registry_tools_snapshot(limit=200)
         return ok(
             status.request_id,
             {
                 "registryVersion": REGISTRY_VERSION,
-                "tools": [item.to_dict() for item in REGISTRY.list()],
+                "tools": tools,
                 "capabilities": data.get("capabilities", {}),
                 "session": data.get("session", {}),
                 "paths": data.get("paths", {}),
@@ -266,14 +271,31 @@ class StatusDomainService:
         availability: str = "all",
         limit: int = 20,
     ) -> ToolResponse:
-        items = REGISTRY.find(
+        items = self._registry_tools_snapshot(
+            query=query,
+            category=category,
+            availability=availability,
+            limit=limit,
+        )
+        return ok(new_id("req"), {"count": len(items), "tools": items})
+
+    def _registry_tools_snapshot(
+        self,
+        query: str = "",
+        category: str = "",
+        availability: str = "all",
+        limit: int = 20,
+    ) -> list[dict]:
+        return REGISTRY.find(
             query=query,
             category=category,
             availability=availability,
             limit=limit,
             flow_enabled=CONFIG.flow_enabled,
+            connected=self.server.session_manager.is_connected(),
+            server_ready=self.server.is_ready(),
+            write_access_approved=CONFIG.write_access_approved,
         )
-        return ok(new_id("req"), {"count": len(items), "tools": items})
 
     def _last_command_succeeded(self, command_name: str) -> bool | None:
         matches = [item for item in self.server.state.commands.values() if item.name == command_name]

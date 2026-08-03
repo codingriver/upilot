@@ -143,25 +143,81 @@ class ResourceDomainService:
         refresh_r = await self.asset_refresh()
         payload: dict = {
             "delayS": delay_s,
+            "triggerCompile": trigger_compile,
+            "status": "refresh_failed" if not refresh_r.ok else "refreshed",
             "refreshed": refresh_r.ok,
         }
-        if refresh_r.ok and refresh_r.data is not None:
+        if refresh_r.data is not None:
             payload["refresh"] = refresh_r.data
         if not refresh_r.ok:
-            return refresh_r
+            msg = refresh_r.error.message if refresh_r.error else "AssetDatabase.Refresh failed"
+            payload["failureSignature"] = refresh_r.error.code if refresh_r.error else "ASSET_REFRESH_FAILED"
+            payload["refreshError"] = msg
+            return fail(
+                request_id,
+                payload["failureSignature"],
+                msg,
+                payload,
+            )
         if not trigger_compile:
             return ok(request_id, payload)
         compile_r = await self.compile()
+        payload["compileStarted"] = compile_r.ok
         payload["compiled"] = compile_r.ok
+        payload["compileCompleted"] = compile_r.ok
         if compile_r.ok and compile_r.data is not None:
+            payload["status"] = "compiled"
             payload["compile"] = compile_r.data
+            compile_state = self.server.state.compile
+            payload["compileState"] = {
+                "status": compile_state.status,
+                "errorCount": compile_state.error_count,
+                "warningCount": compile_state.warning_count,
+                "startedAt": compile_state.started_at,
+                "finishedAt": compile_state.finished_at,
+                "compileRequestId": compile_state.compile_request_id,
+            }
         elif not compile_r.ok:
             msg = compile_r.error.message if compile_r.error else "compile failed"
+            code = compile_r.error.code if compile_r.error else "COMPILE_FAILED"
+            if code == "EDITOR_BUSY":
+                compile_state = self.server.state.compile
+                payload.update(
+                    {
+                        "status": "compiling",
+                        "compileStarted": False,
+                        "compiled": False,
+                        "compileCompleted": False,
+                        "compileAlreadyRunning": True,
+                        "nextAction": "unity_compile_wait",
+                        "compileError": msg,
+                        "failureSignature": code,
+                        "compileState": {
+                            "status": compile_state.status,
+                            "errorCount": compile_state.error_count,
+                            "warningCount": compile_state.warning_count,
+                            "startedAt": compile_state.started_at,
+                            "finishedAt": compile_state.finished_at,
+                            "compileRequestId": compile_state.compile_request_id,
+                        },
+                        "note": "AssetDatabase.Refresh completed; Unity was already compiling.",
+                    }
+                )
+                return ok(request_id, payload)
             logger.warning("sync_after_disk_write: compile failed: %s", msg)
-            payload["compileError"] = msg
+            payload.update(
+                {
+                    "status": "compile_failed",
+                    "compileStarted": False,
+                    "compiled": False,
+                    "compileCompleted": False,
+                    "compileError": msg,
+                    "failureSignature": code,
+                }
+            )
             return fail(
                 request_id,
-                compile_r.error.code if compile_r.error else "COMPILE_FAILED",
+                code,
                 msg,
                 payload,
             )
@@ -226,6 +282,28 @@ class ResourceDomainService:
         if component_index:
             payload["componentIndex"] = component_index
         return await self.dispatcher.call(request_id, "asset.modifyData", payload)
+
+    async def prefab_query_components(
+        self,
+        prefab_path: str,
+        component_type: str,
+        include_serialized_fields: bool = True,
+        max_depth: int = 6,
+        max_results: int = 50,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        payload: dict = {
+            "prefabPath": prefab_path,
+            "componentType": component_type,
+            "includeSerializedFields": include_serialized_fields,
+            "maxDepth": max_depth,
+            "maxResults": max_results,
+        }
+        return await self.dispatcher.call(
+            request_id,
+            "prefab.queryComponents",
+            payload,
+        )
 
     async def prefab_create(
         self, source_game_object_id: int, prefab_path: str

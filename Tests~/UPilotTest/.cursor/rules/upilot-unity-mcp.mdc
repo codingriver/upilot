@@ -1,21 +1,27 @@
+---
+description: Use UPilot MCP for Unity Editor automation
+alwaysApply: true
+---
+
+<!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: {{rulesVersion}}
-upilotPackageVersion: {{upilotPackageVersion}}
-projectPath: {{projectPath}}
-generatedAt: {{generatedAt}}
+rulesVersion: 4
+upilotPackageVersion: 0.3.23
+projectPath: D:\upilot\Tests~\UPilotTest
+generatedAt: 2026-08-03T02:11:32Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
 
 ## Connection
 
-- Streamable HTTP: `{{mcpUrl}}`
-- Health check: `{{healthUrl}}`
+- Streamable HTTP: `http://127.0.0.1:8012/mcp`
+- Health check: `http://127.0.0.1:8012/health`
 - Never configure an MCP client with the internal Unity Bridge WebSocket port.
 1. Call `unity_mcp_status`.
 2. Require `connected: true` and `serverReady: true`.
-3. Verify `paths.unityProjectAbsolute` matches `{{projectPath}}` (allow equivalent slash normalization).
+3. Verify `paths.unityProjectAbsolute` matches `D:\upilot\Tests~\UPilotTest` (allow equivalent slash normalization).
 4. Stop and report the mismatch if another Unity project is connected.
 
 ## Capabilities
@@ -80,3 +86,4 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - If a task exposes missing MCP capability, inconsistent state, unstable polling, insufficient artifacts, or poor failure attribution, record a structured improvement item in the project-level `TODO_UPilot.mcd` when that file exists.
 - Do not block the main task just to write feedback unless the missing MCP capability prevents safe completion; summarize any recorded UPilot improvement in the final handoff.
+<!-- upilot:end -->

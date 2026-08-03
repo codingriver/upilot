@@ -51,17 +51,7 @@ async def unity_mcp_status(forceFresh: bool = False, includeCapabilities: bool =
 @mcp.tool(description="返回 UPilot 核心能力、工具注册表版本、可选 Flow 模块状态和当前 Unity 能力摘要。")
 async def unity_capabilities_get(forceFresh: bool = False):
     _log_tool_call("unity_capabilities_get", {"forceFresh": forceFresh})
-    status = await _get_facade().mcp_status(force_fresh=forceFresh, include_capabilities=True)
-    if not status.ok:
-        return _log_tool_result("unity_capabilities_get", _payload(status))
-    data = status.data or {}
-    r = ok(status.request_id, {
-        "registryVersion": REGISTRY_VERSION,
-        "tools": [item.to_dict() for item in REGISTRY.list()],
-        "capabilities": data.get("capabilities", {}),
-        "session": data.get("session", {}),
-        "paths": data.get("paths", {}),
-    })
+    r = await _get_facade().capabilities_get(force_fresh=forceFresh)
     return _log_tool_result("unity_capabilities_get", _payload(r))
 
 @mcp.tool(description="按名称、类别和可用状态搜索 UPilot MCP 工具，避免读取完整 tools/list。")
@@ -72,14 +62,12 @@ async def unity_tools_find(
     limit: int = 20,
 ):
     _log_tool_call("unity_tools_find", {"query": query, "category": category, "availability": availability, "limit": limit})
-    items = REGISTRY.find(
+    r = await _get_facade().tools_find(
         query=query,
         category=category,
         availability=availability,
         limit=limit,
-        flow_enabled=CONFIG.flow_enabled,
     )
-    r = ok(new_id("req"), {"count": len(items), "tools": items})
     return _log_tool_result("unity_tools_find", _payload(r))
 
 @mcp.tool(description="诊断 Codex/Cursor/通用 MCP 客户端配置中的重复端点、内部端口、HTTP 端口和超时问题。")

@@ -20,7 +20,7 @@ controlled UPilot block take precedence over these generic rules.
 ## Capabilities
 
 - Distinguish server registration, client tool-list injection, and a successful real call; they are different states.
-- If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable.
+- If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable. Treat `registered`, `available`, and `callableNow` as separate states and follow `unavailableReason` / `nextAction`.
 - After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.
 - Use the narrowest dedicated semantic tool. Use `unity_reflection_call` for existing compiled entry points.
 - Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.
@@ -31,6 +31,7 @@ controlled UPilot block take precedence over these generic rules.
 
 - Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.
 - After one batch of disk writes, call `unity_sync_after_disk_write` once.
+- If `unity_sync_after_disk_write(triggerCompile=true)` returns `ok=true/status=compiling`, do not retry sync immediately; call `unity_compile_wait` and then inspect compile errors.
 - Prefer `unity_compile_wait` plus `unity_compile_errors`; `unity_compile_errors_get` is a compatibility alias.
 - Compile only after C# or assembly-related changes. Do not compile again when no code changed.
 - After compilation, read structured compile errors and relevant Console errors before editing again.
@@ -58,12 +59,23 @@ controlled UPilot block take precedence over these generic rules.
 
 - Prefer project-relative artifact paths returned by the project bridge.
 - Prefer `unity_screenshot_save` for screenshots.
-- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`.
+- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`. If screenshot capture falls back, also report `degraded`, `degradeReason`, and `originalError`.
 - UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.
+
+## Assets And Prefabs
+
+- Use `unity_prefab_query_components` for read-only Prefab child hierarchy/component checks before entering Prefab Mode or editing YAML. It returns GameObject paths, component types, and optional serialized fields without changing the current scene or requiring write access.
+- Use write tools such as `unity_asset_modify_data`, `unity_component_modify`, or `unity_prefab_save` only after exact target inspection and write access approval.
 
 ## Acceptance
 
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
+- For EditorWindow acceptance, prefer `unity_verify_window` and use `windowMatch` as the target-window truth. Treat legacy `windowDiagnostics` as UPilot window/layout diagnostics, not proof that a third-party window is absent.
 - Retry automatically only when the registry marks the operation idempotent and non-destructive.
 - If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.
 - On timeout, inspect status, operation timing, Console capture, artifact summary, and last progress before choosing one bounded retry or a documented fallback.
+
+## MCP Improvement Feedback
+
+- If a task exposes missing MCP capability, inconsistent state, unstable polling, insufficient artifacts, or poor failure attribution, record a structured improvement item in the project-level `TODO_UPilot.mcd` when that file exists.
+- Do not block the main task just to write feedback unless the missing MCP capability prevents safe completion; summarize any recorded UPilot improvement in the final handoff.

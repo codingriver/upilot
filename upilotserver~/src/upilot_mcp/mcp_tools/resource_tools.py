@@ -175,6 +175,38 @@ async def unity_asset_modify_data(
     )
     return _log_tool_result("unity_asset_modify_data", _payload(r))
 
+@mcp.tool(
+    description=(
+        "只读递归查询 Prefab 子层级组件。不会进入 Prefab 编辑模式、不会保存资源、"
+        "不要求写权限；按 componentType 返回 GameObject 路径、组件类型和可选序列化字段。"
+    )
+)
+async def unity_prefab_query_components(
+    prefabPath: str,
+    componentType: str,
+    includeSerializedFields: bool = True,
+    maxDepth: int = 6,
+    maxResults: int = 50,
+):
+    _log_tool_call(
+        "unity_prefab_query_components",
+        {
+            "prefabPath": prefabPath,
+            "componentType": componentType,
+            "includeSerializedFields": includeSerializedFields,
+            "maxDepth": maxDepth,
+            "maxResults": maxResults,
+        },
+    )
+    r = await _get_facade().prefab_query_components(
+        prefab_path=prefabPath,
+        component_type=componentType,
+        include_serialized_fields=includeSerializedFields,
+        max_depth=maxDepth,
+        max_results=maxResults,
+    )
+    return _log_tool_result("unity_prefab_query_components", _payload(r))
+
 @mcp.tool(description="将场景中的 GameObject 创建为 Prefab 资源。")
 async def unity_prefab_create(sourceGameObjectId: int, prefabPath: str):
     _log_tool_call(

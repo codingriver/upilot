@@ -113,12 +113,34 @@ namespace CodingRiver.UPilot
 #endif
         }
 
+        public static string CaptureEditorWindowBase64(EditorWindow window)
+        {
+#if UNITY_EDITOR_WIN
+            return CaptureEditorWindowWin(window);
+#else
+            return null;
+#endif
+        }
+
 #if UNITY_EDITOR_WIN
         private static string CaptureEditorWindowWin(string windowTitle)
         {
             try
             {
                 var win = UPilotPlayInputService.FindTargetWindow(windowTitle);
+                return CaptureEditorWindowWin(win);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[UPilot] Editor window capture failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static string CaptureEditorWindowWin(EditorWindow win)
+        {
+            try
+            {
                 if (win == null) return null;
 
                 win.Focus();

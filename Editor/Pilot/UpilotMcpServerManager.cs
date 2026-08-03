@@ -183,32 +183,10 @@ namespace CodingRiver.UPilot
                             string depValue = match.Groups[1].Value;
                             Debug.Log($"[UPilotMcpServerManager] Manifest dep value: {depValue}");
 
-                            if (depValue.StartsWith("file:"))
+                            if (depValue.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
                             {
-                                string filePath = depValue.Substring(5);
-                                
-                                // Normalize URI-style file paths: file:///path → /path
-                                while (filePath.Length >= 2 && filePath[0] == '/' && filePath[1] == '/')
-                                    filePath = filePath.Substring(1);
-
-                                // Windows: /D:/path → D:/path
-                                if (filePath.Length > 2 && filePath[0] == '/' && filePath[2] == ':' && char.IsLetter(filePath[1]))
-                                    filePath = filePath.Substring(1);
-
-                                // Tarball not supported for auto-discovery
-                                if (filePath.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) || 
-                                    filePath.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
+                                if (TryResolveManifestFileDependencyRoot(depValue, manifestPath, out string absPath, out bool isArchive))
                                 {
-                                    Debug.LogWarning($"[UPilotMcpServerManager] Tarball installation ({depValue}) is not auto-discoverable. Please extract it or set path manually.");
-                                }
-                                else
-                                {
-                                    string absPath;
-                                    if (Path.IsPathRooted(filePath))
-                                        absPath = filePath;
-                                    else
-                                        absPath = Path.GetFullPath(Path.Combine(projectRoot, filePath));
-                                    
                                     Debug.Log($"[UPilotMcpServerManager] Resolved file: reference to: {absPath}");
                                     string currentCandidate = Path.Combine(absPath, "upilotserver~", "run_upilot_mcp.py");
                                     if (TryCandidate(currentCandidate, "manifest file: ref current server", out string result))
@@ -217,6 +195,10 @@ namespace CodingRiver.UPilot
                                     string candidate = Path.Combine(absPath, "upilot~", "run_upilot_mcp.py");
                                     if (TryCandidate(candidate, "manifest file: ref alternate server", out result))
                                         return result;
+                                }
+                                else if (isArchive)
+                                {
+                                    Debug.LogWarning($"[UPilotMcpServerManager] Tarball installation ({depValue}) is not auto-discoverable. Please extract it or set path manually.");
                                 }
                             }
                             else
@@ -321,6 +303,50 @@ namespace CodingRiver.UPilot
                 Debug.LogError($"[UPilotMcpServerManager] ResolveDefaultPythonEntry exception: {ex}");
             }
             return "./upilotserver~/run_upilot_mcp.py";
+        }
+
+        private static bool TryResolveManifestFileDependencyRoot(
+            string dependencyValue,
+            string manifestPath,
+            out string packageRoot,
+            out bool isArchive)
+        {
+            packageRoot = null;
+            isArchive = false;
+
+            if (string.IsNullOrEmpty(dependencyValue) ||
+                !dependencyValue.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string filePath = dependencyValue.Substring(5);
+
+            // Normalize URI-style file paths: file:///path → /path
+            while (filePath.Length >= 2 && filePath[0] == '/' && filePath[1] == '/')
+                filePath = filePath.Substring(1);
+
+            // Windows: /D:/path → D:/path
+            if (filePath.Length > 2 && filePath[0] == '/' && filePath[2] == ':' && char.IsLetter(filePath[1]))
+                filePath = filePath.Substring(1);
+
+            if (filePath.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ||
+                filePath.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
+            {
+                isArchive = true;
+                return false;
+            }
+
+            if (Path.IsPathRooted(filePath))
+            {
+                packageRoot = Path.GetFullPath(filePath);
+                return true;
+            }
+
+            string manifestDirectory = Path.GetDirectoryName(manifestPath);
+            if (string.IsNullOrEmpty(manifestDirectory))
+                return false;
+
+            packageRoot = Path.GetFullPath(Path.Combine(manifestDirectory, filePath));
+            return true;
         }
 
         private static string ToAbsoluteProjectPath(string path)

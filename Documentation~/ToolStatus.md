@@ -46,7 +46,7 @@
 | `unity_compile_wait` | 是 | 是 | 是 | 2026-06-30 自动验收通过：在编译空闲状态下等待成功返回。 |
 | `unity_compile_wait_editor` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Unity 编辑器侧等待编译空闲成功。 |
 | `unity_safe_compile_and_wait` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功触发编译、等待完成并完成 Domain Reload 后校验。 |
-| `unity_sync_after_disk_write` | 是 | 是 | 是 | 2026-06-30 自动验收通过：编译空闲状态下成功刷新 AssetDatabase。 |
+| `unity_sync_after_disk_write` | 是 | 是 | 是 | 2026-08-02 契约测试补充：Refresh 成功但 Unity 已在编译时返回 `ok=true/status=compiling/nextAction=unity_compile_wait`，避免把中间态误判为失败。 |
 
 ### 调用与运行时代码
 
@@ -65,7 +65,7 @@
 | `unity_console_search_logs` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功搜索 Unity Console 全量日志。 |
 | `unity_console_clear` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功清空 Unity Console。 |
 | `unity_batch_diagnostics` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功一次性获取窗口布局、Console 摘要和编辑器状态。 |
-| `unity_verify_window` | 是 | 是 | 是 | 2026-06-30 自动验收通过：以 Scene 窗口执行窗口验收成功。 |
+| `unity_verify_window` | 是 | 是 | 是 | 2026-08-02 契约测试补充：`windowMatch` 以 `unity_editor_windows_list` 为窗口存在性 truth；旧 `windowDiagnostics` 保留为 legacy 诊断。 |
 | `unity_task_execute` | 是 | 是 | 是 | 2026-06-30 自动验收通过：通过看门狗包装成功执行 `unity_ensure_ready`。 |
 
 ### 编辑器窗口、菜单与输入
@@ -92,7 +92,7 @@
 | `unity_screenshot_game_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Game 视图 PNG。 |
 | `unity_screenshot_scene_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Scene 视图 PNG。 |
 | `unity_screenshot_camera` | 是 | 是 | 是 | 2026-06-30 自动验收通过：使用临时 Camera 成功截取 320x180 PNG。 |
-| `unity_screenshot_editor_window` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功按 `Scene` 窗口标题截取 EditorWindow PNG。 |
+| `unity_screenshot_editor_window` | 是 | 是 | 是 | 2026-08-02 契约测试补充：成功时返回真实窗口宽高与匹配标题/类型；降级时返回 `degraded/source/degradeReason/originalError`。 |
 
 ### 场景、选择与游戏对象
 
@@ -127,6 +127,7 @@
 | `unity_component_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：修正 Unity 6 EntityId 截断后成功列出临时 Cube 组件。 |
 | `unity_prefab_create` | 是 | 是 | 是 | 2026-06-30 自动验收通过：修正 Unity 6 EntityId 截断后成功从临时 Cube 创建 Prefab。 |
 | `unity_prefab_instantiate` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功实例化临时 Prefab 并返回完整 wire id。 |
+| `unity_prefab_query_components` | 是 | 是 | 是 | 2026-08-02 契约测试补充：只读递归查询 Prefab 子层级组件；不进入 Prefab 编辑模式、不保存资源、不要求写权限。 |
 | `unity_prefab_open` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功打开临时 Prefab 编辑模式。 |
 | `unity_prefab_close` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功退出临时 Prefab 编辑模式。 |
 | `unity_prefab_save` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功保存临时 Prefab 编辑模式修改。 |

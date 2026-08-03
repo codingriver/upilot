@@ -125,10 +125,68 @@ class TestDomainService:
         )
 
         diag_results = await asyncio.gather(
+            self.editor_windows_list(title_filter=window_title),
             self.resource_window_diagnostics(),
             self.resource_console_summary(),
             return_exceptions=True,
         )
+
+        window_list_result = diag_results[0]
+        if (
+            not isinstance(window_list_result, Exception)
+            and window_list_result.ok
+            and not (window_list_result.data or {}).get("windows")
+            and window_title
+        ):
+            # If no title match exists, try the same token as a type filter so
+            # verify_window follows the same title/type matching intent as the
+            # editor-window screenshot and window mutation tools.
+            try:
+                type_match = await self.editor_windows_list(type_filter=window_title)
+                if type_match.ok and (type_match.data or {}).get("windows"):
+                    window_list_result = type_match
+            except Exception:
+                pass
+
+        window_match: dict = {
+            "windowOpen": False,
+            "requestedWindowTitle": window_title,
+            "source": "editor.windows.list",
+        }
+        if isinstance(window_list_result, Exception):
+            window_match.update({"error": str(window_list_result)})
+        elif not window_list_result.ok:
+            window_match.update(
+                {
+                    "error": window_list_result.error.message if window_list_result.error else "unknown",
+                    "code": window_list_result.error.code if window_list_result.error else "",
+                }
+            )
+        else:
+            data = window_list_result.data or {}
+            windows = data.get("windows") or []
+            if windows:
+                first = windows[0]
+                window_match.update(
+                    {
+                        "windowOpen": True,
+                        "matchedTitle": first.get("title", ""),
+                        "matchedTypeName": first.get("typeName", ""),
+                        "matchedFullTypeName": first.get("fullTypeName", ""),
+                        "instanceId": first.get("instanceId", 0),
+                        "posX": first.get("posX", 0),
+                        "posY": first.get("posY", 0),
+                        "width": first.get("width", 0),
+                        "height": first.get("height", 0),
+                        "docked": first.get("docked", False),
+                        "hasFocus": first.get("hasFocus", False),
+                        "hasUIToolkit": first.get("hasUIToolkit", False),
+                        "multipleMatches": len(windows) > 1,
+                        "matchCount": len(windows),
+                    }
+                )
+            else:
+                window_match.update({"matchCount": 0})
 
         screenshot_data = None
         if include_screenshot:
@@ -147,15 +205,17 @@ class TestDomainService:
             except Exception as e:
                 screenshot_data = {"error": str(e)}
 
-        combined: dict = {"compileWait": compile_data}
+        combined: dict = {"compileWait": compile_data, "windowMatch": window_match}
         labels = ["windowDiagnostics", "consoleSummary"]
-        for label, r in zip(labels, diag_results):
+        for label, r in zip(labels, diag_results[1:]):
             if isinstance(r, Exception):
                 combined[label] = {"error": str(r)}
             elif not r.ok:
                 combined[label] = {"error": r.error.message if r.error else "unknown"}
             else:
                 combined[label] = r.data
+
+        combined["legacyWindowDiagnostics"] = combined.get("windowDiagnostics", {})
 
         if screenshot_data is not None:
             combined["screenshot"] = screenshot_data
@@ -272,4 +332,3 @@ class TestDomainService:
             {},
             timeout_ms=30000,
         )
-

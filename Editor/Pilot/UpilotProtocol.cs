@@ -293,6 +293,9 @@ namespace CodingRiver.UPilot
         public string deniedReason;
         public string matchedTitle;
         public string matchedTypeName;
+        public string matchedFullTypeName;
+        public float windowWidth;
+        public float windowHeight;
         public bool multipleMatches;
     }
 

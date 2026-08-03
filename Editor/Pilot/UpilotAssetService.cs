@@ -71,6 +71,40 @@ namespace CodingRiver.UPilot
         public List<BuiltInAssetInfoPayload> assets = new List<BuiltInAssetInfoPayload>();
     }
 
+    [Serializable] public class PrefabQueryComponentsMessage { public PrefabQueryComponentsPayload payload; }
+    [Serializable]
+    public class PrefabQueryComponentsPayload
+    {
+        public string prefabPath = "";
+        public string componentType = "";
+        public bool includeSerializedFields = true;
+        public int maxDepth = 6;
+        public int maxResults = 50;
+    }
+
+    [Serializable]
+    public class PrefabComponentMatchPayload
+    {
+        public string gameObjectPath;
+        public string gameObjectName;
+        public string componentType;
+        public string fullComponentType;
+        public int componentIndex;
+        public List<SerializedPropertyInfo> serializedFields = new List<SerializedPropertyInfo>();
+    }
+
+    [Serializable]
+    public class PrefabQueryComponentsResultPayload
+    {
+        public string prefabPath;
+        public string componentType;
+        public bool found;
+        public int count;
+        public bool readOnly = true;
+        public bool changedEditorState = false;
+        public List<PrefabComponentMatchPayload> matches = new List<PrefabComponentMatchPayload>();
+    }
+
     // ── Service ─────────────────────────────────────────────────────────────────
 
     public class UPilotAssetService
@@ -91,6 +125,7 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("asset.getData",       HandleGetDataAsync);
             _bridge.Router.Register("asset.modifyData",    HandleModifyDataAsync);
             _bridge.Router.Register("asset.findBuiltIn",   HandleFindBuiltInAsync);
+            _bridge.Router.Register("prefab.queryComponents", HandlePrefabQueryComponentsAsync);
         }
 
         // ── asset.find ──────────────────────────────────────────────────────────
@@ -472,6 +507,92 @@ namespace CodingRiver.UPilot
             }
         }
 
+        // ── prefab.queryComponents ───────────────────────────────────────────────
+
+        private async Task HandlePrefabQueryComponentsAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<PrefabQueryComponentsMessage>(json);
+            var p = msg?.payload ?? new PrefabQueryComponentsPayload();
+
+            if (string.IsNullOrWhiteSpace(p.prefabPath))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PREFAB_PATH", "prefabPath is required.", token, "prefab.queryComponents");
+                return;
+            }
+
+            if (!p.prefabPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PREFAB_PATH", "prefabPath must point to a .prefab asset.", token, "prefab.queryComponents");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(p.componentType))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_COMPONENT_TYPE", "componentType is required.", token, "prefab.queryComponents");
+                return;
+            }
+
+            var tcs = new TaskCompletionSource<PrefabQueryComponentsResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                GameObject root = null;
+                try
+                {
+                    if (AssetDatabase.LoadAssetAtPath<GameObject>(p.prefabPath) == null)
+                        throw new Exception($"Prefab not found: {p.prefabPath}");
+
+                    root = PrefabUtility.LoadPrefabContents(p.prefabPath);
+                    if (root == null)
+                        throw new Exception($"Failed to load prefab contents: {p.prefabPath}");
+
+                    var result = new PrefabQueryComponentsResultPayload
+                    {
+                        prefabPath = p.prefabPath,
+                        componentType = p.componentType,
+                    };
+
+                    int maxResults = Mathf.Clamp(p.maxResults <= 0 ? 50 : p.maxResults, 1, 500);
+                    int serializedMaxDepth = Mathf.Clamp(p.maxDepth <= 0 ? 6 : p.maxDepth, 0, 25);
+                    var requestedType = UPilotComponentService.ResolveComponentType(p.componentType);
+                    WalkPrefabComponents(
+                        root.transform,
+                        root.name,
+                        p.componentType,
+                        requestedType,
+                        p.includeSerializedFields,
+                        serializedMaxDepth,
+                        maxResults,
+                        result);
+
+                    result.count = result.matches.Count;
+                    result.found = result.count > 0;
+                    tcs.TrySetResult(result);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+                finally
+                {
+                    if (root != null)
+                    {
+                        try { PrefabUtility.UnloadPrefabContents(root); }
+                        catch (Exception unloadEx) { Debug.LogWarning($"[UPilot] Failed to unload prefab contents: {unloadEx.Message}"); }
+                    }
+                }
+            });
+
+            try
+            {
+                var payload = await tcs.Task;
+                await _bridge.SendResultAsync(id, "prefab.queryComponents", payload, token);
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(id, "PREFAB_QUERY_COMPONENTS_FAILED", ex.Message, token, "prefab.queryComponents");
+            }
+        }
+
         // ── asset.modifyData ───────────────────────────────────────────────────
 
         private async Task HandleModifyDataAsync(string id, string json, CancellationToken token)
@@ -701,6 +822,104 @@ namespace CodingRiver.UPilot
                     return prop.intValue.ToString();
                 default:
                     return "(unsupported)";
+            }
+        }
+
+        private static void WalkPrefabComponents(
+            Transform transform,
+            string path,
+            string requestedComponentType,
+            Type requestedType,
+            bool includeSerializedFields,
+            int maxDepth,
+            int maxResults,
+            PrefabQueryComponentsResultPayload result)
+        {
+            if (transform == null || result.matches.Count >= maxResults)
+                return;
+
+            var components = transform.GetComponents<Component>();
+            var sameTypeIndexes = new Dictionary<Type, int>();
+            foreach (var component in components)
+            {
+                if (component == null)
+                    continue;
+
+                var componentType = component.GetType();
+                sameTypeIndexes.TryGetValue(componentType, out var componentIndex);
+                sameTypeIndexes[componentType] = componentIndex + 1;
+
+                if (!ComponentTypeMatches(componentType, requestedComponentType, requestedType))
+                    continue;
+
+                var match = new PrefabComponentMatchPayload
+                {
+                    gameObjectPath = path,
+                    gameObjectName = transform.gameObject.name,
+                    componentType = componentType.Name,
+                    fullComponentType = componentType.FullName ?? componentType.Name,
+                    componentIndex = componentIndex,
+                };
+
+                if (includeSerializedFields)
+                    AddSerializedFields(component, maxDepth, match.serializedFields);
+
+                result.matches.Add(match);
+                if (result.matches.Count >= maxResults)
+                    return;
+            }
+
+            for (int i = 0; i < transform.childCount; i++)
+            {
+                var child = transform.GetChild(i);
+                WalkPrefabComponents(
+                    child,
+                    path + "/" + child.gameObject.name,
+                    requestedComponentType,
+                    requestedType,
+                    includeSerializedFields,
+                    maxDepth,
+                    maxResults,
+                    result);
+                if (result.matches.Count >= maxResults)
+                    return;
+            }
+        }
+
+        private static bool ComponentTypeMatches(Type actualType, string requestedComponentType, Type requestedType)
+        {
+            if (actualType == null)
+                return false;
+            if (requestedType != null && requestedType.IsAssignableFrom(actualType))
+                return true;
+            return actualType.Name.Equals(requestedComponentType, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(actualType.FullName, requestedComponentType, StringComparison.Ordinal)
+                || (actualType.AssemblyQualifiedName != null && string.Equals(actualType.AssemblyQualifiedName, requestedComponentType, StringComparison.Ordinal));
+        }
+
+        private static void AddSerializedFields(Component component, int maxDepth, List<SerializedPropertyInfo> fields)
+        {
+            var so = new SerializedObject(component);
+            var iterator = so.GetIterator();
+            bool enterChildren = true;
+            while (iterator.NextVisible(enterChildren))
+            {
+                enterChildren = false;
+                if (iterator.name == "m_Script")
+                    continue;
+                var prop = iterator.Copy();
+                if (prop.depth > maxDepth)
+                    continue;
+                fields.Add(new SerializedPropertyInfo
+                {
+                    propertyPath = prop.propertyPath,
+                    type = prop.propertyType.ToString(),
+                    value = GetSerializedPropertyDisplayValue(prop),
+                    depth = prop.depth,
+                    hasChildren = prop.hasChildren,
+                    isArray = prop.isArray,
+                    arraySize = prop.isArray ? prop.arraySize : 0,
+                });
             }
         }
 

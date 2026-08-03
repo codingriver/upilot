@@ -567,6 +567,31 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void ManifestFileDependencyResolvesRelativeToManifestDirectory()
+        {
+            var method = typeof(UPilotMcpServerManager).GetMethod(
+                "TryResolveManifestFileDependencyRoot",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            Assert.That(method, Is.Not.Null);
+
+            var projectRoot = Path.Combine(
+                Path.GetTempPath(),
+                "upilot-test-root",
+                "repo",
+                "Tests~",
+                "UPilotTest");
+            var manifestPath = Path.Combine(projectRoot, "Packages", "manifest.json");
+            var args = new object[] { "file:../../..", manifestPath, null, false };
+            var resolved = (bool)method.Invoke(null, args);
+            var expectedRoot = Path.GetFullPath(Path.Combine(projectRoot, "Packages", "../../.."));
+
+            Assert.That(resolved, Is.True);
+            Assert.That(args[2], Is.EqualTo(expectedRoot));
+            Assert.That(args[3], Is.False);
+        }
+
+        [Test]
         public void FirstSetupEntryIsHostedByMainWindow()
         {
             Assert.That(typeof(EditorWindow).IsAssignableFrom(typeof(UPilotFirstSetupWindow)), Is.False);
