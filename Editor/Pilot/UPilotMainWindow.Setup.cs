@@ -26,6 +26,7 @@ namespace CodingRiver.UPilot
         private static readonly Color SetupReadyColor = new(0.30f, 0.72f, 0.36f);
         private static readonly Color SetupBlockedColor = new(0.90f, 0.30f, 0.25f);
         private static readonly Color SetupNeutralColor = new(0.65f, 0.65f, 0.65f);
+        internal const bool SetupApprovesProjectWritesByDefault = true;
 
         private UPilotMainView _mainView;
         private int _setupStep;
@@ -56,7 +57,7 @@ namespace CodingRiver.UPilot
         private bool _setupWriteClaudeConfig = true;
         private bool _setupWriteCursorConfig = true;
         private bool _setupStartAfterSetup = true;
-        private bool _setupApproveProjectWrites;
+        private bool _setupApproveProjectWrites = SetupApprovesProjectWritesByDefault;
 
         private void EnterSetupView()
         {

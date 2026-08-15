@@ -961,6 +961,12 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void FirstSetupApprovesProjectWritesByDefault()
+        {
+            Assert.That(UPilotMainWindow.SetupApprovesProjectWritesByDefault, Is.True);
+        }
+
+        [Test]
         public void ManagedServerDownloadSelectsMatchingPlatformAndArchitecture()
         {
             var manifest = new UPilotReleaseManifest();

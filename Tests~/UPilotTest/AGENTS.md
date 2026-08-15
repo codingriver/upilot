@@ -4,7 +4,7 @@
 rulesVersion: 8
 upilotPackageVersion: 0.3.24
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-08-13T09:35:27Z
+generatedAt: 2026-08-15T05:03:13Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
