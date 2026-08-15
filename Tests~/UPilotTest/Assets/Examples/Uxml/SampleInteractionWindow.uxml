@@ -1,0 +1,31 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="interaction-root" class="window-root">
+        <ui:VisualElement name="interaction-panel" class="panel">
+            <ui:TextField name="interaction-input" label="Input" class="text-input" />
+            <ui:VisualElement name="interaction-buttons" class="button-row">
+                <ui:Button name="click-button" text="Click" class="btn primary" />
+                <ui:Button name="double-click-button" text="Double Click" class="btn" />
+            </ui:VisualElement>
+            <ui:VisualElement name="hover-target" tooltip="Hover Target" class="hover-target" />
+            <ui:Label name="context-menu-target" text="Context Menu Target" class="menu-target" />
+            <ui:DropdownField name="popup-menu-dropdown" label="Popup Menu" class="text-input" />
+            <ui:Label name="click-status" text="Clicks: 0" class="status" />
+            <ui:Label name="double-click-status" text="Double Clicks: 0" class="status" />
+            <ui:Label name="hover-status" text="Hover: idle" class="status" />
+            <ui:Label name="key-status" text="Key: none" class="status" />
+            <ui:Label name="drag-status" text="Drag: idle" class="status" />
+            <ui:Label name="pointer-status" text="Pointer: none" class="status" />
+            <ui:Label name="menu-status" text="Menu: none" class="status" />
+            <ui:ScrollView name="scroll-view" class="scroll-area">
+                <ui:Label name="scroll-item-1" text="Scroll Item 1" class="item" />
+                <ui:Label name="scroll-item-2" text="Scroll Item 2" class="item" />
+                <ui:Label name="scroll-item-3" text="Scroll Item 3" class="item" />
+                <ui:Label name="scroll-item-4" text="Scroll Item 4" class="item" />
+                <ui:Label name="scroll-item-5" text="Scroll Item 5" class="item" />
+                <ui:Label name="scroll-item-6" text="Scroll Item 6" class="item" />
+                <ui:Label name="scroll-item-7" text="Scroll Item 7" class="item" />
+                <ui:Label name="scroll-item-8" text="Scroll Item 8" class="item" />
+            </ui:ScrollView>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

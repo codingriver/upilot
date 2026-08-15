@@ -1,0 +1,23 @@
+schemaVersion: 2
+name: "108-two-pane-split-view-panes"
+description: Covers set_split_view_size on both pane indices.
+fixture:
+  host_window:
+    type: ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - name: Set pane 0 size
+    action: set_split_view_size
+    selector: "#workspace-split"
+    size: "100"
+    pane: "0"
+  - name: Set pane 1 size
+    action: set_split_view_size
+    selector: "#workspace-split"
+    size: "120"
+    pane: "1"
+  - name: Set pane 0 size again
+    action: set_split_view_size
+    selector: "#workspace-split"
+    size: "80"
+    pane: "0"

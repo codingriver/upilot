@@ -1,0 +1,21 @@
+schemaVersion: 2
+name: "_70-negative-invalid-params"
+description: |
+  Verifies that menu_item rejects an invalid mode parameter.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+
+steps:
+  - name: Reset toolbar status
+    action: click
+    selector: "#toolbar-run"
+
+  - name: Invalid menu_item mode should fail
+    action: menu_item
+    selector: "#toolbar-menu"
+    item: "Refresh"
+    mode: "invalid_mode"

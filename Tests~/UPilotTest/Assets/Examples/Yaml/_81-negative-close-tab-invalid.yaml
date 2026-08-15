@@ -1,0 +1,16 @@
+schemaVersion: 2
+name: "_81-negative-close-tab-invalid"
+description: |
+  Verifies that close_tab fails when given an invalid tab label.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+
+steps:
+  - name: close_tab with invalid label should fail
+    action: close_tab
+    selector: "#settings-tabs"
+    label: "NonExistentTab"

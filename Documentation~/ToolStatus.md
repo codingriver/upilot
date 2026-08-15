@@ -2,7 +2,7 @@
 
 本文档用于跟踪 UPilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 和 `unity_capabilities_get` 返回的实时 schema。
 
-最近同步：2026-07-29，`tools/list` 以当前 MCP 实时返回为准；本表新增长作业编排与 Agent 规则工具记录。
+最近同步：2026-08-12，`tools/list` 以当前 MCP 实时返回为准；本表已同步权威 Context、编译生命周期、Console、资源审计、NavMesh、Profiler、纹理导入、截图像素分析和静态分析结果。
 
 ## 状态口径
 
@@ -28,12 +28,15 @@
 | --- | --- | --- | --- | --- |
 | `unity_open_editor` | 是 | 是 | 是 | 2026-06-30 自动验收通过：空 command 检查现有 Unity 连接成功。 |
 | `unity_mcp_status` | 是 | 是 | 是 | 2026-06-30 自动验收通过：返回 MCP/Unity 会话、路径、编译与超时状态。 |
+| `unity_capabilities_get` | 是 | 是 | 是 | 返回注册表、会话、路径和能力状态；区分已注册、可用与当前可调用。 |
+| `unity_tools_find` | 是 | 是 | 是 | 支持 exact 标记、`callableNow` 过滤及独立近似结果；写权限关闭时 CSV patch 不进入可调用结果。 |
+| `unity_tool_call` | 是 | 契约通过 | 是 | 调用已注册但客户端未注入的工具；拒绝递归，并复用注册表的写权限/Flow/handler 检查。 |
 | `unity_ensure_ready` | 是 | 是 | 是 | 2026-06-30 自动验收通过：确认连接、编译空闲且处于编辑模式。 |
 | `unity_editor_state` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功获取 Editor 状态快照。 |
 | `unity_editor_focus` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Windows 下成功将 Unity Editor 置前。 |
 | `unity_editor_focus_state` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Windows 下成功查询 Unity Editor 焦点状态。 |
-| `unity_playmode_start` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功进入 PlayMode；会改变 Editor PlayMode 状态。 |
-| `unity_playmode_stop` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功退出 PlayMode 并恢复编辑模式。 |
+| `unity_playmode_start` | 是 | 是 | 是 | 2026-08-06 联机复验：仅在权威 Context 确认 `playModeState=play/isPlaying=true` 后返回 `confirmed=true`。 |
+| `unity_playmode_stop` | 是 | 是 | 是 | 2026-08-06 联机复验：等待权威 Context 确认 EditMode 后返回；随后 readiness 约 0.09 秒内恢复。 |
 | `unity_editor_delay` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Unity 主线程 50ms 延迟调用成功。 |
 
 ### 编译、错误与同步
@@ -41,12 +44,12 @@
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
 | `unity_compile` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功触发 Unity 编译请求。 |
-| `unity_compile_status` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取最近一次编译状态。 |
+| `unity_compile_status` | 是 | 是 | 是 | 2026-08-06 三项目联机复验：终态 `phase=completed`，queued/accepted/started/finished 时间完整有序；快速无变更编译也会补齐 `finishedAt`。 |
 | `unity_compile_errors` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取结构化编译错误，当前错误数为 0。 |
 | `unity_compile_wait` | 是 | 是 | 是 | 2026-06-30 自动验收通过：在编译空闲状态下等待成功返回。 |
 | `unity_compile_wait_editor` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Unity 编辑器侧等待编译空闲成功。 |
-| `unity_safe_compile_and_wait` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功触发编译、等待完成并完成 Domain Reload 后校验。 |
-| `unity_sync_after_disk_write` | 是 | 是 | 是 | 2026-08-02 契约测试补充：Refresh 成功但 Unity 已在编译时返回 `ok=true/status=compiling/nextAction=unity_compile_wait`，避免把中间态误判为失败。 |
+| `unity_safe_compile_and_wait` | 是 | 是 | 是 | 2026-08-09 F/D 各连续两轮及最终轮通过：Domain Reload 后瞬时 `COMPILE_ERROR` 继续持久错误复核，避免首轮假失败；权威 EditMode、结构化错误 0。 |
+| `unity_sync_after_disk_write` | 是 | 是 | 是 | 2026-08-06 双 Unity 2022 联机通过：现有编译返回 `attachedToExistingCompile=true` 且无错误签名；终态确认后才返回 `compileCompleted=true`，Context 与阶段时间戳一致。 |
 
 ### 调用与运行时代码
 
@@ -62,8 +65,14 @@
 | --- | --- | --- | --- | --- |
 | `unity_console_mark_logs` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功标记 Unity Console 当前末尾游标。 |
 | `unity_console_tail_logs` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功从 Console 游标读取新增日志。 |
-| `unity_console_search_logs` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功搜索 Unity Console 全量日志。 |
+| `unity_console_search_logs` | 是 | 契约通过，项目联机待补 | 是 | 兼容 `query/maxCount`，回显 `effectiveQuery/effectiveContains/matchedFields/scannedCount`，避免参数静默失效。 |
 | `unity_console_clear` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功清空 Unity Console。 |
+| `unity_console_capture_start` | 是 | 是 | 是 | 持久会话返回 `sessionId`，长 Operation 可自动关联。 |
+| `unity_console_capture_status` | 是 | 是 | 是 | 返回计数、文件大小、活动状态和写入错误。 |
+| `unity_console_capture_read` | 是 | 是 | 是 | 支持 `fromSequence/toSequence`、regex、稳定 snapshot、continuation token、总匹配数、扫描范围/计数和耗时；采集时增量维护稀疏索引。68,052,043 字节/23,648 条历史会话删除索引后最终冷启动首读 1.073 秒，5 模式实际 33 条全部返回；另以 210 条匹配验证 150 条分页上限，全程 sequence 无重复无丢失。 |
+| `unity_console_capture_stop` | 是 | 是 | 是 | 可幂等终结丢失 SessionState 指针的历史 active manifest；现场 5 MB 会话写出 summary/SHA256 后，F/D 活动会话均为 0。 |
+| `unity_console_capture_list` | 是 | 是 | 是 | 兼容顶层与 `session.sessionId` 结构并可列出历史会话。 |
+| `unity_console_capture_cleanup` | 是 | 待 apply 验收 | 条件可用 | 两阶段 dry-run/confirmToken 清理；apply 需要显式删除授权。 |
 | `unity_batch_diagnostics` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功一次性获取窗口布局、Console 摘要和编辑器状态。 |
 | `unity_verify_window` | 是 | 是 | 是 | 2026-08-02 契约测试补充：`windowMatch` 以 `unity_editor_windows_list` 为窗口存在性 truth；旧 `windowDiagnostics` 保留为 legacy 诊断。 |
 | `unity_task_execute` | 是 | 是 | 是 | 2026-06-30 自动验收通过：通过看门狗包装成功执行 `unity_ensure_ready`。 |
@@ -92,7 +101,40 @@
 | `unity_screenshot_game_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Game 视图 PNG。 |
 | `unity_screenshot_scene_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Scene 视图 PNG。 |
 | `unity_screenshot_camera` | 是 | 是 | 是 | 2026-06-30 自动验收通过：使用临时 Camera 成功截取 320x180 PNG。 |
-| `unity_screenshot_editor_window` | 是 | 是 | 是 | 2026-08-02 契约测试补充：成功时返回真实窗口宽高与匹配标题/类型；降级时返回 `degraded/source/degradeReason/originalError`。 |
+| `unity_screenshot_editor_window` | 是 | 是 | 是 | 成功时返回真实窗口宽高与匹配标题/类型；Windows EditMode 同名原生窗口隔离测试通过，不会误解析 OS 窗口。 |
+| `unity_screenshot_save` | 是 | 是 | 是 | GameView 不可用时可降级 SceneView；退出 PlayMode 后可返回 `source=recentGameView/degraded=true/degradeReason`；EditorWindow 捕获复用 Unity `EditorWindow` 对象。 |
+| `unity_screenshot_pixel_stats` | 是 | Python 通过 | 是 | 只读工程内 PNG，返回区域近黑/透明比例与亮度/Alpha 直方图，不返回原始像素。 |
+| `unity_screenshot_compare` | 是 | Python 通过 | 是 | 比较同尺寸 PNG 的差异像素比例、平均通道差和近黑比例变化。 |
+
+### 纹理导入
+
+| 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
+| --- | --- | --- | --- | --- |
+| `unity_texture_importer_get` | 是 | Unity 2022 编译通过，资产待补 | 是 | 返回 Mipmap、Alpha Source/Transparency、sRGB、Wrap、Filter、压缩、尺寸、可读性和平台覆盖。 |
+| `unity_texture_importer_patch` | 是 | Python/Unity 2022 编译通过，资产待补 | 条件可用 | `dryRun -> confirmToken -> apply`；令牌绑定资源和 `.meta` 哈希，apply 需要写权限。 |
+| `unity_asset_reimport` | 是 | Unity 2022 编译通过，资产待补 | 条件可用 | 强制重导入单个现有 `Assets/...` 资源，需写权限。 |
+
+### 资源依赖审计
+
+| 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
+| --- | --- | --- | --- | --- |
+| `unity_asset_dependencies` | 是 | Python/Unity 2022 编译通过，资产待补 | 是 | 返回直接/递归依赖的路径、类型、GUID 和 direct 标记；SerializedObject 的 ObjectReference 同时显示资源路径或运行时 instanceId。 |
+
+### 运行时导航与性能
+
+| 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
+| --- | --- | --- | --- | --- |
+| `unity_navmesh_status` | 是 | Unity 2022 编译通过，场景待补 | 是 | 返回 Surface/DataInstance 可观测信息、Agent 统计、preUpdate/观察版本和 triangulation；注册矩阵不可观测时明确使用推导 Bounds。 |
+| `unity_navmesh_sample` | 是 | Unity 2022 编译通过，场景待补 | 是 | 支持批量点、半径、areaMask/agentType，返回命中、距离、最近边缘和推导 Surface 匹配。 |
+| `unity_navmesh_triangulation_summary` | 是 | Unity 2022 编译通过，场景待补 | 是 | 返回顶点/三角形/区域数和世界 Bounds。 |
+| `unity_profiler_capture_start` | 是 | Unity 2022 编译通过，战场待补 | 是 | 支持 marker 白名单/正则、最大 marker 数、项目 telemetry 静态采样器和 baseline JSON；不可用计数器写入 `unavailableCounters`。 |
+| `unity_profiler_capture_status` | 是 | Unity 2022 编译通过，战场待补 | 是 | 返回进度、样本数、时间、选中/不可用 marker 和产物路径。 |
+| `unity_profiler_capture_stop` | 是 | Unity 2022 编译通过，战场待补 | 是 | 终态生成 JSON/CSV、P50/P95/P99、Top 20 marker、峰值帧、GC/托管堆/组件统计和 baseline 对比；不宣称完整 Timeline 树。 |
+
+KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
+`IGG.Game.Module.KingShotBattle.Editor.KingShotBattleMcpBridge`，方法
+`GetProfilerTelemetry`。它把流程版本、关卡、逻辑帧、战斗时间、双方单位与存活数、
+英雄/怪物/建筑/陷阱、Buff、弹道和世界技能特效规模写入每个 Profiler 样本及峰值帧。
 
 ### 场景、选择与游戏对象
 
@@ -165,7 +207,7 @@
 | `unity_package_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出已安装包；调用时会查询 Unity Package Manager 当前项目包清单、registry 解析结果和本地缓存状态。 |
 | `unity_package_search` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功查询 Unity Package Manager registry；调用时会按包名或关键字查询 registry 返回的包元数据。 |
 | `unity_test_run` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功启动 EditMode 测试运行；调用时会通过 Unity Test Framework 运行项目内 EditMode/PlayMode 测试用例。 |
-| `unity_test_results` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取最近一次测试结果；调用时会查询 Unity Test Framework 最近一次测试运行结果。 |
+| `unity_test_results` | 是 | 是 | 是 | 2026-08-09 Unity 2022 实际回调复验：`45 total / 43 passed / 2 skipped / 0 failed`；Unity 6 保留此前 `43/41/2/0` 证据，当前安装已卸载。 |
 | `unity_test_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出测试用例；调用时会查询项目内 Unity Test Framework 测试用例。 |
 | `unity_build_start` | 是 | 是 | 是 | 2026-06-30 自动验收通过：使用 `StandaloneWindows64` 和临时场景构建成功，错误/警告为 0；调用时会使用目标平台模块、工程构建配置和本机构建环境。 |
 | `unity_build_status` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取最近一次构建状态 `succeeded`；调用时会查询最近一次构建任务状态。 |
@@ -190,14 +232,25 @@
 | --- | --- | --- | --- | --- |
 | `unity_operation_list` | 是 | 是 | 是 | 列出 Unity Bridge 最近操作，保留原有诊断用途。 |
 | `unity_operation_get` | 是 | 是 | 是 | 按 commandId 读取 Unity Bridge 操作步骤，保留原有诊断用途。 |
-| `unity_operation_start` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖 JobSpec 启动；支持 reflection、MCP tool、menu、native route 调用。 |
-| `unity_operation_status` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖状态归一化；解析通用 status/phase/error/failureSignature/artifacts。 |
-| `unity_operation_wait` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖终态等待、artifact 收集和 repeatFailure；正式 smoke 需 Unity 连接后验收。 |
+| `unity_operation_start` | 是 | 是 | 是 | 90 秒显式 EditMode 长作业真实启动通过并自动关联 Console Capture；status/cancel 参数支持 `${start.field}`、`${status.field}`、`${operation.operationId}` 注入。 |
+| `unity_operation_status` | 是 | 是 | 是 | 真实长作业中持续保持 Running，终态返回 Succeeded 及完整 timing/artifact 数据。 |
+| `unity_operation_wait` | 是 | 是 | 是 | 首次 30 秒等待返回非终态且不写 Timeout，第二次等待同一 operationId 成功。 |
+| `unity_asset_subresources_list` | 是 | 是 | 是 | `Hero_10003` FBX 联机列出非预览 AnimationClip 子资源。 |
+| `unity_animator_controller_inspect` | 是 | 是 | 是 | `Hero_10003.controller` 联机返回 2 层、26 State、Motion、Mask、Transition 和未绑定 Clip。 |
+| `unity_avatar_mask_inspect` | 是 | 是 | 是 | `avatarmask.mask` 联机展开 36 条 Transform 路径和 active 状态。 |
+| `unity_model_importer_inspect` | 是 | 是 | 是 | `Attack_01` 联机返回 Generic/NoAvatar、Clip、Root 设置及 428 条曲线摘要。 |
+| `unity_config_csv_get` | 是 | 是 | 是 | xclient 联机识别 GB18030、CRLF、第三行技术表头、31 列和唯一主键。 |
+| `unity_config_csv_patch` | 是 | 是 | 条件可用 | `level_id=10044` 临时副本完成 dry-run/token/apply：GB18030、CRLF、31 列保持，目标外字节不变；业务源文件未写，apply 需要显式写授权。 |
+| `unity_hang_status` | 是 | 是 | 是 | 15 秒主线程忙循环中检测到心跳超时、CPU busy、`mainThreadUnresponsive` 和 `suspectedBusyLoop`。 |
+| `unity_hang_capture` | 是 | 是 | 是 | 忙循环期间成功生成非终止式 MiniDump，返回 bytes/SHA256/`processTerminated=false`，Unity 随后恢复。 |
+| `unity_script_analyze` | 是 | 是 | 是 | `KingShotBattleTest.cs` 联机分析通过，解析依据明确标记 heuristic。 |
+| `unity_script_dependency_graph` | 是 | 是 | 是 | 文件根、程序集、方向、依据和置信度联机通过；`maxDepth=1` 收敛为 77 节点/228 边。 |
+| `unity_project_stack_detect` | 是 | 是 | 是 | xclient 联机识别 Unity 包、asmdef、Editor/Runtime 和测试程序集。 |
 | `unity_operation_cancel` | 是 | 待 Unity 联机验收 | 是 | 调用 JobSpec cancelCall；无 cancelCall 时返回 CANCEL_UNSUPPORTED。 |
 | `unity_operation_collect_artifacts` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖报告 tail、metadata、sha256；业务含义由项目桥接判断。 |
 | `unity_agent_rules_check` | 是 | 是 | 是 | Python 单测覆盖只读检查；返回 recommendedBlock 和 diffSummary，不写文件。 |
 | `unity_agent_rules_install` | 是 | 是 | 是 | Python 单测覆盖 dry-run 与 apply；仅替换 upilot:start/end 受控块，apply=true 需要写权限。 |
-| `unity_compile_errors_get` | 是 | 待补充 | 是 | `unity_compile_errors` 兼容别名，用于旧规则和旧客户端过渡。 |
+| `unity_compile_errors_get` | 是 | 是 | 是 | D/F 两个 Unity 2022 项目保留此前 live strict 错误 0 证据；当前本地候选在独立 Unity 2022 工程编译错误 0，F Bridge 现为断连。兼容别名为 `unity_compile_errors`。 |
 
 ### 界面流程自动化
 

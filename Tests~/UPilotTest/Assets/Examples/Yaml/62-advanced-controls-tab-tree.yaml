@@ -1,0 +1,22 @@
+schemaVersion: 2
+name: "62-advanced-controls-tab-tree"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.AdvancedControlsWindow
+    reopen_if_open: true
+steps:
+  - action: select_tab
+    selector: '#settings-tabs'
+    label: 'Advanced'
+  - action: assert_text_contains
+    selector: '#tab-selection-status'
+    expected: 'Advanced'
+  - action: select_tree_item
+    selector: '#navigation-tree'
+    id: '110'
+  - action: assert_text_contains
+    selector: '#tree-selection-status'
+    expected: 'Leaf A1'
+  - action: close_tab
+    selector: '#settings-tabs'
+    label: 'About'

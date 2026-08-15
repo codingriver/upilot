@@ -36,6 +36,30 @@ async def unity_test_results():
     r = await _get_facade().test_results()
     return _log_tool_result("unity_test_results", _payload(r))
 
+@mcp.tool(description="获取当前 Unity Test Runner 运行 GUID、当前测试、进度时间与取消/清理状态。")
+async def unity_test_status():
+    _log_tool_call("unity_test_status", {})
+    r = await _get_facade().test_status()
+    return _log_tool_result("unity_test_status", _payload(r))
+
+@mcp.tool(description="通过 Unity Test Framework 官方 run GUID 取消当前测试；重复调用是幂等的，终态以 RunFinished 与清理完成为准。")
+async def unity_test_cancel(runGuid: str = ""):
+    _log_tool_call("unity_test_cancel", {"runGuid": runGuid})
+    r = await _get_facade().test_cancel(run_guid=runGuid)
+    return _log_tool_result("unity_test_cancel", _payload(r))
+
+@mcp.tool(description="请求停止并清理当前 Unity Test Runner 作业；不会在后台测试仍运行时伪造终态。")
+async def unity_test_force_cleanup(runGuid: str = ""):
+    _log_tool_call("unity_test_force_cleanup", {"runGuid": runGuid})
+    r = await _get_facade().test_force_cleanup(run_guid=runGuid)
+    return _log_tool_result("unity_test_force_cleanup", _payload(r))
+
+@mcp.tool(description="兼容旧名称；等价于 unity_test_force_cleanup，不会伪造测试终态。")
+async def unity_test_force_reset():
+    _log_tool_call("unity_test_force_reset", {})
+    r = await _get_facade().test_force_reset()
+    return _log_tool_result("unity_test_force_reset", _payload(r))
+
 @mcp.tool(description="列出 Unity 项目中所有可用的测试用例。")
 async def unity_test_list(testMode: str = "EditMode"):
     _log_tool_call("unity_test_list", {"testMode": testMode})

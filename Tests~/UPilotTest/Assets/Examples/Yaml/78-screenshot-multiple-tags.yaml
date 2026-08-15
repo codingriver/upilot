@@ -1,0 +1,36 @@
+schemaVersion: 2
+name: "78-screenshot-multiple-tags"
+description: |
+  Tests taking multiple screenshots with different tags in a single test case.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Initial state screenshot
+    action: screenshot
+    tag: "initial_state"
+
+  - name: Type username
+    action: type_text
+    selector: "#username-input"
+    value: "screenshot_user"
+
+  - name: After input screenshot
+    action: screenshot
+    tag: "after_input"
+
+  - name: Click login
+    action: click
+    selector: "#login-button"
+
+  - name: After click screenshot
+    action: screenshot
+    tag: "after_click"
+
+  - name: Assert status updated
+    action: assert_text_contains
+    selector: "#status-label"
+    expected: "Missing credentials"

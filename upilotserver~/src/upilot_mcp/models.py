@@ -14,6 +14,8 @@ class WsMessage:
     timestamp: int
     session_id: str
     protocol_version: str = "1.0"
+    context: dict[str, Any] | None = None
+    timing: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -22,6 +24,7 @@ class SessionState:
     unity_version: str = ""
     project_path: str = ""
     platform: str = ""
+    process_id: int = 0
     connected: bool = False
     authenticated: bool = False
     last_heartbeat_at: int = 0

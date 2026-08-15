@@ -1,0 +1,19 @@
+schemaVersion: 2
+name: "19-menus-and-commands"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - action: validate_command
+    selector: "#command-input"
+    command: "Copy"
+  - action: assert_text
+    selector: "#command-status"
+    expected: "Validate: Copy"
+  - action: execute_command
+    selector: "#command-input"
+    command: "Paste"
+  - action: assert_text
+    selector: "#command-status"
+    expected: "Execute: Paste"

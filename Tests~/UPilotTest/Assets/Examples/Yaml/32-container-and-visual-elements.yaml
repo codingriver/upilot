@@ -1,0 +1,20 @@
+schemaVersion: 2
+name: "32-container-and-visual-elements"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: assert_visible
+    selector: "#display-box"
+  - action: assert_visible
+    selector: "#settings-group"
+  - action: hover
+    selector: "#preview-image"
+    duration: "16ms"
+  - action: assert_visible
+    selector: "#preview-image"
+  - action: click
+    selector: "#display-box"
+  - action: assert_visible
+    selector: "#display-box"

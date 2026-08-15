@@ -80,6 +80,15 @@ namespace CodingRiver.UPilot.Flow
             }
 
             TestOptions options = UPilotFlowConfigurationService.Resolve(request.Options);
+            string executionId = UPilotFlowExecutionRegistry.EnsureExecutionId(options);
+            var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(request.CancellationToken);
+            IDisposable executionLease = UPilotFlowExecutionRegistry.Register(
+                executionId,
+                options.ExecutionSource,
+                () => linkedCancellation.Cancel());
+            string registryTerminalStatus = "failed";
+            try
+            {
             var batch = new UPilotFlowExecutionBatchResult
             {
                 Suite = new TestSuiteResult
@@ -91,7 +100,7 @@ namespace CodingRiver.UPilot.Flow
 
             for (int index = 0; index < yamlPaths.Count; index++)
             {
-                if (request.CancellationToken.IsCancellationRequested)
+                if (linkedCancellation.IsCancellationRequested)
                 {
                     batch.Cancelled = true;
                     break;
@@ -121,7 +130,7 @@ namespace CodingRiver.UPilot.Flow
                         request.RootOverride,
                         context =>
                         {
-                            cancellationRegistration = request.CancellationToken.Register(
+                            cancellationRegistration = linkedCancellation.Token.Register(
                                 () => context.RuntimeController?.Stop());
                             request.ContextReady?.Invoke(yamlPath, context);
                         });
@@ -179,7 +188,17 @@ namespace CodingRiver.UPilot.Flow
                     writeArtifactManifest: true);
             }
 
+            registryTerminalStatus = batch.Cancelled
+                ? "aborted"
+                : (batch.Suite.Errors > 0 || batch.Suite.Failed > 0 ? "failed" : "completed");
             return batch;
+            }
+            finally
+            {
+                UPilotFlowExecutionRegistry.MarkTerminal(executionId, registryTerminalStatus);
+                executionLease.Dispose();
+                linkedCancellation.Dispose();
+            }
         }
 
         private string ResolveCaseName(string yamlPath)

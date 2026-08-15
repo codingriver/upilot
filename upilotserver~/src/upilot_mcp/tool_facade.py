@@ -5,6 +5,7 @@ import asyncio
 from .auto_fix_loop import AutoFixLoopService
 from .dispatcher import CommandDispatcher
 from .domain.build_service import BuildDomainService
+from .domain.analysis_service import ProjectAnalysisDomainService
 from .domain.compile_service import CompileDomainService
 from .domain.reflection_service import ReflectionDomainService
 from .domain.resource_service import ResourceDomainService
@@ -19,6 +20,7 @@ from .server import WsOrchestratorServer
 
 class McpToolFacade(
     StatusDomainService,
+    ProjectAnalysisDomainService,
     CompileDomainService,
     ResourceDomainService,
     ReflectionDomainService,

@@ -1,0 +1,21 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-scroll-root" class="example-root">
+        <ui:VisualElement name="example-scroll-panel" class="example-panel">
+            <ui:Label name="scroll-status" text="Scroll: 0" class="example-status" />
+            <ui:ScrollView name="scroll-view" class="example-scroll">
+                <ui:Label name="scroll-item-1" text="Item 1" class="example-item" />
+                <ui:Label name="scroll-item-2" text="Item 2" class="example-item" />
+                <ui:Label name="scroll-item-3" text="Item 3" class="example-item" />
+                <ui:Label name="scroll-item-4" text="Item 4" class="example-item" />
+                <ui:Label name="scroll-item-5" text="Item 5" class="example-item" />
+                <ui:Label name="scroll-item-6" text="Item 6" class="example-item" />
+                <ui:Label name="scroll-item-7" text="Item 7" class="example-item" />
+                <ui:Label name="scroll-item-8" text="Item 8" class="example-item" />
+                <ui:Label name="scroll-item-9" text="Item 9" class="example-item" />
+                <ui:Label name="scroll-item-10" text="Item 10" class="example-item" />
+                <ui:Label name="scroll-item-11" text="Item 11" class="example-item" />
+                <ui:Label name="scroll-item-12" text="Item 12" class="example-item" />
+            </ui:ScrollView>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

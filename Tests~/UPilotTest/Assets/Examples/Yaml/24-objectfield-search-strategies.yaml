@@ -1,0 +1,19 @@
+schemaVersion: 2
+name: "24-objectfield-search-strategies"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: set_value
+    selector: "#template-asset"
+    value: "name:SampleInteractionWindow"
+  - action: assert_value
+    selector: "#template-asset"
+    expected: "Assets/Examples/Uxml/SampleInteractionWindow.uxml"
+  - action: set_value
+    selector: "#template-asset"
+    value: "search:VisualTreeAsset:SampleInteractionWindow"
+  - action: assert_value
+    selector: "#template-asset"
+    expected: "Assets/Examples/Uxml/SampleInteractionWindow.uxml"

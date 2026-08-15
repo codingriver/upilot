@@ -4,7 +4,9 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +23,9 @@ namespace CodingRiver.UPilot
     [Serializable] public class TestListMessage    { public TestListPayload payload; }
     [Serializable] public class TestListPayload    { public string testMode = "EditMode"; }
 
+    [Serializable] public class TestCancelMessage  { public TestCancelPayload payload; }
+    [Serializable] public class TestCancelPayload  { public string runGuid = ""; }
+
     [Serializable]
     public class TestResultItemPayload
     {
@@ -34,8 +39,27 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class TestRunResultPayload
     {
-        public string status;  // started, completed
+        public string status;  // started, running, cancel_requested, cleanup, completed, failed, aborted
+        public string phase;
         public string testMode;
+        public string runGuid;
+        public string currentTest;
+        public long   startedAt;
+        public long   lastProgressAt;
+        public bool   isRunning;
+        public bool   cancelRequested;
+        public bool   cancelAccepted;
+        public int    cancelAttemptCount;
+        public long   stopRequestedAt;
+        public long   stoppingAt;
+        public long   cleanupStartedAt;
+        public long   endedAt;
+        public bool   cleanupPending;
+        public bool   forceStopAttempted;
+        public bool   forceStopSucceeded;
+        public string forceStopError;
+        public List<string> cleanupErrors = new List<string>();
+        public List<string> unresolvedResources = new List<string>();
         public int    total;
         public int    passed;
         public int    failed;
@@ -54,15 +78,63 @@ namespace CodingRiver.UPilot
 
     public class UPilotTestService
     {
+        public static UPilotTestService Instance { get; private set; }
+
         private readonly UPilotBridge _bridge;
         private TestRunResultPayload _lastResults;
         private bool _isRunning;
+        private UnityEngine.Object _activeApi;
+        private object _activeCallback;
+        private string _activeRunGuid;
+        private string _pendingTerminalStatus;
+        private bool _cleanupScheduled;
+        private long _forceStopDeadline;
+        private bool _forceStopRequested;
 
-        public UPilotTestService(UPilotBridge bridge) { _bridge = bridge; }
+        public UPilotTestService(UPilotBridge bridge)
+        {
+            _bridge = bridge;
+            Instance = this;
+        }
+
+        public TestRunResultPayload GetStatusSnapshot()
+        {
+            return SnapshotStatus();
+        }
+
+        public TestRunResultPayload CancelActiveRun(string runGuid = "")
+        {
+            string knownRunGuid = _activeRunGuid ?? _lastResults?.runGuid;
+            if (!string.IsNullOrWhiteSpace(runGuid)
+                && !string.Equals(runGuid, knownRunGuid, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Active test run does not match runGuid: {runGuid}");
+            RequestCancel(force: false);
+            return SnapshotStatus();
+        }
+
+        public TestRunResultPayload ForceResetActiveRun()
+        {
+            RequestCancel(force: true);
+            return SnapshotStatus();
+        }
+
+        public TestRunResultPayload ForceCleanupActiveRun(string runGuid = "")
+        {
+            string knownRunGuid = _activeRunGuid ?? _lastResults?.runGuid;
+            if (!string.IsNullOrWhiteSpace(runGuid)
+                && !string.Equals(runGuid, knownRunGuid, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Active test run does not match runGuid: {runGuid}");
+            RequestCancel(force: true);
+            return SnapshotStatus();
+        }
 
         public void RegisterCommands()
         {
             _bridge.Router.Register("test.run",     HandleRunAsync);
+            _bridge.Router.Register("test.status",  HandleStatusAsync);
+            _bridge.Router.Register("test.cancel",  HandleCancelAsync);
+            _bridge.Router.Register("test.force_cleanup", HandleForceCleanupAsync);
+            _bridge.Router.Register("test.force_reset", HandleForceResetAsync);
             _bridge.Router.Register("test.results", HandleResultsAsync);
             _bridge.Router.Register("test.list",    HandleListAsync);
         }
@@ -91,27 +163,35 @@ namespace CodingRiver.UPilot
                 try
                 {
                     _isRunning = true;
-                    _lastResults = new TestRunResultPayload { testMode = mode, status = "started" };
+                    long startedAt = NowMs();
+                    _lastResults = new TestRunResultPayload
+                    {
+                        testMode = mode,
+                        status = "started",
+                        phase = "starting",
+                        startedAt = startedAt,
+                        lastProgressAt = startedAt,
+                        isRunning = true,
+                    };
+                    _activeRunGuid = null;
+                    _pendingTerminalStatus = null;
 
                     // Use TestRunner API via reflection since it's in a separate assembly
                     // UnityEditor.TestTools.TestRunner.Api.TestRunnerApi
                     var apiType = FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
                     if (apiType == null)
                     {
-                        _isRunning = false;
-                        tcs.SetException(new Exception("TestRunnerApi not found. Ensure Test Framework package is installed."));
-                        return;
+                        throw new Exception("TestRunnerApi not found. Ensure Test Framework package is installed.");
                     }
 
                     var api = ScriptableObject.CreateInstance(apiType);
+                    _activeApi = api;
 
                     // Create filter
                     var filterType = FindType("UnityEditor.TestTools.TestRunner.Api.Filter");
                     if (filterType == null)
                     {
-                        _isRunning = false;
-                        tcs.SetException(new Exception("Test Filter type not found."));
-                        return;
+                        throw new Exception("Test Filter type not found.");
                     }
 
                     var filter = Activator.CreateInstance(filterType);
@@ -126,21 +206,31 @@ namespace CodingRiver.UPilot
                             testModeField.SetValue(filter, modeValue);
                     }
 
-                    // Set filter if specified
+                    // Set filter if specified. Preserve the historical exact-name
+                    // behavior, while allowing class/namespace isolation through
+                    // the Unity Test Framework's regex-capable groupNames field.
                     if (!string.IsNullOrEmpty(p.testFilter))
                     {
-                        var testNamesField = filterType.GetField("testNames");
-                        if (testNamesField != null)
-                            testNamesField.SetValue(filter, new[] { p.testFilter });
+                        const string regexPrefix = "regex:";
+                        if (p.testFilter.StartsWith(regexPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            var groupNamesField = filterType.GetField("groupNames");
+                            if (groupNamesField != null)
+                                groupNamesField.SetValue(filter, new[] { p.testFilter.Substring(regexPrefix.Length) });
+                        }
+                        else
+                        {
+                            var testNamesField = filterType.GetField("testNames");
+                            if (testNamesField != null)
+                                testNamesField.SetValue(filter, new[] { p.testFilter });
+                        }
                     }
 
                     // Create ExecutionSettings
                     var execSettingsType = FindType("UnityEditor.TestTools.TestRunner.Api.ExecutionSettings");
                     if (execSettingsType == null)
                     {
-                        _isRunning = false;
-                        tcs.SetException(new Exception("ExecutionSettings type not found."));
-                        return;
+                        throw new Exception("ExecutionSettings type not found.");
                     }
 
                     // Unity 6000.6.0a2 removed the parameterless constructor; use the params Filter[] ctor
@@ -177,60 +267,116 @@ namespace CodingRiver.UPilot
                     var callbacksType = FindType("UnityEditor.TestTools.TestRunner.Api.ICallbacks");
                     if (callbacksType != null)
                     {
-                        var callbackInstance = new TestCallbackProxy(this, tcs);
-                        var registerMethod = apiType.GetMethod("RegisterCallbacks");
-                        if (registerMethod != null)
-                        {
-                            // Create a dynamic proxy wrapper
-                            // Since we can't directly implement the interface, use a workaround:
-                            // We'll poll for completion instead
-                        }
+                        var callbackInstance = CreateCallbackProxy(callbacksType);
+                        RegisterCallbacks(apiType, api, callbacksType, callbackInstance);
+                        _activeCallback = callbackInstance;
+                    }
+                    else
+                    {
+                        throw new Exception("Test Runner ICallbacks type not found.");
                     }
 
                     // Execute
                     var executeMethod = apiType.GetMethod("Execute");
-                    if (executeMethod != null)
-                    {
-                        executeMethod.Invoke(api, new[] { execSettings });
-                    }
+                    if (executeMethod == null)
+                        throw new Exception("TestRunnerApi.Execute method not found.");
 
-                    // Since callback registration is complex via reflection,
-                    // we return immediately with "started" and let test.results poll for results
+                    object executeResult = executeMethod.Invoke(api, new[] { execSettings });
+                    _activeRunGuid = Convert.ToString(executeResult);
+                    _lastResults.runGuid = _activeRunGuid;
+                    _lastResults.lastProgressAt = NowMs();
+
+                    // Return immediately. The registered callback owns the real lifecycle and
+                    // transitions test.results to completed/failed only after RunFinished.
                     _lastResults.status = "running";
+                    _lastResults.phase = "running";
                     tcs.SetResult(_lastResults);
-
-                    // Set up a delayed check to mark as complete
-                    EditorApplication.delayCall += () =>
-                    {
-                        // The test runner will complete asynchronously
-                        // Results can be queried via test.results
-                        _isRunning = false;
-                        _lastResults.status = "completed";
-                    };
                 }
                 catch (Exception ex)
                 {
-                    _isRunning = false;
+                    _pendingTerminalStatus = "failed";
+                    if (_lastResults != null)
+                    {
+                        _lastResults.status = "cleanup";
+                        _lastResults.phase = "cleanup";
+                        _lastResults.cleanupPending = true;
+                        _lastResults.cleanupStartedAt = NowMs();
+                        _lastResults.lastProgressAt = NowMs();
+                    }
+                    CleanupActiveRun();
                     tcs.SetException(ex);
                 }
             });
 
             try
             {
-                var payload = await tcs.Task;
-                await _bridge.SendResultAsync(id, "test.run", payload, token);
+                await tcs.Task;
+                await _bridge.SendResultAsync(id, "test.run", SnapshotStatus(), token);
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "TEST_RUN_FAILED", ex.Message, token, "test.run");
+                var root = ex is TargetInvocationException invocation && invocation.InnerException != null
+                    ? invocation.InnerException
+                    : ex;
+                await _bridge.SendErrorAsync(id, "TEST_RUN_FAILED", root.Message, token, "test.run");
             }
         }
 
         // ── test.results ────────────────────────────────────────────────────────
 
+        private async Task HandleStatusAsync(string id, string json, CancellationToken token)
+        {
+            await _bridge.SendResultAsync(id, "test.status", SnapshotStatus(), token);
+        }
+
+        private async Task HandleCancelAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<TestCancelMessage>(json)?.payload ?? new TestCancelPayload();
+            string knownRunGuid = _activeRunGuid ?? _lastResults?.runGuid;
+            if (!string.IsNullOrWhiteSpace(payload.runGuid)
+                && !string.Equals(payload.runGuid, knownRunGuid, StringComparison.Ordinal))
+            {
+                await _bridge.SendErrorAsync(id, "TEST_RUN_NOT_FOUND", $"Active test run does not match runGuid: {payload.runGuid}", token, "test.cancel");
+                return;
+            }
+
+            RequestCancel(force: false);
+            await _bridge.SendResultAsync(id, "test.cancel", SnapshotStatus(), token);
+        }
+
+        private async Task HandleForceResetAsync(string id, string json, CancellationToken token)
+        {
+            await HandleForceCleanupCoreAsync(id, new TestCancelPayload(), "test.force_reset", token);
+        }
+
+        private async Task HandleForceCleanupAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<TestCancelMessage>(json)?.payload ?? new TestCancelPayload();
+            await HandleForceCleanupCoreAsync(id, payload, "test.force_cleanup", token);
+        }
+
+        private async Task HandleForceCleanupCoreAsync(
+            string id,
+            TestCancelPayload payload,
+            string responseName,
+            CancellationToken token)
+        {
+            string knownRunGuid = _activeRunGuid ?? _lastResults?.runGuid;
+            if (!string.IsNullOrWhiteSpace(payload.runGuid)
+                && !string.Equals(payload.runGuid, knownRunGuid, StringComparison.Ordinal))
+            {
+                await _bridge.SendErrorAsync(id, "TEST_RUN_NOT_FOUND", $"Active test run does not match runGuid: {payload.runGuid}", token, responseName);
+                return;
+            }
+            // Force cleanup still starts with the Test Framework's supported cancel API.
+            // State is intentionally retained until RunFinished and callback cleanup complete.
+            RequestCancel(force: true);
+            await _bridge.SendResultAsync(id, responseName, SnapshotStatus(), token);
+        }
+
         private async Task HandleResultsAsync(string id, string json, CancellationToken token)
         {
-            var result = _lastResults ?? new TestRunResultPayload { status = "none", testMode = "" };
+            var result = SnapshotStatus();
             await _bridge.SendResultAsync(id, "test.results", result, token);
         }
 
@@ -250,53 +396,47 @@ namespace CodingRiver.UPilot
                 {
                     var result = new TestListResultPayload { testMode = mode };
 
-                    // Find tests via reflection of test assemblies
-                    string assemblyNameSuffix = mode == "PlayMode" ? ".PlayMode" : ".EditMode";
+                    // Use the same authoritative discovery tree as TestRunnerApi.Execute.
+                    // Assembly reflection cannot reproduce parameterized/generated FullName
+                    // values and causes valid test filters to complete with NoTests.
+                    var apiType = FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+                    var adaptorType = FindType("UnityEditor.TestTools.TestRunner.Api.ITestAdaptor");
+                    var testModeType = FindType("UnityEditor.TestTools.TestRunner.Api.TestMode");
+                    if (apiType == null || adaptorType == null || testModeType == null)
+                        throw new Exception("Unity Test Runner discovery API is unavailable.");
 
-                    foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    var api = ScriptableObject.CreateInstance(apiType);
+                    var retrieve = apiType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(method => method.Name == "RetrieveTestList" &&
+                                                  method.GetParameters().Length == 2 &&
+                                                  method.GetParameters()[0].ParameterType == testModeType);
+                    if (retrieve == null)
+                        throw new Exception("TestRunnerApi.RetrieveTestList(TestMode, callback) was not found.");
+
+                    Action<object> onRetrieved = root =>
                     {
-                        string asmName = assembly.GetName().Name;
-
-                        // Look for test assemblies (usually contain "Tests" or "Test")
-                        bool isTestAssembly = asmName.Contains("Test") ||
-                                             asmName.EndsWith(".Tests") ||
-                                             asmName.EndsWith(assemblyNameSuffix);
-
-                        if (!isTestAssembly) continue;
-
                         try
                         {
-                            foreach (var type in assembly.GetTypes())
-                            {
-                                foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance))
-                                {
-                                    // Check for [Test] or [UnityTest] attributes
-                                    bool hasTest = false;
-                                    foreach (var attr in method.GetCustomAttributes(false))
-                                    {
-                                        string attrName = attr.GetType().Name;
-                                        if (attrName == "TestAttribute" || attrName == "UnityTestAttribute" ||
-                                            attrName == "TestCaseAttribute")
-                                        {
-                                            hasTest = true;
-                                            break;
-                                        }
-                                    }
-
-                                    if (hasTest)
-                                    {
-                                        result.tests.Add($"{type.FullName}.{method.Name}");
-                                    }
-                                }
-                            }
+                            CollectDiscoveredLeafTests(root, result.tests);
+                            result.tests.Sort(StringComparer.Ordinal);
+                            tcs.TrySetResult(result);
                         }
-                        catch
+                        catch (Exception ex)
                         {
-                            // Skip assemblies that fail reflection
+                            tcs.TrySetException(ex);
                         }
-                    }
+                        finally
+                        {
+                            UnityEngine.Object.DestroyImmediate(api);
+                        }
+                    };
 
-                    tcs.SetResult(result);
+                    Type callbackType = typeof(Action<>).MakeGenericType(adaptorType);
+                    Type wrapperType = typeof(TestListCallback<>).MakeGenericType(adaptorType);
+                    object wrapper = Activator.CreateInstance(wrapperType, onRetrieved);
+                    Delegate callback = Delegate.CreateDelegate(callbackType, wrapper, wrapperType.GetMethod(nameof(TestListCallback<object>.Invoke)));
+                    object modeValue = Enum.Parse(testModeType, mode);
+                    retrieve.Invoke(api, new[] { modeValue, callback });
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
             });
@@ -321,6 +461,111 @@ namespace CodingRiver.UPilot
             return "EditMode";
         }
 
+        private TestRunResultPayload SnapshotStatus()
+        {
+            if (_lastResults == null)
+                return new TestRunResultPayload { status = "none", testMode = "", isRunning = false };
+
+            _lastResults.isRunning = _isRunning;
+            _lastResults.runGuid = _activeRunGuid ?? _lastResults.runGuid;
+            RefreshUnresolvedResources();
+            return _lastResults;
+        }
+
+        private void RequestCancel(bool force)
+        {
+            if (!_isRunning || _lastResults == null)
+                return;
+
+            if (_lastResults.cancelRequested)
+            {
+                if (force)
+                    ScheduleForceStop();
+                return;
+            }
+
+            _lastResults.cancelRequested = true;
+            _lastResults.cancelAttemptCount++;
+            _lastResults.stopRequestedAt = _lastResults.stopRequestedAt > 0
+                ? _lastResults.stopRequestedAt
+                : NowMs();
+            _lastResults.status = force ? "stopping" : "cancel_requested";
+            _lastResults.phase = _lastResults.status;
+            _lastResults.lastProgressAt = NowMs();
+
+            if (string.IsNullOrWhiteSpace(_activeRunGuid))
+                return;
+
+            Type apiType = FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+            MethodInfo cancel = apiType?.GetMethod(
+                "CancelTestRun",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(string) },
+                null);
+            if (cancel == null)
+                throw new Exception("TestRunnerApi.CancelTestRun(string) was not found.");
+
+            _lastResults.cancelAccepted = Convert.ToBoolean(cancel.Invoke(null, new object[] { _activeRunGuid }));
+            if (_lastResults.cancelAccepted)
+            {
+                _lastResults.status = "stopping";
+                _lastResults.phase = "stopping";
+                _lastResults.stoppingAt = _lastResults.stoppingAt > 0
+                    ? _lastResults.stoppingAt
+                    : NowMs();
+                ScheduleCancelCompletionMonitor();
+            }
+            if (force)
+                ScheduleForceStop();
+        }
+
+        private static long NowMs()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+
+        private static void CollectDiscoveredLeafTests(object node, List<string> tests)
+        {
+            if (node == null)
+                return;
+
+            Type nodeType = node.GetType();
+            bool isSuite = (bool)(nodeType.GetProperty("IsSuite")?.GetValue(node) ?? false);
+            var children = nodeType.GetProperty("Children")?.GetValue(node) as IEnumerable;
+            bool hasChildren = false;
+            if (children != null)
+            {
+                foreach (object child in children)
+                {
+                    hasChildren = true;
+                    CollectDiscoveredLeafTests(child, tests);
+                }
+            }
+
+            if (!isSuite && !hasChildren)
+            {
+                string fullName = nodeType.GetProperty("FullName")?.GetValue(node) as string;
+                if (!string.IsNullOrEmpty(fullName))
+                    tests.Add(fullName);
+            }
+        }
+
+        private sealed class TestListCallback<T>
+        {
+            private readonly Action<object> _callback;
+
+            public TestListCallback(Action<object> callback)
+            {
+                _callback = callback;
+            }
+
+            public void Invoke(T root)
+            {
+                _callback(root);
+            }
+        }
+
         private static Type FindType(string fullName)
         {
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
@@ -331,16 +576,350 @@ namespace CodingRiver.UPilot
             return null;
         }
 
-        // Placeholder for callback proxy
-        private class TestCallbackProxy
+        private object CreateCallbackProxy(Type callbacksType)
         {
-            private readonly UPilotTestService _service;
-            private readonly TaskCompletionSource<TestRunResultPayload> _tcs;
+            var create = typeof(DispatchProxy)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .First(method => method.Name == "Create" && method.IsGenericMethodDefinition);
+            var proxy = create.MakeGenericMethod(callbacksType, typeof(TestCallbackProxy)).Invoke(null, null);
+            ((TestCallbackProxy)proxy).Initialize(this);
+            return proxy;
+        }
 
-            public TestCallbackProxy(UPilotTestService service, TaskCompletionSource<TestRunResultPayload> tcs)
+        private static void RegisterCallbacks(Type apiType, object api, Type callbacksType, object callback)
+        {
+            var register = apiType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(method => method.Name == "RegisterCallbacks" && method.IsGenericMethodDefinition);
+            if (register == null)
+                throw new Exception("TestRunnerApi.RegisterCallbacks method not found.");
+
+            register = register.MakeGenericMethod(callbacksType);
+            var args = register.GetParameters()
+                .Select((parameter, index) => index == 0
+                    ? callback
+                    : (parameter.HasDefaultValue ? parameter.DefaultValue : Activator.CreateInstance(parameter.ParameterType)))
+                .ToArray();
+            register.Invoke(api, args);
+        }
+
+        private void OnRunStarted()
+        {
+            if (_lastResults != null)
+            {
+                _lastResults.status = "running";
+                _lastResults.phase = "running";
+                _lastResults.lastProgressAt = NowMs();
+            }
+        }
+
+        private void OnTestStarted(object test)
+        {
+            if (_lastResults == null)
+                return;
+
+            if (Convert.ToBoolean(GetProperty(test, "IsSuite") ?? false))
+                return;
+
+            _lastResults.currentTest = Convert.ToString(GetProperty(test, "FullName"))
+                ?? Convert.ToString(GetProperty(test, "Name"))
+                ?? string.Empty;
+            _lastResults.phase = "test";
+            _lastResults.lastProgressAt = NowMs();
+        }
+
+        private void OnTestFinished()
+        {
+            if (_lastResults != null)
+                _lastResults.lastProgressAt = NowMs();
+        }
+
+        private void OnRunFinished(object rootResult)
+        {
+            try
+            {
+                var results = new List<TestResultItemPayload>();
+                CollectLeafResults(rootResult, results);
+                if (results.Count == 0)
+                {
+                    results.Add(new TestResultItemPayload
+                    {
+                        testName = "UPilot.TestRunner.NoTests",
+                        testStatus = "Failed",
+                        message = "The Test Runner completed without discovering any matching leaf tests.",
+                        stackTrace = string.Empty,
+                    });
+                }
+                _lastResults.results = results;
+                _lastResults.total = results.Count;
+                _lastResults.passed = results.Count(item => item.testStatus == "Passed");
+                _lastResults.failed = results.Count(item => item.testStatus == "Failed");
+                _lastResults.skipped = results.Count(item =>
+                    item.testStatus == "Skipped" || item.testStatus == "Inconclusive");
+                _pendingTerminalStatus = _lastResults.cancelRequested
+                    ? "aborted"
+                    : (_lastResults.failed > 0 ? "failed" : "completed");
+            }
+            catch (Exception ex)
+            {
+                _pendingTerminalStatus = "failed";
+                _lastResults.failed = Math.Max(1, _lastResults.failed);
+                _lastResults.results.Add(new TestResultItemPayload
+                {
+                    testName = "UPilot.TestRunner.Callback",
+                    testStatus = "Failed",
+                    message = ex.Message,
+                    stackTrace = ex.ToString(),
+                });
+                _lastResults.total = _lastResults.results.Count;
+            }
+            finally
+            {
+                _lastResults.status = "cleanup";
+                _lastResults.phase = "cleanup";
+                _lastResults.cleanupPending = true;
+                _lastResults.cleanupStartedAt = _lastResults.cleanupStartedAt > 0
+                    ? _lastResults.cleanupStartedAt
+                    : NowMs();
+                _lastResults.currentTest = null;
+                _lastResults.lastProgressAt = NowMs();
+                ScheduleCleanup();
+            }
+        }
+
+        private static void CollectLeafResults(object result, List<TestResultItemPayload> output)
+        {
+            if (result == null) return;
+            var children = GetProperty(result, "Children") as IEnumerable;
+            var childList = children?.Cast<object>().Where(child => child != null).ToList()
+                ?? new List<object>();
+            if (childList.Count > 0)
+            {
+                foreach (var child in childList)
+                    CollectLeafResults(child, output);
+                return;
+            }
+
+            var test = GetProperty(result, "Test");
+            if (Convert.ToBoolean(GetProperty(test, "IsSuite") ?? false))
+                return;
+            var status = Convert.ToString(GetProperty(result, "TestStatus")) ?? "Inconclusive";
+            output.Add(new TestResultItemPayload
+            {
+                testName = Convert.ToString(GetProperty(test, "FullName"))
+                    ?? Convert.ToString(GetProperty(test, "Name"))
+                    ?? "(unknown)",
+                testStatus = status,
+                duration = Convert.ToSingle(GetProperty(result, "Duration") ?? 0f),
+                message = Convert.ToString(GetProperty(result, "Message")) ?? string.Empty,
+                stackTrace = Convert.ToString(GetProperty(result, "StackTrace")) ?? string.Empty,
+            });
+        }
+
+        private static object GetProperty(object target, string propertyName)
+        {
+            return target?.GetType()
+                .GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)
+                ?.GetValue(target);
+        }
+
+        private void CleanupActiveRun()
+        {
+            EditorApplication.update -= ForceStopTick;
+            EditorApplication.update -= CleanupActiveRunFromUpdate;
+            EditorApplication.delayCall -= CleanupActiveRun;
+            _cleanupScheduled = false;
+            try
+            {
+                var api = _activeApi;
+                var callback = _activeCallback;
+                _activeApi = null;
+                _activeCallback = null;
+
+                if (api != null && callback != null)
+                {
+                    try
+                    {
+                        var unregister = api.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                            .FirstOrDefault(method => method.Name == "UnregisterCallbacks" && method.IsGenericMethodDefinition);
+                        var callbacksType = callback.GetType().GetInterfaces()
+                            .FirstOrDefault(type => type.FullName == "UnityEditor.TestTools.TestRunner.Api.ICallbacks");
+                        if (unregister != null && callbacksType != null)
+                            unregister.MakeGenericMethod(callbacksType).Invoke(api, new[] { callback });
+                    }
+                    catch (Exception ex)
+                    {
+                        _lastResults?.cleanupErrors.Add($"callback-unregister: {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+
+                if (api != null)
+                    UnityEngine.Object.DestroyImmediate(api);
+            }
+            finally
+            {
+                if (_lastResults != null)
+                {
+                    _lastResults.cleanupPending = false;
+                    _lastResults.isRunning = false;
+                    _lastResults.currentTest = null;
+                    _lastResults.lastProgressAt = NowMs();
+                    if (!string.IsNullOrWhiteSpace(_pendingTerminalStatus))
+                        _lastResults.status = _pendingTerminalStatus;
+                    _lastResults.phase = _lastResults.status;
+                    _lastResults.endedAt = NowMs();
+                    _lastResults.unresolvedResources.Clear();
+                }
+
+                _isRunning = false;
+                _activeRunGuid = null;
+                _pendingTerminalStatus = null;
+                _forceStopRequested = false;
+            }
+        }
+
+        private void ScheduleCleanup()
+        {
+            if (_cleanupScheduled)
+                return;
+            _cleanupScheduled = true;
+            EditorApplication.delayCall += CleanupActiveRun;
+            EditorApplication.update += CleanupActiveRunFromUpdate;
+        }
+
+        private void CleanupActiveRunFromUpdate()
+        {
+            CleanupActiveRun();
+        }
+
+        private void ScheduleForceStop()
+        {
+            if (!_isRunning || _lastResults == null)
+                return;
+            _forceStopRequested = true;
+            _forceStopDeadline = NowMs() + 5000;
+            EditorApplication.update -= ForceStopTick;
+            EditorApplication.update += ForceStopTick;
+        }
+
+        private void ScheduleCancelCompletionMonitor()
+        {
+            if (!_isRunning || _lastResults == null)
+                return;
+            EditorApplication.update -= ForceStopTick;
+            EditorApplication.update += ForceStopTick;
+        }
+
+        private void ForceStopTick()
+        {
+            if (!_isRunning || _lastResults == null)
+            {
+                EditorApplication.update -= ForceStopTick;
+                return;
+            }
+            try
+            {
+                Type apiType = FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+                FieldInfo holderField = apiType?.GetField("m_testJobDataHolder", BindingFlags.NonPublic | BindingFlags.Static);
+                object holder = holderField?.GetValue(null);
+                MethodInfo getRunner = holder?.GetType().GetMethod("GetRunner", BindingFlags.Public | BindingFlags.Instance);
+                object runner = getRunner?.Invoke(holder, new object[] { _activeRunGuid });
+
+                // CancelTestRun can unregister the runner without invoking ICallbacks.RunFinished.
+                // Once the framework no longer owns the job, it is safe to finish UPilot cleanup.
+                if (runner == null)
+                {
+                    if (_forceStopRequested)
+                    {
+                        _lastResults.forceStopAttempted = true;
+                        _lastResults.forceStopSucceeded = true;
+                    }
+                    FinalizeCancelledRun();
+                    return;
+                }
+
+                if (!_forceStopRequested || NowMs() < _forceStopDeadline)
+                    return;
+
+                EditorApplication.update -= ForceStopTick;
+                _lastResults.forceStopAttempted = true;
+                MethodInfo stopRun = runner?.GetType().GetMethod("StopRun", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (stopRun == null)
+                    throw new Exception("Test Framework active runner cleanup entry was not found.");
+
+                stopRun.Invoke(runner, null);
+                _lastResults.forceStopSucceeded = true;
+                FinalizeCancelledRun();
+            }
+            catch (Exception ex)
+            {
+                Exception root = ex is TargetInvocationException invocation && invocation.InnerException != null
+                    ? invocation.InnerException
+                    : ex;
+                _lastResults.forceStopError = root.Message;
+                _lastResults.lastProgressAt = NowMs();
+            }
+        }
+
+        private void FinalizeCancelledRun()
+        {
+            EditorApplication.update -= ForceStopTick;
+            _forceStopRequested = false;
+            _lastResults.status = "cleanup";
+            _lastResults.phase = "cleanup";
+            _lastResults.cleanupPending = true;
+            _lastResults.cleanupStartedAt = _lastResults.cleanupStartedAt > 0
+                ? _lastResults.cleanupStartedAt
+                : NowMs();
+            _lastResults.currentTest = null;
+            _lastResults.lastProgressAt = NowMs();
+            _pendingTerminalStatus = "aborted";
+            ScheduleCleanup();
+        }
+
+        private void RefreshUnresolvedResources()
+        {
+            if (_lastResults == null)
+                return;
+            _lastResults.unresolvedResources.Clear();
+            if (_isRunning)
+                _lastResults.unresolvedResources.Add("test-runner-job");
+            if (!string.IsNullOrWhiteSpace(_activeRunGuid))
+                _lastResults.unresolvedResources.Add($"run-guid:{_activeRunGuid}");
+            if (_activeApi != null)
+                _lastResults.unresolvedResources.Add("test-runner-api");
+            if (_activeCallback != null)
+                _lastResults.unresolvedResources.Add("test-callback");
+            _lastResults.cleanupPending = (_lastResults.cancelRequested || _lastResults.status == "cleanup")
+                && _lastResults.unresolvedResources.Count > 0;
+        }
+
+        public class TestCallbackProxy : DispatchProxy
+        {
+            private UPilotTestService _service;
+
+            public void Initialize(UPilotTestService service)
             {
                 _service = service;
-                _tcs     = tcs;
+            }
+
+            protected override object Invoke(MethodInfo targetMethod, object[] args)
+            {
+                switch (targetMethod?.Name)
+                {
+                    case "RunStarted":
+                        _service.OnRunStarted();
+                        break;
+                    case "RunFinished":
+                        _service.OnRunFinished(args != null && args.Length > 0 ? args[0] : null);
+                        break;
+                    case "TestStarted":
+                        _service.OnTestStarted(args != null && args.Length > 0 ? args[0] : null);
+                        break;
+                    case "TestFinished":
+                        _service.OnTestFinished();
+                        break;
+                }
+                return null;
             }
         }
 

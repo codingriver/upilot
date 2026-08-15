@@ -47,6 +47,10 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 class TestDomainService:
+    # This is an application service, not a pytest test class.  Its public
+    # methods intentionally mirror MCP tool names such as ``test_run``.
+    __test__ = False
+
     async def test_run(
         self, test_mode: str = "EditMode", test_filter: str = ""
     ) -> ToolResponse:
@@ -61,6 +65,30 @@ class TestDomainService:
     async def test_results(self) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(request_id, "test.results", {})
+
+    async def test_status(self) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(request_id, "test.status", {})
+
+    async def test_cancel(self, run_guid: str = "") -> ToolResponse:
+        request_id = new_id("req")
+        payload = {"runGuid": run_guid} if run_guid else {}
+        return await self.dispatcher.call(
+            request_id, "test.cancel", payload, timeout_ms=30000
+        )
+
+    async def test_force_reset(self) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id, "test.force_reset", {}, timeout_ms=30000
+        )
+
+    async def test_force_cleanup(self, run_guid: str = "") -> ToolResponse:
+        request_id = new_id("req")
+        payload = {"runGuid": run_guid} if run_guid else {}
+        return await self.dispatcher.call(
+            request_id, "test.force_cleanup", payload, timeout_ms=30000
+        )
 
     async def test_list(self, test_mode: str = "EditMode") -> ToolResponse:
         request_id = new_id("req")
@@ -315,6 +343,37 @@ class TestDomainService:
             timeout_ms=30000,
         )
 
+    async def upilot_flow_status(self, execution_id: str = "") -> ToolResponse:
+        payload = {"executionId": execution_id} if execution_id else {}
+        return await self.dispatcher.call(
+            new_id("req"), "upilot_flow.status", payload, timeout_ms=30000
+        )
+
+    async def upilot_flow_executions(self) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"), "upilot_flow.executions", {}, timeout_ms=30000
+        )
+
+    async def upilot_flow_list(self) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"), "upilot_flow.list", {}, timeout_ms=30000
+        )
+
+    async def upilot_flow_pause(self, execution_id: str) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"), "upilot_flow.pause", {"executionId": execution_id}, timeout_ms=30000
+        )
+
+    async def upilot_flow_resume(self, execution_id: str) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"), "upilot_flow.resume", {"executionId": execution_id}, timeout_ms=30000
+        )
+
+    async def upilot_flow_stop(self, execution_id: str) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"), "upilot_flow.stop", {"executionId": execution_id}, timeout_ms=30000
+        )
+
     async def upilot_flow_cancel(self, execution_id: str) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
@@ -330,5 +389,15 @@ class TestDomainService:
             request_id,
             "upilot_flow.force_reset",
             {},
+            timeout_ms=30000,
+        )
+
+    async def upilot_flow_force_cleanup(self, execution_id: str = "") -> ToolResponse:
+        request_id = new_id("req")
+        payload = {"executionId": execution_id} if execution_id else {}
+        return await self.dispatcher.call(
+            request_id,
+            "upilot_flow.force_cleanup",
+            payload,
             timeout_ms=30000,
         )

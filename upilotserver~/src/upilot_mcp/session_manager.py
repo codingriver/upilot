@@ -19,6 +19,7 @@ class SessionManager:
             unity_version=str(payload.get("unityVersion", "")),
             project_path=str(payload.get("projectPath", "")),
             platform=str(payload.get("platform", "")),
+            process_id=int(payload.get("processId") or 0),
             connected=True,
             authenticated=True,
             last_heartbeat_at=now_ms(),

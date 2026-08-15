@@ -18,9 +18,37 @@ namespace CodingRiver.UPilot.Flow
         public async Task ExecuteAsync(VisualElement root, ActionContext context, Dictionary<string, string> parameters)
         {
             VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "click");
+            bool hasMenuItem = parameters.TryGetValue("menu_item", out string menuItemName)
+                && !string.IsNullOrWhiteSpace(menuItemName);
+
+            // In non-strict mode, execute a known DropdownMenuAction directly before
+            // clicking the ToolbarMenu. Opening Unity's native popup first can enter a
+            // modal message loop that blocks Editor update and prevents cancellation.
+            if (hasMenuItem
+                && context?.Options?.RequireOfficialPointerDriver != true
+                && ActionHelpers.TryExecuteDropdownMenuItem(element, menuItemName))
+            {
+                context.Log($"click: directly selected menu item '{menuItemName}' without opening a modal popup");
+                await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
+                return;
+            }
+
+            bool mayOpenNativePopup = MayOpenNativePopup(element);
+            if (mayOpenNativePopup
+                && !hasMenuItem
+                && context?.Options?.RequireOfficialPointerDriver != true)
+            {
+                context.Log($"click: skipped opening native popup for {element.GetType().Name}; use menu_item or a dedicated selection action to choose a value");
+                await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
+                return;
+            }
+
             MouseButton button = ActionHelpers.ParseMouseButton(parameters, "click");
             EventModifiers modifiers = ActionHelpers.ParseEventModifiers(parameters, "click");
             ActionHelpers.RequireOfficialPointerDriver(context, "click");
+            using IDisposable modalWatchdog = (hasMenuItem || mayOpenNativePopup)
+                ? UPilotFlowModalWatchdog.Arm(context, hasMenuItem ? "click-menu" : "click-popup")
+                : null;
             context.Log($"click: dispatch to {ActionContext.ElementInfo(element)} at {element.worldBound.center} via {ActionHelpers.ResolvePointerDriver(context)} button={button} modifiers={modifiers}");
             if (context?.SimulationSession?.PointerDriver != null)
             {
@@ -34,7 +62,7 @@ namespace CodingRiver.UPilot.Flow
             await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
 
             // Support clicking a menu item through generic click when menu_item is provided.
-            if (parameters.TryGetValue("menu_item", out string menuItemName) && !string.IsNullOrWhiteSpace(menuItemName))
+            if (hasMenuItem)
             {
                 bool selected = false;
 
@@ -61,6 +89,20 @@ namespace CodingRiver.UPilot.Flow
                     context.Log($"click: menu item '{menuItemName}' was not available");
                 }
             }
+        }
+
+        private static bool MayOpenNativePopup(VisualElement element)
+        {
+            if (element == null)
+                return false;
+
+            if (element is DropdownField || element is ToolbarMenu)
+                return true;
+
+            string typeName = element.GetType().Name;
+            return typeName.IndexOf("PopupField", StringComparison.Ordinal) >= 0
+                || typeName.IndexOf("DropdownField", StringComparison.Ordinal) >= 0
+                || typeName.IndexOf("ToolbarMenu", StringComparison.Ordinal) >= 0;
         }
     }
 
@@ -392,15 +434,52 @@ namespace CodingRiver.UPilot.Flow
             context.Log($"{actionName}: sending {commandName} to {ActionContext.ElementInfo(target)} via {ActionHelpers.ResolveHostDriver(context)}");
             await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
 
-            bool usedOfficialDriver = eventType == EventType.ExecuteCommand
-                ? context?.SimulationSession?.TryExecuteCommandWithOfficialDriver(target, commandName, context) == true
-                : context?.SimulationSession?.TryValidateCommandWithOfficialDriver(target, commandName, context) == true;
-
-            // In com.unity.ui 2.0.0, PanelSimulator.ExecuteCommand may generate an event that does not reach
-            // the focused element correctly. Always dispatch the compatibility event as a safeguard.
-            if (!usedOfficialDriver || eventType == EventType.ExecuteCommand)
+            bool observedAtRoot = false;
+            EventCallback<ExecuteCommandEvent> onExecute = evt =>
             {
-                ActionHelpers.DispatchCommandEvent(target, eventType, commandName);
+                if (string.Equals(evt.commandName, commandName, StringComparison.Ordinal))
+                    observedAtRoot = true;
+            };
+            EventCallback<ValidateCommandEvent> onValidate = evt =>
+            {
+                if (string.Equals(evt.commandName, commandName, StringComparison.Ordinal))
+                    observedAtRoot = true;
+            };
+
+            if (eventType == EventType.ExecuteCommand)
+                root.RegisterCallback(onExecute);
+            else
+                root.RegisterCallback(onValidate);
+
+            try
+            {
+                bool usedOfficialDriver = eventType == EventType.ExecuteCommand
+                    ? context?.SimulationSession?.TryExecuteCommandWithOfficialDriver(target, commandName, context) == true
+                    : context?.SimulationSession?.TryValidateCommandWithOfficialDriver(target, commandName, context) == true;
+                Codingriver.Logger.Log($"[UPilot Flow] command probe action={actionName} command={commandName} official={usedOfficialDriver} observedAfterOfficial={observedAtRoot} target={ActionContext.ElementInfo(target)} root={ActionContext.ElementInfo(root)}");
+
+                if (!usedOfficialDriver || !observedAtRoot)
+                {
+                    ActionHelpers.DispatchCommandEvent(target, eventType, commandName);
+                    Codingriver.Logger.Log($"[UPilot Flow] command probe observedAfterTargetFallback={observedAtRoot}");
+                }
+
+                // Focused controls such as TextField can consume ExecuteCommand before
+                // bubble-phase observers see it. The official path already performed the
+                // focused-control behavior; dispatch once on the root only when no root
+                // observer saw either the official or compatibility event.
+                if (!observedAtRoot && !ReferenceEquals(target, root))
+                {
+                    ActionHelpers.DispatchCommandEvent(root, eventType, commandName);
+                    Codingriver.Logger.Log($"[UPilot Flow] command probe observedAfterRootFallback={observedAtRoot}");
+                }
+            }
+            finally
+            {
+                if (eventType == EventType.ExecuteCommand)
+                    root.UnregisterCallback(onExecute);
+                else
+                    root.UnregisterCallback(onValidate);
             }
 
             await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);

@@ -183,11 +183,13 @@ namespace CodingRiver.UPilot.Flow
 
         // ── External run instance state ───────────────────────────────────────
         private string _externalExecutionId;
+        private string _observedExecutionId;
 
         private void OnExternalRunStarted(string executionId, IEnumerable<string> yamlPaths, int total, int batchIndex = 0, int batchTotal = 0, int batchSize = 0)
         {
             if (_state.IsRunning) return; // don't clobber an in-progress manual run
             _externalExecutionId = executionId;
+            _observedExecutionId = executionId;
             _state.IsRunning = true;
             _state.StatusText = $"MCP run in progress…";
             // total here is the overall total (totalAll), set per batch
@@ -338,6 +340,7 @@ namespace CodingRiver.UPilot.Flow
         private ExecutionContext _activeContext;
         private HighlightOverlayRenderer _overlayRenderer;
         private readonly Dictionary<uint, Texture2D> _progressTextures = new Dictionary<uint, Texture2D>();
+        private Label _runtimeDiagnosticsLabel;
 
         // Left panel
         private TextField _searchField;
@@ -719,6 +722,11 @@ namespace CodingRiver.UPilot.Flow
             statusBar.Add(_statusLabel);
             statusBar.Add(new VisualElement { style = { width = 20 } });
             statusBar.Add(_currentCaseLabel);
+            _runtimeDiagnosticsLabel = new Label("leases=0") { name = "test-runner-runtime-diagnostics" };
+            _runtimeDiagnosticsLabel.style.fontSize = 10;
+            _runtimeDiagnosticsLabel.style.flexGrow = 1;
+            _runtimeDiagnosticsLabel.style.unityTextAlign = TextAnchor.MiddleRight;
+            statusBar.Add(_runtimeDiagnosticsLabel);
         }
 
         private Button CreateToolbarButton(string text, Action onClick)
@@ -1726,6 +1734,12 @@ namespace CodingRiver.UPilot.Flow
                         RequireInputSystemKeyboardDriver = _state.RequireInputSystemKeyboardDriver,
                         EnableVerboseLog = _state.EnableVerboseLog,
                     });
+                options.ExecutionId = Guid.NewGuid().ToString("N");
+                _observedExecutionId = options.ExecutionId;
+                options.ExecutionSource = "test-runner";
+                options.Unattended = false;
+                options.PauseTimeoutMs = 0;
+                options.PauseTimeoutPolicy = "manual";
 
                 UPilotFlowExecutionBatchResult execution = await new UPilotFlowExecutionService().RunAsync(
                     new UPilotFlowExecutionRequest
@@ -1831,6 +1845,8 @@ namespace CodingRiver.UPilot.Flow
             }
             _runCts?.Cancel();
             _activeContext?.RuntimeController?.Stop();
+            if (!string.IsNullOrWhiteSpace(_observedExecutionId))
+                UPilotFlowExecutionRegistry.RequestStop(_observedExecutionId);
             ShowNotification(new GUIContent("Cancellation requested."));
         }
 
@@ -1871,6 +1887,26 @@ namespace CodingRiver.UPilot.Flow
 
             _statusLabel.text = $"Status: {_state.StatusText}";
             _currentCaseLabel.text = $"Current: {(_state.CurrentCaseName ?? "-")}";
+            if (_runtimeDiagnosticsLabel != null)
+            {
+                UPilotFlowExecutionSnapshot runtime = string.IsNullOrWhiteSpace(_observedExecutionId)
+                    ? null
+                    : UPilotFlowExecutionRegistry.Get(_observedExecutionId);
+                if (runtime == null)
+                {
+                    _runtimeDiagnosticsLabel.text = "leases=0";
+                    _runtimeDiagnosticsLabel.tooltip = string.Empty;
+                }
+                else
+                {
+                    int unresolved = runtime.unresolvedResources?.Count ?? 0;
+                    int cleanupErrors = runtime.cleanupErrors?.Count ?? 0;
+                    string modal = runtime.waitingForModalUi ? $" modal={runtime.modalType}" : string.Empty;
+                    _runtimeDiagnosticsLabel.text = $"{runtime.phase}  leases={runtime.activeLeaseCount}  unresolved={unresolved}  cleanupErrors={cleanupErrors}{modal}";
+                    _runtimeDiagnosticsLabel.tooltip =
+                        $"executionId={runtime.executionId}\nprogress={runtime.progressDetail}\ndeadline={runtime.actionDeadline}\nresources={string.Join(", ", runtime.unresolvedResources ?? new List<string>())}\nerrors={string.Join(" | ", runtime.cleanupErrors ?? new List<string>())}";
+                }
+            }
             int totalCases = _state.Cases.Count;
 
             // Show overall cross-batch stats when a multi-batch run is active or completed

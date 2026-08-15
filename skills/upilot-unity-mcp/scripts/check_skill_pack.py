@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 
@@ -87,8 +89,22 @@ def check_unity_meta_files() -> None:
 
 
 def check_repository_consistency() -> None:
-    package = (REPO_ROOT / "package.json").read_text(encoding="utf-8")
-    pyproject = (REPO_ROOT / "upilotserver~" / "pyproject.toml").read_text(encoding="utf-8")
+    package_path = REPO_ROOT / "package.json"
+    pyproject_path = REPO_ROOT / "upilotserver~" / "pyproject.toml"
+    package = package_path.read_text(encoding="utf-8")
+    pyproject = pyproject_path.read_text(encoding="utf-8")
+    package_data = json.loads(package)
+    with pyproject_path.open("rb") as stream:
+        pyproject_data = tomllib.load(stream)
+    package_version = str(package_data.get("version", ""))
+    python_version = str(pyproject_data.get("project", {}).get("version", ""))
+    if not re.fullmatch(r"\d+\.\d+\.\d+", package_version):
+        fail(f"package.json has an invalid semantic version: {package_version!r}")
+    if python_version != package_version:
+        fail(
+            "package version mismatch: "
+            f"package.json={package_version!r}, pyproject.toml={python_version!r}"
+        )
     server = (REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "mcp_stdio_server.py").read_text(encoding="utf-8")
     tool_modules = "\n".join(
         path.read_text(encoding="utf-8")
@@ -96,16 +112,32 @@ def check_repository_consistency() -> None:
     )
     config = (REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "config.py").read_text(encoding="utf-8")
     agent_setup = (REPO_ROOT / "Editor" / "Pilot" / "UPilotAgentSetup.cs").read_text(encoding="utf-8")
+    task_service = (REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "domain" / "task_service.py").read_text(encoding="utf-8")
+    agent_template = (ROOT / "AGENTS.md.template").read_text(encoding="utf-8")
+    agent_reference = (REPO_ROOT / "Documentation~" / "AgentRules" / "AGENTS.upilot.md").read_text(encoding="utf-8")
     repo_entry = (REPO_ROOT / ".agents" / "skills" / "upilot-unity-mcp" / "SKILL.md").read_text(encoding="utf-8")
+
+    rules_versions = {
+        "C# generator": re.search(r"AgentRulesTemplateVersion\s*=\s*(\d+)", agent_setup),
+        "Python installer": re.search(r"_UPILOT_RULES_VERSION\s*=\s*(\d+)", task_service),
+        "reference document": re.search(r"^rulesVersion:\s*(\d+)\s*$", agent_reference, re.MULTILINE),
+    }
+    missing_versions = [label for label, match in rules_versions.items() if match is None]
+    if missing_versions:
+        fail("missing Agent rules version in " + ", ".join(missing_versions))
+    resolved_versions = {label: match.group(1) for label, match in rules_versions.items()}
+    if len(set(resolved_versions.values())) != 1:
+        fail(f"Agent rules version mismatch: {resolved_versions}")
 
     required = {
         "package id": (package, '"name": "io.github.codingriver.upilot"'),
-        "package version": (package, '"version": "0.2.0"'),
-        "python version": (pyproject, 'version = "0.2.0"'),
         "HTTP default": (config, "http_port: int = 8011"),
         "stable list": (server, "_list_tools_stable"),
-        "capability rule": (agent_setup, "unity_capabilities_get"),
-        "no-repeat compile rule": (agent_setup, "Do not compile again when no code changed"),
+        "capability rule": (agent_template, "unity_capabilities_get"),
+        "parent rules inheritance": (agent_template, "Parent Agent rules path"),
+        "parent rules cycle guard": (agent_template, "circular references are skipped"),
+        "safe compile rule": (agent_template, "unity_safe_compile_and_wait"),
+        "no-repeat compile rule": (agent_template, "Do not compile again when no code changed"),
         "repository skill entry": (repo_entry, "../../../skills/upilot-unity-mcp/SKILL.md"),
     }
     for label, (text, fragment) in required.items():

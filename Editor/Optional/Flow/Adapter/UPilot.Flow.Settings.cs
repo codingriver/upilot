@@ -1,9 +1,56 @@
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Scripting.APIUpdating;
 
 namespace CodingRiver.UPilot.Flow
 {
+    [MovedFrom(true, "codingriver.upilot.UIFlow", "UIFlow", "UIFlowProjectSettings")]
+    [FilePath("ProjectSettings/UPilotFlowSettings.asset", FilePathAttribute.Location.ProjectFolder)]
+    public sealed class UPilotFlowProjectSettings : ScriptableSingleton<UPilotFlowProjectSettings>
+    {
+        [SerializeField] private bool _alwaysEnableVerboseLog;
+        [SerializeField] private int _preStepDelayMs;
+        [SerializeField] private bool _requireOfficialHostByDefault;
+        [SerializeField] private bool _requireOfficialPointerDriverByDefault;
+        [SerializeField] private bool _requireInputSystemKeyboardDriverByDefault;
+
+        public bool AlwaysEnableVerboseLog
+        {
+            get => _alwaysEnableVerboseLog;
+            set => _alwaysEnableVerboseLog = value;
+        }
+
+        public int PreStepDelayMs
+        {
+            get => Mathf.Clamp(_preStepDelayMs, 0, UPilotFlowProjectSettingsUtility.MaxPreStepDelayMs);
+            set => _preStepDelayMs = Mathf.Clamp(value, 0, UPilotFlowProjectSettingsUtility.MaxPreStepDelayMs);
+        }
+
+        public bool RequireOfficialHostByDefault
+        {
+            get => _requireOfficialHostByDefault;
+            set => _requireOfficialHostByDefault = value;
+        }
+
+        public bool RequireOfficialPointerDriverByDefault
+        {
+            get => _requireOfficialPointerDriverByDefault;
+            set => _requireOfficialPointerDriverByDefault = value;
+        }
+
+        public bool RequireInputSystemKeyboardDriverByDefault
+        {
+            get => _requireInputSystemKeyboardDriverByDefault;
+            set => _requireInputSystemKeyboardDriverByDefault = value;
+        }
+
+        public void SaveSettings()
+        {
+            Save(true);
+        }
+    }
+
     public static class UPilotFlowProjectSettingsProvider
     {
         [SettingsProvider]

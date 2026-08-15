@@ -70,6 +70,12 @@ async def unity_tools_find(
     )
     return _log_tool_result("unity_tools_find", _payload(r))
 
+@mcp.tool(description="调用一个已注册但当前客户端未注入类型化包装的 UPilot 工具。调用仍遵守写权限、Flow 开关和各工具自身安全检查。")
+async def unity_tool_call(toolName: str, args: dict | None = None):
+    _log_tool_call("unity_tool_call", {"toolName": toolName, "args": args or {}})
+    r = await _get_facade().tool_call(tool_name=toolName, args=args or {})
+    return _log_tool_result("unity_tool_call", _payload(r))
+
 @mcp.tool(description="诊断 Codex/Cursor/通用 MCP 客户端配置中的重复端点、内部端口、HTTP 端口和超时问题。")
 async def unity_client_config_diagnose():
     _log_tool_call("unity_client_config_diagnose", {})
@@ -381,6 +387,8 @@ async def unity_console_tail_logs(
 )
 async def unity_console_search_logs(
     count: int = 200,
+    query: str = "",
+    maxCount: int = 0,
     logType: str = "",
     includeStackTrace: bool = False,
     excludeUPilot: bool = True,
@@ -393,7 +401,8 @@ async def unity_console_search_logs(
     _log_tool_call(
         "unity_console_search_logs",
         {
-            "count": count,
+            "count": maxCount if maxCount > 0 else count,
+            "query": query,
             "logType": logType,
             "includeStackTrace": includeStackTrace,
             "excludeUPilot": excludeUPilot,
@@ -405,7 +414,8 @@ async def unity_console_search_logs(
         },
     )
     r = await _get_facade().console_search_logs(
-        count=count,
+        count=maxCount if maxCount > 0 else count,
+        query=query,
         log_type=logType,
         include_stack_trace=includeStackTrace,
         exclude_upilot=excludeUPilot,
@@ -466,42 +476,55 @@ async def unity_console_capture_status(sessionId: str = ""):
 
 @mcp.tool(
     description=(
-        "按 sequence 增量读取持久化 Console JSONL 日志，支持类型和关键词过滤。"
-        "后续读取应把上次返回的 nextSequence 作为 afterSequence。"
+        "分页读取持久化 Console JSONL 日志，支持 sequence 范围、关键词 OR/AND、正则和日志类型过滤。"
+        "首批返回稳定快照范围、总匹配数、扫描范围和 continuationToken；后续优先原样传回 token。"
+        "旧调用仍可把上次 nextSequence 作为 afterSequence。"
     )
 )
 async def unity_console_capture_read(
     sessionId: str = "",
     afterSequence: int = -1,
+    fromSequence: int = -1,
+    toSequence: int = -1,
     count: int = 200,
     logType: str = "",
     includeStackTrace: bool = True,
     contains: list[str] | None = None,
     containsAll: bool = False,
+    regex: str = "",
     newestFirst: bool = False,
+    continuationToken: str = "",
 ):
     _log_tool_call(
         "unity_console_capture_read",
         {
             "sessionId": sessionId,
             "afterSequence": afterSequence,
+            "fromSequence": fromSequence,
+            "toSequence": toSequence,
             "count": count,
             "logType": logType,
             "includeStackTrace": includeStackTrace,
             "contains": contains,
             "containsAll": containsAll,
+            "regex": regex,
             "newestFirst": newestFirst,
+            "continuationToken": continuationToken,
         },
     )
     r = await _get_facade().console_capture_read(
         session_id=sessionId,
         after_sequence=afterSequence,
+        from_sequence=fromSequence,
+        to_sequence=toSequence,
         count=count,
         log_type=logType,
         include_stack_trace=includeStackTrace,
         contains=contains,
         contains_all=containsAll,
+        regex=regex,
         newest_first=newestFirst,
+        continuation_token=continuationToken,
     )
     return _log_tool_result("unity_console_capture_read", _payload(r))
 

@@ -47,12 +47,12 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 4
+_UPILOT_RULES_VERSION = 8
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
 _DEFAULT_OPERATION_SUCCESS = {"succeeded", "success", "complete", "completed", "passed", "ok"}
-_DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "timeout", "timedout", "error"}
+_DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "aborted", "timeout", "timedout", "error"}
 _TERMINAL_STATUSES = _DEFAULT_OPERATION_SUCCESS | _DEFAULT_OPERATION_FAILURE
 
 
@@ -105,6 +105,21 @@ def _is_success_status(status: str, mapping: dict | None) -> bool:
     key = status.strip().lower()
     success = {str(item).lower() for item in (mapping or {}).get("success", [])}
     return key in (_DEFAULT_OPERATION_SUCCESS | success)
+
+
+def _operation_cleanup_pending(payload: dict | None) -> bool:
+    """Return True while the project reports resources that still need cleanup."""
+    if not isinstance(payload, dict):
+        return False
+    if bool(payload.get("cleanupPending")):
+        return True
+    try:
+        if int(payload.get("activeLeaseCount") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        return True
+    unresolved = payload.get("unresolvedResources")
+    return isinstance(unresolved, (list, tuple, set, dict)) and len(unresolved) > 0
 
 
 def _sha256_file(path: Path) -> str:
@@ -183,15 +198,17 @@ class TaskDomainService:
         version = self._upilot_package_version()
         generated_at = _utc_iso()
         template, template_path = self._read_agent_rules_template()
+        parent_agent_rules_path = self._find_parent_agent_rules_relative_path(project_root)
         logger.info(
             "Rendering UPilot Agent rules template: template=%s target=%s rulesVersion=%s "
-            "upilotPackageVersion=%s projectPath=%s generatedAt=%s mcpUrl=%s healthUrl=%s",
+            "upilotPackageVersion=%s projectPath=%s generatedAt=%s parentAgentRulesPath=%s mcpUrl=%s healthUrl=%s",
             template_path,
             project_root / "AGENTS.md",
             _UPILOT_RULES_VERSION,
             version,
             project_path,
             generated_at,
+            parent_agent_rules_path,
             "http://127.0.0.1:8011/mcp",
             "http://127.0.0.1:8011/health",
         )
@@ -201,6 +218,7 @@ class TaskDomainService:
             .replace("{{upilotPackageVersion}}", version)
             .replace("{{projectPath}}", project_path)
             .replace("{{generatedAt}}", generated_at)
+            .replace("{{parentAgentRulesPath}}", parent_agent_rules_path)
             .replace("{{mcpUrl}}", "http://127.0.0.1:8011/mcp")
             .replace("{{healthUrl}}", "http://127.0.0.1:8011/health")
             .replace("\r\n", "\n")
@@ -208,6 +226,21 @@ class TaskDomainService:
             .strip()
         )
         return f"{_UPILOT_BLOCK_START}\n{rendered}\n{_UPILOT_BLOCK_END}"
+
+    @staticmethod
+    def _find_parent_agent_rules_relative_path(project_root: Path) -> str:
+        try:
+            root = project_root.resolve()
+            for parent in root.parents:
+                candidate = parent / "AGENTS.md"
+                if candidate.exists():
+                    try:
+                        return os.path.relpath(candidate.resolve(), root).replace(os.sep, "/")
+                    except ValueError:
+                        return str(candidate.resolve()).replace("\\", "/")
+        except OSError:
+            return "(none)"
+        return "(none)"
 
     def _parse_rules_metadata(self, block: str) -> dict[str, str]:
         metadata: dict[str, str] = {}
@@ -368,6 +401,11 @@ class TaskDomainService:
             "progress": 0,
             "failureSignature": "",
             "repeatFailure": False,
+            "cancelRequested": False,
+            "cancelAccepted": False,
+            "cancelRequestedAt": 0,
+            "cancelAttemptCount": 0,
+            "cleanupPending": False,
             "startedAt": now,
             "updatedAt": now,
             "endedAt": 0,
@@ -403,8 +441,14 @@ class TaskDomainService:
             )
             state["consoleCapture"]["start"] = self._tool_response_summary(capture_result)
             if capture_result.ok and isinstance(capture_result.data, dict):
-                state["consoleCapture"]["sessionId"] = str(capture_result.data.get("sessionId") or "")
-                state["consoleCapture"]["nextSequence"] = int(capture_result.data.get("nextSequence") or -1)
+                session_data = capture_result.data.get("session") if isinstance(capture_result.data.get("session"), dict) else {}
+                state["consoleCapture"]["sessionId"] = str(
+                    capture_result.data.get("sessionId") or session_data.get("sessionId") or ""
+                )
+                state["consoleCapture"]["nextSequence"] = int(
+                    capture_result.data.get("nextSequence") or session_data.get("nextSequence") or -1
+                )
+                state["consoleCapture"]["session"] = session_data
 
         start_result = await self._operation_invoke(start_call)
         self._accumulate_timing(state, start_result)
@@ -421,12 +465,13 @@ class TaskDomainService:
 
         payload = _extract_operation_payload(start_result)
         if payload:
+            state["startData"] = payload
             self._merge_operation_status(state, payload)
         mapping = job_spec.get("terminalStatusMapping")
-        if _is_terminal_status(str(state["status"]), mapping):
+        if _is_terminal_status(str(state["status"]), mapping) and not _operation_cleanup_pending(payload):
             if _is_success_status(str(state["status"]), mapping):
                 state["status"] = "Succeeded"
-            elif str(state["status"]).strip().lower() in {"canceled", "cancelled"}:
+            elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
                 state["status"] = "Canceled"
             elif str(state["status"]).strip().lower() in {"timeout", "timedout"}:
                 state["status"] = "Timeout"
@@ -452,8 +497,20 @@ class TaskDomainService:
             self._finalize_operation_timing(state)
             return ok(request_id, self._public_operation_state(state))
 
+        if now_ms() >= int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000):
+            state["status"] = "Timeout"
+            state["phase"] = "JobTimeout"
+            state["error"] = f"Operation exceeded job timeout of {float(state.get('timeoutSec') or 0):.0f}s"
+            state["failureSignature"] = "OperationJobTimeout"
+            state["endedAt"] = now_ms()
+            self._mark_repeat_failure(state)
+            await self._operation_stop_console_capture(state)
+            await self.operation_collect_artifacts(operation_id)
+            self._finalize_operation_timing(state)
+            return fail(request_id, "OPERATION_TIMEOUT", state["error"], self._public_operation_state(state))
+
         status_call = state["jobSpec"].get("statusCall")
-        result = await self._operation_invoke(status_call)
+        result = await self._operation_invoke(self._resolve_operation_call(status_call, state))
         self._accumulate_timing(state, result)
         state["lastStatusAt"] = now_ms()
         if not result.ok:
@@ -471,10 +528,12 @@ class TaskDomainService:
         if payload:
             self._merge_operation_status(state, payload)
         mapping = state["jobSpec"].get("terminalStatusMapping")
-        if _is_terminal_status(str(state["status"]), mapping):
+        cleanup_pending = _operation_cleanup_pending(payload)
+        state["cleanupPending"] = cleanup_pending
+        if _is_terminal_status(str(state["status"]), mapping) and not cleanup_pending:
             if _is_success_status(str(state["status"]), mapping):
                 state["status"] = "Succeeded"
-            elif str(state["status"]).strip().lower() in {"canceled", "cancelled"}:
+            elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
                 state["status"] = "Canceled"
             elif str(state["status"]).strip().lower() in {"timeout", "timedout"}:
                 state["status"] = "Timeout"
@@ -484,6 +543,9 @@ class TaskDomainService:
             self._mark_repeat_failure(state)
             await self._operation_stop_console_capture(state)
             await self.operation_collect_artifacts(operation_id)
+        elif state.get("cancelRequested"):
+            state["status"] = "Stopping"
+            state["phase"] = "Cleanup" if cleanup_pending else (state.get("phase") or "Stopping")
         state["updatedAt"] = now_ms()
         self._finalize_operation_timing(state)
         return ok(request_id, self._public_operation_state(state))
@@ -550,19 +612,14 @@ class TaskDomainService:
                     return ok(request_id, payload)
 
             if time.monotonic() >= deadline:
-                state["status"] = "Timeout"
-                state["phase"] = state.get("phase") or "Timeout"
-                state["error"] = f"Operation timed out after {timeout:.0f}s"
-                state["failureSignature"] = state.get("failureSignature") or "OperationTimeout"
-                state["endedAt"] = now_ms()
-                self._mark_repeat_failure(state)
-                await self._operation_stop_console_capture(state)
-                await self.operation_collect_artifacts(operation_id)
                 self._finalize_operation_timing(state)
                 payload = self._public_operation_state(state)
                 payload["changes"] = changes
-                payload["recommendation"] = "Inspect phaseElapsedSec, timing, Console capture, and artifact summary before retrying."
-                return fail(request_id, "OPERATION_TIMEOUT", state["error"], payload)
+                payload["terminal"] = False
+                payload["waitWindowElapsed"] = True
+                payload["waitWindowSec"] = timeout
+                payload["recommendation"] = "Call unity_operation_wait again or inspect status; the operation is still running."
+                return ok(request_id, payload)
 
             last_poll = float(state.get("_lastPollMono") or 0)
             if last_poll:
@@ -576,18 +633,27 @@ class TaskDomainService:
         state = self._operations.get(operation_id)
         if state is None:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
+        if state.get("endedAt"):
+            return ok(request_id, self._public_operation_state(state))
+        if state.get("cancelAccepted"):
+            return ok(request_id, self._public_operation_state(state))
         cancel_call = state["jobSpec"].get("cancelCall")
         if not isinstance(cancel_call, dict):
             return fail(request_id, "CANCEL_UNSUPPORTED", "This operation has no cancelCall.", self._public_operation_state(state))
-        result = await self._operation_invoke(cancel_call)
+        result = await self._operation_invoke(self._resolve_operation_call(cancel_call, state))
         self._accumulate_timing(state, result)
         state["cancelResult"] = self._tool_response_summary(result)
-        state["status"] = "Canceled" if result.ok else "Failed"
-        state["phase"] = "Canceled" if result.ok else "CancelFailed"
+        state["cancelRequested"] = True
+        state["cancelRequestedAt"] = state.get("cancelRequestedAt") or now_ms()
+        state["cancelAttemptCount"] = int(state.get("cancelAttemptCount") or 0) + 1
+        state["cancelAccepted"] = bool(result.ok)
+        state["cleanupPending"] = bool(result.ok)
+        state["status"] = "CancelRequested" if result.ok else "Running"
+        state["phase"] = "Stopping" if result.ok else "CancelFailed"
         state["error"] = "" if result.ok else (result.error.message if result.error else "cancelCall failed")
-        state["endedAt"] = now_ms()
-        await self._operation_stop_console_capture(state)
-        await self.operation_collect_artifacts(operation_id)
+        if not result.ok:
+            state["failureSignature"] = result.error.code if result.error else "CancelCallFailed"
+        state["updatedAt"] = now_ms()
         self._finalize_operation_timing(state)
         return ok(request_id, self._public_operation_state(state)) if result.ok else fail(request_id, "OPERATION_CANCEL_FAILED", state["error"], self._public_operation_state(state))
 
@@ -677,6 +743,37 @@ class TaskDomainService:
             return await self.dispatcher.call(request_id, route, payload, timeout_ms=timeout_ms)
         return fail(request_id, "UNSUPPORTED_OPERATION_CALL", f"Unsupported operation call kind: {kind}", {"call": call})
 
+    def _resolve_operation_call(self, call: dict | None, state: dict) -> dict | None:
+        """Resolve exact ${start.*}/${status.*}/${operation.*} placeholders in a call."""
+        if not isinstance(call, dict):
+            return call
+
+        roots = {
+            "start": state.get("startData") or {},
+            "status": state.get("lastStatusData") or {},
+            "operation": self._public_operation_state(state),
+        }
+
+        def resolve(value):
+            if isinstance(value, list):
+                return [resolve(item) for item in value]
+            if isinstance(value, dict):
+                return {key: resolve(item) for key, item in value.items()}
+            if not isinstance(value, str) or not value.startswith("${") or not value.endswith("}"):
+                return value
+            path = value[2:-1].strip().split(".")
+            current = roots.get(path[0])
+            if current is None:
+                return value
+            for segment in path[1:]:
+                if isinstance(current, dict) and segment in current:
+                    current = current[segment]
+                else:
+                    return value
+            return current
+
+        return resolve(call)
+
     @staticmethod
     def _tool_response_summary(result: ToolResponse) -> dict:
         data = result.data if isinstance(result.data, dict) else {}
@@ -719,6 +816,8 @@ class TaskDomainService:
                 state["progress"] = 0
         if payload.get("failureSignature"):
             state["failureSignature"] = str(payload.get("failureSignature"))
+        if "cleanupPending" in payload:
+            state["cleanupPending"] = bool(payload.get("cleanupPending"))
         metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
         project_elapsed = metrics.get("projectElapsedSec", payload.get("elapsedSec"))
         try:
@@ -752,6 +851,8 @@ class TaskDomainService:
             state.get("phase", ""),
             state.get("error", ""),
             state.get("failureSignature", ""),
+            state.get("cancelRequested", False),
+            state.get("cleanupPending", False),
             tuple(sorted(artifacts.keys())) if isinstance(artifacts, dict) else (),
         )
 
@@ -780,6 +881,12 @@ class TaskDomainService:
             return
         result = await self.console_capture_stop(session_id=session_id)
         capture["stop"] = self._tool_response_summary(result)
+        if result.ok and isinstance(result.data, dict):
+            session_data = result.data.get("session") if isinstance(result.data.get("session"), dict) else result.data
+            capture["session"] = session_data
+            for key in ("jsonlPath", "summaryPath", "manifestPath", "sha256", "recordCount", "droppedCount", "fileBytes"):
+                if key in session_data:
+                    capture[key] = session_data[key]
         capture["stopped"] = True
 
     @staticmethod
@@ -798,12 +905,18 @@ class TaskDomainService:
             "progress": state.get("progress"),
             "failureSignature": state.get("failureSignature"),
             "repeatFailure": state.get("repeatFailure", False),
+            "cancelRequested": state.get("cancelRequested", False),
+            "cancelAccepted": state.get("cancelAccepted", False),
+            "cancelRequestedAt": state.get("cancelRequestedAt", 0),
+            "cancelAttemptCount": state.get("cancelAttemptCount", 0),
+            "cleanupPending": state.get("cleanupPending", False),
             "startedAt": state.get("startedAt"),
             "updatedAt": state.get("updatedAt"),
             "endedAt": state.get("endedAt"),
             "elapsedMs": max(0, (state.get("endedAt") or now_ms()) - state.get("startedAt", now_ms())),
             "terminal": bool(state.get("endedAt")),
             "timeoutSec": state.get("timeoutSec"),
+            "jobTimeoutAt": int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000),
             "pollIntervalSec": state.get("pollIntervalSec"),
             "lastStatusData": state.get("lastStatusData") or {},
             "artifacts": state.get("artifacts") or {},
@@ -856,18 +969,46 @@ class TaskDomainService:
         # 3. Check editor state
         state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
         if state_r.ok and state_r.data:
-            checks["isCompiling"] = state_r.data.get("isCompiling", False)
-            checks["playModeState"] = state_r.data.get("playModeState", "unknown")
-            in_edit = state_r.data.get("playModeState", "") in ("edit", "Edit", "")
+            # resource.editorState is a legacy payload and does not itself carry
+            # playModeState.  The Bridge response context is authoritative and the
+            # dispatcher has already copied it into the shared state cache.
+            context = self.server.state.response_context()
+            play_mode_state = str(
+                context.get("playModeState")
+                or state_r.data.get("playModeState")
+                or "unknown"
+            ).strip().lower()
+            checks["isCompiling"] = bool(
+                context.get("isCompiling", state_r.data.get("isCompiling", False))
+            )
+            checks["playModeState"] = play_mode_state
+            in_edit = play_mode_state == "edit"
             checks["inEditMode"] = in_edit
+            checks["contextAuthoritative"] = bool(context.get("authoritative", False))
+            checks["contextStale"] = bool(context.get("isStale", True))
         else:
             checks["inEditMode"] = False
+            checks["playModeState"] = "unknown"
+            checks["contextAuthoritative"] = False
+            checks["contextStale"] = True
 
         checks["ready"] = (
             checks["connected"]
             and checks.get("compileStatus") == "ready"
             and checks.get("inEditMode", False)
+            and checks.get("contextAuthoritative", False)
+            and not checks.get("contextStale", True)
         )
+        if not checks["ready"]:
+            if checks.get("playModeState") in ("unknown", ""):
+                checks["failReason"] = "Editor mode is unknown"
+                checks["nextAction"] = "Call unity_mcp_status(forceFresh=true) and retry after a live Editor response."
+            elif not checks.get("inEditMode"):
+                checks["failReason"] = "Unity is not in EditMode"
+                checks["nextAction"] = "Exit PlayMode and wait for EditMode confirmation."
+            elif checks.get("contextStale") or not checks.get("contextAuthoritative"):
+                checks["failReason"] = "Editor context is stale or non-authoritative"
+                checks["nextAction"] = "Call unity_mcp_status(forceFresh=true) before mutating the Editor."
         return ok(request_id, checks)
 
     @staticmethod
@@ -893,7 +1034,7 @@ class TaskDomainService:
         timeout_s: float = 600,
         max_total_s: float = 1200,
         retry_count: int = 1,
-        restart_unity_on_timeout: bool = True,
+        restart_unity_on_timeout: bool = False,
     ) -> ToolResponse:
         """Execute an MCP tool call with timeout/watchdog.
 

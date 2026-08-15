@@ -573,10 +573,21 @@ namespace CodingRiver.UPilot.Flow
         {
             parameters.TryGetValue("id", out string idLiteral);
             parameters.TryGetValue("index", out string indexLiteral);
+            parameters.TryGetValue("label", out string labelLiteral);
 
-            if (string.IsNullOrWhiteSpace(idLiteral) && string.IsNullOrWhiteSpace(indexLiteral))
+            if (string.IsNullOrWhiteSpace(idLiteral) && string.IsNullOrWhiteSpace(indexLiteral) && string.IsNullOrWhiteSpace(labelLiteral))
             {
-                throw new UPilotFlowException(ErrorCodes.ActionParameterMissing, $"Action {actionName} requires id or index.");
+                throw new UPilotFlowException(ErrorCodes.ActionParameterMissing, $"Action {actionName} requires id, index, or label.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(labelLiteral))
+            {
+                if (TryFindTreeIndexByLabel(element, labelLiteral, out int labelIndex))
+                {
+                    SelectListItemOrThrow(element, labelIndex, actionName);
+                    return;
+                }
+                throw new UPilotFlowException(ErrorCodes.ActionOptionNotFound, $"Action {actionName} tree label was not found: {labelLiteral}");
             }
 
             if (!string.IsNullOrWhiteSpace(idLiteral))
@@ -604,6 +615,47 @@ namespace CodingRiver.UPilot.Flow
             }
 
             throw new UPilotFlowException(ErrorCodes.ActionTargetTypeInvalid, $"Action {actionName} target is not a tree control: {element.GetType().Name}");
+        }
+
+        private static bool TryFindTreeIndexByLabel(VisualElement element, string label, out int index)
+        {
+            index = -1;
+            MethodInfo genericGetter = element?.GetType().GetMethods(PublicInstance)
+                .FirstOrDefault(method => method.Name == "GetItemDataForIndex"
+                    && method.IsGenericMethodDefinition
+                    && method.GetParameters().Length == 1);
+            if (genericGetter != null)
+            {
+                MethodInfo stringGetter = genericGetter.MakeGenericMethod(typeof(string));
+                for (int candidateIndex = 0; candidateIndex < 4096; candidateIndex++)
+                {
+                    try
+                    {
+                        object value = stringGetter.Invoke(element, new object[] { candidateIndex });
+                        if (string.Equals(value?.ToString(), label, StringComparison.Ordinal))
+                        {
+                            index = candidateIndex;
+                            return true;
+                        }
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                }
+            }
+
+            List<Label> labels = element?.Query<Label>().ToList() ?? new List<Label>();
+            Label rendered = labels.FirstOrDefault(candidate => string.Equals(candidate.text, label, StringComparison.Ordinal));
+            if (rendered == null)
+                return false;
+            VisualElement row = rendered;
+            while (row != null && row.parent != element)
+                row = row.parent;
+            if (row == null)
+                return false;
+            index = element.IndexOf(row);
+            return index >= 0;
         }
 
         private static bool TrySetFloatProperty(object target, string propertyName, float value)

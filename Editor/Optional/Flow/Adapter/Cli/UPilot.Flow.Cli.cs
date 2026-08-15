@@ -197,7 +197,7 @@ namespace CodingRiver.UPilot.Flow
         /// </summary>
         public TestOptions ToTestOptions(CliOptions cliOptions)
         {
-            return UPilotFlowConfigurationService.Resolve(new UPilotFlowExecutionSettings
+            TestOptions options = UPilotFlowConfigurationService.Resolve(new UPilotFlowExecutionSettings
             {
                 Headed = cliOptions.Headed,
                 DebugOnFailure = true,
@@ -213,6 +213,11 @@ namespace CodingRiver.UPilot.Flow
                 ReportOutputPath = cliOptions.ReportPath,
                 ScreenshotPath = cliOptions.ScreenshotPath,
             });
+            options.ExecutionSource = "cli";
+            options.Unattended = true;
+            options.PauseTimeoutMs = 30000;
+            options.PauseTimeoutPolicy = "auto_abort";
+            return options;
         }
 
         private static Dictionary<string, string> CreateEnvironmentSnapshot(IDictionary<string, string> source)

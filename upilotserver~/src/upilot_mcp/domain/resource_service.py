@@ -70,6 +70,100 @@ class ResourceDomainService:
             payload["assetType"] = asset_type
         return await self.dispatcher.call(request_id, "asset.find", payload)
 
+    async def texture_importer_get(self, asset_path: str) -> ToolResponse:
+        return await self.dispatcher.call(new_id("req"), "texture.importerGet", {"assetPath": asset_path})
+
+    async def asset_dependencies(self, asset_path: str, recursive: bool = True) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"),
+            "asset.dependencies",
+            {"assetPath": asset_path, "recursive": recursive},
+        )
+
+    async def texture_importer_patch(
+        self,
+        asset_path: str,
+        changes: dict,
+        dry_run: bool = True,
+        confirm_token: str = "",
+        reimport: bool = True,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        if not changes:
+            return fail(request_id, "TEXTURE_PATCH_INVALID", "changes is required.", {"assetPath": asset_path})
+        root = self._active_project_root()
+        if root is None:
+            return fail(request_id, "PROJECT_PATH_UNAVAILABLE", "Unity project path is unavailable.", {})
+        if not asset_path.startswith("Assets/"):
+            return fail(request_id, "TEXTURE_PATH_INVALID", "assetPath must be project-relative under Assets/.", {"assetPath": asset_path})
+        source = (root / asset_path).resolve()
+        meta = Path(str(source) + ".meta")
+        try:
+            source.relative_to(root)
+            before_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            meta_hash = hashlib.sha256(meta.read_bytes()).hexdigest() if meta.exists() else ""
+        except (OSError, ValueError) as ex:
+            return fail(request_id, "TEXTURE_PATH_INVALID", str(ex), {"assetPath": asset_path})
+        normalized = {str(key): value for key, value in sorted(changes.items())}
+        token_payload = json.dumps(
+            {"assetPath": asset_path, "sourceSha256": before_hash, "metaSha256": meta_hash, "changes": normalized, "reimport": bool(reimport)},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected_token = hashlib.sha256(token_payload).hexdigest()
+        preview = {
+            "assetPath": asset_path,
+            "dryRun": dry_run,
+            "applied": False,
+            "changes": normalized,
+            "sourceSha256": before_hash,
+            "metaSha256": meta_hash,
+            "confirmToken": expected_token,
+            "reimport": bool(reimport),
+        }
+        if dry_run:
+            current = await self.texture_importer_get(asset_path)
+            if current.ok:
+                preview["before"] = current.data or {}
+            return ok(request_id, preview)
+        rejected = self._reject_write_if_unapproved(request_id, "unity_texture_importer_patch")
+        if rejected is not None:
+            return rejected
+        if confirm_token != expected_token:
+            return fail(request_id, "TEXTURE_CONFIRM_TOKEN_INVALID", "confirmToken does not match the current asset/meta and changes.", preview)
+        payload: dict = {"assetPath": asset_path, "reimport": bool(reimport)}
+        field_map = {
+            "mipmapEnabled": "MipmapEnabled",
+            "alphaSource": "AlphaSource",
+            "alphaIsTransparency": "AlphaIsTransparency",
+            "sRGBTexture": "SRGBTexture",
+            "wrapMode": "WrapMode",
+            "filterMode": "FilterMode",
+            "anisoLevel": "AnisoLevel",
+            "isReadable": "IsReadable",
+            "textureCompression": "TextureCompression",
+            "maxTextureSize": "MaxTextureSize",
+        }
+        unknown = sorted(set(normalized) - set(field_map))
+        if unknown:
+            return fail(request_id, "TEXTURE_PATCH_FIELD_UNKNOWN", "Unsupported texture importer fields.", {"fields": unknown})
+        for key, value in normalized.items():
+            suffix = field_map[key]
+            payload["apply" + suffix] = True
+            payload[key] = value
+        applied = await self.dispatcher.call(request_id, "texture.importerPatch", payload)
+        if applied.ok and applied.data is not None:
+            applied.data.update({"dryRun": False, "confirmTokenAccepted": True, "sourceSha256": before_hash, "metaSha256Before": meta_hash})
+        return applied
+
+    async def asset_reimport(self, asset_path: str) -> ToolResponse:
+        request_id = new_id("req")
+        rejected = self._reject_write_if_unapproved(request_id, "unity_asset_reimport")
+        if rejected is not None:
+            return rejected
+        return await self.dispatcher.call(request_id, "asset.reimport", {"assetPath": asset_path})
+
     async def asset_create_folder(
         self, parent_folder: str, new_folder_name: str
     ) -> ToolResponse:
@@ -148,7 +242,17 @@ class ResourceDomainService:
             "refreshed": refresh_r.ok,
         }
         if refresh_r.data is not None:
-            payload["refresh"] = refresh_r.data
+            refresh_data = dict(refresh_r.data)
+            reported_ok = refresh_data.get("ok")
+            reported_status = refresh_data.get("status")
+            refresh_data["ok"] = bool(refresh_r.ok)
+            refresh_data["status"] = "ok" if refresh_r.ok else (str(reported_status or "failed"))
+            if reported_ok is not None and bool(reported_ok) != bool(refresh_r.ok):
+                refresh_data["normalizedFrom"] = {
+                    "ok": reported_ok,
+                    "status": reported_status,
+                }
+            payload["refresh"] = refresh_data
         if not refresh_r.ok:
             msg = refresh_r.error.message if refresh_r.error else "AssetDatabase.Refresh failed"
             payload["failureSignature"] = refresh_r.error.code if refresh_r.error else "ASSET_REFRESH_FAILED"
@@ -163,18 +267,78 @@ class ResourceDomainService:
             return ok(request_id, payload)
         compile_r = await self.compile()
         payload["compileStarted"] = compile_r.ok
-        payload["compiled"] = compile_r.ok
-        payload["compileCompleted"] = compile_r.ok
+        payload["compiled"] = False
+        payload["compileCompleted"] = False
         if compile_r.ok and compile_r.data is not None:
-            payload["status"] = "compiled"
             payload["compile"] = compile_r.data
+            wait_r = await self.compile_wait(
+                timeout_s=60,
+                poll_interval_s=0.25,
+                prefer_events=True,
+            )
+            wait_data = dict(wait_r.data or {})
+            payload["compileWait"] = wait_data
             compile_state = self.server.state.compile
             payload["compileState"] = {
                 "status": compile_state.status,
+                "phase": compile_state.phase,
                 "errorCount": compile_state.error_count,
                 "warningCount": compile_state.warning_count,
+                "commandQueuedAt": compile_state.command_queued_at,
+                "unityAcceptedAt": compile_state.unity_accepted_at,
                 "startedAt": compile_state.started_at,
                 "finishedAt": compile_state.finished_at,
+                "lastProgressAt": compile_state.last_progress_at,
+                "compileRequestId": compile_state.compile_request_id,
+            }
+            if not wait_r.ok:
+                msg = wait_r.error.message if wait_r.error else "compile wait failed"
+                code = wait_r.error.code if wait_r.error else "COMPILE_WAIT_FAILED"
+                payload.update(
+                    {
+                        "status": "compile_failed",
+                        "compileError": msg,
+                        "failureSignature": code,
+                    }
+                )
+                return fail(request_id, code, msg, payload)
+
+            terminal = (
+                str(wait_data.get("status") or "").lower() == "ready"
+                and not bool(wait_data.get("isCompiling", False))
+                and not bool(self.server.state.editor.is_compiling)
+            )
+            if terminal:
+                compile_state.status = "finished"
+                compile_state.phase = "completed"
+                if not compile_state.finished_at:
+                    compile_state.finished_at = now_ms()
+                compile_state.last_progress_at = compile_state.finished_at
+                payload.update(
+                    {
+                        "status": "compiled",
+                        "compiled": True,
+                        "compileCompleted": True,
+                    }
+                )
+            else:
+                payload.update(
+                    {
+                        "status": "compiling",
+                        "nextAction": "unity_compile_wait",
+                        "note": "Compilation was accepted but Unity has not confirmed an idle terminal state.",
+                    }
+                )
+            payload["compileState"] = {
+                "status": compile_state.status,
+                "phase": compile_state.phase,
+                "errorCount": compile_state.error_count,
+                "warningCount": compile_state.warning_count,
+                "commandQueuedAt": compile_state.command_queued_at,
+                "unityAcceptedAt": compile_state.unity_accepted_at,
+                "startedAt": compile_state.started_at,
+                "finishedAt": compile_state.finished_at,
+                "lastProgressAt": compile_state.last_progress_at,
                 "compileRequestId": compile_state.compile_request_id,
             }
         elif not compile_r.ok:
@@ -189,15 +353,19 @@ class ResourceDomainService:
                         "compiled": False,
                         "compileCompleted": False,
                         "compileAlreadyRunning": True,
+                        "attachedToExistingCompile": True,
                         "nextAction": "unity_compile_wait",
-                        "compileError": msg,
-                        "failureSignature": code,
+                        "compileAttachReason": msg,
                         "compileState": {
                             "status": compile_state.status,
+                            "phase": compile_state.phase,
                             "errorCount": compile_state.error_count,
                             "warningCount": compile_state.warning_count,
+                            "commandQueuedAt": compile_state.command_queued_at,
+                            "unityAcceptedAt": compile_state.unity_accepted_at,
                             "startedAt": compile_state.started_at,
                             "finishedAt": compile_state.finished_at,
+                            "lastProgressAt": compile_state.last_progress_at,
                             "compileRequestId": compile_state.compile_request_id,
                         },
                         "note": "AssetDatabase.Refresh completed; Unity was already compiling.",
@@ -228,6 +396,24 @@ class ResourceDomainService:
         return await self.dispatcher.call(
             request_id, "asset.getInfo", {"assetPath": asset_path}
         )
+
+    async def asset_subresources_list(
+        self, asset_path: str, type_filter: str = "", include_preview: bool = False
+    ) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"),
+            "asset.subresourcesList",
+            {"assetPath": asset_path, "typeFilter": type_filter, "includePreview": include_preview},
+        )
+
+    async def animator_controller_inspect(self, asset_path: str) -> ToolResponse:
+        return await self.dispatcher.call(new_id("req"), "animator.controllerInspect", {"assetPath": asset_path})
+
+    async def avatar_mask_inspect(self, asset_path: str) -> ToolResponse:
+        return await self.dispatcher.call(new_id("req"), "animator.avatarMaskInspect", {"assetPath": asset_path})
+
+    async def model_importer_inspect(self, asset_path: str) -> ToolResponse:
+        return await self.dispatcher.call(new_id("req"), "model.importerInspect", {"assetPath": asset_path})
 
     async def asset_find_built_in(
         self, query: str = "", asset_type: str = ""

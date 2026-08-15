@@ -24,21 +24,24 @@ class _Server:
 
 
 class _OperationService(TaskDomainService):
-    def __init__(self, project_path: Path, statuses: list[dict]) -> None:
+    def __init__(self, project_path: Path, statuses: list[dict], cancel_results: list | None = None) -> None:
         self.server = _Server(project_path)
         self._operations: dict[str, dict] = {}
         self._operation_failure_history: dict[str, int] = {}
         self._statuses = list(statuses)
+        self._cancel_results = list(cancel_results or [])
         self.calls: list[tuple[str, dict]] = []
 
     async def _dispatch_tool(self, tool_name: str, tool_args: dict):
         self.calls.append((tool_name, tool_args))
         if tool_name == "start":
-            return ok("req-start", {"status": "Running", "phase": "Started"})
+            return ok("req-start", {"status": "Running", "phase": "Started", "captureId": "capture-123"})
         if tool_name == "status":
             payload = self._statuses.pop(0) if self._statuses else {"status": "Running", "phase": "Waiting"}
             return ok("req-status", payload)
         if tool_name == "cancel":
+            if self._cancel_results:
+                return self._cancel_results.pop(0)
             return ok("req-cancel", {"status": "Canceled", "phase": "Canceled"})
         return ok("req-tool", {})
 
@@ -66,8 +69,15 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 4" in text
+    assert "rulesVersion: 8" in text
+    assert "Parent Agent rules path" in text
+    assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
+    assert "unity_safe_compile_and_wait" in text
+    assert "`nextSequence` as the next call's `afterSequence`" in text
+    assert "unity_config_csv_patch" in text
+    assert "unity_hang_status" in text
+    assert "fallbackSources" in text
     assert "{{" not in text
     assert "<!-- upilot:start -->" in text
     assert "<!-- upilot:end -->" in text
@@ -103,7 +113,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     text = agents.read_text(encoding="utf-8")
     agents.write_text(
-        _replace_line(text, "rulesVersion: ", "rulesVersion: 3"),
+        _replace_line(text, "rulesVersion: ", "rulesVersion: 7"),
         encoding="utf-8",
     )
 
@@ -111,7 +121,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "4"
+    assert checked.data["recommendedRulesVersion"] == "8"
     assert "rulesVersion differs" in checked.data["diffSummary"]
 
 
@@ -149,6 +159,124 @@ def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:
     assert waited.data["artifacts"]["reportPath"]["tail"] == "line2\nline3"
     assert waited.data["timing"]["totalWallMs"] >= 0
     assert waited.data["timing"]["projectElapsedMs"] == 1250
+
+
+def test_operation_resolves_start_result_placeholders_for_status_and_cancel(tmp_path: Path) -> None:
+    service = _OperationService(tmp_path, [{"status": "Running", "phase": "Sampling"}])
+    job_spec = {
+        "displayName": "profiler capture",
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {
+            "kind": "tool",
+            "toolName": "status",
+            "toolArgs": {"captureId": "${start.captureId}"},
+        },
+        "cancelCall": {
+            "kind": "tool",
+            "toolName": "cancel",
+            "toolArgs": {"captureId": "${start.captureId}"},
+        },
+        "timeoutSec": 5,
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    asyncio.run(service.operation_status(started.data["operationId"]))
+    canceled = asyncio.run(service.operation_cancel(started.data["operationId"]))
+
+    assert canceled.ok
+    assert ("status", {"captureId": "capture-123"}) in service.calls
+    assert ("cancel", {"captureId": "capture-123"}) in service.calls
+
+
+def test_operation_cancel_waits_for_status_and_cleanup_before_terminal(tmp_path: Path) -> None:
+    service = _OperationService(
+        tmp_path,
+        [
+            {"status": "Canceled", "phase": "Cleanup", "cleanupPending": True, "activeLeaseCount": 1},
+            {"status": "Aborted", "phase": "Aborted", "cleanupPending": False, "activeLeaseCount": 0},
+        ],
+    )
+    job_spec = {
+        "displayName": "cancel lifecycle",
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
+        "timeoutSec": 5,
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    operation_id = started.data["operationId"]
+    canceled = asyncio.run(service.operation_cancel(operation_id))
+
+    assert canceled.ok
+    assert canceled.data["status"] == "CancelRequested"
+    assert canceled.data["phase"] == "Stopping"
+    assert canceled.data["cancelAccepted"] is True
+    assert canceled.data["cleanupPending"] is True
+    assert canceled.data["terminal"] is False
+    assert canceled.data["endedAt"] == 0
+
+    cleaning = asyncio.run(service.operation_status(operation_id))
+    assert cleaning.ok
+    assert cleaning.data["status"] == "Stopping"
+    assert cleaning.data["phase"] == "Cleanup"
+    assert cleaning.data["cleanupPending"] is True
+    assert cleaning.data["terminal"] is False
+
+    terminal = asyncio.run(service.operation_status(operation_id))
+    assert terminal.ok
+    assert terminal.data["status"] == "Canceled"
+    assert terminal.data["cleanupPending"] is False
+    assert terminal.data["terminal"] is True
+
+
+def test_operation_cancel_is_idempotent_after_acceptance(tmp_path: Path) -> None:
+    service = _OperationService(tmp_path, [{"status": "Running", "phase": "Stopping"}])
+    job_spec = {
+        "displayName": "idempotent cancel",
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
+        "timeoutSec": 5,
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    operation_id = started.data["operationId"]
+    first = asyncio.run(service.operation_cancel(operation_id))
+    second = asyncio.run(service.operation_cancel(operation_id))
+
+    assert first.ok and second.ok
+    assert first.data["cancelAttemptCount"] == 1
+    assert second.data["cancelAttemptCount"] == 1
+    assert [name for name, _ in service.calls].count("cancel") == 1
+
+
+def test_operation_wait_window_does_not_terminate_running_job(tmp_path: Path) -> None:
+    service = _OperationService(
+        tmp_path,
+        ([{"status": "Running", "phase": "LongWork"}] * 20)
+        + [{"status": "Succeeded", "phase": "Complete"}],
+    )
+    job_spec = {
+        "displayName": "long smoke",
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "timeoutSec": 5,
+        "pollIntervalSec": 0.01,
+    }
+    started = asyncio.run(service.operation_start(job_spec))
+    first = asyncio.run(service.operation_wait(started.data["operationId"], timeout_s=0.001, poll_interval_s=0.01))
+
+    assert first.ok
+    assert first.data["terminal"] is False
+    assert first.data["waitWindowElapsed"] is True
+    assert first.data["status"] == "Running"
+    assert first.data["endedAt"] == 0
+
+    second = asyncio.run(service.operation_wait(started.data["operationId"], timeout_s=1, poll_interval_s=0.01))
+    assert second.ok
+    assert second.data["status"] == "Succeeded"
+    assert second.data["terminal"] is True
 
 
 def test_operation_repeat_failure_signature_is_reported(tmp_path: Path) -> None:

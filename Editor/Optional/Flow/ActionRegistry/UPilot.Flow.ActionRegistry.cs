@@ -54,9 +54,18 @@ namespace CodingRiver.UPilot.Flow
         public int CurrentStepIndex;
         public Dictionary<string, object> SharedBag = new Dictionary<string, object>(StringComparer.Ordinal);
         public CancellationToken CancellationToken;
+        public int TimeoutMs;
+        public long DeadlineAt;
+        public Action<string> Progress;
         public ScreenshotManager ScreenshotManager;
         public RuntimeController RuntimeController;
         public readonly List<string> CurrentAttachments = new List<string>();
+
+        public void ReportProgress(string detail)
+        {
+            CancellationToken.ThrowIfCancellationRequested();
+            Progress?.Invoke(detail);
+        }
 
         public void AddAttachment(string path)
         {
@@ -850,9 +859,11 @@ namespace CodingRiver.UPilot.Flow
 
             using (commandEvent)
             {
-                // Send directly on target; VisualElement.SendEvent will set evt.target to this
-                // and still perform full propagation (capture/target/bubble) through the panel.
-                target.SendEvent(commandEvent);
+                // Unity 6 requires dispatch through the panel root for reliable command
+                // propagation. Set the intended focused target explicitly so capture,
+                // target and bubble phases are preserved.
+                commandEvent.target = target;
+                (target.panel?.visualTree ?? target).SendEvent(commandEvent);
             }
         }
 

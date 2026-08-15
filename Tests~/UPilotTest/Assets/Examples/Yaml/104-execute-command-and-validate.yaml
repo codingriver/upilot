@@ -1,0 +1,28 @@
+schemaVersion: 2
+name: "104-execute-command-and-validate"
+description: Covers execute_command and validate_command actions on a TextField.
+fixture:
+  host_window:
+    type: ExampleCoverageInputWindow
+    reopen_if_open: true
+steps:
+  - name: Type text into command input
+    action: type_text
+    selector: "#command-input"
+    value: "hello"
+  - name: Execute SelectAll command
+    action: execute_command
+    selector: "#command-input"
+    command: "SelectAll"
+  - name: Assert execute command fired
+    action: assert_text
+    selector: "#command-status"
+    expected: "Execute: SelectAll"
+  - name: Validate Copy command
+    action: validate_command
+    selector: "#command-input"
+    command: "Copy"
+  - name: Assert validate command fired
+    action: assert_text
+    selector: "#command-status"
+    expected: "Validate: Copy"

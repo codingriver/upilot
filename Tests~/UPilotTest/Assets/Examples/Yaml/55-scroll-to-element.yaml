@@ -1,0 +1,13 @@
+schemaVersion: 2
+name: "55-scroll-to-element"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - action: scroll
+    selector: "#item-list"
+    delta: "0,60"
+  - action: assert_text_contains
+    selector: "#list-selection-status"
+    expected: "List:"

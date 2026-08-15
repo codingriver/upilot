@@ -14,6 +14,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from PIL import Image
 
 from ..config import CONFIG, diagnose_client_configs
 from ..dispatcher import CommandDispatcher
@@ -47,6 +48,153 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 class ScreenshotDomainService:
+    def _resolve_image_analysis_path(self, raw_path: str) -> Path | ToolResponse:
+        request_id = new_id("req")
+        session = self.server.session_manager.active
+        root = Path(session.project_path).expanduser().resolve() if session and session.project_path else None
+        if root is None:
+            return fail(request_id, "PROJECT_PATH_UNAVAILABLE", "Unity project path is unavailable.", {})
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.expanduser().resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return fail(request_id, "IMAGE_PATH_OUTSIDE_PROJECT", "Image analysis only reads files under the Unity project.", {"path": raw_path})
+        if not resolved.is_file() or resolved.suffix.lower() != ".png":
+            return fail(request_id, "PNG_PATH_INVALID", "Path must be an existing PNG under the Unity project.", {"path": str(resolved)})
+        return resolved
+
+    async def screenshot_pixel_stats(
+        self,
+        path: str,
+        region: dict | None = None,
+        near_black_threshold: int = 16,
+        alpha_threshold: int = 8,
+        histogram_bins: int = 16,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        target = self._resolve_image_analysis_path(path)
+        if isinstance(target, ToolResponse):
+            return target
+        return await asyncio.to_thread(
+            self._analyze_png,
+            request_id,
+            target,
+            region or {},
+            max(0, min(int(near_black_threshold), 255)),
+            max(0, min(int(alpha_threshold), 255)),
+            max(2, min(int(histogram_bins), 256)),
+        )
+
+    async def screenshot_compare(
+        self,
+        baseline_path: str,
+        candidate_path: str,
+        region: dict | None = None,
+        channel_tolerance: int = 0,
+        near_black_threshold: int = 16,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        baseline = self._resolve_image_analysis_path(baseline_path)
+        candidate = self._resolve_image_analysis_path(candidate_path)
+        if isinstance(baseline, ToolResponse):
+            return baseline
+        if isinstance(candidate, ToolResponse):
+            return candidate
+        return await asyncio.to_thread(
+            self._compare_png,
+            request_id,
+            baseline,
+            candidate,
+            region or {},
+            max(0, min(int(channel_tolerance), 255)),
+            max(0, min(int(near_black_threshold), 255)),
+        )
+
+    @staticmethod
+    def _crop_rgba(image: Image.Image, region: dict) -> tuple[Image.Image, dict]:
+        rgba = image.convert("RGBA")
+        if not region:
+            return rgba, {"x": 0, "y": 0, "width": rgba.width, "height": rgba.height}
+        x = max(0, int(region.get("x", 0)))
+        y = max(0, int(region.get("y", 0)))
+        width = max(1, int(region.get("width", rgba.width - x)))
+        height = max(1, int(region.get("height", rgba.height - y)))
+        right = min(rgba.width, x + width)
+        bottom = min(rgba.height, y + height)
+        if x >= right or y >= bottom:
+            raise ValueError("Region does not intersect the image.")
+        return rgba.crop((x, y, right, bottom)), {"x": x, "y": y, "width": right - x, "height": bottom - y}
+
+    @staticmethod
+    def _analyze_png(request_id: str, target: Path, region: dict, near_black: int, alpha_threshold: int, bins: int) -> ToolResponse:
+        try:
+            raw = target.read_bytes()
+            with Image.open(target) as source:
+                full_size = {"width": source.width, "height": source.height}
+                image, effective_region = ScreenshotDomainService._crop_rgba(source, region)
+                pixels = list(image.get_flattened_data())
+            total = max(1, len(pixels))
+            near_black_count = sum(1 for r, g, b, a in pixels if a > alpha_threshold and max(r, g, b) <= near_black)
+            transparent_count = sum(1 for _, _, _, a in pixels if a <= alpha_threshold)
+            step = 256 / bins
+            luminance_histogram = [0] * bins
+            alpha_histogram = [0] * bins
+            for r, g, b, a in pixels:
+                luminance = int(0.2126 * r + 0.7152 * g + 0.0722 * b)
+                luminance_histogram[min(bins - 1, int(luminance / step))] += 1
+                alpha_histogram[min(bins - 1, int(a / step))] += 1
+            return ok(request_id, {
+                "path": str(target), "sha256": hashlib.sha256(raw).hexdigest(), "size": full_size,
+                "region": effective_region, "pixelCount": len(pixels), "nearBlackThreshold": near_black,
+                "nearBlackPixelCount": near_black_count, "nearBlackRatio": near_black_count / total,
+                "alphaThreshold": alpha_threshold, "transparentPixelCount": transparent_count,
+                "transparentRatio": transparent_count / total, "histogramBins": bins,
+                "luminanceHistogram": luminance_histogram, "alphaHistogram": alpha_histogram,
+            })
+        except (OSError, ValueError) as ex:
+            return fail(request_id, "PNG_ANALYSIS_FAILED", str(ex), {"path": str(target)})
+
+    @staticmethod
+    def _compare_png(request_id: str, baseline: Path, candidate: Path, region: dict, tolerance: int, near_black: int) -> ToolResponse:
+        try:
+            baseline_raw = baseline.read_bytes()
+            candidate_raw = candidate.read_bytes()
+            with Image.open(baseline) as first, Image.open(candidate) as second:
+                if first.size != second.size:
+                    return fail(request_id, "PNG_SIZE_MISMATCH", "Baseline and candidate dimensions differ.", {"baselineSize": first.size, "candidateSize": second.size})
+                first_crop, effective_region = ScreenshotDomainService._crop_rgba(first, region)
+                second_crop, _ = ScreenshotDomainService._crop_rgba(second, region)
+                first_pixels = list(first_crop.get_flattened_data())
+                second_pixels = list(second_crop.get_flattened_data())
+            changed = 0
+            total_abs = 0
+            first_black = 0
+            second_black = 0
+            for a, b in zip(first_pixels, second_pixels):
+                deltas = [abs(int(a[index]) - int(b[index])) for index in range(4)]
+                total_abs += sum(deltas)
+                if max(deltas) > tolerance:
+                    changed += 1
+                if a[3] > 8 and max(a[0], a[1], a[2]) <= near_black:
+                    first_black += 1
+                if b[3] > 8 and max(b[0], b[1], b[2]) <= near_black:
+                    second_black += 1
+            count = max(1, len(first_pixels))
+            return ok(request_id, {
+                "baselinePath": str(baseline), "candidatePath": str(candidate),
+                "baselineSha256": hashlib.sha256(baseline_raw).hexdigest(), "candidateSha256": hashlib.sha256(candidate_raw).hexdigest(),
+                "size": {"width": first_crop.width, "height": first_crop.height}, "region": effective_region,
+                "channelTolerance": tolerance, "differentPixelCount": changed, "differentPixelRatio": changed / count,
+                "meanAbsoluteChannelDifference": total_abs / (count * 4.0), "nearBlackThreshold": near_black,
+                "baselineNearBlackRatio": first_black / count, "candidateNearBlackRatio": second_black / count,
+                "nearBlackRatioDelta": (second_black - first_black) / count,
+            })
+        except (OSError, ValueError) as ex:
+            return fail(request_id, "PNG_COMPARE_FAILED", str(ex), {"baselinePath": str(baseline), "candidatePath": str(candidate)})
+
     async def screenshot_game_view(
         self,
         width: int = 1280,
@@ -118,6 +266,8 @@ class ScreenshotDomainService:
         camera_name: str = "",
         window_title: str = "Game",
         allow_outside_project: bool = False,
+        degrade: str = "none",
+        fallback_sources: list[str] | None = None,
     ) -> ToolResponse:
         request_id = new_id("req")
         image_format = (format or "png").strip().lower()
@@ -174,6 +324,8 @@ class ScreenshotDomainService:
                 "cameraName": camera_name,
                 "windowTitle": window_title,
                 "allowOutsideProject": allow_outside_project,
+                "degrade": degrade,
+                "fallbackSources": fallback_sources or [],
             },
         )
         if bridge_save.ok:
@@ -189,6 +341,9 @@ class ScreenshotDomainService:
                     "format": data.get("format", image_format),
                     "sha256": data.get("sha256", ""),
                     "overwritten": data.get("overwritten", overwrite),
+                    "degraded": bool(data.get("degraded", False)),
+                    "degradeReason": data.get("degradeReason", ""),
+                    "requestedSource": data.get("requestedSource", normalized_source),
                     "savedBy": "unity_bridge",
                 },
             )

@@ -160,8 +160,6 @@ namespace CodingRiver.UPilot.Flow
             _popupMenuSimulator = CreateComponent<PopupMenuSimulator>();
             _fixture.AddTestComponent(_contextMenuSimulator);
             _fixture.AddTestComponent(_popupMenuSimulator);
-            InvokeLifecycle(_contextMenuSimulator, BeforeTestMethod);
-            InvokeLifecycle(_popupMenuSimulator, BeforeTestMethod);
             _simulator.FrameUpdate();
         }
 
@@ -175,7 +173,48 @@ namespace CodingRiver.UPilot.Flow
             DiscardMenus();
             _simulator.Click(element, UiMouseButton.RightMouse, modifiers);
             _simulator.FrameUpdate();
+            if (!_contextMenuSimulator.menuIsDisplayed)
+            {
+                TryPopulateContextMenuDirectly(element, modifiers);
+                _simulator.FrameUpdate();
+            }
+            Codingriver.Logger.Log($"[UPilot Flow] context menu probe displayed={_contextMenuSimulator.menuIsDisplayed} items={_contextMenuSimulator.menuItemCount} target={element.name}");
             return _contextMenuSimulator.menuIsDisplayed;
+        }
+
+        private bool TryPopulateContextMenuDirectly(VisualElement element, EventModifiers modifiers)
+        {
+            try
+            {
+                MethodInfo managerGetter = typeof(ContextMenuSimulator).GetMethod(
+                    "GetContextualMenuManager",
+                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                ContextualMenuManager manager = managerGetter?.Invoke(null, new object[] { element.panel }) as ContextualMenuManager;
+                if (manager == null)
+                    return false;
+
+                var triggerSource = new UnityEngine.Event
+                {
+                    type = EventType.ContextClick,
+                    mousePosition = element.worldBound.center,
+                    button = (int)UiMouseButton.RightMouse,
+                    modifiers = modifiers,
+                };
+                var menu = new DropdownMenu();
+                using (MouseUpEvent trigger = MouseUpEvent.GetPooled(triggerSource))
+                using (ContextualMenuPopulateEvent populate = ContextualMenuPopulateEvent.GetPooled(trigger, menu, element, manager))
+                {
+                    populate.target = element;
+                    element.SendEvent(populate);
+                }
+
+                return _contextMenuSimulator.menuIsDisplayed;
+            }
+            catch (Exception ex)
+            {
+                Codingriver.Logger.LogWarning($"[UPilot Flow] direct context menu population failed: {ex.Message}");
+                return false;
+            }
         }
 
         public bool SelectContextMenuItem(string itemName)
@@ -279,6 +318,8 @@ namespace CodingRiver.UPilot.Flow
                 ? DropdownMenuAction.Status.Disabled
                 : DropdownMenuAction.Status.Normal;
 
+            Codingriver.Logger.Log($"[UPilot Flow] menu assertion item={itemName} expected={expectedStatus} contextDisplayed={_contextMenuSimulator?.menuIsDisplayed == true} contextItems={_contextMenuSimulator?.menuItemCount ?? 0} popupDisplayed={_popupMenuSimulator?.menuIsDisplayed == true} popupItems={_popupMenuSimulator?.menuItemCount ?? 0}");
+
             try
             {
                 if (_contextMenuSimulator != null && _contextMenuSimulator.menuIsDisplayed)
@@ -301,6 +342,11 @@ namespace CodingRiver.UPilot.Flow
             return false;
         }
 
+        public string DescribeState()
+        {
+            return $"contextDisplayed={_contextMenuSimulator?.menuIsDisplayed == true},contextItems={_contextMenuSimulator?.menuItemCount ?? 0},popupDisplayed={_popupMenuSimulator?.menuIsDisplayed == true},popupItems={_popupMenuSimulator?.menuItemCount ?? 0}";
+        }
+
         public void Dispose()
         {
             if (_fixture == null)
@@ -310,14 +356,12 @@ namespace CodingRiver.UPilot.Flow
 
             if (_contextMenuSimulator != null)
             {
-                InvokeLifecycle(_contextMenuSimulator, AfterTestMethod);
                 _fixture.RemoveTestComponent(_contextMenuSimulator);
                 _contextMenuSimulator = null;
             }
 
             if (_popupMenuSimulator != null)
             {
-                InvokeLifecycle(_popupMenuSimulator, AfterTestMethod);
                 _fixture.RemoveTestComponent(_popupMenuSimulator);
                 _popupMenuSimulator = null;
             }
@@ -518,21 +562,39 @@ namespace CodingRiver.UPilot.Flow
 
         public void Click(VisualElement element, int clickCount, UiMouseButton button, EventModifiers modifiers, ActionContext context)
         {
-            if (clickCount >= 2)
+            bool pointerUpReceived = false;
+            bool mouseUpReceived = false;
+            void OnPointerUp(PointerUpEvent _) => pointerUpReceived = true;
+            void OnMouseUp(MouseUpEvent _) => mouseUpReceived = true;
+
+            element.RegisterCallback<PointerUpEvent>(OnPointerUp, TrickleDown.TrickleDown);
+            element.RegisterCallback<MouseUpEvent>(OnMouseUp, TrickleDown.TrickleDown);
+            try
             {
-                _simulator.DoubleClick(element, button, modifiers);
+                if (clickCount >= 2)
+                {
+                    _simulator.DoubleClick(element, button, modifiers);
+                }
+                else
+                {
+                    _simulator.Click(element, button, modifiers);
+                }
+
+                _simulator.FrameUpdate();
             }
-            else
+            finally
             {
-                _simulator.Click(element, button, modifiers);
+                element.UnregisterCallback<PointerUpEvent>(OnPointerUp, TrickleDown.TrickleDown);
+                element.UnregisterCallback<MouseUpEvent>(OnMouseUp, TrickleDown.TrickleDown);
             }
 
-            _simulator.FrameUpdate();
-
-            // Fallback for com.unity.ui 2.0+ where PanelSimulator.Click may not trigger Button clicks correctly
-            // because the generated PointerEvent can be missing required fields (e.g. pointerId).
-            if (element is Button)
+            // Some com.unity.ui versions fail to deliver the terminal input event to an
+            // EditorWindow panel. Fall back only when the official simulator delivered
+            // neither PointerUp nor MouseUp; unconditional fallback performs every click
+            // twice on versions where PanelSimulator works correctly.
+            if (element is Button && !pointerUpReceived && !mouseUpReceived)
             {
+                context?.Log("click: official simulator delivered no terminal event; using validated fallback dispatch");
                 ActionHelpers.DispatchClick(element, clickCount, button, modifiers, context);
             }
         }
@@ -594,14 +656,24 @@ namespace CodingRiver.UPilot.Flow
         private static readonly MethodInfo EventHelpersTearDownMethod = Type.GetType("UnityEngine.UIElements.TestFramework.EventHelpers, Unity.UI.TestFramework.Runtime")
             ?.GetMethod("TestTearDown", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
+        private static readonly FieldInfo EventHelpersInitializedTestIdField = Type.GetType("UnityEngine.UIElements.TestFramework.EventHelpers, Unity.UI.TestFramework.Runtime")
+            ?.GetField("_initializedTestId", BindingFlags.Static | BindingFlags.NonPublic);
+
+        private static readonly object EventLifecycleGate = new object();
+        private static string s_FlowOwnedEventTestId;
+        private static int s_FlowOwnedEventLeaseCount;
+
         private readonly InputTestFixture _inputTestFixture = new InputTestFixture();
         private IUiPointerDriver _pointerDriver;
         private OfficialEditorWindowHostBridge _officialHostBridge;
         private OfficialUiMenuDriver _menuDriver;
+        private VisualElement _fallbackMenuElement;
         private KeyboardState _keyboardState;
         private string _keyboardDriverName = "UIToolkitFallbackOnly";
         private bool _inputSystemReady;
         private bool _officialEventLifecycleReady;
+        private bool _joinedFlowOwnedEventLifecycle;
+        private string _officialEventLifecycleTestId;
 
         public UPilotFlowSimulationSession()
         {
@@ -904,6 +976,32 @@ namespace CodingRiver.UPilot.Flow
             return $"host={HostDriverName}; pointer={PointerDriverName}; keyboard={KeyboardDriverName}; official={OfficialUiToolkit.Describe()}";
         }
 
+        public void RememberFallbackMenuElement(VisualElement element)
+        {
+            _fallbackMenuElement = element;
+        }
+
+        public bool TrySelectRememberedDropdownMenuItem(string itemName)
+        {
+            VisualElement element = _fallbackMenuElement;
+            if (element == null)
+                return false;
+            bool selected = ActionHelpers.TryExecuteDropdownMenuItem(element, itemName);
+            if (selected)
+                _fallbackMenuElement = null;
+            return selected;
+        }
+
+        public bool TryFindRememberedDropdownMenuItem(string itemName, out DropdownMenuAction action)
+        {
+            return ActionHelpers.TryFindDropdownMenuAction(_fallbackMenuElement, itemName, out action);
+        }
+
+        public string DescribeMenuState()
+        {
+            return _menuDriver?.DescribeState() ?? "menuDriver=null";
+        }
+
         public void EnsureInputSystemReady()
         {
             if (_inputSystemReady)
@@ -982,7 +1080,20 @@ namespace CodingRiver.UPilot.Flow
         {
             if (_menuDriver == null)
             {
-                _menuDriver = new OfficialUiMenuDriver(PanelSimulator);
+                // Transfer EventHelpers ownership from the lightweight session lease to
+                // the official UITestFixture. CommonUITestFixture must be in DuringTest
+                // state for FrameUpdate and menu components, and it owns TestSetUp/
+                // TestTearDown while the menu driver is alive.
+                ReleaseOfficialEventLifecycle();
+                try
+                {
+                    _menuDriver = new OfficialUiMenuDriver(PanelSimulator);
+                }
+                catch
+                {
+                    EnsureOfficialEventLifecycle();
+                    throw;
+                }
             }
 
             return _menuDriver;
@@ -1002,11 +1113,13 @@ namespace CodingRiver.UPilot.Flow
             finally
             {
                 _menuDriver = null;
+                EnsureOfficialEventLifecycle();
             }
         }
 
         public void Dispose()
         {
+            _fallbackMenuElement = null;
             ReleaseOfficialHostBridge();
             ReleaseOfficialEventLifecycle();
 
@@ -1062,8 +1175,37 @@ namespace CodingRiver.UPilot.Flow
                 try
                 {
                     EnsureFakeNUnitTestContext();
-                    EventHelpersSetUpMethod.Invoke(null, null);
-                    _officialEventLifecycleReady = true;
+                    string currentTestId = TestContext.CurrentTestExecutionContext.CurrentTest.Id;
+
+                    lock (EventLifecycleGate)
+                    {
+                        string initializedTestId = EventHelpersInitializedTestIdField?.GetValue(null) as string;
+                        if (string.Equals(initializedTestId, currentTestId, StringComparison.Ordinal))
+                        {
+                            if (s_FlowOwnedEventLeaseCount > 0 &&
+                                string.Equals(s_FlowOwnedEventTestId, currentTestId, StringComparison.Ordinal))
+                            {
+                                s_FlowOwnedEventLeaseCount++;
+                                _joinedFlowOwnedEventLifecycle = true;
+                            }
+
+                            _officialEventLifecycleTestId = currentTestId;
+                            _officialEventLifecycleReady = true;
+                            return;
+                        }
+
+                        if (!string.IsNullOrEmpty(initializedTestId))
+                        {
+                            EventHelpersTearDownMethod?.Invoke(null, null);
+                        }
+
+                        EventHelpersSetUpMethod.Invoke(null, null);
+                        s_FlowOwnedEventTestId = currentTestId;
+                        s_FlowOwnedEventLeaseCount = 1;
+                        _joinedFlowOwnedEventLifecycle = true;
+                        _officialEventLifecycleTestId = currentTestId;
+                        _officialEventLifecycleReady = true;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1092,7 +1234,27 @@ namespace CodingRiver.UPilot.Flow
 
             try
             {
-                EventHelpersTearDownMethod?.Invoke(null, null);
+                if (_joinedFlowOwnedEventLifecycle)
+                {
+                    lock (EventLifecycleGate)
+                    {
+                        if (s_FlowOwnedEventLeaseCount > 0 &&
+                            string.Equals(s_FlowOwnedEventTestId, _officialEventLifecycleTestId, StringComparison.Ordinal))
+                        {
+                            s_FlowOwnedEventLeaseCount--;
+                            if (s_FlowOwnedEventLeaseCount == 0)
+                            {
+                                string initializedTestId = EventHelpersInitializedTestIdField?.GetValue(null) as string;
+                                if (string.Equals(initializedTestId, _officialEventLifecycleTestId, StringComparison.Ordinal))
+                                {
+                                    EventHelpersTearDownMethod?.Invoke(null, null);
+                                }
+
+                                s_FlowOwnedEventTestId = null;
+                            }
+                        }
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -1101,6 +1263,8 @@ namespace CodingRiver.UPilot.Flow
             finally
             {
                 _officialEventLifecycleReady = false;
+                _joinedFlowOwnedEventLifecycle = false;
+                _officialEventLifecycleTestId = null;
             }
         }
     }

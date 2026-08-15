@@ -1,0 +1,41 @@
+schemaVersion: 2
+name: "18-layout-and-scroller"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+steps:
+  - action: set_split_view_size
+    selector: "#workspace-split"
+    pane: "0"
+    size: "220"
+  - action: assert_text_contains
+    selector: "#split-status"
+    expected: "220"
+  - action: page_scroller
+    selector: "#standalone-scroller"
+    direction: "next"
+    pages: "2"
+    page_size: "12.5"
+  - action: assert_text_contains
+    selector: "#scroller-status"
+    expected: "Scroller: "
+  - action: drag_scroller
+    selector: "#standalone-scroller"
+    direction: "increase"
+    duration: "200ms"
+  - action: assert_text_contains
+    selector: "#scroller-status"
+    expected: "Scroller: "
+  - action: select_tab
+    selector: "#settings-tabs"
+    label: "About"
+  - action: assert_text
+    selector: "#tab-selection-status"
+    expected: "Tab: About"
+  - action: close_tab
+    selector: "#settings-tabs"
+    label: "About"
+  - action: assert_text
+    selector: "#tab-closed-status"
+    expected: "Closed: About"

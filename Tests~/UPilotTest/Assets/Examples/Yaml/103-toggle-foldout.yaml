@@ -1,0 +1,24 @@
+schemaVersion: 2
+name: "103-toggle-foldout"
+description: Covers toggle_foldout action and assert_property on Foldout value.
+fixture:
+  host_window:
+    type: ExampleAdvancedControlsWindow
+    reopen_if_open: true
+steps:
+  - name: Toggle foldout open
+    action: toggle_foldout
+    selector: "#settings-foldout"
+  - name: Assert foldout is open
+    action: assert_property
+    selector: "#settings-foldout"
+    property: "value"
+    expected: "True"
+  - name: Toggle foldout closed
+    action: toggle_foldout
+    selector: "#settings-foldout"
+  - name: Assert foldout is closed
+    action: assert_property
+    selector: "#settings-foldout"
+    property: "value"
+    expected: "False"

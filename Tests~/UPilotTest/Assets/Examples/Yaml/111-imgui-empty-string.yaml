@@ -1,0 +1,19 @@
+schemaVersion: 2
+name: "111-imgui-empty-string"
+description: Covers imgui_type and imgui_assert_text with empty string on IMGUI TextField.
+fixture:
+  host_window:
+    type: ImguiExampleWindow
+    reopen_if_open: true
+steps:
+  - name: Focus project name field
+    action: imgui_focus
+    selector: 'gui(textfield, control_name="project-name-field")'
+  - name: Type empty text
+    action: imgui_type
+    selector: 'gui(textfield, control_name="project-name-field")'
+    text: ""
+  - name: Assert empty text
+    action: imgui_assert_text
+    selector: 'gui(textfield, control_name="project-name-field")'
+    text: ""

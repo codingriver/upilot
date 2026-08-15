@@ -100,7 +100,12 @@ namespace CodingRiver.UPilot.Flow
         /// <summary>
         /// Captures a screenshot asynchronously.
         /// </summary>
-        public virtual async Task<string> CaptureAsync(string caseName, int stepIndex, string tag, CancellationToken cancellationToken)
+        public virtual Task<string> CaptureAsync(string caseName, int stepIndex, string tag, CancellationToken cancellationToken)
+        {
+            return CaptureAsync(caseName, stepIndex, tag, cancellationToken, allowUnfocusedFallback: false);
+        }
+
+        public async Task<string> CaptureAsync(string caseName, int stepIndex, string tag, CancellationToken cancellationToken, bool allowUnfocusedFallback)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -112,9 +117,18 @@ namespace CodingRiver.UPilot.Flow
             EditorWindow preferred = ResolveCaptureWindow();
             if (preferred == null || preferred != EditorWindow.focusedWindow)
             {
-                LastCaptureSource = "skipped-unfocused";
-                Codingriver.Logger.LogWarning($"[UPilot Flow] 截图跳过：窗口未聚焦 (preferred={preferred?.GetType().Name}, focused={EditorWindow.focusedWindow?.GetType().Name})");
-                return null;
+                if (!allowUnfocusedFallback)
+                {
+                    LastCaptureSource = "skipped-unfocused";
+                    Codingriver.Logger.LogWarning($"[UPilot Flow] 截图跳过：窗口未聚焦 (preferred={preferred?.GetType().Name}, focused={EditorWindow.focusedWindow?.GetType().Name})");
+                    return null;
+                }
+
+                string fallbackPath = _pathBuilder.BuildScreenshotPath(_options.ScreenshotPath, caseName, stepIndex, tag);
+                await EditorAsyncUtility.NextFrameAsync(cancellationToken);
+                CaptureSync(fallbackPath);
+                Codingriver.Logger.LogWarning($"[UPilot Flow] 截图窗口未聚焦，已保存回退截图 {fallbackPath}");
+                return fallbackPath;
             }
 
             string path = _pathBuilder.BuildScreenshotPath(_options.ScreenshotPath, caseName, stepIndex, tag);
@@ -216,17 +230,21 @@ namespace CodingRiver.UPilot.Flow
 
         private EditorWindow ResolveCaptureWindow()
         {
-            try
+            if (_windowProvider != null)
             {
-                EditorWindow provided = _windowProvider?.Invoke();
-                if (provided != null)
+                try
                 {
-                    return provided;
+                    // An explicit provider owns target selection. Returning null means
+                    // "no capturable window" and must not silently fall back to the
+                    // focused Test Runner window, which can turn synchronous callers
+                    // into a main-thread NextFrame deadlock.
+                    return _windowProvider.Invoke();
                 }
-            }
-            catch (Exception ex)
-            {
-                Codingriver.Logger.LogWarning($"[UPilot Flow] Failed to resolve screenshot host window: {ex.Message}");
+                catch (Exception ex)
+                {
+                    Codingriver.Logger.LogWarning($"[UPilot Flow] Failed to resolve screenshot host window: {ex.Message}");
+                    return null;
+                }
             }
 
             return EditorWindow.focusedWindow;
@@ -382,17 +400,29 @@ namespace CodingRiver.UPilot.Flow
 
         public void WriteCaseJson(TestResult result, string path)
         {
+            EnsureParentDirectory(path);
             File.WriteAllText(path, _serializer.Serialize(result), Encoding.UTF8);
         }
 
         public void WriteSuiteJson(TestSuiteResult result, string path)
         {
+            EnsureParentDirectory(path);
             File.WriteAllText(path, _serializer.Serialize(result), Encoding.UTF8);
         }
 
         public void WriteArtifactManifest(IEnumerable<string> paths, string path)
         {
+            EnsureParentDirectory(path);
             File.WriteAllText(path, _serializer.Serialize(paths), Encoding.UTF8);
+        }
+
+        private static void EnsureParentDirectory(string path)
+        {
+            string directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
         }
     }
 
@@ -743,7 +773,7 @@ namespace CodingRiver.UPilot.Flow
 
             if (keyboard == null)
             {
-                return $"H={host}; P={pointer}";
+                return $"H={host}; P={pointer}; K=-";
             }
 
             return $"H={host}; P={pointer}; K={keyboard}";

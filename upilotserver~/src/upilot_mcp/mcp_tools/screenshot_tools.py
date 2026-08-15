@@ -97,6 +97,8 @@ async def unity_screenshot_save(
     cameraName: str = "",
     windowTitle: str = "Game",
     allowOutsideProject: bool = False,
+    degrade: str = "none",
+    fallbackSources: list[str] | None = None,
 ):
     _log_tool_call(
         "unity_screenshot_save",
@@ -111,6 +113,8 @@ async def unity_screenshot_save(
             "cameraName": cameraName,
             "windowTitle": windowTitle,
             "allowOutsideProject": allowOutsideProject,
+            "degrade": degrade,
+            "fallbackSources": fallbackSources,
         },
     )
     r = await _get_facade().screenshot_save(
@@ -124,8 +128,24 @@ async def unity_screenshot_save(
         camera_name=cameraName,
         window_title=windowTitle,
         allow_outside_project=allowOutsideProject,
+        degrade=degrade,
+        fallback_sources=fallbackSources,
     )
     return _log_tool_result("unity_screenshot_save", _payload(r))
+
+@mcp.tool(description="只读分析工程内 PNG 的矩形区域，返回尺寸、SHA256、近黑/透明像素比例及亮度/Alpha 直方图，不返回原始像素。")
+async def unity_screenshot_pixel_stats(path: str, region: dict | None = None, nearBlackThreshold: int = 16, alphaThreshold: int = 8, histogramBins: int = 16):
+    args = {"path": path, "region": region, "nearBlackThreshold": nearBlackThreshold, "alphaThreshold": alphaThreshold, "histogramBins": histogramBins}
+    _log_tool_call("unity_screenshot_pixel_stats", args)
+    r = await _get_facade().screenshot_pixel_stats(path=path, region=region, near_black_threshold=nearBlackThreshold, alpha_threshold=alphaThreshold, histogram_bins=histogramBins)
+    return _log_tool_result("unity_screenshot_pixel_stats", _payload(r))
+
+@mcp.tool(description="只读比较工程内两张同尺寸 PNG，返回差异像素比例、平均通道差与指定区域近黑比例变化，不返回原始像素。")
+async def unity_screenshot_compare(baselinePath: str, candidatePath: str, region: dict | None = None, channelTolerance: int = 0, nearBlackThreshold: int = 16):
+    args = {"baselinePath": baselinePath, "candidatePath": candidatePath, "region": region, "channelTolerance": channelTolerance, "nearBlackThreshold": nearBlackThreshold}
+    _log_tool_call("unity_screenshot_compare", args)
+    r = await _get_facade().screenshot_compare(baseline_path=baselinePath, candidate_path=candidatePath, region=region, channel_tolerance=channelTolerance, near_black_threshold=nearBlackThreshold)
+    return _log_tool_result("unity_screenshot_compare", _payload(r))
 
 @mcp.tool(
     description="截取 Unity 编辑器窗口（EditorWindow）画面，返回 Base64 编码的 PNG。通过窗口标题匹配。screenshotDegrade: none|auto|scene|minimal — auto 在无法截取窗口时降级为 Scene 视图或占位图。"

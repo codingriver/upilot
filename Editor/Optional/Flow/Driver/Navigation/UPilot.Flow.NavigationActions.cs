@@ -98,7 +98,19 @@ namespace CodingRiver.UPilot.Flow
             string duration = ActionHelpers.Require(parameters, "wait", "duration");
             int ms = DurationParser.ParseToMilliseconds(duration, "wait");
             context.Log($"wait: {ms}ms");
-            return EditorAsyncUtility.DelayAsync(ms, context.CancellationToken);
+            return WaitWithProgressAsync(context, ms);
+        }
+
+        private static async Task WaitWithProgressAsync(ActionContext context, int ms)
+        {
+            int remaining = ms;
+            while (remaining > 0)
+            {
+                int slice = Math.Min(remaining, 500);
+                await EditorAsyncUtility.DelayAsync(slice, context.CancellationToken);
+                remaining -= slice;
+                context.ReportProgress($"wait:{ms - remaining}/{ms}ms");
+            }
         }
     }
 

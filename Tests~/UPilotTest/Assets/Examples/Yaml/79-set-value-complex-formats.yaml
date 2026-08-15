@@ -1,0 +1,60 @@
+schemaVersion: 2
+name: "79-set-value-complex-formats"
+description: |
+  Tests set_value with complex type DSLs on Color, Gradient, Curve, and Hash128 fields.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Set Color via hex format
+    action: set_value
+    selector: "#accent-color"
+    value: "#FF0000FF"
+
+  - name: Assert Color value
+    action: assert_value
+    selector: "#accent-color"
+    expected: "#FF0000FF"
+
+  - name: Set Gradient via DSL
+    action: set_value
+    selector: "#ramp-gradient"
+    value: "0:#0000FFFF;1:#00FF00FF|0:1;1:0.5"
+
+  - name: Set Curve via keyframe DSL
+    action: set_value
+    selector: "#speed-curve"
+    value: "0:0:0:0;0.5:2:0:0;1:1:0:0"
+
+  - name: Set Hash128 via hex string
+    action: set_value
+    selector: "#content-hash"
+    value: "0102030405060708090A0B0C0D0E0F10"
+
+  - name: Assert Hash128 value
+    action: assert_value
+    selector: "#content-hash"
+    expected: "0102030405060708090A0B0C0D0E0F10"
+
+  - name: Set Vector3 field
+    action: set_value
+    selector: "#offset-vector3"
+    value: "1,2,3"
+
+  - name: Assert Vector3 value
+    action: assert_value
+    selector: "#offset-vector3"
+    expected: "1,2,3"
+
+  - name: Set Rect field
+    action: set_value
+    selector: "#viewport-rect"
+    value: "10,20,100,200"
+
+  - name: Assert Rect value
+    action: assert_value
+    selector: "#viewport-rect"
+    expected: "10,20,100,200"

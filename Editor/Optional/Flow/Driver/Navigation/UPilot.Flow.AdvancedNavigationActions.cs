@@ -112,6 +112,8 @@ namespace CodingRiver.UPilot.Flow
                 ? DurationParser.ParseToMilliseconds(duration, "drag_scroller")
                 : 100;
             int frameCount = Math.Max(1, delayMs / 16);
+            float beforeValue = scroller.value;
+            float targetValue = AdvancedActionHelpers.ResolveScrollerTargetValue(scroller, parameters, "drag_scroller");
 
             context.Log($"drag_scroller: {fromPos} -> {toPos} ratio target via {ActionHelpers.ResolvePointerDriver(context)} button={button} modifiers={modifiers}");
 
@@ -137,6 +139,14 @@ namespace CodingRiver.UPilot.Flow
 
             context.Log($"drag_scroller: completed");
             await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
+            if (Mathf.Approximately(scroller.value, beforeValue))
+            {
+                if (context?.Options?.RequireOfficialPointerDriver == true)
+                    throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, "drag_scroller official input did not change the scroller value.");
+                scroller.value = targetValue;
+                context?.Log($"drag_scroller: semantic fallback applied value={targetValue:0.###}");
+                await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
+            }
         }
     }
 }

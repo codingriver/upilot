@@ -82,6 +82,9 @@ namespace CodingRiver.UPilot
     public class ConsoleLogsSearchPayload
     {
         public int count = 200;
+        // Compatibility aliases used by older clients and TODO examples.
+        public int maxCount;
+        public string query;
         public string logType;
         public bool includeStackTrace;
         public bool excludeUPilot = true;
@@ -133,7 +136,13 @@ namespace CodingRiver.UPilot
         public List<ConsoleLogEntry> logs = new();
         public int totalCount;
         public int matchedCount;
+        public int scannedCount;
         public bool truncated;
+        public string effectiveQuery;
+        public string[] effectiveContains = Array.Empty<string>();
+        public string effectiveRegex;
+        public string[] matchedFields = { "message", "stackTrace" };
+        public string[] ignoredArguments = Array.Empty<string>();
     }
 
     // ── M07 Console Service ───────────────────────────────────────────────────
@@ -487,9 +496,12 @@ namespace CodingRiver.UPilot
 
         private static void NormalizeSearchPayload(ConsoleLogsSearchPayload payload)
         {
+            if (payload.maxCount > 0) payload.count = payload.maxCount;
             if (payload.count <= 0) payload.count = 1;
             if (payload.count > 5000) payload.count = 5000;
             if (payload.contains == null) payload.contains = Array.Empty<string>();
+            if (!string.IsNullOrWhiteSpace(payload.query) && payload.contains.Length == 0)
+                payload.contains = new[] { payload.query.Trim() };
             if (payload.maxMessageLength < 0) payload.maxMessageLength = 0;
         }
 
@@ -528,7 +540,13 @@ namespace CodingRiver.UPilot
         private static ConsoleLogsSearchResultPayload SearchConsoleLogs(ConsoleLogsSearchPayload payload)
         {
             int total = GetLogEntryCount();
-            var result = new ConsoleLogsSearchResultPayload { totalCount = total };
+            var result = new ConsoleLogsSearchResultPayload
+            {
+                totalCount = total,
+                effectiveQuery = payload.query ?? "",
+                effectiveContains = payload.contains ?? Array.Empty<string>(),
+                effectiveRegex = payload.regex ?? "",
+            };
 
             WithLogEntries((logEntriesType, getEntryMethod, logEntryType, messageField, modeField) =>
             {
@@ -536,6 +554,7 @@ namespace CodingRiver.UPilot
                 {
                     for (int i = total - 1; i >= 0; i--)
                     {
+                        result.scannedCount++;
                         if (TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField))
                             result.matchedCount++;
                         if (result.logs.Count >= payload.count) break;
@@ -545,6 +564,7 @@ namespace CodingRiver.UPilot
                 {
                     for (int i = 0; i < total; i++)
                     {
+                        result.scannedCount++;
                         if (TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField))
                             result.matchedCount++;
                         if (result.logs.Count >= payload.count) break;

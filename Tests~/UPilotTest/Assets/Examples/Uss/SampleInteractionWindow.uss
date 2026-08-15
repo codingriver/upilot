@@ -1,0 +1,91 @@
+.window-root {
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 16px;
+    padding-bottom: 16px;
+    flex-grow: 1;
+    background-color: rgb(218, 210, 198);
+}
+
+.panel {
+    flex-direction: column;
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    border-left-width: 1px;
+    border-right-width: 1px;
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-color: rgb(175, 162, 142);
+    border-right-color: rgb(175, 162, 142);
+    border-top-color: rgb(175, 162, 142);
+    border-bottom-color: rgb(175, 162, 142);
+    background-color: rgb(245, 242, 235);
+}
+
+.text-input {
+    margin-bottom: 8px;
+}
+
+.button-row {
+    flex-direction: row;
+    margin-bottom: 10px;
+}
+
+.btn {
+    margin-right: 8px;
+}
+
+.primary {
+    color: rgb(255, 255, 255);
+    background-color: rgb(193, 89, 35);
+}
+
+.hover-target {
+    width: 160px;
+    height: 42px;
+    margin-bottom: 10px;
+    background-color: rgb(210, 220, 228);
+    border-left-width: 1px;
+    border-right-width: 1px;
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-color: rgb(115, 133, 148);
+    border-right-color: rgb(115, 133, 148);
+    border-top-color: rgb(115, 133, 148);
+    border-bottom-color: rgb(115, 133, 148);
+}
+
+.menu-target {
+    margin-bottom: 10px;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+    border-left-width: 1px;
+    border-right-width: 1px;
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+    border-left-color: rgb(166, 132, 95);
+    border-right-color: rgb(166, 132, 95);
+    border-top-color: rgb(166, 132, 95);
+    border-bottom-color: rgb(166, 132, 95);
+    background-color: rgb(240, 230, 215);
+}
+
+.status {
+    margin-bottom: 4px;
+}
+
+.scroll-area {
+    height: 120px;
+    margin-top: 8px;
+    border-top-width: 1px;
+    border-top-color: rgb(175, 162, 142);
+}
+
+.item {
+    margin-top: 4px;
+    margin-bottom: 4px;
+}

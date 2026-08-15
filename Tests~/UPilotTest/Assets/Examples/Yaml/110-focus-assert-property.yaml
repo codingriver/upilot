@@ -1,0 +1,16 @@
+schemaVersion: 2
+name: "110-focus-assert-property"
+description: Covers focus action followed by assert_property on focusable trait.
+fixture:
+  host_window:
+    type: ExampleBasicLoginWindow
+    reopen_if_open: true
+steps:
+  - name: Focus username input
+    action: focus
+    selector: "#username-input"
+  - name: Assert focused element is focusable
+    action: assert_property
+    selector: "#username-input"
+    property: "focusable"
+    expected: "True"

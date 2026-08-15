@@ -62,11 +62,15 @@ def test_console_capture_facade_maps_read_and_cleanup_payloads() -> None:
         service.console_capture_read(
             session_id="console-1",
             after_sequence=12,
+            from_sequence=20,
+            to_sequence=200,
             count=99999,
             log_type="Error",
             include_stack_trace=False,
             contains=["BattleProcess", "LastError"],
             contains_all=True,
+            regex="Battle(Process|State)",
+            continuation_token="cursor-1",
         )
     )
     asyncio.run(
@@ -83,12 +87,16 @@ def test_console_capture_facade_maps_read_and_cleanup_payloads() -> None:
         {
             "sessionId": "console-1",
             "afterSequence": 12,
+            "fromSequence": 20,
+            "toSequence": 200,
             "count": 5000,
             "includeStackTrace": False,
             "containsAll": True,
             "newestFirst": False,
             "logType": "Error",
             "contains": ["BattleProcess", "LastError"],
+            "regex": "Battle(Process|State)",
+            "continuationToken": "cursor-1",
         },
     )
     assert dispatcher.calls[1] == (

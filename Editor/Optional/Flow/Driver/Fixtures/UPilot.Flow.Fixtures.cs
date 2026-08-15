@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
@@ -90,6 +91,13 @@ namespace CodingRiver.UPilot.Flow
             }
 
             Window.Show();
+            MethodInfo resetMethod = typeof(TWindow).GetMethod(
+                "BuildUi",
+                BindingFlags.Instance | BindingFlags.Public,
+                null,
+                System.Type.EmptyTypes,
+                null);
+            resetMethod?.Invoke(Window, null);
             yield return null;
 
             Root = Window.rootVisualElement;

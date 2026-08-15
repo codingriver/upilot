@@ -1,0 +1,20 @@
+schemaVersion: 2
+name: "53-strict-mode-options"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+  options:
+    pre_step_delay_ms: 50
+steps:
+  - action: type_text_fast
+    selector: "#username-input"
+    value: "strict"
+  - action: type_text_fast
+    selector: "#password-input"
+    value: "mode"
+  - action: click
+    selector: "#login-button"
+  - action: assert_text_contains
+    selector: "#status-label"
+    expected: "Welcome strict"

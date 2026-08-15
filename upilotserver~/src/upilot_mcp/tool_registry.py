@@ -11,7 +11,7 @@ from .config import CONFIG
 
 
 ToolHandler = Callable[..., Awaitable[ToolResponse]]
-REGISTRY_VERSION = 3
+REGISTRY_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +65,11 @@ class ToolRegistry:
         write_access_approved: bool | None = None,
     ) -> list[dict[str, Any]]:
         query_tokens = _tokenize(query)
+        query_key = query.strip().lower()
         category_key = category.strip().lower()
+        availability_key = availability.strip().lower().replace("_", "")
+        if availability_key in {"callablenow", "callable"}:
+            availability_key = "callable"
         scored_results: list[tuple[int, dict[str, Any]]] = []
         for item in self.list():
             available = item.feature == "core" or flow_enabled
@@ -90,13 +94,13 @@ class ToolRegistry:
                 unavailable_reason = "WRITE_ACCESS_NOT_APPROVED"
                 next_action = "Enable project write access in the Unity UPilot setup or .upilot/config.json."
 
-            if availability == "available" and not available:
+            if availability_key == "available" and not available:
                 continue
-            if availability == "unavailable" and available:
+            if availability_key == "unavailable" and available:
                 continue
-            if availability == "callable" and not callable_now:
+            if availability_key == "callable" and not callable_now:
                 continue
-            if availability == "blocked" and callable_now:
+            if availability_key == "blocked" and callable_now:
                 continue
             if category_key and item.category.lower() != category_key:
                 continue
@@ -107,13 +111,21 @@ class ToolRegistry:
             data = item.to_dict()
             data["available"] = available
             data["callableNow"] = callable_now
+            data["exactMatch"] = bool(
+                query_key
+                and (
+                    item.name.lower() == query_key
+                    or item.facade_method.lower() == query_key
+                    or any(alias.lower() == query_key for alias in item.aliases)
+                )
+            )
             if unavailable_reason:
                 data["unavailableReason"] = unavailable_reason
             if next_action:
                 data["nextAction"] = next_action
             if score:
                 data["matchScore"] = score
-            scored_results.append((score, data))
+            scored_results.append((score + (1000 if data["exactMatch"] else 0), data))
             if len(scored_results) >= max(1, min(limit, 200)) and not query_tokens:
                 break
         scored_results.sort(key=lambda pair: (-pair[0], pair[1]["name"]))

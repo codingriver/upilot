@@ -1,0 +1,32 @@
+schemaVersion: 2
+name: "25-selection-extras"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: select_option
+    selector: "#tag-selector"
+    value: "Untagged"
+  - action: assert_value
+    selector: "#tag-selector"
+    expected: "Untagged"
+  - action: select_option
+    selector: "#layer-selector"
+    index: "0"
+  - action: assert_value
+    selector: "#layer-selector"
+    expected: "0"
+  - action: select_option
+    selector: "#feature-mask"
+    value: "One,Three"
+  - action: assert_property
+    selector: "#feature-mask"
+    property: "value"
+    expected: "5"
+  - action: select_option
+    selector: "#permissions-flags"
+    value: "Read, Execute"
+  - action: assert_value
+    selector: "#permissions-flags"
+    expected: "Read, Execute"

@@ -207,6 +207,7 @@ namespace CodingRiver.UPilot
         private UPilotWindowService     _windowService;
         private UPilotEditorDelayService _editorDelayService;
         private UPilotOperationService  _operationService;
+        private UPilotRuntimeDiagnosticsService _runtimeDiagnosticsService;
         private object _flowService;
 
         private ClientWebSocket      _ws;
@@ -222,6 +223,12 @@ namespace CodingRiver.UPilot
         private bool                 _isAuthenticated;
         private long                 _lastHeartbeatSentAt;
         private string               _activeSceneName = string.Empty;
+        private long                 _lastMainThreadPumpAt;
+        private string               _lastDequeuedCommandId = string.Empty;
+        private string               _cachedPlayModeState = "edit";
+        private bool                 _cachedIsPlaying;
+        private bool                 _cachedIsPaused;
+        private bool                 _cachedIsCompiling;
         private long                 _pipelineCompileStartUtcMs;
         private string               _pipelineCompileStatusRequestId = string.Empty;
         private bool                 _pipelineCompileFromMcp;
@@ -541,7 +548,12 @@ namespace CodingRiver.UPilot
 
         private void ProcessMainThreadQueue()
         {
+            _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _activeSceneName = SceneManager.GetActiveScene().name;
+            _cachedIsCompiling = CurrentIsCompiling();
+            _cachedIsPlaying = EditorApplication.isPlaying;
+            _cachedIsPaused = EditorApplication.isPaused;
+            _cachedPlayModeState = _cachedIsPaused ? "pause" : (_cachedIsPlaying ? "play" : "edit");
 
             while (_mainThreadQueue.TryDequeue(out var action))
             {
@@ -581,6 +593,7 @@ namespace CodingRiver.UPilot
 
             _mainThreadQueue.Enqueue(() =>
             {
+                _lastDequeuedCommandId = commandId ?? string.Empty;
                 ctx?.Step("主线程执行中");
                 try
                 {
@@ -750,6 +763,7 @@ namespace CodingRiver.UPilot
                     unityVersion = Application.unityVersion,
                     projectPath = projectRoot,
                     platform = Application.platform == RuntimePlatform.OSXEditor ? "macos" : "windows",
+                    processId = Process.GetCurrentProcess().Id,
                 },
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
@@ -770,7 +784,7 @@ namespace CodingRiver.UPilot
                         id = $"hb-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                         type = "heartbeat",
                         name = "session.heartbeat",
-                        payload = new HeartbeatPayload(),
+                        payload = BuildEditorContextPayload("bridge-heartbeat"),
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                         sessionId = _sessionId,
                     };
@@ -855,8 +869,15 @@ namespace CodingRiver.UPilot
                 var envelope = JsonUtility.FromJson<BridgeEnvelope>(json);
                 if (envelope != null) LogInboundCommand(envelope, json);
 
-                // ConfigureAwait(false)：同样避免命令处理 continuation 被推到主线程队列
-                await HandleMessageJsonAsync(json, envelope, token).ConfigureAwait(false);
+                // Keep receiving while a command waits on Unity's main thread or
+                // performs a long background operation. Blocking this loop also
+                // blocks ClientWebSocket from answering server ping frames.
+                var commandTask = HandleMessageJsonAsync(json, envelope, token);
+                _ = commandTask.ContinueWith(
+                    completed => { var ignored = completed.Exception; },
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
             }
         }
 
@@ -1049,6 +1070,9 @@ namespace CodingRiver.UPilot
 
             _operationService = new UPilotOperationService(this);
             _operationService.RegisterCommands();
+
+            _runtimeDiagnosticsService = new UPilotRuntimeDiagnosticsService(this);
+            _runtimeDiagnosticsService.RegisterCommands();
 
             RegisterOptionalUPilotFlowService();
         }
@@ -1401,6 +1425,7 @@ namespace CodingRiver.UPilot
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
                 timing = timing,
+                context = BuildEditorContextPayload("bridge-response"),
             };
             var serializeWatch = Stopwatch.StartNew();
             var json = JsonUtility.ToJson(result);
@@ -1443,6 +1468,7 @@ namespace CodingRiver.UPilot
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
                 timing = timing,
+                context = BuildEditorContextPayload("bridge-error"),
             };
             var serializeWatch = Stopwatch.StartNew();
             var json = JsonUtility.ToJson(err);
@@ -1452,6 +1478,29 @@ namespace CodingRiver.UPilot
                 json = JsonUtility.ToJson(err);
             await SendJsonAsync(json, token);
             UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
+        }
+
+        private EditorContextPayload BuildEditorContextPayload(string source)
+        {
+            var updatedAt = _lastMainThreadPumpAt;
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            return new EditorContextPayload
+            {
+                connected = _started && _isAuthenticated && _ws != null && _ws.State == WebSocketState.Open,
+                authoritative = updatedAt > 0 && now - updatedAt <= Math.Max(HeartbeatIntervalMs * 2, 5000),
+                source = source ?? "bridge",
+                sessionId = _sessionId ?? string.Empty,
+                updatedAt = updatedAt,
+                playModeState = _cachedPlayModeState ?? "unknown",
+                isPlaying = _cachedIsPlaying,
+                isPaused = _cachedIsPaused,
+                isCompiling = _cachedIsCompiling,
+                activeScene = _activeSceneName ?? string.Empty,
+                lastMainThreadPumpAt = updatedAt,
+                mainThreadQueueDepth = _mainThreadQueue.Count,
+                lastDequeuedCommandId = _lastDequeuedCommandId ?? string.Empty,
+                processId = Process.GetCurrentProcess().Id,
+            };
         }
 
         private async Task SendEditorStateEventAsync(CancellationToken token)
@@ -1507,6 +1556,10 @@ namespace CodingRiver.UPilot
         private void OnPlayModeStateChanged(PlayModeStateChange change)
         {
             Logger.Log("SYSTEM", $"PlayMode 状态变更: {change}");
+            _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _cachedIsPlaying = EditorApplication.isPlaying;
+            _cachedIsPaused = EditorApplication.isPaused;
+            _cachedPlayModeState = _cachedIsPaused ? "pause" : (_cachedIsPlaying ? "play" : "edit");
             if (change == PlayModeStateChange.ExitingEditMode ||
                 change == PlayModeStateChange.EnteredPlayMode ||
                 change == PlayModeStateChange.ExitingPlayMode)

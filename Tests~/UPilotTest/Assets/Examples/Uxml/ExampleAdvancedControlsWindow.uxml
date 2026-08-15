@@ -1,0 +1,8 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-advanced-root" class="example-root">
+        <ui:VisualElement name="example-advanced-panel" class="example-panel">
+            <ui:Label name="advanced-title" text="Advanced Controls" class="example-status" />
+            <ui:VisualElement name="advanced-controls-host" class="example-panel" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

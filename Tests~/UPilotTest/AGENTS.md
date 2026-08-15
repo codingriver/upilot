@@ -1,18 +1,32 @@
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 4
-upilotPackageVersion: 0.3.23
+rulesVersion: 8
+upilotPackageVersion: 0.3.24
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-08-03T02:11:32Z
+generatedAt: 2026-08-13T09:35:27Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
 
+## Parent Agent Rules
+
+- Parent Agent rules path: `../../AGENTS.md` (relative to the project root `AGENTS.md`).
+- Before applying this UPilot block, automatically load the parent rules when the path is not `(none)`.
+- Resolve every loaded `AGENTS.md` to a canonical absolute path and keep a visited set, including this file, so repeated or circular references are skipped.
+- Apply inherited parent rules first, then this project's local rules, then this UPilot block.
+
+## UPilot Package Acceptance
+
+- When validating UPilot repository/package changes, use `./Tests~/UPilotTest` under the UPilot repository as the default and canonical Unity project for compile and EditMode acceptance.
+- Do not treat external client projects such as `D:\MA\xclient` or `F:\xclient2` as default UPilot validation targets.
+- Use external client projects only when explicitly requested for project-side/business smoke validation or investigation.
+- If this rule block is installed inside another Unity project, use that project for its own business workflows, but return to `./Tests~/UPilotTest` before claiming UPilot package compile/EditMode acceptance.
+
 ## Connection
 
-- Streamable HTTP: `http://127.0.0.1:8012/mcp`
-- Health check: `http://127.0.0.1:8012/health`
+- Streamable HTTP: `http://127.0.0.1:8011/mcp`
+- Health check: `http://127.0.0.1:8011/health`
 - Never configure an MCP client with the internal Unity Bridge WebSocket port.
 1. Call `unity_mcp_status`.
 2. Require `connected: true` and `serverReady: true`.
@@ -33,8 +47,9 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.
 - After one batch of disk writes, call `unity_sync_after_disk_write` once.
-- If `unity_sync_after_disk_write(triggerCompile=true)` returns `ok=true/status=compiling`, do not retry sync immediately; call `unity_compile_wait` and then inspect compile errors.
-- Prefer `unity_compile_wait` plus `unity_compile_errors`; `unity_compile_errors_get` is a compatibility alias.
+- After C# or assembly-related changes, prefer one `unity_safe_compile_and_wait` call. It attaches to an existing compile and verifies persistent errors after Domain Reload.
+- If `unity_sync_after_disk_write(triggerCompile=true)` returns `ok=true/status=compiling`, do not retry sync; call `unity_safe_compile_and_wait` and follow its `stage`, `nextAction`, and structured error result.
+- Use `unity_compile_wait` plus `unity_compile_errors` only when observing a compile that must not be triggered or attached through the safe workflow; `unity_compile_errors_get` is a compatibility alias.
 - Compile only after C# or assembly-related changes. Do not compile again when no code changed.
 - After compilation, read structured compile errors and relevant Console errors before editing again.
 
@@ -42,6 +57,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - For tests, builds, smoke runs, and other long workflows, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.
 - Starting an operation is not success; poll until a terminal status.
+- Treat `waitWindowElapsed=true/terminal=false` as a running operation, not a timeout failure. Only the operation's `jobTimeoutAt` is its terminal timeout.
 - Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.
 - Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.
 - Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.
@@ -53,15 +69,29 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 ## Persistent Console Capture
 
-- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, use `unity_console_capture_status` and incremental `unity_console_capture_read`, and always call `unity_console_capture_stop` on success or failure.
+- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, keep its `sessionId`, and always call `unity_console_capture_stop` on success or failure.
+- Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`.
+- Before concluding cleanup, call `unity_console_capture_list`, inspect recovered or historical sessions still marked active, and stop the relevant session explicitly.
 - Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
 - Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
+
+## Configuration CSV Safety
+
+- Read targeted records with `unity_config_csv_get`; do not infer the file encoding, newline style, delimiter, header row, column count, or key uniqueness.
+- Every `unity_config_csv_patch` write must follow `dryRun=true` -> inspect preview and hashes -> explicit write approval -> `dryRun=false` with the returned `confirmToken`.
+- Supply `expectedValues` for fields whose current values are known. After apply, verify the target values, encoding, newline style, column count, and unchanged non-target bytes reported by the tool.
+
+## Hang Diagnostics
+
+- When Unity stops pumping commands or appears stuck, call `unity_hang_status` before retrying or restarting it.
+- On Windows, collect `unity_hang_capture` before restart when diagnostic evidence is needed. Confirm the output path and report dump metadata; the capture must not terminate Unity.
 
 ## Artifacts And Screenshots
 
 - Prefer project-relative artifact paths returned by the project bridge.
 - Prefer `unity_screenshot_save` for screenshots.
-- Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, and `source`. If screenshot capture falls back, also report `degraded`, `degradeReason`, and `originalError`.
+- When fallback is allowed, pass an explicit ordered `fallbackSources` list. Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, the actual `source`, `degraded`, `degradeReason`, and `originalError`.
+- For EditorWindow capture, resolve the Unity window with `unity_editor_windows_list` and reuse its exact `typeName` or title. Validate returned match metadata against that Unity `instanceId`/type identity; never select an operating-system window by a matching title.
 - UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.
 
 ## Assets And Prefabs
@@ -79,6 +109,8 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 ## MCP Improvement Feedback
 
-- If a task exposes missing MCP capability, inconsistent state, unstable polling, insufficient artifacts, or poor failure attribution, record a structured improvement item in the project-level `TODO_UPilot.mcd` when that file exists.
+- If testing or development exposes missing MCP capability, inconsistent state, unstable polling, insufficient artifacts, poor failure attribution, repeated manual steps, or integration friction that could be simplified by improving UPilot features, MCP tools, agent rules, or project integration, record a structured improvement item in the UPilot repository-root `TODO_UPilot.mcd`.
+- Each item should include the observed problem, affected workflow/tool, proposed UPilot or integration improvement, reproduction or evidence when available, and current status.
+- Do not bury UPilot improvement ideas only in external client project TODO files; the UPilot repository-root `TODO_UPilot.mcd` is the source of truth for UPilot product/backlog follow-up.
 - Do not block the main task just to write feedback unless the missing MCP capability prevents safe completion; summarize any recorded UPilot improvement in the final handoff.
 <!-- upilot:end -->

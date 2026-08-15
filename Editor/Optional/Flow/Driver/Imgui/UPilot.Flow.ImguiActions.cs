@@ -748,6 +748,7 @@ namespace CodingRiver.UPilot.Flow
 
             // Fallback path: attempt event simulation (best-effort, unreliable for EditorGUILayout.Popup)
             var bridge2 = GetOrCreateBridge(window);
+            using IDisposable modalWatchdog = UPilotFlowModalWatchdog.Arm(context, "imgui-popup-menu");
             await ImguiActionHelper.ExecuteCommandAsync(
                 bridge2,
                 tcs => new ImguiSelectOptionCommand(parameters, optionIndex, optionText, tcs),

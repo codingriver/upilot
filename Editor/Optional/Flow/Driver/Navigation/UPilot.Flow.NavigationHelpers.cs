@@ -232,6 +232,29 @@ namespace CodingRiver.UPilot.Flow
             return (fromPos, toPos);
         }
 
+        public static float ResolveScrollerTargetValue(Scroller scroller, Dictionary<string, string> parameters, string actionName)
+        {
+            string directionLiteral = parameters.TryGetValue("direction", out string dir) && !string.IsNullOrWhiteSpace(dir)
+                ? dir.Trim().ToLowerInvariant()
+                : null;
+            float ratio = 0.5f;
+            if (parameters.TryGetValue("ratio", out string ratioLiteral) && !string.IsNullOrWhiteSpace(ratioLiteral))
+            {
+                if (!TryParseFloat(ratioLiteral, out ratio) || ratio < 0f || ratio > 1f)
+                    throw new UPilotFlowException(ErrorCodes.ActionParameterInvalid, $"Action {actionName} ratio is invalid: {ratioLiteral}");
+            }
+            else if (!string.IsNullOrWhiteSpace(directionLiteral))
+            {
+                ratio = directionLiteral switch
+                {
+                    "up" or "left" or "decrease" or "previous" => 0f,
+                    "down" or "right" or "increase" or "next" => 1f,
+                    _ => throw new UPilotFlowException(ErrorCodes.ActionParameterInvalid, $"Action {actionName} direction is invalid: {directionLiteral}"),
+                };
+            }
+            return Mathf.Lerp(scroller.lowValue, scroller.highValue, ratio);
+        }
+
         public static void SetSliderOrThrow(VisualElement element, Dictionary<string, string> parameters, string actionName)
         {
             if (element is Slider slider)
@@ -343,6 +366,25 @@ namespace CodingRiver.UPilot.Flow
             if (string.IsNullOrWhiteSpace(labelLiteral) && string.IsNullOrWhiteSpace(indexLiteral))
             {
                 throw new UPilotFlowException(ErrorCodes.ActionParameterMissing, $"Action {actionName} requires label or index.");
+            }
+
+            if (element is TabView tabView)
+            {
+                List<Tab> directTabs = tabView.contentContainer.Children().OfType<Tab>().ToList();
+                Tab directTarget = null;
+                if (!string.IsNullOrWhiteSpace(indexLiteral) && TryParseInt(indexLiteral, out int directIndex)
+                    && directIndex >= 0 && directIndex < directTabs.Count)
+                    directTarget = directTabs[directIndex];
+                else if (!string.IsNullOrWhiteSpace(labelLiteral))
+                    directTarget = directTabs.FirstOrDefault(tab => string.Equals(tab.label, labelLiteral, StringComparison.Ordinal));
+
+                if (directTarget != null)
+                {
+                    if (TryCloseTab(directTarget, context))
+                    {
+                        return;
+                    }
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(indexLiteral) && TryParseInt(indexLiteral, out int index))
@@ -566,10 +608,22 @@ namespace CodingRiver.UPilot.Flow
                 return false;
             }
 
+            VisualElement originalParent = tab.parent;
+            VisualElement tabView = FindAncestor(tab, "TabView");
+            int initialTabCount = tabView?.contentContainer?.childCount ?? tab.parent?.childCount ?? -1;
+            bool IsClosed()
+            {
+                int currentTabCount = tabView?.contentContainer?.childCount ?? originalParent?.childCount ?? -1;
+                return tab.parent == null || (initialTabCount >= 0 && currentTabCount >= 0 && currentTabCount < initialTabCount);
+            }
+
             // 1) Try tab.Close()
             if (TryInvokeParameterlessMethod(tab, "Close"))
             {
-                return true;
+                if (IsClosed())
+                {
+                    return true;
+                }
             }
 
             // 2) Try parent TabView.CloseTab(tab) or CloseTab(index)
@@ -584,7 +638,10 @@ namespace CodingRiver.UPilot.Flow
                         if (ps.Length == 1 && ps[0].ParameterType.IsInstanceOfType(tab))
                         {
                             m.Invoke(parent, new[] { tab });
-                            return true;
+                            if (IsClosed())
+                            {
+                                return true;
+                            }
                         }
                         if (ps.Length == 1 && ps[0].ParameterType == typeof(int))
                         {
@@ -593,7 +650,10 @@ namespace CodingRiver.UPilot.Flow
                             if (idx >= 0)
                             {
                                 m.Invoke(parent, new object[] { idx });
-                                return true;
+                                if (IsClosed())
+                                {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -603,7 +663,10 @@ namespace CodingRiver.UPilot.Flow
                     if (onTabClosed != null)
                     {
                         onTabClosed.Invoke(parent, new[] { tab });
-                        return true;
+                        if (IsClosed())
+                        {
+                            return true;
+                        }
                     }
 
                     // 3) Fallback: directly remove the tab from the TabView
@@ -612,6 +675,21 @@ namespace CodingRiver.UPilot.Flow
                     if (removeMethod != null)
                     {
                         removeMethod.Invoke(parent, new[] { tab });
+                        if (IsClosed())
+                        {
+                            return true;
+                        }
+                    }
+
+                    parent.contentContainer?.Remove(tab);
+                    if (IsClosed())
+                    {
+                        return true;
+                    }
+
+                    parent.Remove(tab);
+                    if (IsClosed())
+                    {
                         return true;
                     }
 
@@ -626,10 +704,26 @@ namespace CodingRiver.UPilot.Flow
             if (closeButton != null)
             {
                 ActionHelpers.DispatchClick(closeButton, 1, MouseButton.LeftMouse, EventModifiers.None, context);
-                return true;
+                return IsClosed();
             }
 
             return false;
+        }
+
+        private static VisualElement FindAncestor(VisualElement element, string typeName)
+        {
+            VisualElement current = element;
+            while (current != null)
+            {
+                if (current.GetType().Name == typeName)
+                {
+                    return current;
+                }
+
+                current = current.parent;
+            }
+
+            return null;
         }
 
         public static void SetSplitViewSizeOrThrow(VisualElement element, Dictionary<string, string> parameters, string actionName)

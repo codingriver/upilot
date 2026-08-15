@@ -20,9 +20,15 @@ class CommandDispatcher:
         "playmode.set": 180000,
         "editor.delay": 150000,
         "test.run": 300000,
+        "test.status": 30000,
+        "test.cancel": 30000,
+        "test.force_cleanup": 30000,
+        "test.force_reset": 30000,
         "build.start": 600000,
         "editor.window.close": 30000,
         "editor.window.setRect": 30000,
+        "console.capture.read": 180000,
+        "console.capture.list": 60000,
         # "uitoolkit.scrollbar.drag": 60000,
     }
     PREFIX_TIMEOUT_MS: dict[str, int] = {
@@ -75,18 +81,33 @@ class CommandDispatcher:
         self.state.create_command(command_id=command_id, request_id=request_id, name=name, payload=payload)
 
         future = self.transport.register_pending(command_id)
-        await self.transport.send_command(command_id=command_id, name=name, payload=payload)
+        try:
+            await self.transport.send_command(command_id=command_id, name=name, payload=payload)
+        except Exception:
+            self.transport.unregister_pending(command_id)
+            raise
 
         wait_timeout = self._resolve_timeout_ms(name, timeout_ms) / 1000
         try:
             result = await asyncio.wait_for(future, timeout=wait_timeout)
         except asyncio.TimeoutError:
+            # A timed-out future must not remain in the transport registry.  If
+            # it is later moved to the reconnect queue, the server can replay a
+            # command whose caller has already received a terminal timeout.
+            self.transport.unregister_pending(command_id)
             self.state.mark_failed(command_id, {"code": "COMMAND_TIMEOUT", "message": "命令超时"})
             elapsed_ms = round((time.monotonic() - started) * 1000)
             return fail(request_id, "COMMAND_TIMEOUT", "命令超时", {"command": name, "commandId": command_id}, timing={"totalMs": elapsed_ms, "queueMs": 0, "bridgeMs": elapsed_ms, "unityExecutionMs": 0})
+        except asyncio.CancelledError:
+            self.transport.unregister_pending(command_id)
+            self.state.mark_failed(command_id, {"code": "CANCELLED", "message": "命令已取消"})
+            raise
 
         if result.get("type") == "error":
             err = result.get("payload") or {}
+            response_context = result.get("context") if isinstance(result.get("context"), dict) else None
+            if response_context:
+                self.state.update_editor_state(response_context)
             self.state.mark_failed(command_id, err)
             elapsed_ms = round((time.monotonic() - started) * 1000)
             bridge_timing = result.get("timing") if isinstance(result, dict) else None
@@ -96,15 +117,19 @@ class CommandDispatcher:
                 str(err.get("code", "INTERNAL_ERROR")),
                 str(err.get("message", "命令执行失败")),
                 {"command": name, "commandId": command_id, "detail": err.get("detail", {})},
+                context=response_context,
                 timing=timing,
             )
 
         payload_data = result.get("payload") or {}
+        response_context = result.get("context") if isinstance(result.get("context"), dict) else None
+        if response_context:
+            self.state.update_editor_state(response_context)
         self.state.mark_success(command_id, payload_data)
         elapsed_ms = round((time.monotonic() - started) * 1000)
         bridge_timing = result.get("timing") if isinstance(result, dict) else None
         timing = self._compose_timing(elapsed_ms, bridge_timing)
-        return ok(request_id, payload_data, timing=timing)
+        return ok(request_id, payload_data, context=response_context, timing=timing)
 
     @staticmethod
     def _compose_timing(total_ms: int, bridge_timing: dict[str, Any] | None) -> dict[str, int]:
@@ -125,6 +150,9 @@ class WsTransport:
         raise NotImplementedError
 
     def register_pending(self, command_id: str) -> asyncio.Future:
+        raise NotImplementedError
+
+    def unregister_pending(self, command_id: str) -> None:
         raise NotImplementedError
 
     async def send_command(self, command_id: str, name: str, payload: dict[str, Any]) -> None:

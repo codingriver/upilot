@@ -6,9 +6,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.Animations;
 using UnityEngine;
 
 namespace CodingRiver.UPilot
@@ -105,6 +107,63 @@ namespace CodingRiver.UPilot
         public List<PrefabComponentMatchPayload> matches = new List<PrefabComponentMatchPayload>();
     }
 
+    [Serializable] public class AssetSubresourcesMessage { public AssetSubresourcesPayload payload; }
+    [Serializable] public class AssetSubresourcesPayload { public string assetPath = ""; public string typeFilter = ""; public bool includePreview; }
+    [Serializable] public class AssetSubresourceInfoPayload { public string name; public string type; public string assetPath; public long localId; public bool preview; }
+    [Serializable] public class AssetSubresourcesResultPayload { public string assetPath; public int count; public List<AssetSubresourceInfoPayload> assets = new List<AssetSubresourceInfoPayload>(); }
+    [Serializable] public class AssetDependenciesMessage { public AssetDependenciesPayload payload; }
+    [Serializable] public class AssetDependenciesPayload { public string assetPath = ""; public bool recursive = true; }
+    [Serializable] public class AssetDependencyInfoPayload { public string assetPath; public string assetType; public string guid; public bool direct; }
+    [Serializable] public class AssetDependenciesResultPayload { public string assetPath; public bool recursive; public int count; public List<AssetDependencyInfoPayload> dependencies = new List<AssetDependencyInfoPayload>(); }
+
+    [Serializable] public class AnimationAuditMessage { public AssetSinglePathPayload payload; }
+    [Serializable] public class AnimatorStateAuditPayload { public string layer; public string statePath; public string name; public string motionName; public string motionPath; public string motionType; public bool isDefault; public float speed; public int transitionCount; }
+    [Serializable] public class AnimatorLayerAuditPayload { public string name; public float defaultWeight; public string blendingMode; public string avatarMaskPath; public int stateCount; }
+    [Serializable] public class AnimatorControllerAuditResultPayload { public string assetPath; public List<AnimatorLayerAuditPayload> layers = new List<AnimatorLayerAuditPayload>(); public List<AnimatorStateAuditPayload> states = new List<AnimatorStateAuditPayload>(); public List<string> unreferencedClips = new List<string>(); }
+    [Serializable] public class AvatarMaskTransformAuditPayload { public string path; public bool active; }
+    [Serializable] public class AvatarMaskAuditResultPayload { public string assetPath; public int transformCount; public List<AvatarMaskTransformAuditPayload> transforms = new List<AvatarMaskTransformAuditPayload>(); }
+    [Serializable] public class AnimationClipAuditPayload { public string name; public string assetPath; public float length; public float frameRate; public bool loopTime; public bool loopPose; public int curveCount; public int positionCurveCount; public int rotationCurveCount; public int scaleCurveCount; }
+    [Serializable] public class ModelImporterAuditResultPayload { public string assetPath; public string animationType; public string avatarSetup; public string sourceAvatarPath; public bool importAnimation; public bool importBlendShapes; public float globalScale; public List<AnimationClipAuditPayload> clips = new List<AnimationClipAuditPayload>(); }
+    [Serializable] public class TextureImporterSettingsMessage { public TextureImporterSettingsPayload payload; }
+    [Serializable] public class TextureImporterSettingsPayload
+    {
+        public string assetPath = "";
+        public bool applyMipmapEnabled; public bool mipmapEnabled;
+        public bool applyAlphaSource; public string alphaSource = "";
+        public bool applyAlphaIsTransparency; public bool alphaIsTransparency;
+        public bool applySRGBTexture; public bool sRGBTexture;
+        public bool applyWrapMode; public string wrapMode = "";
+        public bool applyFilterMode; public string filterMode = "";
+        public bool applyAnisoLevel; public int anisoLevel;
+        public bool applyIsReadable; public bool isReadable;
+        public bool applyTextureCompression; public string textureCompression = "";
+        public bool applyMaxTextureSize; public int maxTextureSize;
+        public bool reimport = true;
+    }
+    [Serializable] public class TexturePlatformSettingsPayload { public string name; public bool overridden; public int maxTextureSize; public string format; public int compressionQuality; }
+    [Serializable] public class TextureImporterSettingsResultPayload
+    {
+        public bool ok = true;
+        public string assetPath;
+        public string textureType;
+        public bool mipmapEnabled;
+        public string alphaSource;
+        public bool alphaIsTransparency;
+        public bool sRGBTexture;
+        public string wrapMode;
+        public string filterMode;
+        public int anisoLevel;
+        public bool isReadable;
+        public string textureCompression;
+        public int maxTextureSize;
+        public int sourceWidth;
+        public int sourceHeight;
+        public bool hasAlpha;
+        public List<TexturePlatformSettingsPayload> platforms = new List<TexturePlatformSettingsPayload>();
+        public bool applied;
+        public bool reimported;
+    }
+
     // ── Service ─────────────────────────────────────────────────────────────────
 
     public class UPilotAssetService
@@ -126,6 +185,127 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("asset.modifyData",    HandleModifyDataAsync);
             _bridge.Router.Register("asset.findBuiltIn",   HandleFindBuiltInAsync);
             _bridge.Router.Register("prefab.queryComponents", HandlePrefabQueryComponentsAsync);
+            _bridge.Router.Register("asset.subresourcesList", HandleSubresourcesListAsync);
+            _bridge.Router.Register("asset.dependencies", HandleAssetDependenciesAsync);
+            _bridge.Router.Register("animator.controllerInspect", HandleAnimatorControllerInspectAsync);
+            _bridge.Router.Register("animator.avatarMaskInspect", HandleAvatarMaskInspectAsync);
+            _bridge.Router.Register("model.importerInspect", HandleModelImporterInspectAsync);
+            _bridge.Router.Register("texture.importerGet", HandleTextureImporterGetAsync);
+            _bridge.Router.Register("texture.importerPatch", HandleTextureImporterPatchAsync);
+            _bridge.Router.Register("asset.reimport", HandleAssetReimportAsync);
+        }
+
+        private async Task HandleTextureImporterGetAsync(string id, string json, CancellationToken token)
+        {
+            var message = JsonUtility.FromJson<TextureImporterSettingsMessage>(json);
+            var path = message?.payload?.assetPath ?? "";
+            await RunAssetCommand(id, "texture.importerGet", token, () => ReadTextureImporterSettings(path));
+        }
+
+        private async Task HandleTextureImporterPatchAsync(string id, string json, CancellationToken token)
+        {
+            var message = JsonUtility.FromJson<TextureImporterSettingsMessage>(json);
+            var payload = message?.payload ?? new TextureImporterSettingsPayload();
+            await RunAssetCommand(id, "texture.importerPatch", token, () => PatchTextureImporterSettings(payload));
+        }
+
+        private async Task HandleAssetReimportAsync(string id, string json, CancellationToken token)
+        {
+            var message = JsonUtility.FromJson<AssetSinglePathMessage>(json);
+            var path = message?.payload?.assetPath ?? "";
+            await RunAssetCommand(id, "asset.reimport", token, () =>
+            {
+                RequireAssetPath(path);
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+                return new GenericOkPayload { ok = true, state = path };
+            });
+        }
+
+        private async Task RunAssetCommand<T>(string id, string command, CancellationToken token, Func<T> action)
+        {
+            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try { tcs.TrySetResult(action()); }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, command, await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ASSET_IMPORTER_FAILED", ex.Message, token, command); }
+        }
+
+        private static TextureImporterSettingsResultPayload ReadTextureImporterSettings(string assetPath)
+        {
+            RequireAssetPath(assetPath);
+            var importer = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            if (importer == null) throw new InvalidOperationException("Asset is not handled by TextureImporter: " + assetPath);
+            importer.GetSourceTextureWidthAndHeight(out var width, out var height);
+            var result = new TextureImporterSettingsResultPayload
+            {
+                assetPath = assetPath,
+                textureType = importer.textureType.ToString(),
+                mipmapEnabled = importer.mipmapEnabled,
+                alphaSource = importer.alphaSource.ToString(),
+                alphaIsTransparency = importer.alphaIsTransparency,
+                sRGBTexture = importer.sRGBTexture,
+                wrapMode = importer.wrapMode.ToString(),
+                filterMode = importer.filterMode.ToString(),
+                anisoLevel = importer.anisoLevel,
+                isReadable = importer.isReadable,
+                textureCompression = importer.textureCompression.ToString(),
+                maxTextureSize = importer.maxTextureSize,
+                sourceWidth = width,
+                sourceHeight = height,
+                hasAlpha = importer.DoesSourceTextureHaveAlpha(),
+            };
+            foreach (var platform in new[] { "DefaultTexturePlatform", "Standalone", "Android", "iPhone", "WebGL" })
+            {
+                var settings = importer.GetPlatformTextureSettings(platform);
+                result.platforms.Add(new TexturePlatformSettingsPayload
+                {
+                    name = platform,
+                    overridden = settings.overridden,
+                    maxTextureSize = settings.maxTextureSize,
+                    format = settings.format.ToString(),
+                    compressionQuality = settings.compressionQuality,
+                });
+            }
+            return result;
+        }
+
+        private static TextureImporterSettingsResultPayload PatchTextureImporterSettings(TextureImporterSettingsPayload payload)
+        {
+            RequireAssetPath(payload.assetPath);
+            var importer = AssetImporter.GetAtPath(payload.assetPath) as TextureImporter;
+            if (importer == null) throw new InvalidOperationException("Asset is not handled by TextureImporter: " + payload.assetPath);
+            if (payload.applyMipmapEnabled) importer.mipmapEnabled = payload.mipmapEnabled;
+            if (payload.applyAlphaSource) importer.alphaSource = ParseEnum(payload.alphaSource, importer.alphaSource);
+            if (payload.applyAlphaIsTransparency) importer.alphaIsTransparency = payload.alphaIsTransparency;
+            if (payload.applySRGBTexture) importer.sRGBTexture = payload.sRGBTexture;
+            if (payload.applyWrapMode) importer.wrapMode = ParseEnum(payload.wrapMode, importer.wrapMode);
+            if (payload.applyFilterMode) importer.filterMode = ParseEnum(payload.filterMode, importer.filterMode);
+            if (payload.applyAnisoLevel) importer.anisoLevel = Mathf.Clamp(payload.anisoLevel, 0, 16);
+            if (payload.applyIsReadable) importer.isReadable = payload.isReadable;
+            if (payload.applyTextureCompression) importer.textureCompression = ParseEnum(payload.textureCompression, importer.textureCompression);
+            if (payload.applyMaxTextureSize) importer.maxTextureSize = Mathf.Clamp(payload.maxTextureSize, 32, 16384);
+            if (payload.reimport) importer.SaveAndReimport();
+            else AssetDatabase.WriteImportSettingsIfDirty(payload.assetPath);
+            var result = ReadTextureImporterSettings(payload.assetPath);
+            result.applied = true;
+            result.reimported = payload.reimport;
+            return result;
+        }
+
+        private static TEnum ParseEnum<TEnum>(string value, TEnum fallback) where TEnum : struct
+        {
+            return Enum.TryParse(value, true, out TEnum parsed) ? parsed : throw new ArgumentException($"Invalid {typeof(TEnum).Name}: {value}");
+        }
+
+        private static void RequireAssetPath(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.Ordinal))
+                throw new ArgumentException("assetPath must be a project-relative Assets/... path.");
+            if (AssetDatabase.LoadMainAssetAtPath(assetPath) == null)
+                throw new FileNotFoundException("Asset not found", assetPath);
         }
 
         // ── asset.find ──────────────────────────────────────────────────────────
@@ -683,6 +863,233 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private async Task HandleSubresourcesListAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<AssetSubresourcesMessage>(json);
+            var p = msg?.payload ?? new AssetSubresourcesPayload();
+            var tcs = new TaskCompletionSource<AssetSubresourcesResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    var result = new AssetSubresourcesResultPayload { assetPath = p.assetPath };
+                    foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(p.assetPath))
+                    {
+                        if (asset == null) continue;
+                        var preview = asset.name.StartsWith("__preview__", StringComparison.OrdinalIgnoreCase) ||
+                                      (asset.hideFlags & HideFlags.HideInHierarchy) != 0;
+                        if (!p.includePreview && preview) continue;
+                        var typeName = asset.GetType().Name;
+                        if (!string.IsNullOrEmpty(p.typeFilter) &&
+                            !string.Equals(typeName, p.typeFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                        AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out string _, out long localId);
+                        result.assets.Add(new AssetSubresourceInfoPayload
+                        {
+                            name = asset.name,
+                            type = typeName,
+                            assetPath = AssetDatabase.GetAssetPath(asset),
+                            localId = localId,
+                            preview = preview,
+                        });
+                    }
+                    result.count = result.assets.Count;
+                    tcs.TrySetResult(result);
+                }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "asset.subresourcesList", await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ASSET_SUBRESOURCES_FAILED", ex.Message, token, "asset.subresourcesList"); }
+        }
+
+        private async Task HandleAssetDependenciesAsync(string id, string json, CancellationToken token)
+        {
+            var message = JsonUtility.FromJson<AssetDependenciesMessage>(json);
+            var payload = message?.payload ?? new AssetDependenciesPayload();
+            await RunAssetCommand(id, "asset.dependencies", token, () =>
+            {
+                RequireAssetPath(payload.assetPath);
+                var result = new AssetDependenciesResultPayload { assetPath = payload.assetPath, recursive = payload.recursive };
+                var direct = new HashSet<string>(AssetDatabase.GetDependencies(payload.assetPath, false), StringComparer.OrdinalIgnoreCase);
+                foreach (var path in AssetDatabase.GetDependencies(payload.assetPath, payload.recursive))
+                {
+                    if (string.Equals(path, payload.assetPath, StringComparison.OrdinalIgnoreCase)) continue;
+                    var type = AssetDatabase.GetMainAssetTypeAtPath(path);
+                    result.dependencies.Add(new AssetDependencyInfoPayload
+                    {
+                        assetPath = path,
+                        assetType = type != null ? type.Name : "Unknown",
+                        guid = AssetDatabase.AssetPathToGUID(path),
+                        direct = direct.Contains(path),
+                    });
+                }
+                result.dependencies = result.dependencies.OrderBy(item => item.assetPath, StringComparer.Ordinal).ToList();
+                result.count = result.dependencies.Count;
+                return result;
+            });
+        }
+
+        private async Task HandleAnimatorControllerInspectAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<AnimationAuditMessage>(json);
+            var path = msg?.payload?.assetPath ?? string.Empty;
+            var tcs = new TaskCompletionSource<AnimatorControllerAuditResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path);
+                    if (controller == null) throw new InvalidOperationException($"AnimatorController not found: {path}");
+                    var result = new AnimatorControllerAuditResultPayload { assetPath = path };
+                    var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var layer in controller.layers)
+                    {
+                        var layerPayload = new AnimatorLayerAuditPayload
+                        {
+                            name = layer.name,
+                            defaultWeight = layer.defaultWeight,
+                            blendingMode = layer.blendingMode.ToString(),
+                            avatarMaskPath = layer.avatarMask == null ? string.Empty : AssetDatabase.GetAssetPath(layer.avatarMask),
+                        };
+                        AppendAnimatorStates(result, referenced, layer.name, layer.stateMachine, layer.stateMachine, string.Empty);
+                        foreach (var state in result.states)
+                            if (state.layer == layer.name) layerPayload.stateCount++;
+                        result.layers.Add(layerPayload);
+                    }
+                    var folder = Path.GetDirectoryName(path)?.Replace('\\', '/') ?? "Assets";
+                    foreach (var guid in AssetDatabase.FindAssets("t:AnimationClip", new[] { folder }))
+                    {
+                        var clipPath = AssetDatabase.GUIDToAssetPath(guid);
+                        foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(clipPath))
+                        {
+                            if (asset is AnimationClip clip && !clip.name.StartsWith("__preview__", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var key = $"{clipPath}::{clip.name}";
+                                if (!referenced.Contains(key)) result.unreferencedClips.Add(key);
+                            }
+                        }
+                    }
+                    tcs.TrySetResult(result);
+                }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "animator.controllerInspect", await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ANIMATOR_INSPECT_FAILED", ex.Message, token, "animator.controllerInspect"); }
+        }
+
+        private static void AppendAnimatorStates(
+            AnimatorControllerAuditResultPayload result,
+            HashSet<string> referenced,
+            string layerName,
+            AnimatorStateMachine root,
+            AnimatorStateMachine stateMachine,
+            string parentPath)
+        {
+            foreach (var child in stateMachine.states)
+            {
+                var state = child.state;
+                var motionPath = state.motion == null ? string.Empty : AssetDatabase.GetAssetPath(state.motion);
+                var statePath = string.IsNullOrEmpty(parentPath) ? state.name : parentPath + "/" + state.name;
+                result.states.Add(new AnimatorStateAuditPayload
+                {
+                    layer = layerName,
+                    statePath = statePath,
+                    name = state.name,
+                    motionName = state.motion == null ? string.Empty : state.motion.name,
+                    motionPath = motionPath,
+                    motionType = state.motion == null ? string.Empty : state.motion.GetType().Name,
+                    isDefault = root.defaultState == state,
+                    speed = state.speed,
+                    transitionCount = state.transitions == null ? 0 : state.transitions.Length,
+                });
+                if (state.motion is AnimationClip clip)
+                    referenced.Add($"{motionPath}::{clip.name}");
+            }
+            foreach (var childMachine in stateMachine.stateMachines)
+            {
+                var nextPath = string.IsNullOrEmpty(parentPath) ? childMachine.stateMachine.name : parentPath + "/" + childMachine.stateMachine.name;
+                AppendAnimatorStates(result, referenced, layerName, root, childMachine.stateMachine, nextPath);
+            }
+        }
+
+        private async Task HandleAvatarMaskInspectAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<AnimationAuditMessage>(json);
+            var path = msg?.payload?.assetPath ?? string.Empty;
+            var tcs = new TaskCompletionSource<AvatarMaskAuditResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    var mask = AssetDatabase.LoadAssetAtPath<AvatarMask>(path);
+                    if (mask == null) throw new InvalidOperationException($"AvatarMask not found: {path}");
+                    var result = new AvatarMaskAuditResultPayload { assetPath = path, transformCount = mask.transformCount };
+                    for (var i = 0; i < mask.transformCount; i++)
+                        result.transforms.Add(new AvatarMaskTransformAuditPayload { path = mask.GetTransformPath(i), active = mask.GetTransformActive(i) });
+                    tcs.TrySetResult(result);
+                }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "animator.avatarMaskInspect", await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "AVATAR_MASK_INSPECT_FAILED", ex.Message, token, "animator.avatarMaskInspect"); }
+        }
+
+        private async Task HandleModelImporterInspectAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<AnimationAuditMessage>(json);
+            var path = msg?.payload?.assetPath ?? string.Empty;
+            var tcs = new TaskCompletionSource<ModelImporterAuditResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    var importer = AssetImporter.GetAtPath(path) as ModelImporter;
+                    if (importer == null) throw new InvalidOperationException($"ModelImporter not found: {path}");
+                    var result = new ModelImporterAuditResultPayload
+                    {
+                        assetPath = path,
+                        animationType = importer.animationType.ToString(),
+                        avatarSetup = importer.avatarSetup.ToString(),
+                        sourceAvatarPath = importer.sourceAvatar == null ? string.Empty : AssetDatabase.GetAssetPath(importer.sourceAvatar),
+                        importAnimation = importer.importAnimation,
+                        importBlendShapes = importer.importBlendShapes,
+                        globalScale = importer.globalScale,
+                    };
+                    var settingsByName = new Dictionary<string, ModelImporterClipAnimation>(StringComparer.OrdinalIgnoreCase);
+                    var importerClips = importer.clipAnimations;
+                    if (importerClips == null || importerClips.Length == 0) importerClips = importer.defaultClipAnimations;
+                    foreach (var settings in importerClips) settingsByName[settings.name] = settings;
+                    foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(path))
+                    {
+                        if (!(asset is AnimationClip clip) || clip.name.StartsWith("__preview__", StringComparison.OrdinalIgnoreCase)) continue;
+                        settingsByName.TryGetValue(clip.name, out var importerSettings);
+                        var bindings = AnimationUtility.GetCurveBindings(clip);
+                        var clipPayload = new AnimationClipAuditPayload
+                        {
+                            name = clip.name,
+                            assetPath = path,
+                            length = clip.length,
+                            frameRate = clip.frameRate,
+                            curveCount = bindings.Length,
+                            loopTime = importerSettings != null && importerSettings.loopTime,
+                            loopPose = importerSettings != null && importerSettings.loopPose,
+                        };
+                        foreach (var binding in bindings)
+                        {
+                            var property = binding.propertyName ?? string.Empty;
+                            if (property.IndexOf("m_LocalPosition", StringComparison.OrdinalIgnoreCase) >= 0) clipPayload.positionCurveCount++;
+                            else if (property.IndexOf("m_LocalRotation", StringComparison.OrdinalIgnoreCase) >= 0 || property.IndexOf("localEulerAngles", StringComparison.OrdinalIgnoreCase) >= 0) clipPayload.rotationCurveCount++;
+                            else if (property.IndexOf("m_LocalScale", StringComparison.OrdinalIgnoreCase) >= 0) clipPayload.scaleCurveCount++;
+                        }
+                        result.clips.Add(clipPayload);
+                    }
+                    tcs.TrySetResult(result);
+                }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "model.importerInspect", await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "MODEL_IMPORTER_INSPECT_FAILED", ex.Message, token, "model.importerInspect"); }
+        }
+
         // ── asset.findBuiltIn ───────────────────────────────────────────────────
 
         private async Task HandleFindBuiltInAsync(string id, string json, CancellationToken token)
@@ -807,9 +1214,11 @@ namespace CodingRiver.UPilot
                 case SerializedPropertyType.Enum:
                     return prop.enumValueIndex.ToString();
                 case SerializedPropertyType.ObjectReference:
-                    return prop.objectReferenceValue != null
-                        ? $"{prop.objectReferenceValue.name} ({prop.objectReferenceValue.GetType().Name})"
-                        : "null";
+                    if (prop.objectReferenceValue == null) return "null";
+                    var referencePath = AssetDatabase.GetAssetPath(prop.objectReferenceValue);
+                    return string.IsNullOrEmpty(referencePath)
+                        ? $"{prop.objectReferenceValue.name} ({prop.objectReferenceValue.GetType().Name}) instanceId={UPilotEntityIds.ToWireId(prop.objectReferenceValue)}"
+                        : $"{prop.objectReferenceValue.name} ({prop.objectReferenceValue.GetType().Name}) path={referencePath}";
                 case SerializedPropertyType.ArraySize:
                     return prop.intValue.ToString();
                 case SerializedPropertyType.Rect:

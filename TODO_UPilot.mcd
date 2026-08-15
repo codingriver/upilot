@@ -1,0 +1,127 @@
+# UPilot Improvement Backlog
+
+本文件是 UPilot 仓库根目录的统一改进清单。测试或开发过程中，如果发现某个问题、手工步骤、诊断缺口、工具能力缺失、集成摩擦或 agent 规则缺口可以通过优化 UPilot 功能、MCP 工具、agent 规则或项目集成来简化，应记录在这里。
+
+## 记录规则
+
+- 记录触发场景：测试、开发、验收或项目集成中实际遇到的问题。
+- 记录改进方向：说明应优化 UPilot 功能、MCP 工具、agent 规则还是项目集成。
+- 记录证据：尽量包含复现步骤、日志、错误信息、相关文件/工具名和影响范围。
+- 记录状态：使用 `待处理`、`进行中`、`已完成`、`已关闭`。
+- 不把 UPilot 产品/集成改进项只放在外部客户项目 TODO 中；这里是 UPilot 后续开发的主入口。
+
+## 模板
+
+```markdown
+### [待处理] 标题
+
+- 发现时间：
+- 来源任务/测试：
+- 现象/问题：
+- 影响范围：
+- 建议改进：
+- 证据/复现：
+- 备注：
+```
+
+## 待处理
+
+### [待处理] Flow 原生菜单/模态弹窗动作增加可取消超时与自动关闭
+
+- 发现时间：2026-08-14
+- 来源任务/测试：Flow 全量 EditMode 运行到 `UPilotFlowBoundaryTests.ClickAction_WithMenuItem_FallsBackToDropdownMenu` 时，Unity 主线程停止 pump，网络心跳仍正常。
+- 现象/问题：`DropdownMenu`/原生 Editor 菜单进入模态等待后，基于 Editor update 的步骤超时、RuntimeController 和 Test Runner cancel 都无法在主线程执行；当前只能通过操作系统向 Unity 窗口发送 Escape 解除模态状态。
+- 影响范围：所有会打开 Unity 原生菜单、对象选择器、文件对话框或其他模态编辑器 UI 的 Flow 动作；在无人值守回归中会冻结整个 Unity 主线程。
+- 建议改进：为菜单/模态动作建立专用 watchdog：动作开始前登记窗口/菜单句柄与取消清理器，由 Bridge 后台线程监控 deadline；超时或 stop 时优先调用可用的 Unity 关闭入口，必要时使用受控的窗口消息/Escape 关闭精确 Unity 窗口。状态返回 `waiting_for_modal_ui`、modal owner/type/deadline 与实际恢复来源，且禁止默认走 Unity 重启。
+- 证据/复现：runGuid `ad2f3dc8-415c-41b5-9c5c-1e6652cb83b4` 在该测试停留约 40 秒；`unity_hang_status` 显示 `mainThreadUnresponsive=true`、CPU 0、networkHeartbeatAgeMs=0。mini dump：`Tests~/UPilotTest/log/UPilotDiagnostics/UPilotFlow_MenuItem_Hang_20260814.dmp`，3,023,672 bytes，SHA256 `b73b0e1a405c8610fd3d21ce130fbd4d7577e472024e4499bfb8410420a29102`。向 Unity PID 107340 的主窗口发送一次 Escape 后，主线程立即恢复并继续后续测试。
+- 备注：恢复动作必须绑定已验证的 Unity PID/窗口句柄，记录是否降级到 OS 输入；不可按标题模糊选择其他应用窗口。
+
+### [待处理] UPilot Test Runner 保存 run GUID 并提供 status/cancel/force-reset 能力
+
+- 发现时间：2026-08-14
+- 来源任务/测试：UPilot Flow EditMode 全量验收中，测试进入 headed failure pause 后无法结束，脚本编译长期停在 queued，最终只能重启 Unity 清理 Test Runner 作业。
+- 现象/问题：`UPilotTestService` 调用 `TestRunnerApi.Execute(execSettings)` 后丢弃返回的 run GUID；当前仅注册 `test.run/test.results/test.list`，没有 `test.status/test.cancel/test.force_reset`。因此无法调用官方 `TestRunnerApi.CancelTestRun(guid)`，也无法报告当前测试、Test Runner 阶段或取消清理进度。
+- 影响范围：任何 EditMode/PlayMode 长测试、UnityTest、EditorWindow 测试或意外进入等待态的验收流程；会阻塞 Domain Reload、后续编译及其他测试运行。
+- 建议改进：保存 `Execute` 返回的 run GUID，并将测试运行接入统一 operation 体系；新增 `unity_test_status`（runGuid、currentTest、stage、progress、lastProgressAt、cancelRequested）、`unity_test_cancel`（调用官方 CancelTestRun）和仅用于残留状态修复的 `unity_test_force_reset`。取消后必须等待 `RunFinished` 或明确的清理终态，不能仅把内存标记改成 aborted。
+- 证据/复现：本次 `HeadedFailurePolicyPause_ActuallyPausesController` 与非交互测试误用 `Headed=true/DebugOnFailure=true` 后均进入无限等待；`unity_safe_compile_and_wait` 只能看到 compile queued，现有 MCP 没有测试取消入口。
+- 备注：force-reset 应是分级停止的最后一级，正常路径优先使用 Unity Test Framework 官方 cancel API，避免重启 Editor。
+
+### [待处理] 建立 Flow 全入口共享的活动执行注册表与可停止业务句柄
+
+- 发现时间：2026-08-14
+- 来源任务/测试：UPilot Flow Sample/Fixture 直接调用 `TestRunner.RunAsync` 时发生 failure-pause，现有 `upilot_flow.cancel/force_reset` 无法定位该运行。
+- 现象/问题：`UPilotFlowMcpService` 只跟踪由 `upilot_flow.run` 创建的 `_activeExecutionId/_activeContext/_executionCts`；直接 API、Fixture、Headed Window、CLI 或 Unity Test Runner 内部启动的 Flow 运行没有注册到该服务。因此 Flow 本身已有 `RuntimeController.Stop/Resume`，但外部无法获得或操作对应 controller。
+- 影响范围：所有非 MCP 入口的 Flow 运行；发生暂停、步骤等待、窗口交互异常或调用方丢失 Task 时无法通过 UPilot/Flow 停止业务。
+- 建议改进：在 Flow Scheduler/TestRunner 核心层建立与入口无关的 `UPilotFlowExecutionRegistry`，每次运行统一登记 executionId、source、RuntimeController、Task、当前 case/step、phase、lastProgressAt 和清理句柄；MCP/UI/CLI/Fixture 只作为注册表的客户端。提供 list/status/pause/resume/stop/cancel/force-cleanup，并允许按 executionId 精确操作。
+- 证据/复现：本次直接 `new TestRunner().RunAsync(...)` 进入 `RuntimeController.WaitIfPausedAsync()`；MCP service 的 `_activeContext` 为空，现有 `upilot_flow.cancel` 和 `force_reset` 无法触达该 controller。
+- 备注：注册表应在 Domain Reload 前持久化最小诊断快照，Reload 后把失去运行 Task 的记录标记为 orphaned 并执行幂等清理。
+
+### [待处理] Flow headed failure pause 增加所有权、超时与自动收敛策略
+
+- 发现时间：2026-08-14
+- 来源任务/测试：Flow 自动化测试沿用 `TestOptions.Headed=true/DebugOnFailure=true`，步骤失败后无限等待 Resume，造成测试套件挂起。
+- 现象/问题：`RuntimeController.PauseForFailure()` 可无限暂停；如果没有已连接的 Headed UI/MCP owner，或 owner 丢失、测试回调写错，`WaitIfPausedAsync()` 不会自行退出。当前状态没有 pause owner、deadline、reason、resume token 或无人值守策略。
+- 影响范围：CI、agent 验收、批量 YAML、Unity Test Runner 及任何无人值守运行；一次预期外失败即可阻塞整个 Editor。
+- 建议改进：为 pause 增加 `ownerId/reason/pausedAt/deadline/policy`；仅在确认存在可操作 owner 时允许交互暂停。自动化来源默认 `Headed=false/DebugOnFailure=false`，或使用 `pauseTimeoutMs`，超时后按配置 auto-resume/auto-abort；status 必须返回明确 `waiting_for_resume` 与可执行 nextAction。
+- 证据/复现：本次测试把 Resume 放在 Task 完成回调中，形成等待环；另一个非交互测试失败后也因默认 headed/debug 设置进入无限暂停。
+- 备注：专门验证暂停功能的测试应先等待 `IsPausedForFailure`，断言后 Resume，再等待 Task 完成，并有有限 deadline。
+
+### [待处理] 统一 UPilot/Flow 分级停止协议，终态以业务清理完成为准
+
+- 发现时间：2026-08-14
+- 来源任务/测试：评审现有 `upilot_flow.cancel` 与 `upilot_flow.force_reset` 在卡死恢复中的适用性。
+- 现象/问题：现有 Flow cancel/force-reset 会较早释放 active slot、把状态标记 aborted，而后台 Task、EditorWindow、输入模拟器或报告写入可能尚未真正结束；这可能允许新运行与旧清理并发，产生状态覆盖和资源竞争。
+- 影响范围：Flow MCP 长运行、取消后立即重跑、Domain Reload、窗口/输入生命周期及报告完整性。
+- 建议改进：采用四级协议：`cancel_requested`（CancellationToken）→ `stopping`（RuntimeController.Stop）→ `cleanup`（主线程 Dispose/关闭窗口/释放输入）→ `aborted` 终态；每级有 grace timeout、时间戳和 cleanup acknowledgements。超时才进入 `force_cleanup`，且仍需返回未清理资源、orphan 句柄和证据。统一由 `unity_operation_cancel/status` 路由到 test/flow/build 等领域实现。
+- 证据/复现：`UPilotFlowMcpService.HandleCancelAsync` 在请求时立即清空 `_activeContext/_activeExecutionId/_isRunning` 并标记 aborted；`ExecuteRunAsync` 仍可能在 finally 中继续运行。
+- 备注：禁止把“已发送 cancel”报告为“业务已停止”；只有 Task 终止且清理完成才进入 terminal。
+
+### [已完成] unity_test_run 缺少类/命名空间正则筛选，难以隔离挂起用例
+
+- 发现时间：2026-08-14
+- 来源任务/测试：UPilot Flow 全量 EditMode 回归发生主线程挂起后，尝试按测试类缩小问题范围。
+- 现象/问题：`unity_test_run.testFilter` 只写入 Test Framework `Filter.testNames`；传类名或由 `unity_test_list` 返回的叶子全名均得到 `UPilot.TestRunner.NoTests`，无法按 fixture/namespace 分组诊断。
+- 影响范围：任何大型 Unity 测试回归的失败或 hang 二分定位，尤其是包含 EditorWindow/UnityTest 的 Flow 测试。
+- 建议改进：保留现有精确名称语义，并支持 `regex:<pattern>` 映射到官方 `Filter.groupNames`；后续可在工具 schema 中将 exact/regex/category/assembly 拆成显式字段。
+- 证据/复现：`testFilter=CodingRiver.UPilot.Flow.UPilotFlowAdvancedControlsFixtureTests` 与完整叶子名均返回 `NoTests`；官方 Test Framework 1.7.0 `Filter.groupNames` 明确支持正则。
+- 备注：本次已加入向后兼容的 `regex:` 支持，待 Flow 分组回归验证。
+
+### [已完成] UPilot Flow Sample 测试仍引用已删除的 CI artifact writer
+
+- 发现时间：2026-08-13
+- 来源任务/测试：在 `./Tests~/UPilotTest` 启用 Flow 并将 `Samples~/UPilotFlow` 导入 `Assets/Examples` 后进行完整验收。
+- 现象/问题：Sample 测试程序集产生 3 个 `CS0246`，仍引用 0.2.0 重构时删除的 `CiArtifactManifestWriter`；同时断言旧的根目录 `artifacts.json`，而现行权威布局为 `Artifacts/artifacts.json`。
+- 影响范围：Unity 6 项目启用并导入官方 UPilot Flow Sample 后无法编译，阻断 EditMode、Headed 和 MCP Flow 验收。
+- 建议改进：Sample 测试统一调用现行 `UPilotFlowReportService.WriteArtifactManifest`，并验证 `ReportPathBuilder.BuildArtifactsPath` 对应的 `Artifacts/artifacts.json`。
+- 证据/复现：`Assets/Examples/Tests/UPilotFlow.ExecutionReportingCliTests.cs(137,17)`、`UPilotFlow.ReportingAndCliBoundaryTests.cs(151,30)`、`(164,17)` 均报 `CiArtifactManifestWriter could not be found`。
+- 备注：已在本次验收中更新 canonical Sample 测试，待完整回归确认。
+
+### [待处理] 测试验收流程的 Console capture 与 ConsoleCaptureService 自测互相干扰
+
+- 发现时间：2026-08-13
+- 来源任务/测试：使用 `./Tests~/UPilotTest` / Unity 6000.6.0a2 进行 UPilot EditMode 验收。
+- 现象/问题：验收脚本在 `unity_test_run(EditMode)` 前启动 `unity_console_capture_start` 后，测试 `CodingRiver.UPilot.Tests.UPilotCoreTests.ConsoleCaptureStopFinalizesHistoricalActiveManifest` 失败，原因是该测试要求无 live capture；停止 capture 后重跑通过，最终 `47 total / 45 passed / 2 skipped / 0 failed`。
+- 影响范围：任何包含 ConsoleCaptureService 自测的 UPilot 回归，如果 agent 按通用“长任务前开启持久 Console capture”规则执行，可能制造假失败。
+- 建议改进：为 `unity_test_run` / 验收流程增加 test-safe console capture 策略：运行前检测 active capture 并提示/自动停止，或提供不会污染被测 `UPilotConsoleCaptureService.Active` 状态的隔离采集通道；同时在 agent 规则中明确“运行 ConsoleCaptureService 相关测试时不要开启 live capture”。
+- 证据/复现：首轮 EditMode：`47 total / 44 passed / 1 failed / 2 skipped`，失败消息 `The historical-stop test requires no live capture`；停止 capture 后重跑：`47 total / 45 passed / 0 failed / 2 skipped`。
+- 备注：这是验收流程设计缺口，不是产品编译失败。
+
+### [待处理] 提供一键 UPilot 包验收工具以减少手写 MCP/轮询脚本
+
+- 发现时间：2026-08-13
+- 来源任务/测试：Codex 环境未直接注入 `unity_*` typed tools，通过 Streamable HTTP `tools/call` 手写调用 `unity_mcp_status`、`unity_safe_compile_and_wait`、`unity_test_run`、`unity_test_results`、`unity_compile_errors` 完成验收。
+- 现象/问题：现有工具可完成验收，但 agent 需要自行处理 SSE 响应解析、测试轮询、Console 日志读取、capture 前置条件和最终摘要，容易引入流程错误或遗漏证据。
+- 影响范围：UPilot 包回归、发布前检查、客户项目接入验收。
+- 建议改进：新增可选工具/集成 `unity_upilot_acceptance_run`（或扩展 `unity_test_run` 为可等待终态）：一次完成项目身份校验、safe compile、EditMode 测试、compile errors 复查、Console tail/错误摘要、结果 artifact 路径和结构化 summary，并内置 test-safe capture 策略。
+- 证据/复现：本次验收需要多次手写 `tools/call` 与轮询；首次因通用 capture 策略触发假失败。
+- 备注：保持现有细粒度工具，同时提供高层验收编排能力，供 agent/CI/发布流程复用。
+
+### [待处理] PlayMode 测试工具需要区分无 PlayMode 用例与无结果状态
+
+- 发现时间：2026-08-13
+- 来源任务/测试：在 `./Tests~/UPilotTest` / Unity 6000.6.0a2 中尝试补充 PlayMode 测试检查。
+- 现象/问题：`unity_test_list(testMode=PlayMode)` 返回了与 EditMode 相同的 UPilot Editor 测试列表；随后 `unity_test_run(testMode=PlayMode)` 短暂进入 PlayMode，但 `unity_test_results` 持续返回 `status=none`、`total=0`，无法形成“无 PlayMode 用例”“运行中”“完成”或“失败”的明确结论。
+- 影响范围：agent 进行“全 Unity 测试”验收时，无法可靠判断 PlayMode 是否无需运行、已通过、未启动或工具丢失结果。
+- 建议改进：修正 `unity_test_list` / `unity_test_run` 的 testMode 过滤和终态契约；当项目没有 PlayMode 测试时返回明确 `status=no_tests` / `total=0`，不要复用 EditMode 列表；当运行被 Unity Test Runner 忽略或中止时返回结构化错误和原因。
+- 证据/复现：本次 PlayMode 列表包含 `CodingRiver.UPilot.Tests.UPilotCoreTests.*` Editor 用例；运行后多次轮询均为 `status=none,total=0`，最终 Editor 回到 `playModeState=edit`，编译错误 0。
+- 备注：本次 UPilot 本体规范验收仍以编译 + EditMode 为准，最终 EditMode 已通过。

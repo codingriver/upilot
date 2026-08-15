@@ -1,0 +1,31 @@
+schemaVersion: 2
+name: "46-popup-item-click"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - name: Reset mask field to 0
+    action: set_value
+    selector: "#feature-mask"
+    value: "0"
+  - name: Click popup item by value
+    action: click_popup_item
+    selector: "#feature-mask"
+    value: "Two"
+  - name: Assert mask field updated to 2
+    action: assert_value
+    selector: "#feature-mask"
+    expected: "2"
+  - name: Reset enum flags field
+    action: set_value
+    selector: "#permissions-flags"
+    value: "None"
+  - name: Click popup item by index
+    action: click_popup_item
+    selector: "#permissions-flags"
+    index: "1"
+  - name: Assert enum flags field updated to Write
+    action: assert_value
+    selector: "#permissions-flags"
+    expected: "Write"

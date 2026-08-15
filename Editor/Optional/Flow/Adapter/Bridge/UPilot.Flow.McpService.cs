@@ -146,6 +146,37 @@ namespace CodingRiver.UPilot
         public long lastProgressAt;
         public int phaseElapsedMs;
         public bool suspectedStuck;
+        public bool cancelRequested;
+        public bool cancelAccepted;
+        public int cancelAttemptCount;
+        public long stopRequestedAt;
+        public long stoppingAt;
+        public long cleanupStartedAt;
+        public long endedAt;
+        public bool cleanupPending;
+        public int activeLeaseCount;
+        public List<string> cleanupErrors = new List<string>();
+        public List<string> unresolvedResources = new List<string>();
+        public bool paused;
+        public string pauseReason;
+        public string pauseOwner;
+        public string pauseToken;
+        public long pauseDeadline;
+        public bool waitingForModalUi;
+        public int activeModalCount;
+        public string modalOwner;
+        public string modalType;
+        public long modalStartedAt;
+        public long modalDeadline;
+        public bool modalRecoveryAttempted;
+        public bool modalRecoverySucceeded;
+        public string modalRecoveryReason;
+        public string modalRecoverySource;
+        public string modalRecoveryError;
+        public long actionStartedAt;
+        public long actionDeadline;
+        public int actionTimeoutMs;
+        public string progressDetail;
         public string reportPath;
         public string errorCode;
         public string errorMessage;
@@ -160,6 +191,12 @@ namespace CodingRiver.UPilot
         // Full list of all yaml paths across all batches (set at run start, never changes).
         public List<string> allYamlPaths = new List<string>();
         public List<UPilotFlowCaseResultPayload> cases = new List<UPilotFlowCaseResultPayload>();
+    }
+
+    [Serializable]
+    public sealed class UPilotFlowExecutionRegistryPayload
+    {
+        public List<UPilotFlowExecutionSnapshot> executions = new List<UPilotFlowExecutionSnapshot>();
     }
 
     public sealed class UPilotFlowService
@@ -190,7 +227,14 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("upilot_flow.validate", HandleValidateAsync);
             _bridge.Router.Register("upilot_flow.migrate", HandleMigrateAsync);
             _bridge.Router.Register("upilot_flow.results", HandleResultsAsync);
+            _bridge.Router.Register("upilot_flow.status", HandleRegistryStatusAsync);
+            _bridge.Router.Register("upilot_flow.executions", HandleRegistryListAsync);
+            _bridge.Router.Register("upilot_flow.list", HandleRegistryListAliasAsync);
+            _bridge.Router.Register("upilot_flow.pause", HandlePauseAsync);
+            _bridge.Router.Register("upilot_flow.resume", HandleResumeAsync);
+            _bridge.Router.Register("upilot_flow.stop", HandleStopAsync);
             _bridge.Router.Register("upilot_flow.cancel", HandleCancelAsync);
+            _bridge.Router.Register("upilot_flow.force_cleanup", HandleForceCleanupAsync);
             _bridge.Router.Register("upilot_flow.force_reset", HandleForceResetAsync);
         }
 
@@ -352,6 +396,47 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            UPilotFlowExecutionSnapshot registry = UPilotFlowExecutionRegistry.Get(payload.executionId);
+            if (registry != null)
+            {
+                execution.cancelRequested = registry.cancelRequested;
+                execution.cancelAccepted = registry.cancelAccepted;
+                execution.cancelAttemptCount = registry.cancelAttemptCount;
+                execution.stopRequestedAt = registry.stopRequestedAt;
+                execution.stoppingAt = registry.stoppingAt;
+                execution.cleanupStartedAt = registry.cleanupStartedAt;
+                execution.endedAt = registry.endedAt;
+                execution.cleanupPending = registry.cleanupPending;
+                execution.activeLeaseCount = registry.activeLeaseCount;
+                execution.cleanupErrors = registry.cleanupErrors?.ToList() ?? new List<string>();
+                execution.unresolvedResources = registry.unresolvedResources?.ToList() ?? new List<string>();
+                execution.paused = registry.paused;
+                execution.pauseReason = registry.pauseReason;
+                execution.pauseOwner = registry.pauseOwner;
+                execution.pauseToken = registry.pauseToken;
+                execution.pauseDeadline = registry.pauseDeadline;
+                execution.waitingForModalUi = registry.waitingForModalUi;
+                execution.activeModalCount = registry.activeModalCount;
+                execution.modalOwner = registry.modalOwner;
+                execution.modalType = registry.modalType;
+                execution.modalStartedAt = registry.modalStartedAt;
+                execution.modalDeadline = registry.modalDeadline;
+                execution.modalRecoveryAttempted = registry.modalRecoveryAttempted;
+                execution.modalRecoverySucceeded = registry.modalRecoverySucceeded;
+                execution.modalRecoveryReason = registry.modalRecoveryReason;
+                execution.modalRecoverySource = registry.modalRecoverySource;
+                execution.modalRecoveryError = registry.modalRecoveryError;
+                execution.actionStartedAt = registry.actionStartedAt;
+                execution.actionDeadline = registry.actionDeadline;
+                execution.actionTimeoutMs = registry.actionTimeoutMs;
+                execution.progressDetail = registry.progressDetail;
+                if (registry.status == "stopping" || registry.status == "cancel_requested" || registry.status == "cleanup")
+                {
+                    execution.status = registry.status;
+                    execution.phase = registry.phase;
+                }
+            }
+
             string prevStatus = _lastResultStatus.TryGetValue(payload.executionId, out string s) ? s : "";
             string currStatus = execution.status ?? "";
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -372,68 +457,60 @@ namespace CodingRiver.UPilot
 
         private async Task HandleForceResetAsync(string id, string json, CancellationToken token)
         {
-            Logger.Log("UPilot.Flow", $"强制重置执行状态: id={id}");
+            await HandleForceCleanupCoreAsync(id, string.Empty, "upilot_flow.force_reset", token);
+        }
 
-            CodingRiver.UPilot.Flow.ExecutionContext contextToDispose = null;
+        private async Task HandleForceCleanupAsync(string id, string json, CancellationToken token)
+        {
+            var request = JsonUtility.FromJson<UPilotFlowCancelMessage>(json)?.payload ?? new UPilotFlowCancelPayload();
+            await HandleForceCleanupCoreAsync(id, request.executionId, "upilot_flow.force_cleanup", token);
+        }
+
+        private async Task HandleForceCleanupCoreAsync(
+            string id,
+            string requestedExecutionId,
+            string responseName,
+            CancellationToken token)
+        {
+            Logger.Log("UPilot.Flow", $"请求强制清理执行资源: id={id}");
             string capturedExecutionId;
             lock (_stateLock)
             {
-                contextToDispose = _activeContext;
-                _activeContext = null;
-                capturedExecutionId = _activeExecutionId;
-                _activeExecutionId = null;
-                _isRunning = false;
+                capturedExecutionId = string.IsNullOrWhiteSpace(requestedExecutionId)
+                    ? _activeExecutionId
+                    : requestedExecutionId;
             }
 
-            // Dispose must run on the Unity main thread to safely close EditorWindow
-            if (contextToDispose != null)
+            UPilotFlowExecutionSnapshot latest = UPilotFlowExecutionRegistry.Get(capturedExecutionId);
+            if (string.IsNullOrWhiteSpace(capturedExecutionId))
+                capturedExecutionId = latest?.executionId;
+            if (!string.IsNullOrWhiteSpace(requestedExecutionId) && latest == null)
             {
-                EditorApplication.delayCall += () =>
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found: {requestedExecutionId}", token, responseName);
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(capturedExecutionId))
+            {
+                if (_executionCts.TryGetValue(capturedExecutionId, out CancellationTokenSource cts))
+                    cts.Cancel();
+                UPilotFlowExecutionRegistry.RequestStop(capturedExecutionId);
+                UpdateExecution(capturedExecutionId, execution =>
                 {
-                    try
-                    {
-                        contextToDispose.Dispose();
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogWarning("UPilot.Flow", $"Dispose during force reset: {ex.Message}");
-                    }
-                };
+                    execution.status = "stopping";
+                    execution.phase = "stopping";
+                    execution.cancelRequested = true;
+                    execution.errorCode = ErrorCodes.TestRunAborted;
+                    execution.errorMessage = "Force cleanup was requested; terminal status awaits task and context cleanup.";
+                    execution.lastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                });
+                latest = UPilotFlowExecutionRegistry.Get(capturedExecutionId);
             }
 
-            foreach (var kvp in _executionCts)
-            {
-                try { kvp.Value.Cancel(); } catch { /* ignored */ }
-                try { kvp.Value.Dispose(); } catch { /* ignored */ }
-            }
-            _executionCts.Clear();
+            var payload = !string.IsNullOrWhiteSpace(capturedExecutionId) && _executions.TryGetValue(capturedExecutionId, out var existing)
+                ? CloneExecution(existing)
+                : new UPilotFlowExecutionResultPayload { executionId = capturedExecutionId ?? string.Empty, status = latest?.status ?? "none" };
 
-            lock (_stateLock)
-            {
-                foreach (var execution in _executions.Values)
-                {
-                    if (execution.status == "queued" || execution.status == "running")
-                    {
-                        execution.status = "aborted";
-                        execution.errorCode = ErrorCodes.TestRunAborted;
-                        execution.errorMessage = "Execution was force-reset.";
-                        execution.endedAtUtc = DateTimeOffset.UtcNow.ToString("O");
-                        execution.currentCaseName = null;
-                        execution.currentYamlPath = null;
-                    }
-                }
-            }
-
-            var payload = new UPilotFlowExecutionResultPayload
-            {
-                executionId = capturedExecutionId ?? string.Empty,
-                status = "aborted",
-                errorCode = ErrorCodes.TestRunAborted,
-                errorMessage = "Execution was force-reset.",
-                endedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
-            };
-
-            await _bridge.SendResultAsync(id, "upilot_flow.force_reset", payload, token);
+            await _bridge.SendResultAsync(id, responseName, payload, token);
         }
 
         private async Task HandleCancelAsync(string id, string json, CancellationToken token)
@@ -448,49 +525,98 @@ namespace CodingRiver.UPilot
 
             if (!_executions.TryGetValue(payload.executionId, out UPilotFlowExecutionResultPayload execution))
             {
+                UPilotFlowExecutionSnapshot registryOnly = UPilotFlowExecutionRegistry.Get(payload.executionId);
+                if (registryOnly != null)
+                {
+                    UPilotFlowExecutionRegistry.RequestStop(payload.executionId);
+                    await _bridge.SendResultAsync(id, "upilot_flow.cancel", UPilotFlowExecutionRegistry.Get(payload.executionId), token);
+                    return;
+                }
                 await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found: {payload.executionId}", token, "upilot_flow.cancel");
                 return;
             }
 
-            bool shouldResetActiveState = false;
             if (_executionCts.TryGetValue(payload.executionId, out CancellationTokenSource cts))
             {
                 cts.Cancel();
             }
 
+            UPilotFlowExecutionRegistry.RequestStop(payload.executionId);
+
             lock (_stateLock)
             {
                 if (string.Equals(_activeExecutionId, payload.executionId, StringComparison.Ordinal))
                 {
-                    shouldResetActiveState = true;
                     _activeContext?.RuntimeController?.Stop();
-                    _activeContext = null;
-                    _activeExecutionId = null;
-                    _isRunning = false;
                 }
 
                 if (execution.status == "queued" || execution.status == "running")
                 {
-                    execution.status = "aborted";
+                    execution.status = "stopping";
                     execution.errorCode = ErrorCodes.TestRunAborted;
-                    execution.errorMessage = "Execution was cancelled by user.";
-                    execution.endedAtUtc = DateTimeOffset.UtcNow.ToString("O");
-                    execution.currentCaseName = null;
-                    execution.currentYamlPath = null;
-                    execution.currentStepName = null;
-                    execution.currentStepIndex = -1;
-                    execution.phase = execution.status;
+                    execution.errorMessage = "Cancellation requested; waiting for task and context cleanup.";
+                    execution.phase = "stopping";
+                    execution.cancelRequested = true;
                     execution.lastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     execution.suspectedStuck = false;
                 }
             }
 
-            if (shouldResetActiveState)
-            {
-                Logger.Log("UPilot.Flow", $"已释放活动执行槽: executionId={payload.executionId}");
-            }
-
             await _bridge.SendResultAsync(id, "upilot_flow.cancel", CloneExecution(execution), token);
+        }
+
+        private async Task HandleStopAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<UPilotFlowCancelMessage>(json)?.payload ?? new UPilotFlowCancelPayload();
+            if (string.IsNullOrWhiteSpace(payload.executionId) || !UPilotFlowExecutionRegistry.RequestStop(payload.executionId))
+            {
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Execution not found: {payload.executionId}", token, "upilot_flow.stop");
+                return;
+            }
+            if (_executionCts.TryGetValue(payload.executionId, out CancellationTokenSource cts))
+                cts.Cancel();
+            await _bridge.SendResultAsync(id, "upilot_flow.stop", UPilotFlowExecutionRegistry.Get(payload.executionId), token);
+        }
+
+        private async Task HandleRegistryStatusAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<UPilotFlowResultsMessage>(json)?.payload ?? new UPilotFlowResultsPayload();
+            UPilotFlowExecutionSnapshot snapshot = UPilotFlowExecutionRegistry.Get(payload.executionId);
+            await _bridge.SendResultAsync(id, "upilot_flow.status", snapshot ?? new UPilotFlowExecutionSnapshot { status = "none" }, token);
+        }
+
+        private async Task HandleRegistryListAsync(string id, string json, CancellationToken token)
+        {
+            var payload = new UPilotFlowExecutionRegistryPayload { executions = UPilotFlowExecutionRegistry.List() };
+            await _bridge.SendResultAsync(id, "upilot_flow.executions", payload, token);
+        }
+
+        private async Task HandleRegistryListAliasAsync(string id, string json, CancellationToken token)
+        {
+            var payload = new UPilotFlowExecutionRegistryPayload { executions = UPilotFlowExecutionRegistry.List() };
+            await _bridge.SendResultAsync(id, "upilot_flow.list", payload, token);
+        }
+
+        private async Task HandlePauseAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<UPilotFlowCancelMessage>(json)?.payload ?? new UPilotFlowCancelPayload();
+            if (string.IsNullOrWhiteSpace(payload.executionId) || !UPilotFlowExecutionRegistry.Pause(payload.executionId))
+            {
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Active execution not found: {payload.executionId}", token, "upilot_flow.pause");
+                return;
+            }
+            await _bridge.SendResultAsync(id, "upilot_flow.pause", UPilotFlowExecutionRegistry.Get(payload.executionId), token);
+        }
+
+        private async Task HandleResumeAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<UPilotFlowCancelMessage>(json)?.payload ?? new UPilotFlowCancelPayload();
+            if (string.IsNullOrWhiteSpace(payload.executionId) || !UPilotFlowExecutionRegistry.Resume(payload.executionId))
+            {
+                await _bridge.SendErrorAsync(id, "NOT_FOUND", $"Active execution not found: {payload.executionId}", token, "upilot_flow.resume");
+                return;
+            }
+            await _bridge.SendResultAsync(id, "upilot_flow.resume", UPilotFlowExecutionRegistry.Get(payload.executionId), token);
         }
 
         private async Task ExecuteRunAsync(string executionId, List<string> yamlPaths, UPilotFlowRunPayload payload, CancellationToken cancellationToken)
@@ -832,7 +958,7 @@ namespace CodingRiver.UPilot
         private static TestOptions BuildTestOptions(UPilotFlowRunPayload payload, string executionId)
         {
             string reportPath = BuildExecutionReportPath(payload.reportPath, executionId);
-            return UPilotFlowConfigurationService.Resolve(new UPilotFlowExecutionSettings
+            TestOptions options = UPilotFlowConfigurationService.Resolve(new UPilotFlowExecutionSettings
             {
                 Headed = payload.headed,
                 DebugOnFailure = payload.debugOnFailure,
@@ -844,6 +970,17 @@ namespace CodingRiver.UPilot
                 ReportOutputPath = reportPath,
                 ScreenshotPath = Path.Combine(reportPath, "Screenshots"),
             });
+            return ConfigureMcpOptions(options, executionId);
+        }
+
+        private static TestOptions ConfigureMcpOptions(TestOptions options, string executionId)
+        {
+            options.ExecutionId = executionId;
+            options.ExecutionSource = "mcp";
+            options.Unattended = true;
+            options.PauseTimeoutMs = 30000;
+            options.PauseTimeoutPolicy = "auto_abort";
+            return options;
         }
 
         public static List<string> ResolveYamlPaths(UPilotFlowRunPayload payload)
@@ -954,6 +1091,35 @@ namespace CodingRiver.UPilot
                     lastProgressAt = source.lastProgressAt,
                     phaseElapsedMs = source.phaseElapsedMs,
                     suspectedStuck = source.suspectedStuck,
+                    cancelRequested = source.cancelRequested,
+                    cancelAccepted = source.cancelAccepted,
+                    cancelAttemptCount = source.cancelAttemptCount,
+                    stopRequestedAt = source.stopRequestedAt,
+                    stoppingAt = source.stoppingAt,
+                    cleanupStartedAt = source.cleanupStartedAt,
+                    endedAt = source.endedAt,
+                    cleanupPending = source.cleanupPending,
+                    activeLeaseCount = source.activeLeaseCount,
+                    paused = source.paused,
+                    pauseReason = source.pauseReason,
+                    pauseOwner = source.pauseOwner,
+                    pauseToken = source.pauseToken,
+                    pauseDeadline = source.pauseDeadline,
+                    waitingForModalUi = source.waitingForModalUi,
+                    activeModalCount = source.activeModalCount,
+                    modalOwner = source.modalOwner,
+                    modalType = source.modalType,
+                    modalStartedAt = source.modalStartedAt,
+                    modalDeadline = source.modalDeadline,
+                    modalRecoveryAttempted = source.modalRecoveryAttempted,
+                    modalRecoverySucceeded = source.modalRecoverySucceeded,
+                    modalRecoveryReason = source.modalRecoveryReason,
+                    modalRecoverySource = source.modalRecoverySource,
+                    modalRecoveryError = source.modalRecoveryError,
+                    actionStartedAt = source.actionStartedAt,
+                    actionDeadline = source.actionDeadline,
+                    actionTimeoutMs = source.actionTimeoutMs,
+                    progressDetail = source.progressDetail,
                     reportPath = source.reportPath,
                     errorCode = source.errorCode,
                     errorMessage = source.errorMessage,
@@ -968,6 +1134,8 @@ namespace CodingRiver.UPilot
                 };
 
                 clone.allYamlPaths.AddRange(source.allYamlPaths);
+                clone.cleanupErrors.AddRange(source.cleanupErrors ?? new List<string>());
+                clone.unresolvedResources.AddRange(source.unresolvedResources ?? new List<string>());
 
                 foreach (UPilotFlowCaseResultPayload caseResult in source.cases)
                 {

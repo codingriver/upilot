@@ -75,6 +75,11 @@ namespace CodingRiver.UPilot.Flow.EditorAutomation
                         ContinueOnStepFailure = false,
                         EnableVerboseLog = true,
                     });
+                options.ExecutionId = Guid.NewGuid().ToString("N");
+                options.ExecutionSource = "headed-auto-run";
+                options.Unattended = true;
+                options.PauseTimeoutMs = 30000;
+                options.PauseTimeoutPolicy = "auto_abort";
                 UPilotFlowExecutionBatchResult execution = await new UPilotFlowExecutionService().RunAsync(
                     new UPilotFlowExecutionRequest
                     {

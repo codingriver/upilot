@@ -111,6 +111,55 @@ async def unity_asset_get_info(assetPath: str):
     r = await _get_facade().asset_get_info(asset_path=assetPath)
     return _log_tool_result("unity_asset_get_info", _payload(r))
 
+@mcp.tool(description="列出 FBX 等资源文件中的内嵌子资源；可按类型过滤并排除预览 AnimationClip。")
+async def unity_asset_subresources_list(assetPath: str, typeFilter: str = "", includePreview: bool = False):
+    _log_tool_call("unity_asset_subresources_list", {"assetPath": assetPath, "typeFilter": typeFilter, "includePreview": includePreview})
+    r = await _get_facade().asset_subresources_list(asset_path=assetPath, type_filter=typeFilter, include_preview=includePreview)
+    return _log_tool_result("unity_asset_subresources_list", _payload(r))
+
+@mcp.tool(description="只读列出一个资源的直接或递归依赖，返回路径、类型、GUID 和是否直接依赖。适用于 Prefab 材质/纹理/动画引用审计。")
+async def unity_asset_dependencies(assetPath: str, recursive: bool = True):
+    _log_tool_call("unity_asset_dependencies", {"assetPath": assetPath, "recursive": recursive})
+    r = await _get_facade().asset_dependencies(asset_path=assetPath, recursive=recursive)
+    return _log_tool_result("unity_asset_dependencies", _payload(r))
+
+@mcp.tool(description="只读审计 AnimatorController 的层、权重、混合模式、AvatarMask、State、Motion、默认状态和未引用 Clip。")
+async def unity_animator_controller_inspect(assetPath: str):
+    _log_tool_call("unity_animator_controller_inspect", {"assetPath": assetPath})
+    r = await _get_facade().animator_controller_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_animator_controller_inspect", _payload(r))
+
+@mcp.tool(description="只读展开 AvatarMask 的全部 Transform 路径及 active 状态。")
+async def unity_avatar_mask_inspect(assetPath: str):
+    _log_tool_call("unity_avatar_mask_inspect", {"assetPath": assetPath})
+    r = await _get_facade().avatar_mask_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_avatar_mask_inspect", _payload(r))
+
+@mcp.tool(description="只读审计模型导入器的 Rig、Avatar、动画 Clip、循环设置和位移/旋转/缩放曲线摘要。")
+async def unity_model_importer_inspect(assetPath: str):
+    _log_tool_call("unity_model_importer_inspect", {"assetPath": assetPath})
+    r = await _get_facade().model_importer_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_model_importer_inspect", _payload(r))
+
+@mcp.tool(description="只读返回 TextureImporter 的 Mipmap、Alpha、sRGB、Wrap、Filter、压缩、尺寸、可读性和平台覆盖。")
+async def unity_texture_importer_get(assetPath: str):
+    _log_tool_call("unity_texture_importer_get", {"assetPath": assetPath})
+    r = await _get_facade().texture_importer_get(asset_path=assetPath)
+    return _log_tool_result("unity_texture_importer_get", _payload(r))
+
+@mcp.tool(description="两阶段修改 TextureImporter。先 dryRun=true 获取 confirmToken，再用相同 changes、当前资源/meta 哈希和 token 应用并重导入。")
+async def unity_texture_importer_patch(assetPath: str, changes: dict, dryRun: bool = True, confirmToken: str = "", reimport: bool = True):
+    args = {"assetPath": assetPath, "changes": changes, "dryRun": dryRun, "confirmToken": bool(confirmToken), "reimport": reimport}
+    _log_tool_call("unity_texture_importer_patch", args)
+    r = await _get_facade().texture_importer_patch(asset_path=assetPath, changes=changes, dry_run=dryRun, confirm_token=confirmToken, reimport=reimport)
+    return _log_tool_result("unity_texture_importer_patch", _payload(r))
+
+@mcp.tool(description="强制重导入一个现有 Assets/... 资源。会改变导入产物，需项目写权限。")
+async def unity_asset_reimport(assetPath: str):
+    _log_tool_call("unity_asset_reimport", {"assetPath": assetPath})
+    r = await _get_facade().asset_reimport(asset_path=assetPath)
+    return _log_tool_result("unity_asset_reimport", _payload(r))
+
 @mcp.tool(description="搜索 Unity 内置资源（如默认材质、Shader、字体等）。")
 async def unity_asset_find_built_in(query: str = "", assetType: str = ""):
     _log_tool_call(
@@ -764,6 +813,7 @@ _DESTRUCTIVE_TOOLS = {
     "unity_gameobject_duplicate", "unity_component_add",
     "unity_component_remove", "unity_component_modify",
     "unity_batch_execute",
+    "unity_texture_importer_patch", "unity_asset_reimport",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}

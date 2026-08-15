@@ -60,8 +60,12 @@ namespace CodingRiver.UPilot.Flow
         private bool _stepRequested;
         private bool _isStopped;
         private bool _pausedForFailure;
+        private bool _unattended;
+        private int _pauseTimeoutMs;
 
         public HeadedRunMode RunMode { get; set; } = HeadedRunMode.Continuous;
+
+        public Action StateChanged { get; set; }
 
         public CancellationToken CancellationToken => _cancellationTokenSource?.Token ?? default;
 
@@ -71,15 +75,45 @@ namespace CodingRiver.UPilot.Flow
 
         public bool IsPausedForFailure => _pausedForFailure;
 
+        public string PauseReason { get; private set; }
+
+        public string PauseOwner { get; private set; }
+
+        public long PausedAt { get; private set; }
+
+        public long PauseDeadline { get; private set; }
+
+        public string PauseTimeoutPolicy { get; private set; } = "manual";
+
+        public string PauseToken { get; private set; }
+
+        public void Configure(TestOptions options)
+        {
+            _unattended = options?.Unattended == true;
+            _pauseTimeoutMs = options?.PauseTimeoutMs ?? 0;
+            PauseTimeoutPolicy = options?.PauseTimeoutPolicy ?? "manual";
+            if (_unattended)
+            {
+                if (_pauseTimeoutMs <= 0)
+                    _pauseTimeoutMs = 30000;
+                if (PauseTimeoutPolicy == "manual")
+                    PauseTimeoutPolicy = "auto_abort";
+            }
+        }
+
         public void Pause()
         {
-            _isPaused = true;
+            Pause("interactive", "manual");
+        }
+
+        public void Pause(string owner, string reason)
+        {
+            SetPaused(owner, reason, false);
         }
 
         public void PauseForFailure()
         {
-            _isPaused = true;
-            _pausedForFailure = true;
+            SetPaused("failure-policy", "failure", true);
         }
 
         public void Resume()
@@ -87,6 +121,12 @@ namespace CodingRiver.UPilot.Flow
             _isPaused = false;
             _stepRequested = false;
             _pausedForFailure = false;
+            PauseReason = null;
+            PauseOwner = null;
+            PausedAt = 0;
+            PauseDeadline = 0;
+            PauseToken = null;
+            StateChanged?.Invoke();
         }
 
         public void StepOnce()
@@ -94,11 +134,22 @@ namespace CodingRiver.UPilot.Flow
             _isPaused = false;
             _stepRequested = true;
             _pausedForFailure = false;
+            PauseReason = null;
+            PauseOwner = null;
+            PausedAt = 0;
+            PauseDeadline = 0;
+            PauseToken = null;
+            StateChanged?.Invoke();
         }
 
         public void Stop()
         {
             _isStopped = true;
+            _isPaused = false;
+            PauseReason = "stop_requested";
+            PauseDeadline = 0;
+            PauseToken = null;
+            StateChanged?.Invoke();
             _cancellationTokenSource?.Cancel();
         }
 
@@ -106,6 +157,20 @@ namespace CodingRiver.UPilot.Flow
         {
             while (_isPaused && !_isStopped)
             {
+                if (PauseDeadline > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= PauseDeadline)
+                {
+                    if (PauseTimeoutPolicy == "auto_resume")
+                    {
+                        Resume();
+                        break;
+                    }
+
+                    if (PauseTimeoutPolicy == "auto_abort")
+                    {
+                        Stop();
+                        CancellationToken.ThrowIfCancellationRequested();
+                    }
+                }
                 await EditorAsyncUtility.NextFrameAsync(CancellationToken);
             }
         }
@@ -116,11 +181,35 @@ namespace CodingRiver.UPilot.Flow
             {
                 _stepRequested = false;
                 _isPaused = true;
+                PauseOwner = "step-mode";
+                PauseReason = "step_completed";
+                PausedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                PauseDeadline = 0;
+                StateChanged?.Invoke();
             }
             else if (RunMode == HeadedRunMode.Step)
             {
                 _isPaused = true;
+                PauseOwner = "step-mode";
+                PauseReason = "step_completed";
+                PausedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                PauseDeadline = 0;
+                StateChanged?.Invoke();
             }
+        }
+
+        private void SetPaused(string owner, string reason, bool failure)
+        {
+            _isPaused = true;
+            _pausedForFailure = failure;
+            PauseOwner = owner;
+            PauseReason = reason;
+            PauseToken = Guid.NewGuid().ToString("N");
+            PausedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            PauseDeadline = _unattended && _pauseTimeoutMs > 0 && PauseTimeoutPolicy != "manual"
+                ? PausedAt + _pauseTimeoutMs
+                : 0;
+            StateChanged?.Invoke();
         }
 
         public void Dispose()
@@ -302,6 +391,11 @@ namespace CodingRiver.UPilot.Flow
                         CurrentStepIndex = stepIndex,
                         SharedBag = context.SharedBag,
                         CancellationToken = timeoutController.Token,
+                        TimeoutMs = step.TimeoutMs,
+                        DeadlineAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + step.TimeoutMs,
+                        Progress = detail => UPilotFlowExecutionRegistry.ActionProgress(
+                            context.Options?.ExecutionId,
+                            detail),
                         ScreenshotManager = context.ScreenshotManager,
                         RuntimeController = context.RuntimeController,
                         Simulator = context.SimulationSession?.PointerDriver,
@@ -379,7 +473,10 @@ namespace CodingRiver.UPilot.Flow
             }
             catch (UPilotFlowException ex)
             {
-                result.Status = ex.ErrorCode == ErrorCodes.ActionExecutionFailed || ex.ErrorCode == ErrorCodes.StepTimeout || ex.ErrorCode == ErrorCodes.AssertionFailed
+                result.Status = ex.ErrorCode == ErrorCodes.ActionExecutionFailed
+                    || ex.ErrorCode == ErrorCodes.StepTimeout
+                    || ex.ErrorCode == ErrorCodes.AssertionFailed
+                    || ex.ErrorCode == ErrorCodes.TestLoopLimitExceeded
                     ? TestStatus.Failed
                     : TestStatus.Error;
                 result.ErrorCode = ex.ErrorCode;
@@ -458,13 +555,13 @@ namespace CodingRiver.UPilot.Flow
             while (LoopConditionMet())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                iterations++;
                 if (iterations >= step.Loop.MaxIterations)
                 {
-                    if (context?.Options?.EnableVerboseLog == true)
-                        Codingriver.Logger.Log($"[UPilot Flow][{context.CaseName}] Loop {step.DisplayName} reached max_iterations {step.Loop.MaxIterations}, exiting gracefully.");
-                    break;
+                    throw new UPilotFlowException(
+                        ErrorCodes.TestLoopLimitExceeded,
+                        $"Loop {step.DisplayName} exceeded max_iterations {step.Loop.MaxIterations}.");
                 }
+                iterations++;
 
                 foreach (ExecutableStep loopStep in step.Loop.Steps)
                 {
@@ -663,6 +760,11 @@ namespace CodingRiver.UPilot.Flow
         {
             options = UPilotFlowProjectSettingsUtility.ApplyOverrides(options);
             options.Validate();
+            string executionId = UPilotFlowExecutionRegistry.EnsureExecutionId(options);
+            IDisposable executionLease = UPilotFlowExecutionRegistry.Register(executionId, options.ExecutionSource);
+            string registryTerminalStatus = "failed";
+            try
+            {
             if (options.TotalCases <= 0)
             {
                 options.CaseIndex = 1;
@@ -712,6 +814,8 @@ namespace CodingRiver.UPilot.Flow
 
             var finder = new ElementFinder();
             if (options != null) finder.EnableVerboseLog = options.EnableVerboseLog;
+            var runtimeController = new RuntimeController();
+            runtimeController.Configure(options);
             var context = new ExecutionContext
             {
                 Root = root,
@@ -721,7 +825,7 @@ namespace CodingRiver.UPilot.Flow
                 Reporter = new MarkdownReporter(reportOptions),
                 ScreenshotManager = new ScreenshotManager(options, () => ResolveScreenshotWindow(managedWindow, root)),
                 ActionRegistry = _actionRegistry,
-                RuntimeController = new RuntimeController(),
+                RuntimeController = runtimeController,
                 SimulationSession = simulationSession,
                 CaseName = definition.Name,
             };
@@ -732,7 +836,20 @@ namespace CodingRiver.UPilot.Flow
                 Codingriver.Logger.Log($"[UPilot Flow] 绑定驱动 {driverSummary}");
             }
             context.CancellationToken = context.RuntimeController.CancellationToken;
+            UPilotFlowExecutionRegistry.AttachContext(executionId, context);
             onContextReady?.Invoke(context);
+            Action<int, ExecutableStep> externalStepStarted = context.StepStarted;
+            Action<int, ExecutableStep, StepResult> externalStepCompleted = context.StepCompleted;
+            context.StepStarted = (index, step) =>
+            {
+                UPilotFlowExecutionRegistry.StepStarted(executionId, index, step);
+                externalStepStarted?.Invoke(index, step);
+            };
+            context.StepCompleted = (index, step, stepResult) =>
+            {
+                UPilotFlowExecutionRegistry.StepCompleted(executionId);
+                externalStepCompleted?.Invoke(index, step, stepResult);
+            };
 
             if (options.Headed)
             {
@@ -831,6 +948,18 @@ namespace CodingRiver.UPilot.Flow
                     result.Status = ComputeStatus(result.StepResults);
                 }
 
+                if ((result.Status == TestStatus.Failed || result.Status == TestStatus.Error)
+                    && string.IsNullOrWhiteSpace(result.ErrorCode))
+                {
+                    StepResult failedStep = result.StepResults.FirstOrDefault(step =>
+                        step.Status == TestStatus.Failed || step.Status == TestStatus.Error);
+                    if (failedStep != null)
+                    {
+                        result.ErrorCode = failedStep.ErrorCode;
+                        result.ErrorMessage = failedStep.ErrorMessage;
+                    }
+                }
+
                 // Negative test adjustment: expected failures are reported as Passed
                 if ((result.Status == TestStatus.Failed || result.Status == TestStatus.Error)
                     && !string.IsNullOrWhiteSpace(definition.Name)
@@ -864,6 +993,7 @@ namespace CodingRiver.UPilot.Flow
                     Codingriver.Logger.LogError($"[UPilot Flow] {ErrorCodes.ReportWriteFailed}: {reportException.Message} 路径={options.ReportOutputPath}");
                 }
 
+                UPilotFlowExecutionRegistry.DetachContext(executionId, context);
                 context.Dispose();
                 HeadedRunEventBus.PublishRunFinished(result);
                 
@@ -874,7 +1004,16 @@ namespace CodingRiver.UPilot.Flow
                 }
             }
 
+            registryTerminalStatus = result.ErrorCode == ErrorCodes.TestRunAborted
+                ? "aborted"
+                : (result.Status == TestStatus.Error || result.Status == TestStatus.Failed ? "failed" : "completed");
             return result;
+            }
+            finally
+            {
+                UPilotFlowExecutionRegistry.MarkTerminal(executionId, registryTerminalStatus);
+                executionLease.Dispose();
+            }
         }
 
         private static TestStatus ComputeStatus(List<StepResult> steps)

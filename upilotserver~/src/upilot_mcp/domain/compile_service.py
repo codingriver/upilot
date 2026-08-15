@@ -47,6 +47,42 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 class CompileDomainService:
+    def _compile_diagnostics(self) -> dict:
+        compile_state = self.server.state.compile
+        editor = self.server.state.editor
+        now = now_ms()
+        last_progress = int(compile_state.last_progress_at or compile_state.started_at or 0)
+        pump_age = max(0, now - int(editor.last_main_thread_pump_at or 0)) if editor.last_main_thread_pump_at else 0
+        suspected_stuck = bool(
+            editor.is_compiling
+            and last_progress
+            and now - last_progress > 60000
+        )
+        compile_state.suspected_stuck = suspected_stuck
+        return {
+            "status": compile_state.status,
+            "phase": compile_state.phase,
+            "compileRequestId": compile_state.compile_request_id,
+            "commandQueuedAt": compile_state.command_queued_at,
+            "unityAcceptedAt": compile_state.unity_accepted_at,
+            "startedAt": compile_state.started_at,
+            "finishedAt": compile_state.finished_at,
+            "lastProgressAt": last_progress,
+            "lastEditorUpdateAt": editor.last_main_thread_pump_at,
+            "editorPumpAgeMs": pump_age,
+            "editorNotPumping": bool(editor.last_main_thread_pump_at and pump_age > 10000),
+            "mainThreadQueueDepth": editor.main_thread_queue_depth,
+            "lastDequeuedCommandId": editor.last_dequeued_command_id,
+            "suspectedStuck": suspected_stuck,
+            "errorCount": compile_state.error_count,
+            "warningCount": compile_state.warning_count,
+            "nextAction": (
+                "Inspect unity_hang_status before retrying or restarting Unity."
+                if suspected_stuck
+                else ("Continue waiting for the active compilation." if editor.is_compiling else "")
+            ),
+        }
+
     def _detect_library_dll_mtime(self) -> int:
         session = self.server.session_manager.active
         if not session or not session.project_path:
@@ -84,6 +120,14 @@ class CompileDomainService:
 
     async def compile(self) -> ToolResponse:
         request_id = new_id("req")
+        compile_state = self.server.state.compile
+        compile_state.phase = "queued"
+        compile_state.status = "queued"
+        compile_state.command_queued_at = now_ms()
+        compile_state.unity_accepted_at = 0
+        compile_state.started_at = 0
+        compile_state.finished_at = 0
+        compile_state.last_progress_at = compile_state.command_queued_at
         result = await self.dispatcher.call(
             request_id, "compile.request", {"requestId": request_id}, timeout_ms=180000
         )
@@ -126,23 +170,29 @@ class CompileDomainService:
                 {"requestId": request_id},
             )
 
+        if result.ok:
+            compile_state.unity_accepted_at = now_ms()
+            terminal = bool(
+                compile_state.finished_at
+                or compile_state.status in ("finished", "completed")
+                or compile_state.phase == "completed"
+            )
+            if not terminal:
+                compile_state.status = (
+                    "accepted"
+                    if compile_state.status in ("idle", "queued")
+                    else compile_state.status
+                )
+                compile_state.phase = "accepted"
+                compile_state.last_progress_at = compile_state.unity_accepted_at
         return result
 
     async def compile_status(self, compile_request_id: str = "") -> ToolResponse:
         request_id = new_id("req")
         compile_state = self.server.state.compile
-        return ok(
-            request_id,
-            {
-                "status": compile_state.status,
-                "errorCount": compile_state.error_count,
-                "warningCount": compile_state.warning_count,
-                "startedAt": compile_state.started_at,
-                "finishedAt": compile_state.finished_at,
-                "compileRequestId": compile_request_id
-                or compile_state.compile_request_id,
-            },
-        )
+        data = self._compile_diagnostics()
+        data["compileRequestId"] = compile_request_id or compile_state.compile_request_id
+        return ok(request_id, data)
 
     async def compile_errors(self, compile_request_id: str = "") -> ToolResponse:
         request_id = new_id("req")
@@ -240,6 +290,7 @@ class CompileDomainService:
                         return ok(
                             request_id,
                             {
+                                **self._compile_diagnostics(),
                                 "status": "timeout",
                                 "isCompiling": True,
                                 "pollCount": polls,
@@ -281,6 +332,7 @@ class CompileDomainService:
                 return ok(
                     request_id,
                     {
+                        **self._compile_diagnostics(),
                         "status": "ready",
                         "isCompiling": False,
                         "pollCount": polls,
@@ -322,6 +374,7 @@ class CompileDomainService:
                             return ok(
                                 request_id,
                                 {
+                                    **self._compile_diagnostics(),
                                     "status": "ready",
                                     "isCompiling": False,
                                     "pollCount": polls + 1,
@@ -343,6 +396,7 @@ class CompileDomainService:
                 return ok(
                     request_id,
                     {
+                        **self._compile_diagnostics(),
                         "status": "timeout",
                         "isCompiling": True,
                         "pollCount": polls,
@@ -351,6 +405,8 @@ class CompileDomainService:
                         "waitMode": "timeout+" + "+".join(modes)
                         if modes
                         else "timeout",
+                        "completed": False,
+                        "timedOut": True,
                     },
                 )
             self.server.sync_compile_state_from_editor(is_compiling)
@@ -393,10 +449,23 @@ class CompileDomainService:
 
         request_id = new_id("req")
 
-        # Step 1: Trigger compile
-        compile_r = await self.compile()
-        if not compile_r.ok:
-            return compile_r
+        # Step 1: attach to an automatic/current compile, otherwise trigger one.
+        attached_to_existing = False
+        state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
+        if state_r.ok and state_r.data and bool(state_r.data.get("isCompiling", False)):
+            attached_to_existing = True
+            compile_r = ok(request_id, {"status": "attached", "compileRequestId": self.server.state.compile.compile_request_id})
+            self.server.state.compile.phase = "compiling"
+        else:
+            compile_r = await self.compile()
+            if not compile_r.ok and compile_r.error and compile_r.error.code == "EDITOR_BUSY":
+                verify_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
+                if verify_r.ok and verify_r.data and bool(verify_r.data.get("isCompiling", False)):
+                    attached_to_existing = True
+                    compile_r = ok(request_id, {"status": "attached", "compileRequestId": self.server.state.compile.compile_request_id})
+                    self.server.state.compile.phase = "compiling"
+            if not compile_r.ok:
+                return compile_r
 
         compile_request_id = (
             compile_r.data.get("compileRequestId", "") if compile_r.data else ""
@@ -409,8 +478,16 @@ class CompileDomainService:
             prefer_events=prefer_events,
         )
 
-        # If compile_wait itself reports compile errors, fail fast
-        if not wait_r.ok:
+        # A just-finished compilation can briefly expose the pre-reload
+        # hasCompileErrors value.  The safe workflow must still perform its
+        # post-reload persistent error query before deciding that compilation
+        # failed.  Transport and other wait failures remain terminal here.
+        wait_reported_compile_error = bool(
+            not wait_r.ok
+            and wait_r.error
+            and wait_r.error.code == "COMPILE_ERROR"
+        )
+        if not wait_r.ok and not wait_reported_compile_error:
             return wait_r
 
         if wait_r.data and wait_r.data.get("status") == "timeout":
@@ -426,20 +503,25 @@ class CompileDomainService:
 
         # Step 3: Cooldown period to allow domain reload to complete
         # This is critical: compile may finish just before domain reload starts
-        remaining_after_wait = (
-            timeout_s - wait_r.data.get("elapsedS", 0) if wait_r.data else timeout_s
+        wait_detail = (
+            wait_r.data
+            if wait_r.data
+            else (wait_r.error.detail if wait_r.error else {})
         )
+        remaining_after_wait = timeout_s - float(wait_detail.get("elapsedS", 0))
         actual_delay = min(post_compile_delay_s, max(0.5, remaining_after_wait * 0.1))
         if actual_delay > 0:
             await asyncio.sleep(actual_delay)
 
         # Step 4: If disconnected (likely domain reload), wait for reconnect
+        reconnected_after_reload = False
         if not self.server.is_ready():
             reconnect_deadline = time.monotonic() + min(60.0, remaining_after_wait)
             reconnected = False
             while time.monotonic() < reconnect_deadline:
                 if self.server.is_ready():
                     reconnected = True
+                    reconnected_after_reload = True
                     break
                 await asyncio.sleep(1.0)
             if not reconnected:
@@ -472,13 +554,14 @@ class CompileDomainService:
         return ok(
             request_id,
             {
+                **self._compile_diagnostics(),
                 "status": "success",
                 "compileRequestId": compile_request_id,
                 "postCompileDelayS": actual_delay,
-                "reconnectedAfterReload": not self.server.is_ready()
-                if False
-                else False,
+                "reconnectedAfterReload": reconnected_after_reload,
                 "errorsVerified": True,
                 "errorTotal": 0,
+                "attachedToExistingCompile": attached_to_existing,
+                "waitReportedCompileError": wait_reported_compile_error,
             },
         )

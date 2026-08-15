@@ -1,0 +1,59 @@
+schemaVersion: 2
+name: "77-assert-property-comprehensive"
+description: |
+  Tests assert_property across multiple control types and properties:
+  value, text, title, scaleMode, and other typed properties.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Assert Toggle value property
+    action: assert_property
+    selector: "#enabled-toggle"
+    property: "value"
+    expected: "False"
+
+  - name: Assert IntegerField value property
+    action: assert_property
+    selector: "#integer-field"
+    property: "value"
+    expected: "0"
+
+  - name: Assert DropdownField value property
+    action: assert_property
+    selector: "#choice-dropdown"
+    property: "value"
+    expected: "Alpha"
+
+  - name: Assert Slider value property
+    action: assert_property
+    selector: "#volume-slider"
+    property: "value"
+    expected: "0"
+
+  - name: Assert ProgressBar title property
+    action: assert_property
+    selector: "#progress-bar"
+    property: "title"
+    expected: "Progress"
+
+  - name: Assert HelpBox text property
+    action: assert_property
+    selector: "#help-box"
+    property: "text"
+    expected: "Helpful message"
+
+  - name: Assert Image scaleMode property
+    action: assert_property
+    selector: "#preview-image"
+    property: "scaleMode"
+    expected: "ScaleToFit"
+
+  - name: Assert FloatField value property
+    action: assert_property
+    selector: "#float-field"
+    property: "value"
+    expected: "0"

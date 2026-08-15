@@ -9,6 +9,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -58,12 +59,16 @@ namespace CodingRiver.UPilot
     {
         public string sessionId;
         public long afterSequence = -1;
+        public long fromSequence = -1;
+        public long toSequence = -1;
         public int count = 200;
         public string logType;
         public bool includeStackTrace = true;
         public string[] contains;
         public bool containsAll;
+        public string regex;
         public bool newestFirst;
+        public string continuationToken;
     }
 
     [Serializable]
@@ -158,7 +163,67 @@ namespace CodingRiver.UPilot
         public long afterSequence;
         public long nextSequence;
         public int matchedCount;
+        public int returnedCount;
+        public long totalMatchCount;
         public bool truncated;
+        public string continuationToken;
+        public long effectiveFromSequence;
+        public long effectiveToSequence;
+        public long scannedFromSequence = -1;
+        public long scannedToSequence = -1;
+        public long scannedCount;
+        public bool scanComplete;
+        public double elapsedMs;
+        public string indexPath;
+        public bool indexUsed;
+        public bool indexCreated;
+    }
+
+    [Serializable]
+    public sealed class ConsoleCaptureReadCursor
+    {
+        public int version = 1;
+        public string sessionId;
+        public string queryHash;
+        public long rangeFromSequence;
+        public long snapshotToSequence;
+        public long nextBoundarySequence;
+        public long totalMatchCount;
+        public long consumedMatchCount;
+        public bool newestFirst;
+        public string logType;
+        public bool includeStackTrace;
+        public string[] contains;
+        public bool containsAll;
+        public string regex;
+    }
+
+    [Serializable]
+    public sealed class ConsoleCaptureSparseIndexEntry
+    {
+        public long sequence;
+        public long byteOffset;
+        public string logType;
+    }
+
+    [Serializable]
+    public sealed class ConsoleCaptureSparseIndexSegment
+    {
+        public string fileName;
+        public long indexedBytes;
+        public long indexedRecordCount;
+        public long firstSequence = -1;
+        public long lastSequence = -1;
+        public List<ConsoleCaptureSparseIndexEntry> entries = new();
+    }
+
+    [Serializable]
+    public sealed class ConsoleCaptureSparseIndex
+    {
+        public int version = 1;
+        public int stride = 128;
+        public long updatedAtUtcMs;
+        public List<ConsoleCaptureSparseIndexSegment> segments = new();
     }
 
     [Serializable]
@@ -207,6 +272,8 @@ namespace CodingRiver.UPilot
         private const string CleanupTokenSessionKey = "UPilot.ConsoleCapture.CleanupToken";
         private const string CleanupTargetsSessionKey = "UPilot.ConsoleCapture.CleanupTargets";
         private const string SessionIndexFileName = "session-index.json";
+        private const string SparseIndexFileName = "console.index.json";
+        private const int SparseIndexStride = 128;
         private const int MaxPendingRecords = 10000;
         private const int MaxIndexedCustomSessions = 1000;
 
@@ -215,6 +282,21 @@ namespace CodingRiver.UPilot
             public ConsoleCaptureManifest Manifest;
             public readonly Queue<ConsoleCaptureRecord> Pending = new();
             public double LastFlushTime;
+        }
+
+        private sealed class ConsoleCaptureReadPreparation
+        {
+            public ConsoleCaptureManifest Manifest;
+            public string Error;
+        }
+
+        private sealed class ConsoleCaptureLiteralScanResult
+        {
+            public readonly List<ConsoleCaptureRecord> Matches = new();
+            public long TotalMatches;
+            public long ScannedCount;
+            public long ScannedFrom = -1;
+            public long ScannedTo = -1;
         }
 
         private static readonly object CaptureLock = new();
@@ -342,13 +424,47 @@ namespace CodingRiver.UPilot
         {
             var message = JsonUtility.FromJson<ConsoleCaptureReadMessage>(json);
             var payload = message?.payload ?? new ConsoleCaptureReadPayload();
-            var tcs = new TaskCompletionSource<ConsoleCaptureReadResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var preparationTcs = new TaskCompletionSource<ConsoleCaptureReadPreparation>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
-                try { tcs.TrySetResult(ReadCapture(payload)); }
-                catch (Exception ex) { tcs.TrySetException(ex); }
+                try { preparationTcs.TrySetResult(PrepareReadCapture(payload)); }
+                catch (Exception ex) { preparationTcs.TrySetException(ex); }
             });
-            await SendResultOrError(id, "console.capture.read", tcs.Task, token);
+
+            try
+            {
+                var preparation = await preparationTcs.Task.ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(preparation.Error))
+                {
+                    await _bridge.SendResultAsync(
+                        id,
+                        "console.capture.read",
+                        new ConsoleCaptureReadResult
+                        {
+                            ok = false,
+                            action = "ReadCapture",
+                            error = preparation.Error,
+                            sessionId = payload.sessionId ?? string.Empty,
+                        },
+                        token);
+                    return;
+                }
+
+                // File IO and JSON parsing must not run inside EditorApplication.update.
+                var result = await Task.Run(
+                    () => ReadCaptureFiles(preparation.Manifest, payload, token),
+                    token).ConfigureAwait(false);
+                await _bridge.SendResultAsync(id, "console.capture.read", result, token);
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(
+                    id,
+                    "INTERNAL_ERROR",
+                    $"Console Capture 操作失败：{ex.Message}",
+                    token,
+                    "console.capture.read");
+            }
         }
 
         private async Task HandleStopAsync(string id, string json, CancellationToken token)
@@ -459,34 +575,176 @@ namespace CodingRiver.UPilot
                 : Result(false, "GetCaptureStatus", "未找到日志采集会话: " + (sessionId ?? string.Empty), null);
         }
 
-        private static ConsoleCaptureReadResult ReadCapture(ConsoleCaptureReadPayload payload)
+        private static ConsoleCaptureReadPreparation PrepareReadCapture(ConsoleCaptureReadPayload payload)
         {
             TryRecoverActiveSession();
             FlushActiveCapture(true);
             var manifest = ResolveManifest(payload.sessionId);
             if (manifest == null)
-                return new ConsoleCaptureReadResult { ok = false, action = "ReadCapture", error = "未找到日志采集会话", sessionId = payload.sessionId ?? string.Empty };
+                return new ConsoleCaptureReadPreparation { Error = "未找到日志采集会话" };
 
+            return new ConsoleCaptureReadPreparation { Manifest = manifest };
+        }
+
+        private static ConsoleCaptureReadResult ReadCaptureFiles(
+            ConsoleCaptureManifest manifest,
+            ConsoleCaptureReadPayload payload,
+            CancellationToken token)
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             int count = Math.Max(1, Math.Min(payload.count, 5000));
-            var matches = new List<ConsoleCaptureRecord>();
-            foreach (string file in GetSegmentFiles(manifest.directory))
+            var matches = new List<ConsoleCaptureRecord>(count);
+            var newestMatches = payload.newestFirst
+                ? new Queue<ConsoleCaptureRecord>(count)
+                : null;
+            var cursor = DecodeReadCursor(payload.continuationToken);
+            if (cursor != null && cursor.version == 1)
             {
-                foreach (string line in File.ReadLines(file))
+                payload.logType = cursor.logType;
+                payload.includeStackTrace = cursor.includeStackTrace;
+                payload.contains = cursor.contains;
+                payload.containsAll = cursor.containsAll;
+                payload.regex = cursor.regex;
+                payload.newestFirst = cursor.newestFirst;
+            }
+            string queryHash = ComputeReadQueryHash(payload);
+            long requestedFrom = payload.fromSequence >= 0
+                ? payload.fromSequence
+                : Math.Max(0, payload.afterSequence + 1);
+            long requestedTo = payload.toSequence >= 0
+                ? payload.toSequence
+                : Math.Max(-1, manifest.nextSequence - 1);
+            if (cursor != null && (cursor.sessionId != manifest.sessionId
+                || cursor.queryHash != queryHash
+                || cursor.newestFirst != payload.newestFirst))
+            {
+                return new ConsoleCaptureReadResult
                 {
+                    ok = false,
+                    action = "ReadCapture",
+                    error = "continuationToken 与当前会话、筛选条件或排序方式不匹配",
+                    sessionId = manifest.sessionId,
+                };
+            }
+
+            long rangeFrom = cursor?.rangeFromSequence ?? requestedFrom;
+            long snapshotTo = cursor?.snapshotToSequence ?? requestedTo;
+            if (snapshotTo < rangeFrom)
+                snapshotTo = rangeFrom - 1;
+            long pageBoundary = cursor?.nextBoundarySequence
+                ?? (payload.newestFirst ? snapshotTo : rangeFrom);
+            long scanFrom = payload.newestFirst ? rangeFrom : Math.Max(rangeFrom, pageBoundary);
+            long scanTo = payload.newestFirst ? Math.Min(snapshotTo, pageBoundary) : snapshotTo;
+            long totalMatches = cursor?.totalMatchCount ?? 0;
+            long scannedCount = 0;
+            long scannedFrom = -1;
+            long scannedTo = -1;
+            bool countAllMatches = cursor == null;
+
+            string indexPath = Path.Combine(manifest.directory, SparseIndexFileName);
+            bool indexCreated;
+            ConsoleCaptureSparseIndex sparseIndex = LoadOrBuildSparseIndex(manifest.directory, token, out indexCreated);
+            Regex compiledRegex = CompileReadRegex(payload.regex);
+            string[] rawLineNeedles = GetRawLinePrefilterNeedles(payload);
+
+            if (rawLineNeedles != null && !payload.newestFirst)
+            {
+                ConsoleCaptureLiteralScanResult fastScan = ScanLiteralRegexFiles(
+                    manifest.directory,
+                    sparseIndex,
+                    scanFrom,
+                    scanTo,
+                    count,
+                    countAllMatches,
+                    cursor != null,
+                    payload,
+                    compiledRegex,
+                    rawLineNeedles,
+                    token);
+                matches = fastScan.Matches;
+                scannedCount = fastScan.ScannedCount;
+                scannedFrom = fastScan.ScannedFrom;
+                scannedTo = fastScan.ScannedTo;
+                if (countAllMatches) totalMatches = fastScan.TotalMatches;
+            }
+            else foreach (string file in GetSegmentFiles(manifest.directory))
+            {
+                var segmentIndex = sparseIndex?.segments?.FirstOrDefault(item =>
+                    string.Equals(item.fileName, Path.GetFileName(file), StringComparison.OrdinalIgnoreCase));
+                if (segmentIndex != null && (segmentIndex.lastSequence < scanFrom || segmentIndex.firstSequence > scanTo))
+                    continue;
+
+                long offset = FindReadOffset(segmentIndex, scanFrom);
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, FileOptions.SequentialScan);
+                if (offset > 0) stream.Seek(offset, SeekOrigin.Begin);
+                using var reader = new StreamReader(stream, Encoding.UTF8, true, 64 * 1024, false);
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    token.ThrowIfCancellationRequested();
                     if (string.IsNullOrWhiteSpace(line)) continue;
+                    if (!TryExtractSequence(line, out long sequence)) continue;
+                    if (sequence < scanFrom) continue;
+                    if (sequence > scanTo) break;
+                    scannedCount++;
+                    if (scannedFrom < 0) scannedFrom = sequence;
+                    scannedTo = sequence;
+                    if (rawLineNeedles != null && !RawLineContainsAny(line, rawLineNeedles)) continue;
                     ConsoleCaptureRecord record;
                     try { record = JsonUtility.FromJson<ConsoleCaptureRecord>(line); }
                     catch { continue; }
-                    if (record == null || record.sequence <= payload.afterSequence || !Matches(record, payload)) continue;
+                    if (record == null) continue;
+                    if (!Matches(record, payload, compiledRegex)) continue;
+                    if (countAllMatches)
+                        totalMatches = totalMatches == long.MaxValue ? long.MaxValue : totalMatches + 1;
                     if (!payload.includeStackTrace) record.stackTrace = string.Empty;
-                    matches.Add(record);
+                    if (payload.newestFirst)
+                    {
+                        if (newestMatches.Count >= count) newestMatches.Dequeue();
+                        newestMatches.Enqueue(record);
+                    }
+                    else if (matches.Count < count)
+                    {
+                        matches.Add(record);
+                    }
+                    if (cursor != null && !payload.newestFirst && matches.Count >= count)
+                        break;
                 }
+                if (cursor != null && !payload.newestFirst && matches.Count >= count)
+                    break;
             }
 
-            int totalMatches = matches.Count;
-            if (payload.newestFirst) matches.Reverse();
-            if (matches.Count > count) matches = matches.GetRange(0, count);
+            if (payload.newestFirst)
+            {
+                matches = newestMatches.ToList();
+                matches.Reverse();
+            }
+
+            long consumedMatches = (cursor?.consumedMatchCount ?? 0) + matches.Count;
+            bool hasMore = consumedMatches < totalMatches;
+            long nextBoundary = payload.newestFirst
+                ? (matches.Count > 0 ? matches.Min(item => item.sequence) - 1 : rangeFrom - 1)
+                : (matches.Count > 0 ? matches.Max(item => item.sequence) + 1 : snapshotTo + 1);
+            string continuationToken = hasMore
+                ? EncodeReadCursor(new ConsoleCaptureReadCursor
+                {
+                    sessionId = manifest.sessionId,
+                    queryHash = queryHash,
+                    rangeFromSequence = rangeFrom,
+                    snapshotToSequence = snapshotTo,
+                    nextBoundarySequence = nextBoundary,
+                    totalMatchCount = totalMatches,
+                    consumedMatchCount = consumedMatches,
+                    newestFirst = payload.newestFirst,
+                    logType = payload.logType,
+                    includeStackTrace = payload.includeStackTrace,
+                    contains = payload.contains,
+                    containsAll = payload.containsAll,
+                    regex = payload.regex,
+                })
+                : string.Empty;
             long nextSequence = matches.Count > 0 ? matches.Max(item => item.sequence) : payload.afterSequence;
+            stopwatch.Stop();
             return new ConsoleCaptureReadResult
             {
                 ok = true,
@@ -495,8 +753,21 @@ namespace CodingRiver.UPilot
                 logs = matches,
                 afterSequence = payload.afterSequence,
                 nextSequence = nextSequence,
-                matchedCount = totalMatches,
-                truncated = totalMatches > matches.Count,
+                matchedCount = totalMatches > int.MaxValue ? int.MaxValue : (int)totalMatches,
+                returnedCount = matches.Count,
+                totalMatchCount = totalMatches,
+                truncated = hasMore,
+                continuationToken = continuationToken,
+                effectiveFromSequence = rangeFrom,
+                effectiveToSequence = snapshotTo,
+                scannedFromSequence = scannedFrom,
+                scannedToSequence = scannedTo,
+                scannedCount = scannedCount,
+                scanComplete = true,
+                elapsedMs = stopwatch.Elapsed.TotalMilliseconds,
+                indexPath = indexPath,
+                indexUsed = sparseIndex != null,
+                indexCreated = indexCreated,
             };
         }
 
@@ -515,9 +786,29 @@ namespace CodingRiver.UPilot
             if (active == null)
             {
                 var existing = LoadManifestBySessionId(sessionId);
-                return existing != null
-                    ? Result(true, "StopCapture", string.Empty, existing)
-                    : Result(false, "StopCapture", "当前没有活跃日志采集会话", null);
+                if (existing == null)
+                    return Result(false, "StopCapture", "当前没有活跃日志采集会话", null);
+
+                // A service restart or domain reload can lose the SessionState
+                // pointer while the persisted manifest still says active.  A
+                // successful stop must finalize that historical session too.
+                if (existing.active)
+                {
+                    existing.active = false;
+                    existing.finishedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    existing.durationSec = Math.Max(
+                        0d,
+                        (existing.finishedAtUtcMs - existing.startedAtUtcMs) / 1000d);
+                    existing.fileBytes = GetDirectoryLogBytes(existing.directory);
+                    existing.sha256 = ComputeCombinedSha256(existing.directory);
+                    WriteManifest(existing);
+                    File.WriteAllText(
+                        existing.summaryPath,
+                        JsonUtility.ToJson(existing, true),
+                        Utf8NoBom);
+                }
+
+                return Result(true, "StopCapture", string.Empty, CloneManifest(existing));
             }
 
             FlushActiveCapture(true);
@@ -657,8 +948,10 @@ namespace CodingRiver.UPilot
                 {
                     active.Manifest.segmentCount++;
                     path = GetCurrentSegmentPath(active.Manifest);
+                    currentBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
                 }
                 File.AppendAllText(path, builder.ToString(), Utf8NoBom);
+                UpdateSparseIndexAfterAppend(path, records, currentBytes, bytes.Length);
                 active.Manifest.jsonlPath = path;
                 active.Manifest.fileBytes = GetDirectoryLogBytes(active.Manifest.directory);
                 active.Manifest.lastError = string.Empty;
@@ -676,13 +969,80 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static bool Matches(ConsoleCaptureRecord record, ConsoleCaptureReadPayload payload)
+        private static void UpdateSparseIndexAfterAppend(
+            string file,
+            List<ConsoleCaptureRecord> records,
+            long startingOffset,
+            long appendedBytes)
+        {
+            if (records == null || records.Count == 0) return;
+            string directory = Path.GetDirectoryName(file);
+            string indexPath = Path.Combine(directory, SparseIndexFileName);
+            ConsoleCaptureSparseIndex index = null;
+            try
+            {
+                if (File.Exists(indexPath))
+                    index = JsonUtility.FromJson<ConsoleCaptureSparseIndex>(File.ReadAllText(indexPath, Encoding.UTF8));
+            }
+            catch { index = null; }
+            index ??= new ConsoleCaptureSparseIndex { stride = SparseIndexStride };
+            index.segments ??= new List<ConsoleCaptureSparseIndexSegment>();
+            string fileName = Path.GetFileName(file);
+            var segment = index.segments.FirstOrDefault(item =>
+                string.Equals(item.fileName, fileName, StringComparison.OrdinalIgnoreCase));
+            if (segment == null && startingOffset > 0 || segment != null && segment.indexedBytes != startingOffset)
+            {
+                LoadOrBuildSparseIndex(directory, CancellationToken.None, out _);
+                return;
+            }
+            if (segment == null)
+            {
+                segment = new ConsoleCaptureSparseIndexSegment { fileName = fileName };
+                index.segments.RemoveAll(item =>
+                    string.Equals(item.fileName, fileName, StringComparison.OrdinalIgnoreCase));
+                index.segments.Add(segment);
+            }
+
+            long offset = startingOffset;
+            long recordIndex = segment.indexedRecordCount;
+            int newlineBytes = Utf8NoBom.GetByteCount(Environment.NewLine);
+            foreach (ConsoleCaptureRecord record in records)
+            {
+                if (segment.firstSequence < 0) segment.firstSequence = record.sequence;
+                segment.lastSequence = record.sequence;
+                if (recordIndex % SparseIndexStride == 0)
+                {
+                    segment.entries.Add(new ConsoleCaptureSparseIndexEntry
+                    {
+                        sequence = record.sequence,
+                        byteOffset = offset,
+                        logType = record.logType,
+                    });
+                }
+                offset += Utf8NoBom.GetByteCount(JsonUtility.ToJson(record)) + newlineBytes;
+                recordIndex++;
+            }
+            segment.indexedBytes = startingOffset + appendedBytes;
+            segment.indexedRecordCount = recordIndex;
+            index.updatedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            File.WriteAllText(indexPath, JsonUtility.ToJson(index), Utf8NoBom);
+        }
+
+        private static Regex CompileReadRegex(string pattern)
+        {
+            return string.IsNullOrWhiteSpace(pattern)
+                ? null
+                : new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        }
+
+        private static bool Matches(ConsoleCaptureRecord record, ConsoleCaptureReadPayload payload, Regex regex)
         {
             if (!string.IsNullOrEmpty(payload.logType) && !string.Equals(record.logType, payload.logType, StringComparison.OrdinalIgnoreCase))
                 return false;
+            string text = (record.message ?? string.Empty) + "\n" + (record.stackTrace ?? string.Empty);
+            if (regex != null && !regex.IsMatch(text)) return false;
             string[] contains = payload.contains ?? Array.Empty<string>();
             if (contains.Length == 0) return true;
-            string text = (record.message ?? string.Empty) + "\n" + (record.stackTrace ?? string.Empty);
             bool any = false;
             foreach (string value in contains)
             {
@@ -692,6 +1052,364 @@ namespace CodingRiver.UPilot
                 if (hit) any = true;
             }
             return payload.containsAll || any;
+        }
+
+        private static ConsoleCaptureSparseIndex LoadOrBuildSparseIndex(
+            string directory,
+            CancellationToken token,
+            out bool changed)
+        {
+            changed = false;
+            string path = Path.Combine(directory, SparseIndexFileName);
+            ConsoleCaptureSparseIndex index = null;
+            try
+            {
+                if (File.Exists(path))
+                    index = JsonUtility.FromJson<ConsoleCaptureSparseIndex>(File.ReadAllText(path, Encoding.UTF8));
+            }
+            catch { index = null; }
+            if (index == null || index.version != 1 || index.stride != SparseIndexStride)
+            {
+                index = new ConsoleCaptureSparseIndex { stride = SparseIndexStride };
+                changed = true;
+            }
+
+            var files = GetSegmentFiles(directory).ToList();
+            index.segments ??= new List<ConsoleCaptureSparseIndexSegment>();
+            index.segments.RemoveAll(item => item == null || files.All(file =>
+                !string.Equals(Path.GetFileName(file), item.fileName, StringComparison.OrdinalIgnoreCase)));
+            foreach (string file in files)
+            {
+                token.ThrowIfCancellationRequested();
+                string fileName = Path.GetFileName(file);
+                long fileBytes = new FileInfo(file).Length;
+                var segment = index.segments.FirstOrDefault(item =>
+                    string.Equals(item.fileName, fileName, StringComparison.OrdinalIgnoreCase));
+                if (segment == null || segment.indexedBytes > fileBytes)
+                {
+                    segment = new ConsoleCaptureSparseIndexSegment { fileName = fileName };
+                    index.segments.RemoveAll(item => string.Equals(item.fileName, fileName, StringComparison.OrdinalIgnoreCase));
+                    index.segments.Add(segment);
+                    changed = true;
+                }
+                if (segment.indexedBytes == fileBytes) continue;
+
+                long offset = segment.indexedBytes;
+                long recordIndex = segment.indexedRecordCount;
+                byte[] bytes = File.ReadAllBytes(file);
+                int position = offset > int.MaxValue ? bytes.Length : Math.Max(0, (int)offset);
+                while (position < bytes.Length)
+                {
+                    token.ThrowIfCancellationRequested();
+                    int lineStart = position;
+                    while (position < bytes.Length && bytes[position] != (byte)'\n') position++;
+                    int lineEnd = position;
+                    if (lineEnd > lineStart && bytes[lineEnd - 1] == (byte)'\r') lineEnd--;
+                    position++;
+                    if (!TryExtractSequence(bytes, lineStart, lineEnd, out long sequence)) continue;
+                    if (segment.firstSequence < 0) segment.firstSequence = sequence;
+                    segment.lastSequence = sequence;
+                    if (recordIndex % SparseIndexStride == 0)
+                    {
+                        segment.entries.Add(new ConsoleCaptureSparseIndexEntry
+                        {
+                            sequence = sequence,
+                            byteOffset = lineStart,
+                        });
+                    }
+                    recordIndex++;
+                }
+                segment.indexedBytes = fileBytes;
+                segment.indexedRecordCount = recordIndex;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                index.updatedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                File.WriteAllText(path, JsonUtility.ToJson(index), Utf8NoBom);
+            }
+            return index;
+        }
+
+        private static bool TryExtractSequence(string line, out long sequence)
+        {
+            sequence = 0;
+            if (string.IsNullOrEmpty(line)) return false;
+            int keyIndex = line.IndexOf("\"sequence\"", StringComparison.Ordinal);
+            if (keyIndex < 0) return false;
+            int colonIndex = line.IndexOf(':', keyIndex + 10);
+            if (colonIndex < 0) return false;
+            int index = colonIndex + 1;
+            while (index < line.Length && char.IsWhiteSpace(line[index])) index++;
+            bool negative = index < line.Length && line[index] == '-';
+            if (negative) index++;
+            long value = 0;
+            int digitCount = 0;
+            while (index < line.Length)
+            {
+                char current = line[index];
+                if (current < '0' || current > '9') break;
+                int digit = current - '0';
+                if (value > (long.MaxValue - digit) / 10) return false;
+                value = value * 10 + digit;
+                digitCount++;
+                index++;
+            }
+            if (digitCount == 0) return false;
+            sequence = negative ? -value : value;
+            return true;
+        }
+
+        private static bool TryExtractSequence(byte[] bytes, int start, int end, out long sequence)
+        {
+            sequence = 0;
+            if (bytes == null || start < 0 || end <= start || end > bytes.Length) return false;
+            byte[] key = { (byte)'"', (byte)'s', (byte)'e', (byte)'q', (byte)'u', (byte)'e', (byte)'n', (byte)'c', (byte)'e', (byte)'"' };
+            int probe = start;
+            if (end - probe >= 3 && bytes[probe] == 0xEF && bytes[probe + 1] == 0xBB && bytes[probe + 2] == 0xBF) probe += 3;
+            while (probe < end && (bytes[probe] == (byte)' ' || bytes[probe] == (byte)'\t')) probe++;
+            if (probe < end && bytes[probe] == (byte)'{') probe++;
+            int keyIndex = BytesEqualAt(bytes, probe, end, key, false)
+                ? probe
+                : IndexOfBytes(bytes, start, end, key, false);
+            if (keyIndex < 0) return false;
+            int index = keyIndex + key.Length;
+            while (index < end && bytes[index] != (byte)':') index++;
+            if (index >= end) return false;
+            index++;
+            while (index < end && (bytes[index] == (byte)' ' || bytes[index] == (byte)'\t')) index++;
+            bool negative = index < end && bytes[index] == (byte)'-';
+            if (negative) index++;
+            long value = 0;
+            int digitCount = 0;
+            while (index < end && bytes[index] >= (byte)'0' && bytes[index] <= (byte)'9')
+            {
+                int digit = bytes[index] - (byte)'0';
+                if (value > (long.MaxValue - digit) / 10) return false;
+                value = value * 10 + digit;
+                digitCount++;
+                index++;
+            }
+            if (digitCount == 0) return false;
+            sequence = negative ? -value : value;
+            return true;
+        }
+
+        private static ConsoleCaptureLiteralScanResult ScanLiteralRegexFiles(
+            string directory,
+            ConsoleCaptureSparseIndex sparseIndex,
+            long scanFrom,
+            long scanTo,
+            int count,
+            bool countAllMatches,
+            bool stopWhenPageFull,
+            ConsoleCaptureReadPayload payload,
+            Regex regex,
+            string[] needles,
+            CancellationToken token)
+        {
+            var result = new ConsoleCaptureLiteralScanResult();
+            byte[][] needleBytes = needles.Select(value => Encoding.ASCII.GetBytes(value)).ToArray();
+            foreach (string file in GetSegmentFiles(directory))
+            {
+                var segment = sparseIndex?.segments?.FirstOrDefault(item =>
+                    string.Equals(item.fileName, Path.GetFileName(file), StringComparison.OrdinalIgnoreCase));
+                if (segment != null && (segment.lastSequence < scanFrom || segment.firstSequence > scanTo)) continue;
+                long requestedOffset = FindReadOffset(segment, scanFrom);
+                byte[] bytes = File.ReadAllBytes(file);
+                int searchStart = requestedOffset > int.MaxValue ? bytes.Length : Math.Max(0, (int)requestedOffset);
+                var lineStarts = new HashSet<int>();
+                foreach (byte[] needle in needleBytes)
+                {
+                    int match = searchStart;
+                    while ((match = IndexOfBytesBoyerMoore(bytes, match, bytes.Length, needle, true)) >= 0)
+                    {
+                        int lineStart = match;
+                        while (lineStart > searchStart && bytes[lineStart - 1] != (byte)'\n') lineStart--;
+                        lineStarts.Add(lineStart);
+                        match += Math.Max(1, needle.Length);
+                    }
+                }
+
+                bool pageFull = false;
+                foreach (int lineStart in lineStarts.OrderBy(value => value))
+                {
+                    token.ThrowIfCancellationRequested();
+                    int lineEnd = lineStart;
+                    while (lineEnd < bytes.Length && bytes[lineEnd] != (byte)'\n') lineEnd++;
+                    if (lineEnd > lineStart && bytes[lineEnd - 1] == (byte)'\r') lineEnd--;
+                    if (!TryExtractSequence(bytes, lineStart, lineEnd, out long sequence) || sequence < scanFrom) continue;
+                    if (sequence > scanTo) break;
+                    string line = Utf8NoBom.GetString(bytes, lineStart, lineEnd - lineStart);
+                    ConsoleCaptureRecord record;
+                    try { record = JsonUtility.FromJson<ConsoleCaptureRecord>(line); }
+                    catch { continue; }
+                    if (record == null || !Matches(record, payload, regex)) continue;
+                    if (countAllMatches) result.TotalMatches++;
+                    if (!payload.includeStackTrace) record.stackTrace = string.Empty;
+                    if (result.Matches.Count < count) result.Matches.Add(record);
+                    if (stopWhenPageFull && result.Matches.Count >= count)
+                    {
+                        pageFull = true;
+                        break;
+                    }
+                }
+                long segmentFrom = segment == null ? scanFrom : Math.Max(scanFrom, segment.firstSequence);
+                long segmentTo = segment == null ? scanTo : Math.Min(scanTo, segment.lastSequence);
+                if (segmentTo >= segmentFrom)
+                {
+                    if (result.ScannedFrom < 0) result.ScannedFrom = segmentFrom;
+                    result.ScannedTo = segmentTo;
+                    result.ScannedCount += segmentTo - segmentFrom + 1;
+                }
+                if (pageFull) return result;
+            }
+            return result;
+        }
+
+        private static int IndexOfBytesBoyerMoore(
+            byte[] haystack,
+            int start,
+            int end,
+            byte[] needle,
+            bool ignoreAsciiCase)
+        {
+            if (needle == null || needle.Length == 0) return start;
+            var shifts = new int[256];
+            for (int index = 0; index < shifts.Length; index++) shifts[index] = needle.Length;
+            for (int index = 0; index < needle.Length - 1; index++)
+                shifts[FoldAscii(needle[index], ignoreAsciiCase)] = needle.Length - 1 - index;
+            int cursor = Math.Max(0, start) + needle.Length - 1;
+            while (cursor < end)
+            {
+                int needleIndex = needle.Length - 1;
+                int haystackIndex = cursor;
+                while (needleIndex >= 0 && FoldAscii(haystack[haystackIndex], ignoreAsciiCase) == FoldAscii(needle[needleIndex], ignoreAsciiCase))
+                {
+                    haystackIndex--;
+                    needleIndex--;
+                }
+                if (needleIndex < 0) return haystackIndex + 1;
+                cursor += Math.Max(1, shifts[FoldAscii(haystack[cursor], ignoreAsciiCase)]);
+            }
+            return -1;
+        }
+
+        private static int IndexOfBytes(byte[] haystack, int start, int end, byte[] needle, bool ignoreAsciiCase)
+        {
+            if (needle == null || needle.Length == 0) return start;
+            int last = end - needle.Length;
+            for (int index = start; index <= last; index++)
+            {
+                if (BytesEqualAt(haystack, index, end, needle, ignoreAsciiCase)) return index;
+            }
+            return -1;
+        }
+
+        private static bool BytesEqualAt(byte[] haystack, int index, int end, byte[] needle, bool ignoreAsciiCase)
+        {
+            if (needle == null || index < 0 || index + needle.Length > end) return false;
+            for (int offset = 0; offset < needle.Length; offset++)
+            {
+                if (FoldAscii(haystack[index + offset], ignoreAsciiCase) != FoldAscii(needle[offset], ignoreAsciiCase))
+                    return false;
+            }
+            return true;
+        }
+
+        private static byte FoldAscii(byte value, bool ignoreAsciiCase)
+        {
+            return ignoreAsciiCase && value >= (byte)'A' && value <= (byte)'Z'
+                ? (byte)(value + 32)
+                : value;
+        }
+
+        private static string[] GetRawLinePrefilterNeedles(ConsoleCaptureReadPayload payload)
+        {
+            if (payload == null || string.IsNullOrWhiteSpace(payload.regex)
+                || (payload.contains?.Length ?? 0) > 0)
+                return null;
+            string[] values = payload.regex.Split('|');
+            if (values.Length == 0) return null;
+            foreach (string value in values)
+            {
+                if (string.IsNullOrEmpty(value)) return null;
+                foreach (char current in value)
+                {
+                    if (!(current >= 'a' && current <= 'z')
+                        && !(current >= 'A' && current <= 'Z')
+                        && !(current >= '0' && current <= '9')
+                        && current != '_' && current != '-' && current != '.' && current != ':' && current != '/')
+                        return null;
+                }
+            }
+            return values;
+        }
+
+        private static bool RawLineContainsAny(string line, string[] needles)
+        {
+            foreach (string needle in needles)
+            {
+                if (line.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        private static long FindReadOffset(ConsoleCaptureSparseIndexSegment segment, long fromSequence)
+        {
+            if (segment?.entries == null || segment.entries.Count == 0) return 0;
+            return segment.entries
+                .Where(item => item.sequence <= fromSequence)
+                .OrderByDescending(item => item.sequence)
+                .Select(item => item.byteOffset)
+                .FirstOrDefault();
+        }
+
+        private static string ComputeReadQueryHash(ConsoleCaptureReadPayload payload)
+        {
+            string canonical = string.Join("\n", new[]
+            {
+                payload.logType ?? string.Empty,
+                payload.containsAll.ToString(),
+                payload.regex ?? string.Empty,
+                payload.newestFirst.ToString(),
+                string.Join("\u001f", payload.contains ?? Array.Empty<string>()),
+            });
+            return ComputeTextSha256(canonical);
+        }
+
+        private static string EncodeReadCursor(ConsoleCaptureReadCursor cursor)
+        {
+            return Convert.ToBase64String(Utf8NoBom.GetBytes(JsonUtility.ToJson(cursor)));
+        }
+
+        private static ConsoleCaptureReadCursor DecodeReadCursor(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token)) return null;
+            try
+            {
+                var cursor = JsonUtility.FromJson<ConsoleCaptureReadCursor>(
+                    Utf8NoBom.GetString(Convert.FromBase64String(token)));
+                return cursor != null && cursor.version == 1 ? cursor : null;
+            }
+            catch
+            {
+                return new ConsoleCaptureReadCursor { version = -1 };
+            }
+        }
+
+        private static int DetectNewlineBytes(string file)
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            int previous = -1;
+            int current;
+            while ((current = stream.ReadByte()) >= 0)
+            {
+                if (current == '\n') return previous == '\r' ? 2 : 1;
+                previous = current;
+            }
+            return Utf8NoBom.GetByteCount(Environment.NewLine);
         }
 
         private static ConsoleCaptureManifest ResolveManifest(string sessionId)

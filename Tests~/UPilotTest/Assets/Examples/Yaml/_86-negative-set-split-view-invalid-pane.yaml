@@ -1,0 +1,17 @@
+schemaVersion: 2
+name: "_86-negative-set-split-view-invalid-pane"
+description: |
+  Verifies that set_split_view_size fails with an invalid pane index.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageCollectionsWindow
+    reopen_if_open: true
+
+steps:
+  - name: set_split_view_size with invalid pane should fail
+    action: set_split_view_size
+    selector: "#workspace-split"
+    pane: "5"
+    size: "200"

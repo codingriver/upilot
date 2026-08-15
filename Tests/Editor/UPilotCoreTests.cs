@@ -1,13 +1,17 @@
 using System;
+using System.Collections;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -71,19 +75,370 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void BridgeResultSerializesAuthoritativeEditorContext()
+        {
+            var message = new ResultMessage<GenericOkPayload>
+            {
+                id = "cmd-1",
+                name = "test.result",
+                payload = new GenericOkPayload { ok = true },
+                context = new EditorContextPayload
+                {
+                    connected = true,
+                    authoritative = true,
+                    source = "bridge-response",
+                    sessionId = "session-1",
+                    playModeState = "edit",
+                    updatedAt = 123,
+                    lastMainThreadPumpAt = 123,
+                    mainThreadQueueDepth = 2,
+                    processId = 42,
+                },
+            };
+
+            var json = JsonUtility.ToJson(message);
+
+            Assert.That(json, Does.Contain("\"authoritative\":true"));
+            Assert.That(json, Does.Contain("\"source\":\"bridge-response\""));
+            Assert.That(json, Does.Contain("\"mainThreadQueueDepth\":2"));
+            Assert.That(json, Does.Contain("\"processId\":42"));
+        }
+
+        [Test]
+        public void ScreenshotSaveDefaultsRemainBackwardCompatible()
+        {
+            var payload = new ScreenshotSavePayload();
+
+            Assert.That(payload.degrade, Is.EqualTo("none"));
+            Assert.That(payload.fallbackSources, Is.Null);
+            Assert.That(new ScreenshotSaveResultPayload().degraded, Is.False);
+        }
+
+        [Test]
+        public void EditorWindowResolutionIgnoresSameNamedNativeWindow()
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("Native-window isolation is Windows-specific.");
+
+            var title = "UPilotNativeWindow-" + Guid.NewGuid().ToString("N");
+            var handle = CreateWindowEx(
+                0,
+                "STATIC",
+                title,
+                unchecked((int)0x80000000),
+                0,
+                0,
+                64,
+                64,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            Assert.That(handle, Is.Not.EqualTo(IntPtr.Zero),
+                $"CreateWindowEx failed with Win32 error {Marshal.GetLastWin32Error()}");
+
+            try
+            {
+                var resolved = UPilotWindowService.ResolveWindow(title, "exact");
+                Assert.That(resolved.window, Is.Null);
+                Assert.That(resolved.info, Is.Null);
+            }
+            finally
+            {
+                DestroyWindow(handle);
+            }
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateWindowEx(
+            int extendedStyle,
+            string className,
+            string windowName,
+            int style,
+            int x,
+            int y,
+            int width,
+            int height,
+            IntPtr parent,
+            IntPtr menu,
+            IntPtr instance,
+            IntPtr parameter);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyWindow(IntPtr window);
+
+        [Test]
+        public void ConsoleCaptureStopFinalizesHistoricalActiveManifest()
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(
+                root,
+                "Log",
+                "UPilotConsole",
+                "test-historical-stop-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var sessionId = "console_test_historical_" + Guid.NewGuid().ToString("N");
+            var manifestPath = Path.Combine(directory, "session.json");
+            var summaryPath = Path.Combine(directory, "summary.json");
+            var jsonlPath = Path.Combine(directory, "console.jsonl");
+            File.WriteAllText(jsonlPath, "{\"sequence\":0}\n");
+            var manifest = new ConsoleCaptureManifest
+            {
+                sessionId = sessionId,
+                title = "historical-stop",
+                directory = directory,
+                jsonlPath = jsonlPath,
+                manifestPath = manifestPath,
+                summaryPath = summaryPath,
+                active = true,
+                startedAtUtcMs = DateTimeOffset.UtcNow.AddSeconds(-1).ToUnixTimeMilliseconds(),
+            };
+            File.WriteAllText(manifestPath, JsonUtility.ToJson(manifest, true));
+
+            string activeDirectoryKey = null;
+            string previousActiveDirectory = null;
+            try
+            {
+                var activeField = typeof(UPilotConsoleCaptureService).GetField(
+                    "s_active",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                Assert.That(activeField.GetValue(null), Is.Null,
+                    "The historical-stop test requires no live capture.");
+                var projectSessionKey = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ProjectSessionKey",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                activeDirectoryKey = (string)projectSessionKey.Invoke(
+                    null,
+                    new object[] { "UPilot.ConsoleCapture.ActiveDirectory" });
+                previousActiveDirectory = SessionState.GetString(activeDirectoryKey, string.Empty);
+                SessionState.EraseString(activeDirectoryKey);
+                activeField.SetValue(null, null);
+                var stop = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "StopCapture",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                var result = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId });
+                var persisted = JsonUtility.FromJson<ConsoleCaptureManifest>(
+                    File.ReadAllText(manifestPath));
+
+                Assert.That(result.ok, Is.True);
+                Assert.That(result.session.active, Is.False);
+                Assert.That(persisted.active, Is.False);
+                Assert.That(persisted.finishedAtUtcMs, Is.GreaterThan(0));
+                Assert.That(persisted.sha256, Is.Not.Empty);
+                Assert.That(File.Exists(summaryPath), Is.True);
+            }
+            finally
+            {
+                if (!string.IsNullOrEmpty(previousActiveDirectory))
+                    SessionState.SetString(activeDirectoryKey, previousActiveDirectory);
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ConsoleCaptureReadPaginatesFilteredSnapshotWithoutDuplicates()
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-read-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var records = Enumerable.Range(0, 40)
+                    .Select(index => new ConsoleCaptureRecord
+                    {
+                        sequence = index,
+                        timestampUtcMs = index,
+                        logType = index % 2 == 0 ? "Log" : "Warning",
+                        message = index % 3 == 0 ? "RewardPending " + index : "Other " + index,
+                        stackTrace = string.Empty,
+                    });
+                File.WriteAllLines(
+                    Path.Combine(directory, "console.jsonl"),
+                    records.Select(JsonUtility.ToJson));
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_read",
+                    directory = directory,
+                    nextSequence = 40,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                var first = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest,
+                    new ConsoleCaptureReadPayload
+                    {
+                        count = 4,
+                        fromSequence = 5,
+                        toSequence = 30,
+                        contains = new[] { "RewardPending", "SkillTrapCast" },
+                    },
+                    CancellationToken.None,
+                });
+                var second = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest,
+                    new ConsoleCaptureReadPayload
+                    {
+                        count = 4,
+                        continuationToken = first.continuationToken,
+                    },
+                    CancellationToken.None,
+                });
+
+                Assert.That(first.ok, Is.True);
+                Assert.That(first.totalMatchCount, Is.EqualTo(9));
+                Assert.That(first.logs.Select(item => item.sequence), Is.EqualTo(new long[] { 6, 9, 12, 15 }));
+                Assert.That(second.logs.Select(item => item.sequence), Is.EqualTo(new long[] { 18, 21, 24, 27 }));
+                Assert.That(first.logs.Select(item => item.sequence).Intersect(second.logs.Select(item => item.sequence)), Is.Empty);
+                Assert.That(first.indexUsed, Is.True);
+                Assert.That(File.Exists(first.indexPath), Is.True);
+                Assert.That(first.effectiveFromSequence, Is.EqualTo(5));
+                Assert.That(first.effectiveToSequence, Is.EqualTo(30));
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void ConsoleCaptureLiteralRegexPaginatesMoreThanPageLimitWithoutLoss()
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-regex-read-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var records = Enumerable.Range(0, 420)
+                    .Select(index => new ConsoleCaptureRecord
+                    {
+                        sequence = index,
+                        timestampUtcMs = index,
+                        logType = "Log",
+                        message = index % 2 == 0 ? "SkillTrapCast " + index : "Other " + index,
+                        stackTrace = string.Empty,
+                    });
+                File.WriteAllLines(
+                    Path.Combine(directory, "console.jsonl"),
+                    records.Select(JsonUtility.ToJson));
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_regex_read",
+                    directory = directory,
+                    nextSequence = 420,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                var all = new System.Collections.Generic.List<long>();
+                string continuationToken = string.Empty;
+                long totalMatches = -1;
+                do
+                {
+                    var result = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                    {
+                        manifest,
+                        new ConsoleCaptureReadPayload
+                        {
+                            count = 150,
+                            regex = string.IsNullOrEmpty(continuationToken) ? "RewardPending|SkillTrapCast" : string.Empty,
+                            continuationToken = continuationToken,
+                        },
+                        CancellationToken.None,
+                    });
+                    Assert.That(result.ok, Is.True, result.error);
+                    if (totalMatches < 0) totalMatches = result.totalMatchCount;
+                    all.AddRange(result.logs.Select(item => item.sequence));
+                    continuationToken = result.continuationToken;
+                } while (!string.IsNullOrEmpty(continuationToken));
+
+                Assert.That(totalMatches, Is.EqualTo(210));
+                Assert.That(all.Count, Is.EqualTo(210));
+                Assert.That(all.Distinct().Count(), Is.EqualTo(210));
+                Assert.That(all, Is.Ordered.Ascending);
+                Assert.That(all.First(), Is.EqualTo(0));
+                Assert.That(all.Last(), Is.EqualTo(418));
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void AnimationAuditDtosAreReadOnlyResultShapes()
+        {
+            var controller = new AnimatorControllerAuditResultPayload();
+            var mask = new AvatarMaskAuditResultPayload();
+            var importer = new ModelImporterAuditResultPayload();
+
+            Assert.That(controller.layers, Is.Not.Null);
+            Assert.That(controller.states, Is.Not.Null);
+            Assert.That(mask.transforms, Is.Not.Null);
+            Assert.That(importer.clips, Is.Not.Null);
+        }
+
+        [UnityTest]
+        [Explicit("Long-running MCP operation wait-window acceptance case.")]
+        public IEnumerator OperationWaitWindowContractLongRun()
+        {
+            var deadline = EditorApplication.timeSinceStartup + 90.0;
+            while (EditorApplication.timeSinceStartup < deadline)
+                yield return null;
+
+            Assert.Pass();
+        }
+
+        public static string BusyLoopForHangDiagnostics()
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            long accumulator = 0;
+            while (stopwatch.ElapsedMilliseconds < 15000)
+            {
+                accumulator ^= stopwatch.ElapsedTicks;
+                Thread.SpinWait(512);
+            }
+
+            return $"completed:{accumulator}";
+        }
+
+        [Test]
         public void AgentTemplateUsesCapabilityCompileAndWorkflowRules()
         {
-            var method = typeof(UPilotAgentSetup).GetMethod("BuildAgentsMd", BindingFlags.NonPublic | BindingFlags.Static);
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "BuildAgentsMd",
+                BindingFlags.NonPublic | BindingFlags.Static,
+                null,
+                Type.EmptyTypes,
+                null);
             var text = (string)method.Invoke(null, null);
 
+            Assert.That(text, Does.Contain("Parent Agent rules path"));
+            Assert.That(text, Does.Contain("visited set"));
+            Assert.That(text, Does.Contain("circular references are skipped"));
             Assert.That(text, Does.Contain("unity_capabilities_get"));
             Assert.That(text, Does.Contain("prefer an available UPilot semantic tool"));
             Assert.That(text, Does.Contain("Use `unity_tools_find` for targeted discovery"));
+            Assert.That(text, Does.Contain("prefer one `unity_safe_compile_and_wait` call"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
             Assert.That(text, Does.Contain("project-provided bridge entry points"));
+            Assert.That(text, Does.Contain("waitWindowElapsed=true/terminal=false"));
             Assert.That(text, Does.Contain("unity_console_capture_start"));
             Assert.That(text, Does.Contain("always call `unity_console_capture_stop`"));
+            Assert.That(text, Does.Contain("`nextSequence` as the next call's `afterSequence`"));
+            Assert.That(text, Does.Contain("recovered or historical sessions still marked active"));
             Assert.That(text, Does.Contain("separate from domain-specific reports"));
+            Assert.That(text, Does.Contain("unity_config_csv_get"));
+            Assert.That(text, Does.Contain("unity_config_csv_patch"));
+            Assert.That(text, Does.Contain("explicit write approval"));
+            Assert.That(text, Does.Contain("unity_hang_status"));
+            Assert.That(text, Does.Contain("unity_hang_capture"));
+            Assert.That(text, Does.Contain("fallbackSources"));
+            Assert.That(text, Does.Contain("unity_editor_windows_list"));
             Assert.That(text, Does.Contain("incremental status, log, and report APIs"));
             Assert.That(text, Does.Contain("project-relative artifact paths"));
             Assert.That(text, Does.Not.Contain("{{"));
@@ -415,6 +770,7 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 SessionState.SetString(GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.RuntimeId"), "previous-runtime");
+                LogAssert.Expect(LogType.Error, new Regex("更新任务在.*脚本重载中断", RegexOptions.Singleline));
 
                 var status = UPilotUpdateService.Instance.GetOperationStatus();
 
@@ -476,6 +832,7 @@ namespace CodingRiver.UPilot.Tests
             {
                 SessionState.SetString(GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.RuntimeId"), "previous-runtime");
                 SessionState.SetString(GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.ReloadGuardRuntimeId"), "previous-runtime");
+                LogAssert.Expect(LogType.Error, new Regex("更新任务在.*脚本重载中断", RegexOptions.Singleline));
 
                 var status = UPilotUpdateService.Instance.GetOperationStatus();
                 var guard = UPilotUpdateService.GetReloadGuardStatus();
@@ -495,6 +852,9 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void PackageManagerConflictIsDetectedOnlyBeforeLifecycleTakesOver()
         {
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                Assert.Ignore("External Package Manager conflict handling applies to managed release channels.");
+
             var method = typeof(UPilotPackageUpdateLifecycle).GetMethod(
                 "ShouldHandleExternalPackageManagerConflict",
                 BindingFlags.NonPublic | BindingFlags.Static);
@@ -727,8 +1087,8 @@ namespace CodingRiver.UPilot.Tests
                 Is.True);
         }
 
-        [Test]
-        public async Task VerifiedDownloadMoveRetriesTransientFileLocks()
+        [UnityTest]
+        public IEnumerator VerifiedDownloadMoveRetriesTransientFileLocks()
         {
             if (Application.platform != RuntimePlatform.WindowsEditor)
                 Assert.Ignore("File sharing behavior is Windows-specific.");
@@ -742,21 +1102,25 @@ namespace CodingRiver.UPilot.Tests
             FileStream heldStream = null;
             try
             {
+                var expectedSha256 = UPilotServerRuntimeService.ComputeSha256(downloadPath);
                 heldStream = new FileStream(downloadPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
                 var method = typeof(UPilotServerRuntimeService).GetMethod(
                     "ReplaceVerifiedDownloadAsync",
                     BindingFlags.NonPublic | BindingFlags.Static);
 
                 Assert.That(method, Is.Not.Null);
-                var expectedSha256 = UPilotServerRuntimeService.ComputeSha256(downloadPath);
                 var moveTask = (Task<bool>)method.Invoke(
                     null,
                     new object[] { downloadPath, finalPath, expectedSha256, CancellationToken.None });
-                await Task.Delay(600);
+                var releaseAt = EditorApplication.timeSinceStartup + 0.6;
+                while (EditorApplication.timeSinceStartup < releaseAt)
+                    yield return null;
                 heldStream.Dispose();
                 heldStream = null;
 
-                Assert.That(await moveTask, Is.True);
+                while (!moveTask.IsCompleted)
+                    yield return null;
+                Assert.That(moveTask.GetAwaiter().GetResult(), Is.True);
                 Assert.That(File.Exists(finalPath), Is.True);
                 Assert.That(File.Exists(downloadPath), Is.False);
             }
@@ -768,8 +1132,8 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
-        [Test]
-        public async Task VerifiedDownloadCopyFallbackRevalidatesTarget()
+        [UnityTest]
+        public IEnumerator VerifiedDownloadCopyFallbackRevalidatesTarget()
         {
             var directory = Path.Combine(Path.GetTempPath(), "upilot-copy-fallback-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(directory);
@@ -788,7 +1152,9 @@ namespace CodingRiver.UPilot.Tests
                 var copyTask = (Task)method.Invoke(
                     null,
                     new object[] { downloadPath, finalPath, expectedSha256, CancellationToken.None });
-                await copyTask;
+                while (!copyTask.IsCompleted)
+                    yield return null;
+                copyTask.GetAwaiter().GetResult();
 
                 Assert.That(File.Exists(finalPath), Is.True);
                 Assert.That(UPilotServerRuntimeService.ComputeSha256(finalPath), Is.EqualTo(expectedSha256));
@@ -947,7 +1313,10 @@ namespace CodingRiver.UPilot.Tests
         {
             var method = typeof(UPilotAgentSetup).GetMethod(
                 "BuildAgentsMd",
-                BindingFlags.NonPublic | BindingFlags.Static);
+                BindingFlags.NonPublic | BindingFlags.Static,
+                null,
+                Type.EmptyTypes,
+                null);
             return (string)method.Invoke(null, null);
         }
 

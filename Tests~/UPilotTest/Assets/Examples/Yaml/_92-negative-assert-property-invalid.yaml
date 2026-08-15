@@ -1,0 +1,17 @@
+schemaVersion: 2
+name: "_92-negative-assert-property-invalid"
+description: |
+  Verifies that assert_property fails when the property does not exist on the element.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: assert_property with non-existent property should fail
+    action: assert_property
+    selector: "#enabled-toggle"
+    property: "nonExistentProperty"
+    expected: "anything"

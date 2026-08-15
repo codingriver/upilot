@@ -105,8 +105,8 @@ namespace CodingRiver.UPilot
         private const string SkillName = "upilot-unity-mcp";
         private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
-        private const int AgentRulesTemplateVersion = 4;
-        private const int SkillInstallTemplateVersion = 2;
+        private const int AgentRulesTemplateVersion = 8;
+        private const int SkillInstallTemplateVersion = 3;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
@@ -892,13 +892,15 @@ namespace CodingRiver.UPilot
                 : UPilotServerRuntimeService.UpmVersion;
             var template = LoadAgentRulesTemplate(out var templatePath);
             var generatedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            var parentAgentRulesPath = FindParentAgentRulesRelativePath(projectRoot);
             if (logRender)
-                LogAgentRulesTemplateRender(templatePath, targetPath, projectRoot, packageVersion, generatedAt);
+                LogAgentRulesTemplateRender(templatePath, targetPath, projectRoot, packageVersion, generatedAt, parentAgentRulesPath);
             return RenderAgentRulesTemplate(
                 template,
                 projectRoot,
                 packageVersion,
-                generatedAt);
+                generatedAt,
+                parentAgentRulesPath);
         }
 
         private static string LoadAgentRulesTemplate(out string templatePath)
@@ -918,13 +920,15 @@ namespace CodingRiver.UPilot
             string template,
             string projectRoot,
             string packageVersion,
-            string generatedAt)
+            string generatedAt,
+            string parentAgentRulesPath)
         {
             return template
                 .Replace("{{rulesVersion}}", AgentRulesTemplateVersion.ToString())
                 .Replace("{{upilotPackageVersion}}", packageVersion)
                 .Replace("{{projectPath}}", projectRoot)
                 .Replace("{{generatedAt}}", generatedAt)
+                .Replace("{{parentAgentRulesPath}}", parentAgentRulesPath)
                 .Replace("{{mcpUrl}}", McpUrl)
                 .Replace("{{healthUrl}}", HealthUrl)
                 .Replace("\r\n", "\n")
@@ -937,7 +941,8 @@ namespace CodingRiver.UPilot
             string targetPath,
             string projectRoot,
             string packageVersion,
-            string generatedAt)
+            string generatedAt,
+            string parentAgentRulesPath)
         {
             Debug.Log(
                 "[UPilot] Rendering Agent rules template." +
@@ -949,6 +954,7 @@ namespace CodingRiver.UPilot
                 "\n  upilotPackageVersion=" + packageVersion +
                 "\n  projectPath=" + NormalizePathForLog(projectRoot) +
                 "\n  generatedAt=" + generatedAt +
+                "\n  parentAgentRulesPath=" + parentAgentRulesPath +
                 "\n  mcpUrl=" + McpUrl +
                 "\n  healthUrl=" + HealthUrl);
         }
@@ -1172,6 +1178,43 @@ namespace CodingRiver.UPilot
         private static string GetProjectRoot()
         {
             return Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
+        }
+
+        private static string FindParentAgentRulesRelativePath(string projectRoot)
+        {
+            try
+            {
+                var root = new DirectoryInfo(projectRoot);
+                for (var current = root.Parent; current != null; current = current.Parent)
+                {
+                    var candidate = Path.Combine(current.FullName, "AGENTS.md");
+                    if (File.Exists(candidate))
+                        return MakeRelativeAgentRulesPath(root.FullName, candidate);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[UPilot] Failed to resolve parent Agent rules path: " + ex.Message);
+            }
+
+            return "(none)";
+        }
+
+        private static string MakeRelativeAgentRulesPath(string fromDirectory, string targetPath)
+        {
+            try
+            {
+                var from = Path.GetFullPath(fromDirectory)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                    Path.DirectorySeparatorChar;
+                var target = Path.GetFullPath(targetPath);
+                var relative = Uri.UnescapeDataString(new Uri(from).MakeRelativeUri(new Uri(target)).ToString());
+                return relative.Replace('\\', '/');
+            }
+            catch
+            {
+                return NormalizePathForLog(targetPath);
+            }
         }
 
         private static string NormalizePathForLog(string path)

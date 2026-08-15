@@ -34,7 +34,11 @@ async def unity_ensure_ready(timeoutS: float = 120):
     return _log_tool_result("unity_ensure_ready", _payload(r))
 
 @mcp.tool(
-    description="带超时看门狗执行另一个 MCP 工具。超时后可尝试重连 Unity 并重试；适合长耗时或可能卡住的幂等操作。不要包裹非幂等/破坏性操作重试，除非用户已确认可重复执行。"
+    description=(
+        "带超时看门狗执行另一个 MCP 工具。超时默认不重启 Unity；应先使用业务 cancel/stop、"
+        "hang_status 和有界清理。只有调用方显式设置 restartUnityOnTimeout=true 时才允许进程级恢复。"
+        "不要包裹非幂等/破坏性操作重试，除非用户已确认可重复执行。"
+    )
 )
 async def unity_task_execute(
     taskName: str,
@@ -43,7 +47,7 @@ async def unity_task_execute(
     timeoutS: float = 600,
     maxTotalS: float = 1200,
     retryCount: int = 1,
-    restartUnityOnTimeout: bool = True,
+    restartUnityOnTimeout: bool = False,
 ):
     _log_tool_call(
         "unity_task_execute",
@@ -114,6 +118,7 @@ async def unity_operation_get(commandId: str):
     description=(
         "启动一个通用长作业编排。jobSpec 包含 displayName、startCall、statusCall、cancelCall、"
         "timeoutSec、pollIntervalSec、terminalStatusMapping、artifactRules、consoleCapture、retryPolicy。"
+        "statusCall/cancelCall 参数可使用 ${start.field}、${status.field}、${operation.operationId} 精确占位符。"
         "UPilot 只调用并轮询项目暴露入口，不解析业务 domain 字段。"
     )
 )
@@ -157,7 +162,7 @@ async def unity_operation_wait(
     )
     return _log_tool_result("unity_operation_wait", _payload(r))
 
-@mcp.tool(description="取消一个通用长作业；仅在 JobSpec 提供 cancelCall 时可用。")
+@mcp.tool(description="请求取消一个通用长作业；成功仅表示 cancel 已接受，仍需 statusCall 确认业务退出和 cleanup 完成后才进入终态。重复调用幂等。")
 async def unity_operation_cancel(operationId: str):
     _log_tool_call("unity_operation_cancel", {"operationId": operationId})
     r = await _get_facade().operation_cancel(operation_id=operationId)

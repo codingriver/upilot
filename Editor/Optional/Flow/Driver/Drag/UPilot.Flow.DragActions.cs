@@ -35,6 +35,8 @@ namespace CodingRiver.UPilot.Flow
 
             VisualElement fromElement = TryResolveElement(from, root, context);
             VisualElement toElement = TryResolveElement(to, root, context);
+            TwoPaneSplitView splitView = FindAncestor<TwoPaneSplitView>(fromElement);
+            float splitDimensionBefore = GetFixedPaneDimension(splitView);
 
             if (context?.SimulationSession?.PointerDriver != null)
             {
@@ -124,6 +126,26 @@ namespace CodingRiver.UPilot.Flow
                 pointerUpTarget.SendEvent(mue);
             }
 
+            if (splitView != null && Mathf.Approximately(GetFixedPaneDimension(splitView), splitDimensionBefore))
+            {
+                if (context?.Options?.RequireOfficialPointerDriver == true)
+                    throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, "drag official input did not resize the TwoPaneSplitView.");
+                float size = splitView.orientation == TwoPaneSplitViewOrientation.Horizontal
+                    ? (splitView.fixedPaneIndex == 0 ? toPos.x - splitView.worldBound.xMin : splitView.worldBound.xMax - toPos.x)
+                    : (splitView.fixedPaneIndex == 0 ? toPos.y - splitView.worldBound.yMin : splitView.worldBound.yMax - toPos.y);
+                size = Mathf.Max(1f, size);
+                AdvancedActionHelpers.SetSplitViewSizeOrThrow(
+                    splitView,
+                    new Dictionary<string, string>
+                    {
+                        ["pane"] = splitView.fixedPaneIndex.ToString(),
+                        ["size"] = size.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    },
+                    "drag");
+                context?.Log($"drag: semantic split-view fallback applied pane={splitView.fixedPaneIndex} size={size:0.###}");
+                await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
+            }
+
             context.Log($"drag: completed {from} -> {to}");
             context.SharedBag["lastDrag"] = $"{from}->{to}";
         }
@@ -184,6 +206,26 @@ namespace CodingRiver.UPilot.Flow
             }
 
             return false;
+        }
+
+        private static T FindAncestor<T>(VisualElement element) where T : VisualElement
+        {
+            VisualElement current = element;
+            while (current != null)
+            {
+                if (current is T typed)
+                    return typed;
+                current = current.parent;
+            }
+            return null;
+        }
+
+        private static float GetFixedPaneDimension(TwoPaneSplitView splitView)
+        {
+            if (splitView == null || splitView.childCount <= splitView.fixedPaneIndex)
+                return 0f;
+            Rect bounds = splitView[splitView.fixedPaneIndex].worldBound;
+            return splitView.orientation == TwoPaneSplitViewOrientation.Horizontal ? bounds.width : bounds.height;
         }
     }
 }

@@ -95,6 +95,8 @@ namespace CodingRiver.UPilot
         public string cameraName = "";
         public string windowTitle = "Game";
         public bool allowOutsideProject = false;
+        public string degrade = "none";
+        public string[] fallbackSources;
     }
 
     [Serializable]
@@ -108,6 +110,9 @@ namespace CodingRiver.UPilot
             public string format;
             public string sha256;
             public bool overwritten;
+            public bool degraded;
+            public string degradeReason;
+            public string requestedSource;
         }
 
     // ── Service ─────────────────────────────────────────────────────────────────
@@ -115,10 +120,14 @@ namespace CodingRiver.UPilot
     public class UPilotScreenshotService
     {
         private readonly UPilotBridge _bridge;
+        private static readonly object RecentCaptureLock = new object();
+        private static ScreenshotBytesResult s_recentGameViewCapture;
 
         public UPilotScreenshotService(UPilotBridge bridge)
         {
             _bridge = bridge;
+            EditorApplication.playModeStateChanged -= CacheGameViewBeforeExit;
+            EditorApplication.playModeStateChanged += CacheGameViewBeforeExit;
         }
 
         public void RegisterCommands()
@@ -264,12 +273,14 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    tcs.SetResult(new ScreenshotBytesResult
+                    var capture = new ScreenshotBytesResult
                     {
                         Bytes = RenderCameraToBytes(cam, w, h, fmt, qual),
                         Width = w,
                         Height = h
-                    });
+                    };
+                    CacheRecentGameView(capture);
+                    tcs.SetResult(capture);
                 }
                 catch (Exception ex)
                 {
@@ -544,9 +555,26 @@ namespace CodingRiver.UPilot
             string source = NormalizeSource(p.source);
 
             ScreenshotBytesResult capture;
+            string requestedSource = source;
+            string degradeReason = string.Empty;
+            bool degraded = false;
             try
             {
                 capture = CaptureBytes(source, p.cameraName ?? "", p.windowTitle ?? "Game", w, h, fmt, qual);
+                if (capture == null && !string.Equals(p.degrade, "none", StringComparison.OrdinalIgnoreCase))
+                {
+                    var fallbacks = p.fallbackSources != null && p.fallbackSources.Length > 0
+                        ? p.fallbackSources
+                        : new[] { "recentGameView", "camera", "sceneView", "editorWindow" };
+                    foreach (var fallback in fallbacks)
+                    {
+                        capture = CaptureFallbackBytes(fallback, p.cameraName ?? "", p.windowTitle ?? "Game", w, h, fmt, qual);
+                        if (capture == null) continue;
+                        degraded = true;
+                        degradeReason = $"{requestedSource} unavailable; used {capture.Source}";
+                        break;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -589,7 +617,10 @@ namespace CodingRiver.UPilot
                     height = capture.Height,
                     format = "png",
                     sha256 = ComputeSha256(capture.Bytes),
-                    overwritten = p.overwrite
+                    overwritten = p.overwrite,
+                    degraded = degraded,
+                    degradeReason = degradeReason,
+                    requestedSource = requestedSource,
                 };
                 return true;
             }
@@ -607,6 +638,62 @@ namespace CodingRiver.UPilot
             public int Width;
             public int Height;
             public string Source;
+        }
+
+        private static void CacheRecentGameView(ScreenshotBytesResult capture)
+        {
+            if (capture == null || capture.Bytes == null || capture.Bytes.Length == 0) return;
+            lock (RecentCaptureLock)
+            {
+                s_recentGameViewCapture = new ScreenshotBytesResult
+                {
+                    Bytes = (byte[])capture.Bytes.Clone(),
+                    Width = capture.Width,
+                    Height = capture.Height,
+                    Source = "recentGameView",
+                };
+            }
+        }
+
+        private static void CacheGameViewBeforeExit(PlayModeStateChange change)
+        {
+            if (change != PlayModeStateChange.ExitingPlayMode) return;
+            try
+            {
+                var cam = GetGameViewCamera();
+                if (cam == null) return;
+                CacheRecentGameView(new ScreenshotBytesResult
+                {
+                    Bytes = RenderCameraToBytes(cam, 640, 360, "png", 75),
+                    Width = 640,
+                    Height = 360,
+                    Source = "recentGameView",
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("SCREENSHOT", $"Failed to cache GameView before PlayMode exit: {ex.Message}");
+            }
+        }
+
+        private static ScreenshotBytesResult CaptureFallbackBytes(string fallback, string cameraName, string windowTitle, int w, int h, string format, int quality)
+        {
+            var value = (fallback ?? string.Empty).Trim();
+            if (string.Equals(value, "recentGameView", StringComparison.OrdinalIgnoreCase) || string.Equals(value, "recent", StringComparison.OrdinalIgnoreCase))
+            {
+                lock (RecentCaptureLock)
+                {
+                    if (s_recentGameViewCapture == null) return null;
+                    return new ScreenshotBytesResult
+                    {
+                        Bytes = (byte[])s_recentGameViewCapture.Bytes.Clone(),
+                        Width = s_recentGameViewCapture.Width,
+                        Height = s_recentGameViewCapture.Height,
+                        Source = "recentGameView",
+                    };
+                }
+            }
+            return CaptureBytes(NormalizeSource(value), cameraName, windowTitle, w, h, format, quality);
         }
 
         /// <summary>Render a camera to RenderTexture → Texture2D → Base64 string.</summary>
@@ -664,7 +751,9 @@ namespace CodingRiver.UPilot
         {
             if (source == "editorWindow")
             {
-                string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(windowTitle);
+                var match = UPilotWindowService.ResolveWindow(windowTitle, "contains");
+                if (match.window == null) return null;
+                string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(match.window);
                 if (string.IsNullOrEmpty(base64))
                 {
                     return null;
@@ -699,13 +788,15 @@ namespace CodingRiver.UPilot
                 return null;
             }
 
-            return new ScreenshotBytesResult
+            var result = new ScreenshotBytesResult
             {
                 Bytes = RenderCameraToBytes(cam, w, h, format, quality),
                 Width = w,
                 Height = h,
                 Source = source == "gameView" ? "gameView-camera" : source
             };
+            if (source == "gameView") CacheRecentGameView(result);
+            return result;
         }
 
         private static Camera FindCamera(string camName)

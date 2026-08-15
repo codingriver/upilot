@@ -1,0 +1,40 @@
+schemaVersion: 2
+name: "90-toggle-mask-multi-bit"
+description: |
+  Tests toggle_mask_option on multiple bits across MaskField and EnumFlagsField.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: Toggle MaskField bit One
+    action: toggle_mask_option
+    selector: "#feature-mask"
+    value: "One"
+
+  - name: Toggle MaskField bit Two
+    action: toggle_mask_option
+    selector: "#feature-mask"
+    value: "Two"
+
+  - name: Assert MaskField value is One + Two = 3
+    action: assert_value
+    selector: "#feature-mask"
+    expected: "3"
+
+  - name: Toggle EnumFlagsField Read
+    action: toggle_mask_option
+    selector: "#permissions-flags"
+    value: "Read"
+
+  - name: Toggle EnumFlagsField Write
+    action: toggle_mask_option
+    selector: "#permissions-flags"
+    value: "Write"
+
+  - name: Assert EnumFlagsField value is Read + Write = 3
+    action: assert_value
+    selector: "#permissions-flags"
+    expected: "3"

@@ -1,0 +1,8 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-bound-inference-root" class="example-root">
+        <ui:VisualElement name="example-bound-inference-panel" class="example-panel">
+            <ui:VisualElement name="inference-host" class="example-column" />
+            <ui:Label name="status-label" text="Idle" class="example-status" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

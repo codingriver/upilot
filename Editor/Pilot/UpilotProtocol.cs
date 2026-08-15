@@ -28,10 +28,30 @@ namespace CodingRiver.UPilot
         public string unityVersion;
         public string projectPath;
         public string platform;
+        public int processId;
     }
 
     [Serializable]
-    public class HeartbeatPayload { }
+    public class HeartbeatPayload
+    {
+        public bool connected;
+        public bool authoritative;
+        public string source;
+        public string sessionId;
+        public long updatedAt;
+        public string playModeState;
+        public bool isPlaying;
+        public bool isPaused;
+        public bool isCompiling;
+        public string activeScene;
+        public long lastMainThreadPumpAt;
+        public int mainThreadQueueDepth;
+        public string lastDequeuedCommandId;
+        public int processId;
+    }
+
+    [Serializable]
+    public class EditorContextPayload : HeartbeatPayload { }
 
     /// <summary>session.hello 成功时服务端 payload（含 MCP 显示名与监听地址）。</summary>
     [Serializable]
@@ -102,6 +122,7 @@ namespace CodingRiver.UPilot
         public string sessionId;
         public string protocolVersion = "1.0";
         public OperationTimingPayload timing;
+        public EditorContextPayload context;
     }
 
     [Serializable]
@@ -142,6 +163,7 @@ namespace CodingRiver.UPilot
         public string sessionId;
         public string protocolVersion = "1.0";
         public OperationTimingPayload timing;
+        public EditorContextPayload context;
     }
 
     [Serializable]

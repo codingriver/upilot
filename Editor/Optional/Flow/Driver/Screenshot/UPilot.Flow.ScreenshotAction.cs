@@ -24,11 +24,14 @@ namespace CodingRiver.UPilot.Flow
 
             if (!parameters.TryGetValue("tag", out string tag) || string.IsNullOrWhiteSpace(tag))
             {
-                tag = context.CurrentStepId;
+                if (!parameters.TryGetValue("name", out tag) || string.IsNullOrWhiteSpace(tag))
+                {
+                    tag = context.CurrentStepId;
+                }
             }
 
             context.Log($"screenshot: tag={tag}, case={context.CurrentCaseName}, step={context.CurrentStepIndex}");
-            string path = await context.ScreenshotManager.CaptureAsync(context.CurrentCaseName, context.CurrentStepIndex, tag, context.CancellationToken);
+            string path = await context.ScreenshotManager.CaptureAsync(context.CurrentCaseName, context.CurrentStepIndex, tag, context.CancellationToken, allowUnfocusedFallback: true);
             if (path == null)
             {
                 context.Log("screenshot: skipped (unfocused)");

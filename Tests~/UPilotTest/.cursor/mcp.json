@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-                    "upilot": {
-      "url": "http://127.0.0.1:8012/mcp"
+                        "upilot": {
+      "url": "http://127.0.0.1:8011/mcp"
     }
   }
 }

@@ -1,0 +1,28 @@
+schemaVersion: 2
+name: "98-min-max-slider"
+description: Covers set_value and set_slider on MinMaxSlider control.
+fixture:
+  host_window:
+    type: ExampleCoverageFieldsWindow
+    reopen_if_open: true
+steps:
+  - action: set_value
+    selector: "#range-slider"
+    value: "15,80"
+  - action: assert_value
+    selector: "#range-slider"
+    expected: "15,80"
+
+  - action: set_slider
+    selector: "#range-slider"
+    value: "20,70"
+  - action: assert_value
+    selector: "#range-slider"
+    expected: "20,70"
+
+  - action: set_value
+    selector: "#range-slider"
+    value: "5,95"
+  - action: assert_value
+    selector: "#range-slider"
+    expected: "5,95"

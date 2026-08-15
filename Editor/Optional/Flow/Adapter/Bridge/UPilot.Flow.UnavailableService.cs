@@ -23,7 +23,14 @@ namespace CodingRiver.UPilot
         {
             _bridge.Router.Register("upilot_flow.run", HandleUnavailableAsync);
             _bridge.Router.Register("upilot_flow.results", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.status", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.executions", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.list", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.pause", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.resume", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.stop", HandleUnavailableAsync);
             _bridge.Router.Register("upilot_flow.cancel", HandleUnavailableAsync);
+            _bridge.Router.Register("upilot_flow.force_cleanup", HandleUnavailableAsync);
             _bridge.Router.Register("upilot_flow.force_reset", HandleUnavailableAsync);
         }
 

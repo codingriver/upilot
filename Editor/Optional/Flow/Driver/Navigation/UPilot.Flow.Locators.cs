@@ -96,18 +96,20 @@ namespace CodingRiver.UPilot.Flow
     public static class FloatingPanelLocator
     {
         private static readonly MethodInfo GetPanelsMethod;
+        private static readonly MethodInfo GetPanelsIteratorMethod;
         private static readonly PropertyInfo VisualTreeProperty;
 
         static FloatingPanelLocator()
         {
             Type uieUtility = Type.GetType("UnityEngine.UIElements.UIElementsUtility, UnityEngine.UIElementsModule");
-            GetPanelsMethod = uieUtility?.GetMethod("GetPanels", BindingFlags.Static | BindingFlags.Public);
+            GetPanelsMethod = uieUtility?.GetMethod("GetPanels", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+            GetPanelsIteratorMethod = uieUtility?.GetMethod("GetPanelsIterator", BindingFlags.Static | BindingFlags.NonPublic);
 
             Type panelType = Type.GetType("UnityEngine.UIElements.Panel, UnityEngine.UIElementsModule");
             VisualTreeProperty = panelType?.GetProperty("visualTree", BindingFlags.Public | BindingFlags.Instance);
         }
 
-        public static bool IsAvailable => GetPanelsMethod != null && VisualTreeProperty != null;
+        public static bool IsAvailable => (GetPanelsMethod != null || GetPanelsIteratorMethod != null) && VisualTreeProperty != null;
 
         public static IEnumerable<VisualElement> GetFloatingPanelRoots(VisualElement excludeRoot = null)
         {
@@ -116,31 +118,53 @@ namespace CodingRiver.UPilot.Flow
                 yield break;
             }
 
-            object panelsDict = GetPanelsMethod.Invoke(null, null);
-            if (panelsDict == null)
-            {
-                yield break;
-            }
-
-            var valuesProperty = panelsDict.GetType().GetProperty("Values");
-            System.Collections.IEnumerable values = valuesProperty?.GetValue(panelsDict) as System.Collections.IEnumerable;
-            if (values == null)
-            {
-                yield break;
-            }
-
-            foreach (object entry in values)
+            foreach (object entry in EnumeratePanels())
             {
                 if (entry == null)
                 {
                     continue;
                 }
 
-                VisualElement root = VisualTreeProperty.GetValue(entry) as VisualElement;
+                object panel = entry;
+                if (!VisualTreeProperty.DeclaringType.IsInstanceOfType(panel))
+                {
+                    PropertyInfo valueProperty = panel.GetType().GetProperty("Value", BindingFlags.Instance | BindingFlags.Public);
+                    panel = valueProperty?.GetValue(panel);
+                }
+                if (panel == null || !VisualTreeProperty.DeclaringType.IsInstanceOfType(panel))
+                    continue;
+                VisualElement root = VisualTreeProperty.GetValue(panel) as VisualElement;
                 if (root != null && root != excludeRoot)
                 {
                     yield return root;
                 }
+            }
+        }
+
+        private static IEnumerable<object> EnumeratePanels()
+        {
+            if (GetPanelsMethod != null)
+            {
+                object panelsDict = GetPanelsMethod.Invoke(null, null);
+                PropertyInfo valuesProperty = panelsDict?.GetType().GetProperty("Values");
+                if (valuesProperty?.GetValue(panelsDict) is System.Collections.IEnumerable values)
+                {
+                    foreach (object entry in values)
+                        yield return entry;
+                    yield break;
+                }
+            }
+
+            object iterator = GetPanelsIteratorMethod?.Invoke(null, null);
+            if (iterator is System.Collections.IEnumerator enumerator)
+            {
+                while (enumerator.MoveNext())
+                    yield return enumerator.Current;
+            }
+            else if (iterator is System.Collections.IEnumerable enumerable)
+            {
+                foreach (object entry in enumerable)
+                    yield return entry;
             }
         }
     }
@@ -251,7 +275,7 @@ namespace CodingRiver.UPilot.Flow
         /// <summary>
         /// Waits for the first matching element to appear.
         /// </summary>
-        public async Task<FindResult> WaitForElementAsync(SelectorExpression selector, VisualElement root, WaitOptions options, CancellationToken cancellationToken)
+        public Task<FindResult> WaitForElementAsync(SelectorExpression selector, VisualElement root, WaitOptions options, CancellationToken cancellationToken)
         {
             if (root == null)
             {
@@ -273,6 +297,11 @@ namespace CodingRiver.UPilot.Flow
                 throw new UPilotFlowException(ErrorCodes.TestOptionsInvalid, "轮询间隔不能小于 16ms");
             }
 
+            return WaitForElementCoreAsync(selector, root, options, cancellationToken);
+        }
+
+        private async Task<FindResult> WaitForElementCoreAsync(SelectorExpression selector, VisualElement root, WaitOptions options, CancellationToken cancellationToken)
+        {
             DateTimeOffset startedAt = DateTimeOffset.UtcNow;
             while (true)
             {

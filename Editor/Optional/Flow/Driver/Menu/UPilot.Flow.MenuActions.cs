@@ -19,10 +19,12 @@ namespace CodingRiver.UPilot.Flow
         {
             VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "open_context_menu");
             EventModifiers modifiers = ActionHelpers.ParseEventModifiers(parameters, "open_context_menu");
+            using IDisposable modalWatchdog = UPilotFlowModalWatchdog.Arm(context, "context-menu");
             bool opened = context?.SimulationSession?.TryOpenContextMenu(element, modifiers, context) == true;
             if (!opened && ActionHelpers.TryGetDropdownMenu(element) != null)
             {
                 opened = true;
+                context?.SimulationSession?.RememberFallbackMenuElement(element);
                 context?.Log($"open_context_menu: using DropdownMenu fallback for {element.GetType().Name}");
             }
             if (!opened)
@@ -46,6 +48,8 @@ namespace CodingRiver.UPilot.Flow
         {
             string itemName = ActionHelpers.RequireMenuItem(parameters, "select_context_menu_item");
             bool selected = context?.SimulationSession?.TrySelectContextMenuItem(itemName, context) == true;
+            if (!selected)
+                selected = context?.SimulationSession?.TrySelectRememberedDropdownMenuItem(itemName) == true;
             if (!selected && parameters.TryGetValue("selector", out string selector) && !string.IsNullOrWhiteSpace(selector))
             {
                 VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "select_context_menu_item");
@@ -67,10 +71,12 @@ namespace CodingRiver.UPilot.Flow
         {
             VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "open_popup_menu");
             EventModifiers modifiers = ActionHelpers.ParseEventModifiers(parameters, "open_popup_menu");
+            using IDisposable modalWatchdog = UPilotFlowModalWatchdog.Arm(context, "popup-menu");
             bool opened = context?.SimulationSession?.TryOpenPopupMenu(element, modifiers, context) == true;
             if (!opened && ActionHelpers.TryGetDropdownMenu(element) != null)
             {
                 opened = true;
+                context?.SimulationSession?.RememberFallbackMenuElement(element);
                 context?.Log($"open_popup_menu: using DropdownMenu fallback for {element.GetType().Name}");
             }
             if (!opened)
@@ -89,6 +95,8 @@ namespace CodingRiver.UPilot.Flow
         {
             string itemName = ActionHelpers.RequireMenuItem(parameters, "select_popup_menu_item");
             bool selected = context?.SimulationSession?.TrySelectPopupMenuItem(itemName, context) == true;
+            if (!selected)
+                selected = context?.SimulationSession?.TrySelectRememberedDropdownMenuItem(itemName) == true;
             if (!selected && parameters.TryGetValue("selector", out string selector) && !string.IsNullOrWhiteSpace(selector))
             {
                 VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "select_popup_menu_item");
@@ -110,6 +118,8 @@ namespace CodingRiver.UPilot.Flow
         {
             string itemName = ActionHelpers.RequireMenuItem(parameters, "assert_menu_item");
             bool passed = context?.SimulationSession?.TryAssertMenuItem(itemName, expectDisabled: false, context) == true;
+            if (!passed && context?.SimulationSession?.TryFindRememberedDropdownMenuItem(itemName, out DropdownMenuAction rememberedAction) == true)
+                passed = ActionHelpers.GetDropdownMenuActionStatus(rememberedAction) != DropdownMenuAction.Status.Disabled;
             if (!passed && parameters.TryGetValue("selector", out string selector) && !string.IsNullOrWhiteSpace(selector))
             {
                 VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "assert_menu_item");
@@ -120,7 +130,7 @@ namespace CodingRiver.UPilot.Flow
             }
             if (!passed)
             {
-                throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, $"Menu item was not available or not enabled: {itemName}");
+                throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, $"Menu item was not available or not enabled: {itemName}; {context?.SimulationSession?.DescribeMenuState() ?? "simulationSession=null"}");
             }
 
             context.Log($"assert_menu_item: {itemName}");
@@ -133,6 +143,8 @@ namespace CodingRiver.UPilot.Flow
         {
             string itemName = ActionHelpers.RequireMenuItem(parameters, "assert_menu_item_disabled");
             bool passed = context?.SimulationSession?.TryAssertMenuItem(itemName, expectDisabled: true, context) == true;
+            if (!passed && context?.SimulationSession?.TryFindRememberedDropdownMenuItem(itemName, out DropdownMenuAction rememberedAction) == true)
+                passed = ActionHelpers.GetDropdownMenuActionStatus(rememberedAction) == DropdownMenuAction.Status.Disabled;
             if (!passed && parameters.TryGetValue("selector", out string selector) && !string.IsNullOrWhiteSpace(selector))
             {
                 VisualElement element = await ActionHelpers.RequireElementAsync(context, parameters, "assert_menu_item_disabled");
@@ -143,7 +155,7 @@ namespace CodingRiver.UPilot.Flow
             }
             if (!passed)
             {
-                throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, $"Menu item was not available or not disabled: {itemName}");
+                throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, $"Menu item was not available or not disabled: {itemName}; {context?.SimulationSession?.DescribeMenuState() ?? "simulationSession=null"}");
             }
 
             context.Log($"assert_menu_item_disabled: {itemName}");
@@ -157,6 +169,18 @@ namespace CodingRiver.UPilot.Flow
             parameters.TryGetValue("mode", out string modeLiteral);
             parameters.TryGetValue("menu", out string menuLiteral);
             string mode = string.IsNullOrWhiteSpace(modeLiteral) ? (string.IsNullOrWhiteSpace(menuLiteral) ? "select" : menuLiteral) : modeLiteral;
+            string normalizedMode = mode.Trim().ToLowerInvariant();
+            if (normalizedMode != "select"
+                && normalizedMode != "click"
+                && normalizedMode != "assert_enabled"
+                && normalizedMode != "enabled"
+                && normalizedMode != "assert"
+                && normalizedMode != "assert_disabled"
+                && normalizedMode != "disabled")
+            {
+                throw new UPilotFlowException(ErrorCodes.ActionParameterInvalid, $"Action menu_item parameter 'mode' is invalid: {mode}");
+            }
+
             string itemName = ActionHelpers.RequireMenuItem(parameters, "menu_item");
             string menuKind = parameters.TryGetValue("kind", out string kindLiteral) && !string.IsNullOrWhiteSpace(kindLiteral)
                 ? kindLiteral.Trim().ToLowerInvariant()
@@ -164,6 +188,7 @@ namespace CodingRiver.UPilot.Flow
 
             VisualElement element = null;
             bool usedFallback = false;
+            using IDisposable modalWatchdog = UPilotFlowModalWatchdog.Arm(context, $"{menuKind}-menu-item");
             if (parameters.TryGetValue("selector", out string selector) && !string.IsNullOrWhiteSpace(selector))
             {
                 element = await ActionHelpers.RequireElementAsync(context, parameters, "menu_item");
@@ -171,7 +196,7 @@ namespace CodingRiver.UPilot.Flow
                 await EditorAsyncUtility.NextFrameAsync(context.CancellationToken);
             }
 
-            switch (mode.Trim().ToLowerInvariant())
+            switch (normalizedMode)
             {
                 case "select":
                 case "click":
@@ -195,8 +220,6 @@ namespace CodingRiver.UPilot.Flow
                         throw new UPilotFlowException(ErrorCodes.ActionExecutionFailed, $"Menu item was not available or not disabled: {itemName}");
                     }
                     break;
-                default:
-                    throw new UPilotFlowException(ErrorCodes.ActionParameterInvalid, $"Action menu_item parameter 'mode' is invalid: {mode}");
             }
 
             context.Log($"menu_item: kind={menuKind} mode={mode} item={itemName}");

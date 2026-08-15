@@ -1,0 +1,41 @@
+schemaVersion: 2
+name: "87-type-text-vs-fast"
+description: |
+  Compares type_text and type_text_fast final results on different fields,
+  verifying both paths produce correct values.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow
+    reopen_if_open: true
+
+steps:
+  - name: Type slow text via type_text
+    action: type_text
+    selector: "#username-input"
+    value: "slow_typed"
+
+  - name: Assert slow text result
+    action: assert_value
+    selector: "#username-input"
+    expected: "slow_typed"
+
+  - name: Type fast text via type_text_fast
+    action: type_text_fast
+    selector: "#password-input"
+    value: "fast_typed"
+
+  - name: Assert fast text result
+    action: assert_value
+    selector: "#password-input"
+    expected: "fast_typed"
+
+  - name: Type empty string via type_text_fast
+    action: type_text_fast
+    selector: "#username-input"
+    value: ""
+
+  - name: Assert empty string result
+    action: assert_value
+    selector: "#username-input"
+    expected: ""

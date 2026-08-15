@@ -495,6 +495,7 @@ def _response_context() -> dict[str, Any]:
     if _facade is None:
         return {
             "unityConnected": False,
+            "authoritative": False,
             "playModeState": "unknown",
             "isPlaying": False,
             "isPaused": False,
@@ -514,31 +515,18 @@ def _response_context() -> dict[str, Any]:
 
     server = _facade.server
     session = server.session_manager.active
-    editor = server.state.editor
     compile_state = server.state.compile
-    play_mode_state = editor.play_mode_state or "unknown"
-    now = int(time.time() * 1000)
-    updated_at = int(editor.updated_at or 0)
-    age_ms = max(0, now - updated_at) if updated_at else 0
-
-    return {
+    context = server.state.response_context(stale_after_ms=CONFIG.context_stale_ms)
+    context.update({
         "unityConnected": server.is_ready(),
-        "playModeState": play_mode_state,
-        "isPlaying": play_mode_state == "play",
-        "isPaused": play_mode_state == "pause",
-        "isCompiling": editor.is_compiling,
         "compileStatus": compile_state.status,
+        "compilePhase": compile_state.phase,
         "compileErrorCount": compile_state.error_count,
         "compileWarningCount": compile_state.warning_count,
-        "activeScene": editor.active_scene,
-        "sessionId": session.session_id if session else "",
+        "sessionId": session.session_id if session else context.get("sessionId", ""),
         "lastHeartbeatAt": session.last_heartbeat_at if session else 0,
-        "source": "cache",
-        "updatedAt": updated_at,
-        "ageMs": age_ms,
-        "isStale": not updated_at or age_ms > CONFIG.context_stale_ms,
-        "timestamp": now,
-    }
+    })
+    return context
 
 
 def _payload(r) -> CallToolResult:
@@ -602,7 +590,13 @@ async def _reject_compile_in_playmode(tool_name: str):
                 new_id("req"),
                 "EDITOR_IN_PLAY_MODE",
                 "Unity 正在 PlayMode 或暂停状态，MCP 不允许触发 Unity 编译。",
-                {"tool": tool_name},
+                {
+                    "tool": tool_name,
+                    "status": "blocked",
+                    "blockedReason": "PlayMode",
+                    "playModeBlocked": True,
+                    "nextAction": "Exit PlayMode after user confirmation, then retry the same compile request.",
+                },
             )
         ),
     )
@@ -647,6 +641,7 @@ from .mcp_tools import resource_tools as _resource_tools
 from .mcp_tools import reflection_tools as _reflection_tools
 from .mcp_tools import test_tools as _test_tools
 from .mcp_tools import build_tools as _build_tools
+from .mcp_tools import analysis_tools as _analysis_tools
 from .mcp_tools import flow_tools as _flow_tools
 
 

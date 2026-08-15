@@ -1,0 +1,12 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" editor-extension-mode="True">
+    <ui:VisualElement name="example-basic-login-root" class="example-root">
+        <ui:VisualElement name="example-basic-login-panel" class="example-panel">
+            <ui:TextField name="username-input" label="Username" class="example-input" />
+            <ui:TextField name="password-input" label="Password" class="example-input" is-password-field="true" />
+            <ui:VisualElement name="basic-login-actions" class="example-row">
+                <ui:Button name="login-button" text="Login" class="example-button" />
+            </ui:VisualElement>
+            <ui:Label name="status-label" text="Idle" class="example-status" />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

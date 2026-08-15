@@ -193,6 +193,7 @@ class StatusDomainService:
                     "projectPath": session.project_path if session else "",
                     "unityVersion": session.unity_version if session else "",
                     "platform": session.platform if session else "",
+                    "processId": session.process_id if session else 0,
                     "lastHeartbeatAt": session.last_heartbeat_at if session else 0,
                 },
                 "paths": {
@@ -277,7 +278,40 @@ class StatusDomainService:
             availability=availability,
             limit=limit,
         )
-        return ok(new_id("req"), {"count": len(items), "tools": items})
+        exact_matches = [item for item in items if item.get("exactMatch")]
+        approximate_matches = [item for item in items if not item.get("exactMatch")]
+        return ok(
+            new_id("req"),
+            {
+                "count": len(items),
+                "tools": items,
+                "exactMatch": bool(exact_matches),
+                "exactMatches": exact_matches,
+                "approximateMatches": approximate_matches,
+            },
+        )
+
+    async def tool_call(self, tool_name: str, args: dict | None = None) -> ToolResponse:
+        """Call a registered public tool when the MCP client did not inject its typed wrapper."""
+        requested = str(tool_name or "").strip()
+        if not requested:
+            return fail(new_id("req"), "TOOL_NAME_REQUIRED", "toolName is required.", {})
+        if requested == "unity_tool_call":
+            return fail(
+                new_id("req"),
+                "RECURSIVE_TOOL_CALL",
+                "unity_tool_call cannot call itself.",
+                {"tool": requested},
+            )
+        descriptor = REGISTRY.resolve(requested)
+        if descriptor is None:
+            return fail(
+                new_id("req"),
+                "UNKNOWN_TOOL",
+                f"Unknown MCP tool: {requested}",
+                {"tool": requested, "nextAction": "Call unity_tools_find with the exact tool name."},
+            )
+        return await dispatch_public_tool(self, requested, dict(args or {}))
 
     def _registry_tools_snapshot(
         self,
@@ -498,41 +532,78 @@ class StatusDomainService:
         result = await self.dispatcher.call(
             request_id, "playmode.set", {"action": "play"}
         )
-
-        # PlayMode can trigger domain reload — handle reconnect
-        if (
+        connection_transition = bool(
             not result.ok
             and result.error
             and result.error.code in ("CONNECTION_LOST", "DOMAIN_RELOAD_TIMEOUT")
-        ):
-            import asyncio
+        )
+        if not result.ok and not connection_transition:
+            return result
 
-            for _ in range(15):
-                await asyncio.sleep(2)
-                if self.server.session_manager.is_connected():
-                    s = self.server.state.editor
-                    return ok(
-                        request_id,
-                        {
-                            "ok": True,
-                            "state": s.play_mode_state or "play",
-                            "reconnected": True,
-                        },
-                    )
-            return fail(
-                request_id,
-                "PLAYMODE_RECONNECT_TIMEOUT",
-                "进入 PlayMode 后 Unity 未能重连",
-                {"requestId": request_id},
+        confirmed = await self._wait_for_playmode_state("play", timeout_s=30.0)
+        if confirmed is not None:
+            state, context = confirmed
+            data = dict(result.data or {}) if result.ok else {}
+            data.update(
+                {
+                    "confirmed": True,
+                    "playModeState": "play",
+                    "editorState": state,
+                    "reconnected": connection_transition,
+                }
             )
+            return ok(request_id, data, context=context)
 
-        return result
+        return fail(
+            request_id,
+            "PLAYMODE_START_TIMEOUT",
+            "Unity did not confirm PlayMode within 30 seconds.",
+            {
+                "confirmed": False,
+                "nextAction": "Call unity_mcp_status and inspect the authoritative Editor context.",
+            },
+        )
 
     async def playmode_stop(self) -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(
+        result = await self.dispatcher.call(
             request_id, "playmode.set", {"action": "stop"}
         )
+        if not result.ok:
+            return result
+        confirmed = await self._wait_for_playmode_state("edit", timeout_s=30.0)
+        if confirmed is not None:
+            state, context = confirmed
+            data = dict(result.data or {})
+            data.update({"confirmed": True, "playModeState": "edit", "editorState": state})
+            return ok(request_id, data, context=context)
+        return fail(
+            request_id,
+            "PLAYMODE_STOP_TIMEOUT",
+            "Unity did not confirm EditMode within 30 seconds.",
+            {
+                "confirmed": False,
+                "nextAction": "Call unity_mcp_status and inspect the authoritative Editor context.",
+            },
+        )
+
+    async def _wait_for_playmode_state(
+        self, target_state: str, *, timeout_s: float
+    ) -> tuple[dict, dict | None] | None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.server.session_manager.is_connected():
+                state_result = await self.dispatcher.call(
+                    new_id("req"), "resource.editorState", {}, timeout_ms=5000
+                )
+                if state_result.ok and state_result.data:
+                    state = self._update_editor_cache_from_resource_state(
+                        state_result.data
+                    )
+                    if state.get("playModeState") == target_state:
+                        return state, state_result.context
+            await asyncio.sleep(0.25)
+        return None
 
     async def mouse_event(
         self,
@@ -825,6 +896,7 @@ class StatusDomainService:
     async def console_search_logs(
         self,
         count: int = 200,
+        query: str = "",
         log_type: str = "",
         include_stack_trace: bool = False,
         exclude_upilot: bool = True,
@@ -843,6 +915,8 @@ class StatusDomainService:
             "newestFirst": newest_first,
             "maxMessageLength": max(0, max_message_length),
         }
+        if query:
+            payload["query"] = query
         if log_type:
             payload["logType"] = log_type
         if contains:
@@ -888,17 +962,23 @@ class StatusDomainService:
         self,
         session_id: str = "",
         after_sequence: int = -1,
+        from_sequence: int = -1,
+        to_sequence: int = -1,
         count: int = 200,
         log_type: str = "",
         include_stack_trace: bool = True,
         contains: list[str] | None = None,
         contains_all: bool = False,
+        regex: str = "",
         newest_first: bool = False,
+        continuation_token: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {
             "sessionId": session_id,
             "afterSequence": after_sequence,
+            "fromSequence": from_sequence,
+            "toSequence": to_sequence,
             "count": max(1, min(count, 5000)),
             "includeStackTrace": include_stack_trace,
             "containsAll": contains_all,
@@ -908,6 +988,10 @@ class StatusDomainService:
             payload["logType"] = log_type
         if contains:
             payload["contains"] = contains
+        if regex:
+            payload["regex"] = regex
+        if continuation_token:
+            payload["continuationToken"] = continuation_token
         return await self.dispatcher.call(request_id, "console.capture.read", payload)
 
     async def console_capture_stop(self, session_id: str = "") -> ToolResponse:

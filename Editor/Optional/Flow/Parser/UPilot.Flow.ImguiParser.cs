@@ -30,13 +30,18 @@ namespace CodingRiver.UPilot.Flow
 
             // Handle group path syntax: gui(group="X" > button, text="Y")
             string groupPrefix = null;
-            int pathSeparator = trimmed.IndexOf('>');
+            Match outerMatch = SelectorRegex.Match(trimmed);
+            int pathSeparator = outerMatch.Success
+                ? FindUnquotedPathSeparator(outerMatch.Groups["inner"].Value)
+                : -1;
             if (pathSeparator > 0)
             {
-                string groupPart = trimmed.Substring(0, pathSeparator).Trim();
-                trimmed = trimmed.Substring(pathSeparator + 1).Trim();
+                string inner = outerMatch.Groups["inner"].Value;
+                string groupPart = $"gui({inner.Substring(0, pathSeparator).Trim()})";
+                trimmed = $"gui({inner.Substring(pathSeparator + 1).Trim()})";
                 var groupSel = CompileSingle(groupPart);
-                if (!string.IsNullOrEmpty(groupSel.Group) && string.IsNullOrEmpty(groupSel.Type))
+                if (!string.IsNullOrEmpty(groupSel.Group)
+                    && (string.IsNullOrEmpty(groupSel.Type) || string.Equals(groupSel.Type, "group", StringComparison.OrdinalIgnoreCase)))
                 {
                     groupPrefix = groupSel.Group;
                 }
@@ -49,6 +54,24 @@ namespace CodingRiver.UPilot.Flow
             }
 
             return result;
+        }
+
+        private static int FindUnquotedPathSeparator(string input)
+        {
+            bool inQuotes = false;
+            for (int i = 0; i < input.Length; i++)
+            {
+                if (input[i] == '"')
+                {
+                    inQuotes = !inQuotes;
+                }
+                else if (input[i] == '>' && !inQuotes)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
         }
 
         private static ImguiSelector CompileSingle(string selectorText)
@@ -83,13 +106,13 @@ namespace CodingRiver.UPilot.Flow
             if (first.StartsWith("group=", StringComparison.OrdinalIgnoreCase) ||
                 first.StartsWith("group=\"", StringComparison.OrdinalIgnoreCase))
             {
-                selector.Group = ExtractValue(first);
+                selector.Group = ExtractValue(first.Substring(first.IndexOf('=') + 1));
                 selector.Type = "group";
             }
             else if (first.StartsWith("control_name=", StringComparison.OrdinalIgnoreCase) ||
                      first.StartsWith("control_name=\"", StringComparison.OrdinalIgnoreCase))
             {
-                selector.ControlName = ExtractValue(first);
+                selector.ControlName = ExtractValue(first.Substring(first.IndexOf('=') + 1));
             }
             else
             {

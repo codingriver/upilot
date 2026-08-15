@@ -27,6 +27,8 @@ def to_wire(msg: WsMessage) -> dict[str, Any]:
         "timestamp": msg.timestamp,
         "sessionId": msg.session_id,
         "protocolVersion": msg.protocol_version,
+        "context": msg.context,
+        "timing": msg.timing,
     }
 
 
@@ -39,4 +41,6 @@ def from_wire(data: dict[str, Any]) -> WsMessage:
         timestamp=int(data.get("timestamp") or 0),
         session_id=str(data.get("sessionId", "")),
         protocol_version=str(data.get("protocolVersion", "")),
+        context=data.get("context") if isinstance(data.get("context"), dict) else None,
+        timing=data.get("timing") if isinstance(data.get("timing"), dict) else None,
     )

@@ -1,0 +1,15 @@
+schemaVersion: 2
+name: "_89-negative-focus-non-focusable"
+description: |
+  Verifies that focus action on a non-focusable element fails or is handled.
+  This test is expected to FAIL.
+
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.Examples.ExampleCoverageFieldsWindow
+    reopen_if_open: true
+
+steps:
+  - name: focus on non-focusable Box element should fail
+    action: focus
+    selector: "#display-box"

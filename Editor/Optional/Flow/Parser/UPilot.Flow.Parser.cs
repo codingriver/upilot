@@ -332,18 +332,17 @@ namespace CodingRiver.UPilot.Flow
                 throw new UPilotFlowException(ErrorCodes.TestCaseSchemaInvalid, $"Step {stepName} cannot declare both repeat_while and action.");
             }
 
-            // Duration validation is intentionally deferred to execution phase so that
-            // negative tests with out-of-bound values (e.g. 601s) fail as step-level
-            // errors rather than crashing the whole case during parsing.
-            // All actions that consume duration/timeout call DurationParser themselves.
-            // if (!string.IsNullOrWhiteSpace(step.Timeout))
-            // {
-            //     DurationParser.ParseToMilliseconds(step.Timeout, stepName);
-            // }
-            // if (!string.IsNullOrWhiteSpace(step.Duration))
-            // {
-            //     DurationParser.ParseToMilliseconds(step.Duration, stepName);
-            // }
+            // Validate syntax at schema time, while leaving range validation to the
+            // execution phase. This keeps malformed values such as "abc" out of the
+            // plan without changing step-level handling for values such as "601s".
+            if (!string.IsNullOrWhiteSpace(step.Timeout) && !DurationParser.IsWellFormed(step.Timeout))
+            {
+                throw new UPilotFlowException(ErrorCodes.TestCaseSchemaInvalid, $"Step {stepName} has an invalid timeout literal: {step.Timeout}");
+            }
+            if (!string.IsNullOrWhiteSpace(step.Duration) && !DurationParser.IsWellFormed(step.Duration))
+            {
+                throw new UPilotFlowException(ErrorCodes.TestCaseSchemaInvalid, $"Step {stepName} has an invalid duration literal: {step.Duration}");
+            }
 
             if (step.If != null && string.IsNullOrWhiteSpace(step.If.Exists) && string.IsNullOrWhiteSpace(step.If.NotExists))
             {
@@ -604,19 +603,19 @@ namespace CodingRiver.UPilot.Flow
     {
         private static readonly Regex DurationRegex = new Regex(@"^(?<value>\d+(\.\d+)?)(?<unit>ms|s)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+        public static bool IsWellFormed(string literal)
+        {
+            return !string.IsNullOrWhiteSpace(literal) && DurationRegex.IsMatch(literal.Trim());
+        }
+
         public static int ParseToMilliseconds(string literal, string stepName)
         {
-            if (string.IsNullOrWhiteSpace(literal))
+            if (!IsWellFormed(literal))
             {
                 throw new UPilotFlowException(ErrorCodes.DurationLiteralInvalid, $"Duration literal in step {stepName} is invalid.");
             }
 
             Match match = DurationRegex.Match(literal.Trim());
-            if (!match.Success)
-            {
-                throw new UPilotFlowException(ErrorCodes.DurationLiteralInvalid, $"Invalid duration literal: {literal}");
-            }
-
             decimal value = decimal.Parse(match.Groups["value"].Value, CultureInfo.InvariantCulture);
             decimal multiplier = match.Groups["unit"].Value == "s" ? 1000m : 1m;
             int milliseconds = (int)Math.Round(value * multiplier, MidpointRounding.AwayFromZero);

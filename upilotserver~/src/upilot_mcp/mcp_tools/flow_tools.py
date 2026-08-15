@@ -213,10 +213,16 @@ async def unity_upilot_flow_run_batch(
 
 @mcp.tool(
     description=(
-        "强制重置 UPilot Flow 执行状态。无需 executionId，直接释放 EDITOR_BUSY 锁，"
-        "Dispose 当前 ExecutionContext，关闭测试窗口，并将所有进行中的执行标记为 aborted。"
+        "请求停止并清理当前 UPilot Flow 执行。不会在后台任务或 ExecutionContext 尚未结束时"
+        "提前释放活动槽或伪造 aborted 终态。"
     ),
 )
+async def unity_upilot_flow_force_cleanup(executionId: str = ""):
+    _log_tool_call("unity_upilot_flow_force_cleanup", {"executionId": executionId})
+    r = await _get_facade().upilot_flow_force_cleanup(execution_id=executionId)
+    return _log_tool_result("unity_upilot_flow_force_cleanup", _payload(r))
+
+@mcp.tool(description="兼容旧名称；等价于 unity_upilot_flow_force_cleanup。")
 async def unity_upilot_flow_force_reset():
     _log_tool_call("unity_upilot_flow_force_reset", {})
     r = await _get_facade().upilot_flow_force_reset()
@@ -342,6 +348,48 @@ async def unity_upilot_flow_results(
     _log_tool_call("unity_upilot_flow_results", {"executionId": executionId})
     r = await _get_facade().upilot_flow_results(execution_id=executionId)
     return _log_tool_result("unity_upilot_flow_results", _payload(r))
+
+@mcp.tool(description="查询任意入口启动的 UPilot Flow 执行状态；executionId 为空时返回最近一次执行。")
+async def unity_upilot_flow_status(executionId: str = ""):
+    _log_tool_call("unity_upilot_flow_status", {"executionId": executionId})
+    r = await _get_facade().upilot_flow_status(execution_id=executionId)
+    return _log_tool_result("unity_upilot_flow_status", _payload(r))
+
+@mcp.tool(description="列出 MCP、CLI、直接 RunAsync 与 Test Runner 窗口启动的 UPilot Flow 执行。")
+async def unity_upilot_flow_executions():
+    _log_tool_call("unity_upilot_flow_executions", {})
+    r = await _get_facade().upilot_flow_executions()
+    return _log_tool_result("unity_upilot_flow_executions", _payload(r))
+
+@mcp.tool(description="列出任意入口启动的 UPilot Flow 执行；是 unity_upilot_flow_executions 的语义别名。")
+async def unity_upilot_flow_list():
+    _log_tool_call("unity_upilot_flow_list", {})
+    r = await _get_facade().upilot_flow_list()
+    return _log_tool_result("unity_upilot_flow_list", _payload(r))
+
+@mcp.tool(description="暂停指定 UPilot Flow 执行；无人值守执行会保留有限超时，避免永久等待。")
+async def unity_upilot_flow_pause(executionId: str):
+    _log_tool_call("unity_upilot_flow_pause", {"executionId": executionId})
+    r = await _get_facade().upilot_flow_pause(execution_id=executionId)
+    return _log_tool_result("unity_upilot_flow_pause", _payload(r))
+
+@mcp.tool(description="恢复指定 UPilot Flow 执行，包括失败策略导致的 waiting_for_resume。")
+async def unity_upilot_flow_resume(executionId: str):
+    _log_tool_call("unity_upilot_flow_resume", {"executionId": executionId})
+    r = await _get_facade().upilot_flow_resume(execution_id=executionId)
+    return _log_tool_result("unity_upilot_flow_resume", _payload(r))
+
+@mcp.tool(description="分阶段停止任意入口启动的 UPilot Flow 执行；终态只在任务和上下文清理完成后出现。")
+async def unity_upilot_flow_stop(executionId: str):
+    _log_tool_call("unity_upilot_flow_stop", {"executionId": executionId})
+    r = await _get_facade().upilot_flow_stop(execution_id=executionId)
+    return _log_tool_result("unity_upilot_flow_stop", _payload(r))
+
+@mcp.tool(description="取消指定 UPilot Flow 执行；重复调用幂等，并等待真实清理终态。")
+async def unity_upilot_flow_cancel(executionId: str):
+    _log_tool_call("unity_upilot_flow_cancel", {"executionId": executionId})
+    r = await _get_facade().upilot_flow_cancel(execution_id=executionId)
+    return _log_tool_result("unity_upilot_flow_cancel", _payload(r))
 
 async def _run_unity_upilot_flow_file(
     yaml_path: str,

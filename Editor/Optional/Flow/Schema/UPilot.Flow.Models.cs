@@ -205,6 +205,27 @@ namespace CodingRiver.UPilot.Flow
         public bool RequireOfficialPointerDriver = false;
         public bool RequireInputSystemKeyboardDriver = false;
 
+        /// <summary>Stable id shared by direct, CLI, headed-window, and MCP entry points.</summary>
+        public string ExecutionId;
+
+        /// <summary>Human-readable owner such as direct, cli, test-runner, or mcp.</summary>
+        public string ExecutionSource = "direct";
+
+        /// <summary>Unattended callers must never wait forever for a manual resume.</summary>
+        public bool Unattended;
+
+        /// <summary>Failure-pause deadline for unattended runs. Zero disables the deadline.</summary>
+        public int PauseTimeoutMs = 30000;
+
+        /// <summary>manual, auto_abort, or auto_resume.</summary>
+        public string PauseTimeoutPolicy = "auto_abort";
+
+        /// <summary>Close native modal menus without restarting Unity when the Editor main thread is blocked.</summary>
+        public bool EnableModalWatchdog = true;
+
+        /// <summary>Deadline before the watchdog posts Escape to the exact current Unity process window.</summary>
+        public int ModalWatchdogTimeoutMs = 5000;
+
         /// <summary>
         /// Enables verbose per-step and per-action logging to the Unity Console.
         /// </summary>
@@ -250,6 +271,13 @@ namespace CodingRiver.UPilot.Flow
                 RequireOfficialHost = RequireOfficialHost,
                 RequireOfficialPointerDriver = RequireOfficialPointerDriver,
                 RequireInputSystemKeyboardDriver = RequireInputSystemKeyboardDriver,
+                ExecutionId = ExecutionId,
+                ExecutionSource = ExecutionSource,
+                Unattended = Unattended,
+                PauseTimeoutMs = PauseTimeoutMs,
+                PauseTimeoutPolicy = PauseTimeoutPolicy,
+                EnableModalWatchdog = EnableModalWatchdog,
+                ModalWatchdogTimeoutMs = ModalWatchdogTimeoutMs,
                 EnableVerboseLog = EnableVerboseLog,
                 PreStepDelayMs = PreStepDelayMs,
                 GenerateSingleReport = GenerateSingleReport,
@@ -281,6 +309,23 @@ namespace CodingRiver.UPilot.Flow
             if (PreStepDelayMs < 0 || PreStepDelayMs > 60000)
             {
                 throw new UPilotFlowException(ErrorCodes.TestOptionsInvalid, "PreStepDelayMs 超出允许范围");
+            }
+
+            if (PauseTimeoutMs < 0 || PauseTimeoutMs > 3600000)
+            {
+                throw new UPilotFlowException(ErrorCodes.TestOptionsInvalid, "PauseTimeoutMs 超出允许范围");
+            }
+
+            if (ModalWatchdogTimeoutMs < 500 || ModalWatchdogTimeoutMs > 600000)
+            {
+                throw new UPilotFlowException(ErrorCodes.TestOptionsInvalid, "ModalWatchdogTimeoutMs 超出允许范围");
+            }
+
+            if (PauseTimeoutPolicy != "manual"
+                && PauseTimeoutPolicy != "auto_abort"
+                && PauseTimeoutPolicy != "auto_resume")
+            {
+                throw new UPilotFlowException(ErrorCodes.TestOptionsInvalid, "PauseTimeoutPolicy 必须为 manual、auto_abort 或 auto_resume");
             }
         }
     }

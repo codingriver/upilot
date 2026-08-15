@@ -1,0 +1,9 @@
+schemaVersion: 2
+name: "61-host-window-switch-b"
+fixture:
+  host_window:
+    type: CodingRiver.UPilot.Flow.SampleInteractionWindow
+    reopen_if_open: true
+steps:
+  - action: assert_visible
+    selector: '#interaction-root'

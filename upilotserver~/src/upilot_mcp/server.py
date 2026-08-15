@@ -40,10 +40,10 @@ def _log_ws_message(direction: str, raw: str, *, session_id: str | None = None, 
 class WsOrchestratorServer(WsTransport):
     """WebSocket server with unified disconnect handling.
 
-    - **Any disconnect** (not only domain reload): pending command futures move to *suspended* and
-      wait for reconnect + optional grace timer (``UPILOT_DISCONNECT_GRACE_S``; ``0`` = wait forever).
-    - **session.hello** after reconnect: restores suspended futures and **re-sends** commands so Unity
-      (new domain) receives them again.
+    - Domain reloads suspend pending command futures and resend them after the
+      new Unity domain announces ``session.hello``.
+    - Ordinary disconnects fail pending commands. Replaying an arbitrary command
+      after a socket timeout can duplicate writes or revive a timed-out request.
     - **domain_reload.starting**: optional extra grace (``UPILOT_DOMAIN_RELOAD_BONUS_S``).
     - Stale socket handlers must not clear ``_ws`` or session if a newer connection took over.
     """
@@ -65,6 +65,7 @@ class WsOrchestratorServer(WsTransport):
         self._pending: dict[str, asyncio.Future] = {}
         self._suspended: dict[str, asyncio.Future] = {}
         self._domain_reloading = False
+        self._reconnected_after_domain_reload = False
         self._compile_idle_event = asyncio.Event()
         self._compile_idle_event.set()
         self._server = None
@@ -269,6 +270,33 @@ class WsOrchestratorServer(WsTransport):
         self._pending.clear()
         self._suspended.clear()
 
+    def _suspend_or_fail_pending_on_disconnect(self, sid_log: str) -> None:
+        """Only a declared domain reload may replay in-flight commands."""
+        if self._domain_reloading:
+            n = len(self._pending)
+            if n:
+                logger.info(
+                    "[%s] Disconnect — suspending %d pending commands (await reconnect)",
+                    sid_log[:12],
+                    n,
+                )
+            self._suspended.update(self._pending)
+            self._pending.clear()
+            self._schedule_reconnect_grace()
+            return
+
+        n = len(self._pending) + len(self._suspended)
+        if n:
+            logger.warning(
+                "[%s] Ordinary disconnect — failing %d pending commands instead of replaying them",
+                sid_log[:12],
+                n,
+            )
+        self._fail_all_pending_and_suspended(
+            "CONNECTION_LOST",
+            "Unity 连接中断，未完成命令不会在普通重连后自动重放",
+        )
+
     def _note_compile_busy(self, busy: bool) -> None:
         if busy:
             self._compile_idle_event.clear()
@@ -322,6 +350,13 @@ class WsOrchestratorServer(WsTransport):
         fut = loop.create_future()
         self._pending[command_id] = fut
         return fut
+
+    def unregister_pending(self, command_id: str) -> None:
+        future = self._pending.pop(command_id, None)
+        if future is None:
+            future = self._suspended.pop(command_id, None)
+        if future is not None and not future.done():
+            future.cancel()
 
     async def send_command(self, command_id: str, name: str, payload: dict[str, Any]) -> None:
         if not self._ws or not self.session_manager.active:
@@ -387,6 +422,7 @@ class WsOrchestratorServer(WsTransport):
 
         if self._domain_reloading:
             logger.info("Unity TCP reconnected during domain reload — awaiting session.hello")
+            self._reconnected_after_domain_reload = True
             self._domain_reloading = False
 
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -439,12 +475,7 @@ class WsOrchestratorServer(WsTransport):
                     sid_log[:12],
                 )
             else:
-                n = len(self._pending)
-                if n:
-                    logger.info("[%s] Disconnect — suspending %d pending commands (await reconnect)", sid_log[:12], n)
-                self._suspended.update(self._pending)
-                self._pending.clear()
-                self._schedule_reconnect_grace()
+                self._suspend_or_fail_pending_on_disconnect(sid_log)
 
     async def _handle_message(self, message, auth_box: list[str | None] | None = None) -> None:
         if message.session_id:
@@ -452,24 +483,54 @@ class WsOrchestratorServer(WsTransport):
 
         if message.type == "hello" and message.name == "session.hello":
             self._cancel_reconnect_grace()
+            preserve_compile_snapshot = self._reconnected_after_domain_reload
+            self._reconnected_after_domain_reload = False
+            previous_process_id = self.state.editor.process_id
+            incoming_process_id = int(message.payload.get("processId") or 0)
             if self._suspended:
-                logger.info(
-                    "[%s] Restoring %d suspended commands after reconnect",
-                    message.session_id[:12],
-                    len(self._suspended),
-                )
-                self._pending.update(self._suspended)
-                self._suspended.clear()
+                if preserve_compile_snapshot and (
+                    not previous_process_id
+                    or not incoming_process_id
+                    or previous_process_id == incoming_process_id
+                ):
+                    logger.info(
+                        "[%s] Restoring %d suspended commands after domain reload",
+                        message.session_id[:12],
+                        len(self._suspended),
+                    )
+                    self._pending.update(self._suspended)
+                    self._suspended.clear()
+                else:
+                    logger.warning(
+                        "[%s] Unity process changed without a domain-reload contract; failing %d suspended commands",
+                        message.session_id[:12],
+                        len(self._suspended),
+                    )
+                    self._fail_all_pending_and_suspended(
+                        "EDITOR_RESTARTED",
+                        "Unity 进程已重启，未完成命令不会自动重放",
+                    )
             elif self._pending:
                 logger.info(
                     "[%s] session.hello with %d in-flight pending — latest connection wins, will resend",
                     message.session_id[:12],
                     len(self._pending),
                 )
-            self.state.compile = CompileSnapshot()
-            self._compile_idle_event.set()
+            if not preserve_compile_snapshot:
+                self.state.compile = CompileSnapshot()
+            if preserve_compile_snapshot and self.state.compile.status in (
+                "queued",
+                "accepted",
+                "compiling",
+            ):
+                self._compile_idle_event.clear()
+            else:
+                self._compile_idle_event.set()
             self.session_manager.on_hello(message.session_id, message.payload)
-            self.state.editor.connected = True
+            self.state.reset_editor_session(
+                message.session_id,
+                incoming_process_id,
+            )
             if auth_box is not None:
                 auth_box[0] = message.session_id
             logger.info(
@@ -521,11 +582,19 @@ class WsOrchestratorServer(WsTransport):
                     name=ack["name"],
                 )
                 await self._ws.send(ack_raw)
-            await self._resend_pending_commands()
+            if preserve_compile_snapshot:
+                await self._resend_pending_commands()
             return
 
         if message.type == "heartbeat":
             self.session_manager.on_heartbeat(message.session_id)
+            if message.payload:
+                heartbeat_context = dict(message.payload)
+                heartbeat_context.setdefault("connected", True)
+                heartbeat_context.setdefault("sessionId", message.session_id)
+                heartbeat_context.setdefault("source", "bridge-heartbeat")
+                heartbeat_context.setdefault("authoritative", True)
+                self.state.update_editor_state(heartbeat_context)
             return
 
         if message.type in ("result", "error"):
@@ -564,6 +633,15 @@ class WsOrchestratorServer(WsTransport):
                     message.session_id[:12] if message.session_id else "?",
                 )
                 self._domain_reloading = True
+                if bool(message.payload.get("isCompiling")) or self.state.compile.status in (
+                    "queued",
+                    "accepted",
+                    "compiling",
+                ):
+                    self.state.compile.status = "compiling"
+                    self.state.compile.phase = "domainReload"
+                    self.state.compile.last_progress_at = now_ms()
+                    self.state.editor.is_compiling = True
                 self._extend_grace_for_domain_reload()
                 return
             if message.name == "compile.status":
@@ -586,7 +664,16 @@ class WsOrchestratorServer(WsTransport):
             elif message.name == "editor.state":
                 self.state.update_editor_state(message.payload)
             elif message.name == "playmode.changed":
-                self.state.editor.play_mode_state = str(message.payload.get("state", self.state.editor.play_mode_state))
+                state = str(message.payload.get("state", self.state.editor.play_mode_state))
+                self.state.update_editor_state(
+                    {
+                        "connected": True,
+                        "playModeState": state,
+                        "authoritative": True,
+                        "source": "playmode.changed",
+                        "sessionId": message.session_id,
+                    }
+                )
 
     async def _heartbeat_loop(self) -> None:
         while True:
