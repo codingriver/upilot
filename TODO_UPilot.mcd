@@ -135,3 +135,13 @@
 - 建议改进：截图结果同时记录并校验 Unity instanceId/typeName、映射后的 Unity PID/OS HWND、捕获 API/source、窗口矩形、前台/遮挡状态和像素哈希；优先使用能离屏捕获精确 HWND 的实现，若只能 CopyFromScreen，应先把已验证的精确 HWND 置前并明确返回 `degraded=true/degradeReason=occlusion-sensitive`。捕获后增加窗口标题栏/已知 UI 特征的轻量校验，身份与像素源不一致时直接失败。
 - 证据/复现：Unity PID `88060`，Test Runner Unity instanceId `568105589213663200`，窗口 `Test Runner`、类型 `UnityEditor.TestTools.TestRunner.TestRunnerWindow`；两次 MCP 截图均显示 Codex 内容。映射到精确 HWND `7358378` 后，OS helper 首次仍因窗口被遮挡抓到 Codex；将该 HWND 置前后再次捕获才得到有效 Test Runner PNG。
 - 备注：有效截图为 `Tests~/UPilotTest/log/UPilotScreenshots/final-editmode-327-results.png`，SHA256 `f5300e0ba203c02aeddf8e4dbb72ad0c860222ca5a339aada41f19a4d7499d15`；该窗口仅显示发现的 327 个测试，MCP 全量运行结果未回填到 Test Runner UI，后续还应提供可直接渲染终态摘要的验收截图工具。
+
+### [已完成] 安装器和发布配置混淆外部 HTTP MCP 与内部 Unity WebSocket
+
+- 发现时间：2026-08-15
+- 来源任务/测试：审查 `install_upilot.py`、客户端配置诊断、离线发布配置与 Agent/Skill 模板的版本及端口语义。
+- 现象/问题：安装器固定默认 UPM ref `v0.2.0`，默认创建 Python venv，并为 Codex 生成 stdio/process 配置且暴露内部 8765；离线发布示例也生成 command/args/stdio 配置。诊断只读取 URL，无法识别这些进程式 UPilot 注册，也会把其他 MCP 服务误判为 UPilot。
+- 影响范围：远程 UPM 安装可复现性、独立 EXE 分发、多项目并行、Codex/Cursor/Claude/VSCode 等第三方 AI 工具接入，以及 8011/8765 端口职责理解。
+- 建议改进：远程 UPM 强制显式 tag/branch/commit，本地安装使用 `--use-local-upm`；Python 环境改为 opt-in；所有第三方 AI 配置只生成 `http://127.0.0.1:<httpPort>/mcp`；8765 仅保留为 MCP Server 与 Unity Bridge 的内部端口；诊断识别并拒绝 UPilot command/args/stdio/WebSocket 注册，同时忽略无关 MCP 服务。
+- 证据/复现：旧安装器包含 `DEFAULT_UPM_REF = "v0.2.0"` 与 `--transport stdio --port 8765`；旧 `upilotserver~/mcp.example.json` 和 `deploy/build_release.py` 生成相同的客户端进程配置。
+- 状态：已完成。Python 全量 87/87 通过；Unity 定向 Agent/Skill EditMode 8/8 通过；最终 EditMode 327 total / 322 passed / 5 skipped / 0 failed；编译错误 0。

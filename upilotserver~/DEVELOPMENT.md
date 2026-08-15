@@ -8,7 +8,7 @@
 
 Python server 负责：
 
-- 通过 stdio 或 Streamable HTTP 暴露 MCP tools；
+- 通过 Streamable HTTP 向第三方 AI 工具暴露 MCP tools；
 - 通过 WebSocket 接收 Unity Editor bridge 连接；
 - 转发编辑器状态、Console 日志、编译、资源、场景、GameObject、组件、窗口、截图、包、菜单、脚本、Prefab、材质、构建、测试和诊断等工具调用；
 - 当 Unity 侧显式启用 UPilot Flow 时，转发 YAML EditorWindow 自动化调用。
@@ -39,14 +39,14 @@ upilotserver~/
 
 Server 有两层传输：
 
-- **MCP transport**：通过 stdio 或 Streamable HTTP 暴露给 MCP client。
+- **MCP transport**：通过 Streamable HTTP 暴露给第三方 AI client。
 - **Unity bridge transport**：供 Unity Editor bridge 连接的内部 WebSocket listener。
 
 常见本地开发拓扑：
 
 ```text
 MCP client
-  -> stdio 或 http://127.0.0.1:8011/mcp
+  -> http://127.0.0.1:8011/mcp
   -> Python MCP server
   -> ws://127.0.0.1:8765
   -> Unity Editor bridge
@@ -58,7 +58,7 @@ HTTP MCP endpoint 必须使用 `/mcp` 路径，例如：
 http://127.0.0.1:8011/mcp
 ```
 
-WebSocket 端口 `8765` 不是 MCP client endpoint，它是 Python server 与 Unity Editor bridge 之间的内部连接端口。
+WebSocket 端口 `8765` 不是 MCP client endpoint，它是 Python server 与 Unity Editor bridge 之间的内部连接端口。第三方 AI 客户端不得使用 WebSocket、stdio 或 command/args 启动配置。
 
 ## 源码环境
 
@@ -102,12 +102,6 @@ MCP client URL：
 http://127.0.0.1:8011/mcp
 ```
 
-面向 local-command MCP client 的 stdio 启动方式：
-
-```bash
-python run_upilot_mcp.py --transport stdio --port 8765
-```
-
 开发模式安装后的 console script 启动方式：
 
 ```bash
@@ -118,20 +112,20 @@ upilot-mcp --transport http --http-port 8011 --port 8765
 
 | CLI 参数 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- | --- |
-| `--transport` | `UPILOT_TRANSPORT` | `stdio` | MCP 传输方式：`stdio` 或 `http`。 |
+| `--transport` | `UPILOT_TRANSPORT` | `http` | MCP 传输方式。第三方 AI 工具必须使用 `http`；`stdio` 仅保留用于内部兼容测试。 |
 | `--host` | `UPILOT_HOST` | `127.0.0.1` | Unity Editor bridge 使用的 WebSocket host。 |
 | `--port` | `UPILOT_PORT` | `8765` | Unity Editor bridge 使用的 WebSocket port。 |
 | `--http-host` | `UPILOT_HTTP_HOST` | `127.0.0.1` | Streamable HTTP host。 |
-| `--http-port` | `UPILOT_HTTP_PORT` | `8000` | Streamable HTTP port。 |
+| `--http-port` | `UPILOT_HTTP_PORT` | `8011` | Streamable HTTP port。 |
 | `--label` | 无 | 当前目录名 | Unity 诊断中显示的标签。 |
 | `--log-file` | `UPILOT_LOG_FILE` | 未设置 | 可选日志文件路径。 |
 | `--log-level` | `UPILOT_LOG_LEVEL` | `DEBUG` | Python 日志级别。 |
 
-如果同时运行多个 Unity 项目，给每个项目使用不同的 `--port`，例如 `8765`、`8766`、`8767`。
+如果同时运行多个 Unity 项目，给每个项目分配唯一的 `--http-port` 与内部 `--port` 端口对，并使用不同的 MCP 注册名称。AI 客户端只配置对应的 HTTP `/mcp` URL。
 
 ## MCP Client 配置
 
-对于支持 Streamable HTTP 的 client，先自行启动 server，再配置 HTTP URL：
+第三方 AI client 只能使用 Streamable HTTP。先自行启动 server，再配置 HTTP URL：
 
 ```json
 {
@@ -144,29 +138,7 @@ upilot-mcp --transport http --http-port 8011 --port 8765
 }
 ```
 
-对于 local-command client，使用 stdio：
-
-```json
-{
-  "mcpServers": {
-    "upilot": {
-      "command": "python",
-      "args": [
-        "<PATH_TO_UPILOT_REPO>/upilotserver~/run_upilot_mcp.py",
-        "--transport",
-        "stdio",
-        "--port",
-        "8765"
-      ],
-      "env": {
-        "PYTHONUTF8": "1"
-      }
-    }
-  }
-}
-```
-
-更完整的 local-command 示例见 `mcp.example.json`。
+不要在 AI 客户端中配置 `command`、`args`、`stdio` 或 WebSocket URL。HTTP-only 完整示例见 `mcp.example.json`。
 
 ## Unity Editor 连接
 
@@ -195,7 +167,7 @@ python -m pytest
 
 - 保持 `run_upilot_mcp.py` 作为推荐源码启动入口。
 - MCP HTTP 路径保持为 `/mcp`。
-- WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint。
+- WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint；第三方 AI 客户端只使用 HTTP `/mcp`。
 - Python import module 为 `upilot_mcp`，对外发布名和命令为 `upilot-mcp`。
 - MCP 工具命名需要与实现路径保持一致。Roslyn 动态编译工具不再暴露，也不注册 Unity bridge `roslyn.*` 路由。
 - 稳定调用已有业务方法时应使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`，对应 Unity bridge 路由 `reflection.eval`。
@@ -228,15 +200,7 @@ python run_upilot_mcp.py --transport http --http-port 8011 --port 8766
 
 ### 非 ASCII 路径或文本乱码
 
-local-command client 可以设置 Python UTF-8 模式：
-
-```json
-{
-  "env": {
-    "PYTHONUTF8": "1"
-  }
-}
-```
+在启动 MCP Server 的进程环境中设置 `PYTHONUTF8=1`，不要把 Python 进程环境配置放进第三方 AI 客户端。
 
 ## 相关文档
 

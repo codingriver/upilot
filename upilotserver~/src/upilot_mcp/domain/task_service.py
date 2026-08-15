@@ -47,7 +47,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 8
+_UPILOT_RULES_VERSION = 9
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"

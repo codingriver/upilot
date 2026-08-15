@@ -883,6 +883,102 @@ def test_client_config_diagnostics_allows_same_endpoint_for_different_clients(tm
     assert "DUPLICATE_MCP_ENDPOINT" not in codes
 
 
+def test_client_config_diagnostics_rejects_upilot_process_transport(tmp_path) -> None:
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    codex_dir.joinpath("config.toml").write_text(
+        """
+[mcp_servers.upilot]
+command = "python"
+args = ["run_upilot_mcp.py", "--transport", "stdio", "--port", "8765"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_client_configs(tmp_path)
+    issues = {item["code"]: item for item in result["issues"]}
+
+    assert "NON_HTTP_UPILOT_TRANSPORT" in issues
+    assert "internal Unity Bridge port" in issues["NON_HTTP_UPILOT_TRANSPORT"]["message"]
+    assert result["ok"] is False
+
+
+def test_client_config_diagnostics_ignores_unrelated_mcp_servers(tmp_path) -> None:
+    tmp_path.joinpath(".mcp.json").write_text(
+        '{"mcpServers":{"database":{"url":"http://127.0.0.1:9999/not-mcp","timeout":5}}}',
+        encoding="utf-8",
+    )
+
+    result = diagnose_client_configs(tmp_path)
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+    assert result["registrations"][0]["isUpilot"] is False
+
+
+def test_client_config_diagnostics_detects_internal_websocket_url(tmp_path) -> None:
+    tmp_path.joinpath(".mcp.json").write_text(
+        '{"mcpServers":{"upilot":{"url":"ws://127.0.0.1:8765"}}}',
+        encoding="utf-8",
+    )
+
+    result = diagnose_client_configs(tmp_path)
+    codes = {item["code"] for item in result["issues"]}
+
+    assert "INTERNAL_BRIDGE_PORT_USED" in codes
+    assert "MCP_HTTP_ENDPOINT_MISMATCH" in codes
+
+
+def test_client_config_diagnostics_accepts_http_only_upilot_config(tmp_path) -> None:
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    codex_dir.joinpath("config.toml").write_text(
+        '[mcp_servers.upilot]\nurl = "http://127.0.0.1:8011/mcp"\ntool_timeout_sec = 300',
+        encoding="utf-8",
+    )
+
+    result = diagnose_client_configs(tmp_path)
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+
+
+def test_client_config_diagnostics_accepts_distinct_named_project_endpoints(tmp_path) -> None:
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    codex_dir.joinpath("config.toml").write_text(
+        """
+[mcp_servers.upilot-game-a]
+url = "http://127.0.0.1:8011/mcp"
+
+[mcp_servers.upilot-game-b]
+url = "http://127.0.0.1:8012/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = diagnose_client_configs(tmp_path)
+    codes = {item["code"] for item in result["issues"]}
+
+    assert "DUPLICATE_MCP_ENDPOINT" not in codes
+    assert "MCP_HTTP_ENDPOINT_MISMATCH" not in codes
+
+
+def test_client_config_diagnostics_reads_vscode_servers_shape(tmp_path) -> None:
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    vscode_dir.joinpath("mcp.json").write_text(
+        '{"servers":{"upilot":{"type":"http","url":"http://127.0.0.1:8011/mcp"}}}',
+        encoding="utf-8",
+    )
+
+    result = diagnose_client_configs(tmp_path)
+
+    assert result["ok"] is True
+    assert result["registrations"][0]["client"] == "vscode"
+    assert result["registrations"][0]["transport"] == "http"
+
+
 def test_mcp_tool_functions_do_not_declare_legacy_string_outputs() -> None:
     tools_dir = Path(__file__).parents[1] / "src" / "upilot_mcp" / "mcp_tools"
     offenders: list[str] = []

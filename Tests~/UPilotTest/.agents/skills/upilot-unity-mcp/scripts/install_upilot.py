@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,6 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/codingriver/upilot.git"
 UPM_PACKAGE = "io.github.codingriver.upilot"
-DEFAULT_UPM_REF = "v0.2.0"
 SKILL_NAME = "upilot-unity-mcp"
 
 FLOW_DEPS = {
@@ -45,6 +45,23 @@ def parse_dep(value: str) -> tuple[str, str]:
     if not name or not version:
         raise argparse.ArgumentTypeError("expected name=version")
     return name, version
+
+
+def parse_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected an integer port") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
+def parse_mcp_name(value: str) -> str:
+    name = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        raise argparse.ArgumentTypeError("MCP name may contain only letters, digits, '_' and '-'")
+    return name
 
 
 def load_manifest(path: Path) -> dict:
@@ -107,7 +124,13 @@ def update_unity_manifest(args: argparse.Namespace, upilot_dir: Path) -> None:
     if args.use_local_upm:
         value = "file:" + upilot_dir.as_posix()
     else:
-        value = f"{args.repo_url}#{args.upm_ref}"
+        upm_ref = str(args.upm_ref or "").strip()
+        if not upm_ref:
+            raise SystemExit(
+                "Remote UPM installation requires --upm-ref <tag|branch|commit>. "
+                "Use --use-local-upm for a local checkout."
+            )
+        value = f"{args.repo_url}#{upm_ref}"
     deps[UPM_PACKAGE] = value
 
     if args.enable_flow:
@@ -168,11 +191,9 @@ def remove_toml_table(text: str, table_names: set[str]) -> str:
     return "\n".join(output).rstrip() + ("\n" if output else "")
 
 
-def write_codex_mcp(args: argparse.Namespace, upilot_dir: Path, venv_python: Path | None) -> None:
+def write_codex_mcp(args: argparse.Namespace) -> None:
     if args.write_codex_mcp == "none":
         return
-    if venv_python is None:
-        raise SystemExit("--write-codex-mcp requires Python environment setup")
 
     unity_project = Path(args.unity_project).expanduser().resolve()
     if args.write_codex_mcp == "project":
@@ -180,17 +201,14 @@ def write_codex_mcp(args: argparse.Namespace, upilot_dir: Path, venv_python: Pat
     else:
         config_path = Path.home() / ".codex" / "config.toml"
 
-    server_script = upilot_dir / "upilotserver~" / "run_upilot_mcp.py"
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    existing = remove_toml_table(existing, {"mcp_servers.upilot", "mcp_servers.upilot.env"})
+    table_name = f"mcp_servers.{args.mcp_name}"
+    existing = remove_toml_table(existing, {table_name, f"{table_name}.env"})
     block = (
-        "\n[mcp_servers.upilot]\n"
-        f"command = {toml_string(str(venv_python))}\n"
-        f"args = [{toml_string(str(server_script))}, \"--transport\", \"stdio\", \"--port\", {toml_string(args.port)}]\n"
+        f"\n[{table_name}]\n"
+        f"url = {toml_string(f'http://127.0.0.1:{args.http_port}/mcp')}\n"
         "startup_timeout_sec = 30\n"
         "tool_timeout_sec = 300\n"
-        "\n[mcp_servers.upilot.env]\n"
-        "PYTHONUTF8 = \"1\"\n"
     )
     text = existing.rstrip() + "\n" + block
     if args.dry_run:
@@ -206,33 +224,44 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install UPilot for a Unity project.")
     parser.add_argument("--unity-project", help="Unity project root containing Packages/manifest.json")
     parser.add_argument("--repo-url", default=REPO_URL)
-    parser.add_argument("--upm-ref", default=DEFAULT_UPM_REF)
+    parser.add_argument("--upm-ref", help="Required tag, branch, or commit for remote UPM installation")
     parser.add_argument("--upilot-dir", default=str(repo_root_from_script()))
     parser.add_argument("--clone-to", help="Clone upilot here if it is not present")
     parser.add_argument("--use-local-upm", action="store_true", help="Use file:<upilot-dir> instead of Git URL in Unity manifest")
     parser.add_argument("--enable-flow", action="store_true", help="Explicitly add optional UPilot Flow Unity package dependencies")
     parser.add_argument("--upm-dep", action="append", type=parse_dep, help="Override/add a Unity package dependency as name=version")
-    parser.add_argument("--no-python", action="store_true", help="Skip Python venv creation and server install")
+    parser.add_argument("--setup-python", action="store_true", help="Create a Python venv and install the MCP server package")
+    parser.add_argument("--no-python", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--venv", help="Python venv path; default is upilotserver~/.venv")
     parser.add_argument("--install-skill", choices=["none", "repo", "user", "both"], default="repo")
     parser.add_argument("--write-codex-mcp", choices=["none", "project", "user"], default="none")
-    parser.add_argument("--port", default="8765", help="Unity bridge WebSocket port for stdio MCP config")
+    parser.add_argument("--http-port", type=parse_port, default=8011, help="Public Streamable HTTP MCP port")
+    parser.add_argument("--mcp-name", type=parse_mcp_name, default="upilot", help="Codex MCP registration name")
+    parser.add_argument("--port", help=argparse.SUPPRESS)
     parser.add_argument("--force", action="store_true", help="Replace existing installed skill")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.port is not None:
+        raise SystemExit(
+            "--port is no longer a client configuration option. "
+            "Unity Bridge WebSocket ports are internal; use --http-port for the external MCP endpoint."
+        )
+    if args.setup_python and args.no_python:
+        raise SystemExit("--setup-python and the deprecated --no-python option cannot be used together")
+    if args.use_local_upm and args.upm_ref:
+        raise SystemExit("--use-local-upm and --upm-ref are mutually exclusive")
     upilot_dir = ensure_upilot_repo(args)
     if not upilot_dir.exists() and not args.dry_run:
         raise SystemExit(f"upilot directory does not exist: {upilot_dir}")
 
-    venv_python: Path | None = None
-    if not args.no_python:
+    if args.setup_python and not args.no_python:
         venv = Path(args.venv).expanduser().resolve() if args.venv else upilot_dir / "upilotserver~" / ".venv"
-        venv_python = setup_python_env(upilot_dir, venv, args.python, args.dry_run)
+        setup_python_env(upilot_dir, venv, args.python, args.dry_run)
 
     if args.unity_project:
         update_unity_manifest(args, upilot_dir)
@@ -240,7 +269,7 @@ def main() -> int:
         raise SystemExit("--write-codex-mcp requires --unity-project")
 
     install_skill(args, upilot_dir)
-    write_codex_mcp(args, upilot_dir, venv_python)
+    write_codex_mcp(args)
 
     print("upilot install complete")
     return 0

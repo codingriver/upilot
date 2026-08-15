@@ -1,7 +1,7 @@
 # UPilot Unity MCP Agent Rules Template
 
-rulesVersion: 8
-upilotPackageVersion: 0.3.24
+rulesVersion: 9
+upilotPackageVersion: 0.3.25
 
 This template is the generic UPilot rule source for Unity projects that install
 `io.github.codingriver.upilot`. Project-specific business rules outside the
@@ -25,7 +25,10 @@ controlled UPilot block take precedence over these generic rules.
 
 - Streamable HTTP: `http://127.0.0.1:8011/mcp`
 - Health check: `http://127.0.0.1:8011/health`
-- Never configure an MCP client with the internal Unity Bridge WebSocket port.
+- Third-party AI tools must connect through Streamable HTTP at `http://127.0.0.1:<httpPort>/mcp` only.
+- Never configure a third-party AI client with a WebSocket URL, the internal Unity Bridge port, a stdio command, or a local MCP Server process command.
+- WebSocket transport is internal to MCP Server <-> Unity Bridge. The default internal port is 8765 and must not appear as the AI client's endpoint.
+- When multiple Unity projects run concurrently, allocate a unique HTTP/WebSocket port pair per project internally, give each client registration a distinct name, and expose only that project's HTTP `/mcp` endpoint to the AI tool.
 1. Call `unity_mcp_status`.
 2. Require `connected: true` and `serverReady: true`.
 3. Verify `paths.unityProjectAbsolute` matches the intended project path (allow equivalent slash normalization).

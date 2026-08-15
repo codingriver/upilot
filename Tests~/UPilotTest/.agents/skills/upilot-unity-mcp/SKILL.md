@@ -15,7 +15,9 @@ Use UPilot with projects that install `io.github.codingriver.upilot`.
 4. Call `unity_capabilities_get` when tool availability is uncertain.
 5. Call `unity_ensure_ready` before Editor mutations.
 
-Use `http://127.0.0.1:8011/mcp` for MCP clients. Treat every WebSocket port as internal Bridge transport.
+Use Streamable HTTP such as `http://127.0.0.1:8011/mcp` as the only third-party AI client transport. Never configure an AI client with a WebSocket URL, the internal Bridge port, stdio, or a command that launches the MCP Server. WebSocket transport is internal to MCP Server <-> Unity Bridge.
+
+For concurrent Unity projects, use a distinct MCP registration name and a unique HTTP/WebSocket port pair per project, but expose only each project's HTTP `/mcp` endpoint to the AI client. Always verify project identity after connecting.
 
 ## Capability Rules
 

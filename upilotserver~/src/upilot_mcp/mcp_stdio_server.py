@@ -114,21 +114,21 @@ def _log_stdio_message(direction: str, tool_name: str, payload: str) -> None:
 
 def _resolve_transport() -> str:
     transport = (
-        getenv("UPILOT_TRANSPORT", "stdio").strip().lower() or "stdio"
+        getenv("UPILOT_TRANSPORT", "http").strip().lower() or "http"
     )
 
     args = sys.argv[1:]
     i = 0
     while i < len(args):
         if args[i] == "--transport" and i + 1 < len(args):
-            transport = args[i + 1].strip().lower() or "stdio"
+            transport = args[i + 1].strip().lower() or "http"
             i += 2
         else:
             i += 1
 
     if transport not in _MCP_TRANSPORTS:
-        logger.warning("Invalid transport value: %s, falling back to stdio", transport)
-        return "stdio"
+        logger.warning("Invalid transport value: %s, falling back to http", transport)
+        return "http"
     return transport
 
 

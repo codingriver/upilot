@@ -2,9 +2,9 @@
 """
 build_release.py — UPilot MCP 一键打包脚本
 
-MCP 协议（JSON-RPC/stdio）对所有 AI 工具完全相同（Claude Code / Cursor /
-VSCode Copilot / OpenCode），无需多份服务端；但 Python 二进制依赖（pywin32、
-cryptography 等）是平台相关的，因此按平台出独立离线安装包。
+UPilot 对第三方 AI 工具统一暴露 Streamable HTTP MCP endpoint。MCP Server
+与 Unity Bridge 之间使用内部 WebSocket。Python 二进制依赖是平台相关的，
+因此按平台出独立离线安装包。
 
 用法:
   python upilotserver~/deploy/build_release.py                 # 为当前平台打包
@@ -57,46 +57,42 @@ def _get_version() -> str:
 
 VERSION = _get_version()
 
-# ── MCP 配置模板（协议完全相同，只是 key 名和路径约定不同）────────────────────
+# ── MCP 配置模板（统一 HTTP，仅 key 名和路径约定不同）─────────────────────────
 
-def _make_configs(cmd: str, args: list[str], platform_name: str) -> dict[str, dict]:
+def _make_configs(http_port: int = 8011) -> dict[str, dict]:
     """生成各 AI 工具的 MCP 配置文件内容。"""
+
+    url = f"http://127.0.0.1:{http_port}/mcp"
 
     # Claude Code / Claude VSCode 扩展 / OpenCode  → .mcp.json
     claude = {
         "mcpServers": {
             "upilot": {
-                "command": cmd,
-                "args": args,
-                **({"env": {"PYTHONUTF8": "1"}} if "win" in platform_name else {}),
+                "url": url,
             }
         },
-        "_comment": f"Put this file as .mcp.json in your Unity project root. ({platform_name})",
+        "_comment": "Put this file as .mcp.json in your Unity project root. Start the UPilot HTTP MCP Server first.",
     }
 
     # Cursor → .cursor/mcp.json  （格式与 Claude Code 相同）
     cursor = {
         "mcpServers": {
             "upilot": {
-                "command": cmd,
-                "args": args,
-                **({"env": {"PYTHONUTF8": "1"}} if "win" in platform_name else {}),
+                "url": url,
             }
         },
-        "_comment": f"Put this file as .cursor/mcp.json in your Unity project root. ({platform_name})",
+        "_comment": "Put this file as .cursor/mcp.json in your Unity project root. Start the UPilot HTTP MCP Server first.",
     }
 
-    # VSCode Copilot → .vscode/mcp.json  （"servers" 键，需 "type":"stdio"）
+    # VSCode Copilot → .vscode/mcp.json
     vscode = {
         "servers": {
             "upilot": {
-                "type": "stdio",
-                "command": cmd,
-                "args": args,
-                **({"env": {"PYTHONUTF8": "1"}} if "win" in platform_name else {}),
+                "type": "http",
+                "url": url,
             }
         },
-        "_comment": f"Put this file as .vscode/mcp.json in your Unity project root. ({platform_name})",
+        "_comment": "Put this file as .vscode/mcp.json in your Unity project root. Start the UPilot HTTP MCP Server first.",
     }
 
     return {"claude-code.mcp.json": claude, "cursor.mcp.json": cursor, "vscode.mcp.json": vscode}
@@ -115,7 +111,13 @@ UPilot MCP — Windows 离线安装包
   若提示找不到命令，用完整路径：
     %APPDATA%\\Python\\Python311\\Scripts\\upilot-mcp.exe
 
-二、配置 AI 工具（选择你使用的工具）
+二、启动 MCP Server
+  upilot-mcp --transport http --http-port 8011 --port 8765
+
+  8011 是第三方 AI 工具连接的 HTTP 端口；8765 是 MCP Server 与 Unity Bridge
+  之间的内部 WebSocket 端口，绝不能写入 AI 客户端 URL。
+
+三、配置 AI 工具（选择你使用的工具）
   1. Claude Code / OpenCode / Claude VSCode 扩展
      把 mcp-configs/claude-code.mcp.json 复制到 Unity 项目根目录，
      重命名为 .mcp.json
@@ -128,20 +130,19 @@ UPilot MCP — Windows 离线安装包
      把 mcp-configs/vscode.mcp.json 复制到 Unity 项目根目录的 .vscode/ 目录，
      重命名为 mcp.json
 
-三、Unity 插件
+四、Unity 插件
   在 Unity 工程的 Packages/manifest.json 中添加 UPM 依赖（与仓库 README 一致），例如：
-  "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git"
+  "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>"
   Unity 菜单中启用 upilot（勾选）
 
-四、验证
+五、验证
   # Claude Code
   claude mcp list
   # 应显示：upilot: ... - Connected
 
-MCP 协议说明：
-  Claude Code、Cursor、VSCode Copilot、OpenCode 使用完全相同的 MCP 协议
-  （JSON-RPC over stdio），无需分别安装不同版本的服务器。
-  配置文件格式略有差异，已在 mcp-configs/ 中分别提供。
+MCP 连接说明：
+  所有第三方 AI 工具只连接 http://127.0.0.1:8011/mcp。
+  配置文件不得包含 command、args、stdio 或内部 WebSocket 端口。
 """
 
 README_MAC = """\
@@ -153,7 +154,12 @@ UPilot MCP — macOS 离线安装包
 
   安装完成后 PATH 中会出现 upilot-mcp 命令。
 
-二、配置 AI 工具（选择你使用的工具）
+二、启动 MCP Server
+  upilot-mcp --transport http --http-port 8011 --port 8765
+
+  8011 是第三方 AI 工具连接的 HTTP 端口；8765 是内部 Unity Bridge 端口。
+
+三、配置 AI 工具（选择你使用的工具）
   1. Claude Code / OpenCode / Claude VSCode 扩展
      cp mcp-configs/claude-code.mcp.json <Unity项目根>/.mcp.json
 
@@ -165,18 +171,18 @@ UPilot MCP — macOS 离线安装包
      mkdir -p <Unity项目根>/.vscode
      cp mcp-configs/vscode.mcp.json <Unity项目根>/.vscode/mcp.json
 
-三、Unity 插件
+四、Unity 插件
   在 Unity 工程的 Packages/manifest.json 中添加 UPM 依赖，例如：
-  "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git"
+  "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>"
   Unity 菜单中启用 upilot（勾选）
 
-四、验证
+五、验证
   claude mcp list
   # 应显示：upilot: ... - Connected
 
-MCP 协议说明：
-  Claude Code、Cursor、VSCode Copilot、OpenCode 使用完全相同的 MCP 协议
-  （JSON-RPC over stdio），无需分别安装不同版本的服务器。
+MCP 连接说明：
+  所有第三方 AI 工具只连接 http://127.0.0.1:8011/mcp。
+  配置文件不得包含 command、args、stdio 或内部 WebSocket 端口。
 """
 
 # ── 核心步骤 ──────────────────────────────────────────────────────────────────
@@ -213,7 +219,7 @@ def step_download_deps(whl: Path, tmp: Path) -> None:
     print(f"  共下载 {count} 个依赖包")
 
 
-def step_write_scripts(tmp: Path, plat: str, cmd_after_install: str) -> None:
+def step_write_scripts(tmp: Path, plat: str) -> None:
     """生成安装脚本和 MCP 配置文件。"""
     print("\n[3/4] 生成脚本和配置文件...")
 
@@ -258,7 +264,7 @@ def step_write_scripts(tmp: Path, plat: str, cmd_after_install: str) -> None:
     cfg_dir = tmp / "mcp-configs"
     cfg_dir.mkdir(exist_ok=True)
 
-    configs = _make_configs(cmd=cmd_after_install, args=[], platform_name=plat)
+    configs = _make_configs()
     for fname, content in configs.items():
         (cfg_dir / fname).write_text(
             json.dumps(content, ensure_ascii=False, indent=2),
@@ -303,15 +309,9 @@ def build_platform(plat: str) -> Path:
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
 
-    # console_scripts 安装后的命令名
-    if "win" in plat:
-        cmd_after_install = "upilot-mcp"
-    else:
-        cmd_after_install = "upilot-mcp"
-
     whl = step_build_wheel(tmp)
     step_download_deps(whl, tmp)
-    step_write_scripts(tmp, plat, cmd_after_install)
+    step_write_scripts(tmp, plat)
     zip_path = step_zip(tmp, plat)
 
     shutil.rmtree(tmp, ignore_errors=True)
@@ -370,12 +370,14 @@ def main() -> None:
   Windows:
     1. 解压 zip
     2. 双击 install.bat
-    3. 将 mcp-configs/claude-code.mcp.json 复制为项目根 .mcp.json
+    3. 启动 upilot-mcp --transport http --http-port 8011 --port 8765
+    4. 将 mcp-configs/claude-code.mcp.json 复制为项目根 .mcp.json
 
   macOS:
     1. unzip upilot-mcp-*.zip
     2. chmod +x install.sh && ./install.sh
-    3. cp mcp-configs/claude-code.mcp.json <项目根>/.mcp.json
+    3. 启动 upilot-mcp --transport http --http-port 8011 --port 8765
+    4. cp mcp-configs/claude-code.mcp.json <项目根>/.mcp.json
 """)
 
 

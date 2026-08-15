@@ -18,7 +18,7 @@ UPilot 会在 Unity 中启动本地 MCP 服务，并为常见 Agent 自动写入
 
 ### 1. 确认环境
 
-在终端中确认已安装 Python 3.11 或更高版本：
+只有从源码运行 MCP Server 时才需要 Python。若使用 UPilot 管理的独立 MCP Server 可执行程序，可跳过本步骤。源码模式请确认已安装 Python 3.11 或更高版本：
 
 ```powershell
 python --version
@@ -37,7 +37,7 @@ Window > Package Manager
 点击左上角 `+`，选择 **Add package from git URL...**，输入：
 
 ```text
-https://github.com/codingriver/upilot.git#v0.2.0
+https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>
 #开发模式
 https://github.com/codingriver/upilot.git#main
 ```
@@ -48,12 +48,12 @@ https://github.com/codingriver/upilot.git#main
 
 *输入 UPilot Git URL 后点击右侧 Add。*
 
-### 3. 安装 Python 依赖
+### 3. 可选：安装 Python MCP Server
 
-在 PowerShell 或终端中执行：
+仅在不使用独立 MCP Server 可执行程序、需要从 Python 源码运行时执行。显式选择所需的 Server ref；它不从 Unity 包的 `package.json` 自动推断，也可以独立版本化：
 
 ```powershell
-python -m pip install "git+https://github.com/codingriver/upilot.git@v0.2.0#subdirectory=upilotserver~"
+python -m pip install "git+https://github.com/codingriver/upilot.git@<SERVER_REF>#subdirectory=upilotserver~"
 ```
 
 如果你已经下载或克隆了 UPilot 仓库，也可以在仓库中执行：
@@ -127,7 +127,7 @@ UPilot 默认只监听本机地址 `127.0.0.1`。Unity Editor 必须保持打开
 *点击左上角加号，然后选择“Add package from git URL...”。*
 
 ```text
-https://github.com/codingriver/upilot.git#v0.2.0
+https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>
 ```
 
 安装完成后，Package Manager 中应显示包名 **UPilot**，包标识为：
@@ -143,19 +143,19 @@ io.github.codingriver.upilot
 ```json
 {
   "dependencies": {
-    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.2.0"
+    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>"
   }
 }
 ```
 
 如果文件中已有其他依赖，请只增加这一项，并注意上一项末尾的逗号。保存后返回 Unity，等待包解析和脚本编译完成。
 
-### 安装 Python 服务依赖
+### 可选：安装 Python MCP Server
 
-Unity 包内已经包含 UPilot 服务启动脚本，但运行它仍需要 Python 依赖。推荐直接安装与 Unity 包相同版本的 Python 包：
+UPilot 可使用独立 MCP Server 可执行程序，因此 Python 版本号不是 Unity UPM 安装所必需的。只有源码运行 Server 时才安装 Python 包，并显式选择兼容的 Server ref：
 
 ```powershell
-python -m pip install "git+https://github.com/codingriver/upilot.git@v0.2.0#subdirectory=upilotserver~"
+python -m pip install "git+https://github.com/codingriver/upilot.git@<SERVER_REF>#subdirectory=upilotserver~"
 ```
 
 安装完成后可以执行以下命令进行检查：
@@ -481,17 +481,17 @@ UPilot 首次配置或自动修复时会优先寻找空闲端口。多项目同�
 使用固定版本 Git URL 时，把 `Packages/manifest.json` 中的版本标签改为目标版本，例如：
 
 ```text
-https://github.com/codingriver/upilot.git#v0.2.0
+https://github.com/codingriver/upilot.git#<TARGET_RELEASE_TAG>
 ```
 
 保存后等待 Unity 完成包更新和脚本编译。
 
 ### 更新 Python 包
 
-将命令中的版本改为与 Unity 包一致：
+源码安装 MCP Server 时，显式选择需要升级到的兼容 Server ref。MCP Server 可以作为独立程序版本化，不要求从 Unity 包版本自动推断：
 
 ```powershell
-python -m pip install --upgrade "git+https://github.com/codingriver/upilot.git@v0.2.0#subdirectory=upilotserver~"
+python -m pip install --upgrade "git+https://github.com/codingriver/upilot.git@<TARGET_SERVER_REF>#subdirectory=upilotserver~"
 ```
 
 ### 同步 Agent 配置

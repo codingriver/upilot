@@ -115,6 +115,12 @@ def check_repository_consistency() -> None:
     task_service = (REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "domain" / "task_service.py").read_text(encoding="utf-8")
     agent_template = (ROOT / "AGENTS.md.template").read_text(encoding="utf-8")
     agent_reference = (REPO_ROOT / "Documentation~" / "AgentRules" / "AGENTS.upilot.md").read_text(encoding="utf-8")
+    skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    installation = (ROOT / "references" / "installation.md").read_text(encoding="utf-8")
+    installer = (ROOT / "scripts" / "install_upilot.py").read_text(encoding="utf-8")
+    release_builder = (REPO_ROOT / "upilotserver~" / "deploy" / "build_release.py").read_text(encoding="utf-8")
+    mcp_example_path = REPO_ROOT / "upilotserver~" / "mcp.example.json"
+    mcp_example_text = mcp_example_path.read_text(encoding="utf-8")
     repo_entry = (REPO_ROOT / ".agents" / "skills" / "upilot-unity-mcp" / "SKILL.md").read_text(encoding="utf-8")
 
     rules_versions = {
@@ -128,14 +134,26 @@ def check_repository_consistency() -> None:
     resolved_versions = {label: match.group(1) for label, match in rules_versions.items()}
     if len(set(resolved_versions.values())) != 1:
         fail(f"Agent rules version mismatch: {resolved_versions}")
+    skill_version = re.search(r"SkillInstallTemplateVersion\s*=\s*(\d+)", agent_setup)
+    if skill_version is None or int(skill_version.group(1)) < 4:
+        fail("Skill install template version must be at least 4 for the HTTP-only skill update")
 
     required = {
         "package id": (package, '"name": "io.github.codingriver.upilot"'),
         "HTTP default": (config, "http_port: int = 8011"),
         "stable list": (server, "_list_tools_stable"),
         "capability rule": (agent_template, "unity_capabilities_get"),
+        "parent rules inheritance": (agent_template, "Parent Agent rules path"),
+        "parent rules cycle guard": (agent_template, "circular references are skipped"),
         "safe compile rule": (agent_template, "unity_safe_compile_and_wait"),
         "no-repeat compile rule": (agent_template, "Do not compile again when no code changed"),
+        "HTTP-only Agent rule": (agent_template, "Third-party AI tools must connect through Streamable HTTP"),
+        "internal WebSocket rule": (agent_template, "WebSocket transport is internal to MCP Server <-> Unity Bridge"),
+        "HTTP-only Skill rule": (skill, "only third-party AI client transport"),
+        "explicit remote UPM ref documentation": (installation, "--upm-ref <STABLE_RELEASE_TAG>"),
+        "local UPM documentation": (installation, "--use-local-upm"),
+        "HTTP installer config": (installer, "url = {toml_string(f'http://127.0.0.1:{args.http_port}/mcp')}"),
+        "explicit remote ref error": (installer, "Remote UPM installation requires --upm-ref"),
         "repository skill entry": (repo_entry, "../../../skills/upilot-unity-mcp/SKILL.md"),
     }
     for label, (text, fragment) in required.items():
@@ -156,6 +174,36 @@ def check_repository_consistency() -> None:
 
     if "UIFlow" in ROOT.joinpath("SKILL.md").read_text(encoding="utf-8"):
         fail("canonical core SKILL.md must not preload legacy UIFlow guidance")
+
+    forbidden_installer_fragments = {
+        "hardcoded default UPM ref": "DEFAULT_UPM_REF",
+        "generated stdio client transport": '"--transport", "stdio"',
+        "generated internal Bridge port": '"--port", "8765"',
+    }
+    for label, fragment in forbidden_installer_fragments.items():
+        if fragment in installer:
+            fail(f"installer still contains {label}: {fragment}")
+
+    for label, fragment in {
+        "release stdio type": '"type": "stdio"',
+        "release command config": '"command": cmd',
+        "release args config": '"args": args',
+    }.items():
+        if fragment in release_builder:
+            fail(f"release builder still emits {label}: {fragment}")
+
+    try:
+        mcp_example = json.loads(mcp_example_text)
+        example_server = mcp_example["mcpServers"]["upilot"]
+    except (KeyError, TypeError, ValueError) as exc:
+        fail(f"invalid HTTP MCP example config: {exc}")
+    if example_server.get("url") != "http://127.0.0.1:8011/mcp":
+        fail("mcp.example.json must use the default HTTP /mcp endpoint")
+    if any(key in example_server for key in ("command", "args", "env", "transport")):
+        fail("mcp.example.json must not configure a client-side process or stdio transport")
+
+    if re.search(r"\bv\d+\.\d+\.\d+\b", installation):
+        fail("installation documentation must not hardcode a semantic release tag")
 
 
 def main() -> int:
