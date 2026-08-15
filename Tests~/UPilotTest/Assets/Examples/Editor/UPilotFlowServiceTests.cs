@@ -19,8 +19,9 @@ namespace CodingRiver.UPilot.tests
                 yamlDirectory = "Assets/UPilot/Flow/Samples/Yaml",
             };
 
-            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => UPilotFlowService.ResolveYamlPaths(payload));
+            UPilotFlowException ex = Assert.Throws<UPilotFlowException>(() => UPilotFlowService.ResolveYamlPaths(payload));
 
+            Assert.That(ex.ErrorCode, Is.EqualTo(ErrorCodes.TestCasePathInvalid));
             Assert.That(ex.Message, Does.Contain("yamlPaths"));
             Assert.That(ex.Message, Does.Contain("yamlDirectory"));
         }
@@ -78,8 +79,8 @@ namespace CodingRiver.UPilot.tests
             UPilotFlowCaseResultPayload payload = UPilotFlowService.ToCasePayload(result, yamlPath, reportPath, new ReportPathBuilder());
 
             Assert.That(payload.yamlPath.Replace('\\', '/'), Does.StartWith("Assets/"));
-            Assert.That(payload.reportJsonPath.Replace('\\', '/'), Is.EqualTo($"Reports/UPilot/Flow/{executionId}/Basic Login.json"));
-            Assert.That(payload.reportMarkdownPath.Replace('\\', '/'), Is.EqualTo($"Reports/UPilot/Flow/{executionId}/Basic Login.md"));
+            Assert.That(payload.reportJsonPath.Replace('\\', '/'), Is.EqualTo($"Reports/UPilot/Flow/{executionId}/Cases/Basic Login.json"));
+            Assert.That(payload.reportMarkdownPath.Replace('\\', '/'), Is.EqualTo($"Reports/UPilot/Flow/{executionId}/Cases/Basic Login.md"));
             Assert.That(payload.attachments, Has.Count.EqualTo(1));
             Assert.That(payload.attachments[0].Replace('\\', '/'), Is.EqualTo($"Reports/UPilot/Flow/{executionId}/Screenshots/top-level.png"));
             Assert.That(payload.stepResults, Has.Count.EqualTo(1));

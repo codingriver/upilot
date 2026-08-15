@@ -101,18 +101,9 @@ namespace CodingRiver.UPilot
 
                 SaveSetupPorts();
                 if (_setupApproveProjectWrites)
-                {
-                    if (!ConfirmSetupProjectWriteAccess())
-                    {
-                        _setupCompletionMessage = "已取消非 safe 模式授权，设置尚未完成。";
-                        _setupCompletionMessageType = MessageType.Info;
-                        return;
-                    }
-                }
+                    UPilotProjectConfig.ApproveProjectWriteAccess();
                 else
-                {
                     UPilotProjectConfig.RevokeProjectWriteAccess();
-                }
 
                 if (_setupWriteAgentRules)
                     Debug.Log("[UPilot] First setup agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
@@ -169,18 +160,5 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static bool ConfirmSetupProjectWriteAccess()
-        {
-            var confirmed = EditorUtility.DisplayDialog(
-                "允许 UPilot 修改项目？",
-                "启用后，Agent 可以通过 MCP 修改 Assets、Packages、场景、Prefab、脚本和组件，并可能触发编译或保存。请确认你信任当前 Agent 工作流。",
-                "允许修改",
-                "保持 safe 模式");
-            if (!confirmed)
-                return false;
-
-            UPilotProjectConfig.ApproveProjectWriteAccess();
-            return true;
-        }
     }
 }

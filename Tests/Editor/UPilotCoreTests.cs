@@ -967,6 +967,16 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void FirstSetupWriteApprovalDoesNotRequireSecondaryConfirmation()
+        {
+            Assert.That(
+                typeof(UPilotMainWindow).GetMethod(
+                    "ConfirmSetupProjectWriteAccess",
+                    BindingFlags.NonPublic | BindingFlags.Static),
+                Is.Null);
+        }
+
+        [Test]
         public void ManagedServerDownloadSelectsMatchingPlatformAndArchitecture()
         {
             var manifest = new UPilotReleaseManifest();

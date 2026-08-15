@@ -292,6 +292,11 @@ namespace CodingRiver.UPilot.Flow
         private static bool TryCaptureFullDisplay(EditorWindow window, out Texture2D capturedTexture)
         {
             capturedTexture = null;
+            if (!Application.isPlaying)
+            {
+                return false;
+            }
+
             Texture2D fullTexture = null;
             try
             {

@@ -125,3 +125,13 @@
 - 建议改进：修正 `unity_test_list` / `unity_test_run` 的 testMode 过滤和终态契约；当项目没有 PlayMode 测试时返回明确 `status=no_tests` / `total=0`，不要复用 EditMode 列表；当运行被 Unity Test Runner 忽略或中止时返回结构化错误和原因。
 - 证据/复现：本次 PlayMode 列表包含 `CodingRiver.UPilot.Tests.UPilotCoreTests.*` Editor 用例；运行后多次轮询均为 `status=none,total=0`，最终 Editor 回到 `playModeState=edit`，编译错误 0。
 - 备注：本次 UPilot 本体规范验收仍以编译 + EditMode 为准，最终 EditMode 已通过。
+
+### [待处理] EditorWindow 截图必须校验窗口身份与实际像素来源一致
+
+- 发现时间：2026-08-15
+- 来源任务/测试：UPilot UIFlow 全量 EditMode 验收后，为 `UnityEditor.TestTools.TestRunner.TestRunnerWindow` 保存结果截图。
+- 现象/问题：`unity_screenshot_save` 和 `unity_verify_window` 均返回了正确的 Unity `windowMatch`/Test Runner 身份，但实际 PNG 像素来自前台 Codex 窗口；工具元数据中的目标窗口身份与真实像素来源不一致，可能把错误画面当作验收证据。
+- 影响范围：所有 EditorWindow、Test Runner、第三方 Unity 工具窗口的截图验收与视觉审计；窗口被其他应用遮挡时尤其容易产生假证据。
+- 建议改进：截图结果同时记录并校验 Unity instanceId/typeName、映射后的 Unity PID/OS HWND、捕获 API/source、窗口矩形、前台/遮挡状态和像素哈希；优先使用能离屏捕获精确 HWND 的实现，若只能 CopyFromScreen，应先把已验证的精确 HWND 置前并明确返回 `degraded=true/degradeReason=occlusion-sensitive`。捕获后增加窗口标题栏/已知 UI 特征的轻量校验，身份与像素源不一致时直接失败。
+- 证据/复现：Unity PID `88060`，Test Runner Unity instanceId `568105589213663200`，窗口 `Test Runner`、类型 `UnityEditor.TestTools.TestRunner.TestRunnerWindow`；两次 MCP 截图均显示 Codex 内容。映射到精确 HWND `7358378` 后，OS helper 首次仍因窗口被遮挡抓到 Codex；将该 HWND 置前后再次捕获才得到有效 Test Runner PNG。
+- 备注：有效截图为 `Tests~/UPilotTest/log/UPilotScreenshots/final-editmode-327-results.png`，SHA256 `f5300e0ba203c02aeddf8e4dbb72ad0c860222ca5a339aada41f19a4d7499d15`；该窗口仅显示发现的 327 个测试，MCP 全量运行结果未回填到 Test Runner UI，后续还应提供可直接渲染终态摘要的验收截图工具。
