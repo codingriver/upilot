@@ -38,6 +38,7 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - A long-operation wait window ending is non-terminal when `waitWindowElapsed=true` and `terminal=false`; continue polling until the job completes or reaches `jobTimeoutAt`.
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
+- Use `detailLevel=summary` and a bounded `maxTailChars` for routine `unity_operation_status/wait`; use `standard` or `full` only for targeted diagnosis.
 - Retry automatically only when the operation is idempotent and non-destructive.
 
 ## Project Workflows
@@ -57,6 +58,8 @@ Use persistent capture when logs must survive long waits, Console clears, or Age
 6. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
 
 Default captures belong under `Log/UPilotConsole/<timestamp>_<title>/`. Keep raw Console capture separate from domain-specific reports such as battle smoke-test reports. Prefer a project-relative custom path; do not set `allowOutsideProject=true` unless the user explicitly needs an external directory.
+
+Exception: canonical UPilot package acceptance should use `unity_upilot_acceptance_run`. It detects and stops active captures before running ConsoleCaptureService self-tests and writes a structured hashed report; do not wrap it in another persistent capture.
 
 ## Configuration CSV
 
@@ -82,7 +85,9 @@ Default captures belong under `Log/UPilotConsole/<timestamp>_<title>/`. Keep raw
 - Prefer dedicated project-relative artifact or screenshot save tools that return metadata or hashes.
 - For screenshot fallback, pass ordered `fallbackSources` and report the actual `source`, `degraded`, and `degradeReason`.
 - Resolve EditorWindow targets with `unity_editor_windows_list`, reuse the exact Unity type/title identity, and never select an operating-system window by a matching title.
+- Trust EditorWindow/SceneView pixels only when `pixelSourceVerified=true` and `occlusionSensitive=false`; report `captureApi`, Unity PID, HWND, foreground state, and any degradation.
 - If capture falls back to base64 or OS-level automation, report the reason.
+- Use `unity_shader_inspect` / `unity_shader_check_errors` for Shader-specific import, support, dependency, and compiler-message diagnostics.
 
 ## Routing
 

@@ -47,7 +47,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 9
+_UPILOT_RULES_VERSION = 10
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
@@ -488,14 +488,17 @@ class TaskDomainService:
         self._finalize_operation_timing(state)
         return ok(request_id, self._public_operation_state(state))
 
-    async def operation_status(self, operation_id: str) -> ToolResponse:
+    async def operation_status(
+        self, operation_id: str, detail_level: str = "summary", max_tail_chars: int = 2000,
+        include_raw_state: bool = False,
+    ) -> ToolResponse:
         request_id = new_id("req")
         state = self._operations.get(operation_id)
         if state is None:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
         if state.get("endedAt"):
             self._finalize_operation_timing(state)
-            return ok(request_id, self._public_operation_state(state))
+            return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
         if now_ms() >= int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000):
             state["status"] = "Timeout"
@@ -507,7 +510,7 @@ class TaskDomainService:
             await self._operation_stop_console_capture(state)
             await self.operation_collect_artifacts(operation_id)
             self._finalize_operation_timing(state)
-            return fail(request_id, "OPERATION_TIMEOUT", state["error"], self._public_operation_state(state))
+            return fail(request_id, "OPERATION_TIMEOUT", state["error"], self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
         status_call = state["jobSpec"].get("statusCall")
         result = await self._operation_invoke(self._resolve_operation_call(status_call, state))
@@ -522,7 +525,7 @@ class TaskDomainService:
             await self._operation_stop_console_capture(state)
             await self.operation_collect_artifacts(operation_id)
             self._finalize_operation_timing(state)
-            return fail(request_id, "OPERATION_STATUS_FAILED", state["error"], self._public_operation_state(state))
+            return fail(request_id, "OPERATION_STATUS_FAILED", state["error"], self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
         payload = _extract_operation_payload(result)
         if payload:
@@ -548,7 +551,7 @@ class TaskDomainService:
             state["phase"] = "Cleanup" if cleanup_pending else (state.get("phase") or "Stopping")
         state["updatedAt"] = now_ms()
         self._finalize_operation_timing(state)
-        return ok(request_id, self._public_operation_state(state))
+        return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
     async def operation_wait(
         self,
@@ -558,6 +561,9 @@ class TaskDomainService:
         return_on_suspected_stuck: bool = True,
         timeout_sec: float | None = None,
         poll_interval_sec: float | None = None,
+        detail_level: str = "summary",
+        max_tail_chars: int = 2000,
+        include_raw_state: bool = False,
     ) -> ToolResponse:
         request_id = new_id("req")
         state = self._operations.get(operation_id)
@@ -577,7 +583,7 @@ class TaskDomainService:
         last_key = self._operation_change_key(state)
 
         while True:
-            status_result = await self.operation_status(operation_id)
+            status_result = await self.operation_status(operation_id, detail_level="summary", max_tail_chars=max_tail_chars)
             state = self._operations.get(operation_id, state)
             current_key = self._operation_change_key(state)
             if current_key != last_key:
@@ -597,7 +603,7 @@ class TaskDomainService:
             if state.get("endedAt"):
                 await self.operation_collect_artifacts(operation_id)
                 self._finalize_operation_timing(state)
-                payload = self._public_operation_state(state)
+                payload = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
                 payload["changes"] = changes
                 return ok(request_id, payload) if status_result.ok else status_result
 
@@ -606,14 +612,14 @@ class TaskDomainService:
                 if phase_elapsed >= suspected_stuck_sec and return_on_suspected_stuck:
                     state["suspectedStuck"] = True
                     self._finalize_operation_timing(state)
-                    payload = self._public_operation_state(state)
+                    payload = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
                     payload["changes"] = changes
                     payload["recommendation"] = "Inspect operation status, Console capture, and artifacts before retrying."
                     return ok(request_id, payload)
 
             if time.monotonic() >= deadline:
                 self._finalize_operation_timing(state)
-                payload = self._public_operation_state(state)
+                payload = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
                 payload["changes"] = changes
                 payload["terminal"] = False
                 payload["waitWindowElapsed"] = True
@@ -657,7 +663,10 @@ class TaskDomainService:
         self._finalize_operation_timing(state)
         return ok(request_id, self._public_operation_state(state)) if result.ok else fail(request_id, "OPERATION_CANCEL_FAILED", state["error"], self._public_operation_state(state))
 
-    async def operation_collect_artifacts(self, operation_id: str) -> ToolResponse:
+    async def operation_collect_artifacts(
+        self, operation_id: str, detail_level: str = "summary", max_tail_chars: int = 2000,
+        include_raw_state: bool = False,
+    ) -> ToolResponse:
         request_id = new_id("req")
         state = self._operations.get(operation_id)
         if state is None:
@@ -697,7 +706,13 @@ class TaskDomainService:
                         "modifiedAt": int(stat.st_mtime * 1000),
                     })
                     if tail_lines and path.suffix.lower() in {".txt", ".log", ".md", ".json", ".csv"}:
-                        item["tail"] = _read_text_tail(path, tail_lines)
+                        tail = _read_text_tail(path, tail_lines)
+                        if max_tail_chars > 0 and len(tail) > max_tail_chars:
+                            item["tail"] = tail[-max_tail_chars:]
+                            item["tailTruncated"] = True
+                            item["tailOriginalChars"] = len(tail)
+                        else:
+                            item["tail"] = tail
                 except OSError as ex:
                     item["error"] = str(ex)
                     errors.append({"artifact": name, "path": str(path), "error": str(ex)})
@@ -709,7 +724,11 @@ class TaskDomainService:
         state["artifactErrors"] = errors
         state["timing"]["artifactReadMs"] += int((time.monotonic() - started) * 1000)
         self._finalize_operation_timing(state)
-        return ok(request_id, {"operationId": operation_id, "artifacts": artifacts, "artifactErrors": errors})
+        payload = {"operationId": operation_id, "artifacts": artifacts, "artifactErrors": errors,
+                   "responseDetailLevel": self._normalize_operation_detail_level(detail_level)}
+        if include_raw_state:
+            payload["operation"] = self._public_operation_state(state, detail_level, max_tail_chars, True)
+        return ok(request_id, payload)
 
     async def _operation_invoke(self, call: dict | None) -> ToolResponse:
         request_id = new_id("req")
@@ -894,7 +913,29 @@ class TaskDomainService:
         started = float(state.get("_startedMono") or time.monotonic())
         state["timing"]["totalWallMs"] = int(max(0, time.monotonic() - started) * 1000)
 
-    def _public_operation_state(self, state: dict) -> dict:
+    @staticmethod
+    def _normalize_operation_detail_level(value: str) -> str:
+        normalized = str(value or "summary").strip().lower()
+        return normalized if normalized in {"summary", "standard", "full"} else "summary"
+
+    @staticmethod
+    def _bounded_operation_value(value, max_chars: int, path: str = "", truncated: list[str] | None = None):
+        truncated = truncated if truncated is not None else []
+        if isinstance(value, str) and max_chars > 0 and len(value) > max_chars:
+            truncated.append(path or "value")
+            return value[:max_chars] + f"…[truncated {len(value) - max_chars} chars]"
+        if isinstance(value, dict):
+            return {str(k): TaskDomainService._bounded_operation_value(v, max_chars, f"{path}.{k}".strip("."), truncated) for k, v in value.items()}
+        if isinstance(value, list):
+            return [TaskDomainService._bounded_operation_value(v, max_chars, f"{path}[{i}]", truncated) for i, v in enumerate(value)]
+        return value
+
+    def _public_operation_state(
+        self, state: dict, detail_level: str = "summary", max_tail_chars: int = 2000,
+        include_raw_state: bool = False,
+    ) -> dict:
+        level = self._normalize_operation_detail_level(detail_level)
+        max_chars = max(128, min(int(max_tail_chars or 2000), 1000000))
         public = {
             "operationId": state.get("operationId"),
             "displayName": state.get("displayName"),
@@ -918,21 +959,44 @@ class TaskDomainService:
             "timeoutSec": state.get("timeoutSec"),
             "jobTimeoutAt": int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000),
             "pollIntervalSec": state.get("pollIntervalSec"),
-            "lastStatusData": state.get("lastStatusData") or {},
             "artifacts": state.get("artifacts") or {},
             "artifactErrors": state.get("artifactErrors") or [],
-            "consoleCapture": state.get("consoleCapture") or {},
             "timing": state.get("timing") or {},
+            "responseDetailLevel": level,
+            "rawStateAvailable": True,
         }
         status_data = state.get("lastStatusData") or {}
         if isinstance(status_data.get("metrics"), dict):
             public["metrics"] = status_data["metrics"]
-        if isinstance(status_data.get("domain"), dict):
-            public["domain"] = status_data["domain"]
+        truncated: list[str] = []
+        capture = state.get("consoleCapture") or {}
+        if level == "summary":
+            public["consoleCapture"] = {key: capture.get(key) for key in (
+                "sessionId", "stopped", "jsonlPath", "summaryPath", "manifestPath", "sha256",
+                "recordCount", "droppedCount", "fileBytes",
+            ) if key in capture}
+        elif level == "standard":
+            public["lastStatusData"] = self._bounded_operation_value(status_data, max_chars, "lastStatusData", truncated)
+            if isinstance(status_data.get("domain"), dict):
+                public["domain"] = self._bounded_operation_value(status_data["domain"], max_chars, "domain", truncated)
+            public["consoleCapture"] = self._bounded_operation_value(capture, max_chars, "consoleCapture", truncated)
+        else:
+            public["lastStatusData"] = status_data
+            if isinstance(status_data.get("domain"), dict): public["domain"] = status_data["domain"]
+            public["consoleCapture"] = capture
+        public["artifacts"] = self._bounded_operation_value(public["artifacts"], max_chars, "artifacts", truncated)
+        if include_raw_state:
+            public["rawState"] = self._bounded_operation_value(state, max_chars, "rawState", truncated) if level != "full" else state
         if state.get("suspectedStuck"):
             public["suspectedStuck"] = True
         if state.get("recommendation"):
             public["recommendation"] = state["recommendation"]
+        if truncated:
+            public["truncatedFields"] = sorted(set(truncated))
+        try:
+            public["responseBytes"] = len(json.dumps(public, ensure_ascii=False, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            pass
         return public
 
     async def ensure_ready(self, timeout_s: float = 300) -> ToolResponse:

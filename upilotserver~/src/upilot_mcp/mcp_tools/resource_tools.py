@@ -354,6 +354,18 @@ async def unity_shader_list():
     r = await _get_facade().shader_list()
     return _log_tool_result("unity_shader_list", _payload(r))
 
+@mcp.tool(description="检查指定 Shader 资产的导入状态、平台支持、属性、依赖和编译消息。")
+async def unity_shader_inspect(assetPath: str):
+    _log_tool_call("unity_shader_inspect", {"assetPath": assetPath})
+    r = await _get_facade().shader_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_shader_inspect", _payload(r))
+
+@mcp.tool(description="读取指定 Shader 资产的结构化编译错误和警告，不修改或重新导入资产。")
+async def unity_shader_check_errors(assetPath: str, includeWarnings: bool = True):
+    _log_tool_call("unity_shader_check_errors", {"assetPath": assetPath, "includeWarnings": includeWarnings})
+    r = await _get_facade().shader_check_errors(asset_path=assetPath, include_warnings=includeWarnings)
+    return _log_tool_result("unity_shader_check_errors", _payload(r))
+
 @mcp.tool(
     description="执行 Unity 编辑器中指定路径的菜单项。菜单项可能触发任意编辑器行为、编译、窗口打开或项目修改；调用前确认 menuPath，必要时先 unity_menu_list。"
 )

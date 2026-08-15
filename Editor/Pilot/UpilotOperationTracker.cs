@@ -465,6 +465,8 @@ namespace CodingRiver.UPilot
             { "material.assign",       "分配材质" },
             { "material.get",          "获取材质" },
             { "shader.list",           "列出着色器" },
+            { "shader.inspect",        "检查着色器" },
+            { "shader.checkErrors",    "检查着色器错误" },
             // script
             { "script.read",           "读取脚本" },
             { "script.create",         "创建脚本" },

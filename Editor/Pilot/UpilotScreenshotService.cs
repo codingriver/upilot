@@ -62,6 +62,14 @@ namespace CodingRiver.UPilot
         public string matchedTypeName;
         public string matchedFullTypeName;
         public bool   multipleMatches;
+        public string captureApi;
+        public long   windowHandle;
+        public int    unityProcessId;
+        public bool   foreground;
+        public bool   occlusionSensitive;
+        public bool   pixelSourceVerified;
+        public long   repaintRequestedAtUtcMs;
+        public long   capturedAtUtcMs;
     }
 
     [Serializable]
@@ -113,6 +121,14 @@ namespace CodingRiver.UPilot
             public bool degraded;
             public string degradeReason;
             public string requestedSource;
+            public string captureApi;
+            public long windowHandle;
+            public int unityProcessId;
+            public bool foreground;
+            public bool occlusionSensitive;
+            public bool pixelSourceVerified;
+            public long repaintRequestedAtUtcMs;
+            public long capturedAtUtcMs;
         }
 
     // ── Service ─────────────────────────────────────────────────────────────────
@@ -163,15 +179,15 @@ namespace CodingRiver.UPilot
                     }
 
                     var info = match.info ?? UPilotWindowService.BuildWindowInfo(match.window);
-                    string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(match.window);
-                    if (string.IsNullOrEmpty(base64))
+                    var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(match.window);
+                    if (capture == null || string.IsNullOrEmpty(capture.imageData))
                     {
                         tcs.SetResult(new EditorWindowCaptureResult
                         {
                             Found = true,
                             Captured = false,
                             FailureReason = "EDITOR_WINDOW_CAPTURE_UNAVAILABLE",
-                            Payload = BuildEditorWindowScreenshotPayload("", info, match.multipleMatches),
+                            Payload = BuildEditorWindowScreenshotPayload(null, info, match.multipleMatches),
                         });
                         return;
                     }
@@ -180,7 +196,7 @@ namespace CodingRiver.UPilot
                     {
                         Found = true,
                         Captured = true,
-                        Payload = BuildEditorWindowScreenshotPayload(base64, info, match.multipleMatches),
+                        Payload = BuildEditorWindowScreenshotPayload(capture, info, match.multipleMatches),
                     });
                 }
                 catch (Exception ex)
@@ -228,24 +244,32 @@ namespace CodingRiver.UPilot
         }
 
         private static ScreenshotResultPayload BuildEditorWindowScreenshotPayload(
-            string imageData,
+            EditorWindowPixelCapture capture,
             EditorWindowInfo info,
             bool multipleMatches)
         {
             return new ScreenshotResultPayload
             {
-                imageData = imageData,
-                width = info == null ? 0 : Mathf.Max(1, Mathf.RoundToInt(info.width)),
-                height = info == null ? 0 : Mathf.Max(1, Mathf.RoundToInt(info.height)),
+                imageData = capture?.imageData ?? "",
+                width = capture?.width ?? (info == null ? 0 : Mathf.Max(1, Mathf.RoundToInt(info.width))),
+                height = capture?.height ?? (info == null ? 0 : Mathf.Max(1, Mathf.RoundToInt(info.height))),
                 format = "png",
                 source = "editorWindow",
-                degraded = false,
-                degradeLevel = "",
-                degradeReason = "",
+                degraded = capture?.degraded ?? true,
+                degradeLevel = capture != null && capture.degraded ? "occlusion_sensitive_fallback" : "",
+                degradeReason = capture?.degradeReason ?? "",
                 matchedTitle = info?.title ?? "",
                 matchedTypeName = info?.typeName ?? "",
                 matchedFullTypeName = info?.fullTypeName ?? "",
                 multipleMatches = multipleMatches,
+                captureApi = capture?.captureApi ?? "",
+                windowHandle = capture?.windowHandle ?? 0,
+                unityProcessId = capture?.unityProcessId ?? 0,
+                foreground = capture?.foreground ?? false,
+                occlusionSensitive = capture?.occlusionSensitive ?? true,
+                pixelSourceVerified = capture?.pixelSourceVerified ?? false,
+                repaintRequestedAtUtcMs = capture?.repaintRequestedAtUtcMs ?? 0,
+                capturedAtUtcMs = capture?.capturedAtUtcMs ?? 0,
             };
         }
 
@@ -327,20 +351,35 @@ namespace CodingRiver.UPilot
             string fmt = NormalizeFormat(p.format);
             int qual   = Clamp(p.quality, 1, 100, 75);
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<ScreenshotBytesResult>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
                     var sceneView = SceneView.lastActiveSceneView;
-                    if (sceneView == null || sceneView.camera == null)
+                    if (sceneView == null)
                     {
                         tcs.SetResult(null);
                         return;
                     }
 
-                    string base64 = RenderCameraToBase64(sceneView.camera, w, h, fmt, qual);
-                    tcs.SetResult(base64);
+                    SceneView.RepaintAll();
+                    sceneView.Repaint();
+                    var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(sceneView);
+                    if (pixels != null && !string.IsNullOrEmpty(pixels.imageData))
+                        tcs.SetResult(FromEditorWindowCapture(pixels, "sceneView"));
+                    else if (sceneView.camera != null)
+                        tcs.SetResult(new ScreenshotBytesResult
+                        {
+                            Bytes = RenderCameraToBytes(sceneView.camera, w, h, fmt, qual), Width = w, Height = h,
+                            Source = "sceneView-camera", Degraded = true,
+                            DegradeReason = "EditorWindow pixel capture unavailable; camera render excludes Handles and overlays.",
+                            CaptureApi = "Camera.Render", PixelSourceVerified = false,
+                        });
+                    else
+                    {
+                        tcs.SetResult(null);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -348,7 +387,7 @@ namespace CodingRiver.UPilot
                 }
             });
 
-            string result;
+            ScreenshotBytesResult result;
             try
             {
                 result = await tcs.Task;
@@ -365,7 +404,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var payload = new ScreenshotResultPayload { imageData = result, width = w, height = h, format = fmt };
+            var payload = BuildScreenshotPayload(result, fmt);
             await _bridge.SendResultAsync(id, "screenshot.sceneView", payload, token);
         }
 
@@ -618,9 +657,17 @@ namespace CodingRiver.UPilot
                     format = "png",
                     sha256 = ComputeSha256(capture.Bytes),
                     overwritten = p.overwrite,
-                    degraded = degraded,
-                    degradeReason = degradeReason,
+                    degraded = degraded || capture.Degraded,
+                    degradeReason = !string.IsNullOrEmpty(degradeReason) ? degradeReason : capture.DegradeReason,
                     requestedSource = requestedSource,
+                    captureApi = capture.CaptureApi,
+                    windowHandle = capture.WindowHandle,
+                    unityProcessId = capture.UnityProcessId,
+                    foreground = capture.Foreground,
+                    occlusionSensitive = capture.OcclusionSensitive,
+                    pixelSourceVerified = capture.PixelSourceVerified,
+                    repaintRequestedAtUtcMs = capture.RepaintRequestedAtUtcMs,
+                    capturedAtUtcMs = capture.CapturedAtUtcMs,
                 };
                 return true;
             }
@@ -638,6 +685,16 @@ namespace CodingRiver.UPilot
             public int Width;
             public int Height;
             public string Source;
+            public bool Degraded;
+            public string DegradeReason;
+            public string CaptureApi;
+            public long WindowHandle;
+            public int UnityProcessId;
+            public bool Foreground;
+            public bool OcclusionSensitive;
+            public bool PixelSourceVerified;
+            public long RepaintRequestedAtUtcMs;
+            public long CapturedAtUtcMs;
         }
 
         private static void CacheRecentGameView(ScreenshotBytesResult capture)
@@ -753,18 +810,20 @@ namespace CodingRiver.UPilot
             {
                 var match = UPilotWindowService.ResolveWindow(windowTitle, "contains");
                 if (match.window == null) return null;
-                string base64 = UPilotWindowDiagnostics.CaptureEditorWindowBase64(match.window);
-                if (string.IsNullOrEmpty(base64))
+                var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(match.window);
+                if (pixels == null || string.IsNullOrEmpty(pixels.imageData))
                 {
                     return null;
                 }
 
                 return new ScreenshotBytesResult
                 {
-                    Bytes = Convert.FromBase64String(base64),
-                    Width = 0,
-                    Height = 0,
-                    Source = "editorWindow"
+                    Bytes = Convert.FromBase64String(pixels.imageData), Width = pixels.width, Height = pixels.height,
+                    Source = "editorWindow", Degraded = pixels.degraded, DegradeReason = pixels.degradeReason,
+                    CaptureApi = pixels.captureApi, WindowHandle = pixels.windowHandle, UnityProcessId = pixels.unityProcessId,
+                    Foreground = pixels.foreground, OcclusionSensitive = pixels.occlusionSensitive,
+                    PixelSourceVerified = pixels.pixelSourceVerified, RepaintRequestedAtUtcMs = pixels.repaintRequestedAtUtcMs,
+                    CapturedAtUtcMs = pixels.capturedAtUtcMs,
                 };
             }
 
@@ -776,7 +835,13 @@ namespace CodingRiver.UPilot
             else if (source == "sceneView")
             {
                 var sceneView = SceneView.lastActiveSceneView;
-                cam = sceneView != null ? sceneView.camera : null;
+                if (sceneView != null)
+                {
+                    SceneView.RepaintAll();
+                    var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(sceneView);
+                    if (pixels != null && !string.IsNullOrEmpty(pixels.imageData)) return FromEditorWindowCapture(pixels, "sceneView");
+                    cam = sceneView.camera;
+                }
             }
             else if (source == "camera")
             {
@@ -793,10 +858,39 @@ namespace CodingRiver.UPilot
                 Bytes = RenderCameraToBytes(cam, w, h, format, quality),
                 Width = w,
                 Height = h,
-                Source = source == "gameView" ? "gameView-camera" : source
+                Source = source == "gameView" ? "gameView-camera" : (source == "sceneView" ? "sceneView-camera" : source),
+                Degraded = source == "sceneView",
+                DegradeReason = source == "sceneView" ? "EditorWindow pixel capture unavailable; camera render excludes Handles and overlays." : "",
+                CaptureApi = "Camera.Render",
+                PixelSourceVerified = source != "sceneView",
             };
             if (source == "gameView") CacheRecentGameView(result);
             return result;
+        }
+
+        private static ScreenshotBytesResult FromEditorWindowCapture(EditorWindowPixelCapture pixels, string source)
+        {
+            return new ScreenshotBytesResult
+            {
+                Bytes = Convert.FromBase64String(pixels.imageData), Width = pixels.width, Height = pixels.height, Source = source,
+                Degraded = pixels.degraded, DegradeReason = pixels.degradeReason, CaptureApi = pixels.captureApi,
+                WindowHandle = pixels.windowHandle, UnityProcessId = pixels.unityProcessId, Foreground = pixels.foreground,
+                OcclusionSensitive = pixels.occlusionSensitive, PixelSourceVerified = pixels.pixelSourceVerified,
+                RepaintRequestedAtUtcMs = pixels.repaintRequestedAtUtcMs, CapturedAtUtcMs = pixels.capturedAtUtcMs,
+            };
+        }
+
+        private static ScreenshotResultPayload BuildScreenshotPayload(ScreenshotBytesResult result, string format)
+        {
+            return new ScreenshotResultPayload
+            {
+                imageData = Convert.ToBase64String(result.Bytes), width = result.Width, height = result.Height, format = format,
+                source = result.Source, degraded = result.Degraded, degradeReason = result.DegradeReason,
+                degradeLevel = result.Degraded ? "capture_fallback" : "", captureApi = result.CaptureApi,
+                windowHandle = result.WindowHandle, unityProcessId = result.UnityProcessId, foreground = result.Foreground,
+                occlusionSensitive = result.OcclusionSensitive, pixelSourceVerified = result.PixelSourceVerified,
+                repaintRequestedAtUtcMs = result.RepaintRequestedAtUtcMs, capturedAtUtcMs = result.CapturedAtUtcMs,
+            };
         }
 
         private static Camera FindCamera(string camName)

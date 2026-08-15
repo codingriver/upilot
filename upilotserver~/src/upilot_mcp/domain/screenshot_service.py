@@ -330,9 +330,7 @@ class ScreenshotDomainService:
         )
         if bridge_save.ok:
             data = bridge_save.data or {}
-            return ok(
-                request_id,
-                {
+            result = {
                     "path": data.get("path", str(target_path)),
                     "source": data.get("source", normalized_source),
                     "bytes": data.get("bytes", 0),
@@ -345,8 +343,15 @@ class ScreenshotDomainService:
                     "degradeReason": data.get("degradeReason", ""),
                     "requestedSource": data.get("requestedSource", normalized_source),
                     "savedBy": "unity_bridge",
-                },
-            )
+                }
+            for key in (
+                "captureApi", "windowHandle", "unityProcessId", "foreground",
+                "occlusionSensitive", "pixelSourceVerified", "repaintRequestedAtUtcMs",
+                "capturedAtUtcMs",
+            ):
+                if key in data:
+                    result[key] = data[key]
+            return ok(request_id, result)
         return bridge_save
 
     @staticmethod

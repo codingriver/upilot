@@ -96,7 +96,7 @@
 - 证据/复现：`Assets/Examples/Tests/UPilotFlow.ExecutionReportingCliTests.cs(137,17)`、`UPilotFlow.ReportingAndCliBoundaryTests.cs(151,30)`、`(164,17)` 均报 `CiArtifactManifestWriter could not be found`。
 - 备注：已在本次验收中更新 canonical Sample 测试，待完整回归确认。
 
-### [待处理] 测试验收流程的 Console capture 与 ConsoleCaptureService 自测互相干扰
+### [已完成] 测试验收流程的 Console capture 与 ConsoleCaptureService 自测互相干扰
 
 - 发现时间：2026-08-13
 - 来源任务/测试：使用 `./Tests~/UPilotTest` / Unity 6000.6.0a2 进行 UPilot EditMode 验收。
@@ -104,9 +104,9 @@
 - 影响范围：任何包含 ConsoleCaptureService 自测的 UPilot 回归，如果 agent 按通用“长任务前开启持久 Console capture”规则执行，可能制造假失败。
 - 建议改进：为 `unity_test_run` / 验收流程增加 test-safe console capture 策略：运行前检测 active capture 并提示/自动停止，或提供不会污染被测 `UPilotConsoleCaptureService.Active` 状态的隔离采集通道；同时在 agent 规则中明确“运行 ConsoleCaptureService 相关测试时不要开启 live capture”。
 - 证据/复现：首轮 EditMode：`47 total / 44 passed / 1 failed / 2 skipped`，失败消息 `The historical-stop test requires no live capture`；停止 capture 后重跑：`47 total / 45 passed / 0 failed / 2 skipped`。
-- 备注：这是验收流程设计缺口，不是产品编译失败。
+- 备注：`unity_upilot_acceptance_run` 运行前列出并停止 active capture，且不会在 ConsoleCaptureService 自测外再包一层持久 capture；规则与 Skill 已同步。
 
-### [待处理] 提供一键 UPilot 包验收工具以减少手写 MCP/轮询脚本
+### [已完成] 提供一键 UPilot 包验收工具以减少手写 MCP/轮询脚本
 
 - 发现时间：2026-08-13
 - 来源任务/测试：Codex 环境未直接注入 `unity_*` typed tools，通过 Streamable HTTP `tools/call` 手写调用 `unity_mcp_status`、`unity_safe_compile_and_wait`、`unity_test_run`、`unity_test_results`、`unity_compile_errors` 完成验收。
@@ -114,9 +114,9 @@
 - 影响范围：UPilot 包回归、发布前检查、客户项目接入验收。
 - 建议改进：新增可选工具/集成 `unity_upilot_acceptance_run`（或扩展 `unity_test_run` 为可等待终态）：一次完成项目身份校验、safe compile、EditMode 测试、compile errors 复查、Console tail/错误摘要、结果 artifact 路径和结构化 summary，并内置 test-safe capture 策略。
 - 证据/复现：本次验收需要多次手写 `tools/call` 与轮询；首次因通用 capture 策略触发假失败。
-- 备注：保持现有细粒度工具，同时提供高层验收编排能力，供 agent/CI/发布流程复用。
+- 备注：已新增并联机验收 `unity_upilot_acceptance_run`，本次过滤验收 1/1 通过，报告 `Log/UPilotAcceptance/20260815-224818/summary.json`，SHA256 `965149097a80ad6881fee7dc0f96c0e882c9668a7a5beeca3f4e80ac94205693`；细粒度工具继续保留。
 
-### [待处理] PlayMode 测试工具需要区分无 PlayMode 用例与无结果状态
+### [已完成] PlayMode 测试工具需要区分无 PlayMode 用例与无结果状态
 
 - 发现时间：2026-08-13
 - 来源任务/测试：在 `./Tests~/UPilotTest` / Unity 6000.6.0a2 中尝试补充 PlayMode 测试检查。
@@ -124,9 +124,9 @@
 - 影响范围：agent 进行“全 Unity 测试”验收时，无法可靠判断 PlayMode 是否无需运行、已通过、未启动或工具丢失结果。
 - 建议改进：修正 `unity_test_list` / `unity_test_run` 的 testMode 过滤和终态契约；当项目没有 PlayMode 测试时返回明确 `status=no_tests` / `total=0`，不要复用 EditMode 列表；当运行被 Unity Test Runner 忽略或中止时返回结构化错误和原因。
 - 证据/复现：本次 PlayMode 列表包含 `CodingRiver.UPilot.Tests.UPilotCoreTests.*` Editor 用例；运行后多次轮询均为 `status=none,total=0`，最终 Editor 回到 `playModeState=edit`，编译错误 0。
-- 备注：本次 UPilot 本体规范验收仍以编译 + EditMode 为准，最终 EditMode 已通过。
+- 备注：Test Runner 回调在零 leaf tests 时返回清理后的 `status=no_tests,total=0,noTests=true,discoveryStatus=no_tests`，不再构造 `UPilot.TestRunner.NoTests` 伪失败。
 
-### [待处理] EditorWindow 截图必须校验窗口身份与实际像素来源一致
+### [已完成] EditorWindow 截图必须校验窗口身份与实际像素来源一致
 
 - 发现时间：2026-08-15
 - 来源任务/测试：UPilot UIFlow 全量 EditMode 验收后，为 `UnityEditor.TestTools.TestRunner.TestRunnerWindow` 保存结果截图。
@@ -134,7 +134,21 @@
 - 影响范围：所有 EditorWindow、Test Runner、第三方 Unity 工具窗口的截图验收与视觉审计；窗口被其他应用遮挡时尤其容易产生假证据。
 - 建议改进：截图结果同时记录并校验 Unity instanceId/typeName、映射后的 Unity PID/OS HWND、捕获 API/source、窗口矩形、前台/遮挡状态和像素哈希；优先使用能离屏捕获精确 HWND 的实现，若只能 CopyFromScreen，应先把已验证的精确 HWND 置前并明确返回 `degraded=true/degradeReason=occlusion-sensitive`。捕获后增加窗口标题栏/已知 UI 特征的轻量校验，身份与像素源不一致时直接失败。
 - 证据/复现：Unity PID `88060`，Test Runner Unity instanceId `568105589213663200`，窗口 `Test Runner`、类型 `UnityEditor.TestTools.TestRunner.TestRunnerWindow`；两次 MCP 截图均显示 Codex 内容。映射到精确 HWND `7358378` 后，OS helper 首次仍因窗口被遮挡抓到 Codex；将该 HWND 置前后再次捕获才得到有效 Test Runner PNG。
-- 备注：有效截图为 `Tests~/UPilotTest/log/UPilotScreenshots/final-editmode-327-results.png`，SHA256 `f5300e0ba203c02aeddf8e4dbb72ad0c860222ca5a339aada41f19a4d7499d15`；该窗口仅显示发现的 327 个测试，MCP 全量运行结果未回填到 Test Runner UI，后续还应提供可直接渲染终态摘要的验收截图工具。
+- 备注：Windows 现优先按 Unity PID 和精确 HWND 使用 `PrintWindow(PW_RENDERFULLCONTENT)` 离屏捕获；Console 与 SceneView 已在非前台状态联机返回 `pixelSourceVerified=true/occlusionSensitive=false`。保存证据 SHA256 `98e18e25f6eb58f5c7bc10f3a38b0422760edcc9dda05decc9414fbd90fb9863`。
+
+### [已完成] Operation 状态响应缺少紧凑级别与输出上限
+
+- 发现时间：2026-08-15
+- 现象/问题：轮询总是返回完整 `lastStatusData/domain/consoleCapture`，长业务状态和日志会显著增加上下文与传输成本。
+- 改进结果：`unity_operation_status/wait/collect_artifacts` 新增 `detailLevel=summary|standard|full`、`maxTailChars`、`includeRawState`；默认 summary，返回截断字段与响应字节数。
+- 状态：Python 回归覆盖 summary/full 差异和长 tail 截断。
+
+### [已完成] 缺少 Shader 专项编译诊断工具
+
+- 发现时间：2026-08-15
+- 现象/问题：此前只有 `unity_shader_list`，Shader 编译问题只能依赖宽泛 Console 搜索，缺少资产级错误、平台支持和依赖证据。
+- 改进结果：新增只读 `unity_shader_inspect` 与 `unity_shader_check_errors`，返回导入状态、`Shader.isSupported`、属性数、依赖及结构化错误/警告。
+- 状态：使用反射读取 `ShaderUtil.GetShaderMessages`，兼容不同 Unity 版本的消息类型。
 
 ### [已完成] 安装器和发布配置混淆外部 HTTP MCP 与内部 Unity WebSocket
 

@@ -39,7 +39,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class TestRunResultPayload
     {
-        public string status;  // started, running, cancel_requested, cleanup, completed, failed, aborted
+        public string status;  // started, running, cancel_requested, cleanup, completed, no_tests, failed, aborted
         public string phase;
         public string testMode;
         public string runGuid;
@@ -64,6 +64,8 @@ namespace CodingRiver.UPilot
         public int    passed;
         public int    failed;
         public int    skipped;
+        public bool   noTests;
+        public string discoveryStatus;
         public List<TestResultItemPayload> results = new List<TestResultItemPayload>();
     }
 
@@ -639,25 +641,7 @@ namespace CodingRiver.UPilot
             {
                 var results = new List<TestResultItemPayload>();
                 CollectLeafResults(rootResult, results);
-                if (results.Count == 0)
-                {
-                    results.Add(new TestResultItemPayload
-                    {
-                        testName = "UPilot.TestRunner.NoTests",
-                        testStatus = "Failed",
-                        message = "The Test Runner completed without discovering any matching leaf tests.",
-                        stackTrace = string.Empty,
-                    });
-                }
-                _lastResults.results = results;
-                _lastResults.total = results.Count;
-                _lastResults.passed = results.Count(item => item.testStatus == "Passed");
-                _lastResults.failed = results.Count(item => item.testStatus == "Failed");
-                _lastResults.skipped = results.Count(item =>
-                    item.testStatus == "Skipped" || item.testStatus == "Inconclusive");
-                _pendingTerminalStatus = _lastResults.cancelRequested
-                    ? "aborted"
-                    : (_lastResults.failed > 0 ? "failed" : "completed");
+                _pendingTerminalStatus = ApplyRunResults(_lastResults, results, _lastResults.cancelRequested);
             }
             catch (Exception ex)
             {
@@ -684,6 +668,20 @@ namespace CodingRiver.UPilot
                 _lastResults.lastProgressAt = NowMs();
                 ScheduleCleanup();
             }
+        }
+
+        internal static string ApplyRunResults(TestRunResultPayload target, List<TestResultItemPayload> results, bool canceled)
+        {
+            target.results = results ?? new List<TestResultItemPayload>();
+            target.total = target.results.Count;
+            target.passed = target.results.Count(item => item.testStatus == "Passed");
+            target.failed = target.results.Count(item => item.testStatus == "Failed");
+            target.skipped = target.results.Count(item => item.testStatus == "Skipped" || item.testStatus == "Inconclusive");
+            target.noTests = target.total == 0;
+            target.discoveryStatus = target.noTests ? "no_tests" : "tests_discovered";
+            if (canceled) return "aborted";
+            if (target.noTests) return "no_tests";
+            return target.failed > 0 ? "failed" : "completed";
         }
 
         private static void CollectLeafResults(object result, List<TestResultItemPayload> output)

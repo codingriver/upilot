@@ -5,6 +5,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections;
+using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -57,6 +60,35 @@ namespace CodingRiver.UPilot
         public List<string> shaders = new List<string>();
     }
 
+    [Serializable] public class ShaderInspectMessage { public ShaderInspectPayload payload; }
+    [Serializable] public class ShaderInspectPayload { public string assetPath = ""; public bool includeWarnings = true; }
+
+    [Serializable]
+    public class ShaderDiagnosticMessagePayload
+    {
+        public string severity;
+        public string message;
+        public int line;
+        public string platform;
+        public string file;
+    }
+
+    [Serializable]
+    public class ShaderDiagnosticResultPayload
+    {
+        public string assetPath;
+        public string shaderName;
+        public ulong instanceId;
+        public bool imported;
+        public bool supported;
+        public int propertyCount;
+        public int messageCount;
+        public int errorCount;
+        public int warningCount;
+        public List<string> dependencies = new List<string>();
+        public List<ShaderDiagnosticMessagePayload> messages = new List<ShaderDiagnosticMessagePayload>();
+    }
+
     // ── Service ─────────────────────────────────────────────────────────────────
 
     public class UPilotMaterialService
@@ -72,6 +104,95 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("material.assign",  HandleAssignAsync);
             _bridge.Router.Register("material.get",     HandleGetAsync);
             _bridge.Router.Register("shader.list",      HandleShaderListAsync);
+            _bridge.Router.Register("shader.inspect",   HandleShaderInspectAsync);
+            _bridge.Router.Register("shader.checkErrors", HandleShaderCheckErrorsAsync);
+        }
+
+        private Task HandleShaderInspectAsync(string id, string json, CancellationToken token)
+        {
+            return HandleShaderDiagnosticsAsync(id, json, token, "shader.inspect", includeMessages: true);
+        }
+
+        private Task HandleShaderCheckErrorsAsync(string id, string json, CancellationToken token)
+        {
+            return HandleShaderDiagnosticsAsync(id, json, token, "shader.checkErrors", includeMessages: true);
+        }
+
+        private async Task HandleShaderDiagnosticsAsync(string id, string json, CancellationToken token, string command, bool includeMessages)
+        {
+            var msg = JsonUtility.FromJson<ShaderInspectMessage>(json);
+            var p = msg?.payload ?? new ShaderInspectPayload();
+            if (string.IsNullOrWhiteSpace(p.assetPath))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "assetPath is required.", token, command);
+                return;
+            }
+
+            var tcs = new TaskCompletionSource<ShaderDiagnosticResultPayload>();
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    string path = p.assetPath.Replace('\\', '/');
+                    var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
+                    if (shader == null) throw new InvalidOperationException($"Shader asset not found: {path}");
+                    var result = new ShaderDiagnosticResultPayload
+                    {
+                        assetPath = path,
+                        shaderName = shader.name,
+                        instanceId = UPilotEntityIds.ToWireId(shader),
+                        imported = AssetImporter.GetAtPath(path) != null,
+                        supported = shader.isSupported,
+                        propertyCount = ShaderUtil.GetPropertyCount(shader),
+                        dependencies = AssetDatabase.GetDependencies(path, false).Where(item => !string.Equals(item, path, StringComparison.OrdinalIgnoreCase)).ToList(),
+                    };
+                    if (includeMessages) ReadShaderMessages(shader, p.includeWarnings, result);
+                    tcs.SetResult(result);
+                }
+                catch (Exception ex) { tcs.SetException(ex); }
+            });
+
+            try { await _bridge.SendResultAsync(id, command, await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SHADER_DIAGNOSTICS_FAILED", ex.Message, token, command); }
+        }
+
+        internal static void ReadShaderMessages(Shader shader, bool includeWarnings, ShaderDiagnosticResultPayload result)
+        {
+            var method = typeof(ShaderUtil).GetMethod("GetShaderMessages", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(Shader) }, null);
+            var values = method?.Invoke(null, new object[] { shader }) as IEnumerable;
+            if (values == null) return;
+            foreach (var value in values)
+            {
+                string severity = ReadMember(value, "severity");
+                bool warning = severity.IndexOf("warning", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool error = severity.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (warning) result.warningCount++;
+                if (error) result.errorCount++;
+                if (!includeWarnings && warning) continue;
+                result.messages.Add(new ShaderDiagnosticMessagePayload
+                {
+                    severity = severity,
+                    message = ReadMember(value, "message"),
+                    line = ReadIntMember(value, "line"),
+                    platform = ReadMember(value, "platform"),
+                    file = ReadMember(value, "file"),
+                });
+            }
+            result.messageCount = result.messages.Count;
+        }
+
+        private static string ReadMember(object value, string name)
+        {
+            if (value == null) return string.Empty;
+            var type = value.GetType();
+            object member = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(value)
+                ?? type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(value);
+            return Convert.ToString(member) ?? string.Empty;
+        }
+
+        private static int ReadIntMember(object value, string name)
+        {
+            return int.TryParse(ReadMember(value, name), out int parsed) ? parsed : 0;
         }
 
         // ── material.create ─────────────────────────────────────────────────────

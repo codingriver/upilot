@@ -66,6 +66,20 @@ async def unity_test_list(testMode: str = "EditMode"):
     r = await _get_facade().test_list(test_mode=testMode)
     return _log_tool_result("unity_test_list", _payload(r))
 
+@mcp.tool(description="一键执行 UPilot 包标准验收：校验规范项目、停止活动 Console capture、安全编译、测试发现与运行、错误检查并写入带 hash 的 JSON 报告。")
+async def unity_upilot_acceptance_run(
+    testMode: str = "EditMode", testFilter: str = "", timeoutSec: float = 900,
+    stopActiveCaptures: bool = True, requireTests: bool = True, writeArtifact: bool = True,
+):
+    args = {"testMode": testMode, "testFilter": testFilter, "timeoutSec": timeoutSec,
+            "stopActiveCaptures": stopActiveCaptures, "requireTests": requireTests, "writeArtifact": writeArtifact}
+    _log_tool_call("unity_upilot_acceptance_run", args)
+    r = await _get_facade().upilot_acceptance_run(
+        test_mode=testMode, test_filter=testFilter, timeout_sec=timeoutSec,
+        stop_active_captures=stopActiveCaptures, require_tests=requireTests, write_artifact=writeArtifact,
+    )
+    return _log_tool_result("unity_upilot_acceptance_run", _payload(r))
+
 @mcp.tool(
     description="一次性获取全部诊断信息：窗口布局诊断 + 控制台摘要 + 编辑器状态。免去多次调用。"
 )
@@ -137,6 +151,7 @@ _DESTRUCTIVE_TOOLS = {
     "unity_package_add", "unity_package_remove", "unity_scene_save",
     "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
 }
+_NON_IDEMPOTENT_TOOLS = {"unity_upilot_acceptance_run", "unity_test_run", "unity_test_cancel", "unity_test_force_cleanup", "unity_test_force_reset"}
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
@@ -147,7 +162,7 @@ for _name, _value in list(globals().items()):
     register_public_tool(
         _name,
         destructive=_name in _DESTRUCTIVE_TOOLS,
-        idempotent=_name not in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
     )

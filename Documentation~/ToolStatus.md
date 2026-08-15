@@ -2,7 +2,7 @@
 
 本文档用于跟踪 UPilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 和 `unity_capabilities_get` 返回的实时 schema。
 
-最近同步：2026-08-12，`tools/list` 以当前 MCP 实时返回为准；本表已同步权威 Context、编译生命周期、Console、资源审计、NavMesh、Profiler、纹理导入、截图像素分析和静态分析结果。
+最近同步：2026-08-15，`tools/list` 以当前 MCP 实时返回为准；本表已同步可信窗口截图、一键包验收、`no_tests`、紧凑 Operation 响应和 Shader 专项诊断。
 
 ## 状态口径
 
@@ -99,10 +99,10 @@
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
 | `unity_screenshot_game_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Game 视图 PNG。 |
-| `unity_screenshot_scene_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Scene 视图 PNG。 |
+| `unity_screenshot_scene_view` | 是 | 是 | 是 | 2026-08-15 联机返回 SceneView 精确 HWND、`PrintWindow`、`pixelSourceVerified=true/occlusionSensitive=false`；相机回退明确标记 degraded。 |
 | `unity_screenshot_camera` | 是 | 是 | 是 | 2026-06-30 自动验收通过：使用临时 Camera 成功截取 320x180 PNG。 |
-| `unity_screenshot_editor_window` | 是 | 是 | 是 | 成功时返回真实窗口宽高与匹配标题/类型；Windows EditMode 同名原生窗口隔离测试通过，不会误解析 OS 窗口。 |
-| `unity_screenshot_save` | 是 | 是 | 是 | GameView 不可用时可降级 SceneView；退出 PlayMode 后可返回 `source=recentGameView/degraded=true/degradeReason`；EditorWindow 捕获复用 Unity `EditorWindow` 对象。 |
+| `unity_screenshot_editor_window` | 是 | 是 | 是 | 2026-08-15 Console 窗口在非前台状态仍通过精确 Unity PID/HWND 离屏捕获，`pixelSourceVerified=true/occlusionSensitive=false`。 |
+| `unity_screenshot_save` | 是 | 是 | 是 | 可信窗口截图 `new-editor-window-trust.png`：1016x628、189877 bytes、SHA256 `98e18e25...fb9863`，完整返回像素来源元数据。 |
 | `unity_screenshot_pixel_stats` | 是 | Python 通过 | 是 | 只读工程内 PNG，返回区域近黑/透明比例与亮度/Alpha 直方图，不返回原始像素。 |
 | `unity_screenshot_compare` | 是 | Python 通过 | 是 | 比较同尺寸 PNG 的差异像素比例、平均通道差和近黑比例变化。 |
 
@@ -178,6 +178,8 @@ KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
 | `unity_material_assign` | 是 | 是 | 是 | 2026-06-30 自动验收通过：修正 Unity 6 EntityId 截断后成功向临时 Cube Renderer 分配临时材质。 |
 | `unity_material_get` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取临时材质属性信息。 |
 | `unity_shader_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出可用 Shader。 |
+| `unity_shader_inspect` | 是 | 是 | 是 | 2026-08-15 联机检查 URP Core `UnlitGizmo.shader`：imported/supported=true、propertyCount=1、错误警告 0。 |
+| `unity_shader_check_errors` | 是 | 是 | 是 | 同一 Shader 联机返回结构化 `messageCount/errorCount/warningCount=0`，不修改或重导入资产。 |
 
 ### 资源与脚本文件
 
@@ -206,9 +208,10 @@ KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
 | `unity_package_remove` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功移除临时添加的 `com.unity.nuget.newtonsoft-json` 并恢复 manifest；调用时会通过 Unity Package Manager 修改 `Packages/manifest.json` 依赖项。 |
 | `unity_package_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出已安装包；调用时会查询 Unity Package Manager 当前项目包清单、registry 解析结果和本地缓存状态。 |
 | `unity_package_search` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功查询 Unity Package Manager registry；调用时会按包名或关键字查询 registry 返回的包元数据。 |
-| `unity_test_run` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功启动 EditMode 测试运行；调用时会通过 Unity Test Framework 运行项目内 EditMode/PlayMode 测试用例。 |
+| `unity_test_run` | 是 | 是 | 是 | 2026-08-15 不存在的精确过滤器联机返回清理后的 `status=no_tests,total=0,noTests=true/results=[]`，无伪失败。 |
 | `unity_test_results` | 是 | 是 | 是 | 2026-08-09 Unity 2022 实际回调复验：`45 total / 43 passed / 2 skipped / 0 failed`；Unity 6 保留此前 `43/41/2/0` 证据，当前安装已卸载。 |
 | `unity_test_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出测试用例；调用时会查询项目内 Unity Test Framework 测试用例。 |
+| `unity_upilot_acceptance_run` | 是 | 是 | 是 | 2026-08-15 联机过滤验收通过：safe compile 错误 0、1/1 测试通过、cleanup 完成；summary SHA256 `96514909...4205693`。 |
 | `unity_build_start` | 是 | 是 | 是 | 2026-06-30 自动验收通过：使用 `StandaloneWindows64` 和临时场景构建成功，错误/警告为 0；调用时会使用目标平台模块、工程构建配置和本机构建环境。 |
 | `unity_build_status` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取最近一次构建状态 `succeeded`；调用时会查询最近一次构建任务状态。 |
 | `unity_build_cancel` | 是 | 是 | 是 | 2026-06-30 自动验收通过：无活动构建时返回幂等 `not_running`；调用时会取消当前活动构建任务。 |
@@ -233,8 +236,8 @@ KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
 | `unity_operation_list` | 是 | 是 | 是 | 列出 Unity Bridge 最近操作，保留原有诊断用途。 |
 | `unity_operation_get` | 是 | 是 | 是 | 按 commandId 读取 Unity Bridge 操作步骤，保留原有诊断用途。 |
 | `unity_operation_start` | 是 | 是 | 是 | 90 秒显式 EditMode 长作业真实启动通过并自动关联 Console Capture；status/cancel 参数支持 `${start.field}`、`${status.field}`、`${operation.operationId}` 注入。 |
-| `unity_operation_status` | 是 | 是 | 是 | 真实长作业中持续保持 Running，终态返回 Succeeded 及完整 timing/artifact 数据。 |
-| `unity_operation_wait` | 是 | 是 | 是 | 首次 30 秒等待返回非终态且不写 Timeout，第二次等待同一 operationId 成功。 |
+| `unity_operation_status` | 是 | 是 | 是 | Python 覆盖大字段截断；2026-08-15 联机 summary 825 bytes、full 1520 bytes 且仅 full 返回 lastStatusData。 |
+| `unity_operation_wait` | 是 | 是 | 是 | Python 覆盖等待语义与有界输出；轮询与终态响应支持 `detailLevel/maxTailChars/includeRawState`。 |
 | `unity_asset_subresources_list` | 是 | 是 | 是 | `Hero_10003` FBX 联机列出非预览 AnimationClip 子资源。 |
 | `unity_animator_controller_inspect` | 是 | 是 | 是 | `Hero_10003.controller` 联机返回 2 层、26 State、Motion、Mask、Transition 和未绑定 Clip。 |
 | `unity_avatar_mask_inspect` | 是 | 是 | 是 | `avatarmask.mask` 联机展开 36 条 Transform 路径和 active 状态。 |
@@ -247,7 +250,7 @@ KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
 | `unity_script_dependency_graph` | 是 | 是 | 是 | 文件根、程序集、方向、依据和置信度联机通过；`maxDepth=1` 收敛为 77 节点/228 边。 |
 | `unity_project_stack_detect` | 是 | 是 | 是 | xclient 联机识别 Unity 包、asmdef、Editor/Runtime 和测试程序集。 |
 | `unity_operation_cancel` | 是 | 待 Unity 联机验收 | 是 | 调用 JobSpec cancelCall；无 cancelCall 时返回 CANCEL_UNSUPPORTED。 |
-| `unity_operation_collect_artifacts` | 是 | 待 Unity 联机验收 | 是 | Python 单测覆盖报告 tail、metadata、sha256；业务含义由项目桥接判断。 |
+| `unity_operation_collect_artifacts` | 是 | Python 通过 | 是 | 报告 tail 受 `maxTailChars` 限制并返回 `tailTruncated/tailOriginalChars`；保留 metadata、sha256。 |
 | `unity_agent_rules_check` | 是 | 是 | 是 | Python 单测覆盖只读检查；返回 recommendedBlock 和 diffSummary，不写文件。 |
 | `unity_agent_rules_install` | 是 | 是 | 是 | Python 单测覆盖 dry-run 与 apply；仅替换 upilot:start/end 受控块，apply=true 需要写权限。 |
 | `unity_compile_errors_get` | 是 | 是 | 是 | D/F 两个 Unity 2022 项目保留此前 live strict 错误 0 证据；当前本地候选在独立 Unity 2022 工程编译错误 0，F Bridge 现为断连。兼容别名为 `unity_compile_errors`。 |

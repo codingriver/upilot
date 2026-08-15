@@ -18,6 +18,10 @@
 | P1 | 编码保持的 CSV 查询与字段补丁 | 避免 GBK/CRLF 配置表转码和整行误改 | 已实现；GB18030、CRLF、31 列和目标外字节不变联机通过 |
 | P1 | Unity 卡死看门狗和非终止式 Dump | Unity 主线程卡死时仍能保留 CPU、心跳、队列和 dump 证据 | 已实现；15 秒主线程忙循环和非终止式 Dump 通过 |
 | P1 | 窗口 truth 和截图降级 | 确保截图来自 Unity 窗口，并支持退出 PlayMode 后取证 | 已实现；SceneView 降级和 EditorWindow 实例截图联机通过 |
+| P0 | 一键 UPilot 包验收与 test-safe Console capture | 避免自测被活动 capture 污染并统一证据 | 已实现 `unity_upilot_acceptance_run`；规范项目、safe compile、测试、错误与 hashed summary 闭环 |
+| P0 | Test Runner `no_tests` 终态 | 区分零用例、失败与无结果 | 已实现；零 leaf tests 返回 `no_tests/total=0/noTests=true`，无伪失败 |
+| P1 | Operation 紧凑响应 | 降低轮询上下文和大日志传输 | 已实现 summary/standard/full、tail 上限、截断元数据 |
+| P1 | Shader 专项诊断 | 直接定位 Shader 导入/支持/编译消息 | 已实现 inspect/check_errors 只读工具 |
 | P1 | 工具精确搜索和 `callableNow` 过滤 | 防止近似 CRUD 工具被误认为目标能力 | 已实现；精确、可调用过滤和近似结果分离联机通过 |
 | P1 | 客户端未注入工具的安全代理调用 | 能力发现后无需手写 HTTP/SSE；仍遵守工具注册表、写权限和 Flow 开关 | 已实现 `unity_tool_call`；Python 路由/递归/安全契约通过，客户端刷新后可用 |
 | P1 | Console 严格关键词搜索契约 | 修复 `query/maxCount` 被静默忽略而返回无关日志 | 已实现兼容参数、`effectiveQuery/effectiveContains/matchedFields/scannedCount`；Python 与 Unity 2022 编译通过，项目 Console 联机待补 |

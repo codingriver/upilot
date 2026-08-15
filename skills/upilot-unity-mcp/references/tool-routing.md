@@ -17,10 +17,11 @@ Use the narrowest tool that matches the request.
 | Runtime profiler | `unity_profiler_capture_start/status/stop` |
 | Scenes/objects/components | `unity_scene_*`, `unity_gameobject_*`, `unity_component_*` |
 | Assets/prefabs/materials | `unity_asset_*`, `unity_prefab_*`, `unity_material_*`; use `unity_asset_dependencies` for reference audits |
+| Shader diagnostics | `unity_shader_inspect`, `unity_shader_check_errors`; use `unity_shader_list` only for discovery |
 | Packages | `unity_package_*` |
-| Tests/builds | `unity_test_*`, `unity_build_*` |
+| Tests/builds | `unity_upilot_acceptance_run` for canonical package acceptance; otherwise `unity_test_*`, `unity_build_*` |
 | Screenshots | `unity_screenshot_save` with explicit `fallbackSources`, `unity_screenshot_*`; use `unity_screenshot_pixel_stats/compare` for structured PNG acceptance |
-| Long tasks | `unity_task_*`, `unity_operation_*` |
+| Long tasks | `unity_task_*`, `unity_operation_*`; default `detailLevel=summary` with bounded `maxTailChars` |
 | Existing compiled API | `unity_reflection_call` |
 | One bounded fallback expression | `reflection_eval` |
 

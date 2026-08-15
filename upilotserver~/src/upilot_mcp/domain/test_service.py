@@ -96,6 +96,135 @@ class TestDomainService:
             request_id, "test.list", {"testMode": test_mode}
         )
 
+    async def upilot_acceptance_run(
+        self,
+        test_mode: str = "EditMode",
+        test_filter: str = "",
+        timeout_sec: float = 900,
+        stop_active_captures: bool = True,
+        require_tests: bool = True,
+        write_artifact: bool = True,
+    ) -> ToolResponse:
+        """Run canonical package acceptance without an active persistent Console capture."""
+        request_id = new_id("req")
+        started_at = now_ms()
+        expected_project = (Path(__file__).resolve().parents[4] / "Tests~" / "UPilotTest").resolve()
+        report: dict[str, object] = {
+            "schemaVersion": 1,
+            "workflow": "UPilotPackageAcceptance",
+            "startedAt": started_at,
+            "testMode": test_mode,
+            "testFilter": test_filter,
+            "expectedProject": str(expected_project),
+            "stoppedConsoleCaptures": [],
+            "steps": {},
+        }
+
+        def response_summary(response: ToolResponse) -> dict:
+            return {
+                "ok": response.ok,
+                "data": response.data or {},
+                "error": ({"code": response.error.code, "message": response.error.message, "detail": response.error.detail} if response.error else None),
+            }
+
+        async def finish(passed: bool, code: str = "", message: str = "") -> ToolResponse:
+            report["acceptancePassed"] = passed
+            report["endedAt"] = now_ms()
+            report["elapsedMs"] = int(report["endedAt"]) - started_at
+            if code:
+                report["failureCode"] = code
+                report["failureMessage"] = message
+            if write_artifact:
+                artifact_dir = expected_project / "Log" / "UPilotAcceptance" / time.strftime("%Y%m%d-%H%M%S")
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                artifact_path = artifact_dir / "summary.json"
+                content = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+                artifact_path.write_bytes(content)
+                report["artifact"] = {
+                    "path": str(artifact_path), "bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            return ok(request_id, report) if passed else fail(request_id, code or "UPILOT_ACCEPTANCE_FAILED", message or "UPilot acceptance failed.", report)
+
+        status = await self.mcp_status(force_fresh=True, include_capabilities=False)
+        report["steps"]["mcpStatus"] = response_summary(status)
+        status_data = status.data or {}
+        actual_project_text = str((status_data.get("paths") or {}).get("unityProjectAbsolute") or "")
+        try:
+            actual_project = Path(actual_project_text).resolve()
+        except OSError:
+            actual_project = Path(actual_project_text)
+        if not status.ok or not status_data.get("connected") or not status_data.get("serverReady"):
+            return await finish(False, "UPILOT_ACCEPTANCE_NOT_CONNECTED", "Unity MCP is not connected and ready.")
+        if os.path.normcase(str(actual_project)) != os.path.normcase(str(expected_project)):
+            report["actualProject"] = str(actual_project)
+            return await finish(False, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project is not the canonical UPilot acceptance project.")
+
+        ready = await self.ensure_ready(timeout_s=min(120, max(10, timeout_sec)))
+        report["steps"]["ensureReady"] = response_summary(ready)
+        if not ready.ok or not bool((ready.data or {}).get("ready", False)):
+            return await finish(False, "UPILOT_ACCEPTANCE_NOT_READY", "Unity Editor did not become ready for acceptance.")
+
+        captures = await self.console_capture_list(count=200, include_active=True)
+        report["steps"]["consoleCaptureList"] = response_summary(captures)
+        active_sessions = [item for item in ((captures.data or {}).get("sessions") or []) if item.get("active")]
+        if active_sessions and not stop_active_captures:
+            return await finish(False, "UPILOT_ACCEPTANCE_ACTIVE_CAPTURE", "Persistent Console capture is active; self-tests require capture-safe execution.")
+        for session in active_sessions:
+            session_id = str(session.get("sessionId") or "")
+            stopped = await self.console_capture_stop(session_id=session_id)
+            report["stoppedConsoleCaptures"].append({"sessionId": session_id, **response_summary(stopped)})
+            if not stopped.ok:
+                return await finish(False, "UPILOT_ACCEPTANCE_CAPTURE_STOP_FAILED", f"Could not stop Console capture {session_id}.")
+
+        compiled = await self.safe_compile_and_wait(timeout_s=min(timeout_sec, 600))
+        report["steps"]["compile"] = response_summary(compiled)
+        if not compiled.ok:
+            return await finish(False, "UPILOT_ACCEPTANCE_COMPILE_FAILED", "UPilot package compilation failed.")
+
+        listed = await self.test_list(test_mode=test_mode)
+        report["steps"]["testList"] = response_summary(listed)
+        tests = (listed.data or {}).get("tests") or []
+        report["discoveredTestCount"] = len(tests)
+        if not listed.ok:
+            return await finish(False, "UPILOT_ACCEPTANCE_DISCOVERY_FAILED", "Unity Test Runner discovery failed.")
+        if require_tests and not tests:
+            return await finish(False, "UPILOT_ACCEPTANCE_NO_TESTS", "No matching tests were discovered.")
+
+        run = await self.test_run(test_mode=test_mode, test_filter=test_filter)
+        report["steps"]["testRun"] = response_summary(run)
+        if not run.ok:
+            return await finish(False, "UPILOT_ACCEPTANCE_TEST_START_FAILED", "Unity Test Runner could not start.")
+        deadline = time.monotonic() + max(10, timeout_sec)
+        terminal = {"completed", "failed", "aborted", "no_tests"}
+        final_status = run
+        while time.monotonic() < deadline:
+            final_status = await self.test_status()
+            data = final_status.data or {}
+            if str(data.get("status") or "").lower() in terminal and not data.get("cleanupPending"):
+                break
+            await asyncio.sleep(1.0)
+        else:
+            cleanup = await self.test_force_cleanup(str((run.data or {}).get("runGuid") or ""))
+            report["steps"]["timeoutCleanup"] = response_summary(cleanup)
+            return await finish(False, "UPILOT_ACCEPTANCE_TEST_TIMEOUT", "Unity tests did not reach a cleaned terminal state before timeout.")
+        report["steps"]["testStatus"] = response_summary(final_status)
+
+        compile_errors = await self.compile_errors()
+        console_errors = await self.console_search_logs(count=200, log_type="Error", include_stack_trace=True, exclude_upilot=False, max_message_length=4000)
+        report["steps"]["compileErrors"] = response_summary(compile_errors)
+        report["steps"]["consoleErrors"] = response_summary(console_errors)
+        test_data = final_status.data or {}
+        passed = (
+            final_status.ok
+            and str(test_data.get("status") or "").lower() == "completed"
+            and int(test_data.get("failed") or 0) == 0
+            and not bool(test_data.get("noTests"))
+            and compile_errors.ok
+            and int((compile_errors.data or {}).get("total") or 0) == 0
+        )
+        return await finish(passed, "UPILOT_ACCEPTANCE_FAILED", "Compile, test, or cleanup acceptance criteria were not met.")
+
     async def editor_e2e_run(
         self,
         spec_path: str,

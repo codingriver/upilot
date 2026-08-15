@@ -128,9 +128,9 @@ async def unity_operation_start(jobSpec: dict):
     return _log_tool_result("unity_operation_start", _payload(r))
 
 @mcp.tool(description="读取并刷新一个通用长作业状态；会调用 jobSpec.statusCall 并归一化通用状态字段。")
-async def unity_operation_status(operationId: str):
-    _log_tool_call("unity_operation_status", {"operationId": operationId})
-    r = await _get_facade().operation_status(operation_id=operationId)
+async def unity_operation_status(operationId: str, detailLevel: str = "summary", maxTailChars: int = 2000, includeRawState: bool = False):
+    _log_tool_call("unity_operation_status", {"operationId": operationId, "detailLevel": detailLevel, "maxTailChars": maxTailChars, "includeRawState": includeRawState})
+    r = await _get_facade().operation_status(operation_id=operationId, detail_level=detailLevel, max_tail_chars=maxTailChars, include_raw_state=includeRawState)
     return _log_tool_result("unity_operation_status", _payload(r))
 
 @mcp.tool(
@@ -144,6 +144,9 @@ async def unity_operation_wait(
     timeoutSec: float | None = None,
     pollIntervalSec: float | None = None,
     returnOnSuspectedStuck: bool = True,
+    detailLevel: str = "summary",
+    maxTailChars: int = 2000,
+    includeRawState: bool = False,
 ):
     _log_tool_call(
         "unity_operation_wait",
@@ -152,6 +155,9 @@ async def unity_operation_wait(
             "timeoutSec": timeoutSec,
             "pollIntervalSec": pollIntervalSec,
             "returnOnSuspectedStuck": returnOnSuspectedStuck,
+            "detailLevel": detailLevel,
+            "maxTailChars": maxTailChars,
+            "includeRawState": includeRawState,
         },
     )
     r = await _get_facade().operation_wait(
@@ -159,6 +165,9 @@ async def unity_operation_wait(
         timeout_s=timeoutSec,
         poll_interval_s=pollIntervalSec,
         return_on_suspected_stuck=returnOnSuspectedStuck,
+        detail_level=detailLevel,
+        max_tail_chars=maxTailChars,
+        include_raw_state=includeRawState,
     )
     return _log_tool_result("unity_operation_wait", _payload(r))
 
@@ -169,9 +178,9 @@ async def unity_operation_cancel(operationId: str):
     return _log_tool_result("unity_operation_cancel", _payload(r))
 
 @mcp.tool(description="按作业状态 JSON 和 artifactRules 收集报告、summary、timing、截图等 artifact 元数据与 hash。")
-async def unity_operation_collect_artifacts(operationId: str):
-    _log_tool_call("unity_operation_collect_artifacts", {"operationId": operationId})
-    r = await _get_facade().operation_collect_artifacts(operation_id=operationId)
+async def unity_operation_collect_artifacts(operationId: str, detailLevel: str = "summary", maxTailChars: int = 2000, includeRawState: bool = False):
+    _log_tool_call("unity_operation_collect_artifacts", {"operationId": operationId, "detailLevel": detailLevel, "maxTailChars": maxTailChars, "includeRawState": includeRawState})
+    r = await _get_facade().operation_collect_artifacts(operation_id=operationId, detail_level=detailLevel, max_tail_chars=maxTailChars, include_raw_state=includeRawState)
     return _log_tool_result("unity_operation_collect_artifacts", _payload(r))
 
 @mcp.tool(description="只读检查项目根 AGENTS.md 的 UPilot 受控规则块，返回 diff 摘要和 recommendedBlock，不写文件。")

@@ -595,6 +595,16 @@ class ResourceDomainService:
         request_id = new_id("req")
         return await self.dispatcher.call(request_id, "shader.list", {})
 
+    async def shader_inspect(self, asset_path: str) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(request_id, "shader.inspect", {"assetPath": asset_path})
+
+    async def shader_check_errors(self, asset_path: str, include_warnings: bool = True) -> ToolResponse:
+        request_id = new_id("req")
+        return await self.dispatcher.call(
+            request_id, "shader.checkErrors", {"assetPath": asset_path, "includeWarnings": include_warnings}
+        )
+
     async def menu_execute(self, menu_path: str) -> ToolResponse:
         request_id = new_id("req")
         rejected = self._reject_write_if_unapproved(request_id, "unity_menu_execute")

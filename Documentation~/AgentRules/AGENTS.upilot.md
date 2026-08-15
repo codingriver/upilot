@@ -1,7 +1,7 @@
 # UPilot Unity MCP Agent Rules Template
 
-rulesVersion: 9
-upilotPackageVersion: 0.3.25
+rulesVersion: 10
+upilotPackageVersion: 0.3.26
 
 This template is the generic UPilot rule source for Unity projects that install
 `io.github.codingriver.upilot`. Project-specific business rules outside the
@@ -60,6 +60,7 @@ controlled UPilot block take precedence over these generic rules.
 - Starting an operation is not success; poll until a terminal status.
 - Treat `waitWindowElapsed=true/terminal=false` as a running operation, not a timeout failure. Only the operation's `jobTimeoutAt` is its terminal timeout.
 - Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.
+- Use `detailLevel=summary` for routine status/wait polling. Request `standard` or `full` only for bounded diagnosis, and set `maxTailChars` instead of returning unbounded domain/log/report text.
 - Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.
 - Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.
 
@@ -75,6 +76,7 @@ controlled UPilot block take precedence over these generic rules.
 - Before concluding cleanup, call `unity_console_capture_list`, inspect recovered or historical sessions still marked active, and stop the relevant session explicitly.
 - Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
 - Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
+- For canonical UPilot package acceptance, prefer `unity_upilot_acceptance_run`. It stops active captures before ConsoleCaptureService self-tests and does not start a persistent capture around that test run.
 
 ## Configuration CSV Safety
 
@@ -93,6 +95,7 @@ controlled UPilot block take precedence over these generic rules.
 - Prefer `unity_screenshot_save` for screenshots.
 - When fallback is allowed, pass an explicit ordered `fallbackSources` list. Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, the actual `source`, `degraded`, `degradeReason`, and `originalError`.
 - For EditorWindow capture, resolve the Unity window with `unity_editor_windows_list` and reuse its exact `typeName` or title. Validate returned match metadata against that Unity `instanceId`/type identity; never select an operating-system window by a matching title.
+- Treat EditorWindow/SceneView screenshots as trustworthy pixel evidence only when `pixelSourceVerified=true` and `occlusionSensitive=false`. Always report `captureApi`, Unity PID, `windowHandle`, `foreground`, `degraded`, and `degradeReason`; reject or explicitly downgrade screen-pixel/camera fallbacks.
 - UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.
 
 ## Assets And Prefabs
@@ -103,6 +106,8 @@ controlled UPilot block take precedence over these generic rules.
 ## Acceptance
 
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
+- For UPilot repository/package acceptance in `./Tests~/UPilotTest`, call `unity_upilot_acceptance_run` and preserve its `summary.json` path, bytes, and SHA256. Treat `status=no_tests` as a distinct terminal result, not a failed synthetic test and not a passing run when tests are required.
+- For Shader failures, use `unity_shader_inspect` and `unity_shader_check_errors` before broad Console searches or manual reimports.
 - For EditorWindow acceptance, prefer `unity_verify_window` and use `windowMatch` as the target-window truth. Treat legacy `windowDiagnostics` as UPilot window/layout diagnostics, not proof that a third-party window is absent.
 - Retry automatically only when the registry marks the operation idempotent and non-destructive.
 - If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.

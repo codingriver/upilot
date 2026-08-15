@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1323,6 +1324,49 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(File.Exists(source), Is.True);
             Assert.That(File.ReadAllText(source), Does.Contain("{{projectPath}}"));
+        }
+
+        [Test]
+        public void TestRunnerNoTestsIsExplicitTerminalContractWithoutSyntheticFailure()
+        {
+            var payload = new TestRunResultPayload();
+            string terminal = UPilotTestService.ApplyRunResults(payload, new List<TestResultItemPayload>(), false);
+
+            Assert.That(terminal, Is.EqualTo("no_tests"));
+            Assert.That(payload.noTests, Is.True);
+            Assert.That(payload.discoveryStatus, Is.EqualTo("no_tests"));
+            Assert.That(payload.total, Is.Zero);
+            Assert.That(payload.failed, Is.Zero);
+            Assert.That(payload.results, Is.Empty);
+        }
+
+        [Test]
+        public void ShaderDiagnosticsCanReadMessagesWithoutVersionSpecificMessageType()
+        {
+            var shader = Shader.Find("Hidden/InternalErrorShader");
+            Assert.That(shader, Is.Not.Null);
+            var result = new ShaderDiagnosticResultPayload();
+
+            Assert.DoesNotThrow(() => UPilotMaterialService.ReadShaderMessages(shader, true, result));
+            Assert.That(result.messageCount, Is.EqualTo(result.messages.Count));
+            Assert.That(result.errorCount, Is.GreaterThanOrEqualTo(0));
+            Assert.That(result.warningCount, Is.GreaterThanOrEqualTo(0));
+        }
+
+        [Test]
+        public void ScreenshotEvidencePayloadExposesPixelProvenance()
+        {
+            var capture = new EditorWindowPixelCapture
+            {
+                captureApi = "Win32.PrintWindow(PW_RENDERFULLCONTENT)",
+                windowHandle = 42,
+                pixelSourceVerified = true,
+                occlusionSensitive = false,
+            };
+            Assert.That(capture.captureApi, Does.Contain("PrintWindow"));
+            Assert.That(capture.windowHandle, Is.EqualTo(42));
+            Assert.That(capture.pixelSourceVerified, Is.True);
+            Assert.That(capture.occlusionSensitive, Is.False);
         }
 
         private static string BuildAgentRulesText()
