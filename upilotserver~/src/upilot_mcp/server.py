@@ -461,11 +461,21 @@ class WsOrchestratorServer(WsTransport):
             )
             logger.info("[%s] Unity client disconnected from %s", sid_log[:12], remote)
             self.session_manager.disconnect(auth_session_id)
-            if self.state.compile.status == "compiling":
-                self.state.compile.status = "unknown"
-                self.state.compile.errors = []
+            if self.state.compile.status in ("queued", "accepted", "compiling", "verifying"):
+                if self._domain_reloading:
+                    self.state.compile.status = "compiling"
+                    self.state.compile.phase = "domain_reload"
+                self.state.compile.last_progress_at = now_ms()
             self._compile_idle_event.set()
-            self.state.editor.connected = False
+            self.state.update_editor_state(
+                {
+                    "connected": False,
+                    "authoritative": False,
+                    "source": "bridge-disconnected",
+                    "sessionId": auth_session_id or self.state.editor.session_id,
+                    "updatedAt": now_ms(),
+                }
+            )
 
             if self._shutting_down:
                 self._fail_all_pending_and_suspended("SERVER_STOPPED", "MCP 服务器已关闭")
@@ -633,13 +643,15 @@ class WsOrchestratorServer(WsTransport):
                     message.session_id[:12] if message.session_id else "?",
                 )
                 self._domain_reloading = True
-                if bool(message.payload.get("isCompiling")) or self.state.compile.status in (
+                compile_phase = str(message.payload.get("compilePhase") or "").strip().lower()
+                if compile_phase in ("domain_reload", "domainreload") or bool(message.payload.get("isCompiling")) or self.state.compile.status in (
                     "queued",
                     "accepted",
                     "compiling",
+                    "verifying",
                 ):
                     self.state.compile.status = "compiling"
-                    self.state.compile.phase = "domainReload"
+                    self.state.compile.phase = "domain_reload"
                     self.state.compile.last_progress_at = now_ms()
                     self.state.editor.is_compiling = True
                 self._extend_grace_for_domain_reload()

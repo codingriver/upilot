@@ -94,6 +94,8 @@ def test_acceptance_stops_capture_and_writes_hashed_summary(monkeypatch, tmp_pat
     result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
 
     assert result.ok and result.data["acceptancePassed"] is True
+    assert "failureCode" not in result.data
+    assert "failureMessage" not in result.data
     assert result.data["stoppedConsoleCaptures"][0]["sessionId"] == "old"
     assert result.data["discoveredTestCount"] == 1
     descriptor = REGISTRY.resolve("unity_upilot_acceptance_run")

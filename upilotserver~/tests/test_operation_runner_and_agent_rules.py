@@ -69,7 +69,7 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 10" in text
+    assert "rulesVersion: 12" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
@@ -121,7 +121,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "10"
+    assert checked.data["recommendedRulesVersion"] == "12"
     assert "rulesVersion differs" in checked.data["diffSummary"]
 
 
@@ -159,6 +159,50 @@ def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:
     assert waited.data["artifacts"]["reportPath"]["tail"] == "line2\nline3"
     assert waited.data["timing"]["totalWallMs"] >= 0
     assert waited.data["timing"]["projectElapsedMs"] == 1250
+
+
+def test_operation_validate_normalizes_without_starting_business(tmp_path: Path) -> None:
+    service = _OperationService(tmp_path, [])
+    job_spec = {
+        "displayName": "project workflow",
+        "startCall": {"kind": "native", "route": "workflow.start", "payload": {}},
+        "statusCall": {
+            "kind": "native",
+            "route": "workflow.status",
+            "payload": {"operationId": "${start.operationId}"},
+        },
+        "cancelCall": {
+            "kind": "native",
+            "route": "workflow.cancel",
+            "payload": {"operationId": "${start.operationId}"},
+        },
+        "artifactRules": {"fromStatusFields": ["summaryPath"]},
+    }
+
+    result = asyncio.run(service.operation_validate(job_spec))
+
+    assert result.ok and result.data["valid"] is True
+    assert result.data["normalizedJobSpec"]["timeoutSec"] == 300
+    assert result.data["normalizedJobSpec"]["pollIntervalSec"] == 3
+    assert service.calls == []
+
+
+def test_operation_validate_reports_precise_field_errors(tmp_path: Path) -> None:
+    service = _OperationService(tmp_path, [])
+    result = asyncio.run(service.operation_validate({
+        "startCall": {"kind": "reflection", "typeName": "", "methodName": ""},
+        "statusCall": {"kind": "tool", "toolName": "missing_tool", "toolArgs": {"id": "prefix-${start.id}"}},
+        "timeoutSec": 0,
+        "artifactRules": {"fromStatusFields": "summaryPath"},
+    }, inspect_reflection=False))
+
+    assert result.ok is False
+    paths = {item["path"] for item in result.error.detail["errors"]}
+    assert "startCall.typeName" in paths
+    assert "startCall.methodName" in paths
+    assert "statusCall.toolName" in paths
+    assert "statusCall.toolArgs.id" in paths
+    assert "artifactRules.fromStatusFields" in paths
 
 
 def test_operation_resolves_start_result_placeholders_for_status_and_cancel(tmp_path: Path) -> None:
@@ -314,6 +358,7 @@ def test_operation_and_agent_rule_tools_are_registered() -> None:
     names = {item.name for item in REGISTRY.list()}
     assert {
         "unity_operation_start",
+        "unity_operation_validate",
         "unity_operation_status",
         "unity_operation_wait",
         "unity_operation_cancel",

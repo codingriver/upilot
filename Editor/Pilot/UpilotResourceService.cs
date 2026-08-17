@@ -61,9 +61,30 @@ namespace CodingRiver.UPilot
     {
         public string  unityVersion;
         public string  platform;
+        public bool    connected;
         public bool    isPlaying;
         public bool    isPaused;
         public bool    isCompiling;
+        public bool    hasCompileErrors;
+        public bool    authoritative;
+        public bool    isStale;
+        public bool    ready;
+        public bool    blocked;
+        public string  blockedReason;
+        public string  nextAction;
+        public string  source;
+        public string  sessionId;
+        public long    updatedAt;
+        public long    lastMainThreadPumpAt;
+        public int     mainThreadQueueDepth;
+        public int     processId;
+        public string  playModeState;
+        public string  compileStatus;
+        public string  compilePhase;
+        public string  compileRequestId;
+        public long    compileStartedAt;
+        public long    compileFinishedAt;
+        public long    lastProgressAt;
         public string  activeSceneName;
         public string  activeScenePath;
         public string  projectPath;
@@ -325,13 +346,35 @@ namespace CodingRiver.UPilot
                 try
                 {
                     var scene = SceneManager.GetActiveScene();
+                    var context = _bridge.GetEditorExecutionContext("resource.editorState");
                     var payload = new EditorStateResourcePayload
                     {
                         unityVersion    = Application.unityVersion,
                         platform        = Application.platform.ToString(),
-                        isPlaying       = EditorApplication.isPlaying,
-                        isPaused        = EditorApplication.isPaused,
-                        isCompiling     = EditorApplication.isCompiling,
+                        connected       = context.connected,
+                        authoritative   = context.authoritative,
+                        isStale         = context.isStale,
+                        ready           = context.ready,
+                        blocked         = context.blocked,
+                        blockedReason   = context.blockedReason,
+                        nextAction      = context.nextAction,
+                        source          = context.source,
+                        sessionId       = context.sessionId,
+                        updatedAt       = context.updatedAt,
+                        isPlaying       = context.isPlaying,
+                        isPaused        = context.isPaused,
+                        playModeState   = context.playModeState,
+                        isCompiling     = context.isCompiling,
+                        hasCompileErrors = _bridge.CompileService.LastErrorCount > 0,
+                        compileStatus   = context.compileStatus,
+                        compilePhase    = context.compilePhase,
+                        compileRequestId = context.compileRequestId,
+                        compileStartedAt = context.compileStartedAt,
+                        compileFinishedAt = context.compileFinishedAt,
+                        lastProgressAt  = context.lastProgressAt,
+                        lastMainThreadPumpAt = context.lastMainThreadPumpAt,
+                        mainThreadQueueDepth = context.mainThreadQueueDepth,
+                        processId       = context.processId,
                         activeSceneName = scene.name,
                         activeScenePath = scene.path,
                         projectPath     = Application.dataPath,

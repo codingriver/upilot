@@ -47,7 +47,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 10
+_UPILOT_RULES_VERSION = 12
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
@@ -378,14 +378,129 @@ class TaskDomainService:
         )
         return ok(request_id, data)
 
+    async def operation_validate(
+        self, job_spec: dict | None, inspect_reflection: bool = True, strict_tool_registry: bool = True,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        errors: list[dict] = []
+        warnings: list[dict] = []
+        if not isinstance(job_spec, dict):
+            return fail(request_id, "INVALID_JOB_SPEC", "jobSpec must be an object.", {
+                "valid": False, "errors": [{"path": "jobSpec", "code": "type", "message": "Expected an object."}]
+            })
+
+        normalized = dict(job_spec)
+        normalized["displayName"] = str(job_spec.get("displayName") or "Unity operation")
+        normalized["timeoutSec"] = float(job_spec.get("timeoutSec") or 300)
+        normalized["pollIntervalSec"] = float(job_spec.get("pollIntervalSec") or 3)
+        if normalized["timeoutSec"] <= 0:
+            errors.append({"path": "timeoutSec", "code": "range", "message": "timeoutSec must be greater than zero."})
+        if normalized["pollIntervalSec"] <= 0:
+            errors.append({"path": "pollIntervalSec", "code": "range", "message": "pollIntervalSec must be greater than zero."})
+
+        for field, required in (("startCall", True), ("statusCall", True), ("cancelCall", False)):
+            call = job_spec.get(field)
+            if call is None and not required:
+                continue
+            if not isinstance(call, dict):
+                errors.append({"path": field, "code": "type", "message": f"{field} must be an object."})
+                continue
+            await self._validate_operation_call(
+                field, call, errors, warnings, inspect_reflection, strict_tool_registry,
+            )
+
+        mapping = job_spec.get("terminalStatusMapping")
+        if mapping is not None and not isinstance(mapping, dict):
+            errors.append({"path": "terminalStatusMapping", "code": "type", "message": "terminalStatusMapping must be an object."})
+        elif isinstance(mapping, dict):
+            for key, value in mapping.items():
+                if not isinstance(value, (str, list, tuple)):
+                    errors.append({"path": f"terminalStatusMapping.{key}", "code": "type", "message": "Status mapping values must be a string or array."})
+
+        rules = job_spec.get("artifactRules")
+        if rules is not None and not isinstance(rules, dict):
+            errors.append({"path": "artifactRules", "code": "type", "message": "artifactRules must be an object."})
+        elif isinstance(rules, dict):
+            fields = rules.get("fromStatusFields")
+            if fields is not None and (not isinstance(fields, list) or not all(isinstance(item, str) for item in fields)):
+                errors.append({"path": "artifactRules.fromStatusFields", "code": "type", "message": "fromStatusFields must be an array of field names."})
+
+        valid = not errors
+        data = {
+            "valid": valid,
+            "normalizedJobSpec": normalized,
+            "errors": errors,
+            "warnings": warnings,
+            "nextAction": "Call unity_operation_start with normalizedJobSpec." if valid else "Fix the reported jobSpec fields and validate again.",
+        }
+        return ok(request_id, data) if valid else fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", data)
+
+    async def _validate_operation_call(
+        self, field: str, call: dict, errors: list[dict], warnings: list[dict], inspect_reflection: bool,
+        strict_tool_registry: bool,
+    ) -> None:
+        kind = str(call.get("kind") or call.get("type") or "").strip().lower()
+        if kind not in {"reflection", "mcp", "tool", "mcp_tool", "menu", "native", "route", "bridge"}:
+            errors.append({"path": f"{field}.kind", "code": "unsupported", "message": f"Unsupported operation call kind: {kind or '(empty)'}"})
+            return
+        self._validate_operation_placeholders(field, call, errors)
+        if kind == "reflection":
+            type_name = str(call.get("typeName") or call.get("type_name") or "").strip()
+            method_name = str(call.get("methodName") or call.get("method_name") or "").strip()
+            if not type_name:
+                errors.append({"path": f"{field}.typeName", "code": "required", "message": "typeName is required."})
+            if not method_name:
+                errors.append({"path": f"{field}.methodName", "code": "required", "message": "methodName is required."})
+            parameters = call.get("parameters", [])
+            if not isinstance(parameters, list):
+                errors.append({"path": f"{field}.parameters", "code": "type", "message": "parameters must be an array."})
+            if inspect_reflection and type_name and method_name:
+                result = await self.reflection_find(type_name=type_name, method_name=method_name)
+                if not result.ok:
+                    errors.append({"path": field, "code": "reflection_not_found", "message": result.error.message if result.error else "Reflection entry point was not found."})
+        elif kind in {"mcp", "tool", "mcp_tool"}:
+            tool_name = str(call.get("toolName") or call.get("name") or "").strip()
+            if not tool_name:
+                errors.append({"path": f"{field}.toolName", "code": "required", "message": "toolName is required."})
+            elif strict_tool_registry and REGISTRY.resolve(tool_name) is None:
+                errors.append({"path": f"{field}.toolName", "code": "tool_not_found", "message": f"Registered tool not found: {tool_name}"})
+            tool_args = call.get("toolArgs", call.get("args", call.get("arguments", {})))
+            if not isinstance(tool_args, dict):
+                errors.append({"path": f"{field}.toolArgs", "code": "type", "message": "toolArgs must be an object."})
+        elif kind == "menu" and not str(call.get("commandName") or call.get("menuPath") or "").strip():
+            errors.append({"path": f"{field}.commandName", "code": "required", "message": "commandName or menuPath is required."})
+        elif kind in {"native", "route", "bridge"}:
+            if not str(call.get("route") or call.get("command") or "").strip():
+                errors.append({"path": f"{field}.route", "code": "required", "message": "route or command is required."})
+            if not isinstance(call.get("payload", {}), dict):
+                errors.append({"path": f"{field}.payload", "code": "type", "message": "payload must be an object."})
+
+    @staticmethod
+    def _validate_operation_placeholders(path: str, value: object, errors: list[dict]) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                TaskDomainService._validate_operation_placeholders(f"{path}.{key}", child, errors)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                TaskDomainService._validate_operation_placeholders(f"{path}[{index}]", child, errors)
+        elif isinstance(value, str) and "${" in value:
+            if not (value.startswith("${") and value.endswith("}")):
+                errors.append({"path": path, "code": "placeholder_format", "message": "Placeholders must occupy the complete string value."})
+                return
+            parts = value[2:-1].strip().split(".")
+            if len(parts) < 2 or parts[0] not in {"start", "status", "operation"} or any(not part for part in parts):
+                errors.append({"path": path, "code": "placeholder_path", "message": f"Unsupported placeholder: {value}"})
+
     async def operation_start(self, job_spec: dict | None) -> ToolResponse:
         request_id = new_id("req")
-        if not isinstance(job_spec, dict):
-            return fail(request_id, "INVALID_JOB_SPEC", "jobSpec must be an object.", {"jobSpec": job_spec})
-        start_call = job_spec.get("startCall")
-        status_call = job_spec.get("statusCall")
-        if not isinstance(start_call, dict) or not isinstance(status_call, dict):
-            return fail(request_id, "INVALID_JOB_SPEC", "startCall and statusCall are required.", {"jobSpec": job_spec})
+        validation = await self.operation_validate(
+            job_spec, inspect_reflection=False, strict_tool_registry=False,
+        )
+        if not validation.ok:
+            detail = validation.error.detail if validation.error else {}
+            return fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", detail)
+        job_spec = dict((validation.data or {}).get("normalizedJobSpec") or job_spec or {})
+        start_call = job_spec["startCall"]
 
         operation_id = new_id("op")
         now = now_ms()
@@ -1027,34 +1142,30 @@ class TaskDomainService:
         compile_r = await self.compile_wait(timeout_s=remaining, poll_interval_s=0.5)
         if compile_r.ok and compile_r.data:
             checks["compileStatus"] = compile_r.data.get("status", "unknown")
+            checks["compileWait"] = compile_r.data
         else:
             checks["compileStatus"] = "error"
 
         # 3. Check editor state
         state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
         if state_r.ok and state_r.data:
-            # resource.editorState is a legacy payload and does not itself carry
-            # playModeState.  The Bridge response context is authoritative and the
-            # dispatcher has already copied it into the shared state cache.
-            context = self.server.state.response_context()
-            play_mode_state = str(
-                context.get("playModeState")
-                or state_r.data.get("playModeState")
-                or "unknown"
-            ).strip().lower()
-            checks["isCompiling"] = bool(
-                context.get("isCompiling", state_r.data.get("isCompiling", False))
-            )
-            checks["playModeState"] = play_mode_state
-            in_edit = play_mode_state == "edit"
-            checks["inEditMode"] = in_edit
-            checks["contextAuthoritative"] = bool(context.get("authoritative", False))
-            checks["contextStale"] = bool(context.get("isStale", True))
+            execution = self.server.state.execution_state()
+            checks["executionState"] = execution
+            checks["isCompiling"] = bool(execution["isCompiling"])
+            checks["playModeState"] = execution["playModeState"]
+            checks["inEditMode"] = execution["playModeState"] == "edit"
+            checks["contextAuthoritative"] = bool(execution["authoritative"])
+            checks["contextStale"] = bool(execution["isStale"])
+            checks["blocked"] = bool(execution["blocked"])
+            checks["blockedReason"] = execution["blockedReason"]
+            checks["nextAction"] = execution["nextAction"]
         else:
             checks["inEditMode"] = False
             checks["playModeState"] = "unknown"
             checks["contextAuthoritative"] = False
             checks["contextStale"] = True
+            checks["blocked"] = True
+            checks["blockedReason"] = "EditorContextUnknown"
 
         checks["ready"] = (
             checks["connected"]
@@ -1062,9 +1173,12 @@ class TaskDomainService:
             and checks.get("inEditMode", False)
             and checks.get("contextAuthoritative", False)
             and not checks.get("contextStale", True)
+            and not checks.get("blocked", True)
         )
         if not checks["ready"]:
-            if checks.get("playModeState") in ("unknown", ""):
+            if checks.get("blockedReason"):
+                checks["failReason"] = checks["blockedReason"]
+            elif checks.get("playModeState") in ("unknown", ""):
                 checks["failReason"] = "Editor mode is unknown"
                 checks["nextAction"] = "Call unity_mcp_status(forceFresh=true) and retry after a live Editor response."
             elif not checks.get("inEditMode"):

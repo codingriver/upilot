@@ -48,6 +48,8 @@ Project-specific business rules outside this controlled UPilot block take preced
 ## Writes And Compile
 
 - Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.
+- Decide Editor readiness from `ready`, `blocked`, `blockedReason`, `authoritative`, `isStale`, and `nextAction`; follow `nextAction` while blocked or recovering.
+- Do not infer readiness from raw `isPlaying` or `isCompiling` values alone. Compilation phases `queued`, `compiling`, `domain_reload`, and `verifying` are non-ready even when `isCompiling=false`.
 - After one batch of disk writes, call `unity_sync_after_disk_write` once.
 - After C# or assembly-related changes, prefer one `unity_safe_compile_and_wait` call. It attaches to an existing compile and verifies persistent errors after Domain Reload.
 - If `unity_sync_after_disk_write(triggerCompile=true)` returns `ok=true/status=compiling`, do not retry sync; call `unity_safe_compile_and_wait` and follow its `stage`, `nextAction`, and structured error result.
@@ -57,6 +59,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 ## Long Operations
 
+- Before starting a hand-authored generic operation, call `unity_operation_validate(jobSpec)` and fix its structured field errors; validation must not start PlayMode or business work.
 - For tests, builds, smoke runs, and other long workflows, prefer `unity_operation_start`, `unity_operation_status`, `unity_operation_wait`, `unity_operation_cancel`, and `unity_operation_collect_artifacts`.
 - Starting an operation is not success; poll until a terminal status.
 - Treat `waitWindowElapsed=true/terminal=false` as a running operation, not a timeout failure. Only the operation's `jobTimeoutAt` is its terminal timeout.
@@ -106,10 +109,12 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 ## Acceptance
 
+- Preserve the `runGuid` returned by `unity_test_run`; after PlayMode Domain Reload or MCP reconnect, query `unity_test_results(runGuid=...)` instead of treating a new in-memory service as authoritative.
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
 - For UPilot repository/package acceptance in `./Tests~/UPilotTest`, call `unity_upilot_acceptance_run` and preserve its `summary.json` path, bytes, and SHA256. Treat `status=no_tests` as a distinct terminal result, not a failed synthetic test and not a passing run when tests are required.
 - For Shader failures, use `unity_shader_inspect` and `unity_shader_check_errors` before broad Console searches or manual reimports.
 - For EditorWindow acceptance, prefer `unity_verify_window` and use `windowMatch` as the target-window truth. Treat legacy `windowDiagnostics` as UPilot window/layout diagnostics, not proof that a third-party window is absent.
+- For SceneView pixel acceptance, require an exact `UnityEditor.SceneView` match plus `includesSceneGui=true`, `includesHandles=true`, `pixelSourceVerified=true`, and `occlusionSensitive=false`; report repaint sequence/timestamps.
 - Retry automatically only when the registry marks the operation idempotent and non-destructive.
 - If the same `failureSignature` repeats, stop blind reruns and fix project logic, test configuration, or acceptance criteria first.
 - On timeout, inspect status, operation timing, Console capture, artifact summary, and last progress before choosing one bounded retry or a documented fallback.

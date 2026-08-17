@@ -347,6 +347,8 @@ class ScreenshotDomainService:
             for key in (
                 "captureApi", "windowHandle", "unityProcessId", "foreground",
                 "occlusionSensitive", "pixelSourceVerified", "repaintRequestedAtUtcMs",
+                "repaintObservedAtUtcMs", "repaintSequence", "includesSceneGui",
+                "includesHandles", "matchedFullTypeName", "matchedInstanceId",
                 "capturedAtUtcMs",
             ):
                 if key in data:

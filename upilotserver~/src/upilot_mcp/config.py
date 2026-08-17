@@ -16,7 +16,7 @@ class UPilotConfig:
     http_port: int = 8011
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
-    context_stale_ms: int = 2000
+    context_stale_ms: int = 5000
     flow_enabled: bool = False
     write_access_approved: bool = False
 
@@ -60,7 +60,7 @@ def load_config() -> UPilotConfig:
         http_port=env_int("UPILOT_HTTP_PORT", int(mcp.get("httpPort") or 8011)),
         ws_host=os.getenv("UPILOT_HOST", str(mcp.get("wsHost") or "127.0.0.1")),
         ws_port=env_int("UPILOT_PORT", int(mcp.get("wsPort") or 8765)),
-        context_stale_ms=max(250, int(cache.get("contextStaleMs") or 2000)),
+        context_stale_ms=max(250, int(cache.get("contextStaleMs") or 5000)),
         flow_enabled=bool(flow.get("enabled", False)),
         write_access_approved=bool(safety.get("writeAccessApproved", False)),
     )

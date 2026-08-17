@@ -231,12 +231,13 @@ def test_ensure_ready_uses_authoritative_bridge_context_for_legacy_editor_state_
 
 def test_playmode_start_waits_for_authoritative_play_context() -> None:
     state = StateStore()
+    timestamp = int(__import__("time").time() * 1000)
     edit_context = {
         "connected": True,
         "authoritative": True,
         "source": "bridge-response",
-        "sessionId": "session-edit",
-        "updatedAt": 100,
+        "sessionId": "session-playmode",
+        "updatedAt": timestamp,
         "playModeState": "edit",
         "isPlaying": False,
         "isCompiling": False,
@@ -244,13 +245,14 @@ def test_playmode_start_waits_for_authoritative_play_context() -> None:
     }
     play_context = {
         **edit_context,
-        "sessionId": "session-play",
-        "updatedAt": 200,
+        "updatedAt": timestamp + 1,
         "playModeState": "play",
         "isPlaying": True,
     }
 
     class _SessionManager:
+        active = types.SimpleNamespace(session_id="session-playmode", process_id=42)
+
         @staticmethod
         def is_connected() -> bool:
             return True
@@ -315,29 +317,20 @@ def test_safe_compile_verifies_persistent_errors_after_transient_wait_error() ->
 
     from upilot_mcp.domain.compile_service import CompileDomainService
 
+    state = StateStore()
+    _authoritative_editor_state(state)
+    state.compile.status = "finished"
+    state.compile.phase = "completed"
+    state.compile.compile_request_id = "req-transient"
+    state.compile.command_queued_at = 1
+    state.compile.unity_accepted_at = 2
+    state.compile.started_at = 3
+    state.compile.finished_at = 4
+    state.compile.last_progress_at = 4
+
     service = CompileDomainService()
     service.server = SimpleNamespace(
-        state=SimpleNamespace(
-            compile=SimpleNamespace(
-                status="finished",
-                phase="completed",
-                compile_request_id="req-transient",
-                command_queued_at=1,
-                unity_accepted_at=2,
-                started_at=3,
-                finished_at=4,
-                last_progress_at=4,
-                suspected_stuck=False,
-                error_count=0,
-                warning_count=0,
-            ),
-            editor=SimpleNamespace(
-                is_compiling=False,
-                last_main_thread_pump_at=0,
-                main_thread_queue_depth=0,
-                last_dequeued_command_id="",
-            ),
-        ),
+        state=state,
         is_ready=lambda: True,
     )
 
@@ -686,23 +679,23 @@ def test_compile_result_does_not_overwrite_completed_phase_with_accepted() -> No
 
     service = CompileDomainService.__new__(CompileDomainService)
 
-    class _CompileState:
-        status = "idle"
-        phase = "idle"
-        command_queued_at = 0
-        unity_accepted_at = 0
-        started_at = 0
-        finished_at = 0
-        last_progress_at = 0
-
-    class _State:
-        compile = _CompileState()
+    state = StateStore()
+    _authoritative_editor_state(state)
 
     class _Server:
-        state = _State()
+        def __init__(self) -> None:
+            self.state = state
 
     class _Dispatcher:
-        async def call(self, *_: object, **__: object) -> ToolResponse:
+        async def call(
+            self,
+            request_id: str,
+            name: str,
+            payload: dict,
+            **__: object,
+        ) -> ToolResponse:
+            if name == "resource.editorState":
+                return ok(request_id, {"isCompiling": False})
             service.server.state.compile.status = "finished"
             service.server.state.compile.phase = "completed"
             service.server.state.compile.finished_at = 456
@@ -746,6 +739,33 @@ def test_screenshot_editor_window_fallbacks_include_degrade_metadata() -> None:
     assert result.data["source"] == "sceneView"
     assert result.data["degradeReason"] == "EDITOR_WINDOW_CAPTURE_UNAVAILABLE"
     assert result.data["requestedWindowTitle"] == "资源审计中心"
+
+
+def test_screenshot_save_preserves_scene_view_repaint_evidence(tmp_path: Path) -> None:
+    from upilot_mcp.domain.screenshot_service import ScreenshotDomainService
+
+    evidence = {
+        "repaintObservedAtUtcMs": 1234,
+        "repaintSequence": 7,
+        "includesSceneGui": True,
+        "includesHandles": True,
+        "matchedFullTypeName": "UnityEditor.SceneView",
+        "matchedInstanceId": 99,
+    }
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict, **_: object) -> ToolResponse:
+            assert name == "screenshot.save"
+            return ok(request_id, {"path": payload["path"], "source": "sceneView", **evidence})
+
+    service = ScreenshotDomainService.__new__(ScreenshotDomainService)
+    service.dispatcher = _Dispatcher()
+    service._resolve_screenshot_save_path = lambda *_: tmp_path / "scene-view.png"
+
+    result = asyncio.run(service.screenshot_save(source="sceneView"))
+    assert result.ok is True
+    for key, value in evidence.items():
+        assert result.data[key] == value
 
 
 def test_png_pixel_stats_and_compare_are_structured(tmp_path: Path) -> None:
@@ -1043,6 +1063,7 @@ def test_test_domain_service_forwards_staged_stop_commands() -> None:
     service = TestDomainService()
     service.dispatcher = Dispatcher()
 
+    asyncio.run(service.test_results("run-123"))
     asyncio.run(service.test_cancel("run-123"))
     asyncio.run(service.test_force_cleanup("run-123"))
     asyncio.run(service.test_force_reset())
@@ -1052,6 +1073,7 @@ def test_test_domain_service_forwards_staged_stop_commands() -> None:
     asyncio.run(service.upilot_flow_force_cleanup("flow-123"))
 
     assert service.dispatcher.calls == [
+        ("test.results", {"runGuid": "run-123"}, None),
         ("test.cancel", {"runGuid": "run-123"}, 30000),
         ("test.force_cleanup", {"runGuid": "run-123"}, 30000),
         ("test.force_reset", {}, 30000),
@@ -1060,3 +1082,356 @@ def test_test_domain_service_forwards_staged_stop_commands() -> None:
         ("upilot_flow.resume", {"executionId": "flow-123"}, 30000),
         ("upilot_flow.force_cleanup", {"executionId": "flow-123"}, 30000),
     ]
+
+
+def _authoritative_editor_state(
+    state: StateStore,
+    *,
+    session_id: str = "session-current",
+    play_mode_state: str = "edit",
+    is_compiling: bool = False,
+) -> int:
+    timestamp = int(__import__("time").time() * 1000)
+    state.reset_editor_session(session_id, process_id=42)
+    accepted = state.update_editor_state(
+        {
+            "connected": True,
+            "authoritative": True,
+            "source": "bridge-heartbeat",
+            "sessionId": session_id,
+            "updatedAt": timestamp,
+            "playModeState": play_mode_state,
+            "isCompiling": is_compiling,
+            "lastMainThreadPumpAt": timestamp,
+        }
+    )
+    assert accepted is True
+    return timestamp
+
+
+def test_execution_state_defaults_to_unknown_stale_and_not_ready() -> None:
+    execution = StateStore().execution_state()
+
+    assert execution["status"] == "disconnected"
+    assert execution["ready"] is False
+    assert execution["blocked"] is True
+    assert execution["authoritative"] is False
+    assert execution["isStale"] is True
+    assert execution["playModeState"] == "unknown"
+
+
+def test_new_editor_session_is_recovering_until_authoritative_context_arrives() -> None:
+    state = StateStore()
+    state.reset_editor_session("session-new", process_id=42)
+
+    execution = state.execution_state()
+
+    assert execution["status"] == "recovering_after_reload"
+    assert execution["ready"] is False
+    assert execution["blockedReason"] == "EditorContextStale"
+    assert execution["sessionId"] == "session-new"
+
+
+def test_editor_context_rejects_old_session_and_out_of_order_updates() -> None:
+    state = StateStore()
+    current_timestamp = _authoritative_editor_state(state, session_id="session-new")
+
+    old_session_accepted = state.update_editor_state(
+        {
+            "connected": True,
+            "authoritative": True,
+            "sessionId": "session-old",
+            "updatedAt": current_timestamp + 100,
+            "playModeState": "play",
+        }
+    )
+    older_update_accepted = state.update_editor_state(
+        {
+            "connected": True,
+            "authoritative": True,
+            "sessionId": "session-new",
+            "updatedAt": current_timestamp - 1,
+            "playModeState": "play",
+        }
+    )
+
+    assert old_session_accepted is False
+    assert older_update_accepted is False
+    assert state.editor.session_id == "session-new"
+    assert state.editor.play_mode_state == "edit"
+    assert state.editor.updated_at == current_timestamp
+
+
+def test_execution_state_blocks_playmode_with_structured_reason() -> None:
+    state = StateStore()
+    _authoritative_editor_state(state, play_mode_state="play")
+
+    execution = state.execution_state()
+
+    assert execution["status"] == "blocked"
+    assert execution["ready"] is False
+    assert execution["blockedReason"] == "PlayMode"
+    assert execution["isPlaying"] is True
+    assert execution["nextAction"]
+
+
+def test_queued_compile_is_not_ready_when_editor_flag_is_false() -> None:
+    state = StateStore()
+    _authoritative_editor_state(state, is_compiling=False)
+    state.compile.status = "queued"
+    state.compile.phase = "queued"
+
+    execution = state.execution_state()
+
+    assert execution["status"] == "queued"
+    assert execution["ready"] is False
+    assert execution["isCompiling"] is True
+    assert execution["blockedReason"] == "CompilationInProgress"
+
+
+def test_authoritative_editor_context_restores_compile_lifecycle_snapshot() -> None:
+    state = StateStore()
+    timestamp = int(__import__("time").time() * 1000)
+    state.reset_editor_session("session-restore", process_id=42)
+
+    accepted = state.update_editor_state(
+        {
+            "connected": True,
+            "authoritative": True,
+            "source": "bridge-heartbeat",
+            "sessionId": "session-restore",
+            "updatedAt": timestamp,
+            "playModeState": "edit",
+            "isCompiling": False,
+            "compileStatus": "verifying",
+            "compilePhase": "verifying",
+            "compileRequestId": "compile-restored",
+            "compileStartedAt": 100,
+            "compileFinishedAt": 200,
+            "lastProgressAt": 250,
+        }
+    )
+    execution = state.execution_state()
+
+    assert accepted is True
+    assert execution["status"] == "verifying"
+    assert execution["ready"] is False
+    assert execution["isCompiling"] is True
+    assert execution["compileRequestId"] == "compile-restored"
+    assert execution["compileStartedAt"] == 100
+    assert execution["compileFinishedAt"] == 200
+    assert execution["lastProgressAt"] == 250
+
+
+def test_domain_reload_compile_progresses_through_verification_to_terminal_state() -> None:
+    state = StateStore()
+    timestamp = _authoritative_editor_state(state)
+    state.compile.status = "compiling"
+    state.compile.phase = "domain_reload"
+    state.compile.compile_request_id = "compile-reload"
+
+    accepted = state.update_editor_state(
+        {
+            "connected": True,
+            "authoritative": True,
+            "source": "bridge-heartbeat",
+            "sessionId": "session-current",
+            "updatedAt": timestamp + 1,
+            "playModeState": "edit",
+            "isCompiling": False,
+        }
+    )
+    assert accepted is True
+    assert state.compile.phase == "verifying"
+
+    state.update_compile_errors({"total": 0, "errors": []})
+    assert state.compile.phase == "completed"
+
+    state.compile.status = "verifying"
+    state.compile.phase = "verifying"
+    state.update_compile_errors(
+        {"total": 1, "errors": [{"message": "compile failed"}]}
+    )
+    assert state.compile.phase == "failed"
+
+
+def test_compile_wait_returns_structured_playmode_block() -> None:
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state, play_mode_state="play")
+
+    class _Server:
+        def __init__(self) -> None:
+            self.state = state
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict) -> ToolResponse:
+            assert name == "resource.editorState"
+            return ok(request_id, {"isCompiling": False})
+
+    service = CompileDomainService.__new__(CompileDomainService)
+    service.server = _Server()
+    service.dispatcher = _Dispatcher()
+    service._wake_unity_editor = lambda: False
+
+    result = asyncio.run(
+        service.compile_wait(timeout_s=0, poll_interval_s=0, prefer_events=False)
+    )
+
+    assert result.ok is True
+    assert result.data["status"] == "blocked"
+    assert result.data["blockedReason"] == "PlayMode"
+    assert result.data["completed"] is False
+
+
+def test_compile_wait_does_not_report_queued_phase_as_ready() -> None:
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+    state.compile.status = "queued"
+    state.compile.phase = "queued"
+
+    class _Server:
+        def __init__(self) -> None:
+            self.state = state
+
+        @staticmethod
+        def reconcile_editor_compile_busy(_: bool) -> None:
+            return None
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict) -> ToolResponse:
+            assert name == "resource.editorState"
+            return ok(request_id, {"isCompiling": False})
+
+    service = CompileDomainService.__new__(CompileDomainService)
+    service.server = _Server()
+    service.dispatcher = _Dispatcher()
+    service._wake_unity_editor = lambda: False
+
+    result = asyncio.run(
+        service.compile_wait(timeout_s=0, poll_interval_s=0, prefer_events=False)
+    )
+
+    assert result.ok is True
+    assert result.data["status"] == "timeout"
+    assert result.data["phase"] == "queued"
+    assert result.data["completed"] is False
+
+
+def test_ensure_ready_rejects_unknown_editor_context() -> None:
+    state = StateStore()
+
+    class _SessionManager:
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    class _Server:
+        session_manager = _SessionManager()
+
+        def __init__(self) -> None:
+            self.state = state
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict) -> ToolResponse:
+            assert name == "resource.editorState"
+            return ok(request_id, {"isPlaying": False, "isCompiling": False})
+
+    service = TaskDomainService()
+    service.server = _Server()
+    service.dispatcher = _Dispatcher()
+
+    async def _compile_wait(**_: object) -> ToolResponse:
+        return ok("req-compile", {"status": "ready"})
+
+    service.compile_wait = _compile_wait
+    result = asyncio.run(service.ensure_ready(timeout_s=1))
+
+    assert result.ok is True
+    assert result.data["ready"] is False
+    assert result.data["contextAuthoritative"] is False
+    assert result.data["contextStale"] is True
+    assert result.data["blockedReason"] in (
+        "UnityDisconnected",
+        "EditorContextUnknown",
+    )
+
+
+def test_sync_after_disk_write_preserves_compile_block_reason() -> None:
+    from upilot_mcp.domain.resource_service import ResourceDomainService
+
+    service = ResourceDomainService.__new__(ResourceDomainService)
+
+    async def _asset_refresh() -> ToolResponse:
+        return ok("req-refresh", {"ok": True})
+
+    async def _compile() -> ToolResponse:
+        return fail(
+            "req-compile",
+            "EDITOR_IN_PLAY_MODE",
+            "blocked",
+            {"blockedReason": "PlayMode", "nextAction": "Exit PlayMode."},
+        )
+
+    service.asset_refresh = _asset_refresh
+    service.compile = _compile
+    result = asyncio.run(
+        service.sync_after_disk_write(delay_s=0, trigger_compile=True)
+    )
+
+    assert result.ok is False
+    assert result.error.code == "EDITOR_IN_PLAY_MODE"
+    assert result.error.detail["status"] == "blocked"
+    assert result.error.detail["blockedReason"] == "PlayMode"
+    assert result.error.detail["compileStarted"] is False
+    assert result.error.detail["compileCompleted"] is False
+
+
+def test_mcp_status_exposes_same_unified_execution_state() -> None:
+    from types import SimpleNamespace
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+
+    session = SimpleNamespace(
+        session_id="session-current",
+        project_path="",
+        unity_version="2022.3",
+        platform="WindowsEditor",
+        process_id=42,
+        last_heartbeat_at=state.editor.updated_at,
+    )
+
+    class _SessionManager:
+        active = session
+
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    class _Dispatcher:
+        @staticmethod
+        def timeout_policy_snapshot() -> dict:
+            return {}
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    service.server = SimpleNamespace(
+        state=state,
+        session_manager=_SessionManager(),
+        is_ready=lambda: True,
+        mcp_label="test",
+        host="127.0.0.1",
+        port=8765,
+    )
+    service.dispatcher = _Dispatcher()
+
+    result = asyncio.run(service.mcp_status(include_capabilities=False))
+    execution = state.execution_state()
+
+    assert result.ok is True
+    assert result.data["executionState"]["ready"] == execution["ready"]
+    assert result.data["executionState"]["blockedReason"] == execution["blockedReason"]
+    assert result.data["compile"]["phase"] == execution["compilePhase"]

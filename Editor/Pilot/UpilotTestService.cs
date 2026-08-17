@@ -6,6 +6,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -25,6 +26,8 @@ namespace CodingRiver.UPilot
 
     [Serializable] public class TestCancelMessage  { public TestCancelPayload payload; }
     [Serializable] public class TestCancelPayload  { public string runGuid = ""; }
+    [Serializable] public class TestResultsMessage { public TestResultsPayload payload; }
+    [Serializable] public class TestResultsPayload { public string runGuid = ""; }
 
     [Serializable]
     public class TestResultItemPayload
@@ -92,11 +95,31 @@ namespace CodingRiver.UPilot
         private bool _cleanupScheduled;
         private long _forceStopDeadline;
         private bool _forceStopRequested;
+        private long _recoveryDeadline;
+        private static bool s_recoveryCallbackAttached;
+
+        private static string PersistenceDirectory => Path.GetFullPath(
+            Path.Combine(Application.dataPath, "..", "Library", "UPilot", "TestRuns"));
+        private static string ActiveRunPointerPath => Path.Combine(PersistenceDirectory, "active-run.txt");
+        private static string LastRunPointerPath => Path.Combine(PersistenceDirectory, "last-run.txt");
+
+        [InitializeOnLoadMethod]
+        private static void BootstrapPersistedRunRecovery()
+        {
+            // The bridge is initialized later than Unity Test Framework's post-PlayMode
+            // resume path. Reattach during editor assembly initialization so a short test
+            // cannot finish before the MCP-facing service has been constructed.
+            if (Instance == null)
+                _ = new UPilotTestService(null);
+        }
 
         public UPilotTestService(UPilotBridge bridge)
         {
             _bridge = bridge;
             Instance = this;
+            RecoverPersistedState();
+            if (_isRunning && !s_recoveryCallbackAttached)
+                EditorApplication.update += ReattachPersistedRun;
         }
 
         public TestRunResultPayload GetStatusSnapshot()
@@ -177,6 +200,7 @@ namespace CodingRiver.UPilot
                     };
                     _activeRunGuid = null;
                     _pendingTerminalStatus = null;
+                    PersistSnapshot();
 
                     // Use TestRunner API via reflection since it's in a separate assembly
                     // UnityEditor.TestTools.TestRunner.Api.TestRunnerApi
@@ -292,6 +316,7 @@ namespace CodingRiver.UPilot
                     // transitions test.results to completed/failed only after RunFinished.
                     _lastResults.status = "running";
                     _lastResults.phase = "running";
+                    PersistSnapshot();
                     tcs.SetResult(_lastResults);
                 }
                 catch (Exception ex)
@@ -378,7 +403,16 @@ namespace CodingRiver.UPilot
 
         private async Task HandleResultsAsync(string id, string json, CancellationToken token)
         {
-            var result = SnapshotStatus();
+            var payload = JsonUtility.FromJson<TestResultsMessage>(json)?.payload ?? new TestResultsPayload();
+            var result = string.IsNullOrWhiteSpace(payload.runGuid)
+                ? SnapshotStatus()
+                : LoadPersistedSnapshot(payload.runGuid) ?? new TestRunResultPayload
+                {
+                    status = "none",
+                    phase = "not_found",
+                    runGuid = payload.runGuid,
+                    isRunning = false,
+                };
             await _bridge.SendResultAsync(id, "test.results", result, token);
         }
 
@@ -518,6 +552,7 @@ namespace CodingRiver.UPilot
                     : NowMs();
                 ScheduleCancelCompletionMonitor();
             }
+            PersistSnapshot();
             if (force)
                 ScheduleForceStop();
         }
@@ -611,6 +646,7 @@ namespace CodingRiver.UPilot
                 _lastResults.status = "running";
                 _lastResults.phase = "running";
                 _lastResults.lastProgressAt = NowMs();
+                PersistSnapshot();
             }
         }
 
@@ -627,12 +663,16 @@ namespace CodingRiver.UPilot
                 ?? string.Empty;
             _lastResults.phase = "test";
             _lastResults.lastProgressAt = NowMs();
+            PersistSnapshot();
         }
 
         private void OnTestFinished()
         {
             if (_lastResults != null)
+            {
                 _lastResults.lastProgressAt = NowMs();
+                PersistSnapshot();
+            }
         }
 
         private void OnRunFinished(object rootResult)
@@ -666,6 +706,7 @@ namespace CodingRiver.UPilot
                     : NowMs();
                 _lastResults.currentTest = null;
                 _lastResults.lastProgressAt = NowMs();
+                PersistSnapshot();
                 ScheduleCleanup();
             }
         }
@@ -724,6 +765,9 @@ namespace CodingRiver.UPilot
         {
             EditorApplication.update -= ForceStopTick;
             EditorApplication.update -= CleanupActiveRunFromUpdate;
+            EditorApplication.update -= ReattachPersistedRun;
+            EditorApplication.update -= RecoveredRunWatchdog;
+            s_recoveryCallbackAttached = false;
             EditorApplication.delayCall -= CleanupActiveRun;
             _cleanupScheduled = false;
             try
@@ -766,6 +810,7 @@ namespace CodingRiver.UPilot
                     _lastResults.phase = _lastResults.status;
                     _lastResults.endedAt = NowMs();
                     _lastResults.unresolvedResources.Clear();
+                    PersistSnapshot(clearActivePointer: true);
                 }
 
                 _isRunning = false;
@@ -871,6 +916,7 @@ namespace CodingRiver.UPilot
             _lastResults.currentTest = null;
             _lastResults.lastProgressAt = NowMs();
             _pendingTerminalStatus = "aborted";
+            PersistSnapshot();
             ScheduleCleanup();
         }
 
@@ -889,6 +935,174 @@ namespace CodingRiver.UPilot
                 _lastResults.unresolvedResources.Add("test-callback");
             _lastResults.cleanupPending = (_lastResults.cancelRequested || _lastResults.status == "cleanup")
                 && _lastResults.unresolvedResources.Count > 0;
+        }
+
+        private void RecoverPersistedState()
+        {
+            string runGuid = ReadPointer(ActiveRunPointerPath);
+            bool active = !string.IsNullOrWhiteSpace(runGuid);
+            if (!active)
+                runGuid = ReadPointer(LastRunPointerPath);
+            if (string.IsNullOrWhiteSpace(runGuid))
+                return;
+
+            _lastResults = LoadPersistedSnapshot(runGuid);
+            if (_lastResults == null)
+                return;
+
+            _activeRunGuid = active ? runGuid : null;
+            _isRunning = active;
+            _lastResults.isRunning = _isRunning;
+            if (active)
+            {
+                _lastResults.phase = "recovering_after_reload";
+                _recoveryDeadline = NowMs() + 10000;
+            }
+        }
+
+        private void ReattachPersistedRun()
+        {
+            if (!_isRunning || string.IsNullOrWhiteSpace(_activeRunGuid) || _activeCallback != null)
+            {
+                EditorApplication.update -= ReattachPersistedRun;
+                return;
+            }
+            try
+            {
+                Type apiType = FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+                Type callbacksType = FindType("UnityEditor.TestTools.TestRunner.Api.ICallbacks");
+                if (apiType == null || callbacksType == null)
+                {
+                    if (NowMs() < _recoveryDeadline)
+                        return;
+                    MarkRecoveredRunOrphaned();
+                    return;
+                }
+                var api = ScriptableObject.CreateInstance(apiType);
+                var callback = CreateCallbackProxy(callbacksType);
+                RegisterCallbacks(apiType, api, callbacksType, callback);
+                _activeApi = api;
+                _activeCallback = callback;
+                _lastResults.phase = "running_recovered";
+                _lastResults.lastProgressAt = NowMs();
+                PersistSnapshot();
+                s_recoveryCallbackAttached = true;
+                EditorApplication.update -= ReattachPersistedRun;
+                EditorApplication.update += RecoveredRunWatchdog;
+            }
+            catch (Exception ex)
+            {
+                string error = $"callback-reattach: {ex.GetType().Name}: {ex.Message}";
+                if (!_lastResults.cleanupErrors.Contains(error))
+                    _lastResults.cleanupErrors.Add(error);
+                PersistSnapshot();
+            }
+        }
+
+        private void MarkRecoveredRunOrphaned()
+        {
+            EditorApplication.update -= ReattachPersistedRun;
+            EditorApplication.update -= RecoveredRunWatchdog;
+            s_recoveryCallbackAttached = false;
+            _lastResults.status = "failed";
+            _lastResults.phase = "orphaned_after_reload";
+            _lastResults.cleanupPending = false;
+            _lastResults.isRunning = false;
+            _lastResults.endedAt = NowMs();
+            _lastResults.cleanupErrors.Add("The persisted Test Runner job was no longer active after Domain Reload before a terminal callback was recovered.");
+            _isRunning = false;
+            _activeRunGuid = null;
+            PersistSnapshot(clearActivePointer: true);
+        }
+
+        private void RecoveredRunWatchdog()
+        {
+            if (!_isRunning)
+            {
+                EditorApplication.update -= RecoveredRunWatchdog;
+                return;
+            }
+
+            if (NowMs() >= _recoveryDeadline && !IsFrameworkRunActive(_activeRunGuid))
+                MarkRecoveredRunOrphaned();
+        }
+
+        private static bool IsFrameworkRunActive(string runGuid)
+        {
+            if (string.IsNullOrWhiteSpace(runGuid))
+                return false;
+            Type apiType = FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+            MethodInfo isRunning = apiType?.GetMethod(
+                "IsRunning", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
+            return isRunning != null && Convert.ToBoolean(isRunning.Invoke(null, new object[] { runGuid }));
+        }
+
+        private static bool IsNonTerminal(string status)
+        {
+            return status == "started" || status == "running" || status == "running_recovered"
+                || status == "cancel_requested" || status == "stopping" || status == "cleanup";
+        }
+
+        private void PersistSnapshot(bool clearActivePointer = false)
+        {
+            if (_lastResults == null || string.IsNullOrWhiteSpace(_lastResults.runGuid ?? _activeRunGuid))
+                return;
+            string runGuid = _lastResults.runGuid ?? _activeRunGuid;
+            _lastResults.runGuid = runGuid;
+            try
+            {
+                Directory.CreateDirectory(PersistenceDirectory);
+                string path = GetRunPath(runGuid);
+                string temporaryPath = path + ".tmp";
+                File.WriteAllText(temporaryPath, JsonUtility.ToJson(_lastResults, true));
+                if (File.Exists(path))
+                    File.Delete(path);
+                File.Move(temporaryPath, path);
+                File.WriteAllText(LastRunPointerPath, runGuid);
+                if (clearActivePointer)
+                {
+                    if (File.Exists(ActiveRunPointerPath))
+                        File.Delete(ActiveRunPointerPath);
+                }
+                else if (_isRunning || IsNonTerminal(_lastResults.status))
+                {
+                    File.WriteAllText(ActiveRunPointerPath, runGuid);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!_lastResults.cleanupErrors.Any(item => item.StartsWith("persistence:", StringComparison.Ordinal)))
+                    _lastResults.cleanupErrors.Add($"persistence: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private static TestRunResultPayload LoadPersistedSnapshot(string runGuid)
+        {
+            try
+            {
+                string path = GetRunPath(runGuid);
+                return File.Exists(path)
+                    ? JsonUtility.FromJson<TestRunResultPayload>(File.ReadAllText(path))
+                    : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string GetRunPath(string runGuid)
+        {
+            string safeName = new string((runGuid ?? string.Empty)
+                .Where(character => char.IsLetterOrDigit(character) || character == '-' || character == '_')
+                .ToArray());
+            return Path.Combine(PersistenceDirectory, $"{safeName}.json");
+        }
+
+        private static string ReadPointer(string path)
+        {
+            try { return File.Exists(path) ? File.ReadAllText(path).Trim() : string.Empty; }
+            catch { return string.Empty; }
         }
 
         public class TestCallbackProxy : DispatchProxy

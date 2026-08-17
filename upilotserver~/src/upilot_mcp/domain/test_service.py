@@ -62,9 +62,10 @@ class TestDomainService:
             request_id, "test.run", payload, timeout_ms=300000
         )
 
-    async def test_results(self) -> ToolResponse:
+    async def test_results(self, run_guid: str = "") -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(request_id, "test.results", {})
+        payload = {"runGuid": run_guid} if run_guid else {}
+        return await self.dispatcher.call(request_id, "test.results", payload)
 
     async def test_status(self) -> ToolResponse:
         request_id = new_id("req")
@@ -223,7 +224,9 @@ class TestDomainService:
             and compile_errors.ok
             and int((compile_errors.data or {}).get("total") or 0) == 0
         )
-        return await finish(passed, "UPILOT_ACCEPTANCE_FAILED", "Compile, test, or cleanup acceptance criteria were not met.")
+        if passed:
+            return await finish(True)
+        return await finish(False, "UPILOT_ACCEPTANCE_FAILED", "Compile, test, or cleanup acceptance criteria were not met.")
 
     async def editor_e2e_run(
         self,

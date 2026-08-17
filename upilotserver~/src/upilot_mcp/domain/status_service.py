@@ -143,28 +143,28 @@ class StatusDomainService:
             )
             if live.ok and live.data is not None:
                 state = self._update_editor_cache_from_resource_state(live.data)
+                execution = self.server.state.execution_state()
                 return ok(
                     request_id,
                     {
+                        **execution,
                         "connected": True,
                         "isCompiling": state["isCompiling"],
                         "playModeState": state["playModeState"],
                         "activeScene": state["activeScene"],
                         "isPlaying": state["isPlaying"],
                         "isPaused": state["isPaused"],
-                        "source": "resource",
+                        "source": "resource.editorState",
                     },
                 )
 
-        s = self.server.state.editor
-        connected = s.connected or self.server.is_ready()
+        execution = self.server.state.execution_state()
+        connected = bool(execution["unityConnected"] or self.server.is_ready())
         return ok(
             request_id,
             {
+                **execution,
                 "connected": connected,
-                "isCompiling": s.is_compiling,
-                "playModeState": s.play_mode_state,
-                "activeScene": s.active_scene,
                 "source": "cache-fallback",
             },
         )
@@ -185,6 +185,7 @@ class StatusDomainService:
             except OSError:
                 unity_abs = session.project_path
 
+        execution = self.server.state.execution_state()
         data = {
                 "connected": self.server.session_manager.is_connected(),
                 "serverReady": self.server.is_ready(),
@@ -202,17 +203,17 @@ class StatusDomainService:
                 },
                 "compile": {
                     "status": compile_state.status,
+                    "phase": execution["compilePhase"],
                     "errorCount": compile_state.error_count,
                     "warningCount": compile_state.warning_count,
                     "startedAt": compile_state.started_at,
                     "finishedAt": compile_state.finished_at,
                 },
                 "editor": live_state or {
-                    "playModeState": self.server.state.editor.play_mode_state,
-                    "activeScene": self.server.state.editor.active_scene,
-                    "isCompiling": self.server.state.editor.is_compiling,
+                    **execution,
                     "source": "cache",
                 },
+                "executionState": execution,
                 "timeouts": self.dispatcher.timeout_policy_snapshot(),
                 "mcp": {
                     "label": self.server.mcp_label,
@@ -511,12 +512,20 @@ class StatusDomainService:
         play_mode_state = "pause" if is_paused else ("play" if is_playing else "edit")
         active_scene = str(data.get("activeSceneName", ""))
         is_compiling = bool(data.get("isCompiling", False))
+        session = self.server.session_manager.active
         self.server.state.update_editor_state(
             {
                 "connected": True,
                 "isCompiling": is_compiling,
                 "playModeState": play_mode_state,
                 "activeScene": active_scene,
+                "authoritative": bool(data.get("authoritative", True)),
+                "source": str(data.get("source") or "resource.editorState"),
+                "sessionId": str(data.get("sessionId") or (session.session_id if session else "")),
+                "updatedAt": int(data.get("updatedAt") or now_ms()),
+                "lastMainThreadPumpAt": int(data.get("lastMainThreadPumpAt") or 0),
+                "mainThreadQueueDepth": int(data.get("mainThreadQueueDepth") or 0),
+                "processId": int(data.get("processId") or (session.process_id if session else 0)),
             }
         )
         return {

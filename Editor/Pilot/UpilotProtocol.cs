@@ -36,13 +36,25 @@ namespace CodingRiver.UPilot
     {
         public bool connected;
         public bool authoritative;
+        public bool isStale;
+        public bool ready;
+        public bool blocked;
+        public string blockedReason;
+        public string nextAction;
         public string source;
         public string sessionId;
         public long updatedAt;
+        public long contextUpdatedAt;
         public string playModeState;
         public bool isPlaying;
         public bool isPaused;
         public bool isCompiling;
+        public string compileStatus;
+        public string compilePhase;
+        public string compileRequestId;
+        public long compileStartedAt;
+        public long compileFinishedAt;
+        public long lastProgressAt;
         public string activeScene;
         public long lastMainThreadPumpAt;
         public int mainThreadQueueDepth;
@@ -172,6 +184,8 @@ namespace CodingRiver.UPilot
         public string phase; // "starting" or "completed"
         public bool isCompiling;
         public string playModeState;
+        public string compilePhase;
+        public string compileRequestId;
     }
 
     [Serializable]
@@ -224,7 +238,13 @@ namespace CodingRiver.UPilot
     public class CompileErrorsPayload
     {
         public string requestId;
+        public string status;
+        public string phase;
         public int total;
+        public int warningCount;
+        public long startedAt;
+        public long finishedAt;
+        public long lastProgressAt;
         public List<CompileErrorItemPayload> errors = new();
     }
 
@@ -405,7 +425,18 @@ namespace CodingRiver.UPilot
     public class EditorStatePayload
     {
         public bool connected;
+        public bool authoritative;
+        public bool isStale;
+        public bool ready;
+        public bool blocked;
+        public string blockedReason;
+        public string nextAction;
+        public string source;
+        public string sessionId;
+        public long updatedAt;
         public bool isCompiling;
+        public string compileStatus;
+        public string compilePhase;
         public string playModeState;
         public string activeScene;
     }
@@ -443,6 +474,11 @@ namespace CodingRiver.UPilot
         public bool ok;
         public string state;
         public string status;
+        public bool blocked;
+        public string blockedReason;
+        public string nextAction;
+        public string playModeState;
+        public string compilePhase;
     }
 
     [Serializable]

@@ -352,15 +352,6 @@ namespace CodingRiver.UPilot
         {
             if (Thread.CurrentThread.ManagedThreadId != _mainThreadId)
                 return _compileService.IsCompiling;
-
-            if (EditorApplication.isPlayingOrWillChangePlaymode)
-            {
-                _compileService.ClearStaleCompileBusy(
-                    "Unity is in PlayMode or changing PlayMode; script compilation is not available.",
-                    ignoreEditorCompiling: true);
-                return false;
-            }
-
             return _compileService.IsCompiling || EditorApplication.isCompiling;
         }
 
@@ -1183,6 +1174,7 @@ namespace CodingRiver.UPilot
 
         private async Task HandleCompileErrorsGetAsync(string id, string json, CancellationToken token)
         {
+            _compileService.CompleteVerification();
             var payload = _compileService.BuildLastCompileErrorsPayload();
             Logger.Log("COMPILE", $"compile.errors.get: errors={payload.total} requestId={payload.requestId}");
             await SendResultAsync(id, "compile.errors.get", payload, token);
@@ -1201,13 +1193,44 @@ namespace CodingRiver.UPilot
             opCtx?.Step("等待编译空闲", $"timeout={timeoutMs}ms");
             Logger.Log("COMPILE", $"compile.wait 开始: timeout={timeoutMs}ms isCompiling={CurrentIsCompiling()} id={id}");
 
+            if (IsPlayingOrWillChangePlaymode())
+            {
+                await SendResultAsync(id, "compile.wait", new GenericOkPayload
+                {
+                    ok = false,
+                    state = "compile_blocked",
+                    status = "blocked",
+                    blocked = true,
+                    blockedReason = "PlayMode",
+                    nextAction = "Exit PlayMode after user confirmation, then retry the compile wait.",
+                    playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                    compilePhase = _compileService.Phase,
+                }, token);
+                return;
+            }
+
+            bool CompileWaitPending()
+            {
+                if (CurrentIsCompiling())
+                    return true;
+
+                if (string.Equals(_compileService.Phase, "verifying", StringComparison.OrdinalIgnoreCase))
+                {
+                    _compileService.CompleteVerification();
+                    return false;
+                }
+
+                return string.Equals(_compileService.Phase, "queued", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(_compileService.Phase, "domain_reload", StringComparison.OrdinalIgnoreCase);
+            }
+
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var stop = false;
 
             void PollIdle()
             {
                 if (stop) return;
-                if (!CurrentIsCompiling())
+                if (!CompileWaitPending())
                 {
                     EditorApplication.update -= PollIdle;
                     tcs.TrySetResult(true);
@@ -1216,7 +1239,7 @@ namespace CodingRiver.UPilot
 
             EnqueueTracked(id, () =>
             {
-                if (!CurrentIsCompiling())
+                if (!CompileWaitPending())
                 {
                     tcs.TrySetResult(true);
                     return;
@@ -1239,8 +1262,30 @@ namespace CodingRiver.UPilot
             }
 
             Logger.Log("COMPILE", $"compile.wait 完成，编译空闲 id={id}");
+            if (string.Equals(_compileService.Phase, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                await SendResultAsync(id, "compile.wait", new GenericOkPayload
+                {
+                    ok = false,
+                    state = "compile_failed",
+                    status = "failed",
+                    blocked = true,
+                    blockedReason = "CompileErrors",
+                    nextAction = "Read compile.errors.get and fix the reported compiler errors.",
+                    playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                    compilePhase = _compileService.Phase,
+                }, token);
+                return;
+            }
             await SendResultAsync(id, "compile.wait",
-                new GenericOkPayload { ok = true, state = "compile_idle", status = "ready" }, token);
+                new GenericOkPayload
+                {
+                    ok = true,
+                    state = "compile_idle",
+                    status = "ready",
+                    playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                    compilePhase = _compileService.Phase,
+                }, token);
         }
 
         private async Task HandlePlayModeSetAsync(string id, string json, CancellationToken token)
@@ -1291,13 +1336,7 @@ namespace CodingRiver.UPilot
 
         private async Task HandleEditorStateAsync(string id, string json, CancellationToken token)
         {
-            var payload = new EditorStatePayload
-            {
-                connected = true,
-                isCompiling = CurrentIsCompiling(),
-                playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
-                activeScene = _activeSceneName,
-            };
+            var payload = BuildEditorStatePayload("editor.state");
             await SendResultAsync(id, "editor.state", payload, token);
         }
 
@@ -1480,21 +1519,70 @@ namespace CodingRiver.UPilot
             UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
         }
 
+        internal EditorContextPayload GetEditorExecutionContext(string source) =>
+            BuildEditorContextPayload(source);
+
         private EditorContextPayload BuildEditorContextPayload(string source)
         {
             var updatedAt = _lastMainThreadPumpAt;
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var connected = _started && _isAuthenticated && _ws != null && _ws.State == WebSocketState.Open;
+            var authoritative = updatedAt > 0 && now - updatedAt <= Math.Max(HeartbeatIntervalMs * 2, 5000);
+            var playModeState = _cachedPlayModeState ?? "unknown";
+            var editorIsCompiling = _cachedIsCompiling;
+            var compilePhase = _compileService.Phase ?? "idle";
+            var compilePhaseActive =
+                string.Equals(compilePhase, "queued", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(compilePhase, "compiling", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(compilePhase, "domain_reload", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(compilePhase, "verifying", StringComparison.OrdinalIgnoreCase);
+            var isCompiling = editorIsCompiling || compilePhaseActive;
+            var blockedReason = string.Empty;
+            var nextAction = string.Empty;
+            if (!connected || !authoritative)
+            {
+                blockedReason = connected ? "EditorContextStale" : "UnityDisconnected";
+                nextAction = "Wait for a live authoritative Editor response before mutating the Editor.";
+            }
+            else if (string.Equals(playModeState, "play", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(playModeState, "pause", StringComparison.OrdinalIgnoreCase))
+            {
+                blockedReason = "PlayMode";
+                nextAction = "Exit PlayMode after user confirmation, then retry the operation.";
+            }
+            else if (!string.Equals(playModeState, "edit", StringComparison.OrdinalIgnoreCase))
+            {
+                blockedReason = "EditorModeUnknown";
+                nextAction = "Wait for an authoritative Editor state that confirms EditMode.";
+            }
+            else if (isCompiling || compilePhaseActive)
+            {
+                blockedReason = "CompilationInProgress";
+                nextAction = "Continue with unity_compile_wait until compilation reaches a terminal state.";
+            }
             return new EditorContextPayload
             {
-                connected = _started && _isAuthenticated && _ws != null && _ws.State == WebSocketState.Open,
-                authoritative = updatedAt > 0 && now - updatedAt <= Math.Max(HeartbeatIntervalMs * 2, 5000),
+                connected = connected,
+                authoritative = authoritative,
+                isStale = !authoritative,
+                ready = connected && authoritative && string.IsNullOrEmpty(blockedReason),
+                blocked = !string.IsNullOrEmpty(blockedReason),
+                blockedReason = blockedReason,
+                nextAction = nextAction,
                 source = source ?? "bridge",
                 sessionId = _sessionId ?? string.Empty,
                 updatedAt = updatedAt,
-                playModeState = _cachedPlayModeState ?? "unknown",
+                contextUpdatedAt = updatedAt,
+                playModeState = playModeState,
                 isPlaying = _cachedIsPlaying,
                 isPaused = _cachedIsPaused,
-                isCompiling = _cachedIsCompiling,
+                isCompiling = isCompiling,
+                compileStatus = _compileService.Status,
+                compilePhase = compilePhase,
+                compileRequestId = _compileService.LastRequestId,
+                compileStartedAt = _compileService.CompileStartedAt,
+                compileFinishedAt = _compileService.CompileFinishedAt,
+                lastProgressAt = _compileService.LastProgressAt,
                 activeScene = _activeSceneName ?? string.Empty,
                 lastMainThreadPumpAt = updatedAt,
                 mainThreadQueueDepth = _mainThreadQueue.Count,
@@ -1503,15 +1591,32 @@ namespace CodingRiver.UPilot
             };
         }
 
+        private EditorStatePayload BuildEditorStatePayload(string source)
+        {
+            var context = BuildEditorContextPayload(source);
+            return new EditorStatePayload
+            {
+                connected = context.connected,
+                authoritative = context.authoritative,
+                isStale = context.isStale,
+                ready = context.ready,
+                blocked = context.blocked,
+                blockedReason = context.blockedReason,
+                nextAction = context.nextAction,
+                source = context.source,
+                sessionId = context.sessionId,
+                updatedAt = context.updatedAt,
+                isCompiling = context.isCompiling,
+                compileStatus = context.compileStatus,
+                compilePhase = context.compilePhase,
+                playModeState = context.playModeState,
+                activeScene = context.activeScene,
+            };
+        }
+
         private async Task SendEditorStateEventAsync(CancellationToken token)
         {
-            var payload = new EditorStatePayload
-            {
-                connected = true,
-                isCompiling = CurrentIsCompiling(),
-                playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
-                activeScene = _activeSceneName,
-            };
+            var payload = BuildEditorStatePayload("editor.state.event");
             await SendEventAsync(
                 $"evt-editor-state-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                 "editor.state", payload, token);
@@ -1525,6 +1630,7 @@ namespace CodingRiver.UPilot
                 await SendEventAsync(
                     $"evt-compile-errors-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                     "compile.errors", errorsPayload, token);
+                _compileService.CompleteVerification();
             }
         }
 
@@ -1532,13 +1638,7 @@ namespace CodingRiver.UPilot
         private async Task SendEditorStateOnlyAsync(CancellationToken token)
         {
             if (_ws?.State != WebSocketState.Open || !_isAuthenticated) return;
-            var payload = new EditorStatePayload
-            {
-                connected = true,
-                isCompiling = CurrentIsCompiling(),
-                playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
-                activeScene = _activeSceneName,
-            };
+            var payload = BuildEditorStatePayload("editor.state.event");
             await SendEventAsync(
                 $"evt-editor-state-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                 "editor.state", payload, token);
@@ -1595,6 +1695,7 @@ namespace CodingRiver.UPilot
         {
             var focus = GetFocusStateString();
             var isCompiling = CurrentIsCompiling();
+            _compileService?.MarkDomainReload();
             UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.domain.reload.start", "Domain Reload开始",
                 $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 认证={(_isAuthenticated ? "是" : "否")} 编译={(isCompiling ? "是" : "否")}");
@@ -1607,6 +1708,8 @@ namespace CodingRiver.UPilot
                         phase = "starting",
                         isCompiling = isCompiling,
                         playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                        compilePhase = _compileService?.Phase ?? "domain_reload",
+                        compileRequestId = _compileService?.LastRequestId ?? string.Empty,
                     };
                     // Synchronous send — we must complete before the domain unloads
                     var msg = new EventMessage<DomainReloadPayload>
@@ -1640,6 +1743,7 @@ namespace CodingRiver.UPilot
 
             // Restore compile errors from disk after domain reload
             _compileService?.TryRestoreFromDisk();
+            _compileService?.MarkVerifyingAfterReload();
 
             if (!_started && !Application.isBatchMode)
             {

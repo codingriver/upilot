@@ -5,7 +5,7 @@
 - `F:\xclient2\TODO_UPilot.mcd`
 - `D:\MA\xclient\TODO_UPilot.mcd`
 
-整合日期：2026-08-12。实施范围以 `D:\upilot` 为主；通用能力留在 UPilot，用户原始清单中明确属于项目桥接的事项在 `F:\xclient2` 精确落地。
+首次整合日期：2026-08-12；最近规范化：2026-08-17。实施范围以 `D:\upilot` 为主；通用能力留在 UPilot，用户原始清单中明确属于项目桥接的事项在业务项目精确落地。仓库根 `TODO_UPilot.mcd` 是权威状态源。
 
 ## 优先级
 
@@ -30,6 +30,9 @@
 | P1 | 结构化长时段 Profiler | 自动记录帧耗时、GC、渲染计数和运行时组件规模并生成 JSON/CSV | 已实现 start/status/stop、P50/P95/P99 和产物；Unity 2022 编译通过，120 秒战场联机待补 |
 | P2 | 纹理导入与截图像素验收 | 支持透明黑底问题的参数修复和结构化视觉断言 | 已实现 TextureImporter 读/两阶段改/重导入与 PNG stats/compare；Python/Unity 2022 编译通过，AttackLine 资产联机待补 |
 | P2 | 脚本分析、依赖图和项目栈检测 | 减少跨模块调用链人工搜索 | 已实现并联机通过；无第三方解析依赖，结果明确标记置信度 |
+| P0 | PlayMode Test Runner 跨 Domain Reload 持久化 | 保证 PlayMode 测试终态和失败详情不会因 Bridge/MCP 会话切换丢失 | 已实现 runGuid 快照、回调重挂接、孤儿归因与按 runGuid 查询；待完整 Unity PlayMode 回归 |
+| P2 | Operation jobSpec 只读预校验 | 启动业务前发现调用、占位符、映射和产物规则错误 | 已实现 `unity_operation_validate` 与 Skill/Agent 模板；Python 回归通过 |
+| P1 | SceneView Scene GUI/Handles 完成帧截图 | 避免纯背景、Camera.Render 丢 Handles 和模糊窗口误匹配 | 已实现精确 SceneView Repaint 等待、wire instanceId、repaint/Handles/像素来源元数据；待 10 次窗口像素稳定性回归 |
 
 ## 2026-08-12 增量实施结果
 
@@ -70,7 +73,7 @@
 
 ### 状态和长任务
 
-- 所有 Bridge result/error 增加 `context`：`authoritative/source/sessionId/updatedAt/isStale/playModeState/isCompiling/activeScene/lastMainThreadPumpAt/mainThreadQueueDepth/processId`。
+- 所有 Bridge result/error 增加统一 `context`：`ready/blocked/blockedReason/nextAction/authoritative/source/sessionId/updatedAt/isStale/playModeState/isCompiling/compileStatus/compilePhase/activeScene/lastMainThreadPumpAt/mainThreadQueueDepth/processId`。调用方不得只依据 `isPlaying/isCompiling` 推断 readiness。
 - `unity_operation_wait` 的等待窗口结束返回 `terminal=false`、`waitWindowElapsed=true`；仅 `jobSpec.timeoutSec` 到期才产生作业 Timeout。
 - 编译状态增加 `phase/commandQueuedAt/unityAcceptedAt/lastProgressAt/lastEditorUpdateAt/editorNotPumping/suspectedStuck/nextAction`。
 - `unity_tool_call(toolName,args)`：调用已注册但客户端未注入的工具；拒绝递归并复用注册表安全策略。

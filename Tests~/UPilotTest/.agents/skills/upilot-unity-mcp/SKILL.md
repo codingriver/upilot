@@ -15,6 +15,8 @@ Use UPilot with projects that install `io.github.codingriver.upilot`.
 4. Call `unity_capabilities_get` when tool availability is uncertain.
 5. Call `unity_ensure_ready` before Editor mutations.
 
+Use the unified execution state: require `ready=true`, `authoritative=true`, and `isStale=false`. When `blocked=true` or readiness is false, follow `blockedReason` and `nextAction`; do not infer readiness from raw `isPlaying` or `isCompiling` values alone.
+
 Use Streamable HTTP such as `http://127.0.0.1:8011/mcp` as the only third-party AI client transport. Never configure an AI client with a WebSocket URL, the internal Bridge port, stdio, or a command that launches the MCP Server. WebSocket transport is internal to MCP Server <-> Unity Bridge.
 
 For concurrent Unity projects, use a distinct MCP registration name and a unique HTTP/WebSocket port pair per project, but expose only each project's HTTP `/mcp` endpoint to the AI client. Always verify project identity after connecting.
@@ -36,6 +38,8 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 - After C# or assembly-related changes, prefer one `unity_safe_compile_and_wait` call. It attaches to an existing compile and verifies errors after Domain Reload.
 - Compile only after C# or assembly-related changes. Do not repeat compilation when no code changed.
 - Starting a test, build, or async task is not success; poll to a terminal state.
+- For PlayMode tests, keep the returned `runGuid` and query `unity_test_results(runGuid=...)`; UPilot persists the run across Domain Reload and MCP reconnects.
+- Before starting a hand-authored generic operation, call `unity_operation_validate(jobSpec)` to check calls, placeholders, mappings, timeouts, and artifact rules without starting business work.
 - A long-operation wait window ending is non-terminal when `waitWindowElapsed=true` and `terminal=false`; continue polling until the job completes or reaches `jobTimeoutAt`.
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
 - Use `detailLevel=summary` and a bounded `maxTailChars` for routine `unity_operation_status/wait`; use `standard` or `full` only for targeted diagnosis.
@@ -85,7 +89,7 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 - Prefer dedicated project-relative artifact or screenshot save tools that return metadata or hashes.
 - For screenshot fallback, pass ordered `fallbackSources` and report the actual `source`, `degraded`, and `degradeReason`.
 - Resolve EditorWindow targets with `unity_editor_windows_list`, reuse the exact Unity type/title identity, and never select an operating-system window by a matching title.
-- Trust EditorWindow/SceneView pixels only when `pixelSourceVerified=true` and `occlusionSensitive=false`; report `captureApi`, Unity PID, HWND, foreground state, and any degradation.
+- Trust EditorWindow/SceneView pixels only when `pixelSourceVerified=true` and `occlusionSensitive=false`; for SceneView evidence also require `matchedFullTypeName=UnityEditor.SceneView`, `includesSceneGui=true`, and `includesHandles=true`, then report repaint sequence/timestamps, `captureApi`, Unity PID, HWND, foreground state, and any degradation.
 - If capture falls back to base64 or OS-level automation, report the reason.
 - Use `unity_shader_inspect` / `unity_shader_check_errors` for Shader-specific import, support, dependency, and compiler-message diagnostics.
 

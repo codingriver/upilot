@@ -30,10 +30,10 @@ async def unity_test_run(testMode: str = "EditMode", testFilter: str = ""):
     r = await _get_facade().test_run(test_mode=testMode, test_filter=testFilter)
     return _log_tool_result("unity_test_run", _payload(r))
 
-@mcp.tool(description="获取最近一次 Unity 测试运行的结果。")
-async def unity_test_results():
-    _log_tool_call("unity_test_results", {})
-    r = await _get_facade().test_results()
+@mcp.tool(description="获取最近一次或指定 runGuid 的 Unity 测试结果；PlayMode Domain Reload 或 MCP 重连后仍可读取持久化终态。")
+async def unity_test_results(runGuid: str = ""):
+    _log_tool_call("unity_test_results", {"runGuid": runGuid})
+    r = await _get_facade().test_results(run_guid=runGuid)
     return _log_tool_result("unity_test_results", _payload(r))
 
 @mcp.tool(description="获取当前 Unity Test Runner 运行 GUID、当前测试、进度时间与取消/清理状态。")

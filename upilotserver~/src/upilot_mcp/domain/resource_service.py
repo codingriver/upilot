@@ -303,6 +303,39 @@ class ResourceDomainService:
                 )
                 return fail(request_id, code, msg, payload)
 
+            if str(wait_data.get("status") or "").lower() in (
+                "blocked",
+                "unknown",
+                "recovering_after_reload",
+            ):
+                blocked_reason = str(
+                    wait_data.get("blockedReason")
+                    or (wait_data.get("executionState") or {}).get("blockedReason")
+                    or "EditorContextNotReady"
+                )
+                payload.update(
+                    {
+                        "status": "blocked",
+                        "blocked": True,
+                        "blockedReason": blocked_reason,
+                        "playModeBlocked": blocked_reason == "PlayMode",
+                        "nextAction": wait_data.get("nextAction")
+                        or (wait_data.get("executionState") or {}).get("nextAction")
+                        or "Refresh the Editor context and retry.",
+                        "compileStarted": False,
+                        "compiled": False,
+                        "compileCompleted": False,
+                    }
+                )
+                return fail(
+                    request_id,
+                    "EDITOR_IN_PLAY_MODE"
+                    if blocked_reason == "PlayMode"
+                    else "EDITOR_CONTEXT_NOT_READY",
+                    "Compilation is blocked by the current Unity Editor state.",
+                    payload,
+                )
+
             terminal = (
                 str(wait_data.get("status") or "").lower() == "ready"
                 and not bool(wait_data.get("isCompiling", False))
@@ -344,6 +377,26 @@ class ResourceDomainService:
         elif not compile_r.ok:
             msg = compile_r.error.message if compile_r.error else "compile failed"
             code = compile_r.error.code if compile_r.error else "COMPILE_FAILED"
+            if code in ("EDITOR_IN_PLAY_MODE", "EDITOR_CONTEXT_NOT_READY"):
+                detail = compile_r.error.detail if compile_r.error else {}
+                blocked_reason = str(
+                    detail.get("blockedReason")
+                    or ("PlayMode" if code == "EDITOR_IN_PLAY_MODE" else "EditorContextNotReady")
+                )
+                payload.update(
+                    {
+                        "status": "blocked",
+                        "blocked": True,
+                        "blockedReason": blocked_reason,
+                        "playModeBlocked": blocked_reason == "PlayMode",
+                        "nextAction": detail.get("nextAction")
+                        or "Refresh the Editor context and retry.",
+                        "compileStarted": False,
+                        "compiled": False,
+                        "compileCompleted": False,
+                    }
+                )
+                return fail(request_id, code, msg, payload)
             if code == "EDITOR_BUSY":
                 compile_state = self.server.state.compile
                 payload.update(

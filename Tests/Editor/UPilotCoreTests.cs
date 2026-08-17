@@ -87,9 +87,18 @@ namespace CodingRiver.UPilot.Tests
                 {
                     connected = true,
                     authoritative = true,
+                    isStale = false,
+                    ready = false,
+                    blocked = true,
+                    blockedReason = "CompilationInProgress",
+                    nextAction = "Continue with unity_compile_wait.",
                     source = "bridge-response",
                     sessionId = "session-1",
                     playModeState = "edit",
+                    isCompiling = true,
+                    compileStatus = "compiling",
+                    compilePhase = "domain_reload",
+                    compileRequestId = "compile-1",
                     updatedAt = 123,
                     lastMainThreadPumpAt = 123,
                     mainThreadQueueDepth = 2,
@@ -100,9 +109,44 @@ namespace CodingRiver.UPilot.Tests
             var json = JsonUtility.ToJson(message);
 
             Assert.That(json, Does.Contain("\"authoritative\":true"));
+            Assert.That(json, Does.Contain("\"ready\":false"));
+            Assert.That(json, Does.Contain("\"blocked\":true"));
+            Assert.That(json, Does.Contain("\"blockedReason\":\"CompilationInProgress\""));
+            Assert.That(json, Does.Contain("\"nextAction\":\"Continue with unity_compile_wait.\""));
+            Assert.That(json, Does.Contain("\"compilePhase\":\"domain_reload\""));
+            Assert.That(json, Does.Contain("\"compileRequestId\":\"compile-1\""));
             Assert.That(json, Does.Contain("\"source\":\"bridge-response\""));
             Assert.That(json, Does.Contain("\"mainThreadQueueDepth\":2"));
             Assert.That(json, Does.Contain("\"processId\":42"));
+        }
+
+        [Test]
+        public void CompileLifecyclePayloadRoundTripPreservesReloadVerificationState()
+        {
+            var payload = new CompileErrorsPayload
+            {
+                requestId = "compile-reload",
+                status = "verifying",
+                phase = "verifying",
+                total = 0,
+                warningCount = 2,
+                startedAt = 100,
+                finishedAt = 200,
+                lastProgressAt = 250,
+                errors = new List<CompileErrorItemPayload>(),
+            };
+
+            var restored = JsonUtility.FromJson<CompileErrorsPayload>(
+                JsonUtility.ToJson(payload));
+
+            Assert.That(restored.requestId, Is.EqualTo("compile-reload"));
+            Assert.That(restored.status, Is.EqualTo("verifying"));
+            Assert.That(restored.phase, Is.EqualTo("verifying"));
+            Assert.That(restored.warningCount, Is.EqualTo(2));
+            Assert.That(restored.startedAt, Is.EqualTo(100));
+            Assert.That(restored.finishedAt, Is.EqualTo(200));
+            Assert.That(restored.lastProgressAt, Is.EqualTo(250));
+            Assert.That(restored.errors, Is.Empty);
         }
 
         [Test]
@@ -425,6 +469,8 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("prefer an available UPilot semantic tool"));
             Assert.That(text, Does.Contain("Use `unity_tools_find` for targeted discovery"));
             Assert.That(text, Does.Contain("prefer one `unity_safe_compile_and_wait` call"));
+            Assert.That(text, Does.Contain("`ready`, `blocked`, `blockedReason`, `authoritative`, `isStale`, and `nextAction`"));
+            Assert.That(text, Does.Contain("Do not infer readiness from raw `isPlaying` or `isCompiling`"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
             Assert.That(text, Does.Contain("project-provided bridge entry points"));
             Assert.That(text, Does.Contain("waitWindowElapsed=true/terminal=false"));
@@ -1298,6 +1344,12 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(readArgs[1], Is.EqualTo(GetSkillInstallTemplateVersion()));
                 Assert.That(readArgs[2], Is.EqualTo(originalHash));
 
+                var cacheDirectory = Path.Combine(directory, "scripts", "__pycache__");
+                Directory.CreateDirectory(cacheDirectory);
+                File.WriteAllBytes(Path.Combine(cacheDirectory, "generated.pyc"), new byte[] { 1, 2, 3 });
+                var hashWithGeneratedCache = (string)hashMethod.Invoke(null, new object[] { directory });
+                Assert.That(hashWithGeneratedCache, Is.EqualTo(originalHash));
+
                 File.AppendAllText(Path.Combine(directory, "SKILL.md"), "\nuser change");
                 var changedHash = (string)hashMethod.Invoke(null, new object[] { directory });
                 Assert.That(changedHash, Is.Not.EqualTo(originalHash));
@@ -1338,6 +1390,40 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(payload.total, Is.Zero);
             Assert.That(payload.failed, Is.Zero);
             Assert.That(payload.results, Is.Empty);
+        }
+
+        [Test]
+        public void TestRunnerSnapshotRoundTripPreservesRunIdentityAndFailureEvidence()
+        {
+            var payload = new TestRunResultPayload
+            {
+                status = "failed",
+                phase = "failed",
+                testMode = "PlayMode",
+                runGuid = "run-domain-reload-123",
+                total = 2,
+                passed = 1,
+                failed = 1,
+                endedAt = 123456,
+                results = new List<TestResultItemPayload>
+                {
+                    new TestResultItemPayload
+                    {
+                        testName = "Example.PlayModeFailure",
+                        testStatus = "Failed",
+                        message = "expected failure",
+                        stackTrace = "stack evidence",
+                    },
+                },
+            };
+
+            var restored = JsonUtility.FromJson<TestRunResultPayload>(JsonUtility.ToJson(payload));
+
+            Assert.That(restored.runGuid, Is.EqualTo(payload.runGuid));
+            Assert.That(restored.testMode, Is.EqualTo("PlayMode"));
+            Assert.That(restored.total, Is.EqualTo(2));
+            Assert.That(restored.results.Single().message, Is.EqualTo("expected failure"));
+            Assert.That(restored.results.Single().stackTrace, Is.EqualTo("stack evidence"));
         }
 
         [Test]

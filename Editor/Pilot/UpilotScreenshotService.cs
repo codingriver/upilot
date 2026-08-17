@@ -61,6 +61,7 @@ namespace CodingRiver.UPilot
         public string matchedTitle;
         public string matchedTypeName;
         public string matchedFullTypeName;
+        public ulong  matchedInstanceId;
         public bool   multipleMatches;
         public string captureApi;
         public long   windowHandle;
@@ -69,6 +70,10 @@ namespace CodingRiver.UPilot
         public bool   occlusionSensitive;
         public bool   pixelSourceVerified;
         public long   repaintRequestedAtUtcMs;
+        public long   repaintObservedAtUtcMs;
+        public long   repaintSequence;
+        public bool   includesSceneGui;
+        public bool   includesHandles;
         public long   capturedAtUtcMs;
     }
 
@@ -128,6 +133,12 @@ namespace CodingRiver.UPilot
             public bool occlusionSensitive;
             public bool pixelSourceVerified;
             public long repaintRequestedAtUtcMs;
+            public long repaintObservedAtUtcMs;
+            public long repaintSequence;
+            public bool includesSceneGui;
+            public bool includesHandles;
+            public string matchedFullTypeName;
+            public ulong matchedInstanceId;
             public long capturedAtUtcMs;
         }
 
@@ -363,23 +374,7 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    SceneView.RepaintAll();
-                    sceneView.Repaint();
-                    var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(sceneView);
-                    if (pixels != null && !string.IsNullOrEmpty(pixels.imageData))
-                        tcs.SetResult(FromEditorWindowCapture(pixels, "sceneView"));
-                    else if (sceneView.camera != null)
-                        tcs.SetResult(new ScreenshotBytesResult
-                        {
-                            Bytes = RenderCameraToBytes(sceneView.camera, w, h, fmt, qual), Width = w, Height = h,
-                            Source = "sceneView-camera", Degraded = true,
-                            DegradeReason = "EditorWindow pixel capture unavailable; camera render excludes Handles and overlays.",
-                            CaptureApi = "Camera.Render", PixelSourceVerified = false,
-                        });
-                    else
-                    {
-                        tcs.SetResult(null);
-                    }
+                    CaptureSceneViewAfterRepaint(sceneView, w, h, fmt, qual, tcs);
                 }
                 catch (Exception ex)
                 {
@@ -502,6 +497,12 @@ namespace CodingRiver.UPilot
             var msg = JsonUtility.FromJson<ScreenshotSaveMessage>(json);
             var p = msg?.payload ?? new ScreenshotSavePayload();
 
+            if (NormalizeSource(p.source) == "sceneView")
+            {
+                await HandleSceneViewSaveAsync(id, p, token);
+                return;
+            }
+
             var tcs = new TaskCompletionSource<ScreenshotSaveResultPayload>();
             string errorCode = string.Empty;
             string errorMessage = string.Empty;
@@ -546,6 +547,106 @@ namespace CodingRiver.UPilot
             }
 
             await _bridge.SendResultAsync(id, "screenshot.save", payload, token);
+        }
+
+        private async Task HandleSceneViewSaveAsync(string id, ScreenshotSavePayload payload, CancellationToken token)
+        {
+            var captureCompletion = new TaskCompletionSource<ScreenshotBytesResult>();
+            _bridge.EnqueueTracked(id, () =>
+            {
+                var sceneView = SceneView.lastActiveSceneView;
+                if (sceneView == null)
+                {
+                    captureCompletion.TrySetResult(null);
+                    return;
+                }
+                CaptureSceneViewAfterRepaint(
+                    sceneView,
+                    Clamp(payload.width, 1, 4096, 1280),
+                    Clamp(payload.height, 1, 4096, 720),
+                    "png",
+                    Clamp(payload.quality, 1, 100, 75),
+                    captureCompletion);
+            });
+
+            try
+            {
+                ScreenshotBytesResult capture = await captureCompletion.Task;
+                if (capture == null)
+                {
+                    await _bridge.SendErrorAsync(id, "NO_SCENE_VIEW", "No active SceneView could be captured.", token, "screenshot.save");
+                    return;
+                }
+                if (!TryWriteCapturedScreenshot(payload, capture, out var result, out string errorCode, out string errorMessage))
+                {
+                    await _bridge.SendErrorAsync(id, errorCode, errorMessage, token, "screenshot.save");
+                    return;
+                }
+                await _bridge.SendResultAsync(id, "screenshot.save", result, token);
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(id, "SCREENSHOT_FAILED", ex.Message, token, "screenshot.save");
+            }
+        }
+
+        private static bool TryWriteCapturedScreenshot(
+            ScreenshotSavePayload payload, ScreenshotBytesResult capture,
+            out ScreenshotSaveResultPayload result, out string errorCode, out string errorMessage)
+        {
+            result = null;
+            errorCode = string.Empty;
+            errorMessage = string.Empty;
+            if (NormalizeFormat(payload.format) != "png")
+            {
+                errorCode = "INVALID_SCREENSHOT_FORMAT";
+                errorMessage = "screenshot.save only supports format=png.";
+                return false;
+            }
+            string targetPath = ResolveSavePath(payload.path, payload.allowOutsideProject, out string pathError);
+            if (!string.IsNullOrEmpty(pathError))
+            {
+                errorCode = "INVALID_SCREENSHOT_PATH";
+                errorMessage = pathError;
+                return false;
+            }
+            if (File.Exists(targetPath) && !payload.overwrite)
+            {
+                errorCode = "FILE_EXISTS";
+                errorMessage = $"Screenshot target already exists: {targetPath}";
+                return false;
+            }
+            try
+            {
+                string directory = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                string temporaryPath = Path.Combine(directory ?? "", $".{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}.tmp");
+                File.WriteAllBytes(temporaryPath, capture.Bytes);
+                if (File.Exists(targetPath)) File.Delete(targetPath);
+                File.Move(temporaryPath, targetPath);
+                var info = new FileInfo(targetPath);
+                result = new ScreenshotSaveResultPayload
+                {
+                    path = targetPath, source = capture.Source, bytes = info.Length,
+                    width = capture.Width, height = capture.Height, format = "png", sha256 = ComputeSha256(capture.Bytes),
+                    overwritten = payload.overwrite, degraded = capture.Degraded, degradeReason = capture.DegradeReason,
+                    requestedSource = "sceneView", captureApi = capture.CaptureApi, windowHandle = capture.WindowHandle,
+                    unityProcessId = capture.UnityProcessId, foreground = capture.Foreground,
+                    occlusionSensitive = capture.OcclusionSensitive, pixelSourceVerified = capture.PixelSourceVerified,
+                    repaintRequestedAtUtcMs = capture.RepaintRequestedAtUtcMs,
+                    repaintObservedAtUtcMs = capture.RepaintObservedAtUtcMs, repaintSequence = capture.RepaintSequence,
+                    includesSceneGui = capture.IncludesSceneGui, includesHandles = capture.IncludesHandles,
+                    matchedFullTypeName = capture.MatchedFullTypeName, matchedInstanceId = capture.MatchedInstanceId,
+                    capturedAtUtcMs = capture.CapturedAtUtcMs,
+                };
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorCode = "SCREENSHOT_WRITE_FAILED";
+                errorMessage = ex.Message;
+                return false;
+            }
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────
@@ -667,6 +768,12 @@ namespace CodingRiver.UPilot
                     occlusionSensitive = capture.OcclusionSensitive,
                     pixelSourceVerified = capture.PixelSourceVerified,
                     repaintRequestedAtUtcMs = capture.RepaintRequestedAtUtcMs,
+                    repaintObservedAtUtcMs = capture.RepaintObservedAtUtcMs,
+                    repaintSequence = capture.RepaintSequence,
+                    includesSceneGui = capture.IncludesSceneGui,
+                    includesHandles = capture.IncludesHandles,
+                    matchedFullTypeName = capture.MatchedFullTypeName,
+                    matchedInstanceId = capture.MatchedInstanceId,
                     capturedAtUtcMs = capture.CapturedAtUtcMs,
                 };
                 return true;
@@ -694,7 +801,94 @@ namespace CodingRiver.UPilot
             public bool OcclusionSensitive;
             public bool PixelSourceVerified;
             public long RepaintRequestedAtUtcMs;
+            public long RepaintObservedAtUtcMs;
+            public long RepaintSequence;
+            public bool IncludesSceneGui;
+            public bool IncludesHandles;
+            public string MatchedFullTypeName;
+            public ulong MatchedInstanceId;
             public long CapturedAtUtcMs;
+        }
+
+        private static long s_sceneViewRepaintSequence;
+
+        private static void CaptureSceneViewAfterRepaint(
+            SceneView sceneView, int width, int height, string format, int quality,
+            TaskCompletionSource<ScreenshotBytesResult> completion)
+        {
+            long requestedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            double deadline = EditorApplication.timeSinceStartup + 5.0;
+            bool captureScheduled = false;
+
+            Action<SceneView> onSceneGui = null;
+            EditorApplication.CallbackFunction onUpdate = null;
+            Action cleanup = () =>
+            {
+                SceneView.duringSceneGui -= onSceneGui;
+                EditorApplication.update -= onUpdate;
+            };
+
+            onSceneGui = current =>
+            {
+                if (captureScheduled || current == null
+                    || UPilotEntityIds.ToWireId(current) != UPilotEntityIds.ToWireId(sceneView))
+                    return;
+                if (Event.current == null || Event.current.type != EventType.Repaint)
+                    return;
+                captureScheduled = true;
+                long observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                long sequence = Interlocked.Increment(ref s_sceneViewRepaintSequence);
+                EditorApplication.delayCall += () =>
+                {
+                    cleanup();
+                    try
+                    {
+                        var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(sceneView);
+                        ScreenshotBytesResult result;
+                        if (pixels != null && !string.IsNullOrEmpty(pixels.imageData))
+                        {
+                            result = FromEditorWindowCapture(pixels, "sceneView");
+                            result.RepaintRequestedAtUtcMs = requestedAt;
+                            result.RepaintObservedAtUtcMs = observedAt;
+                            result.RepaintSequence = sequence;
+                            result.IncludesSceneGui = true;
+                            result.IncludesHandles = true;
+                            result.MatchedFullTypeName = sceneView.GetType().FullName;
+                            result.MatchedInstanceId = UPilotEntityIds.ToWireId(sceneView);
+                        }
+                        else if (sceneView.camera != null)
+                        {
+                            result = new ScreenshotBytesResult
+                            {
+                                Bytes = RenderCameraToBytes(sceneView.camera, width, height, format, quality),
+                                Width = width, Height = height, Source = "sceneView-camera", Degraded = true,
+                                DegradeReason = "EditorWindow pixel capture unavailable; camera render excludes Handles and overlays.",
+                                CaptureApi = "Camera.Render", PixelSourceVerified = false,
+                                RepaintRequestedAtUtcMs = requestedAt, RepaintObservedAtUtcMs = observedAt,
+                                RepaintSequence = sequence, IncludesSceneGui = false, IncludesHandles = false,
+                                MatchedFullTypeName = sceneView.GetType().FullName,
+                                MatchedInstanceId = UPilotEntityIds.ToWireId(sceneView),
+                            };
+                        }
+                        else result = null;
+                        completion.TrySetResult(result);
+                    }
+                    catch (Exception ex) { completion.TrySetException(ex); }
+                };
+            };
+            onUpdate = () =>
+            {
+                if (captureScheduled || EditorApplication.timeSinceStartup < deadline)
+                    return;
+                cleanup();
+                completion.TrySetException(new TimeoutException(
+                    $"SceneView {UPilotEntityIds.ToWireId(sceneView)} did not complete a Repaint event within 5 seconds."));
+            };
+
+            SceneView.duringSceneGui += onSceneGui;
+            EditorApplication.update += onUpdate;
+            SceneView.RepaintAll();
+            sceneView.Repaint();
         }
 
         private static void CacheRecentGameView(ScreenshotBytesResult capture)
@@ -890,6 +1084,9 @@ namespace CodingRiver.UPilot
                 windowHandle = result.WindowHandle, unityProcessId = result.UnityProcessId, foreground = result.Foreground,
                 occlusionSensitive = result.OcclusionSensitive, pixelSourceVerified = result.PixelSourceVerified,
                 repaintRequestedAtUtcMs = result.RepaintRequestedAtUtcMs, capturedAtUtcMs = result.CapturedAtUtcMs,
+                repaintObservedAtUtcMs = result.RepaintObservedAtUtcMs, repaintSequence = result.RepaintSequence,
+                includesSceneGui = result.IncludesSceneGui, includesHandles = result.IncludesHandles,
+                matchedFullTypeName = result.MatchedFullTypeName, matchedInstanceId = result.MatchedInstanceId,
             };
         }
 

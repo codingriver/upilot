@@ -127,6 +127,12 @@ async def unity_operation_start(jobSpec: dict):
     r = await _get_facade().operation_start(job_spec=jobSpec)
     return _log_tool_result("unity_operation_start", _payload(r))
 
+@mcp.tool(description="只读预校验通用长作业 jobSpec；检查调用类型、已注册工具或反射入口、参数容器、占位符、终态映射、超时和产物规则，不启动业务。")
+async def unity_operation_validate(jobSpec: dict, inspectReflection: bool = True):
+    _log_tool_call("unity_operation_validate", {"jobSpec": jobSpec, "inspectReflection": inspectReflection})
+    r = await _get_facade().operation_validate(job_spec=jobSpec, inspect_reflection=inspectReflection)
+    return _log_tool_result("unity_operation_validate", _payload(r))
+
 @mcp.tool(description="读取并刷新一个通用长作业状态；会调用 jobSpec.statusCall 并归一化通用状态字段。")
 async def unity_operation_status(operationId: str, detailLevel: str = "summary", maxTailChars: int = 2000, includeRawState: bool = False):
     _log_tool_call("unity_operation_status", {"operationId": operationId, "detailLevel": detailLevel, "maxTailChars": maxTailChars, "includeRawState": includeRawState})

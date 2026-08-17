@@ -49,39 +49,68 @@ def _json_dumps_or_empty(value: object | None) -> str:
 class CompileDomainService:
     def _compile_diagnostics(self) -> dict:
         compile_state = self.server.state.compile
-        editor = self.server.state.editor
-        now = now_ms()
-        last_progress = int(compile_state.last_progress_at or compile_state.started_at or 0)
-        pump_age = max(0, now - int(editor.last_main_thread_pump_at or 0)) if editor.last_main_thread_pump_at else 0
-        suspected_stuck = bool(
-            editor.is_compiling
-            and last_progress
-            and now - last_progress > 60000
+        execution = self.server.state.execution_state(
+            stale_after_ms=CONFIG.context_stale_ms
         )
-        compile_state.suspected_stuck = suspected_stuck
         return {
+            "executionState": execution,
             "status": compile_state.status,
-            "phase": compile_state.phase,
+            "phase": execution["compilePhase"],
             "compileRequestId": compile_state.compile_request_id,
             "commandQueuedAt": compile_state.command_queued_at,
             "unityAcceptedAt": compile_state.unity_accepted_at,
             "startedAt": compile_state.started_at,
             "finishedAt": compile_state.finished_at,
-            "lastProgressAt": last_progress,
-            "lastEditorUpdateAt": editor.last_main_thread_pump_at,
-            "editorPumpAgeMs": pump_age,
-            "editorNotPumping": bool(editor.last_main_thread_pump_at and pump_age > 10000),
-            "mainThreadQueueDepth": editor.main_thread_queue_depth,
-            "lastDequeuedCommandId": editor.last_dequeued_command_id,
-            "suspectedStuck": suspected_stuck,
+            "lastProgressAt": execution["lastProgressAt"],
+            "lastEditorUpdateAt": execution["lastMainThreadPumpAt"],
+            "editorPumpAgeMs": execution["editorPumpAgeMs"],
+            "editorNotPumping": bool(
+                execution["lastMainThreadPumpAt"]
+                and execution["editorPumpAgeMs"] > 10000
+            ),
+            "mainThreadQueueDepth": execution["mainThreadQueueDepth"],
+            "lastDequeuedCommandId": execution["lastDequeuedCommandId"],
+            "suspectedStuck": execution["suspectedStuck"],
             "errorCount": compile_state.error_count,
             "warningCount": compile_state.warning_count,
-            "nextAction": (
-                "Inspect unity_hang_status before retrying or restarting Unity."
-                if suspected_stuck
-                else ("Continue waiting for the active compilation." if editor.is_compiling else "")
-            ),
+            "blocked": execution["blocked"],
+            "blockedReason": execution["blockedReason"],
+            "nextAction": execution["nextAction"],
         }
+
+    async def _refresh_execution_state(self) -> tuple[ToolResponse, dict]:
+        result = await self.dispatcher.call(
+            new_id("req"), "resource.editorState", {}, timeout_ms=15000
+        )
+        return result, self.server.state.execution_state(
+            stale_after_ms=CONFIG.context_stale_ms
+        )
+
+    @staticmethod
+    def _compile_precondition_error(request_id: str, execution: dict) -> ToolResponse | None:
+        reason = str(execution.get("blockedReason") or "")
+        if reason == "PlayMode":
+            return fail(
+                request_id,
+                "EDITOR_IN_PLAY_MODE",
+                "Unity is in PlayMode or paused; script compilation is blocked.",
+                {**execution, "playModeBlocked": True},
+            )
+        if not execution.get("authoritative") or execution.get("isStale"):
+            return fail(
+                request_id,
+                "EDITOR_CONTEXT_NOT_READY",
+                "Unity Editor context is stale, unknown, or recovering after Domain Reload.",
+                execution,
+            )
+        if str(execution.get("playModeState") or "") != "edit":
+            return fail(
+                request_id,
+                "EDITOR_CONTEXT_NOT_READY",
+                "Unity Editor mode is not authoritatively known to be EditMode.",
+                execution,
+            )
+        return None
 
     def _detect_library_dll_mtime(self) -> int:
         session = self.server.session_manager.active
@@ -120,6 +149,19 @@ class CompileDomainService:
 
     async def compile(self) -> ToolResponse:
         request_id = new_id("req")
+        state_r, execution = await self._refresh_execution_state()
+        if not state_r.ok:
+            return state_r
+        precondition_error = self._compile_precondition_error(request_id, execution)
+        if precondition_error is not None:
+            return precondition_error
+        if bool(execution.get("isCompiling")):
+            return fail(
+                request_id,
+                "EDITOR_BUSY",
+                "Unity compilation is already active.",
+                execution,
+            )
         compile_state = self.server.state.compile
         compile_state.phase = "queued"
         compile_state.status = "queued"
@@ -305,24 +347,82 @@ class CompileDomainService:
                     continue
                 return r
 
-            is_compiling = bool(r.data.get("isCompiling", False)) if r.data else False
-            has_compile_errors = (
-                bool(r.data.get("hasCompileErrors", False)) if r.data else False
+            execution = self.server.state.execution_state(
+                stale_after_ms=CONFIG.context_stale_ms
             )
-            if not is_compiling:
-                if has_compile_errors:
-                    return fail(
-                        request_id,
-                        "COMPILE_ERROR",
-                        "Unity compilation finished with errors.",
-                        {
-                            "pollCount": polls,
-                            "elapsedS": round(
-                                timeout_s - (deadline - time.monotonic()), 2
-                            ),
-                            "reconnectedDuringWait": reconnect_waited,
-                        },
+            editor_is_compiling = bool(r.data.get("isCompiling", False)) if r.data else False
+            compile_phase = str(execution.get("compilePhase") or "idle")
+
+            if execution.get("blockedReason") == "PlayMode":
+                return ok(
+                    request_id,
+                    {
+                        **self._compile_diagnostics(),
+                        "status": "blocked",
+                        "blocked": True,
+                        "blockedReason": "PlayMode",
+                        "playModeBlocked": True,
+                        "isCompiling": False,
+                        "pollCount": polls,
+                        "elapsedS": round(timeout_s - (deadline - time.monotonic()), 2),
+                        "waitMode": "blocked",
+                        "completed": False,
+                    },
+                )
+
+            context_ready = bool(execution.get("authoritative")) and not bool(
+                execution.get("isStale")
+            )
+            if (
+                context_ready
+                and compile_phase == "verifying"
+            ):
+                errors_result = await self.compile_errors(
+                    self.server.state.compile.compile_request_id
+                )
+                if errors_result.ok and errors_result.data:
+                    error_total = int(errors_result.data.get("total") or 0)
+                    if error_total > 0:
+                        return fail(
+                            request_id,
+                            "COMPILE_ERROR",
+                            "Unity compilation finished with errors.",
+                            {
+                                **self._compile_diagnostics(),
+                                "pollCount": polls,
+                                "elapsedS": round(timeout_s - (deadline - time.monotonic()), 2),
+                                "reconnectedDuringWait": reconnect_waited,
+                                "errors": errors_result.data.get("errors") or [],
+                            },
+                        )
+                    execution = self.server.state.execution_state(
+                        stale_after_ms=CONFIG.context_stale_ms
                     )
+                    compile_phase = str(execution.get("compilePhase") or "completed")
+
+            if (
+                context_ready
+                and not editor_is_compiling
+                and compile_phase == "failed"
+            ):
+                return fail(
+                    request_id,
+                    "COMPILE_ERROR",
+                    "Unity compilation finished with errors.",
+                    {
+                        **self._compile_diagnostics(),
+                        "pollCount": polls,
+                        "elapsedS": round(timeout_s - (deadline - time.monotonic()), 2),
+                        "reconnectedDuringWait": reconnect_waited,
+                    },
+                )
+
+            terminal_idle = (
+                context_ready
+                and not editor_is_compiling
+                and compile_phase not in ("queued", "compiling", "domain_reload", "verifying")
+            )
+            if terminal_idle:
                 if polls == 1:
                     wm = "immediate"
                 elif modes:
@@ -343,7 +443,9 @@ class CompileDomainService:
                 )
 
             if polls == 1:
-                self.server.reconcile_editor_compile_busy(True)
+                self.server.reconcile_editor_compile_busy(
+                    editor_is_compiling or compile_phase in ("compiling", "domain_reload")
+                )
 
             if polls == 1 and prefer_events and self.server.is_ready():
                 remaining = deadline - time.monotonic()
@@ -352,39 +454,6 @@ class CompileDomainService:
                     ev_budget = min(ev_budget, remaining)
                     if await self.server.wait_for_compile_idle(ev_budget):
                         modes.append("event")
-                        r_ev = await poll_editor_state()
-                        if (
-                            r_ev.ok
-                            and r_ev.data
-                            and not r_ev.data.get("isCompiling", False)
-                        ):
-                            if r_ev.data.get("hasCompileErrors", False):
-                                return fail(
-                                    request_id,
-                                    "COMPILE_ERROR",
-                                    "Unity compilation finished with errors.",
-                                    {
-                                        "pollCount": polls + 1,
-                                        "elapsedS": round(
-                                            timeout_s - (deadline - time.monotonic()), 2
-                                        ),
-                                        "reconnectedDuringWait": reconnect_waited,
-                                    },
-                                )
-                            return ok(
-                                request_id,
-                                {
-                                    **self._compile_diagnostics(),
-                                    "status": "ready",
-                                    "isCompiling": False,
-                                    "pollCount": polls + 1,
-                                    "elapsedS": round(
-                                        timeout_s - (deadline - time.monotonic()), 2
-                                    ),
-                                    "reconnectedDuringWait": reconnect_waited,
-                                    "waitMode": "event",
-                                },
-                            )
                         continue
 
             interval = (
@@ -398,7 +467,7 @@ class CompileDomainService:
                     {
                         **self._compile_diagnostics(),
                         "status": "timeout",
-                        "isCompiling": True,
+                        "isCompiling": bool(editor_is_compiling),
                         "pollCount": polls,
                         "elapsedS": timeout_s,
                         "reconnectedDuringWait": reconnect_waited,
@@ -409,7 +478,8 @@ class CompileDomainService:
                         "timedOut": True,
                     },
                 )
-            self.server.sync_compile_state_from_editor(is_compiling)
+            if editor_is_compiling:
+                self.server.sync_compile_state_from_editor(True)
             await asyncio.sleep(interval)
 
     async def compile_wait_editor(self, timeout_ms: int = 300000) -> ToolResponse:

@@ -6,6 +6,9 @@
 2. Verify `connected`, `serverReady`, and the project path.
 3. If a tool is not visible, call `unity_capabilities_get` or `unity_tools_find`.
 4. Call `unity_ensure_ready` before mutations.
+5. Require unified execution state `ready=true`, `authoritative=true`, and `isStale=false`; when blocked, follow `blockedReason` and `nextAction`.
+
+Do not infer readiness from raw `isPlaying` or `isCompiling` values. Treat `queued`, `compiling`, `domain_reload`, and `verifying` as non-ready compile phases.
 
 ## Compile Fix
 
@@ -27,9 +30,12 @@ Do not trigger another compile when no C# or assembly file changed.
 ## Tests And Builds
 
 1. Start the operation.
-2. Poll the result/status tool to a terminal state.
-3. For long operations, report only phase changes, errors, or suspected-stuck state.
-4. Read Console errors and artifacts before declaring success.
+2. Keep the returned test `runGuid`; for PlayMode/Domain Reload query `unity_test_results(runGuid=...)` after reconnect.
+3. Poll the result/status tool to a terminal state.
+4. For long operations, report only phase changes, errors, or suspected-stuck state.
+5. Read Console errors and artifacts before declaring success.
+
+For a generic project bridge operation, call `unity_operation_validate(jobSpec)` before `unity_operation_start`; validation is read-only and returns a normalized spec or precise field errors.
 
 `status=no_tests` is a distinct cleaned terminal state with `total=0`; do not represent it as a fake failed test. If tests are required, fail the acceptance criterion explicitly.
 

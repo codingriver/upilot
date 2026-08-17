@@ -1,6 +1,13 @@
 # UPilot Improvement Backlog
 
-本文件是 UPilot 仓库根目录的统一改进清单。测试或开发过程中，如果发现某个问题、手工步骤、诊断缺口、工具能力缺失、集成摩擦或 agent 规则缺口可以通过优化 UPilot 功能、MCP 工具、agent 规则或项目集成来简化，应记录在这里。
+本文件是 UPilot 仓库根目录的统一改进清单。测试或开发过程中，如果发现某个问题、手工步骤、诊断缺口、工具能力缺失、集成摩擦或 agent 规则缺口可以通过优化 UPilot 通用功能、MCP 工具、agent 规则或通用项目接入协议来简化，应记录在这里。
+
+## 产品范围边界
+
+- UPilot 提供通用 Unity Editor/MCP 自动化、状态、诊断、资源、测试、长作业、日志与产物能力，不理解也不实现客户项目的具体业务语义。
+- `D:\MA\xclient`、`F:\xclient2` 只可作为通用问题的历史证据来源；其中的 KingShotBattle、StageTool、关卡、配置 ID、SmokeCase、业务 Bridge、业务报告和具体测试用例均不属于 UPilot 包支持或开发范围。
+- 外部项目若需要业务前置检查、业务 readiness、业务快照、业务 failureSignature、业务清理或业务测试编排，应在该项目自己的编译代码、Bridge 或测试框架中实现。UPilot 仅负责调用、轮询、透传通用状态、取消、日志采集和产物元数据。
+- 不在 UPilot 规范项目中建立外部业务模型、兼容分支、专用 MCP 工具或外部项目测试用例。外部现象只有能抽象成与项目无关的通用契约，并可在 `Tests~/UPilotTest` 使用通用 fixture 验收时，才可进入本清单。
 
 ## 记录规则
 
@@ -9,6 +16,7 @@
 - 记录证据：尽量包含复现步骤、日志、错误信息、相关文件/工具名和影响范围。
 - 记录状态：使用 `待处理`、`进行中`、`已完成`、`已关闭`。
 - 不把 UPilot 产品/集成改进项只放在外部客户项目 TODO 中；这里是 UPilot 后续开发的主入口。
+- 外部项目业务项不得因“可由 MCP 调用”而转化为 UPilot 产品项；记录时必须明确通用抽象、通用 API 和规范项目验收方式。
 
 ## 模板
 
@@ -26,7 +34,98 @@
 
 ## 待处理
 
-### [待处理] Flow 原生菜单/模态弹窗动作增加可取消超时与自动关闭
+### 当前 UPilot 推荐开发清单
+
+1. `P0（已完成）`：统一编译、PlayMode、磁盘同步与 Editor Context 状态契约。这里只处理 Unity Editor 通用生命周期和编译阻塞状态，不包含任何项目 Smoke/入场/关卡逻辑。
+2. `P1（先验收后决定实现）`：Console 查询参数契约、过滤正确性与大体量增量索引性能复测。只使用通用合成日志或脱敏 fixture 建立基准，不依赖 xclient/xclient2 业务日志或测试流程。
+3. `P1 候选（先复现）`：配置 CSV 多行表头与键前缀的通用格式兼容。只接受无业务语义的显式格式参数，并在规范项目 fixture 复现后决定是否实现。
+4. 当前没有其它来自 xclient/xclient2 的 P0/P1 业务条目进入 UPilot 开发清单；外部项目 Bridge、SmokeCase、业务快照、业务 readiness 和业务保存事务全部排除。
+
+### [已完成][P0] 统一编译、PlayMode、磁盘同步与 Editor Context 状态契约
+
+- 发现时间：2026-08-17（由多个 Unity 项目暴露的通用 Editor 状态问题归并）
+- 来源任务/测试：通用 PlayMode 中落盘同步与编译、Domain Reload 后状态恢复、长编译等待、`unity_ensure_ready` 前置检查；不包含项目业务状态机。
+- 现象/问题：不同工具可能使用心跳缓存、编译持久状态、命令实时结果和推断值等不同状态源，导致同一时刻出现 `isPlaying=true` 但 `inEditMode=true`、顶层刷新成功但嵌套 `refresh.ok=false`、编译尚未开始却返回 `ready`、Domain Reload 后外层 context 长时间陈旧等矛盾。
+- 影响范围：`unity_ensure_ready`、`unity_sync_after_disk_write`、`unity_compile*`、`unity_safe_compile_and_wait` 及所有附带 Editor context 的响应。
+- 原理分析：命令结果、Unity 实时状态、Bridge 心跳缓存和跨 Domain Reload 持久状态具有不同生命周期；若没有统一 freshness、authority、phase 和 blocked 规则，聚合层会把“未知/排队/缓存”错误归一化为“EditMode/ready/success”。
+- 建议开发方案：
+  1. 建立统一 `EditorExecutionState` 快照，包含 `playModeState/isPlaying/isCompiling/compilePhase/contextUpdatedAt/source/authoritative/isStale/sessionId`，相关工具返回前从同一聚合器取值。
+  2. 定义 `idle -> queued -> compiling -> domain_reload -> verifying -> completed|failed` 状态机；PlayMode 阻塞使用 `blocked` 和 `blockedReason=PlayMode`，禁止映射为 `ready`。
+  3. `unknown/stale` 保守处理：`unity_ensure_ready.ready=false` 并提供 `nextAction`；只有权威实时 EditMode 快照才允许 mutation/compile。
+  4. 顶层 `ok`、`data.status` 和嵌套阶段结果由同一归一化函数生成；部分成功返回 `status=partial` 和失败阶段。
+  5. Domain Reload 后按 sessionId 失效旧缓存；新 Bridge 首次权威心跳前返回 `recovering_after_reload`。
+  6. 长编译等待公开 `startedAt/lastProgressAt/editorPumpAgeMs/mainThreadQueueDepth/suspectedStuck/failureSignature`，区分真实长编译、尚未启动、Domain Reload 和主线程停止 pump。
+  7. 更新 Agent 规则和 Skill，只依据 `ready/blocked/authoritative/nextAction` 决策。
+- 验收标准：在 EditMode、PlayMode、编译排队、正在编译、Domain Reload、Bridge 重连和主线程暂时不 pump 场景执行相关工具；响应内不存在矛盾字段，PlayMode 编译明确阻塞，未知状态不允许写入，退出 PlayMode 后自动恢复可编译状态。
+- 风险与边界：不自动退出用户 PlayMode；不因缓存陈旧重启 Unity；不复制项目业务状态机。
+- 实现结果：
+  1. Python `StateStore.execution_state()` 成为统一聚合器，公开 `ready/blocked/blockedReason/nextAction/authoritative/isStale/sessionId/playModeState/compilePhase` 及 pump/队列/进度诊断；默认和新会话状态保守为 unknown/recovering，不再推断为 EditMode。
+  2. 编译生命周期统一为 `idle -> queued -> compiling -> domain_reload -> verifying -> completed|failed`。Bridge 将生命周期持久化到编译快照；新 AppDomain 构造时恢复 `domain_reload` 并进入 `verifying`，持久化错误复核后才允许 ready。2026-08-17 首次真实验收复现并修复了仅依赖 `afterAssemblyReload` 订阅导致 phase 停在 `domain_reload` 的问题。
+  3. `unity_compile`、`unity_compile_wait`、`unity_safe_compile_and_wait`、`unity_sync_after_disk_write`、`unity_ensure_ready`、`unity_mcp_status`、Bridge result/error context 和 `resource.editorState` 使用同一 authority/freshness/blocking 语义；PlayMode、unknown/stale 和活动编译 phase 不再映射为 ready/compiled。
+  4. 旧 session 和同 session 乱序 context 会被拒绝；重连后首个权威心跳前保持 `recovering_after_reload`。`resource.editorState` 直接字段与统一 play/compile phase 一致，并携带 request/timestamp/pump/queue 信息。
+  5. Agent 规则模板升级为 v12，Skill 安装模板升级为 v7；规则明确只依据统一状态字段决策，不从原始 `isPlaying/isCompiling` 推断 readiness。Skill 管理哈希同时忽略 `__pycache__/.pyc/.pyo`，避免运行校验后误判受控安装被定制。
+- 回归证据：Python 全量 `105 passed`；Skill pack 校验通过；Unity 6000.6.0a2 两轮真实安全编译最终均为 `phase=completed/errorCount=0/warningCount=0`，第二轮在构造期恢复修复后 15.9 秒自然完成；定向 `UPilotCoreTests` 为 `54 total / 52 passed / 2 skipped / 0 failed`。仅重启 MCP Server（未重启 Unity）加载新 Python 后，真实 `unity_mcp_status(forceFresh=true)` 返回 `executionState.status=ready/ready=true/authoritative=true/isStale=false/compilePhase=completed`，并与 `unity_ensure_ready.ready=true` 一致。
+- 最终验收：规范项目 `D:\upilot\Tests~\UPilotTest` 唯一一次完整 EditMode acceptance 为 `332 total / 327 passed / 5 skipped / 0 failed`，`acceptancePassed=true`，编译错误/警告为 0；测试清理完成、活动 Console capture 为 0、Editor 返回权威 EditMode。证据 `Log/UPilotAcceptance/20260817-170917/summary.json`，189051 bytes，SHA256 `1552619d1d47588efe118845ef3a31972e5229731d993b1935ca08135e7c4bde`。
+- 当前状态：已完成。未修改或运行 xclient/xclient2 业务代码、业务 Bridge、SmokeCase 或业务测试。
+
+### [待处理][P1] Console 查询契约与大体量增量索引性能复测及优化
+
+- 发现时间：2026-08-17（历史现场曾出现 68 MB/23648 条通用 Console capture；仅作为规模证据）
+- 现象/问题：sequence 范围、continuation token、过滤条件和索引状态已经实现，但尚未在大采集上确认延迟、索引命中率和内存开销；历史上还出现过查询参数未生效却静默返回最近日志的现象，需要先验证过滤正确性与参数回显契约。
+- 建议改进：先验证 `effectiveQuery/matchedFields/scannedCount/ignoredArguments` 或等价结构化字段，未知参数必须报错或明确列入 ignored；再建立 10 MB/50 MB/100 MB JSONL 基准，目标关键词查询 P95 小于 2 秒。正确性或性能未达标时，分别修复参数绑定/过滤，或增加分段 sequence-offset 索引、关键词倒排摘要和按 segment 跳读。
+- 验收标准：在 `Tests~/UPilotTest` 使用等价规模的通用合成 capture 验证存在/不存在关键词、未知参数、8 关键词、sequence 范围和 regex 查询；结果不得包含不匹配记录，并报告实际生效参数、扫描条数、索引命中、耗时、内存、continuation 和完整性。不运行外部项目业务测试。
+- 当前状态：建议先验收，失败后再进入实现。
+
+### [待处理][P1 候选] 配置 CSV 多行表头与键前缀通用兼容复现
+
+- 发现时间：2026-08-17（由外部项目三行表头、GBK/CRLF 文件暴露的格式兼容问题归并）
+- 现象/问题：`unity_config_csv_get/patch` 已提供编码、换行、dry-run 和 confirmToken 安全契约，但历史记录显示“字段名所在行”和“数据起始行”可能无法独立指定，且 `#id` 一类键前缀可能影响主键匹配。
+- 范围约束：只支持通用 CSV 格式参数和可配置键规范化，不内置任何项目表名、字段名、配置 ID、跨表引用或业务校验规则。
+- 建议步骤：先在 `Tests~/UPilotTest` 增加最小 GBK/CRLF/无 BOM/三行表头 fixture，使用现有 `headerRowIndex` 实测；只有复现失败时才设计 `dataStartRow` 与显式 `keyNormalization=none|strip-leading-markers`，默认保持严格匹配和向后兼容。
+- 验收标准：对通用 fixture 完成 get -> dry-run -> confirmToken apply；目标字段正确修改，编码/换行/列数/非目标字节保持不变。不得读取或运行 xclient2 的具体配置和业务测试。
+- 当前状态：候选，等待规范项目最小复现；未复现则关闭，不进入实现。
+
+### [已完成] UPilot Acceptance 成功报告不得残留失败字段
+
+- 发现时间：2026-08-17
+- 来源任务/测试：规范项目最终 `unity_upilot_acceptance_run`。
+- 现象/问题：331 个 EditMode 用例完成且 `acceptancePassed=true` 时，报告仍残留 `failureCode=UPILOT_ACCEPTANCE_FAILED` 与失败消息，造成成功证据自相矛盾。
+- 影响范围：所有消费 UPilot 标准验收 summary 的 Agent、CI 和发布判断。
+- 建议改进：成功分支不得向 `finish` 传入失败 code/message；失败字段只在验收不通过时出现，并增加回归断言。
+- 证据/复现：原报告 `Log/UPilotAcceptance/20260817-115546/summary.json` 同时包含成功状态和默认失败字段；`test_acceptance_compact_shader.py` 已增加成功结果不含 `failureCode/failureMessage` 的断言。
+- 备注：已修复 `upilotserver~/src/upilot_mcp/domain/test_service.py`；无需重跑已通过的 331 个 Unity 用例，Python 契约回归覆盖报告分支。
+
+### [已完成] PlayMode Test Runner 结果跨 Domain Reload 与 MCP 重连持久化
+
+- 发现时间：2026-08-15
+- 来源任务/测试：`F:\xclient2\TODO_UPilot.mcd` / PlayMode 测试结束后 `unity_test_results` 返回 `none`。
+- 现象/问题：动态 TestRunner callback 和内存结果随 Domain Reload 丢失，完成状态无法作为验收证据。
+- 影响范围：所有进入/退出 PlayMode 的 Unity Test Framework 运行。
+- 建议改进：持久化 runGuid、进度与叶子结果；Reload 后重挂 callback；按 runGuid 查询历史终态。
+- 证据/复现：实现位于 `Editor/Pilot/UPilotTestService.cs`；快照写入 `Library/UPilot/TestRuns/<runGuid>.json`，活动/最近指针分离；`unity_test_results(runGuid=...)` 可在 MCP 重连后精确读取且不会串线。
+- 备注：Unity 6000.6.0a2 真实 PlayMode 回归通过：`IntegrationTests.Integration_CanSendAndReceiveEvents` 的原 runGuid `fb16e615-8347-44c6-b853-f14eb0b06dae` 在 Domain Reload 与 MCP session 从 `a88ffe2f412249f18dd21fd406a9a0f2` 切换到 `53d2b1d7e9fe4f9fa55a2334162e4c39` 后仍返回 `completed`、`total=1/passed=1`。恢复监听在 Editor assembly 初始化期注册，短测试不会早于 MCP 服务构造而丢失终态；无法恢复的残留运行仍明确归因为 `orphaned_after_reload`，不伪造通过。
+
+### [已完成] 通用长作业 jobSpec 只读预校验
+
+- 发现时间：2026-08-15
+- 来源任务/测试：`D:\MA\xclient\TODO_UPilot.mcd` / 项目反射工作流需要手写 operation jobSpec。
+- 现象/问题：调用类型、入口名、参数容器、占位符和 artifactRules 写错只能在启动业务后发现。
+- 影响范围：所有通过 `unity_operation_start` 编排项目已编译入口的 Agent/客户端。
+- 建议改进：新增不启动业务的 `unity_operation_validate(jobSpec)`，返回 normalizedJobSpec、精确字段错误和 nextAction。
+- 证据/复现：已实现调用 kind、注册工具/反射入口、完整值占位符、终态映射、超时和产物规则校验；Python 回归覆盖成功规范化和多字段错误定位。
+- 备注：Skill 与 Agent 规则要求手写 jobSpec 在 start 前先 validate；不引入 KingShotBattle 专用服务端分支。
+
+### [已完成] SceneView 截图等待真实 Repaint 并验证 Handles 像素来源
+
+- 发现时间：2026-08-13
+- 来源任务/测试：`F:\xclient2\TODO_UPilot.mcd` / StageTool SceneView Handles 视觉验收。
+- 现象/问题：立即截图可能发生在 Scene GUI Repaint 前，或降级到 Camera.Render 后丢失 Handles/overlays。
+- 影响范围：SceneView Gizmo、Handles、标签和 Editor 场景工具视觉验收。
+- 建议改进：绑定精确 SceneView 实例，等待该实例的 `EventType.Repaint`，在完成帧后捕获 EditorWindow 像素并公开来源元数据。
+- 证据/复现：`screenshot.sceneView` 与 `screenshot.save(source=sceneView)` 现在等待目标 Repaint；返回 `matchedFullTypeName=UnityEditor.SceneView`、wire instanceId、repaint sequence/timestamps、`includesSceneGui/includesHandles` 和像素可信字段；5 秒未 Repaint 返回结构化超时。
+- 备注：Unity 6000.6.0a2 连续 10 次真实 SceneView 窗口像素捕获均成功，repaint sequence 1..10 单调递增，精确匹配同一 `UnityEditor.SceneView` wire instanceId，且每次均为 `includesSceneGui=true/includesHandles=true/pixelSourceVerified=true/occlusionSensitive=false/degraded=false`。保存型截图也透传完整证据，产物 `Logs/UPilotAcceptance/scene-view-repaint.png`，138483 bytes，SHA256 `a05c296a76f742de385c3e5470953e1876d5af9816fffcdbb1149a15c9b60776`。Camera.Render 仍仅作为明确 degraded fallback，并固定返回 `includesHandles=false/pixelSourceVerified=false`。
+
+### [已完成] Flow 原生菜单/模态弹窗动作增加可取消超时与自动关闭
 
 - 发现时间：2026-08-14
 - 来源任务/测试：Flow 全量 EditMode 运行到 `UPilotFlowBoundaryTests.ClickAction_WithMenuItem_FallsBackToDropdownMenu` 时，Unity 主线程停止 pump，网络心跳仍正常。
@@ -34,9 +133,9 @@
 - 影响范围：所有会打开 Unity 原生菜单、对象选择器、文件对话框或其他模态编辑器 UI 的 Flow 动作；在无人值守回归中会冻结整个 Unity 主线程。
 - 建议改进：为菜单/模态动作建立专用 watchdog：动作开始前登记窗口/菜单句柄与取消清理器，由 Bridge 后台线程监控 deadline；超时或 stop 时优先调用可用的 Unity 关闭入口，必要时使用受控的窗口消息/Escape 关闭精确 Unity 窗口。状态返回 `waiting_for_modal_ui`、modal owner/type/deadline 与实际恢复来源，且禁止默认走 Unity 重启。
 - 证据/复现：runGuid `ad2f3dc8-415c-41b5-9c5c-1e6652cb83b4` 在该测试停留约 40 秒；`unity_hang_status` 显示 `mainThreadUnresponsive=true`、CPU 0、networkHeartbeatAgeMs=0。mini dump：`Tests~/UPilotTest/log/UPilotDiagnostics/UPilotFlow_MenuItem_Hang_20260814.dmp`，3,023,672 bytes，SHA256 `b73b0e1a405c8610fd3d21ce130fbd4d7577e472024e4499bfb8410420a29102`。向 Unity PID 107340 的主窗口发送一次 Escape 后，主线程立即恢复并继续后续测试。
-- 备注：恢复动作必须绑定已验证的 Unity PID/窗口句柄，记录是否降级到 OS 输入；不可按标题模糊选择其他应用窗口。
+- 备注：已实现 `UPilotFlowModalWatchdog`，菜单/弹窗动作登记 modal owner/type/deadline，超时后绑定 Unity PID/HWND 恢复并记录来源；执行注册表公开 `waitingForModalUi`、recovery 和 cleanup 状态。
 
-### [待处理] UPilot Test Runner 保存 run GUID 并提供 status/cancel/force-reset 能力
+### [已完成] UPilot Test Runner 保存 run GUID 并提供 status/cancel/force-reset 能力
 
 - 发现时间：2026-08-14
 - 来源任务/测试：UPilot Flow EditMode 全量验收中，测试进入 headed failure pause 后无法结束，脚本编译长期停在 queued，最终只能重启 Unity 清理 Test Runner 作业。
@@ -44,9 +143,9 @@
 - 影响范围：任何 EditMode/PlayMode 长测试、UnityTest、EditorWindow 测试或意外进入等待态的验收流程；会阻塞 Domain Reload、后续编译及其他测试运行。
 - 建议改进：保存 `Execute` 返回的 run GUID，并将测试运行接入统一 operation 体系；新增 `unity_test_status`（runGuid、currentTest、stage、progress、lastProgressAt、cancelRequested）、`unity_test_cancel`（调用官方 CancelTestRun）和仅用于残留状态修复的 `unity_test_force_reset`。取消后必须等待 `RunFinished` 或明确的清理终态，不能仅把内存标记改成 aborted。
 - 证据/复现：本次 `HeadedFailurePolicyPause_ActuallyPausesController` 与非交互测试误用 `Headed=true/DebugOnFailure=true` 后均进入无限等待；`unity_safe_compile_and_wait` 只能看到 compile queued，现有 MCP 没有测试取消入口。
-- 备注：force-reset 应是分级停止的最后一级，正常路径优先使用 Unity Test Framework 官方 cancel API，避免重启 Editor。
+- 备注：已实现 `unity_test_status/cancel/force_cleanup/force_reset`、官方 `CancelTestRun(runGuid)` 与分级清理；2026-08-17 进一步加入 `Library/UPilot/TestRuns` 持久化、Domain Reload 回调重挂接和 `unity_test_results(runGuid=...)` 重连查询。
 
-### [待处理] 建立 Flow 全入口共享的活动执行注册表与可停止业务句柄
+### [已完成] 建立 Flow 全入口共享的活动执行注册表与可停止业务句柄
 
 - 发现时间：2026-08-14
 - 来源任务/测试：UPilot Flow Sample/Fixture 直接调用 `TestRunner.RunAsync` 时发生 failure-pause，现有 `upilot_flow.cancel/force_reset` 无法定位该运行。
@@ -54,9 +153,9 @@
 - 影响范围：所有非 MCP 入口的 Flow 运行；发生暂停、步骤等待、窗口交互异常或调用方丢失 Task 时无法通过 UPilot/Flow 停止业务。
 - 建议改进：在 Flow Scheduler/TestRunner 核心层建立与入口无关的 `UPilotFlowExecutionRegistry`，每次运行统一登记 executionId、source、RuntimeController、Task、当前 case/step、phase、lastProgressAt 和清理句柄；MCP/UI/CLI/Fixture 只作为注册表的客户端。提供 list/status/pause/resume/stop/cancel/force-cleanup，并允许按 executionId 精确操作。
 - 证据/复现：本次直接 `new TestRunner().RunAsync(...)` 进入 `RuntimeController.WaitIfPausedAsync()`；MCP service 的 `_activeContext` 为空，现有 `upilot_flow.cancel` 和 `force_reset` 无法触达该 controller。
-- 备注：注册表应在 Domain Reload 前持久化最小诊断快照，Reload 后把失去运行 Task 的记录标记为 orphaned 并执行幂等清理。
+- 备注：已实现 `UPilotFlowExecutionRegistry`，Scheduler、ExecutionService、MCP、Headed、Fixture/直接 API 共用 executionId、controller、进度、资源和分级停止状态，并提供 list/status/pause/resume/stop/force-cleanup。
 
-### [待处理] Flow headed failure pause 增加所有权、超时与自动收敛策略
+### [已完成] Flow headed failure pause 增加所有权、超时与自动收敛策略
 
 - 发现时间：2026-08-14
 - 来源任务/测试：Flow 自动化测试沿用 `TestOptions.Headed=true/DebugOnFailure=true`，步骤失败后无限等待 Resume，造成测试套件挂起。
@@ -64,9 +163,9 @@
 - 影响范围：CI、agent 验收、批量 YAML、Unity Test Runner 及任何无人值守运行；一次预期外失败即可阻塞整个 Editor。
 - 建议改进：为 pause 增加 `ownerId/reason/pausedAt/deadline/policy`；仅在确认存在可操作 owner 时允许交互暂停。自动化来源默认 `Headed=false/DebugOnFailure=false`，或使用 `pauseTimeoutMs`，超时后按配置 auto-resume/auto-abort；status 必须返回明确 `waiting_for_resume` 与可执行 nextAction。
 - 证据/复现：本次测试把 Resume 放在 Task 完成回调中，形成等待环；另一个非交互测试失败后也因默认 headed/debug 设置进入无限暂停。
-- 备注：专门验证暂停功能的测试应先等待 `IsPausedForFailure`，断言后 Resume，再等待 Task 完成，并有有限 deadline。
+- 备注：已实现 pause owner/reason/deadline/policy，无 owner 的自动化运行采用有限 pauseTimeout 与 auto-resume/auto-abort；状态返回 `waiting_for_resume` 及可执行恢复信息。
 
-### [待处理] 统一 UPilot/Flow 分级停止协议，终态以业务清理完成为准
+### [已完成] 统一 UPilot/Flow 分级停止协议，终态以业务清理完成为准
 
 - 发现时间：2026-08-14
 - 来源任务/测试：评审现有 `upilot_flow.cancel` 与 `upilot_flow.force_reset` 在卡死恢复中的适用性。
@@ -74,7 +173,7 @@
 - 影响范围：Flow MCP 长运行、取消后立即重跑、Domain Reload、窗口/输入生命周期及报告完整性。
 - 建议改进：采用四级协议：`cancel_requested`（CancellationToken）→ `stopping`（RuntimeController.Stop）→ `cleanup`（主线程 Dispose/关闭窗口/释放输入）→ `aborted` 终态；每级有 grace timeout、时间戳和 cleanup acknowledgements。超时才进入 `force_cleanup`，且仍需返回未清理资源、orphan 句柄和证据。统一由 `unity_operation_cancel/status` 路由到 test/flow/build 等领域实现。
 - 证据/复现：`UPilotFlowMcpService.HandleCancelAsync` 在请求时立即清空 `_activeContext/_activeExecutionId/_isRunning` 并标记 aborted；`ExecuteRunAsync` 仍可能在 finally 中继续运行。
-- 备注：禁止把“已发送 cancel”报告为“业务已停止”；只有 Task 终止且清理完成才进入 terminal。
+- 备注：Test Runner 与 Flow 均已实现 `cancel_requested -> stopping -> cleanup -> terminal`，公开 cleanupPending/unresolvedResources/cleanupErrors；force cleanup 不再提前释放活动槽或伪造终态。
 
 ### [已完成] unity_test_run 缺少类/命名空间正则筛选，难以隔离挂起用例
 

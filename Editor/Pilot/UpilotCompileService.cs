@@ -31,8 +31,11 @@ namespace CodingRiver.UPilot
         private TaskCompletionSource<bool> _compileTcs;
 
         public bool IsCompiling { get; private set; }
+        public string Status { get; private set; } = "idle";
+        public string Phase { get; private set; } = "idle";
         public long CompileStartedAt { get; private set; }
         public long CompileFinishedAt { get; private set; }
+        public long LastProgressAt { get; private set; }
         public int LastErrorCount => _lastErrors.Count;
         public bool HasCompileErrors { get; private set; }
         public bool IsRequestCompileActive { get; private set; }
@@ -48,6 +51,9 @@ namespace CodingRiver.UPilot
 
             // Restore persistent errors after domain reload
             TryRestoreFromDisk();
+            // AssemblyReloadEvents subscriptions do not survive into the new AppDomain.
+            // Normalize a restored reload snapshot during construction as the reliable path.
+            MarkVerifyingAfterReload();
         }
 
         /// <summary>
@@ -61,7 +67,13 @@ namespace CodingRiver.UPilot
                 var payload = new CompileErrorsPayload
                 {
                     requestId = _lastRequestId,
+                    status = Status,
+                    phase = Phase,
                     total = _lastErrors.Count,
+                    warningCount = _lastWarningCount,
+                    startedAt = CompileStartedAt,
+                    finishedAt = CompileFinishedAt,
+                    lastProgressAt = LastProgressAt,
                     errors = new List<CompileErrorItemPayload>(_lastErrors),
                 };
                 var json = JsonUtility.ToJson(payload, true);
@@ -90,6 +102,20 @@ namespace CodingRiver.UPilot
                     return;
 
                 _lastRequestId = payload.requestId ?? string.Empty;
+                Status = string.IsNullOrEmpty(payload.status) ? "finished" : payload.status;
+                Phase = string.IsNullOrEmpty(payload.phase)
+                    ? (payload.total > 0 ? "failed" : "completed")
+                    : payload.phase;
+                IsCompiling = string.Equals(Phase, "queued", StringComparison.OrdinalIgnoreCase) ||
+                              string.Equals(Phase, "compiling", StringComparison.OrdinalIgnoreCase) ||
+                              string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase);
+                IsRequestCompileActive = IsCompiling && !string.IsNullOrEmpty(_lastRequestId);
+                _lastWarningCount = payload.warningCount;
+                CompileStartedAt = payload.startedAt;
+                CompileFinishedAt = payload.finishedAt;
+                LastProgressAt = payload.lastProgressAt > 0
+                    ? payload.lastProgressAt
+                    : Math.Max(CompileStartedAt, CompileFinishedAt);
                 _lastErrors.Clear();
                 if (payload.errors != null)
                     _lastErrors.AddRange(payload.errors);
@@ -160,6 +186,11 @@ namespace CodingRiver.UPilot
             _lastRequestId = requestId;
             IsCompiling = true;
             IsRequestCompileActive = true;
+            Status = "queued";
+            Phase = "queued";
+            LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            CompileStartedAt = 0;
+            CompileFinishedAt = 0;
             _compileTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Clear previous persistent errors when starting a new compile
@@ -182,10 +213,13 @@ namespace CodingRiver.UPilot
         private void OnCompilationStarted(object _)
         {
             IsCompiling = true;
+            Status = "compiling";
+            Phase = "compiling";
             _lastErrors.Clear();
             _lastWarningCount = 0;
             HasCompileErrors = false;
             CompileStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            LastProgressAt = CompileStartedAt;
             CompileFinishedAt = 0;
             Logger.Log("COMPILE", "编译流水线开始");
         }
@@ -198,6 +232,9 @@ namespace CodingRiver.UPilot
             IsCompiling = false;
             IsRequestCompileActive = false;
             CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            LastProgressAt = CompileFinishedAt;
+            Status = "failed";
+            Phase = "failed";
             _compileTcs?.TrySetResult(false);
             Logger.LogWarning("COMPILE", $"清理编译忙状态: {reason}");
         }
@@ -235,8 +272,11 @@ namespace CodingRiver.UPilot
         private void OnCompilationFinished(object _)
         {
             CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            LastProgressAt = CompileFinishedAt;
             IsCompiling = false;
             IsRequestCompileActive = false;
+            Status = _lastErrors.Count > 0 ? "failed" : "finished";
+            Phase = _lastErrors.Count > 0 ? "failed" : "completed";
             var elapsed = CompileFinishedAt - CompileStartedAt;
             var focus = GetFocusStateString();
             Logger.Log("COMPILE", $"编译流水线完成: requestId={_lastRequestId} errors={_lastErrors.Count} warnings={_lastWarningCount} elapsed={elapsed}ms 焦点={focus}");
@@ -245,6 +285,48 @@ namespace CodingRiver.UPilot
             PersistToDisk();
 
             _compileTcs?.TrySetResult(true);
+        }
+
+        public void MarkDomainReload()
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var recentCompile = CompileFinishedAt > 0 && now - CompileFinishedAt <= 30000;
+            if (!IsCompiling && !IsRequestCompileActive && !recentCompile)
+                return;
+
+            Status = "compiling";
+            Phase = "domain_reload";
+            LastProgressAt = now;
+            PersistToDisk();
+        }
+
+        public void MarkVerifyingAfterReload()
+        {
+            if (!string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            IsCompiling = false;
+            Status = "verifying";
+            Phase = "verifying";
+            LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            PersistToDisk();
+        }
+
+        public void CompleteVerification()
+        {
+            if (!string.Equals(Phase, "verifying", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            IsCompiling = false;
+            IsRequestCompileActive = false;
+            Status = _lastErrors.Count > 0 ? "failed" : "finished";
+            Phase = _lastErrors.Count > 0 ? "failed" : "completed";
+            CompileFinishedAt = CompileFinishedAt > 0
+                ? CompileFinishedAt
+                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            PersistToDisk();
         }
 
         public CompileStatusPayload BuildStartedStatusPayload(string requestId) =>
@@ -273,7 +355,13 @@ namespace CodingRiver.UPilot
             new CompileErrorsPayload
             {
                 requestId = requestId,
+                status = Status,
+                phase = Phase,
                 total = _lastErrors.Count,
+                warningCount = _lastWarningCount,
+                startedAt = CompileStartedAt,
+                finishedAt = CompileFinishedAt,
+                lastProgressAt = LastProgressAt,
                 errors = new List<CompileErrorItemPayload>(_lastErrors),
             };
 

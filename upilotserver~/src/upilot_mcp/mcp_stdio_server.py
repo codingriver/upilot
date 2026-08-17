@@ -581,25 +581,56 @@ async def _unity_is_playmode() -> bool:
 
 
 async def _reject_compile_in_playmode(tool_name: str):
-    if not await _unity_is_playmode():
-        return None
-    return _log_tool_result(
-        tool_name,
-        _payload(
-            fail(
-                new_id("req"),
-                "EDITOR_IN_PLAY_MODE",
-                "Unity 正在 PlayMode 或暂停状态，MCP 不允许触发 Unity 编译。",
-                {
-                    "tool": tool_name,
-                    "status": "blocked",
-                    "blockedReason": "PlayMode",
-                    "playModeBlocked": True,
-                    "nextAction": "Exit PlayMode after user confirmation, then retry the same compile request.",
-                },
-            )
-        ),
+    is_playmode = await _unity_is_playmode()
+    execution = (
+        _facade.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+        if _facade is not None
+        else {}
     )
+    if is_playmode:
+        detail = {
+            **execution,
+            "tool": tool_name,
+            "status": "blocked",
+            "blocked": True,
+            "blockedReason": "PlayMode",
+            "playModeBlocked": True,
+            "nextAction": "Exit PlayMode after user confirmation, then retry the same compile request.",
+        }
+        return _log_tool_result(
+            tool_name,
+            _payload(
+                fail(
+                    new_id("req"),
+                    "EDITOR_IN_PLAY_MODE",
+                    "Unity 正在 PlayMode 或暂停状态，MCP 不允许触发 Unity 编译。",
+                    detail,
+                )
+            ),
+        )
+
+    if _facade is not None and (
+        not execution.get("authoritative")
+        or execution.get("isStale")
+        or execution.get("playModeState") != "edit"
+    ):
+        return _log_tool_result(
+            tool_name,
+            _payload(
+                fail(
+                    new_id("req"),
+                    "EDITOR_CONTEXT_NOT_READY",
+                    "Unity Editor context is stale, unknown, or recovering after Domain Reload.",
+                    {
+                        **execution,
+                        "tool": tool_name,
+                        "status": execution.get("status") or "unknown",
+                        "blocked": True,
+                    },
+                )
+            ),
+        )
+    return None
 
 
 def _reject_write_if_unapproved(tool_name: str):

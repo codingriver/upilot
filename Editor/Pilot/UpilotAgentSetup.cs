@@ -105,8 +105,8 @@ namespace CodingRiver.UPilot
         private const string SkillName = "upilot-unity-mcp";
         private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
-        private const int AgentRulesTemplateVersion = 10;
-        private const int SkillInstallTemplateVersion = 5;
+        private const int AgentRulesTemplateVersion = 12;
+        private const int SkillInstallTemplateVersion = 7;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
@@ -799,7 +799,7 @@ namespace CodingRiver.UPilot
             foreach (var file in files)
             {
                 if (string.Equals(Path.GetFileName(file), SkillInstallMetadataFileName, StringComparison.OrdinalIgnoreCase) ||
-                    file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                    ShouldSkipSkillInstallPath(file))
                     continue;
 
                 var relativePath = file.Substring(target.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
@@ -843,7 +843,7 @@ namespace CodingRiver.UPilot
             Directory.CreateDirectory(target);
             foreach (var file in Directory.GetFiles(source))
             {
-                if (file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                if (ShouldSkipSkillInstallPath(file))
                     continue;
 
                 var dest = Path.Combine(target, Path.GetFileName(file));
@@ -853,9 +853,21 @@ namespace CodingRiver.UPilot
 
             foreach (var dir in Directory.GetDirectories(source))
             {
+                if (ShouldSkipSkillInstallPath(dir))
+                    continue;
+
                 var dest = Path.Combine(target, Path.GetFileName(dir));
                 CopyDirectoryWithoutMeta(dir, dest);
             }
+        }
+
+        private static bool ShouldSkipSkillInstallPath(string path)
+        {
+            var name = Path.GetFileName(path);
+            return string.Equals(name, "__pycache__", StringComparison.OrdinalIgnoreCase) ||
+                   path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) ||
+                   path.EndsWith(".pyc", StringComparison.OrdinalIgnoreCase) ||
+                   path.EndsWith(".pyo", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ResolvePackageRoot()
