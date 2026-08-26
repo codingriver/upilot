@@ -8,7 +8,7 @@
         "Unity.InputSystem.TestFramework",
         "Unity.UI.TestFramework.Runtime",
         "Unity.UI.TestFramework.Editor",
-        "MonoHook"
+        "UPilot.MonoHook.Editor"
     ],
     "includePlatforms": [
         "Editor"

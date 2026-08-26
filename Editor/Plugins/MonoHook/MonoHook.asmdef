@@ -1,5 +1,5 @@
 {
-    "name": "MonoHook",
+    "name": "UPilot.MonoHook.Editor",
     "rootNamespace": "MonoHook",
     "references": [],
     "includePlatforms": [
@@ -9,11 +9,8 @@
     "allowUnsafeCode": true,
     "overrideReferences": false,
     "precompiledReferences": [],
-    "autoReferenced": true,
-    "defineConstraints": [
-        "UNITY_6000_0_OR_NEWER",
-        "UPILOT_ENABLE_FLOW"
-    ],
+    "autoReferenced": false,
+    "defineConstraints": [],
     "versionDefines": [],
     "noEngineReferences": false
 }
