@@ -39,9 +39,21 @@
 1. `P0（已完成）`：统一编译、PlayMode、磁盘同步与 Editor Context 状态契约。这里只处理 Unity Editor 通用生命周期和编译阻塞状态，不包含任何项目 Smoke/入场/关卡逻辑。
 2. `P1（先验收后决定实现）`：Console 查询参数契约、过滤正确性与大体量增量索引性能复测。只使用通用合成日志或脱敏 fixture 建立基准，不依赖 xclient/xclient2 业务日志或测试流程。
 3. `P1 候选（先复现）`：配置 CSV 多行表头与键前缀的通用格式兼容。只接受无业务语义的显式格式参数，并在规范项目 fixture 复现后决定是否实现。
-4. 当前没有其它来自 xclient/xclient2 的 P0/P1 业务条目进入 UPilot 开发清单；外部项目 Bridge、SmokeCase、业务快照、业务 readiness 和业务保存事务全部排除。
+4. `P1（待处理）`：外部轮询可能漏掉短暂出现后消失的项目里程碑；提供带操作身份、时间戳和后续失效原因的通用持久化里程碑证据。
+5. 当前没有其它来自 xclient/xclient2 的 P0/P1 业务条目进入 UPilot 开发清单；外部项目 Bridge、SmokeCase、业务快照、业务 readiness 和业务保存事务全部排除。
 
-### [已完成][P0] 统一编译、PlayMode、磁盘同步与 Editor Context 状态契约
+### [待处理][P1] 瞬态项目里程碑的持久化观测契约
+
+- 发现时间：2026-08-22
+- 来源任务/测试：外部 Unity 项目通过已编译 Bridge 启动流程并由 MCP 轮询终态。
+- 现象/问题：项目 Bridge 可能在一次 MCP 轮询间隔内达到有效里程碑，随后立即进入退出或后续状态；外部轮询只能看到较晚状态，无法证明里程碑曾真实达到，也无法区分其后是否发生了使其失效的失败。
+- 影响范围：所有由外部 MCP 客户端轮询项目编译入口、状态 API 或通用 operation 的短流程验收；问题与具体项目业务语义无关。
+- 建议改进：为 UPilot operation 与项目 Bridge 集成提供事件式或持久化里程碑证据，至少包含里程碑名称、时间戳、operation identity/context，以及后续 failure/exit 是否使该证据失效和对应原因。UPilot 不解释业务里程碑，只负责按通用契约保存和透传。
+- 证据/复现：使用规范项目通用 fixture，在两次状态轮询之间先达到里程碑再离开；当前轮询只能看到离开后的状态，需要项目自行额外保存历史字段才能可靠验收。
+- 验收标准：规范项目 fixture 在两次轮询之间达到并离开里程碑后，operation status 仍能报告该里程碑、达到时间、所属操作，以及任何后续失败是否使其失效；不引入外部项目业务模型或专用工具。
+- 当前状态：待处理。
+
+### [回归待处理][P0] 统一编译、PlayMode、磁盘同步与 Editor Context 状态契约
 
 - 发现时间：2026-08-17（由多个 Unity 项目暴露的通用 Editor 状态问题归并）
 - 来源任务/测试：通用 PlayMode 中落盘同步与编译、Domain Reload 后状态恢复、长编译等待、`unity_ensure_ready` 前置检查；不包含项目业务状态机。
@@ -66,7 +78,11 @@
   5. Agent 规则模板升级为 v12，Skill 安装模板升级为 v7；规则明确只依据统一状态字段决策，不从原始 `isPlaying/isCompiling` 推断 readiness。Skill 管理哈希同时忽略 `__pycache__/.pyc/.pyo`，避免运行校验后误判受控安装被定制。
 - 回归证据：Python 全量 `105 passed`；Skill pack 校验通过；Unity 6000.6.0a2 两轮真实安全编译最终均为 `phase=completed/errorCount=0/warningCount=0`，第二轮在构造期恢复修复后 15.9 秒自然完成；定向 `UPilotCoreTests` 为 `54 total / 52 passed / 2 skipped / 0 failed`。仅重启 MCP Server（未重启 Unity）加载新 Python 后，真实 `unity_mcp_status(forceFresh=true)` 返回 `executionState.status=ready/ready=true/authoritative=true/isStale=false/compilePhase=completed`，并与 `unity_ensure_ready.ready=true` 一致。
 - 最终验收：规范项目 `D:\upilot\Tests~\UPilotTest` 唯一一次完整 EditMode acceptance 为 `332 total / 327 passed / 5 skipped / 0 failed`，`acceptancePassed=true`，编译错误/警告为 0；测试清理完成、活动 Console capture 为 0、Editor 返回权威 EditMode。证据 `Log/UPilotAcceptance/20260817-170917/summary.json`，189051 bytes，SHA256 `1552619d1d47588efe118845ef3a31972e5229731d993b1935ca08135e7c4bde`。
-- 当前状态：已完成。未修改或运行 xclient/xclient2 业务代码、业务 Bridge、SmokeCase 或业务测试。
+- 2026-08-18 回归证据：在 `F:\xclient2`（Unity 2022.3.62f2，UPilot 0.3.27）中文化弹道 Inspector 后，`unity_sync_after_disk_write(triggerCompile=true)` 已附加到活动编译；随后 `unity_safe_compile_and_wait` 在正常 Domain Reload 重连窗口以 `EDITOR_CONTEXT_NOT_READY/UnityDisconnected` 返回失败，响应同时显示 `compileFinishedAt` 已写入且错误/警告为 0。约 3 秒后 `unity_mcp_status(forceFresh=true)` 返回同一编译 `finished/completed/errorCount=0/warningCount=0`，实时 `unity_compile_errors` 为 0。说明安全编译工具仍会把可恢复的 Domain Reload 短暂断连当成终态失败。
+- 2026-08-18 同任务二次回归：继续清理 Tooltip 残留英文后再次触发编译，`unity_safe_compile_and_wait` 仍在正常 Domain Reload 阶段立即返回相同 `EDITOR_CONTEXT_NOT_READY/UnityDisconnected`；响应已包含 `compileFinishedAt` 且错误/警告为 0，约 3 秒后同一编译恢复为权威 `finished/completed`。该缺陷在 Unity 2022.3.62f2 / UPilot 0.3.27 已连续复现两次。
+- 2026-08-18 同项目第三次回归：将 Emitter 子弹引用升级为子节点模板物体后触发编译，`unity_safe_compile_and_wait` 第三次在正常 `domain_reload` 窗口返回相同断连失败；3 秒后同一编译恢复为权威 `finished/completed/errorCount=0/warningCount=0`。连续复现表明该问题会稳定增加每轮 Unity 2022 脚本开发的额外状态查询。
+- 回归验收补充：在 Unity 2022 与 Unity 6 各执行至少 10 轮触发 Domain Reload 的 `unity_sync_after_disk_write -> unity_safe_compile_and_wait`；安全编译调用必须跨 session 重连继续等待，最终直接返回 `completed` 或真实编译失败，不得因正常重载返回 `EDITOR_CONTEXT_NOT_READY`。若等待窗口尚未完成，应返回非终态 `recovering/nextAction`，并保留原 compileRequestId。
+- 当前状态：回归待处理。优先修复 `unity_safe_compile_and_wait` 跨 Domain Reload 的自动重连与等待语义，再在规范项目和 Unity 2022 客户项目复测。
 
 ### [待处理][P1] Console 查询契约与大体量增量索引性能复测及优化
 
@@ -258,3 +274,12 @@
 - 建议改进：远程 UPM 强制显式 tag/branch/commit，本地安装使用 `--use-local-upm`；Python 环境改为 opt-in；所有第三方 AI 配置只生成 `http://127.0.0.1:<httpPort>/mcp`；8765 仅保留为 MCP Server 与 Unity Bridge 的内部端口；诊断识别并拒绝 UPilot command/args/stdio/WebSocket 注册，同时忽略无关 MCP 服务。
 - 证据/复现：旧安装器包含 `DEFAULT_UPM_REF = "v0.2.0"` 与 `--transport stdio --port 8765`；旧 `upilotserver~/mcp.example.json` 和 `deploy/build_release.py` 生成相同的客户端进程配置。
 - 状态：已完成。Python 全量 87/87 通过；Unity 定向 Agent/Skill EditMode 8/8 通过；最终 EditMode 327 total / 322 passed / 5 skipped / 0 failed；编译错误 0。
+### [待处理] 通用 Operation 无法解析 reflection_call 的嵌套业务状态
+
+- 发现时间：2026-08-24
+- 来源任务/测试：`F:\xclient3` KingShotBattle 默认 Automation 验收，通过 `unity_operation_start` 包装 `KingShotBattleAutomationBridge.StartWorkflow/GetWorkflowState`。
+- 现象/问题：`statusCall` 使用 reflection 时，真实业务 JSON 位于 reflection 返回的 `data.result` 字符串内。业务已返回 `status=Succeeded, phase=Complete`，但通用 Operation 仍保留启动时的 `status=Running, phase=OpeningLaunch`；取消后也长期停留在 `Stopping`，无法自动终态和收集产物。
+- 影响范围：所有通过 `unity_reflection_call` 包装项目 Bridge 的测试、构建和业务长作业；会造成错误轮询、假超时、残留 Operation 状态和额外人工清理。
+- 建议改进：为 reflection 类型的 `startCall/statusCall/cancelCall` 自动解析 `data.result` 中的 JSON，或在 jobSpec 增加 `resultPath/statusPath/phasePath/errorPath/artifactsPath` 显式映射；解析后再应用 `terminalStatusMapping`，并允许业务已经终态时立即停止 Console capture 和完成 Operation。
+- 证据/复现：Operation `op-5fb0c7e1-b730-4886-8395-c3b94d8a21f0` 的 `lastStatusData.result` 已包含 `status=Succeeded`、`phase=Complete`、`postObserveSec=0`、`loggingRestored=true` 和报告路径，但 Operation 外层仍显示 `Running/OpeningLaunch`；调用 cancel 后显示 `Stopping` 且不终止。
+- 当前状态：待处理。
