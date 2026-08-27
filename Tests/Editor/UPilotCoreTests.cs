@@ -472,6 +472,11 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("`ready`, `blocked`, `blockedReason`, `authoritative`, `isStale`, and `nextAction`"));
             Assert.That(text, Does.Contain("Do not infer readiness from raw `isPlaying` or `isCompiling`"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
+            Assert.That(text, Does.Contain("Optional MonoHook Tracing"));
+            Assert.That(text, Does.Contain("All hook points, per-point stack capture, and Console output default to disabled"));
+            Assert.That(text, Does.Contain("saves without applying by default"));
+            Assert.That(text, Does.Contain("Do not use Native, InternalCall, injected"));
+            Assert.That(text, Does.Contain("restore the original configuration"));
             Assert.That(text, Does.Contain("project-provided bridge entry points"));
             Assert.That(text, Does.Contain("waitWindowElapsed=true/terminal=false"));
             Assert.That(text, Does.Contain("unity_console_capture_start"));

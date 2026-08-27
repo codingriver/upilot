@@ -57,6 +57,14 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Compile only after C# or assembly-related changes. Do not compile again when no code changed.
 - After compilation, read structured compile errors and relevant Console errors before editing again.
 
+## Optional MonoHook Tracing
+
+- MonoHook Tracing is optional and manually controlled. All hook points, per-point stack capture, and Console output default to disabled.
+- Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
+- `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
+- Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
+- Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
+
 ## Long Operations
 
 - Before starting a hand-authored generic operation, call `unity_operation_validate(jobSpec)` and fix its structured field errors; validation must not start PlayMode or business work.

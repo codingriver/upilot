@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server, including setup, compile and Console diagnostics, scenes, assets, tests, builds, screenshots, reflection entry points, and long-task monitoring.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server, including setup, compile and Console diagnostics, optional MonoHook tracing, scenes, assets, tests, builds, screenshots, reflection entry points, and long-task monitoring.
 ---
 
 # UPilot Unity MCP

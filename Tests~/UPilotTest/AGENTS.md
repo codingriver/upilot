@@ -41,7 +41,7 @@ UPilot Agent 规则模板和配套 Skills 都是 UPilot 产品体验的一部分
 ## 规则模板与 Skill 主源
 
 - Agent 规则模板主源：`../../skills/upilot-unity-mcp/AGENTS.md.template`。
-- 规则生成与安装逻辑：`../../Editor/Pilot/UPilotAgentSetup.cs`。
+- 规则生成与安装逻辑：`../../Editor/Core/UPilotAgentSetup.cs`。
 - UPilot Skill 主源：`../../skills/upilot-unity-mcp/`。
 - 仓库级 Skill 发现入口：`../../.agents/skills/upilot-unity-mcp/`。
 - 本项目 `.agents/skills/upilot-unity-mcp/` 是安装和兼容性验证副本，不是长期维护的唯一主源。
@@ -55,7 +55,7 @@ UPilot Agent 规则模板和配套 Skills 都是 UPilot 产品体验的一部分
 2. 先复现并定位问题属于包实现、测试、规则模板、Skill 还是项目集成，不盲目增加重试或重启 Unity。
 3. 优先修复可复用的根因，并补充针对性测试；已通过的测试不重复运行。
 4. C# 或程序集相关修改完成后执行一次安全编译，处理结构化编译错误后再继续。
-5. 针对性测试全部通过后，最后只运行一次完整 EditMode 回归作为最终验收。
+5. 针对性测试全部通过后，默认停止；只有用户明确要求全量、完整回归、整套验收或语义等价的 whole-suite 验证时，才运行一次完整 EditMode 回归。
 6. 长任务必须轮询到终态；取消、停止和清理必须以业务真正结束、资源释放完成为准，不能把“已发送取消请求”当作完成。
 7. Unity 疑似卡死时先采集状态和诊断证据，优先通过 UPilot 或业务停止能力恢复；重启 Unity 只能作为有证据、有说明的最后手段。
 8. 最终报告应区分编译结果、测试结果、条件跳过、已知限制、产物路径、截图来源、哈希和未完成项。
@@ -65,7 +65,7 @@ UPilot Agent 规则模板和配套 Skills 都是 UPilot 产品体验的一部分
 一次 UPilot 改动只有同时满足以下条件才可以报告完成：
 
 - 根因已在正确的主源中修复，没有只依赖测试项目临时绕过。
-- 相关针对性测试通过，最终完整 EditMode 回归通过，且没有重复运行已经通过的用例。
+- 相关针对性测试通过；完整 EditMode 回归仅在用户明确要求时作为附加验收，且不得重复运行已经通过的用例。
 - 编译错误为零；与任务相关的 Console 错误、活动操作、活动采集和未清理资源已处理或明确说明。
 - 测试中暴露的通用 Agent 使用问题已评估是否需要更新规则模板和 Skills；需要更新时应在同一任务中完成，或写入 `TODO_UPilot.mcd`。
 - 规则模板或 Skill 有变化时，生成、安装、版本、同步和校验流程已经验证。
@@ -76,10 +76,10 @@ UPilot Agent 规则模板和配套 Skills 都是 UPilot 产品体验的一部分
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 12
-upilotPackageVersion: 0.3.26
+rulesVersion: 13
+upilotPackageVersion: 0.3.27
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-08-17T09:14:04Z
+generatedAt: 2026-08-27T06:44:41Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -132,6 +132,14 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Use `unity_compile_wait` plus `unity_compile_errors` only when observing a compile that must not be triggered or attached through the safe workflow; `unity_compile_errors_get` is a compatibility alias.
 - Compile only after C# or assembly-related changes. Do not compile again when no code changed.
 - After compilation, read structured compile errors and relevant Console errors before editing again.
+
+## Optional MonoHook Tracing
+
+- MonoHook Tracing is optional and manually controlled. All hook points, per-point stack capture, and Console output default to disabled.
+- Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
+- `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
+- Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
+- Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
 
 ## Long Operations
 

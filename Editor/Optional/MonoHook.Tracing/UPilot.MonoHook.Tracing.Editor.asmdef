@@ -1,0 +1,21 @@
+{
+    "name": "UPilot.MonoHook.Tracing.Editor",
+    "rootNamespace": "CodingRiver.UPilot",
+    "references": [
+        "UPilot.MonoHook.Editor",
+        "UPilot.MonoHook.Tracing.Contracts.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "!UPILOT_DISABLE_MONOHOOK_TRACING"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

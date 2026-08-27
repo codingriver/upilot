@@ -81,6 +81,7 @@
 - 2026-08-18 回归证据：在 `F:\xclient2`（Unity 2022.3.62f2，UPilot 0.3.27）中文化弹道 Inspector 后，`unity_sync_after_disk_write(triggerCompile=true)` 已附加到活动编译；随后 `unity_safe_compile_and_wait` 在正常 Domain Reload 重连窗口以 `EDITOR_CONTEXT_NOT_READY/UnityDisconnected` 返回失败，响应同时显示 `compileFinishedAt` 已写入且错误/警告为 0。约 3 秒后 `unity_mcp_status(forceFresh=true)` 返回同一编译 `finished/completed/errorCount=0/warningCount=0`，实时 `unity_compile_errors` 为 0。说明安全编译工具仍会把可恢复的 Domain Reload 短暂断连当成终态失败。
 - 2026-08-18 同任务二次回归：继续清理 Tooltip 残留英文后再次触发编译，`unity_safe_compile_and_wait` 仍在正常 Domain Reload 阶段立即返回相同 `EDITOR_CONTEXT_NOT_READY/UnityDisconnected`；响应已包含 `compileFinishedAt` 且错误/警告为 0，约 3 秒后同一编译恢复为权威 `finished/completed`。该缺陷在 Unity 2022.3.62f2 / UPilot 0.3.27 已连续复现两次。
 - 2026-08-18 同项目第三次回归：将 Emitter 子弹引用升级为子节点模板物体后触发编译，`unity_safe_compile_and_wait` 第三次在正常 `domain_reload` 窗口返回相同断连失败；3 秒后同一编译恢复为权威 `finished/completed/errorCount=0/warningCount=0`。连续复现表明该问题会稳定增加每轮 Unity 2022 脚本开发的额外状态查询。
+- 2026-08-26 Unity 6 回归补充：MonoHook.Tracing P1 在规范项目连续三轮脚本编译中，`unity_safe_compile_and_wait` 均在正常 `domain_reload` 窗口返回 `EDITOR_CONTEXT_NOT_READY/UnityDisconnected`；每轮随后通过 `unity_mcp_status(forceFresh=true)` 恢复到同一编译的 `finished/completed/errorCount=0/warningCount=0`。说明该缺陷也稳定存在于 Unity 6000.6.0a2，并非 Unity 2022 特有。
 - 回归验收补充：在 Unity 2022 与 Unity 6 各执行至少 10 轮触发 Domain Reload 的 `unity_sync_after_disk_write -> unity_safe_compile_and_wait`；安全编译调用必须跨 session 重连继续等待，最终直接返回 `completed` 或真实编译失败，不得因正常重载返回 `EDITOR_CONTEXT_NOT_READY`。若等待窗口尚未完成，应返回非终态 `recovering/nextAction`，并保留原 compileRequestId。
 - 当前状态：回归待处理。优先修复 `unity_safe_compile_and_wait` 跨 Domain Reload 的自动重连与等待语义，再在规范项目和 Unity 2022 客户项目复测。
 
@@ -118,7 +119,7 @@
 - 现象/问题：动态 TestRunner callback 和内存结果随 Domain Reload 丢失，完成状态无法作为验收证据。
 - 影响范围：所有进入/退出 PlayMode 的 Unity Test Framework 运行。
 - 建议改进：持久化 runGuid、进度与叶子结果；Reload 后重挂 callback；按 runGuid 查询历史终态。
-- 证据/复现：实现位于 `Editor/Pilot/UPilotTestService.cs`；快照写入 `Library/UPilot/TestRuns/<runGuid>.json`，活动/最近指针分离；`unity_test_results(runGuid=...)` 可在 MCP 重连后精确读取且不会串线。
+- 证据/复现：实现位于 `Editor/Core/UPilotTestService.cs`；快照写入 `Library/UPilot/TestRuns/<runGuid>.json`，活动/最近指针分离；`unity_test_results(runGuid=...)` 可在 MCP 重连后精确读取且不会串线。
 - 备注：Unity 6000.6.0a2 真实 PlayMode 回归通过：`IntegrationTests.Integration_CanSendAndReceiveEvents` 的原 runGuid `fb16e615-8347-44c6-b853-f14eb0b06dae` 在 Domain Reload 与 MCP session 从 `a88ffe2f412249f18dd21fd406a9a0f2` 切换到 `53d2b1d7e9fe4f9fa55a2334162e4c39` 后仍返回 `completed`、`total=1/passed=1`。恢复监听在 Editor assembly 初始化期注册，短测试不会早于 MCP 服务构造而丢失终态；无法恢复的残留运行仍明确归因为 `orphaned_after_reload`，不伪造通过。
 
 ### [已完成] 通用长作业 jobSpec 只读预校验
@@ -283,3 +284,45 @@
 - 建议改进：为 reflection 类型的 `startCall/statusCall/cancelCall` 自动解析 `data.result` 中的 JSON，或在 jobSpec 增加 `resultPath/statusPath/phasePath/errorPath/artifactsPath` 显式映射；解析后再应用 `terminalStatusMapping`，并允许业务已经终态时立即停止 Console capture 和完成 Operation。
 - 证据/复现：Operation `op-5fb0c7e1-b730-4886-8395-c3b94d8a21f0` 的 `lastStatusData.result` 已包含 `status=Succeeded`、`phase=Complete`、`postObserveSec=0`、`loggingRestored=true` 和报告路径，但 Operation 外层仍显示 `Running/OpeningLaunch`；调用 cancel 后显示 `Stopping` 且不终止。
 - 当前状态：待处理。
+
+### [已完成] Agent 默认误触发全量 EditMode 测试
+
+- 发现时间：2026-08-26
+- 来源任务/测试：MonoHook 手动点位管理第一期开发，使用 `D:\upilot\Tests~\UPilotTest` 验证新增 Editor C# 代码。
+- 现象/问题：针对性测试已经通过后，Agent 未收到全量测试要求仍尝试启动整套 EditMode；现有 `Example_AllYamlCasesInDirectory_RunSuccessfully` 长时间无进度，触发额外等待、取消和清理，且与本次改动无直接覆盖关系。
+- 影响范围：Unity Editor 验收耗时、测试 Runner 清理风险、上下文轮询成本，以及用户对“是否卡死”的判断。
+- 改进结果：已更新仓库级 `AGENTS.md` 和 `Tests~/UPilotTest/AGENTS.md`：默认只运行覆盖变更代码的最窄针对性测试；只有用户明确要求全量/完整回归/整套验收时才启动全量 EditMode。
+- 证据：本次 MonoHook 定向测试 `CodingRiver.UPilot.Tests` 共 65 项，63 通过、2 条条件跳过、0 失败；此前一次无明确授权的全量运行在 `Example_AllYamlCasesInDirectory_RunSuccessfully` 处无进度并被取消清理。
+- 当前状态：已完成。
+
+### [已完成] MonoHook 生命周期安装产生大量短方法警告
+
+- 发现时间：2026-08-26
+- 来源任务/测试：MonoHook P0 定向集成测试 `UPilotMonoHookIntegrationTests`，runGuid `20480dd4-de02-4986-b4d8-b82f3f555a0a`。
+- 现象/问题：生命周期点位会扫描并尝试安装所有已加载 MonoBehaviour 的 Awake/OnEnable/OnDestroy 等方法；MonoHook 对方法体过短的目标逐条输出 `method body is too short` 警告，包括 UIBehaviour、NavMeshModifier 和测试 Probe，单次测试会产生大量重复 Console 消息。
+- 影响范围：MonoHook 手动点位安装、Console 可读性、诊断信噪比；MonoHook 警告还提示这些目标在 IL2CPP Release 下可能存在随机崩溃风险。
+- 建议改进：安装前增加可 Hook 性预检并跳过明确不安全的短方法；将跳过结果按点位聚合显示数量和少量样例，不逐个刷 Console；点位状态应能表达“部分覆盖”。
+- 证据：窗口验收时 Console 汇总包含大量来自 `UPilotMonoHookInstallationService.InstallLifecycle` -> `MonoHook.MethodHook.CheckMethod` 的重复 Warning；本次定向测试本身为 2/2 通过。
+- 改进结果：`UPilot.MonoHook.Tracing.Editor` 在创建 `MethodHook` 前统一检查抽象、泛型、InternalCall 与托管 IL 长度；生命周期、Transform、Instantiate 和 Destroy 会跳过明确不安全的短方法，并通过 `UPilotMonoHookCoverage` 聚合候选、安装、跳过、失败数量和最多 5 条样例。窗口新增“部分覆盖”状态与悬停详情，不再为每个短目标调用底层安装器。
+- 回归证据：独立 `UPilot.MonoHook.Tracing.Editor.Tests` 定向测试共 20 项通过；最终再次运行 `UPilotMonoHookIntegrationTests` 为 3/3 通过。测试前记录 Console cursor，运行后按 `method body is too short` 读取增量 Warning 为 0。
+- 当前状态：已完成。
+
+### [已完成] MonoHook Tracing P1 手动范围、诊断、兼容与稳定性收口
+
+- 发现时间：2026-08-26
+- 来源任务/测试：`UPilot.MonoHook.Tracing.Editor` P1 开发与 Unity 6000.6.0a2 / 2022.3.62f2 双版本验收。
+- 现象/问题：P0 缺少生命周期目标范围过滤、覆盖诊断导出、独立点位条件跳过、可导入自定义 Provider 示例、真实 Domain Reload 恢复及长时间稳定性证据；部分 Unity 2022 API 是 `InternalCall`，旧探测会在实际安装阶段才失败。
+- 改进结果：新增 assembly/namespace/type 包含与排除通配符、范围变化自动重装、逐点 JSONL 诊断、自定义 Provider Sample、独立点位测试、20 轮安装/卸载与 5000 事件有界缓冲测试；所有内置目标统一在安装前拒绝 InternalCall/不安全托管入口。设置补充 `FilePath` 持久化，自动恢复改为 Editor ready 后的一次性 update 回调。
+- Unity 6 证据：MonoHook 定向测试 34 项，33 通过、1 条条件跳过、0 失败；`Behaviour.enabled` 可安全安装并捕获事件，`GameObject.AddComponent(Type)` 因 8-byte 短方法明确跳过。真实 Domain Reload 后 `SetActive` 自动恢复，`installed=true/capturedEvents=1`。
+- Unity 2022.3 证据：独立最小工程包编译成功；MonoHook 测试程序集 34 项，29 通过、5 条条件跳过、0 失败。5 条跳过均明确归因于该版本的 InternalCall 入口；导入后的自定义 Provider Sample 单独编译成功。
+- 当前状态：已完成。调用堆栈、MCP 控制、独立 Contracts 程序集、编译宏、Update 系列点位和 Native/Injected Hook 仍按既定范围延后，不属于 P1 未完成项。
+
+### [待处理] Skill 安装脚本会破坏 Editor 受管元数据并改写本地 UPM 引用
+
+- 发现时间：2026-08-27
+- 来源任务/测试：同步 MonoHook Tracing Skill 主源到 `Tests~/UPilotTest/.agents/skills/upilot-unity-mcp`。
+- 现象/问题：执行 `install_upilot.py --use-local-upm --install-skill repo --force` 会删除已有 `.upilot-install.json`，且把测试项目原有的相对引用 `file:../../..` 改成绝对路径 `file:D:/upilot`；Windows 下还会把 `manifest.json` 换行整体改为 CRLF。`--dry-run` 展示最终 manifest，但没有突出这些非必要差异，也不会生成 Editor 管理所需的 Skill 模板版本和内容哈希。
+- 影响范围：仓库内标准测试项目的 Skill 同步、受管 Skill 自动升级检测、dirty worktree 噪声，以及本地 UPM 配置的可移植性。
+- 建议改进：为安装脚本增加仅同步 Skill 的窄模式；保留已有等价本地 UPM 引用和原文件换行；同步受管副本时复用与 `UPilotAgentSetup` 相同的跳过规则、内容哈希和 `.upilot-install.json` 写入逻辑；dry-run 明确列出将变化的字段和元数据处理。
+- 证据/复现：本次 dry-run/执行后 `.upilot-install.json` 被删除，`Packages/manifest.json` 出现 57 行删除/57 行新增及相对路径变绝对路径；随后通过已编译入口 `UPilotAgentSetup.UpdateAllAgentRules(true)` 才恢复模板版本 8 和内容哈希。
+- 当前状态：待处理。本任务已恢复原 manifest，并使用正式 Editor 入口生成受管 Skill 副本；未扩展修改安装器。

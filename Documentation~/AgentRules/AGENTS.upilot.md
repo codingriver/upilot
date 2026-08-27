@@ -1,6 +1,6 @@
 # UPilot Unity MCP Agent Rules Template
 
-rulesVersion: 12
+rulesVersion: 13
 upilotPackageVersion: 0.3.26
 
 This template is the generic UPilot rule source for Unity projects that install
@@ -55,6 +55,14 @@ controlled UPilot block take precedence over these generic rules.
 - Use `unity_compile_wait` plus `unity_compile_errors` only when observing a compile that must not be triggered or attached through the safe workflow; `unity_compile_errors_get` is a compatibility alias.
 - Compile only after C# or assembly-related changes. Do not compile again when no code changed.
 - After compilation, read structured compile errors and relevant Console errors before editing again.
+
+## Optional MonoHook Tracing
+
+- MonoHook Tracing is optional and manually controlled. All hook points, per-point stack capture, and Console output default to disabled.
+- Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
+- `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
+- Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
+- Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
 
 ## Long Operations
 

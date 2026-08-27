@@ -674,6 +674,7 @@ from .mcp_tools import test_tools as _test_tools
 from .mcp_tools import build_tools as _build_tools
 from .mcp_tools import analysis_tools as _analysis_tools
 from .mcp_tools import flow_tools as _flow_tools
+from .mcp_tools import monohook_tools as _monohook_tools
 
 
 

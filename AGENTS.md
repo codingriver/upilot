@@ -14,6 +14,9 @@
 
 - Use `./Tests~/UPilotTest` as the default and canonical Unity project for UPilot package compile and EditMode acceptance.
 - After UPilot C# or assembly-related changes, validate against `./Tests~/UPilotTest` before claiming Unity compile/EditMode acceptance, unless the user explicitly says not to run tests.
+- Do not attempt a full EditMode suite by default. Unless the user explicitly requests a full/complete EditMode regression, run only the narrowest targeted tests that cover the changed code and its direct regressions.
+- A full EditMode run is authorized only when the user explicitly asks for full, complete, regression, acceptance, or equivalent whole-suite validation; otherwise report targeted results and any unrun coverage.
+- If a full-suite run is not explicitly authorized, do not start it speculatively after targeted tests pass, even when preparing a final handoff.
 - Do not use external client projects such as `D:\MA\xclient` or `F:\xclient2` as default UPilot validation projects.
 - Use external client projects only when the user explicitly requests project-side/business smoke validation or investigation.
 

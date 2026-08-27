@@ -12,6 +12,13 @@
   "changelogUrl": "https://github.com/codingriver/upilot/blob/main/CHANGELOG.md",
   "licensesUrl": "https://github.com/codingriver/upilot/blob/main/LICENSE.md",
   "dependencies": {},
+  "samples": [
+    {
+      "displayName": "MonoHook Tracing Custom Provider",
+      "description": "A minimal attribute-discovered custom MonoHook point that remains disabled until manually enabled.",
+      "path": "Samples~/MonoHookTracing"
+    }
+  ],
   "keywords": [
     "upilot",
     "unity",

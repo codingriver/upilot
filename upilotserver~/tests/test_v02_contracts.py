@@ -1049,6 +1049,42 @@ def test_test_and_flow_cancellation_tools_are_registered() -> None:
     }.issubset(names)
 
 
+def test_monohook_tracing_tools_are_registered_with_safe_defaults() -> None:
+    from upilot_mcp.mcp_tools import monohook_tools  # noqa: F401
+    from upilot_mcp.tool_registry import REGISTRY
+
+    status = REGISTRY.resolve("unity_monohook_tracing_status")
+    configure = REGISTRY.resolve("unity_monohook_tracing_configure")
+    events = REGISTRY.resolve("unity_monohook_tracing_events")
+
+    assert status is not None and status.destructive is False
+    assert configure is not None and configure.destructive is True
+    assert configure.requires_write_access is True
+    assert events is not None and events.destructive is False
+
+
+def test_monohook_tracing_domain_service_forwards_apply_default_false() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            self.calls.append((command, payload, timeout_ms))
+            return ok(request_id, {"ok": True})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    asyncio.run(service.monohook_tracing_configure(point_ids=["lifecycle.update"]))
+
+    command, payload, timeout_ms = service.dispatcher.calls[0]
+    assert command == "monohook.tracing.configure"
+    assert payload["pointIds"] == ["lifecycle.update"]
+    assert payload["apply"] is False
+    assert timeout_ms == 30000
+
+
 def test_test_domain_service_forwards_staged_stop_commands() -> None:
     from upilot_mcp.domain.test_service import TestDomainService
 

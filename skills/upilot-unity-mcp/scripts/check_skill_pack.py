@@ -18,6 +18,7 @@ REQUIRED_FILES = [
     "agents/openai.yaml",
     "references/workflows.md",
     "references/tool-routing.md",
+    "references/monohook-tracing.md",
     "references/client-configs.md",
     "references/installation.md",
     "references/safety.md",
@@ -29,6 +30,7 @@ REQUIRED_FILES = [
 REQUIRED_SKILL_REFERENCES = [
     "references/workflows.md",
     "references/tool-routing.md",
+    "references/monohook-tracing.md",
     "references/client-configs.md",
     "references/installation.md",
     "references/safety.md",
@@ -111,7 +113,7 @@ def check_repository_consistency() -> None:
         for path in sorted((REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "mcp_tools").glob("*_tools.py"))
     )
     config = (REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "config.py").read_text(encoding="utf-8")
-    agent_setup = (REPO_ROOT / "Editor" / "Pilot" / "UPilotAgentSetup.cs").read_text(encoding="utf-8")
+    agent_setup = (REPO_ROOT / "Editor" / "Core" / "UPilotAgentSetup.cs").read_text(encoding="utf-8")
     task_service = (REPO_ROOT / "upilotserver~" / "src" / "upilot_mcp" / "domain" / "task_service.py").read_text(encoding="utf-8")
     agent_template = (ROOT / "AGENTS.md.template").read_text(encoding="utf-8")
     agent_reference = (REPO_ROOT / "Documentation~" / "AgentRules" / "AGENTS.upilot.md").read_text(encoding="utf-8")
@@ -150,11 +152,13 @@ def check_repository_consistency() -> None:
         "HTTP-only Agent rule": (agent_template, "Third-party AI tools must connect through Streamable HTTP"),
         "internal WebSocket rule": (agent_template, "WebSocket transport is internal to MCP Server <-> Unity Bridge"),
         "HTTP-only Skill rule": (skill, "only third-party AI client transport"),
+        "MonoHook Skill discovery": (skill, "optional MonoHook tracing"),
         "explicit remote UPM ref documentation": (installation, "--upm-ref <STABLE_RELEASE_TAG>"),
         "local UPM documentation": (installation, "--use-local-upm"),
         "HTTP installer config": (installer, "url = {toml_string(f'http://127.0.0.1:{args.http_port}/mcp')}"),
         "explicit remote ref error": (installer, "Remote UPM installation requires --upm-ref"),
         "repository skill entry": (repo_entry, "../../../skills/upilot-unity-mcp/SKILL.md"),
+        "repository MonoHook discovery": (repo_entry, "optional MonoHook tracing"),
     }
     for label, (text, fragment) in required.items():
         if fragment not in text:
@@ -168,6 +172,9 @@ def check_repository_consistency() -> None:
         "unity_task_start",
         "unity_task_status",
         "unity_task_cancel",
+        "unity_monohook_tracing_status",
+        "unity_monohook_tracing_configure",
+        "unity_monohook_tracing_events",
     ):
         if f"def {tool}" not in tool_modules:
             fail(f"core tool is not registered: {tool}")

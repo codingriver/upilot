@@ -533,3 +533,43 @@ class TestDomainService:
             payload,
             timeout_ms=30000,
         )
+
+    async def monohook_tracing_status(self) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"), "monohook.tracing.status", {}, timeout_ms=30000
+        )
+
+    async def monohook_tracing_configure(
+        self,
+        point_ids: list[str] | None = None,
+        enabled: bool = False,
+        update_capture_stack_trace: bool = False,
+        capture_stack_trace: bool = False,
+        set_master_enabled: bool = False,
+        master_enabled: bool = True,
+        apply: bool = False,
+    ) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"),
+            "monohook.tracing.configure",
+            {
+                "pointIds": point_ids or [],
+                "enabled": enabled,
+                "updateCaptureStackTrace": update_capture_stack_trace,
+                "captureStackTrace": capture_stack_trace,
+                "setMasterEnabled": set_master_enabled,
+                "masterEnabled": master_enabled,
+                "apply": apply,
+            },
+            timeout_ms=30000,
+        )
+
+    async def monohook_tracing_events(
+        self, max_count: int = 100, consume: bool = False
+    ) -> ToolResponse:
+        return await self.dispatcher.call(
+            new_id("req"),
+            "monohook.tracing.events",
+            {"maxCount": max_count, "consume": consume},
+            timeout_ms=30000,
+        )
