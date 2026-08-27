@@ -23,10 +23,10 @@ namespace CodingRiver.UPilot
         private bool _showLifecycleScope;
         private string _eventFilter = string.Empty;
 
-        [MenuItem("UPilot/Advanced/MonoHook", false, 215)]
+        [MenuItem("UPilot/Advanced/追踪器", false, 215)]
         public static void ShowWindow()
         {
-            var window = GetWindow<UPilotMonoHookWindow>("UPilot MonoHook");
+            var window = GetWindow<UPilotMonoHookWindow>("UPilot 追踪器");
             window.minSize = new Vector2(520f, 420f);
             window.Show();
         }
@@ -53,9 +53,9 @@ namespace CodingRiver.UPilot
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
 
-            EditorGUILayout.LabelField("MonoHook 打点设置", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("追踪点位设置", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
-                "手动选择需要安装的打点点位。修改配置后点击“应用”才会安装或卸载变化的 Hook。堆栈采集按点位独立开启，默认全部关闭。",
+                "手动选择需要追踪的点位。修改配置后点击“应用”才会安装或移除对应追踪。堆栈采集按点位独立开启，默认全部关闭。",
                 MessageType.Info);
 
             DrawRuntimeOptions(settings);
@@ -79,14 +79,14 @@ namespace CodingRiver.UPilot
             if (GUILayout.Button("卸载全部", EditorStyles.toolbarButton, GUILayout.Width(70f)))
             {
                 _controller.UninstallAll();
-                _status = "已卸载全部 Hook";
+                _status = "已卸载全部追踪点位";
             }
             if (GUILayout.Button("导出诊断", EditorStyles.toolbarButton, GUILayout.Width(70f)))
             {
                 string path = EditorUtility.SaveFilePanel(
-                    "导出 MonoHook 覆盖诊断",
+                    "导出 UPilot 追踪器诊断",
                     string.Empty,
-                    "UPilotMonoHookDiagnostics.jsonl",
+                    "UPilotTraceDiagnostics.jsonl",
                     "jsonl");
                 if (!string.IsNullOrEmpty(path))
                 {
@@ -164,7 +164,7 @@ namespace CodingRiver.UPilot
             if (_showLifecycleScope)
             {
                 EditorGUILayout.HelpBox(
-                    "支持逗号、分号或换行分隔，支持 * 和 ? 通配符；排除规则优先于包含规则。修改后需要重新应用生命周期 Hook。",
+                    "支持逗号、分号或换行分隔，支持 * 和 ? 通配符；排除规则优先于包含规则。修改后需要重新应用生命周期追踪。",
                     MessageType.None);
                 EditorGUI.BeginChangeCheck();
                 settings.lifecycleAssemblyIncludes = EditorGUILayout.TextField("程序集包含", settings.lifecycleAssemblyIncludes);
@@ -189,7 +189,7 @@ namespace CodingRiver.UPilot
                 true);
             EditorGUI.BeginChangeCheck();
             bool logEventsToConsole = EditorGUILayout.ToggleLeft(
-                new GUIContent("输出到 Console", "Hook 事件通过过滤和事件限流后，同步输出格式化日志到 Unity Console。"),
+                new GUIContent("输出到 Console", "追踪事件通过过滤和事件限流后，同步输出格式化日志到 Unity Console。"),
                 settings.logEventsToConsole,
                 GUILayout.Width(115f));
             if (EditorGUI.EndChangeCheck())
@@ -224,9 +224,9 @@ namespace CodingRiver.UPilot
             if (GUILayout.Button("导出", GUILayout.Width(48f)))
             {
                 string path = EditorUtility.SaveFilePanel(
-                    "导出 MonoHook 事件",
+                    "导出追踪事件",
                     string.Empty,
-                    "UPilotMonoHook.jsonl",
+                    "UPilotTrace.jsonl",
                     "jsonl");
                 if (!string.IsNullOrEmpty(path))
                 {
@@ -240,6 +240,8 @@ namespace CodingRiver.UPilot
             foreach (var hookEvent in events)
             {
                 string line = $"#{hookEvent.sequence} F{hookEvent.frame} {hookEvent.kind} {hookEvent.hierarchyPath}";
+                if (!string.IsNullOrEmpty(hookEvent.methodSignature))
+                    line += "  " + hookEvent.methodSignature;
                 if (!string.IsNullOrEmpty(hookEvent.beforeValue) || !string.IsNullOrEmpty(hookEvent.afterValue))
                     line += $"  {hookEvent.beforeValue} -> {hookEvent.afterValue}";
                 if (!string.IsNullOrEmpty(_eventFilter) &&
@@ -284,6 +286,24 @@ namespace CodingRiver.UPilot
                     GUILayout.ExpandWidth(true));
                 if (next != enabled)
                     settings.SetEnabled(definition.Id, next);
+
+                if (_controller.Runtime.TryGetValue(definition.Id, out var overloadState) &&
+                    overloadState.SupportsHookAllSafeOverloads)
+                {
+                    bool hookAllSafeOverloads = settings.ShouldHookAllSafeOverloads(definition.Id);
+                    bool nextHookAllSafeOverloads = EditorGUILayout.ToggleLeft(
+                        new GUIContent(
+                            "全部安全重载",
+                            "默认安装当前 Unity 版本下的推荐安全重载集合；开启后安装所有通过安全检查的公开非泛型重载，包装调用可能产生重复事件。"),
+                        hookAllSafeOverloads,
+                        GUILayout.Width(105f));
+                    if (nextHookAllSafeOverloads != hookAllSafeOverloads)
+                    {
+                        settings.SetHookAllSafeOverloads(definition.Id, nextHookAllSafeOverloads);
+                        settings.SaveSettings();
+                        _controller.RefreshRuntime();
+                    }
+                }
 
                 bool captureStack = settings.ShouldCaptureStackTrace(definition.Id);
                 bool nextCaptureStack = EditorGUILayout.ToggleLeft(

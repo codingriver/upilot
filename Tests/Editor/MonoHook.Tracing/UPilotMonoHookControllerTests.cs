@@ -23,7 +23,11 @@ namespace CodingRiver.UPilot.Tests
             settings.EnsureDefaults();
             _masterEnabled = settings.masterEnabled;
             _points = settings.points
-                .Select(point => new UPilotMonoHookPointState(point.Id, point.Enabled, point.CaptureStackTrace))
+                .Select(point => new UPilotMonoHookPointState(
+                    point.Id,
+                    point.Enabled,
+                    point.CaptureStackTrace,
+                    point.HookAllSafeOverloads))
                 .ToList();
         }
 

@@ -39,7 +39,11 @@ namespace CodingRiver.UPilot.Tests
             _lifecycleTypeIncludes = settings.lifecycleTypeIncludes;
             _lifecycleTypeExcludes = settings.lifecycleTypeExcludes;
             _points = settings.points
-                .Select(point => new UPilotMonoHookPointState(point.Id, point.Enabled, point.CaptureStackTrace))
+                .Select(point => new UPilotMonoHookPointState(
+                    point.Id,
+                    point.Enabled,
+                    point.CaptureStackTrace,
+                    point.HookAllSafeOverloads))
                 .ToList();
             UPilotMonoHookTelemetry.Clear();
         }
@@ -199,6 +203,80 @@ namespace CodingRiver.UPilot.Tests
                 controller.UninstallAll();
                 if (gameObject != null)
                     Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void DestroyImmediateOverloadModeIsAppliedExplicitly()
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            foreach (var point in UPilotMonoHookCatalog.All)
+                settings.SetEnabled(point.Id, false);
+            settings.SetEnabled(UPilotMonoHookPointId.GameObjectDestroy, true);
+            settings.SetHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy, false);
+
+            var controller = new UPilotMonoHookController();
+            GameObject recommendedTarget = null;
+            GameObject allTarget = null;
+            GameObject directTarget = null;
+            try
+            {
+                var recommendedReport = controller.Apply(false);
+                Assert.That(recommendedReport.Failed, Does.Not.Contain(UPilotMonoHookPointId.GameObjectDestroy));
+                Assert.That(
+                    controller.Runtime[UPilotMonoHookPointId.GameObjectDestroy].Coverage.CandidateCount,
+                    Is.EqualTo(2));
+
+                recommendedTarget = new GameObject("UPilotMonoHookDestroyRecommended");
+                UPilotMonoHookTelemetry.Clear();
+                Object.DestroyImmediate(recommendedTarget);
+                recommendedTarget = null;
+                var recommendedEvents = UPilotMonoHookTelemetry.Read(16)
+                    .Where(item => item.kind == "gameObject.destroy")
+                    .ToList();
+                Assert.That(recommendedEvents.Count, Is.EqualTo(1));
+                Assert.That(recommendedEvents[0].methodSignature, Is.EqualTo("DestroyImmediate(Object,bool)"));
+
+                settings.SetHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy, true);
+                controller.RefreshRuntime();
+                Assert.That(
+                    controller.Runtime[UPilotMonoHookPointId.GameObjectDestroy].Message,
+                    Is.EqualTo("未应用"));
+
+                var allReport = controller.Apply(false);
+                Assert.That(allReport.Enabled, Does.Contain(UPilotMonoHookPointId.GameObjectDestroy));
+                Assert.That(allReport.Failed, Does.Not.Contain(UPilotMonoHookPointId.GameObjectDestroy));
+                Assert.That(
+                    controller.Runtime[UPilotMonoHookPointId.GameObjectDestroy].Coverage.CandidateCount,
+                    Is.EqualTo(4));
+
+                allTarget = new GameObject("UPilotMonoHookDestroyAllSafeOverloads");
+                UPilotMonoHookTelemetry.Clear();
+                Object.DestroyImmediate(allTarget);
+                allTarget = null;
+                var allSafeEvents = UPilotMonoHookTelemetry.Read(16)
+                    .Where(item => item.kind == "gameObject.destroy")
+                    .ToList();
+                Assert.That(allSafeEvents.Count, Is.EqualTo(2));
+                Assert.That(allSafeEvents.Select(item => item.methodSignature), Does.Contain("DestroyImmediate(Object)"));
+                Assert.That(allSafeEvents.Select(item => item.methodSignature), Does.Contain("DestroyImmediate(Object,bool)"));
+
+                directTarget = new GameObject("UPilotMonoHookDestroyDirectFinalOverload");
+                UPilotMonoHookTelemetry.Clear();
+                Object.DestroyImmediate(directTarget, false);
+                directTarget = null;
+                var directEvents = UPilotMonoHookTelemetry.Read(16)
+                    .Where(item => item.kind == "gameObject.destroy")
+                    .ToList();
+                Assert.That(directEvents.Count, Is.EqualTo(1));
+                Assert.That(directEvents[0].methodSignature, Is.EqualTo("DestroyImmediate(Object,bool)"));
+            }
+            finally
+            {
+                controller.UninstallAll();
+                if (recommendedTarget != null) Object.DestroyImmediate(recommendedTarget);
+                if (allTarget != null) Object.DestroyImmediate(allTarget);
+                if (directTarget != null) Object.DestroyImmediate(directTarget);
             }
         }
 

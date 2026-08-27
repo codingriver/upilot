@@ -1,8 +1,8 @@
-# 自定义 MonoHook 点位教程
+# 自定义 UPilot 追踪点位教程
 
-本文说明如何为 UPilot MonoHook Tracing 增加一个由 C# 特性自动发现、在窗口中手动启用的自定义点位。
+本文说明如何为 UPilot 追踪器增加一个由 C# 特性自动发现、在窗口中手动启用的自定义点位。底层扩展契约和程序集名称继续保留 MonoHook 技术标识。
 
-自定义点位默认关闭。代码编译完成后，它只会出现在 `UPilot > Advanced > MonoHook` 列表中；必须由用户勾选并点击“应用”，才会安装 Hook。
+自定义点位默认关闭。代码编译完成后，它只会出现在 `UPilot > Advanced > 追踪器` 列表中；必须由用户勾选并点击“应用”，才会安装追踪。
 
 ## 1. 创建 Editor 程序集
 
@@ -231,6 +231,16 @@ Provider 必须满足以下条件：
 
 也可以直接实现 `IUPilotMonoHookPointProvider`，但这意味着安装状态、重复安装、异常清理和卸载都需要自行处理。
 
+如果自定义点位包含多个公开重载，并且希望窗口自动显示“全部安全重载”，Provider 可以额外实现 `IUPilotMonoHookOverloadPolicyProvider`：
+
+```csharp
+public bool SupportsHookAllSafeOverloads => true;
+public bool HookAllSafeOverloads { get; set; }
+public bool IsHookAllSafeOverloadsApplied { get; private set; }
+```
+
+`HookAllSafeOverloads=false` 时应创建按当前运行环境选择的最小推荐绑定集合；为 `true` 时才创建所有通过安全检查的公开非泛型绑定。安装成功后记录实际应用值，卸载时清除该状态。不要因为启用了全部模式而绕过 Native、`InternalCall`、Injected、开放泛型或不可读 IL 检查。
+
 ## 5. Target、Replacement 和 Proxy 签名
 
 三者的参数与返回值必须严格匹配。
@@ -284,7 +294,7 @@ EventSink 会统一处理事件序号、UTC 时间、事件速率限制、未变
 ## 7. 手动验收
 
 1. 等待程序集编译和 Domain Reload 完成。
-2. 打开 `UPilot > Advanced > MonoHook`。
+2. 打开 `UPilot > Advanced > 追踪器`。
 3. 在 `My Project` 分类中确认出现 `SetValue`，且默认未启用。
 4. 勾选点位并点击“应用”。只勾选但不应用不会安装 Hook。
 5. 执行 `Tools > MonoHook Demo > Call SetValue`。
@@ -326,7 +336,7 @@ EventSink 会统一处理事件序号、UTC 时间、事件速率限制、未变
 
 ## 9. 参考实现
 
-Package Manager 中的 `MonoHook Tracing Custom Provider` Sample 是最小权威示例，主源位于：
+Package Manager 中的 `UPilot Tracer Custom Provider` Sample 是最小权威示例，主源位于：
 
 ```text
 Samples~/MonoHookTracing/

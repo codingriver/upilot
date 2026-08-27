@@ -1,11 +1,13 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional MonoHook tracing, scenes, GameObjects, components, assets, prefabs, packages, tests, builds, screenshots, Editor windows, existing compiled reflection entry points, and long-running Unity task monitoring.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, GameObjects, components, assets, prefabs, packages, tests, builds, screenshots, Editor windows, existing compiled reflection entry points, and long-running Unity task monitoring.
 ---
 
 # UPilot Unity MCP
 
 Use UPilot with projects that install `io.github.codingriver.upilot`.
+
+Terminology: in a UPilot context, `Tracer`, `追踪器`, and `the tracer` mean UPilot Tracer (`UPilot 追踪器`). MonoHook names the internal implementation technology or preserved compatibility identifiers, not a separate user-facing feature.
 
 ## Start
 
@@ -100,5 +102,5 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 - Tool choice: read `references/tool-routing.md` and `references/tool-boundaries.md`.
 - Client transport/config: read `references/client-configs.md`.
 - Recovery and destructive work: read `references/safety.md`.
-- MonoHook tracing: read `references/monohook-tracing.md`.
+- UPilot Tracer: read `references/monohook-tracing.md`.
 - Only when the user explicitly requests UPilot Flow or YAML EditorWindow automation: read `references/flow.md`.

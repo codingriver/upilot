@@ -46,7 +46,11 @@ namespace CodingRiver.UPilot.Tests
             _masterEnabled = settings.masterEnabled;
             _suppressUnchangedValues = settings.suppressUnchangedValues;
             _maxEventsPerSecond = settings.maxEventsPerSecond;
-            _points = settings.points.Select(point => new UPilotMonoHookPointState(point.Id, point.Enabled, point.CaptureStackTrace)).ToList();
+            _points = settings.points.Select(point => new UPilotMonoHookPointState(
+                point.Id,
+                point.Enabled,
+                point.CaptureStackTrace,
+                point.HookAllSafeOverloads)).ToList();
             UPilotMonoHookTelemetry.Clear();
         }
 

@@ -167,7 +167,7 @@ namespace CodingRiver.UPilot.Tests
 
                 LogAssert.Expect(
                     LogType.Log,
-                    new Regex("^\\[UPilot\\]\\[MonoHook\\] #\\d+ F42 point=\\\"component\\.rendererEnabled\\\" phase=\\\"after\\\" scene=\\\"Assets/Scenes/Test\\.unity\\\" object=\\\"Root/Renderer\\\" component=\\\"UnityEngine\\.MeshRenderer\\\" value=\\\"True -> False\\\"$"));
+                    new Regex("^\\[UPilot\\]\\[Trace\\] #\\d+ F42 point=\\\"component\\.rendererEnabled\\\" phase=\\\"after\\\" scene=\\\"Assets/Scenes/Test\\.unity\\\" object=\\\"Root/Renderer\\\" component=\\\"UnityEngine\\.MeshRenderer\\\" method=\\\"set_enabled\\(Boolean\\)\\\" value=\\\"True -> False\\\"$"));
 
                 var sink = UPilotMonoHookRegistry.Instance.Context.EventSink;
                 sink.Publish(new UPilotMonoHookEvent
@@ -180,6 +180,7 @@ namespace CodingRiver.UPilot.Tests
                     hierarchyPath = "Root/Renderer",
                     scenePath = "Assets/Scenes/Test.unity",
                     componentType = typeof(MeshRenderer).FullName,
+                    methodSignature = "set_enabled(Boolean)",
                     beforeValue = "True",
                     afterValue = "False",
                 });
@@ -209,7 +210,7 @@ namespace CodingRiver.UPilot.Tests
                 stackTrace = "Game.TestCaller()",
             });
 
-            Assert.That(formatted, Does.StartWith("[UPilot][MonoHook] #7 F12 point=\"tests.console.stack\""));
+            Assert.That(formatted, Does.StartWith("[UPilot][Trace] #7 F12 point=\"tests.console.stack\""));
             Assert.That(formatted, Does.EndWith("Hook caller:\nGame.TestCaller()"));
         }
     }

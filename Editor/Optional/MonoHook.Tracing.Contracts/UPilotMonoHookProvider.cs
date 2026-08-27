@@ -108,6 +108,17 @@ namespace CodingRiver.UPilot
         UPilotMonoHookCoverage Coverage { get; }
     }
 
+    /// <summary>
+    /// Optional capability for points that can switch between a minimal recommended
+    /// overload set and every overload that passes the current safety checks.
+    /// </summary>
+    public interface IUPilotMonoHookOverloadPolicyProvider
+    {
+        bool SupportsHookAllSafeOverloads { get; }
+        bool HookAllSafeOverloads { get; set; }
+        bool IsHookAllSafeOverloadsApplied { get; }
+    }
+
     public interface IUPilotMonoHookEventSink
     {
         long Publish(UPilotMonoHookEvent hookEvent);
@@ -233,4 +244,3 @@ namespace CodingRiver.UPilot
         }
     }
 }
-

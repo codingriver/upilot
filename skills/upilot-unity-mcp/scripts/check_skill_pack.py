@@ -152,13 +152,15 @@ def check_repository_consistency() -> None:
         "HTTP-only Agent rule": (agent_template, "Third-party AI tools must connect through Streamable HTTP"),
         "internal WebSocket rule": (agent_template, "WebSocket transport is internal to MCP Server <-> Unity Bridge"),
         "HTTP-only Skill rule": (skill, "only third-party AI client transport"),
-        "MonoHook Skill discovery": (skill, "optional MonoHook tracing"),
+        "UPilot Tracer Skill discovery": (skill, "optional UPilot Tracer diagnostics"),
+        "UPilot Tracer terminology": (skill, "`追踪器`, and `the tracer` mean UPilot Tracer (`UPilot 追踪器`)"),
         "explicit remote UPM ref documentation": (installation, "--upm-ref <STABLE_RELEASE_TAG>"),
         "local UPM documentation": (installation, "--use-local-upm"),
         "HTTP installer config": (installer, "url = {toml_string(f'http://127.0.0.1:{args.http_port}/mcp')}"),
         "explicit remote ref error": (installer, "Remote UPM installation requires --upm-ref"),
         "repository skill entry": (repo_entry, "../../../skills/upilot-unity-mcp/SKILL.md"),
-        "repository MonoHook discovery": (repo_entry, "optional MonoHook tracing"),
+        "repository UPilot Tracer discovery": (repo_entry, "optional UPilot Tracer diagnostics"),
+        "repository UPilot Tracer terminology": (repo_entry, "`追踪器` means UPilot Tracer (`UPilot 追踪器`)"),
     }
     for label, (text, fragment) in required.items():
         if fragment not in text:

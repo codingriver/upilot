@@ -1,0 +1,174 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &1
+MonoBehaviour:
+  m_ObjectHideFlags: 53
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 566be69573a4f644ab3556a8260c72c2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: UPilot.Editor::CodingRiver.UPilot.UPilotMonoHookSettings
+  schemaVersion: 6
+  masterEnabled: 1
+  autoApplyOnEditorLoad: 0
+  suppressUnchangedValues: 1
+  maxEventsPerSecond: 1000
+  logEventsToConsole: 1
+  maxConsoleLogsPerSecond: 200
+  stackTraceMaxFrames: 16
+  stackTraceSampleEveryN: 1
+  lifecycleAssemblyIncludes: 
+  lifecycleAssemblyExcludes: 
+  lifecycleNamespaceIncludes: 
+  lifecycleNamespaceExcludes: 
+  lifecycleTypeIncludes: 
+  lifecycleTypeExcludes: 
+  points:
+  - Id: lifecycle.awake
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.onEnable
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.start
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.onDisable
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.onDestroy
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: gameObject.instantiate
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0
+  - Id: gameObject.destroy
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0
+  - Id: gameObject.setActive
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0
+  - Id: component.behaviourEnabled
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.position
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.localPosition
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.rotation
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.localRotation
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.eulerAngles
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.localEulerAngles
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.localScale
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.setParent
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.setSiblingIndex
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: tests.custom.attribute-provider
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0
+  - Id: transform.setPositionAndRotation
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.setLocalPositionAndRotation
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: gameObject.addComponent
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0
+  - Id: transform.translate
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.rotate
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.rotateAround
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.lookAt
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.setAsFirstSibling
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.setAsLastSibling
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: transform.detachChildren
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.update
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.fixedUpdate
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: lifecycle.lateUpdate
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: component.rendererEnabled
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: component.colliderEnabled
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: component.collider2DEnabled
+    Enabled: 0
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+  - Id: provider:UPilot.MonoHook.Tracing.Editor.Tests:CodingRiver.UPilot.Tests.ImplicitIdTestHookPoint
+    Enabled: 1
+    CaptureStackTrace: 1
+    HookAllSafeOverloads: 0

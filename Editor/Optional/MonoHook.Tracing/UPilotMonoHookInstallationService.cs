@@ -30,6 +30,8 @@ namespace CodingRiver.UPilot
             new Dictionary<string, string>(StringComparer.Ordinal);
         private static readonly Dictionary<string, UPilotMonoHookCoverage> CoverageByPoint =
             new Dictionary<string, UPilotMonoHookCoverage>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, bool> AppliedHookAllSafeOverloadsByPoint =
+            new Dictionary<string, bool>(StringComparer.Ordinal);
 
         private static MethodHook _setActiveHook;
         private static MethodHook _addComponentHook;
@@ -44,6 +46,7 @@ namespace CodingRiver.UPilot
 
         [ThreadStatic] private static bool _insideHook;
         [ThreadStatic] private static bool _insideConsoleLog;
+        [ThreadStatic] private static int _instantiateHookDepth;
         private static double _eventRateWindowStart;
         private static int _eventRateWindowCount;
         private static double _consoleRateWindowStart;
@@ -60,6 +63,28 @@ namespace CodingRiver.UPilot
 
         public static readonly UPilotMonoHookEventBuffer Events = new UPilotMonoHookEventBuffer();
         public static int ConsoleDroppedCount => _consoleDroppedCount;
+
+        internal static bool SupportsHookAllSafeOverloads(string pointId)
+        {
+            switch (pointId)
+            {
+                case UPilotMonoHookPointId.GameObjectInstantiate:
+                case UPilotMonoHookPointId.GameObjectDestroy:
+                case UPilotMonoHookPointId.TransformSetParent:
+                case UPilotMonoHookPointId.TransformTranslate:
+                case UPilotMonoHookPointId.TransformRotate:
+                case UPilotMonoHookPointId.TransformRotateAround:
+                case UPilotMonoHookPointId.TransformLookAt:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        internal static bool IsHookAllSafeOverloadsApplied(string pointId)
+        {
+            return AppliedHookAllSafeOverloadsByPoint.TryGetValue(pointId, out bool applied) && applied;
+        }
 
         internal static long Publish(UPilotMonoHookEvent hookEvent)
         {
@@ -157,6 +182,10 @@ namespace CodingRiver.UPilot
 
         public static UPilotMonoHookSupport CheckSupport(string pointId)
         {
+            if (pointId == UPilotMonoHookPointId.GameObjectInstantiate)
+                return CheckAnySafeObjectDefinition(BuildInstantiateAllDefinitions(), "Object.Instantiate");
+            if (pointId == UPilotMonoHookPointId.GameObjectDestroy)
+                return CheckAnySafeObjectDefinition(BuildDestroyAllDefinitions(), "Object.Destroy/DestroyImmediate");
             if (pointId == UPilotMonoHookPointId.ComponentBehaviourEnabled)
             {
                 return TryGetBehaviourEnabledSetter(out _, out var reason)
@@ -204,17 +233,17 @@ namespace CodingRiver.UPilot
                 case UPilotMonoHookPointId.TransformSetLocalPositionAndRotation:
                     return CheckTransformMethodSupport("SetLocalPositionAndRotation", new[] { typeof(Vector3), typeof(Quaternion) });
                 case UPilotMonoHookPointId.TransformSetParent:
-                    return CheckTransformMethodSupport("SetParent", new[] { typeof(Transform), typeof(bool) });
+                    return CheckAnySafeTransformDefinition(BuildSetParentDefinitions(true), "Transform.SetParent");
                 case UPilotMonoHookPointId.TransformSetSiblingIndex:
                     return CheckTransformMethodSupport("SetSiblingIndex", new[] { typeof(int) });
                 case UPilotMonoHookPointId.TransformTranslate:
-                    return CheckTransformMethodSupport("Translate", new[] { typeof(Vector3), typeof(Space) });
+                    return CheckAnySafeTransformDefinition(BuildTranslateDefinitions(true), "Transform.Translate");
                 case UPilotMonoHookPointId.TransformRotate:
-                    return CheckTransformMethodSupport("Rotate", new[] { typeof(Vector3), typeof(Space) });
+                    return CheckAnySafeTransformDefinition(BuildRotateDefinitions(true), "Transform.Rotate");
                 case UPilotMonoHookPointId.TransformRotateAround:
-                    return CheckTransformMethodSupport("RotateAround", new[] { typeof(Vector3), typeof(Vector3), typeof(float) });
+                    return CheckAnySafeTransformDefinition(BuildRotateAroundDefinitions(true), "Transform.RotateAround");
                 case UPilotMonoHookPointId.TransformLookAt:
-                    return CheckTransformMethodSupport("LookAt", new[] { typeof(Transform), typeof(Vector3) });
+                    return CheckAnySafeTransformDefinition(BuildLookAtDefinitions(true), "Transform.LookAt");
                 case UPilotMonoHookPointId.TransformSetAsFirstSibling:
                     return CheckTransformMethodSupport("SetAsFirstSibling", Type.EmptyTypes);
                 case UPilotMonoHookPointId.TransformSetAsLastSibling:
@@ -228,7 +257,7 @@ namespace CodingRiver.UPilot
                 : UPilotMonoHookSupport.Unsupported("未知的内置 MonoHook 点位：" + pointId);
         }
 
-        public static void InstallPoint(string pointId)
+        public static void InstallPoint(string pointId, bool hookAllSafeOverloads = false)
         {
             switch (pointId)
             {
@@ -240,8 +269,8 @@ namespace CodingRiver.UPilot
                 case UPilotMonoHookPointId.LifecycleLateUpdate: InstallLifecycle(pointId, "LateUpdate"); return;
                 case UPilotMonoHookPointId.LifecycleOnDisable: InstallLifecycle(pointId, "OnDisable"); return;
                 case UPilotMonoHookPointId.LifecycleOnDestroy: InstallLifecycle(pointId, "OnDestroy"); return;
-                case UPilotMonoHookPointId.GameObjectInstantiate: InstallInstantiate(); return;
-                case UPilotMonoHookPointId.GameObjectDestroy: InstallDestroy(); return;
+                case UPilotMonoHookPointId.GameObjectInstantiate: InstallInstantiate(hookAllSafeOverloads); return;
+                case UPilotMonoHookPointId.GameObjectDestroy: InstallDestroy(hookAllSafeOverloads); return;
                 case UPilotMonoHookPointId.GameObjectSetActive: InstallSetActive(); return;
                 case UPilotMonoHookPointId.GameObjectAddComponent: InstallAddComponent(); return;
                 case UPilotMonoHookPointId.TransformPosition: InstallTransform(pointId, new MethodHookDefinition("set_position", new[] { typeof(Vector3) }, nameof(PositionReplacement), nameof(PositionProxy))); return;
@@ -254,16 +283,13 @@ namespace CodingRiver.UPilot
                 case UPilotMonoHookPointId.TransformSetPositionAndRotation: InstallTransform(pointId, new MethodHookDefinition("SetPositionAndRotation", new[] { typeof(Vector3), typeof(Quaternion) }, nameof(SetPositionAndRotationReplacement), nameof(SetPositionAndRotationProxy))); return;
                 case UPilotMonoHookPointId.TransformSetLocalPositionAndRotation: InstallTransform(pointId, new MethodHookDefinition("SetLocalPositionAndRotation", new[] { typeof(Vector3), typeof(Quaternion) }, nameof(SetLocalPositionAndRotationReplacement), nameof(SetLocalPositionAndRotationProxy))); return;
                 case UPilotMonoHookPointId.TransformSetParent:
-                    InstallTransform(
-                        pointId,
-                        new MethodHookDefinition("SetParent", new[] { typeof(Transform) }, nameof(SetParentReplacement), nameof(SetParentProxy)),
-                        new MethodHookDefinition("SetParent", new[] { typeof(Transform), typeof(bool) }, nameof(SetParentWorldReplacement), nameof(SetParentWorldProxy)));
+                    InstallTransform(pointId, hookAllSafeOverloads, BuildSetParentDefinitions(hookAllSafeOverloads));
                     return;
                 case UPilotMonoHookPointId.TransformSetSiblingIndex: InstallTransform(pointId, new MethodHookDefinition("SetSiblingIndex", new[] { typeof(int) }, nameof(SetSiblingIndexReplacement), nameof(SetSiblingIndexProxy))); return;
-                case UPilotMonoHookPointId.TransformTranslate: InstallTransform(pointId, new MethodHookDefinition("Translate", new[] { typeof(Vector3), typeof(Space) }, nameof(TranslateReplacement), nameof(TranslateProxy))); return;
-                case UPilotMonoHookPointId.TransformRotate: InstallTransform(pointId, new MethodHookDefinition("Rotate", new[] { typeof(Vector3), typeof(Space) }, nameof(RotateReplacement), nameof(RotateProxy))); return;
-                case UPilotMonoHookPointId.TransformRotateAround: InstallTransform(pointId, new MethodHookDefinition("RotateAround", new[] { typeof(Vector3), typeof(Vector3), typeof(float) }, nameof(RotateAroundReplacement), nameof(RotateAroundProxy))); return;
-                case UPilotMonoHookPointId.TransformLookAt: InstallTransform(pointId, new MethodHookDefinition("LookAt", new[] { typeof(Transform), typeof(Vector3) }, nameof(LookAtReplacement), nameof(LookAtProxy))); return;
+                case UPilotMonoHookPointId.TransformTranslate: InstallTransform(pointId, hookAllSafeOverloads, BuildTranslateDefinitions(hookAllSafeOverloads)); return;
+                case UPilotMonoHookPointId.TransformRotate: InstallTransform(pointId, hookAllSafeOverloads, BuildRotateDefinitions(hookAllSafeOverloads)); return;
+                case UPilotMonoHookPointId.TransformRotateAround: InstallTransform(pointId, hookAllSafeOverloads, BuildRotateAroundDefinitions(hookAllSafeOverloads)); return;
+                case UPilotMonoHookPointId.TransformLookAt: InstallTransform(pointId, hookAllSafeOverloads, BuildLookAtDefinitions(hookAllSafeOverloads)); return;
                 case UPilotMonoHookPointId.TransformSetAsFirstSibling: InstallTransform(pointId, new MethodHookDefinition("SetAsFirstSibling", Type.EmptyTypes, nameof(SetAsFirstSiblingReplacement), nameof(SetAsFirstSiblingProxy))); return;
                 case UPilotMonoHookPointId.TransformSetAsLastSibling: InstallTransform(pointId, new MethodHookDefinition("SetAsLastSibling", Type.EmptyTypes, nameof(SetAsLastSiblingReplacement), nameof(SetAsLastSiblingProxy))); return;
                 case UPilotMonoHookPointId.TransformDetachChildren: InstallTransform(pointId, new MethodHookDefinition("DetachChildren", Type.EmptyTypes, nameof(DetachChildrenReplacement), nameof(DetachChildrenProxy))); return;
@@ -342,10 +368,199 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private static MethodHookDefinition[] BuildInstantiateAllDefinitions()
+        {
+            return new[]
+            {
+                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object) }, nameof(InstantiateOriginalReplacement), nameof(InstantiateOriginalProxy)),
+                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Vector3), typeof(Quaternion) }, nameof(InstantiatePositionRotationReplacement), nameof(InstantiatePositionRotationProxy)),
+                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Transform) }, nameof(InstantiateReplacement), nameof(InstantiateProxy)),
+                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Transform), typeof(bool) }, nameof(InstantiateParentWorldReplacement), nameof(InstantiateParentWorldProxy)),
+                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Vector3), typeof(Quaternion), typeof(Transform) }, nameof(InstantiatePositionRotationParentReplacement), nameof(InstantiatePositionRotationParentProxy)),
+                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(UnityEngine.SceneManagement.Scene) }, nameof(InstantiateSceneReplacement), nameof(InstantiateSceneProxy)),
+            };
+        }
+
+        private static MethodHookDefinition[] BuildDestroyAllDefinitions()
+        {
+            return new[]
+            {
+                new MethodHookDefinition("Destroy", new[] { typeof(UnityEngine.Object), typeof(float) }, nameof(DestroyDelayedReplacement), nameof(DestroyDelayedProxy)),
+                new MethodHookDefinition("Destroy", new[] { typeof(UnityEngine.Object) }, nameof(DestroyReplacement), nameof(DestroyProxy)),
+                new MethodHookDefinition("DestroyImmediate", new[] { typeof(UnityEngine.Object), typeof(bool) }, nameof(DestroyImmediateAllowAssetsReplacement), nameof(DestroyImmediateAllowAssetsProxy)),
+                new MethodHookDefinition("DestroyImmediate", new[] { typeof(UnityEngine.Object) }, nameof(DestroyImmediateReplacement), nameof(DestroyImmediateProxy)),
+            };
+        }
+
+        private static UPilotMonoHookSupport CheckAnySafeObjectDefinition(
+            IEnumerable<MethodHookDefinition> definitions,
+            string displayName)
+        {
+            var reasons = new List<string>();
+            foreach (var definition in definitions ?? Array.Empty<MethodHookDefinition>())
+            {
+                var target = GetObjectTarget(definition);
+                string reason = string.Empty;
+                if (target != null && TryValidateHookTarget(target, false, out reason))
+                    return UPilotMonoHookSupport.Supported();
+                AddCoverageSample(reasons, definition.Signature + "：" + (target == null ? "未找到目标方法" : reason));
+            }
+            return UPilotMonoHookSupport.Unsupported(
+                displayName + " 没有可安全 Hook 的公开托管重载" +
+                (reasons.Count == 0 ? string.Empty : "：" + string.Join("；", reasons)));
+        }
+
+        private static UPilotMonoHookSupport CheckAnySafeTransformDefinition(
+            IEnumerable<MethodHookDefinition> definitions,
+            string displayName)
+        {
+            var reasons = new List<string>();
+            foreach (var definition in definitions ?? Array.Empty<MethodHookDefinition>())
+            {
+                var target = GetTransformTarget(definition);
+                string reason = string.Empty;
+                if (target != null && TryValidateHookTarget(target, false, out reason))
+                    return UPilotMonoHookSupport.Supported();
+                AddCoverageSample(reasons, definition.Signature + "：" + (target == null ? "未找到目标方法" : reason));
+            }
+            return UPilotMonoHookSupport.Unsupported(
+                displayName + " 没有可安全 Hook 的公开托管重载" +
+                (reasons.Count == 0 ? string.Empty : "：" + string.Join("；", reasons)));
+        }
+
+        private static MethodHookDefinition[] BuildSetParentDefinitions(bool hookAllSafeOverloads)
+        {
+            var final = new MethodHookDefinition(
+                "SetParent",
+                new[] { typeof(Transform), typeof(bool) },
+                nameof(SetParentWorldReplacement),
+                nameof(SetParentWorldProxy));
+            var wrapper = new MethodHookDefinition(
+                "SetParent",
+                new[] { typeof(Transform) },
+                nameof(SetParentReplacement),
+                nameof(SetParentProxy));
+            return hookAllSafeOverloads
+                ? new[] { final, wrapper }
+                : new[] { SelectFirstSafeTransformDefinition(final, wrapper) };
+        }
+
+        private static MethodHookDefinition[] BuildTranslateDefinitions(bool hookAllSafeOverloads)
+        {
+            var vectorSpace = new MethodHookDefinition("Translate", new[] { typeof(Vector3), typeof(Space) }, nameof(TranslateReplacement), nameof(TranslateProxy));
+            var vector = new MethodHookDefinition("Translate", new[] { typeof(Vector3) }, nameof(TranslateVectorReplacement), nameof(TranslateVectorProxy));
+            var xyzSpace = new MethodHookDefinition("Translate", new[] { typeof(float), typeof(float), typeof(float), typeof(Space) }, nameof(TranslateXYZSpaceReplacement), nameof(TranslateXYZSpaceProxy));
+            var xyz = new MethodHookDefinition("Translate", new[] { typeof(float), typeof(float), typeof(float) }, nameof(TranslateXYZReplacement), nameof(TranslateXYZProxy));
+            var vectorTransform = new MethodHookDefinition("Translate", new[] { typeof(Vector3), typeof(Transform) }, nameof(TranslateTransformReplacement), nameof(TranslateTransformProxy));
+            var xyzTransform = new MethodHookDefinition("Translate", new[] { typeof(float), typeof(float), typeof(float), typeof(Transform) }, nameof(TranslateXYZTransformReplacement), nameof(TranslateXYZTransformProxy));
+            if (hookAllSafeOverloads)
+                return new[] { vectorSpace, vector, xyzSpace, xyz, vectorTransform, xyzTransform };
+            return new[]
+            {
+                SelectFirstSafeTransformDefinition(vectorSpace, vector, xyzSpace, xyz),
+                SelectFirstSafeTransformDefinition(vectorTransform, xyzTransform),
+            };
+        }
+
+        private static MethodHookDefinition[] BuildRotateDefinitions(bool hookAllSafeOverloads)
+        {
+            var vectorSpace = new MethodHookDefinition("Rotate", new[] { typeof(Vector3), typeof(Space) }, nameof(RotateReplacement), nameof(RotateProxy));
+            var vector = new MethodHookDefinition("Rotate", new[] { typeof(Vector3) }, nameof(RotateVectorReplacement), nameof(RotateVectorProxy));
+            var xyzSpace = new MethodHookDefinition("Rotate", new[] { typeof(float), typeof(float), typeof(float), typeof(Space) }, nameof(RotateXYZSpaceReplacement), nameof(RotateXYZSpaceProxy));
+            var xyz = new MethodHookDefinition("Rotate", new[] { typeof(float), typeof(float), typeof(float) }, nameof(RotateXYZReplacement), nameof(RotateXYZProxy));
+            var axisAngleSpace = new MethodHookDefinition("Rotate", new[] { typeof(Vector3), typeof(float), typeof(Space) }, nameof(RotateAxisAngleSpaceReplacement), nameof(RotateAxisAngleSpaceProxy));
+            var axisAngle = new MethodHookDefinition("Rotate", new[] { typeof(Vector3), typeof(float) }, nameof(RotateAxisAngleReplacement), nameof(RotateAxisAngleProxy));
+            if (hookAllSafeOverloads)
+                return new[] { vectorSpace, vector, xyzSpace, xyz, axisAngleSpace, axisAngle };
+            return new[]
+            {
+                SelectFirstSafeTransformDefinition(vectorSpace, vector, xyzSpace, xyz),
+                SelectFirstSafeTransformDefinition(axisAngleSpace, axisAngle),
+            };
+        }
+
+        private static MethodHookDefinition[] BuildRotateAroundDefinitions(bool hookAllSafeOverloads)
+        {
+            var current = new MethodHookDefinition(
+                "RotateAround",
+                new[] { typeof(Vector3), typeof(Vector3), typeof(float) },
+                nameof(RotateAroundReplacement),
+                nameof(RotateAroundProxy));
+            var legacy = new MethodHookDefinition(
+                "RotateAround",
+                new[] { typeof(Vector3), typeof(float) },
+                nameof(RotateAroundLegacyReplacement),
+                nameof(RotateAroundLegacyProxy));
+            return hookAllSafeOverloads
+                ? new[] { current, legacy }
+                : new[] { SelectFirstSafeTransformDefinition(current) };
+        }
+
+        private static MethodHookDefinition[] BuildLookAtDefinitions(bool hookAllSafeOverloads)
+        {
+            var vectorUp = new MethodHookDefinition("LookAt", new[] { typeof(Vector3), typeof(Vector3) }, nameof(LookAtPositionUpReplacement), nameof(LookAtPositionUpProxy));
+            var transformUp = new MethodHookDefinition("LookAt", new[] { typeof(Transform), typeof(Vector3) }, nameof(LookAtReplacement), nameof(LookAtProxy));
+            var vector = new MethodHookDefinition("LookAt", new[] { typeof(Vector3) }, nameof(LookAtPositionReplacement), nameof(LookAtPositionProxy));
+            var transform = new MethodHookDefinition("LookAt", new[] { typeof(Transform) }, nameof(LookAtTransformReplacement), nameof(LookAtTransformProxy));
+            if (hookAllSafeOverloads)
+                return new[] { vectorUp, transformUp, vector, transform };
+
+            var explicitUp = SelectFirstSafeTransformDefinition(vectorUp, transformUp);
+            var selected = new List<MethodHookDefinition>
+            {
+                explicitUp,
+                SelectFirstSafeTransformDefinition(vector),
+            };
+            if (!ReferenceEquals(explicitUp, vectorUp))
+                selected.Add(SelectFirstSafeTransformDefinition(transform));
+            return selected.ToArray();
+        }
+
+        private static MethodHookDefinition SelectFirstSafeTransformDefinition(
+            params MethodHookDefinition[] definitions)
+        {
+            foreach (var definition in definitions ?? Array.Empty<MethodHookDefinition>())
+            {
+                var target = GetTransformTarget(definition);
+                if (target != null && TryValidateHookTarget(target, false, out _))
+                    return definition;
+            }
+            return definitions != null && definitions.Length > 0 ? definitions[0] : null;
+        }
+
+        private static MethodInfo GetTransformTarget(MethodHookDefinition definition)
+        {
+            if (definition == null) return null;
+            if (definition.MethodName.StartsWith("set_", StringComparison.Ordinal))
+            {
+                var propertyName = definition.MethodName.Substring(4);
+                return typeof(Transform)
+                    .GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public)
+                    ?.GetSetMethod(true);
+            }
+            return typeof(Transform).GetMethod(
+                definition.MethodName,
+                BindingFlags.Instance | BindingFlags.Public,
+                null,
+                definition.Parameters,
+                null);
+        }
+
         private static void InstallTransform(string pointId, params MethodHookDefinition[] definitions)
         {
+            InstallTransform(pointId, false, definitions);
+        }
+
+        private static void InstallTransform(
+            string pointId,
+            bool hookAllSafeOverloads,
+            params MethodHookDefinition[] definitions)
+        {
             if (TransformHooks.TryGetValue(pointId, out var existing) &&
-                existing.Count > 0 && existing.All(hook => hook != null && hook.isHooked))
+                existing.Count > 0 &&
+                existing.All(hook => hook != null && hook.isHooked) &&
+                (!SupportsHookAllSafeOverloads(pointId) ||
+                 IsHookAllSafeOverloadsApplied(pointId) == hookAllSafeOverloads))
                 return;
 
             UninstallTransform(pointId);
@@ -356,31 +571,17 @@ namespace CodingRiver.UPilot
             int failedCount = 0;
             foreach (var definition in definitions ?? Array.Empty<MethodHookDefinition>())
             {
-                MethodInfo target;
-                if (definition.MethodName.StartsWith("set_", StringComparison.Ordinal))
-                {
-                    var propertyName = definition.MethodName.Substring(4);
-                    target = typeof(Transform).GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public)?.GetSetMethod(true);
-                }
-                else
-                {
-                    target = typeof(Transform).GetMethod(
-                        definition.MethodName,
-                        BindingFlags.Instance | BindingFlags.Public,
-                        null,
-                        definition.Parameters,
-                        null);
-                }
+                var target = GetTransformTarget(definition);
                 if (target == null)
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, definition.MethodName + "：未找到目标方法");
+                    AddCoverageSample(samples, definition.Signature + "：未找到目标方法");
                     continue;
                 }
                 if (!TryValidateHookTarget(target, false, out var skipReason))
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, definition.MethodName + "：" + skipReason);
+                    AddCoverageSample(samples, definition.Signature + "：" + skipReason);
                     continue;
                 }
 
@@ -390,12 +591,12 @@ namespace CodingRiver.UPilot
                         target,
                         definition.Replacement,
                         definition.Proxy,
-                        "UPilot.MonoHook." + pointId + "." + definition.Parameters.Length));
+                        "UPilot.MonoHook." + pointId + "." + definition.Signature));
                 }
                 catch (Exception ex)
                 {
                     failedCount++;
-                    AddCoverageSample(samples, definition.MethodName + "：" + ex.GetBaseException().Message);
+                    AddCoverageSample(samples, definition.Signature + "：" + ex.GetBaseException().Message);
                 }
             }
 
@@ -408,14 +609,19 @@ namespace CodingRiver.UPilot
             if (installed.Count == 0)
                 throw new InvalidOperationException(CoverageByPoint[pointId].BuildSummary());
             TransformHooks[pointId] = installed;
+            if (SupportsHookAllSafeOverloads(pointId))
+                AppliedHookAllSafeOverloadsByPoint[pointId] = hookAllSafeOverloads;
         }
 
         private static void UninstallTransform(string pointId)
         {
-            if (!TransformHooks.TryGetValue(pointId, out var hooks)) return;
-            foreach (var hook in hooks)
-                hook?.Uninstall();
-            TransformHooks.Remove(pointId);
+            if (TransformHooks.TryGetValue(pointId, out var hooks))
+            {
+                foreach (var hook in hooks)
+                    hook?.Uninstall();
+                TransformHooks.Remove(pointId);
+            }
+            AppliedHookAllSafeOverloadsByPoint.Remove(pointId);
             CoverageByPoint.Remove(pointId);
         }
 
@@ -526,20 +732,30 @@ namespace CodingRiver.UPilot
             hook = null;
         }
 
-        private static void InstallInstantiate()
+        private static void InstallInstantiate(bool hookAllSafeOverloads)
         {
-            if (InstantiateHooks.Count > 0 && InstantiateHooks.All(hook => hook != null && hook.isHooked))
+            if (InstantiateHooks.Count > 0 &&
+                InstantiateHooks.All(hook => hook != null && hook.isHooked) &&
+                IsHookAllSafeOverloadsApplied(UPilotMonoHookPointId.GameObjectInstantiate) == hookAllSafeOverloads)
                 return;
 
             UninstallInstantiate();
-            var definitions = new[]
-            {
-                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object) }, nameof(InstantiateOriginalReplacement), nameof(InstantiateOriginalProxy)),
-                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Vector3), typeof(Quaternion) }, nameof(InstantiatePositionRotationReplacement), nameof(InstantiatePositionRotationProxy)),
-                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Transform) }, nameof(InstantiateReplacement), nameof(InstantiateProxy)),
-                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Transform), typeof(bool) }, nameof(InstantiateParentWorldReplacement), nameof(InstantiateParentWorldProxy)),
-                new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Vector3), typeof(Quaternion), typeof(Transform) }, nameof(InstantiatePositionRotationParentReplacement), nameof(InstantiatePositionRotationParentProxy)),
-            };
+            var original = new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object) }, nameof(InstantiateOriginalReplacement), nameof(InstantiateOriginalProxy));
+            var positionRotation = new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Vector3), typeof(Quaternion) }, nameof(InstantiatePositionRotationReplacement), nameof(InstantiatePositionRotationProxy));
+            var parentWrapper = new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Transform) }, nameof(InstantiateReplacement), nameof(InstantiateProxy));
+            var parentWorld = new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Transform), typeof(bool) }, nameof(InstantiateParentWorldReplacement), nameof(InstantiateParentWorldProxy));
+            var positionRotationParent = new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(Vector3), typeof(Quaternion), typeof(Transform) }, nameof(InstantiatePositionRotationParentReplacement), nameof(InstantiatePositionRotationParentProxy));
+            var scene = new MethodHookDefinition("Instantiate", new[] { typeof(UnityEngine.Object), typeof(UnityEngine.SceneManagement.Scene) }, nameof(InstantiateSceneReplacement), nameof(InstantiateSceneProxy));
+            var definitions = hookAllSafeOverloads
+                ? new[] { original, positionRotation, parentWrapper, parentWorld, positionRotationParent, scene }
+                : new[]
+                {
+                    original,
+                    positionRotation,
+                    SelectFirstSafeObjectDefinition(parentWorld, parentWrapper),
+                    positionRotationParent,
+                    scene,
+                };
 
             var samples = new List<string>();
             int skippedCount = 0;
@@ -555,13 +771,13 @@ namespace CodingRiver.UPilot
                 if (target == null)
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, "Instantiate/" + definition.Parameters.Length + "：未找到目标方法");
+                    AddCoverageSample(samples, definition.Signature + "：未找到目标方法");
                     continue;
                 }
                 if (!TryValidateHookTarget(target, false, out var skipReason))
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, "Instantiate/" + definition.Parameters.Length + "：" + skipReason);
+                    AddCoverageSample(samples, definition.Signature + "：" + skipReason);
                     continue;
                 }
 
@@ -571,12 +787,12 @@ namespace CodingRiver.UPilot
                         target,
                         definition.Replacement,
                         definition.Proxy,
-                        "UPilot.MonoHook.Object.Instantiate." + definition.Parameters.Length));
+                        "UPilot.MonoHook.Object." + definition.Signature));
                 }
                 catch (Exception ex)
                 {
                     failedCount++;
-                    AddCoverageSample(samples, "Instantiate/" + definition.Parameters.Length + "：" + ex.GetBaseException().Message);
+                    AddCoverageSample(samples, definition.Signature + "：" + ex.GetBaseException().Message);
                 }
             }
 
@@ -589,6 +805,7 @@ namespace CodingRiver.UPilot
             if (InstantiateHooks.Count == 0)
                 throw new InvalidOperationException(
                     CoverageByPoint[UPilotMonoHookPointId.GameObjectInstantiate].BuildSummary());
+            AppliedHookAllSafeOverloadsByPoint[UPilotMonoHookPointId.GameObjectInstantiate] = hookAllSafeOverloads;
         }
 
         private static void UninstallInstantiate()
@@ -596,22 +813,29 @@ namespace CodingRiver.UPilot
             foreach (var hook in InstantiateHooks)
                 hook?.Uninstall();
             InstantiateHooks.Clear();
+            AppliedHookAllSafeOverloadsByPoint.Remove(UPilotMonoHookPointId.GameObjectInstantiate);
             CoverageByPoint.Remove(UPilotMonoHookPointId.GameObjectInstantiate);
         }
 
-        private static void InstallDestroy()
+        private static void InstallDestroy(bool hookAllSafeOverloads)
         {
-            if (DestroyHooks.Count > 0 && DestroyHooks.All(hook => hook != null && hook.isHooked))
+            if (DestroyHooks.Count > 0 &&
+                DestroyHooks.All(hook => hook != null && hook.isHooked) &&
+                IsHookAllSafeOverloadsApplied(UPilotMonoHookPointId.GameObjectDestroy) == hookAllSafeOverloads)
                 return;
 
             UninstallDestroy();
-            var candidates = new[]
-            {
-                new MethodHookDefinition("Destroy", new[] { typeof(UnityEngine.Object) }, nameof(DestroyReplacement), nameof(DestroyProxy)),
-                new MethodHookDefinition("Destroy", new[] { typeof(UnityEngine.Object), typeof(float) }, nameof(DestroyDelayedReplacement), nameof(DestroyDelayedProxy)),
-                new MethodHookDefinition("DestroyImmediate", new[] { typeof(UnityEngine.Object) }, nameof(DestroyImmediateReplacement), nameof(DestroyImmediateProxy)),
-                new MethodHookDefinition("DestroyImmediate", new[] { typeof(UnityEngine.Object), typeof(bool) }, nameof(DestroyImmediateAllowAssetsReplacement), nameof(DestroyImmediateAllowAssetsProxy)),
-            };
+            var destroyFinal = new MethodHookDefinition("Destroy", new[] { typeof(UnityEngine.Object), typeof(float) }, nameof(DestroyDelayedReplacement), nameof(DestroyDelayedProxy));
+            var destroyWrapper = new MethodHookDefinition("Destroy", new[] { typeof(UnityEngine.Object) }, nameof(DestroyReplacement), nameof(DestroyProxy));
+            var immediateFinal = new MethodHookDefinition("DestroyImmediate", new[] { typeof(UnityEngine.Object), typeof(bool) }, nameof(DestroyImmediateAllowAssetsReplacement), nameof(DestroyImmediateAllowAssetsProxy));
+            var immediateWrapper = new MethodHookDefinition("DestroyImmediate", new[] { typeof(UnityEngine.Object) }, nameof(DestroyImmediateReplacement), nameof(DestroyImmediateProxy));
+            var candidates = hookAllSafeOverloads
+                ? new List<MethodHookDefinition> { destroyFinal, destroyWrapper, immediateFinal, immediateWrapper }
+                : new List<MethodHookDefinition>
+                {
+                    SelectFirstSafeObjectDefinition(destroyFinal, destroyWrapper),
+                    SelectFirstSafeObjectDefinition(immediateFinal, immediateWrapper),
+                };
 
             var samples = new List<string>();
             int skippedCount = 0;
@@ -627,13 +851,13 @@ namespace CodingRiver.UPilot
                 if (target == null)
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, candidate.MethodName + "/" + candidate.Parameters.Length + "：未找到目标方法");
+                    AddCoverageSample(samples, candidate.Signature + "：未找到目标方法");
                     continue;
                 }
                 if (!TryValidateHookTarget(target, false, out var skipReason))
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, candidate.MethodName + "/" + candidate.Parameters.Length + "：" + skipReason);
+                    AddCoverageSample(samples, candidate.Signature + "：" + skipReason);
                     continue;
                 }
 
@@ -643,17 +867,17 @@ namespace CodingRiver.UPilot
                         target,
                         candidate.Replacement,
                         candidate.Proxy,
-                        "UPilot.MonoHook.GameObject.Destroy." + candidate.MethodName + "." + candidate.Parameters.Length));
+                        "UPilot.MonoHook.GameObject." + candidate.Signature));
                 }
                 catch (Exception ex)
                 {
                     failedCount++;
-                    AddCoverageSample(samples, candidate.MethodName + "/" + candidate.Parameters.Length + "：" + ex.GetBaseException().Message);
+                    AddCoverageSample(samples, candidate.Signature + "：" + ex.GetBaseException().Message);
                 }
             }
 
             CoverageByPoint[UPilotMonoHookPointId.GameObjectDestroy] = new UPilotMonoHookCoverage(
-                candidates.Length,
+                candidates.Count,
                 DestroyHooks.Count,
                 skippedCount,
                 failedCount,
@@ -661,6 +885,7 @@ namespace CodingRiver.UPilot
             if (DestroyHooks.Count == 0)
                 throw new InvalidOperationException(
                     CoverageByPoint[UPilotMonoHookPointId.GameObjectDestroy].BuildSummary());
+            AppliedHookAllSafeOverloadsByPoint[UPilotMonoHookPointId.GameObjectDestroy] = hookAllSafeOverloads;
         }
 
         private static void UninstallDestroy()
@@ -668,7 +893,32 @@ namespace CodingRiver.UPilot
             foreach (var hook in DestroyHooks)
                 hook?.Uninstall();
             DestroyHooks.Clear();
+            AppliedHookAllSafeOverloadsByPoint.Remove(UPilotMonoHookPointId.GameObjectDestroy);
             CoverageByPoint.Remove(UPilotMonoHookPointId.GameObjectDestroy);
+        }
+
+        private static MethodHookDefinition SelectFirstSafeObjectDefinition(
+            params MethodHookDefinition[] definitions)
+        {
+            foreach (var definition in definitions ?? Array.Empty<MethodHookDefinition>())
+            {
+                var target = GetObjectTarget(definition);
+                if (target != null && TryValidateHookTarget(target, false, out _))
+                    return definition;
+            }
+            return definitions != null && definitions.Length > 0 ? definitions[0] : null;
+        }
+
+        private static MethodInfo GetObjectTarget(MethodHookDefinition definition)
+        {
+            return definition == null
+                ? null
+                : typeof(UnityEngine.Object).GetMethod(
+                    definition.MethodName,
+                    BindingFlags.Static | BindingFlags.Public,
+                    null,
+                    definition.Parameters,
+                    null);
         }
 
         private static void InstallLifecycle(string pointId, string methodName)
@@ -978,6 +1228,8 @@ namespace CodingRiver.UPilot
             public readonly Type[] Parameters;
             public readonly string Replacement;
             public readonly string Proxy;
+            public string Signature => MethodName + "(" +
+                                       string.Join(",", Parameters.Select(type => type.Name)) + ")";
 
             public MethodHookDefinition(string methodName, Type[] parameters, string replacement, string proxy)
             {
@@ -1006,7 +1258,14 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static void Record(string kind, UnityEngine.Object target, string componentType = null, string before = null, string after = null, string phase = "after")
+        private static void Record(
+            string kind,
+            UnityEngine.Object target,
+            string componentType = null,
+            string before = null,
+            string after = null,
+            string phase = "after",
+            string methodSignature = null)
         {
             if (_insideHook || target == null) return;
             _insideHook = true;
@@ -1026,6 +1285,7 @@ namespace CodingRiver.UPilot
                     hierarchyPath = GetHierarchyPath(transform),
                     scenePath = transform != null && transform.gameObject.scene.IsValid() ? transform.gameObject.scene.path : string.Empty,
                     componentType = componentType ?? component?.GetType().FullName ?? target.GetType().FullName,
+                    methodSignature = methodSignature ?? string.Empty,
                     beforeValue = before ?? string.Empty,
                     afterValue = after ?? string.Empty,
                 });
@@ -1102,9 +1362,9 @@ namespace CodingRiver.UPilot
         internal static string FormatConsoleLog(UPilotMonoHookEvent hookEvent)
         {
             if (hookEvent == null)
-                return "[UPilot][MonoHook]";
+                return "[UPilot][Trace]";
 
-            var builder = new StringBuilder("[UPilot][MonoHook]");
+            var builder = new StringBuilder("[UPilot][Trace]");
             if (hookEvent.sequence > 0)
                 builder.Append(" #").Append(hookEvent.sequence);
             builder.Append(" F").Append(hookEvent.frame);
@@ -1118,6 +1378,7 @@ namespace CodingRiver.UPilot
             if (hookEvent.instanceId != 0)
                 builder.Append(" id=").Append(hookEvent.instanceId);
             AppendConsoleField(builder, "component", hookEvent.componentType);
+            AppendConsoleField(builder, "method", hookEvent.methodSignature);
 
             string value = string.Empty;
             if (!string.IsNullOrEmpty(hookEvent.beforeValue) && !string.IsNullOrEmpty(hookEvent.afterValue))
@@ -1294,9 +1555,18 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static UnityEngine.Object InstantiateOriginalReplacement(UnityEngine.Object original)
         {
-            var clone = InstantiateOriginalProxy(original);
-            RecordInstantiate(original, clone);
-            return clone;
+            _instantiateHookDepth++;
+            try
+            {
+                var clone = InstantiateOriginalProxy(original);
+                if (ShouldRecordInstantiate())
+                    RecordInstantiate(original, clone, "Instantiate(Object)");
+                return clone;
+            }
+            finally
+            {
+                _instantiateHookDepth--;
+            }
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1311,9 +1581,18 @@ namespace CodingRiver.UPilot
             Vector3 position,
             Quaternion rotation)
         {
-            var clone = InstantiatePositionRotationProxy(original, position, rotation);
-            RecordInstantiate(original, clone);
-            return clone;
+            _instantiateHookDepth++;
+            try
+            {
+                var clone = InstantiatePositionRotationProxy(original, position, rotation);
+                if (ShouldRecordInstantiate())
+                    RecordInstantiate(original, clone, "Instantiate(Object,Vector3,Quaternion)");
+                return clone;
+            }
+            finally
+            {
+                _instantiateHookDepth--;
+            }
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1328,9 +1607,18 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static UnityEngine.Object InstantiateReplacement(UnityEngine.Object original, Transform parent)
         {
-            var clone = InstantiateProxy(original, parent);
-            RecordInstantiate(original, clone);
-            return clone;
+            _instantiateHookDepth++;
+            try
+            {
+                var clone = InstantiateProxy(original, parent);
+                if (ShouldRecordInstantiate())
+                    RecordInstantiate(original, clone, "Instantiate(Object,Transform)");
+                return clone;
+            }
+            finally
+            {
+                _instantiateHookDepth--;
+            }
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1345,9 +1633,18 @@ namespace CodingRiver.UPilot
             Transform parent,
             bool instantiateInWorldSpace)
         {
-            var clone = InstantiateParentWorldProxy(original, parent, instantiateInWorldSpace);
-            RecordInstantiate(original, clone);
-            return clone;
+            _instantiateHookDepth++;
+            try
+            {
+                var clone = InstantiateParentWorldProxy(original, parent, instantiateInWorldSpace);
+                if (ShouldRecordInstantiate())
+                    RecordInstantiate(original, clone, "Instantiate(Object,Transform,bool)");
+                return clone;
+            }
+            finally
+            {
+                _instantiateHookDepth--;
+            }
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1366,9 +1663,18 @@ namespace CodingRiver.UPilot
             Quaternion rotation,
             Transform parent)
         {
-            var clone = InstantiatePositionRotationParentProxy(original, position, rotation, parent);
-            RecordInstantiate(original, clone);
-            return clone;
+            _instantiateHookDepth++;
+            try
+            {
+                var clone = InstantiatePositionRotationParentProxy(original, position, rotation, parent);
+                if (ShouldRecordInstantiate())
+                    RecordInstantiate(original, clone, "Instantiate(Object,Vector3,Quaternion,Transform)");
+                return clone;
+            }
+            finally
+            {
+                _instantiateHookDepth--;
+            }
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1381,20 +1687,58 @@ namespace CodingRiver.UPilot
             throw new InvalidOperationException("InstantiatePositionRotationParentProxy must only be called through MonoHook.");
         }
 
-        private static void RecordInstantiate(UnityEngine.Object original, UnityEngine.Object clone)
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static UnityEngine.Object InstantiateSceneReplacement(
+            UnityEngine.Object original,
+            UnityEngine.SceneManagement.Scene scene)
+        {
+            _instantiateHookDepth++;
+            try
+            {
+                var clone = InstantiateSceneProxy(original, scene);
+                if (ShouldRecordInstantiate())
+                    RecordInstantiate(original, clone, "Instantiate(Object,Scene)");
+                return clone;
+            }
+            finally
+            {
+                _instantiateHookDepth--;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static UnityEngine.Object InstantiateSceneProxy(
+            UnityEngine.Object original,
+            UnityEngine.SceneManagement.Scene scene)
+        {
+            throw new InvalidOperationException("InstantiateSceneProxy must only be called through MonoHook.");
+        }
+
+        private static bool ShouldRecordInstantiate()
+        {
+            return IsHookAllSafeOverloadsApplied(UPilotMonoHookPointId.GameObjectInstantiate) ||
+                   _instantiateHookDepth == 1;
+        }
+
+        private static void RecordInstantiate(
+            UnityEngine.Object original,
+            UnityEngine.Object clone,
+            string methodSignature)
         {
             Record(
                 "gameObject.instantiate",
                 clone,
                 clone != null ? clone.GetType().FullName : string.Empty,
                 original != null ? original.name : string.Empty,
-                clone != null ? clone.name : string.Empty);
+                clone != null ? clone.name : string.Empty,
+                "after",
+                methodSignature);
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void DestroyReplacement(UnityEngine.Object target)
         {
-            RecordDestroy(target, "Destroy");
+            RecordDestroy(target, "Destroy", string.Empty, "Destroy(Object)");
             DestroyProxy(target);
         }
 
@@ -1407,7 +1751,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void DestroyDelayedReplacement(UnityEngine.Object target, float delay)
         {
-            RecordDestroy(target, "Destroy", delay.ToString());
+            RecordDestroy(target, "Destroy", delay.ToString(), "Destroy(Object,float)");
             DestroyDelayedProxy(target, delay);
         }
 
@@ -1420,7 +1764,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void DestroyImmediateReplacement(UnityEngine.Object target)
         {
-            RecordDestroy(target, "DestroyImmediate");
+            RecordDestroy(target, "DestroyImmediate", string.Empty, "DestroyImmediate(Object)");
             DestroyImmediateProxy(target);
         }
 
@@ -1433,7 +1777,11 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void DestroyImmediateAllowAssetsReplacement(UnityEngine.Object target, bool allowDestroyingAssets)
         {
-            RecordDestroy(target, "DestroyImmediate", allowDestroyingAssets.ToString());
+            RecordDestroy(
+                target,
+                "DestroyImmediate",
+                allowDestroyingAssets.ToString(),
+                "DestroyImmediate(Object,bool)");
             DestroyImmediateAllowAssetsProxy(target, allowDestroyingAssets);
         }
 
@@ -1443,9 +1791,20 @@ namespace CodingRiver.UPilot
             throw new InvalidOperationException("DestroyImmediateAllowAssetsProxy must only be called through MonoHook.");
         }
 
-        private static void RecordDestroy(UnityEngine.Object target, string methodName, string detail = "")
+        private static void RecordDestroy(
+            UnityEngine.Object target,
+            string methodName,
+            string detail,
+            string methodSignature)
         {
-            Record("gameObject.destroy", target, target != null ? target.GetType().FullName : string.Empty, methodName, detail, "before");
+            Record(
+                "gameObject.destroy",
+                target,
+                target != null ? target.GetType().FullName : string.Empty,
+                methodName,
+                detail,
+                "before",
+                methodSignature);
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1673,7 +2032,7 @@ namespace CodingRiver.UPilot
             var before = __this != null && __this.parent != null ? __this.parent.name : string.Empty;
             SetParentProxy(__this, parent);
             var after = __this != null && __this.parent != null ? __this.parent.name : string.Empty;
-            Record("transform.setParent", __this, typeof(Transform).FullName, before, after);
+            Record("transform.setParent", __this, typeof(Transform).FullName, before, after, "after", "SetParent(Transform)");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1685,7 +2044,7 @@ namespace CodingRiver.UPilot
             var before = __this != null && __this.parent != null ? __this.parent.name : string.Empty;
             SetParentWorldProxy(__this, parent, worldPositionStays);
             var after = __this != null && __this.parent != null ? __this.parent.name : string.Empty;
-            Record("transform.setParent", __this, typeof(Transform).FullName, before, after);
+            Record("transform.setParent", __this, typeof(Transform).FullName, before, after, "after", "SetParent(Transform,bool)");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1712,7 +2071,7 @@ namespace CodingRiver.UPilot
             var before = __this != null ? __this.position : Vector3.zero;
             TranslateProxy(__this, translation, relativeTo);
             var after = __this != null ? __this.position : before;
-            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString());
+            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Translate(Vector3,Space)");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1722,12 +2081,113 @@ namespace CodingRiver.UPilot
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateVectorReplacement(Transform __this, Vector3 translation)
+        {
+            var before = __this != null ? __this.position : Vector3.zero;
+            TranslateVectorProxy(__this, translation);
+            var after = __this != null ? __this.position : before;
+            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Translate(Vector3)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateVectorProxy(Transform __this, Vector3 translation)
+        {
+            throw new InvalidOperationException("TranslateVectorProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateXYZSpaceReplacement(
+            Transform __this,
+            float x,
+            float y,
+            float z,
+            Space relativeTo)
+        {
+            var before = __this != null ? __this.position : Vector3.zero;
+            TranslateXYZSpaceProxy(__this, x, y, z, relativeTo);
+            var after = __this != null ? __this.position : before;
+            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Translate(float,float,float,Space)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateXYZSpaceProxy(
+            Transform __this,
+            float x,
+            float y,
+            float z,
+            Space relativeTo)
+        {
+            throw new InvalidOperationException("TranslateXYZSpaceProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateXYZReplacement(Transform __this, float x, float y, float z)
+        {
+            var before = __this != null ? __this.position : Vector3.zero;
+            TranslateXYZProxy(__this, x, y, z);
+            var after = __this != null ? __this.position : before;
+            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Translate(float,float,float)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateXYZProxy(Transform __this, float x, float y, float z)
+        {
+            throw new InvalidOperationException("TranslateXYZProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateTransformReplacement(
+            Transform __this,
+            Vector3 translation,
+            Transform relativeTo)
+        {
+            var before = __this != null ? __this.position : Vector3.zero;
+            TranslateTransformProxy(__this, translation, relativeTo);
+            var after = __this != null ? __this.position : before;
+            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Translate(Vector3,Transform)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateTransformProxy(
+            Transform __this,
+            Vector3 translation,
+            Transform relativeTo)
+        {
+            throw new InvalidOperationException("TranslateTransformProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateXYZTransformReplacement(
+            Transform __this,
+            float x,
+            float y,
+            float z,
+            Transform relativeTo)
+        {
+            var before = __this != null ? __this.position : Vector3.zero;
+            TranslateXYZTransformProxy(__this, x, y, z, relativeTo);
+            var after = __this != null ? __this.position : before;
+            Record("transform.translate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Translate(float,float,float,Transform)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void TranslateXYZTransformProxy(
+            Transform __this,
+            float x,
+            float y,
+            float z,
+            Transform relativeTo)
+        {
+            throw new InvalidOperationException("TranslateXYZTransformProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void RotateReplacement(Transform __this, Vector3 eulers, Space relativeTo)
         {
             var before = __this != null ? __this.rotation : Quaternion.identity;
             RotateProxy(__this, eulers, relativeTo);
             var after = __this != null ? __this.rotation : before;
-            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString());
+            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Rotate(Vector3,Space)");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1737,12 +2197,113 @@ namespace CodingRiver.UPilot
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateVectorReplacement(Transform __this, Vector3 eulers)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            RotateVectorProxy(__this, eulers);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Rotate(Vector3)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateVectorProxy(Transform __this, Vector3 eulers)
+        {
+            throw new InvalidOperationException("RotateVectorProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateXYZSpaceReplacement(
+            Transform __this,
+            float xAngle,
+            float yAngle,
+            float zAngle,
+            Space relativeTo)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            RotateXYZSpaceProxy(__this, xAngle, yAngle, zAngle, relativeTo);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Rotate(float,float,float,Space)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateXYZSpaceProxy(
+            Transform __this,
+            float xAngle,
+            float yAngle,
+            float zAngle,
+            Space relativeTo)
+        {
+            throw new InvalidOperationException("RotateXYZSpaceProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateXYZReplacement(
+            Transform __this,
+            float xAngle,
+            float yAngle,
+            float zAngle)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            RotateXYZProxy(__this, xAngle, yAngle, zAngle);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Rotate(float,float,float)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateXYZProxy(
+            Transform __this,
+            float xAngle,
+            float yAngle,
+            float zAngle)
+        {
+            throw new InvalidOperationException("RotateXYZProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateAxisAngleSpaceReplacement(
+            Transform __this,
+            Vector3 axis,
+            float angle,
+            Space relativeTo)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            RotateAxisAngleSpaceProxy(__this, axis, angle, relativeTo);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Rotate(Vector3,float,Space)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateAxisAngleSpaceProxy(
+            Transform __this,
+            Vector3 axis,
+            float angle,
+            Space relativeTo)
+        {
+            throw new InvalidOperationException("RotateAxisAngleSpaceProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateAxisAngleReplacement(Transform __this, Vector3 axis, float angle)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            RotateAxisAngleProxy(__this, axis, angle);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.rotate", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "Rotate(Vector3,float)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateAxisAngleProxy(Transform __this, Vector3 axis, float angle)
+        {
+            throw new InvalidOperationException("RotateAxisAngleProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void RotateAroundReplacement(Transform __this, Vector3 point, Vector3 axis, float angle)
         {
             var before = __this != null ? __this.position + " | " + __this.rotation : string.Empty;
             RotateAroundProxy(__this, point, axis, angle);
             var after = __this != null ? __this.position + " | " + __this.rotation : string.Empty;
-            Record("transform.rotateAround", __this, typeof(Transform).FullName, before, after);
+            Record("transform.rotateAround", __this, typeof(Transform).FullName, before, after, "after", "RotateAround(Vector3,Vector3,float)");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
@@ -1752,18 +2313,84 @@ namespace CodingRiver.UPilot
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateAroundLegacyReplacement(Transform __this, Vector3 axis, float angle)
+        {
+            var before = __this != null ? __this.position + " | " + __this.rotation : string.Empty;
+            RotateAroundLegacyProxy(__this, axis, angle);
+            var after = __this != null ? __this.position + " | " + __this.rotation : string.Empty;
+            Record("transform.rotateAround", __this, typeof(Transform).FullName, before, after, "after", "RotateAround(Vector3,float)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void RotateAroundLegacyProxy(Transform __this, Vector3 axis, float angle)
+        {
+            throw new InvalidOperationException("RotateAroundLegacyProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void LookAtReplacement(Transform __this, Transform target, Vector3 worldUp)
         {
             var before = __this != null ? __this.rotation : Quaternion.identity;
             LookAtProxy(__this, target, worldUp);
             var after = __this != null ? __this.rotation : before;
-            Record("transform.lookAt", __this, typeof(Transform).FullName, before.ToString(), after.ToString());
+            Record("transform.lookAt", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "LookAt(Transform,Vector3)");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void LookAtProxy(Transform __this, Transform target, Vector3 worldUp)
         {
             throw new InvalidOperationException("LookAtProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void LookAtPositionUpReplacement(
+            Transform __this,
+            Vector3 worldPosition,
+            Vector3 worldUp)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            LookAtPositionUpProxy(__this, worldPosition, worldUp);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.lookAt", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "LookAt(Vector3,Vector3)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void LookAtPositionUpProxy(
+            Transform __this,
+            Vector3 worldPosition,
+            Vector3 worldUp)
+        {
+            throw new InvalidOperationException("LookAtPositionUpProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void LookAtPositionReplacement(Transform __this, Vector3 worldPosition)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            LookAtPositionProxy(__this, worldPosition);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.lookAt", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "LookAt(Vector3)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void LookAtPositionProxy(Transform __this, Vector3 worldPosition)
+        {
+            throw new InvalidOperationException("LookAtPositionProxy must only be called through MonoHook.");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void LookAtTransformReplacement(Transform __this, Transform target)
+        {
+            var before = __this != null ? __this.rotation : Quaternion.identity;
+            LookAtTransformProxy(__this, target);
+            var after = __this != null ? __this.rotation : before;
+            Record("transform.lookAt", __this, typeof(Transform).FullName, before.ToString(), after.ToString(), "after", "LookAt(Transform)");
+        }
+
+        [MethodImpl(MethodImplOptions.NoOptimization)]
+        private static void LookAtTransformProxy(Transform __this, Transform target)
+        {
+            throw new InvalidOperationException("LookAtTransformProxy must only be called through MonoHook.");
         }
 
         [MethodImpl(MethodImplOptions.NoOptimization)]

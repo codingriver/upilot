@@ -77,7 +77,11 @@ namespace CodingRiver.UPilot.Tests
             _lifecycleTypeIncludes = settings.lifecycleTypeIncludes;
             _lifecycleTypeExcludes = settings.lifecycleTypeExcludes;
             _points = settings.points
-                .Select(point => new UPilotMonoHookPointState(point.Id, point.Enabled, point.CaptureStackTrace))
+                .Select(point => new UPilotMonoHookPointState(
+                    point.Id,
+                    point.Enabled,
+                    point.CaptureStackTrace,
+                    point.HookAllSafeOverloads))
                 .ToList();
         }
 
@@ -194,6 +198,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(settings.points.Count, Is.EqualTo(UPilotMonoHookCatalog.All.Count));
             Assert.That(settings.points.All(point => !point.Enabled), Is.True);
             Assert.That(settings.points.All(point => !point.CaptureStackTrace), Is.True);
+            Assert.That(settings.points.All(point => !point.HookAllSafeOverloads), Is.True);
             Assert.That(settings.IsConfiguredEnabled(UPilotMonoHookPointId.LifecycleOnEnable), Is.False);
             Assert.That(settings.IsConfiguredEnabled(UPilotMonoHookPointId.TransformPosition), Is.False);
         }
@@ -255,6 +260,18 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(settings.ShouldCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive), Is.True);
             Assert.That(settings.ShouldCaptureStackTrace(UPilotMonoHookPointId.TransformPosition), Is.False);
+        }
+
+        [Test]
+        public void HookAllSafeOverloadsIsConfiguredPerPointAndDefaultsOff()
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            Assert.That(settings.ShouldHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy), Is.False);
+
+            settings.SetHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy, true);
+
+            Assert.That(settings.ShouldHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy), Is.True);
+            Assert.That(settings.ShouldHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectInstantiate), Is.False);
         }
 
         [Test]

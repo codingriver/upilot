@@ -196,7 +196,7 @@ namespace CodingRiver.UPilot
                 .ToArray();
             var unknown = pointIds.Where(id => UPilotMonoHookCatalog.Find(id) == null).ToArray();
             if (unknown.Length > 0)
-                throw new ArgumentException("未知 MonoHook 点位：" + string.Join(", ", unknown));
+                throw new ArgumentException("未知追踪点位：" + string.Join(", ", unknown));
 
             var result = new UPilotMonoHookTracingConfigureResultPayload();
             if (payload.setMasterEnabled)
@@ -261,4 +261,3 @@ namespace CodingRiver.UPilot
         }
     }
 }
-

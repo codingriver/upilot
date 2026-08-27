@@ -5,12 +5,26 @@
 
 namespace CodingRiver.UPilot
 {
-    internal abstract class UPilotBuiltInMonoHookPointBase : UPilotMonoHookPointBase, IUPilotMonoHookCoverageProvider
+    internal abstract class UPilotBuiltInMonoHookPointBase :
+        UPilotMonoHookPointBase,
+        IUPilotMonoHookCoverageProvider,
+        IUPilotMonoHookOverloadPolicyProvider
     {
+        private bool _hookAllSafeOverloads;
+
         protected abstract string PointId { get; }
 
         public override bool IsInstalled => UPilotMonoHookInstallationService.IsInstalled(PointId);
         public UPilotMonoHookCoverage Coverage => UPilotMonoHookInstallationService.GetCoverage(PointId);
+        public bool SupportsHookAllSafeOverloads =>
+            UPilotMonoHookInstallationService.SupportsHookAllSafeOverloads(PointId);
+        public bool HookAllSafeOverloads
+        {
+            get => _hookAllSafeOverloads;
+            set => _hookAllSafeOverloads = value;
+        }
+        public bool IsHookAllSafeOverloadsApplied =>
+            UPilotMonoHookInstallationService.IsHookAllSafeOverloadsApplied(PointId);
 
         public override UPilotMonoHookSupport CheckSupport(UPilotMonoHookContext context)
         {
@@ -19,7 +33,7 @@ namespace CodingRiver.UPilot
 
         protected override void InstallCore(UPilotMonoHookContext context)
         {
-            UPilotMonoHookInstallationService.InstallPoint(PointId);
+            UPilotMonoHookInstallationService.InstallPoint(PointId, _hookAllSafeOverloads);
         }
 
         protected override void UninstallCore(UPilotMonoHookContext context)

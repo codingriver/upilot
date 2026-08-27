@@ -16,14 +16,20 @@ namespace CodingRiver.UPilot
         public string Id;
         public bool Enabled;
         public bool CaptureStackTrace;
+        public bool HookAllSafeOverloads;
 
         public UPilotMonoHookPointState() { }
 
-        public UPilotMonoHookPointState(string id, bool enabled, bool captureStackTrace = false)
+        public UPilotMonoHookPointState(
+            string id,
+            bool enabled,
+            bool captureStackTrace = false,
+            bool hookAllSafeOverloads = false)
         {
             Id = id;
             Enabled = enabled;
             CaptureStackTrace = captureStackTrace;
+            HookAllSafeOverloads = hookAllSafeOverloads;
         }
     }
 
@@ -34,7 +40,7 @@ namespace CodingRiver.UPilot
     public sealed class UPilotMonoHookSettings : ScriptableSingleton<UPilotMonoHookSettings>
     {
         private const string AssetPath = "ProjectSettings/UPilotMonoHookSettings.asset";
-        public const int CurrentSchemaVersion = 5;
+        public const int CurrentSchemaVersion = 6;
 
         public int schemaVersion = CurrentSchemaVersion;
         public bool masterEnabled = true;
@@ -110,6 +116,21 @@ namespace CodingRiver.UPilot
             var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
             if (point == null) return;
             point.CaptureStackTrace = capture;
+        }
+
+        public bool ShouldHookAllSafeOverloads(string id)
+        {
+            EnsureDefaults();
+            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+            return point != null && point.HookAllSafeOverloads;
+        }
+
+        public void SetHookAllSafeOverloads(string id, bool hookAllSafeOverloads)
+        {
+            EnsureDefaults();
+            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+            if (point == null) return;
+            point.HookAllSafeOverloads = hookAllSafeOverloads;
         }
 
         public void SetCategoryEnabled(UPilotMonoHookPointCategory category, bool enabled)

@@ -69,7 +69,7 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 13" in text
+    assert "rulesVersion: 15" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
@@ -78,7 +78,8 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     assert "unity_config_csv_patch" in text
     assert "unity_hang_status" in text
     assert "fallbackSources" in text
-    assert "Optional MonoHook Tracing" in text
+    assert "Optional UPilot Tracer" in text
+    assert "`追踪器`, or `the tracer` as UPilot Tracer (`UPilot 追踪器`)" in text
     assert "saves without applying by default" in text
     assert "Do not use Native, InternalCall, injected" in text
     assert "{{" not in text

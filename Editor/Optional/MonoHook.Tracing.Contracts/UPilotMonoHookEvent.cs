@@ -21,9 +21,9 @@ namespace CodingRiver.UPilot
         public string hierarchyPath;
         public string scenePath;
         public string componentType;
+        public string methodSignature;
         public string beforeValue;
         public string afterValue;
         public string stackTrace;
     }
 }
-

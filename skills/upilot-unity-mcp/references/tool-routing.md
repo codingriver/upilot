@@ -10,7 +10,7 @@ Use the narrowest tool that matches the request.
 | Compile/errors | `unity_safe_compile_and_wait`, `unity_compile_errors` |
 | Console | `unity_console_tail_logs`, `unity_console_search_logs` |
 | Persistent Console | `unity_console_capture_*`; use `afterSequence` / `nextSequence` for live tails, and `fromSequence` / `toSequence` plus `continuationToken` for filtered large captures |
-| Optional MonoHook tracing | `unity_monohook_tracing_status`, `unity_monohook_tracing_configure`, `unity_monohook_tracing_events`; read `monohook-tracing.md` before configuration |
+| Optional UPilot Tracer | `unity_monohook_tracing_status`, `unity_monohook_tracing_configure`, `unity_monohook_tracing_events`; read `monohook-tracing.md` before configuration |
 | Configuration CSV | `unity_config_csv_get`, `unity_config_csv_patch` |
 | Texture importer | `unity_texture_importer_get`, `unity_texture_importer_patch`, `unity_asset_reimport` |
 | Hang diagnostics | `unity_hang_status`, `unity_hang_capture` |

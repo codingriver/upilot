@@ -144,7 +144,11 @@ namespace CodingRiver.UPilot.Tests
                 lifecycleNamespaceExcludes = settings.lifecycleNamespaceExcludes,
                 lifecycleTypeIncludes = settings.lifecycleTypeIncludes,
                 lifecycleTypeExcludes = settings.lifecycleTypeExcludes,
-                points = settings.points.Select(point => new UPilotMonoHookPointState(point.Id, point.Enabled, point.CaptureStackTrace)).ToList(),
+                points = settings.points.Select(point => new UPilotMonoHookPointState(
+                    point.Id,
+                    point.Enabled,
+                    point.CaptureStackTrace,
+                    point.HookAllSafeOverloads)).ToList(),
             };
         }
     }

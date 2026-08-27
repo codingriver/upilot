@@ -1,16 +1,18 @@
-# UPilot MonoHook Tracing
+# UPilot 追踪器
 
-`UPilot.MonoHook.Tracing.Editor` 是 UPilot 的可选 Editor 追踪模块，用于手动选择并安装 Unity 方法打点。扩展契约独立位于 `UPilot.MonoHook.Tracing.Contracts.Editor`，MCP 薄适配位于 `UPilot.MonoHook.Tracing.Mcp.Editor`。
+UPilot 追踪器是可选的 Editor 诊断模块，用于手动选择并安装 Unity 方法追踪点位。底层使用 MonoHook 技术栈，程序集仍保留 `UPilot.MonoHook.Tracing.Editor`；扩展契约位于 `UPilot.MonoHook.Tracing.Contracts.Editor`，MCP 薄适配位于 `UPilot.MonoHook.Tracing.Mcp.Editor`。
 
 ## 使用方式
 
 在 Unity 中打开：
 
 ```text
-UPilot > Advanced > MonoHook
+UPilot > Advanced > 追踪器
 ```
 
 所有内置点位默认关闭。勾选点位只修改项目配置，点击“应用”后才会实际安装或卸载 Hook。“卸载全部”只卸载当前 Hook，不修改已保存的点位选择。
+
+`Instantiate`、`Destroy`、`SetParent`、`Translate`、`Rotate`、`RotateAround` 和 `LookAt` 提供“全部安全重载”选项，默认关闭。推荐模式按当前 Unity 版本选择能够覆盖独立调用族的最小安全集合，避免包装方法转发产生同点位重复日志；开启后会尝试安装所有通过安全检查的公开非泛型重载。`RotateAround` 的全部模式还会尝试覆盖仍可执行的过时二参数入口。修改该选项后点位显示“未应用”，点击“应用”才会按新策略重新安装。该选项不会绕过 Native、`InternalCall`、Injected、开放泛型或其他不安全目标检查，实际安装数量以点位覆盖诊断为准。
 
 配置保存在：
 
@@ -40,16 +42,17 @@ Domain Reload 后自动应用默认关闭，可在窗口的“运行保护”区
 - 稳定 pointId
 - 对象名、实例 ID、层级路径和 Scene 路径
 - 组件类型
+- 实际命中的方法签名
 - 修改前后的值
 - 可选调用堆栈
 
 窗口支持文本筛选、清空和事件 JSONL 导出。“导出诊断”会为每个点位输出配置状态、安装状态、candidate/installed/skipped/failed 统计和最多 5 条样例。调用堆栈按点位单独开启，默认全部关闭；全局只提供最大帧数和每 N 条采样一次两个保护参数。
 
-“事件日志”标题右侧提供“输出到 Console”开关，默认关闭且切换后立即生效，不需要重新应用 Hook。Console 日志使用固定 `[UPilot][MonoHook]` 前缀并包含 pointId、阶段、帧号、Scene、对象层级、组件类型和修改前后值；开启点位堆栈后会追加 `Hook caller`。Console 使用独立的每秒日志上限，超过上限只丢弃 Console 输出，不影响内存事件和 JSONL 导出。
+“事件日志”标题右侧提供“输出到 Console”开关，默认关闭且切换后立即生效，不需要重新应用追踪点位。Console 日志使用固定 `[UPilot][Trace]` 前缀并包含 pointId、阶段、帧号、Scene、对象层级、组件类型、实际方法签名和修改前后值；开启点位堆栈后会追加 `Hook caller`。Console 使用独立的每秒日志上限，超过上限只丢弃 Console 输出，不影响内存事件和 JSONL 导出。
 
 ## 自定义点位
 
-完整的程序集配置、可运行示例、签名规则和排错步骤见 [自定义 MonoHook 点位教程](MonoHook-Custom-Point-Tutorial.md)。
+完整的程序集配置、可运行示例、签名规则和排错步骤见 [自定义 UPilot 追踪点位教程](MonoHook-Custom-Point-Tutorial.md)。
 
 自定义 Editor 程序集需要引用：
 
@@ -79,7 +82,7 @@ internal sealed class ExampleHookPoint : UPilotMethodHookPointBase
 
 Provider 必须具有无参构造方法。最终点位 ID 必须全局唯一；重复 ID、无法创建的 Provider 和不安全目标会在窗口中显示明确状态。
 
-Package Manager 的 Samples 中提供 `MonoHook Tracing Custom Provider` 示例，导入后会自动发现 `Sample Custom / Sample SetValue` 点位；该示例同样默认关闭。
+Package Manager 的 Samples 中提供 `UPilot Tracer Custom Provider` 示例，导入后会自动发现 `Sample Custom / Sample SetValue` 点位；该示例同样默认关闭。
 
 ## MCP 辅助控制
 

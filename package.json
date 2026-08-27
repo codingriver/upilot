@@ -14,8 +14,8 @@
   "dependencies": {},
   "samples": [
     {
-      "displayName": "MonoHook Tracing Custom Provider",
-      "description": "A minimal attribute-discovered custom MonoHook point that remains disabled until manually enabled.",
+      "displayName": "UPilot Tracer Custom Provider",
+      "description": "A minimal attribute-discovered custom UPilot Tracer point that remains disabled until manually enabled.",
       "path": "Samples~/MonoHookTracing"
     }
   ],

@@ -326,3 +326,13 @@
 - 建议改进：为安装脚本增加仅同步 Skill 的窄模式；保留已有等价本地 UPM 引用和原文件换行；同步受管副本时复用与 `UPilotAgentSetup` 相同的跳过规则、内容哈希和 `.upilot-install.json` 写入逻辑；dry-run 明确列出将变化的字段和元数据处理。
 - 证据/复现：本次 dry-run/执行后 `.upilot-install.json` 被删除，`Packages/manifest.json` 出现 57 行删除/57 行新增及相对路径变绝对路径；随后通过已编译入口 `UPilotAgentSetup.UpdateAllAgentRules(true)` 才恢复模板版本 8 和内容哈希。
 - 当前状态：待处理。本任务已恢复原 manifest，并使用正式 Editor 入口生成受管 Skill 副本；未扩展修改安装器。
+
+### [待处理] EditMode 测试被未保存场景对话框阻塞时缺少结构化诊断
+
+- 发现时间：2026-08-27
+- 来源任务/测试：在 `D:\upilot\Tests~\UPilotTest` 运行 MonoHook 安全重载定向 EditMode 测试。
+- 现象/问题：`unity_test_run` 返回 `status=running` 后长期没有 `currentTest`、测试数量或进度；Editor 主线程停止泵送，状态只显示 `EditorContextStale`。实际原因是 Unity 弹出 `Scene(s) Have Been Modified` 模态框，等待用户选择 Save / Don't Save / Cancel，但测试状态和 `nextAction` 没有报告该对话框。
+- 影响范围：任何存在未保存 Scene 修改的 EditMode/PlayMode 测试；Agent 容易误判 Unity 卡死并盲目轮询、取消甚至重启，且 Save / Don't Save 涉及用户数据，不能自动选择。
+- 建议改进：`unity_test_run` 启动前检测未保存 Scene，并返回结构化 `blockedReason=UnsavedScenes`、场景列表和明确 `nextAction`；测试运行中若主线程停止泵送且存在 Unity 模态框，`unity_hang_status` / 测试状态应返回窗口标题和安全恢复建议。默认不得自动保存或丢弃场景修改。
+- 证据/复现：runGuid `e3d3f077-423a-4639-8408-6627d4da0e30` 长期停留在 `running,total=0,currentTest=""`；`unity_hang_status` 显示主线程心跳超过 56 秒、CPU 0%；Windows 窗口枚举确认 PID 51148 存在 `Scene(s) Have Been Modified`；选择 Cancel 后运行立即进入 `aborted` 并完成资源清理。诊断 dump：`Tests~/UPilotTest/Log/UPilotDiagnostics/MonoHookTargetedTestHang.dmp`，SHA256 `d1f8f5ffcd28abc986305c7509eb3bc1e63383d82e255478b52650d7b5a560bb`。
+- 当前状态：待处理；本次未保存或丢弃用户场景修改，定向测试尚未执行。

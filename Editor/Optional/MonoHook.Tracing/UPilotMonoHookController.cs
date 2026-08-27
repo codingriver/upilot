@@ -28,6 +28,9 @@ namespace CodingRiver.UPilot
         public UPilotMonoHookInstallState InstallState;
         public string Message;
         public UPilotMonoHookCoverage Coverage;
+        public bool SupportsHookAllSafeOverloads;
+        public bool ConfiguredHookAllSafeOverloads;
+        public bool AppliedHookAllSafeOverloads;
     }
 
     public sealed class UPilotMonoHookApplyReport
@@ -49,6 +52,9 @@ namespace CodingRiver.UPilot
         public string displayName;
         public string categoryId;
         public bool configuredEnabled;
+        public bool supportsHookAllSafeOverloads;
+        public bool configuredHookAllSafeOverloads;
+        public bool appliedHookAllSafeOverloads;
         public string installState;
         public string message;
         public int candidateCount;
@@ -84,7 +90,7 @@ namespace CodingRiver.UPilot
         public void RegisterInstaller(string pointId, Action install, Action uninstall)
         {
             if (string.IsNullOrEmpty(pointId)) throw new ArgumentException("Point id is required.", nameof(pointId));
-            if (UPilotMonoHookCatalog.Find(pointId) == null) throw new ArgumentException("Unknown MonoHook point: " + pointId, nameof(pointId));
+            if (UPilotMonoHookCatalog.Find(pointId) == null) throw new ArgumentException("Unknown trace point: " + pointId, nameof(pointId));
             _installers[pointId] = install;
             _uninstallers[pointId] = uninstall;
         }
@@ -107,6 +113,7 @@ namespace CodingRiver.UPilot
                 }
 
                 state.ConfiguredEnabled = settings.IsConfiguredEnabled(definition.Id);
+                state.ConfiguredHookAllSafeOverloads = settings.ShouldHookAllSafeOverloads(definition.Id);
                 RefreshPointState(definition.Id, state);
             }
         }
@@ -125,6 +132,12 @@ namespace CodingRiver.UPilot
                 var state = _runtime[definition.Id];
                 bool shouldInstall = settings.IsEnabled(definition.Id);
                 bool isInstalled = IsInstalled(definition.Id, state);
+
+                if (shouldInstall && isInstalled && HasPendingAppliedConfiguration(definition.Id))
+                {
+                    ApplyReinstall(definition.Id, state, report);
+                    continue;
+                }
 
                 if (shouldInstall == isInstalled)
                 {
@@ -169,6 +182,9 @@ namespace CodingRiver.UPilot
                     displayName = definition.DisplayName,
                     categoryId = definition.CategoryId,
                     configuredEnabled = state.ConfiguredEnabled,
+                    supportsHookAllSafeOverloads = state.SupportsHookAllSafeOverloads,
+                    configuredHookAllSafeOverloads = state.ConfiguredHookAllSafeOverloads,
+                    appliedHookAllSafeOverloads = state.AppliedHookAllSafeOverloads,
                     installState = state.InstallState.ToString(),
                     message = state.Message ?? string.Empty,
                     candidateCount = coverage?.CandidateCount ?? 0,
@@ -210,14 +226,25 @@ namespace CodingRiver.UPilot
             var descriptor = _registry.Find(pointId);
             if (descriptor == null || !descriptor.IsValid)
             {
+                state.SupportsHookAllSafeOverloads = false;
+                state.AppliedHookAllSafeOverloads = false;
                 state.InstallState = UPilotMonoHookInstallState.Unsupported;
                 state.Message = descriptor?.DiscoveryError ?? "未发现点位 Provider";
                 state.Coverage = null;
                 return;
             }
 
+            ConfigureOverloadPolicy(pointId, descriptor.Provider, state);
+
             if (descriptor.Provider.IsInstalled)
             {
+                if (HasPendingAppliedConfiguration(pointId))
+                {
+                    state.InstallState = UPilotMonoHookInstallState.NotInstalled;
+                    state.Message = "未应用";
+                    state.Coverage = GetCoverage(descriptor.Provider);
+                    return;
+                }
                 SetInstalledState(state, descriptor.Provider);
                 return;
             }
@@ -246,6 +273,51 @@ namespace CodingRiver.UPilot
             return descriptor != null && descriptor.Provider != null && descriptor.Provider.IsInstalled;
         }
 
+        private bool HasPendingAppliedConfiguration(string pointId)
+        {
+            if (_installers.ContainsKey(pointId)) return false;
+            var descriptor = _registry.Find(pointId);
+            var policy = descriptor?.Provider as IUPilotMonoHookOverloadPolicyProvider;
+            return policy != null &&
+                   policy.SupportsHookAllSafeOverloads &&
+                   policy.IsHookAllSafeOverloadsApplied !=
+                   UPilotMonoHookSettings.instance.ShouldHookAllSafeOverloads(pointId);
+        }
+
+        private static void ConfigureOverloadPolicy(
+            string pointId,
+            IUPilotMonoHookPointProvider provider,
+            UPilotMonoHookPointRuntimeState state = null)
+        {
+            var policy = provider as IUPilotMonoHookOverloadPolicyProvider;
+            bool supports = policy != null && policy.SupportsHookAllSafeOverloads;
+            bool configured = supports &&
+                              UPilotMonoHookSettings.instance.ShouldHookAllSafeOverloads(pointId);
+            if (policy != null)
+                policy.HookAllSafeOverloads = configured;
+            if (state == null) return;
+            state.SupportsHookAllSafeOverloads = supports;
+            state.ConfiguredHookAllSafeOverloads = configured;
+            state.AppliedHookAllSafeOverloads = supports &&
+                                                policy.IsHookAllSafeOverloadsApplied;
+        }
+
+        private void ApplyReinstall(
+            string pointId,
+            UPilotMonoHookPointRuntimeState state,
+            UPilotMonoHookApplyReport report)
+        {
+            var uninstallReport = new UPilotMonoHookApplyReport();
+            ApplyUninstall(pointId, state, uninstallReport);
+            if (uninstallReport.Failed.Count > 0)
+            {
+                report.Failed.AddRange(uninstallReport.Failed);
+                return;
+            }
+
+            ApplyInstall(pointId, state, report);
+        }
+
         private void ApplyInstall(
             string pointId,
             UPilotMonoHookPointRuntimeState state,
@@ -266,6 +338,8 @@ namespace CodingRiver.UPilot
                     MarkUnsupported(pointId, state, report, descriptor?.DiscoveryError ?? "未发现点位 Provider");
                     return;
                 }
+
+                ConfigureOverloadPolicy(pointId, descriptor.Provider, state);
 
                 var result = descriptor.Provider.Install(_registry.Context);
                 switch (result.Status)
@@ -376,6 +450,14 @@ namespace CodingRiver.UPilot
             UPilotMonoHookPointRuntimeState state,
             IUPilotMonoHookPointProvider provider)
         {
+            var overloadPolicy = provider as IUPilotMonoHookOverloadPolicyProvider;
+            if (overloadPolicy != null)
+            {
+                state.SupportsHookAllSafeOverloads = overloadPolicy.SupportsHookAllSafeOverloads;
+                state.AppliedHookAllSafeOverloads =
+                    overloadPolicy.SupportsHookAllSafeOverloads &&
+                    overloadPolicy.IsHookAllSafeOverloadsApplied;
+            }
             var coverage = GetCoverage(provider);
             state.Coverage = coverage;
             if (coverage != null && coverage.IsPartial)
@@ -434,7 +516,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 LastResult = "失败：" + ex.Message;
-                Debug.LogWarning("[UPilot MonoHook] 自动应用失败：" + ex.Message);
+                Debug.LogWarning("[UPilot Trace] 自动应用失败：" + ex.Message);
             }
         }
     }

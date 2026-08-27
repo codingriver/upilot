@@ -472,8 +472,9 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("`ready`, `blocked`, `blockedReason`, `authoritative`, `isStale`, and `nextAction`"));
             Assert.That(text, Does.Contain("Do not infer readiness from raw `isPlaying` or `isCompiling`"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
-            Assert.That(text, Does.Contain("Optional MonoHook Tracing"));
-            Assert.That(text, Does.Contain("All hook points, per-point stack capture, and Console output default to disabled"));
+            Assert.That(text, Does.Contain("Optional UPilot Tracer"));
+            Assert.That(text, Does.Contain("`追踪器`, or `the tracer` as UPilot Tracer (`UPilot 追踪器`)"));
+            Assert.That(text, Does.Contain("All trace points, per-point stack capture, and Console output default to disabled"));
             Assert.That(text, Does.Contain("saves without applying by default"));
             Assert.That(text, Does.Contain("Do not use Native, InternalCall, injected"));
             Assert.That(text, Does.Contain("restore the original configuration"));

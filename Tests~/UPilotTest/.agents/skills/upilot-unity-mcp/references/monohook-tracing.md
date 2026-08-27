@@ -1,14 +1,14 @@
-# MonoHook Tracing
+# UPilot Tracer
 
-MonoHook Tracing is an optional diagnostic feature for observing selected Unity lifecycle, object, Transform, and component calls. Manual management is the primary workflow; MCP tools are an auxiliary interface.
+UPilot Tracer (`UPilot 追踪器`) is an optional diagnostic feature for observing selected Unity lifecycle, object, Transform, and component calls. In a UPilot context, `Tracer`, `追踪器`, and `the tracer` all refer to this feature. MonoHook is the internal implementation technology or a preserved compatibility identifier, not a separate user-facing feature name. Manual management is the primary workflow; MCP tools are an auxiliary interface.
 
 ## Manual Workflow
 
-- Open `UPilot > Advanced > MonoHook`.
-- Hook points, per-point stack capture, and Console output all default to disabled.
+- Open `UPilot > Advanced > 追踪器`.
+- Trace points, per-point stack capture, and Console output all default to disabled.
 - Select only the points needed for the current investigation, then apply the configuration explicitly.
 - Keep high-frequency points such as `Update` and Transform setters bounded. Enable stack capture only for the smallest useful point set.
-- The window's `输出到 Console` switch emits formatted `[UPilot][MonoHook]` logs and has its own rate limit. This switch is not currently exposed through the MCP configure tool.
+- The window's `输出到 Console` switch emits formatted `[UPilot][Trace]` logs and has its own rate limit. This switch is not currently exposed through the MCP configure tool.
 
 ## MCP Workflow
 
@@ -28,4 +28,4 @@ For a temporary diagnostic session:
 
 Do not enable, apply, auto-restore, or consume events merely because the tools are available. Respect `Unsupported` diagnostics and the returned `nextAction`; do not bypass them with Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 
-MonoHook Console output is different from `unity_console_capture_*`: MonoHook decides whether hook events are emitted to the Unity Console, while persistent Console capture records Console messages that already exist. Enabling capture does not enable MonoHook Console output.
+UPilot Tracer Console output is different from `unity_console_capture_*`: the tracer decides whether trace events are emitted to the Unity Console, while persistent Console capture records Console messages that already exist. Enabling capture does not enable tracer Console output.
