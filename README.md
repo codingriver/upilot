@@ -607,7 +607,7 @@ UPilot Flow 是可选的 Unity Editor 界面自动化功能，普通用户不需
 
 ## UPilot 追踪器
 
-UPilot 追踪器是默认不启用任何点位的手动 Editor 诊断模块，可按列表选择生命周期、GameObject、Component 和 Transform 点位，并查看或导出事件。
+UPilot 追踪器是默认不启用任何点位的手动 Editor 诊断模块，可按列表选择生命周期、GameObject、Component 和 Transform 点位，并按对象来源、类型、名称、Hierarchy、Scene、Layer/Tag、Prefab、点位/方法/阶段和运行模式过滤后查看或导出事件。
 
 需要使用时请查看 [UPilot 追踪器文档](Documentation~/MonoHook-Tracing.md)。
 

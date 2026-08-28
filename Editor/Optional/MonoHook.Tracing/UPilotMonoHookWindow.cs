@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
-    public sealed class UPilotMonoHookWindow : EditorWindow
+    public sealed partial class UPilotMonoHookWindow : EditorWindow
     {
         private const string ScrollXSessionKey = "UPilot.MonoHook.Tracing.Window.ScrollX";
         private const string ScrollYSessionKey = "UPilot.MonoHook.Tracing.Window.ScrollY";
@@ -20,7 +20,7 @@ namespace CodingRiver.UPilot
         private Vector2 _scroll;
         private string _status = "未应用";
         private bool _showEvents = true;
-        private bool _showLifecycleScope;
+        private bool _showFilterProfiles = true;
         private string _eventFilter = string.Empty;
 
         [MenuItem("UPilot/Advanced/追踪器", false, 215)]
@@ -59,7 +59,7 @@ namespace CodingRiver.UPilot
                 MessageType.Info);
 
             DrawRuntimeOptions(settings);
-            DrawLifecycleScope(settings);
+            DrawFilterProfiles(settings);
 
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             bool master = EditorGUILayout.ToggleLeft("总开关", settings.masterEnabled, GUILayout.Width(80f));
@@ -143,6 +143,20 @@ namespace CodingRiver.UPilot
             settings.maxEventsPerSecond = Mathf.Max(1, EditorGUILayout.IntField(
                 new GUIContent("每秒最大事件数", "超过上限的事件会被丢弃并计入丢弃数量。"),
                 settings.maxEventsPerSecond));
+            settings.enablePerObjectRateLimit = EditorGUILayout.ToggleLeft(
+                new GUIContent("启用单对象限流", "按点位和对象分别限制事件数量，默认关闭。"),
+                settings.enablePerObjectRateLimit);
+            if (settings.enablePerObjectRateLimit)
+                settings.maxEventsPerObjectPerSecond = Mathf.Clamp(EditorGUILayout.IntField(
+                    new GUIContent("单对象每秒最大事件数", "只影响单个对象，不改变全局事件上限。"),
+                    settings.maxEventsPerObjectPerSecond), 1, 10000);
+            settings.suppressDuplicateEvents = EditorGUILayout.ToggleLeft(
+                new GUIContent("抑制重复事件", "相同点位、对象、方法、阶段和值在短窗口内只保留一条，默认关闭。"),
+                settings.suppressDuplicateEvents);
+            if (settings.suppressDuplicateEvents)
+                settings.duplicateEventWindowMilliseconds = Mathf.Clamp(EditorGUILayout.IntField(
+                    new GUIContent("重复事件窗口（毫秒）", "仅用于重复事件抑制，不影响值变化抑制。"),
+                    settings.duplicateEventWindowMilliseconds), 1, 60000);
             settings.stackTraceMaxFrames = Mathf.Max(1, EditorGUILayout.IntField(
                 new GUIContent("堆栈最大帧数", "仅对勾选了“堆栈”的点位生效。"),
                 settings.stackTraceMaxFrames));
@@ -151,31 +165,6 @@ namespace CodingRiver.UPilot
                 settings.stackTraceSampleEveryN));
             if (EditorGUI.EndChangeCheck())
                 settings.SaveSettings();
-            EditorGUILayout.EndVertical();
-        }
-
-        private void DrawLifecycleScope(UPilotMonoHookSettings settings)
-        {
-            EditorGUILayout.BeginVertical("helpBox");
-            _showLifecycleScope = EditorGUILayout.Foldout(
-                _showLifecycleScope,
-                "生命周期目标范围（空值表示不过滤）",
-                true);
-            if (_showLifecycleScope)
-            {
-                EditorGUILayout.HelpBox(
-                    "支持逗号、分号或换行分隔，支持 * 和 ? 通配符；排除规则优先于包含规则。修改后需要重新应用生命周期追踪。",
-                    MessageType.None);
-                EditorGUI.BeginChangeCheck();
-                settings.lifecycleAssemblyIncludes = EditorGUILayout.TextField("程序集包含", settings.lifecycleAssemblyIncludes);
-                settings.lifecycleAssemblyExcludes = EditorGUILayout.TextField("程序集排除", settings.lifecycleAssemblyExcludes);
-                settings.lifecycleNamespaceIncludes = EditorGUILayout.TextField("命名空间包含", settings.lifecycleNamespaceIncludes);
-                settings.lifecycleNamespaceExcludes = EditorGUILayout.TextField("命名空间排除", settings.lifecycleNamespaceExcludes);
-                settings.lifecycleTypeIncludes = EditorGUILayout.TextField("类型包含", settings.lifecycleTypeIncludes);
-                settings.lifecycleTypeExcludes = EditorGUILayout.TextField("类型排除", settings.lifecycleTypeExcludes);
-                if (EditorGUI.EndChangeCheck())
-                    settings.SaveSettings();
-            }
             EditorGUILayout.EndVertical();
         }
 
@@ -235,6 +224,9 @@ namespace CodingRiver.UPilot
                 }
             }
             EditorGUILayout.EndHorizontal();
+            EditorGUILayout.LabelField(
+                $"低噪声统计：重复丢弃 {UPilotMonoHookTelemetry.DuplicateDroppedCount}；单对象限流丢弃 {UPilotMonoHookTelemetry.PerObjectDroppedCount}",
+                EditorStyles.miniLabel);
 
             var events = UPilotMonoHookTelemetry.Snapshot(100);
             foreach (var hookEvent in events)
@@ -287,6 +279,24 @@ namespace CodingRiver.UPilot
                 if (next != enabled)
                     settings.SetEnabled(definition.Id, next);
 
+                string configuredFilter = settings.GetConfiguredFilterProfileId(definition.Id);
+                var filterIds = new List<string> { string.Empty, UPilotTraceFilterProfileIds.None };
+                var filterLabels = new List<string> { "继承全局", "不过滤" };
+                foreach (var profile in settings.filterProfiles ?? new List<UPilotTraceFilterProfile>())
+                {
+                    if (profile == null) continue;
+                    filterIds.Add(profile.Id);
+                    filterLabels.Add(profile.Name);
+                }
+                int filterIndex = filterIds.IndexOf(configuredFilter);
+                if (filterIndex < 0) filterIndex = 0;
+                int nextFilterIndex = EditorGUILayout.Popup(filterIndex, filterLabels.ToArray(), GUILayout.Width(125f));
+                if (nextFilterIndex != filterIndex)
+                {
+                    settings.SetFilterProfileId(definition.Id, filterIds[nextFilterIndex]);
+                    settings.SaveSettings();
+                }
+
                 if (_controller.Runtime.TryGetValue(definition.Id, out var overloadState) &&
                     overloadState.SupportsHookAllSafeOverloads)
                 {
@@ -315,6 +325,16 @@ namespace CodingRiver.UPilot
 
                 if (_controller.Runtime.TryGetValue(definition.Id, out var state))
                 {
+                    string effectiveFilterId = settings.GetEffectiveFilterProfileId(definition.Id);
+                    var effectiveFilter = settings.FindFilterProfile(effectiveFilterId);
+                    var filterStats = UPilotTraceFilterEngine.GetStatistics(definition.Id, effectiveFilterId);
+                    string statusText = state.Message ?? string.Empty;
+                    if (effectiveFilter != null)
+                    {
+                        statusText += " · 过滤：" + effectiveFilter.Name;
+                        if (filterStats != null)
+                            statusText += $" ({filterStats.accepted}/{filterStats.evaluated})";
+                    }
                     var previousColor = GUI.color;
                     GUI.color = GetStatusColor(state.InstallState);
                     var statusStyle = new GUIStyle(EditorStyles.miniLabel)
@@ -322,7 +342,7 @@ namespace CodingRiver.UPilot
                         alignment = TextAnchor.MiddleRight,
                         clipping = TextClipping.Clip,
                     };
-                    GUILayout.Label(new GUIContent(state.Message, BuildStatusTooltip(state)), statusStyle, GUILayout.Width(170f));
+                    GUILayout.Label(new GUIContent(statusText, BuildStatusTooltip(state)), statusStyle, GUILayout.Width(170f));
                     GUI.color = previousColor;
                 }
                 EditorGUILayout.EndHorizontal();

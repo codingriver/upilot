@@ -19,6 +19,15 @@ Terminology: in a UPilot context, `Tracer`, `追踪器`, and `the tracer` mean U
 
 Use the unified execution state: require `ready=true`, `authoritative=true`, and `isStale=false`. When `blocked=true` or readiness is false, follow `blockedReason` and `nextAction`; do not infer readiness from raw `isPlaying` or `isCompiling` values alone.
 
+## Optional UPilot Tracer
+
+- In a UPilot context, `Tracer`, `追踪器`, and `the tracer` mean UPilot Tracer (`UPilot 追踪器`); MonoHook is only the internal implementation technology.
+- The Tracer is manually controlled. Trace points, stack capture, and Console output default to disabled; do not enable, apply, or consume events unless explicitly requested.
+- Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor/root/direct-child, scene/resource path, Layer/Tag, Active/enabled, required-component state, Prefab/source path, selection, point/method/phase/event source, EditMode/PlayMode, object identity, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
+- Optional global/per-object rate limits and duplicate suppression are disabled by default; when enabled, report their dropped counters separately from filter rejections.
+- Point-specific profiles override the global profile; empty point selection inherits the global profile. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
+- Keep high-frequency points, stack capture, and Console output bounded; use filter statistics and rejection reasons before widening the scope.
+
 Use Streamable HTTP such as `http://127.0.0.1:8011/mcp` as the only third-party AI client transport. Never configure an AI client with a WebSocket URL, the internal Bridge port, stdio, or a command that launches the MCP Server. WebSocket transport is internal to MCP Server <-> Unity Bridge.
 
 For concurrent Unity projects, use a distinct MCP registration name and a unique HTTP/WebSocket port pair per project, but expose only each project's HTTP `/mcp` endpoint to the AI client. Always verify project identity after connecting.

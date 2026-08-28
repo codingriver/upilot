@@ -24,6 +24,40 @@ Domain Reload 后自动应用默认关闭，可在窗口的“运行保护”区
 
 生命周期点位可以按程序集、命名空间和类型分别设置包含/排除范围。规则支持逗号、分号或换行分隔，并支持 `*`、`?` 通配符；空包含规则表示不过滤，排除规则优先。范围修改后再次点击“应用”，已安装的生命周期 Hook 会按新范围重新安装。
 
+## 目标与事件过滤
+
+目标过滤器支持按“对象 + 上下文 + 事件”组合筛选。单条规则内条件按 AND 组合，多条包含规则按 OR 组合，排除规则优先；过滤器默认关闭，不改变现有点位选择。
+
+- 对象：场景对象、资源、Prefab Stage、Editor 临时对象、对象类型、派生类型、必需组件。
+- 标识：GameObject 名称、完整 Hierarchy、父节点名称、任意祖先节点名称、最大层级深度、Scene、资源路径、Layer、Tag、Prefab 状态。
+- 关系与身份：根对象、直接子节点、必需组件 enabled 状态、Prefab 来源路径、会话 InstanceID、GlobalObjectId、事件来源模式。
+- 范围：当前选中对象、当前选中对象子树。
+- 事件：点位模式、方法签名模式、`before/after` 阶段、EditMode/PlayMode。
+- 值：值是否改变、修改前后内容、字符串包含、数值变化阈值。
+
+追踪器还提供全局事件限流、可选单对象限流和可选重复事件抑制；新增低噪声选项默认关闭。它们产生的丢弃计数与过滤拒绝独立统计。
+
+点位行可以单独绑定过滤器，未绑定时继承全局过滤器。对象名称和 Hierarchy 条件属于事件级过滤：底层方法可能仍被 Hook，但事件会在堆栈采集、缓冲和 Console 输出之前被拒绝；生命周期类型条件在满足条件时还可以缩小实际安装候选。
+
+InstanceID 只适合当前 Unity 会话；需要长期保存时优先使用名称、Hierarchy、Prefab 路径或 GlobalObjectId。内置事件来源为 `EditMode`/`PlayMode`，不等同于调用者堆栈。
+
+常用预设包括“场景业务对象”“当前选中及子树”和“排除 Editor 临时对象”。建议先用预览/统计确认命中结果，再启用高频点位；不要默认打开正则、完整堆栈或全部重载。
+
+例如，筛选 Player 子树中禁用的 BoxCollider：
+
+```json
+{
+  "NameMatchMode": 2,
+  "NamePattern": "Player",
+  "HierarchyMatchMode": 4,
+  "HierarchyPattern": "Gameplay/Player",
+  "RequiredComponentTypeName": "UnityEngine.BoxCollider",
+  "RequiredComponentEnabledState": 2
+}
+```
+
+其中枚举值以 C# 枚举为准，实际使用建议直接在界面编辑或导出预设，不要手写枚举数字。
+
 ## 当前点位
 
 - 生命周期：`Awake`、`OnEnable`、`Start`、`Update`、`FixedUpdate`、`LateUpdate`、`OnDisable`、`OnDestroy`
@@ -41,7 +75,7 @@ Domain Reload 后自动应用默认关闭，可在窗口的“运行保护”区
 - 点位 kind 与执行阶段
 - 稳定 pointId
 - 对象名、实例 ID、层级路径和 Scene 路径
-- 组件类型
+- 组件类型、目标类型、GlobalObjectId 和事件来源
 - 实际命中的方法签名
 - 修改前后的值
 - 可选调用堆栈

@@ -17,6 +17,7 @@ namespace CodingRiver.UPilot
         public bool Enabled;
         public bool CaptureStackTrace;
         public bool HookAllSafeOverloads;
+        public string FilterProfileId;
 
         public UPilotMonoHookPointState() { }
 
@@ -24,12 +25,14 @@ namespace CodingRiver.UPilot
             string id,
             bool enabled,
             bool captureStackTrace = false,
-            bool hookAllSafeOverloads = false)
+            bool hookAllSafeOverloads = false,
+            string filterProfileId = "")
         {
             Id = id;
             Enabled = enabled;
             CaptureStackTrace = captureStackTrace;
             HookAllSafeOverloads = hookAllSafeOverloads;
+            FilterProfileId = filterProfileId ?? string.Empty;
         }
     }
 
@@ -40,13 +43,17 @@ namespace CodingRiver.UPilot
     public sealed class UPilotMonoHookSettings : ScriptableSingleton<UPilotMonoHookSettings>
     {
         private const string AssetPath = "ProjectSettings/UPilotMonoHookSettings.asset";
-        public const int CurrentSchemaVersion = 6;
+        public const int CurrentSchemaVersion = 8;
 
         public int schemaVersion = CurrentSchemaVersion;
         public bool masterEnabled = true;
         public bool autoApplyOnEditorLoad;
         public bool suppressUnchangedValues = true;
         public int maxEventsPerSecond = 1000;
+        public bool enablePerObjectRateLimit;
+        public int maxEventsPerObjectPerSecond = 100;
+        public bool suppressDuplicateEvents;
+        public int duplicateEventWindowMilliseconds = 100;
         public bool logEventsToConsole;
         public int maxConsoleLogsPerSecond = 50;
         public int stackTraceMaxFrames = 16;
@@ -57,10 +64,19 @@ namespace CodingRiver.UPilot
         public string lifecycleNamespaceExcludes = string.Empty;
         public string lifecycleTypeIncludes = string.Empty;
         public string lifecycleTypeExcludes = string.Empty;
+        public string globalFilterProfileId = UPilotTraceFilterProfileIds.None;
+        public List<UPilotTraceFilterProfile> filterProfiles = new List<UPilotTraceFilterProfile>();
         public List<UPilotMonoHookPointState> points = new List<UPilotMonoHookPointState>();
 
         public void EnsureDefaults()
         {
+            if (schemaVersion < 8)
+            {
+                enablePerObjectRateLimit = false;
+                maxEventsPerObjectPerSecond = 100;
+                suppressDuplicateEvents = false;
+                duplicateEventWindowMilliseconds = 100;
+            }
             if (points == null)
                 points = new List<UPilotMonoHookPointState>();
 
@@ -75,10 +91,157 @@ namespace CodingRiver.UPilot
             // choices return when the defining Editor assembly is restored.
             points.RemoveAll(p => p == null || string.IsNullOrEmpty(p.Id));
             maxEventsPerSecond = Math.Max(1, maxEventsPerSecond);
+            maxEventsPerObjectPerSecond = Math.Max(1, Math.Min(10000, maxEventsPerObjectPerSecond));
+            duplicateEventWindowMilliseconds = Math.Max(1, Math.Min(60000, duplicateEventWindowMilliseconds));
             maxConsoleLogsPerSecond = Math.Max(1, Math.Min(200, maxConsoleLogsPerSecond));
             stackTraceMaxFrames = Math.Max(1, stackTraceMaxFrames);
             stackTraceSampleEveryN = Math.Max(1, stackTraceSampleEveryN);
+            EnsureFilterDefaults();
+            MigrateLegacyLifecycleFilters();
             schemaVersion = CurrentSchemaVersion;
+        }
+
+        private void EnsureFilterDefaults()
+        {
+            if (filterProfiles == null)
+                filterProfiles = new List<UPilotTraceFilterProfile>();
+            filterProfiles.RemoveAll(profile => profile == null || string.IsNullOrWhiteSpace(profile.Id));
+
+            var unique = new HashSet<string>(StringComparer.Ordinal);
+            filterProfiles.RemoveAll(profile => !unique.Add(profile.Id));
+            foreach (var profile in filterProfiles)
+            {
+                if (string.IsNullOrWhiteSpace(profile.Name)) profile.Name = "未命名过滤器";
+                if (profile.Rules == null) profile.Rules = new List<UPilotTraceFilterRule>();
+                profile.Rules.RemoveAll(rule => rule == null);
+                foreach (var rule in profile.Rules)
+                {
+                    if (string.IsNullOrWhiteSpace(rule.Id)) rule.Id = Guid.NewGuid().ToString("N");
+                    if (string.IsNullOrWhiteSpace(rule.Name)) rule.Name = "未命名规则";
+                }
+            }
+
+            if (FindFilterProfile(UPilotTraceFilterProfileIds.SceneObjects) == null)
+                filterProfiles.Insert(0, CreateSceneObjectsProfile());
+            if (FindFilterProfile(UPilotTraceFilterProfileIds.CurrentSelection) == null)
+                filterProfiles.Insert(Math.Min(1, filterProfiles.Count), CreateCurrentSelectionProfile());
+
+            if (string.IsNullOrWhiteSpace(globalFilterProfileId))
+                globalFilterProfileId = UPilotTraceFilterProfileIds.None;
+        }
+
+        private void MigrateLegacyLifecycleFilters()
+        {
+            if (schemaVersion >= CurrentSchemaVersion) return;
+            bool hasLegacy = !string.IsNullOrWhiteSpace(lifecycleAssemblyIncludes) ||
+                             !string.IsNullOrWhiteSpace(lifecycleAssemblyExcludes) ||
+                             !string.IsNullOrWhiteSpace(lifecycleNamespaceIncludes) ||
+                             !string.IsNullOrWhiteSpace(lifecycleNamespaceExcludes) ||
+                             !string.IsNullOrWhiteSpace(lifecycleTypeIncludes) ||
+                             !string.IsNullOrWhiteSpace(lifecycleTypeExcludes);
+            if (!hasLegacy) return;
+
+            var profile = FindFilterProfile(UPilotTraceFilterProfileIds.LegacyLifecycle);
+            if (profile == null)
+            {
+                profile = new UPilotTraceFilterProfile
+                {
+                    Id = UPilotTraceFilterProfileIds.LegacyLifecycle,
+                    Name = "迁移的生命周期范围",
+                };
+                if (!string.IsNullOrWhiteSpace(lifecycleAssemblyIncludes) ||
+                    !string.IsNullOrWhiteSpace(lifecycleNamespaceIncludes) ||
+                    !string.IsNullOrWhiteSpace(lifecycleTypeIncludes))
+                {
+                    profile.Rules.Add(new UPilotTraceFilterRule
+                    {
+                        Name = "原包含范围",
+                        Effect = UPilotTraceFilterRuleEffect.Include,
+                        AssemblyPatterns = lifecycleAssemblyIncludes,
+                        NamespacePatterns = lifecycleNamespaceIncludes,
+                        TypePatterns = lifecycleTypeIncludes,
+                    });
+                }
+                AddLegacyExcludeRule(profile, "程序集排除", lifecycleAssemblyExcludes, null, null);
+                AddLegacyExcludeRule(profile, "命名空间排除", null, lifecycleNamespaceExcludes, null);
+                AddLegacyExcludeRule(profile, "类型排除", null, null, lifecycleTypeExcludes);
+                filterProfiles.Add(profile);
+            }
+
+            foreach (var definition in UPilotMonoHookCatalog.All)
+            {
+                if (!string.Equals(definition.CategoryId, UPilotMonoHookCategoryId.Lifecycle, StringComparison.Ordinal)) continue;
+                var point = points.FirstOrDefault(item => string.Equals(item.Id, definition.Id, StringComparison.Ordinal));
+                if (point != null && string.IsNullOrEmpty(point.FilterProfileId))
+                    point.FilterProfileId = profile.Id;
+            }
+
+            lifecycleAssemblyIncludes = string.Empty;
+            lifecycleAssemblyExcludes = string.Empty;
+            lifecycleNamespaceIncludes = string.Empty;
+            lifecycleNamespaceExcludes = string.Empty;
+            lifecycleTypeIncludes = string.Empty;
+            lifecycleTypeExcludes = string.Empty;
+        }
+
+        private static void AddLegacyExcludeRule(
+            UPilotTraceFilterProfile profile,
+            string name,
+            string assembly,
+            string namespaceName,
+            string type)
+        {
+            if (string.IsNullOrWhiteSpace(assembly) &&
+                string.IsNullOrWhiteSpace(namespaceName) &&
+                string.IsNullOrWhiteSpace(type)) return;
+            profile.Rules.Add(new UPilotTraceFilterRule
+            {
+                Name = name,
+                Effect = UPilotTraceFilterRuleEffect.Exclude,
+                AssemblyPatterns = assembly ?? string.Empty,
+                NamespacePatterns = namespaceName ?? string.Empty,
+                TypePatterns = type ?? string.Empty,
+            });
+        }
+
+        private static UPilotTraceFilterProfile CreateSceneObjectsProfile()
+        {
+            var profile = new UPilotTraceFilterProfile
+            {
+                Id = UPilotTraceFilterProfileIds.SceneObjects,
+                Name = "场景业务对象",
+                BuiltIn = true,
+            };
+            profile.Rules.Add(new UPilotTraceFilterRule
+            {
+                Name = "包含场景对象",
+                Effect = UPilotTraceFilterRuleEffect.Include,
+                ObjectScope = UPilotTraceObjectScope.SceneObject,
+            });
+            profile.Rules.Add(new UPilotTraceFilterRule
+            {
+                Name = "排除 Editor 临时对象",
+                Effect = UPilotTraceFilterRuleEffect.Exclude,
+                ObjectScope = UPilotTraceObjectScope.EditorTemporary,
+            });
+            return profile;
+        }
+
+        private static UPilotTraceFilterProfile CreateCurrentSelectionProfile()
+        {
+            var profile = new UPilotTraceFilterProfile
+            {
+                Id = UPilotTraceFilterProfileIds.CurrentSelection,
+                Name = "当前选中及子树",
+                BuiltIn = true,
+            };
+            profile.Rules.Add(new UPilotTraceFilterRule
+            {
+                Name = "选中对象及子树",
+                Effect = UPilotTraceFilterRuleEffect.Include,
+                SelectionScope = UPilotTraceSelectionScope.SelectedSubtree,
+            });
+            return profile;
         }
 
         public bool IsEnabled(string id)
@@ -133,6 +296,41 @@ namespace CodingRiver.UPilot
             point.HookAllSafeOverloads = hookAllSafeOverloads;
         }
 
+        public string GetConfiguredFilterProfileId(string id)
+        {
+            EnsureDefaults();
+            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+            return point?.FilterProfileId ?? string.Empty;
+        }
+
+        public void SetFilterProfileId(string id, string filterProfileId)
+        {
+            EnsureDefaults();
+            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+            if (point != null) point.FilterProfileId = filterProfileId ?? string.Empty;
+        }
+
+        public string GetEffectiveFilterProfileId(string id)
+        {
+            string configured = GetConfiguredFilterProfileId(id);
+            return string.IsNullOrEmpty(configured) ? globalFilterProfileId : configured;
+        }
+
+        public UPilotTraceFilterProfile ResolveFilterProfile(string pointId)
+        {
+            EnsureDefaults();
+            string profileId = GetEffectiveFilterProfileId(pointId);
+            if (string.IsNullOrEmpty(profileId) || string.Equals(profileId, UPilotTraceFilterProfileIds.None, StringComparison.Ordinal))
+                return null;
+            return FindFilterProfile(profileId);
+        }
+
+        public UPilotTraceFilterProfile FindFilterProfile(string profileId)
+        {
+            if (filterProfiles == null || string.IsNullOrEmpty(profileId)) return null;
+            return filterProfiles.FirstOrDefault(profile => string.Equals(profile.Id, profileId, StringComparison.Ordinal));
+        }
+
         public void SetCategoryEnabled(UPilotMonoHookPointCategory category, bool enabled)
         {
             SetCategoryEnabled(UPilotMonoHookCategoryId.FromLegacy(category), enabled);
@@ -160,6 +358,10 @@ namespace CodingRiver.UPilot
             autoApplyOnEditorLoad = false;
             suppressUnchangedValues = true;
             maxEventsPerSecond = 1000;
+            enablePerObjectRateLimit = false;
+            maxEventsPerObjectPerSecond = 100;
+            suppressDuplicateEvents = false;
+            duplicateEventWindowMilliseconds = 100;
             logEventsToConsole = false;
             maxConsoleLogsPerSecond = 50;
             stackTraceMaxFrames = 16;
@@ -170,6 +372,8 @@ namespace CodingRiver.UPilot
             lifecycleNamespaceExcludes = string.Empty;
             lifecycleTypeIncludes = string.Empty;
             lifecycleTypeExcludes = string.Empty;
+            globalFilterProfileId = UPilotTraceFilterProfileIds.None;
+            filterProfiles = new List<UPilotTraceFilterProfile>();
             points = new List<UPilotMonoHookPointState>();
             EnsureDefaults();
             SaveSettings();

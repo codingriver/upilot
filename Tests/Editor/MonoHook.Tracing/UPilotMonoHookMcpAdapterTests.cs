@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -13,6 +15,12 @@ namespace CodingRiver.UPilot.Tests
     {
         private bool _masterEnabled;
         private List<UPilotMonoHookPointState> _points;
+        private string _globalFilterProfileId;
+        private List<UPilotTraceFilterProfile> _filterProfiles;
+        private bool _enablePerObjectRateLimit;
+        private int _maxEventsPerObjectPerSecond;
+        private bool _suppressDuplicateEvents;
+        private int _duplicateEventWindowMilliseconds;
 
         [SetUp]
         public void SetUp()
@@ -20,12 +28,24 @@ namespace CodingRiver.UPilot.Tests
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
             _masterEnabled = settings.masterEnabled;
+            _globalFilterProfileId = settings.globalFilterProfileId;
+            _enablePerObjectRateLimit = settings.enablePerObjectRateLimit;
+            _maxEventsPerObjectPerSecond = settings.maxEventsPerObjectPerSecond;
+            _suppressDuplicateEvents = settings.suppressDuplicateEvents;
+            _duplicateEventWindowMilliseconds = settings.duplicateEventWindowMilliseconds;
+            _filterProfiles = (settings.filterProfiles ?? new List<UPilotTraceFilterProfile>())
+                .Where(profile => profile != null)
+                .Select(profile => JsonUtility.FromJson<UPilotTraceFilterProfile>(JsonUtility.ToJson(profile)))
+                .ToList();
+            var knownFilterProfileIds = new HashSet<string>(_filterProfiles.Select(profile => profile.Id), System.StringComparer.Ordinal);
             _points = settings.points
+                .Where(point => point != null)
                 .Select(point => new UPilotMonoHookPointState(
                     point.Id,
                     point.Enabled,
                     point.CaptureStackTrace,
-                    point.HookAllSafeOverloads))
+                    point.HookAllSafeOverloads,
+                    knownFilterProfileIds.Contains(point.FilterProfileId) ? point.FilterProfileId : string.Empty))
                 .ToList();
             new UPilotMonoHookController().UninstallAll();
         }
@@ -36,7 +56,14 @@ namespace CodingRiver.UPilot.Tests
             new UPilotMonoHookController().UninstallAll();
             var settings = UPilotMonoHookSettings.instance;
             settings.masterEnabled = _masterEnabled;
+            settings.globalFilterProfileId = _globalFilterProfileId;
+            settings.enablePerObjectRateLimit = _enablePerObjectRateLimit;
+            settings.maxEventsPerObjectPerSecond = _maxEventsPerObjectPerSecond;
+            settings.suppressDuplicateEvents = _suppressDuplicateEvents;
+            settings.duplicateEventWindowMilliseconds = _duplicateEventWindowMilliseconds;
+            settings.filterProfiles = _filterProfiles;
             settings.points = _points;
+            settings.EnsureDefaults();
             settings.SaveSettings();
             UPilotMonoHookTelemetry.Clear();
         }
@@ -75,6 +102,127 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(events.consumed, Is.False);
             Assert.That(events.items.Count, Is.EqualTo(1));
             Assert.That(UPilotMonoHookTelemetry.Count, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ConfigureCanSetGlobalFilterProfileAndExposeProfilesInStatus()
+        {
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+            var profile = new UPilotTraceFilterProfile { Id = "mcp.global", Name = "MCP 全局" };
+
+            var result = service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                replaceFilterProfiles = true,
+                filterProfiles = new[] { profile },
+                setGlobalFilterProfile = true,
+                globalFilterProfileId = profile.Id,
+            });
+
+            Assert.That(result.status.globalFilterProfileId, Is.EqualTo(profile.Id));
+            Assert.That(result.status.filterProfiles.Any(item => item.Id == profile.Id), Is.True);
+        }
+
+        [Test]
+        public void ConfigureCanAssignPointFilterProfileAndClearItToInheritGlobal()
+        {
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+            var profile = new UPilotTraceFilterProfile { Id = "mcp.point", Name = "MCP 点位" };
+            service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                replaceFilterProfiles = true,
+                filterProfiles = new[] { profile },
+                updatePointFilterProfile = true,
+                pointFilterProfileId = profile.Id,
+                pointIds = new[] { UPilotMonoHookPointId.GameObjectDestroy },
+            });
+
+            Assert.That(UPilotMonoHookSettings.instance.GetConfiguredFilterProfileId(UPilotMonoHookPointId.GameObjectDestroy),
+                Is.EqualTo(profile.Id));
+
+            service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                updatePointFilterProfile = true,
+                pointFilterProfileId = string.Empty,
+                pointIds = new[] { UPilotMonoHookPointId.GameObjectDestroy },
+            });
+            Assert.That(UPilotMonoHookSettings.instance.GetConfiguredFilterProfileId(UPilotMonoHookPointId.GameObjectDestroy),
+                Is.Empty);
+        }
+
+        [Test]
+        public void ConfigureRejectsUnknownProfileBeforeChangingGlobalSelection()
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            settings.globalFilterProfileId = UPilotTraceFilterProfileIds.None;
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+
+            var exception = Assert.Throws<ArgumentException>(() => service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                setGlobalFilterProfile = true,
+                globalFilterProfileId = "mcp.unknown",
+            }));
+
+            Assert.That(exception.Message, Does.Contain("未知追踪器过滤器"));
+            Assert.That(settings.globalFilterProfileId, Is.EqualTo(UPilotTraceFilterProfileIds.None));
+        }
+
+        [Test]
+        public void StatusIncludesFilterStatisticsForAcceptedAndRejectedEvents()
+        {
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+            var profile = new UPilotTraceFilterProfile { Id = "mcp.stats", Name = "MCP 统计" };
+            profile.Rules.Add(new UPilotTraceFilterRule
+            {
+                NameMatchMode = UPilotTraceStringMatchMode.Equals,
+                NamePattern = "Accepted",
+            });
+            service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                replaceFilterProfiles = true,
+                filterProfiles = new[] { profile },
+                setGlobalFilterProfile = true,
+                globalFilterProfileId = profile.Id,
+                resetFilterStatistics = true,
+            });
+
+            UPilotMonoHookRegistry.Instance.Context.EventSink.Publish(new UPilotMonoHookEvent
+            {
+                pointId = "mcp.stats",
+                kind = "mcp.stats",
+                objectName = "Accepted",
+            });
+            UPilotMonoHookRegistry.Instance.Context.EventSink.Publish(new UPilotMonoHookEvent
+            {
+                pointId = "mcp.stats",
+                kind = "mcp.stats",
+                objectName = "Rejected",
+            });
+
+            var statistics = service.BuildStatus().filterStatistics
+                .First(item => item.pointId == "mcp.stats" && item.profileId == profile.Id);
+            Assert.That(statistics.evaluated, Is.EqualTo(2));
+            Assert.That(statistics.accepted, Is.EqualTo(1));
+            Assert.That(statistics.rejected, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ConfigureCanSetPerObjectNoiseControlsAndExposeStatus()
+        {
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+            var result = service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                updatePerObjectRateLimit = true,
+                enablePerObjectRateLimit = true,
+                maxEventsPerObjectPerSecond = 3,
+                updateDuplicateSuppression = true,
+                suppressDuplicateEvents = true,
+                duplicateEventWindowMilliseconds = 250,
+            });
+
+            Assert.That(result.status.enablePerObjectRateLimit, Is.True);
+            Assert.That(result.status.maxEventsPerObjectPerSecond, Is.EqualTo(3));
+            Assert.That(result.status.suppressDuplicateEvents, Is.True);
+            Assert.That(result.status.duplicateEventWindowMilliseconds, Is.EqualTo(250));
         }
     }
 }

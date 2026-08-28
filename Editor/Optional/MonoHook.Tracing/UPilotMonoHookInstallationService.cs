@@ -52,6 +52,14 @@ namespace CodingRiver.UPilot
         private static double _consoleRateWindowStart;
         private static int _consoleRateWindowCount;
         private static int _consoleDroppedCount;
+        private static int _perObjectDroppedCount;
+        private static int _duplicateDroppedCount;
+        private static readonly Dictionary<string, double> PerObjectRateWindowStarts =
+            new Dictionary<string, double>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int> PerObjectRateWindowCounts =
+            new Dictionary<string, int>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, double> LastEventTimes =
+            new Dictionary<string, double>(StringComparer.Ordinal);
         private static readonly MethodInfo InstanceIdToObjectMethod = typeof(EditorUtility).GetMethod(
             "InstanceIDToObject",
             BindingFlags.Static | BindingFlags.Public,
@@ -63,6 +71,8 @@ namespace CodingRiver.UPilot
 
         public static readonly UPilotMonoHookEventBuffer Events = new UPilotMonoHookEventBuffer();
         public static int ConsoleDroppedCount => _consoleDroppedCount;
+        public static int PerObjectDroppedCount => _perObjectDroppedCount;
+        public static int DuplicateDroppedCount => _duplicateDroppedCount;
 
         internal static bool SupportsHookAllSafeOverloads(string pointId)
         {
@@ -92,6 +102,17 @@ namespace CodingRiver.UPilot
 
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
+            if (string.IsNullOrEmpty(hookEvent.pointId))
+                hookEvent.pointId = hookEvent.kind ?? string.Empty;
+            if (!hookEvent.filterEvaluated)
+            {
+                if (!UPilotTraceFilterEngine.Evaluate(hookEvent, true, out var filterDecision))
+                    return 0;
+                hookEvent.filterProfileId = filterDecision.ProfileId;
+                hookEvent.filterProfileName = filterDecision.ProfileName;
+                hookEvent.filterReason = filterDecision.Reason;
+                hookEvent.filterEvaluated = true;
+            }
             bool hasValue = !string.IsNullOrEmpty(hookEvent.beforeValue) ||
                             !string.IsNullOrEmpty(hookEvent.afterValue);
             if (settings.suppressUnchangedValues && hasValue &&
@@ -100,14 +121,27 @@ namespace CodingRiver.UPilot
                 return 0;
             }
 
+            double now = EditorApplication.timeSinceStartup;
+            if (settings.suppressDuplicateEvents && IsDuplicateEvent(hookEvent, now, settings.duplicateEventWindowMilliseconds))
+            {
+                _duplicateDroppedCount++;
+                Events.MarkDropped();
+                return 0;
+            }
+
             if (!TryAcquireEventSlot(settings.maxEventsPerSecond))
             {
                 Events.MarkDropped();
                 return 0;
             }
+            if (settings.enablePerObjectRateLimit &&
+                !TryAcquirePerObjectEventSlot(hookEvent, now, settings.maxEventsPerObjectPerSecond))
+            {
+                _perObjectDroppedCount++;
+                Events.MarkDropped();
+                return 0;
+            }
 
-            if (string.IsNullOrEmpty(hookEvent.pointId))
-                hookEvent.pointId = hookEvent.kind ?? string.Empty;
             if (settings.ShouldCaptureStackTrace(hookEvent.pointId) &&
                 ShouldSampleStackTrace(hookEvent.pointId, settings.stackTraceSampleEveryN))
             {
@@ -115,6 +149,8 @@ namespace CodingRiver.UPilot
             }
             if (string.IsNullOrEmpty(hookEvent.timestampUtc))
                 hookEvent.timestampUtc = DateTime.UtcNow.ToString("O");
+            if (settings.suppressDuplicateEvents)
+                LastEventTimes[BuildEventIdentityKey(hookEvent)] = now;
             long sequence = Events.Add(hookEvent);
             if (sequence > 0 && settings.logEventsToConsole)
                 WriteConsoleLog(hookEvent, settings.maxConsoleLogsPerSecond);
@@ -129,7 +165,13 @@ namespace CodingRiver.UPilot
             _consoleRateWindowStart = 0d;
             _consoleRateWindowCount = 0;
             _consoleDroppedCount = 0;
+            _perObjectDroppedCount = 0;
+            _duplicateDroppedCount = 0;
+            PerObjectRateWindowStarts.Clear();
+            PerObjectRateWindowCounts.Clear();
+            LastEventTimes.Clear();
             StackTraceSampleCounts.Clear();
+            UPilotTraceFilterEngine.ClearStatistics();
         }
 
         public static bool IsInstalled(string pointId)
@@ -162,7 +204,7 @@ namespace CodingRiver.UPilot
                        lifecycle.Count > 0 &&
                        lifecycle.All(hook => hook.isHooked) &&
                        LifecycleFilterSignatures.TryGetValue(pointId, out var signature) &&
-                       string.Equals(signature, GetLifecycleFilterSignature(), StringComparison.Ordinal);
+                       string.Equals(signature, GetLifecycleFilterSignature(pointId), StringComparison.Ordinal);
             return TransformHooks.TryGetValue(pointId, out var transform) &&
                    transform.Count > 0 && transform.All(hook => hook != null && hook.isHooked);
         }
@@ -923,7 +965,7 @@ namespace CodingRiver.UPilot
 
         private static void InstallLifecycle(string pointId, string methodName)
         {
-            string filterSignature = GetLifecycleFilterSignature();
+            string filterSignature = GetLifecycleFilterSignature(pointId);
             if (LifecycleHooks.TryGetValue(pointId, out var existing) &&
                 existing.Count > 0 &&
                 LifecycleFilterSignatures.TryGetValue(pointId, out var existingSignature) &&
@@ -948,7 +990,7 @@ namespace CodingRiver.UPilot
                 if (!seenTargets.Add(target)) continue;
                 candidateCount++;
 
-                if (!UPilotMonoHookLifecycleFilter.Includes(type, UPilotMonoHookSettings.instance, out var filterReason))
+                if (!UPilotMonoHookLifecycleFilter.Includes(type, UPilotMonoHookSettings.instance, pointId, out var filterReason))
                 {
                     skippedCount++;
                     AddCoverageSample(samples, type.FullName + "：" + filterReason);
@@ -1011,7 +1053,7 @@ namespace CodingRiver.UPilot
             CoverageByPoint.Remove(pointId);
         }
 
-        private static string GetLifecycleFilterSignature()
+        private static string GetLifecycleFilterSignature(string pointId)
         {
             var settings = UPilotMonoHookSettings.instance;
             return string.Join("\u001f", new[]
@@ -1022,6 +1064,7 @@ namespace CodingRiver.UPilot
                 settings.lifecycleNamespaceExcludes ?? string.Empty,
                 settings.lifecycleTypeIncludes ?? string.Empty,
                 settings.lifecycleTypeExcludes ?? string.Empty,
+                UPilotTraceFilterEngine.GetProfileSignature(pointId, settings),
             });
         }
 
@@ -1271,6 +1314,27 @@ namespace CodingRiver.UPilot
             _insideHook = true;
             try
             {
+                if (!UPilotTraceFilterEngine.Evaluate(
+                        kind,
+                        target,
+                        string.Empty,
+                        string.Empty,
+                        string.Empty,
+                        componentType,
+                        methodSignature,
+                        before,
+                        after,
+                        phase,
+                        EditorApplication.isPlaying,
+                        true,
+                        out var filterDecision,
+                        target.GetType().FullName,
+                        TryGetGlobalObjectId(target),
+                        EditorApplication.isPlaying ? "PlayMode" : "EditMode",
+                        GetObjectId(target)))
+                {
+                    return;
+                }
                 var gameObject = target as GameObject;
                 var component = target as Component;
                 var transform = gameObject != null ? gameObject.transform : component != null ? component.transform : null;
@@ -1285,15 +1349,30 @@ namespace CodingRiver.UPilot
                     hierarchyPath = GetHierarchyPath(transform),
                     scenePath = transform != null && transform.gameObject.scene.IsValid() ? transform.gameObject.scene.path : string.Empty,
                     componentType = componentType ?? component?.GetType().FullName ?? target.GetType().FullName,
+                    targetType = target.GetType().FullName,
+                    targetGlobalObjectId = TryGetGlobalObjectId(target),
+                    eventSource = EditorApplication.isPlaying ? "PlayMode" : "EditMode",
                     methodSignature = methodSignature ?? string.Empty,
                     beforeValue = before ?? string.Empty,
                     afterValue = after ?? string.Empty,
+                    filterProfileId = filterDecision.ProfileId,
+                    filterProfileName = filterDecision.ProfileName,
+                    filterReason = filterDecision.Reason,
+                    target = target,
+                    filterEvaluated = true,
                 });
             }
             finally
             {
                 _insideHook = false;
             }
+        }
+
+        private static string TryGetGlobalObjectId(UnityEngine.Object target)
+        {
+            if (target == null) return string.Empty;
+            try { return GlobalObjectId.GetGlobalObjectIdSlow(target).ToString(); }
+            catch { return string.Empty; }
         }
 
         private static bool TryAcquireEventSlot(int maxEventsPerSecond)
@@ -1310,6 +1389,47 @@ namespace CodingRiver.UPilot
 
             _eventRateWindowCount++;
             return true;
+        }
+
+        private static bool TryAcquirePerObjectEventSlot(
+            UPilotMonoHookEvent hookEvent,
+            double now,
+            int maxEventsPerSecond)
+        {
+            string key = BuildEventObjectKey(hookEvent);
+            if (!PerObjectRateWindowStarts.TryGetValue(key, out double start) || now - start >= 1d)
+            {
+                PerObjectRateWindowStarts[key] = now;
+                PerObjectRateWindowCounts[key] = 0;
+            }
+            PerObjectRateWindowCounts.TryGetValue(key, out int count);
+            if (count >= Math.Max(1, maxEventsPerSecond)) return false;
+            PerObjectRateWindowCounts[key] = count + 1;
+            return true;
+        }
+
+        private static bool IsDuplicateEvent(UPilotMonoHookEvent hookEvent, double now, int windowMilliseconds)
+        {
+            string key = BuildEventIdentityKey(hookEvent);
+            if (!LastEventTimes.TryGetValue(key, out double previous)) return false;
+            return now - previous <= Math.Max(1, windowMilliseconds) / 1000d;
+        }
+
+        private static string BuildEventObjectKey(UPilotMonoHookEvent hookEvent)
+        {
+            return (hookEvent?.pointId ?? hookEvent?.kind ?? string.Empty) + "\u001f" +
+                   (hookEvent?.instanceId.ToString() ?? "0") + "\u001f" +
+                   (hookEvent?.targetGlobalObjectId ?? string.Empty) + "\u001f" +
+                   (hookEvent?.hierarchyPath ?? hookEvent?.objectName ?? string.Empty);
+        }
+
+        private static string BuildEventIdentityKey(UPilotMonoHookEvent hookEvent)
+        {
+            return BuildEventObjectKey(hookEvent) + "\u001f" +
+                   (hookEvent?.methodSignature ?? string.Empty) + "\u001f" +
+                   (hookEvent?.phase ?? string.Empty) + "\u001f" +
+                   (hookEvent?.beforeValue ?? string.Empty) + "\u001f" +
+                   (hookEvent?.afterValue ?? string.Empty);
         }
 
         private static bool TryAcquireConsoleLogSlot(int maxLogsPerSecond)
@@ -1379,6 +1499,9 @@ namespace CodingRiver.UPilot
                 builder.Append(" id=").Append(hookEvent.instanceId);
             AppendConsoleField(builder, "component", hookEvent.componentType);
             AppendConsoleField(builder, "method", hookEvent.methodSignature);
+            if (!string.IsNullOrEmpty(hookEvent.filterProfileId) &&
+                !string.Equals(hookEvent.filterProfileId, UPilotTraceFilterProfileIds.None, StringComparison.Ordinal))
+                AppendConsoleField(builder, "filter", hookEvent.filterProfileName);
 
             string value = string.Empty;
             if (!string.IsNullOrEmpty(hookEvent.beforeValue) && !string.IsNullOrEmpty(hookEvent.afterValue))
@@ -1445,7 +1568,7 @@ namespace CodingRiver.UPilot
             return string.Join("/", names);
         }
 
-        private static int GetObjectId(UnityEngine.Object target)
+        internal static int GetObjectId(UnityEngine.Object target)
         {
 #if UNITY_6000_0_OR_NEWER
             // Unity 6 marks GetInstanceID obsolete-as-error. Reflection keeps the

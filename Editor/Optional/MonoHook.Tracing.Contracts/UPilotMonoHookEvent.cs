@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
@@ -21,9 +22,18 @@ namespace CodingRiver.UPilot
         public string hierarchyPath;
         public string scenePath;
         public string componentType;
+        public string targetType;
+        public string targetGlobalObjectId;
+        public string eventSource;
         public string methodSignature;
         public string beforeValue;
         public string afterValue;
         public string stackTrace;
+        public string filterProfileId;
+        public string filterProfileName;
+        public string filterReason;
+
+        [NonSerialized] public UnityEngine.Object target;
+        [NonSerialized] internal bool filterEvaluated;
     }
 }

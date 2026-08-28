@@ -15,6 +15,8 @@ namespace CodingRiver.UPilot
         public static int Count => UPilotMonoHookInstallationService.Events.Count;
         public static int DroppedCount => UPilotMonoHookInstallationService.Events.DroppedCount;
         public static int ConsoleDroppedCount => UPilotMonoHookInstallationService.ConsoleDroppedCount;
+        public static int PerObjectDroppedCount => UPilotMonoHookInstallationService.PerObjectDroppedCount;
+        public static int DuplicateDroppedCount => UPilotMonoHookInstallationService.DuplicateDroppedCount;
 
         public static List<UPilotMonoHookEvent> Read(int maxCount = 256)
         {

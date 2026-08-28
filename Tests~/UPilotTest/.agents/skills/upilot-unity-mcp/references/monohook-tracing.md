@@ -9,6 +9,11 @@ UPilot Tracer (`UPilot 追踪器`) is an optional diagnostic feature for observi
 - Select only the points needed for the current investigation, then apply the configuration explicitly.
 - Keep high-frequency points such as `Update` and Transform setters bounded. Enable stack capture only for the smallest useful point set.
 - The window's `输出到 Console` switch emits formatted `[UPilot][Trace]` logs and has its own rate limit. This switch is not currently exposed through the MCP configure tool.
+- Target filters can combine object source/type, GameObject name, hierarchy/parent/ancestor/root/direct-child, scene/resource path, Layer/Tag (equals/wildcard/regex), Active/enabled, required-component enabled state, Prefab state/source path, selection, point/method/phase/event source, EditMode/PlayMode, object InstanceID/GlobalObjectId, and value-change conditions. Conditions inside one rule are AND; include rules are OR; exclude rules have priority.
+- Optional global/per-object event limits and duplicate suppression are disabled by default; use them only after filtering and report their dropped counters separately from filter rejections.
+- `unity_monohook_tracing_status` reports the per-object and duplicate-suppression settings and separate dropped counters. Configure them only with the explicit `updatePerObjectRateLimit` / `updateDuplicateSuppression` flags.
+- Use the built-in `场景业务对象`, `当前选中及子树`, or `排除 Editor 临时对象` profiles for common noise control. Target name and hierarchy filters suppress recording before stack capture and Console output, but do not necessarily reduce the physical Hook cost; type-only lifecycle filters may reduce installation candidates.
+- Point-specific profiles override the global profile. An empty point profile selection means inherit the global profile; `__none__` or a disabled profile means no target filtering.
 
 ## MCP Workflow
 
@@ -25,6 +30,8 @@ For a temporary diagnostic session:
 3. Use `apply=true` only when the user explicitly requested hook installation or application.
 4. Read a bounded event count and stop when enough evidence is collected.
 5. Restore the retained configuration and apply it if the temporary configuration was applied.
+
+When diagnosing a noisy point, narrow in this order: object source/type → hierarchy/name → point/method/phase → value condition. Use filter statistics and the last rejection reason before widening the scope.
 
 Do not enable, apply, auto-restore, or consume events merely because the tools are available. Respect `Unsupported` diagnostics and the returned `nextAction`; do not bypass them with Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 

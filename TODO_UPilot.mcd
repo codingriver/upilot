@@ -317,6 +317,15 @@
 - Unity 2022.3 证据：独立最小工程包编译成功；MonoHook 测试程序集 34 项，29 通过、5 条条件跳过、0 失败。5 条跳过均明确归因于该版本的 InternalCall 入口；导入后的自定义 Provider Sample 单独编译成功。
 - 当前状态：已完成。调用堆栈、MCP 控制、独立 Contracts 程序集、编译宏、Update 系列点位和 Native/Injected Hook 仍按既定范围延后，不属于 P1 未完成项。
 
+### [已完成] UPilot 追踪器 P0/P1/P2 目标过滤与低噪声能力
+
+- 发现时间：2026-08-27
+- 来源任务/测试：追踪范围扩展需求；用户要求支持物体类型、名称包含和层级等更丰富的手动过滤。
+- 改进结果：统一过滤规则支持对象来源/类型、程序集/命名空间、GameObject 名称、Hierarchy/父节点/祖先/根对象/直接子节点/深度、Scene/资源路径、Layer/Tag、Active/enabled、Prefab、选中范围、点位/方法/阶段、EditMode/PlayMode、InstanceID/GlobalObjectId、值变化和 C# 自定义 Provider；同规则 AND、Include OR、Exclude 优先，过滤先于堆栈/缓冲/Console。补充全局/单对象限流和重复事件抑制，默认均关闭。
+- 证据：Unity 6000.6.0a2 定向 `UPilotTraceFilterTests` 17/17、`UPilotMonoHookSettingsTests` 14/14、`UPilotMonoHookControllerTests` 5/5、`UPilotMonoHookMcpAdapterTests` 7/7、`UPilotMonoHookEventBufferTests` 8/8、`UPilotMonoHookOverloadPolicyTests` 7/7、`UPilotMonoHookStabilityTests` 2/2、`UPilotMonoHookIntegrationTests` 5/5；AdditionalPointTests 12 项为 11 通过、1 条条件跳过。Skill pack 校验通过，Python 定向测试 68 passed，编译错误 0。
+- 文档：`Documentation~/MonoHook-Tracing.md`、`Documentation~/MonoHook-Custom-Point-Tutorial.md`、UPilot Skill/Agent 模板及项目副本已同步，规则版本 17、Skill 模板版本 12。
+- 当前状态：已完成。暂不实现 SerializedProperty/空间范围/调用堆栈内容过滤等高复杂度条件，避免扩大 P0-P2 范围。
+
 ### [待处理] Skill 安装脚本会破坏 Editor 受管元数据并改写本地 UPM 引用
 
 - 发现时间：2026-08-27

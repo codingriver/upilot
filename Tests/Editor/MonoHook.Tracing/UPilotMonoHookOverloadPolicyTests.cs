@@ -40,7 +40,8 @@ namespace CodingRiver.UPilot.Tests
                 point.Id,
                 point.Enabled,
                 point.CaptureStackTrace,
-                point.HookAllSafeOverloads)).ToList();
+                point.HookAllSafeOverloads,
+                point.FilterProfileId)).ToList();
             UPilotMonoHookInstallationService.UninstallAll();
             UPilotMonoHookTelemetry.Clear();
         }

@@ -55,6 +55,14 @@ namespace CodingRiver.UPilot
         public bool supportsHookAllSafeOverloads;
         public bool configuredHookAllSafeOverloads;
         public bool appliedHookAllSafeOverloads;
+        public string configuredFilterProfileId;
+        public string configuredFilterProfileName;
+        public string effectiveFilterProfileId;
+        public string effectiveFilterProfileName;
+        public long filterEvaluated;
+        public long filterAccepted;
+        public long filterRejected;
+        public string filterLastReason;
         public string installState;
         public string message;
         public int candidateCount;
@@ -174,6 +182,12 @@ namespace CodingRiver.UPilot
             {
                 var state = _runtime[definition.Id];
                 var coverage = state.Coverage;
+                var settings = UPilotMonoHookSettings.instance;
+                string configuredProfileId = settings.GetConfiguredFilterProfileId(definition.Id);
+                string effectiveProfileId = settings.GetEffectiveFilterProfileId(definition.Id);
+                var configuredProfile = settings.FindFilterProfile(configuredProfileId);
+                var effectiveProfile = settings.FindFilterProfile(effectiveProfileId);
+                var statistics = UPilotTraceFilterEngine.GetStatistics(definition.Id, effectiveProfileId);
                 records.Add(new UPilotMonoHookDiagnosticRecord
                 {
                     generatedAtUtc = generatedAtUtc,
@@ -185,6 +199,14 @@ namespace CodingRiver.UPilot
                     supportsHookAllSafeOverloads = state.SupportsHookAllSafeOverloads,
                     configuredHookAllSafeOverloads = state.ConfiguredHookAllSafeOverloads,
                     appliedHookAllSafeOverloads = state.AppliedHookAllSafeOverloads,
+                    configuredFilterProfileId = configuredProfileId,
+                    configuredFilterProfileName = configuredProfile?.Name ?? string.Empty,
+                    effectiveFilterProfileId = effectiveProfileId,
+                    effectiveFilterProfileName = effectiveProfile?.Name ?? string.Empty,
+                    filterEvaluated = statistics?.evaluated ?? 0,
+                    filterAccepted = statistics?.accepted ?? 0,
+                    filterRejected = statistics?.rejected ?? 0,
+                    filterLastReason = statistics?.lastReason ?? string.Empty,
                     installState = state.InstallState.ToString(),
                     message = state.Message ?? string.Empty,
                     candidateCount = coverage?.CandidateCount ?? 0,

@@ -1,7 +1,7 @@
 # UPilot Unity MCP Agent Rules Template
 
-rulesVersion: 15
-upilotPackageVersion: 0.3.26
+rulesVersion: 17
+upilotPackageVersion: 0.3.27
 
 This template is the generic UPilot rule source for Unity projects that install
 `io.github.codingriver.upilot`. Project-specific business rules outside the
@@ -62,6 +62,8 @@ controlled UPilot block take precedence over these generic rules.
 - UPilot Tracer is optional and manually controlled. All trace points, per-point stack capture, and Console output default to disabled.
 - Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
 - `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
+- Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor, scene/resource path, Layer/Tag, Active/enabled, Prefab, selection, point/method/phase, EditMode/PlayMode, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
+- Point-specific filter profiles override the global profile; an empty point profile inherits global filtering. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
 - Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 - Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
 

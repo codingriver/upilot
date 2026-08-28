@@ -76,10 +76,10 @@ UPilot Agent 规则模板和配套 Skills 都是 UPilot 产品体验的一部分
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 15
+rulesVersion: 17
 upilotPackageVersion: 0.3.27
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-08-27T11:39:56Z
+generatedAt: 2026-08-27T13:27:15Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -139,6 +139,9 @@ Project-specific business rules outside this controlled UPilot block take preced
 - UPilot Tracer is optional and manually controlled. All trace points, per-point stack capture, and Console output default to disabled.
 - Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
 - `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
+- Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor/root/direct-child, scene/resource path, Layer/Tag, Active/enabled, required-component state, Prefab/source path, selection, point/method/phase/event source, EditMode/PlayMode, object identity, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
+- Optional global/per-object rate limits and duplicate suppression are disabled by default; when enabled, report their dropped counters separately from filter rejections.
+- Point-specific filter profiles override the global profile; an empty point profile inherits global filtering. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
 - Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 - Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
 

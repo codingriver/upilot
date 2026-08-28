@@ -27,7 +27,8 @@ namespace CodingRiver.UPilot.Tests
                     point.Id,
                     point.Enabled,
                     point.CaptureStackTrace,
-                    point.HookAllSafeOverloads))
+                    point.HookAllSafeOverloads,
+                    point.FilterProfileId))
                 .ToList();
         }
 

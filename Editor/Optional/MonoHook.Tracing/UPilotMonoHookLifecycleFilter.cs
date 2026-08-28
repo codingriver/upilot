@@ -13,6 +13,15 @@ namespace CodingRiver.UPilot
     {
         internal static bool Includes(Type type, UPilotMonoHookSettings settings, out string reason)
         {
+            return Includes(type, settings, string.Empty, out reason);
+        }
+
+        internal static bool Includes(
+            Type type,
+            UPilotMonoHookSettings settings,
+            string pointId,
+            out string reason)
+        {
             if (type == null)
             {
                 reason = "类型为空";
@@ -52,6 +61,12 @@ namespace CodingRiver.UPilot
             if (MatchesAny(typeName, settings.lifecycleTypeExcludes))
             {
                 reason = "类型命中排除范围：" + typeName;
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(pointId) &&
+                !UPilotTraceFilterEngine.IncludesLifecycleType(type, pointId, settings, out reason))
+            {
                 return false;
             }
 

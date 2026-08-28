@@ -1085,6 +1085,35 @@ def test_monohook_tracing_domain_service_forwards_apply_default_false() -> None:
     assert timeout_ms == 30000
 
 
+def test_monohook_tracing_domain_service_forwards_noise_controls() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            self.calls.append((command, payload, timeout_ms))
+            return ok(request_id, {"ok": True})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    asyncio.run(service.monohook_tracing_configure(
+        update_per_object_rate_limit=True,
+        enable_per_object_rate_limit=True,
+        max_events_per_object_per_second=4,
+        update_duplicate_suppression=True,
+        suppress_duplicate_events=True,
+        duplicate_event_window_milliseconds=250,
+    ))
+
+    _, payload, _ = service.dispatcher.calls[0]
+    assert payload["updatePerObjectRateLimit"] is True
+    assert payload["maxEventsPerObjectPerSecond"] == 4
+    assert payload["updateDuplicateSuppression"] is True
+    assert payload["duplicateEventWindowMilliseconds"] == 250
+
+
 def test_test_domain_service_forwards_staged_stop_commands() -> None:
     from upilot_mcp.domain.test_service import TestDomainService
 

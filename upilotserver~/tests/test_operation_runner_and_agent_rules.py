@@ -69,7 +69,7 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 15" in text
+    assert "rulesVersion: 17" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
@@ -125,7 +125,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "13"
+    assert checked.data["recommendedRulesVersion"] == "17"
     assert "rulesVersion differs" in checked.data["diffSummary"]
 
 

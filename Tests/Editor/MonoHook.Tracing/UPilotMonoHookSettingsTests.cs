@@ -81,8 +81,14 @@ namespace CodingRiver.UPilot.Tests
                     point.Id,
                     point.Enabled,
                     point.CaptureStackTrace,
-                    point.HookAllSafeOverloads))
+                    point.HookAllSafeOverloads,
+                    point.FilterProfileId))
                 .ToList();
+            // Each settings test exercises catalog defaults independently. The
+            // project asset may intentionally contain a user's enabled points,
+            // so avoid leaking those choices into tests that assert defaults.
+            settings.points = new List<UPilotMonoHookPointState>();
+            settings.EnsureDefaults();
         }
 
         [TearDown]
@@ -235,6 +241,8 @@ namespace CodingRiver.UPilot.Tests
             var settings = UPilotMonoHookSettings.instance;
             settings.autoApplyOnEditorLoad = false;
             settings.maxEventsPerSecond = 0;
+            settings.enablePerObjectRateLimit = false;
+            settings.suppressDuplicateEvents = false;
             settings.logEventsToConsole = false;
             settings.maxConsoleLogsPerSecond = 0;
             settings.stackTraceMaxFrames = 0;
@@ -248,6 +256,8 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(settings.maxConsoleLogsPerSecond, Is.EqualTo(1));
             Assert.That(settings.stackTraceMaxFrames, Is.EqualTo(1));
             Assert.That(settings.stackTraceSampleEveryN, Is.EqualTo(1));
+            Assert.That(settings.enablePerObjectRateLimit, Is.False);
+            Assert.That(settings.suppressDuplicateEvents, Is.False);
         }
 
         [Test]
