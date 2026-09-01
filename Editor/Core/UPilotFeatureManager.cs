@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEditor.PackageManager;
 using UnityEditor.PackageManager.Requests;
 using UnityEngine;
@@ -182,14 +183,15 @@ namespace CodingRiver.UPilot
         private static void SetFlowDefine(bool enabled)
         {
             var group = EditorUserBuildSettings.selectedBuildTargetGroup;
-            var defines = PlayerSettings.GetScriptingDefineSymbolsForGroup(group)
+            var buildTarget = NamedBuildTarget.FromBuildTargetGroup(group);
+            var defines = PlayerSettings.GetScriptingDefineSymbols(buildTarget)
                 .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(value => value.Trim())
                 .Where(value => !string.Equals(value, FlowDefine, StringComparison.Ordinal))
                 .ToList();
             if (enabled)
                 defines.Add(FlowDefine);
-            PlayerSettings.SetScriptingDefineSymbolsForGroup(group, string.Join(";", defines.Distinct()));
+            PlayerSettings.SetScriptingDefineSymbols(buildTarget, string.Join(";", defines.Distinct()));
         }
 
         private static void ClearFlowInstallState()

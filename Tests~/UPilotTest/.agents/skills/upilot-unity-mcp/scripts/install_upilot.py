@@ -217,14 +217,21 @@ def install_skill(args: argparse.Namespace, upilot_dir: Path) -> None:
     if not source.is_dir():
         raise SystemExit(f"source skill not found: {source}")
 
+    clients = set(args.skill_client or ("codex", "claude", "cursor"))
     targets: list[Path] = []
     unity_project = Path(args.unity_project).expanduser().resolve() if args.unity_project else Path.cwd()
     if args.install_skill in {"repo", "both"}:
-        targets.append(unity_project / ".agents" / "skills" / SKILL_NAME)
+        if clients.intersection({"codex", "cursor"}):
+            targets.append(unity_project / ".agents" / "skills" / SKILL_NAME)
+        if "claude" in clients:
+            targets.append(unity_project / ".claude" / "skills" / SKILL_NAME)
     if args.install_skill in {"user", "both"}:
-        targets.append(Path.home() / ".agents" / "skills" / SKILL_NAME)
+        if clients.intersection({"codex", "cursor"}):
+            targets.append(Path.home() / ".agents" / "skills" / SKILL_NAME)
+        if "claude" in clients:
+            targets.append(Path.home() / ".claude" / "skills" / SKILL_NAME)
 
-    for target in targets:
+    for target in dict.fromkeys(targets):
         if target.exists():
             if not args.force:
                 raise SystemExit(f"skill already exists, pass --force to replace: {target}")
@@ -301,6 +308,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--venv", help="Python venv path; default is upilotserver~/.venv")
     parser.add_argument("--install-skill", choices=["none", "repo", "user", "both"], default="repo")
+    parser.add_argument(
+        "--skill-client",
+        action="append",
+        choices=["codex", "claude", "cursor"],
+        help=(
+            "Agent that should discover the installed Skill; repeat for multiple Agents. "
+            "Defaults to all. Codex and Cursor share .agents/skills; Claude uses .claude/skills."
+        ),
+    )
     parser.add_argument("--skill-only", action="store_true", help="Synchronize Skill content without modifying Packages/manifest.json")
     parser.add_argument("--write-codex-mcp", choices=["none", "project", "user"], default="none")
     parser.add_argument("--http-port", type=parse_port, default=8011, help="Public Streamable HTTP MCP port")

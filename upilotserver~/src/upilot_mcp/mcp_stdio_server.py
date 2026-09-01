@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
@@ -107,6 +108,46 @@ StreamableHTTPSessionManager._handle_stateless_request = _patched_handle_statele
 _MCP_TRANSPORTS = {"stdio", "http"}
 _WS_START_TIMEOUT_S = 10.0
 _SERVER_STARTED_AT = time.time()
+
+
+def _build_tool_availability_summary(
+    *,
+    flow_enabled: bool,
+    connected: bool,
+    server_ready: bool,
+    write_access_approved: bool,
+) -> dict[str, Any]:
+    tools = REGISTRY.list()
+    available_tools = []
+    callable_tools = []
+    for item in tools:
+        available = item.feature == "core" or flow_enabled
+        if not available:
+            continue
+        available_tools.append(item)
+
+        callable_now = True
+        if item.requires_unity_connection and not (connected and server_ready):
+            callable_now = False
+        if item.requires_write_access and not write_access_approved:
+            callable_now = False
+        if callable_now:
+            callable_tools.append(item)
+
+    categories = Counter(item.category or "other" for item in available_tools)
+    category_summary = ",".join(
+        f"{name}:{count}"
+        for name, count in sorted(categories.items(), key=lambda pair: (-pair[1], pair[0]))
+    )
+    return {
+        # `tool_count` remains as the backwards-compatible available-tool count.
+        "tool_count": len(available_tools),
+        "registered_tool_count": len(tools),
+        "available_tool_count": len(available_tools),
+        "callable_tool_count": len(callable_tools),
+        "tool_category_summary": category_summary,
+        "registry_version": REGISTRY_VERSION,
+    }
 
 
 def _log_stdio_message(direction: str, tool_name: str, payload: str) -> None:
@@ -359,14 +400,19 @@ async def _run_http_server(
         session = _orchestrator.session_manager.active if _orchestrator else None
         now_ms = int(time.time() * 1000)
         heartbeat_at = int(session.last_heartbeat_at) if session else 0
+        connected = _orchestrator.is_ready() if _orchestrator else False
+        tool_summary = _build_tool_availability_summary(
+            flow_enabled=CONFIG.flow_enabled,
+            connected=connected,
+            server_ready=connected,
+            write_access_approved=CONFIG.write_access_approved,
+        )
         payload = {
             "status": "ok",
-            "unity_connected": _orchestrator.is_ready() if _orchestrator else False,
+            "unity_connected": connected,
             "project_path": session.project_path if session else "",
             "unity_version": session.unity_version if session else "",
             "heartbeat_age_ms": max(0, now_ms - heartbeat_at) if heartbeat_at else None,
-            "tool_count": len([item for item in REGISTRY.list() if item.feature == "core" or CONFIG.flow_enabled]),
-            "registry_version": REGISTRY_VERSION,
             "server_pid": os.getpid(),
             "server_uptime_ms": max(0, int((time.time() - _SERVER_STARTED_AT) * 1000)),
             "http_port": http_port,
@@ -375,6 +421,7 @@ async def _run_http_server(
             "write_access_approved": CONFIG.write_access_approved,
             "timestamp": time.time(),
         }
+        payload.update(tool_summary)
         payload.update(config_status)
         payload.update(version_payload())
         return JSONResponse(payload)
@@ -390,15 +437,22 @@ async def _run_http_server(
                 http_sessions = len(getattr(sm, "_sessions", {}))
         except Exception:
             pass
+        connected = bool(_orchestrator and _orchestrator.session_manager.is_connected())
+        server_ready = bool(_orchestrator and _orchestrator.is_ready())
+        tool_summary = _build_tool_availability_summary(
+            flow_enabled=CONFIG.flow_enabled,
+            connected=connected,
+            server_ready=server_ready,
+            write_access_approved=CONFIG.write_access_approved,
+        )
         payload = {
             "ws_connections": ws_count,
             "http_sessions": http_sessions,
-            "tool_count": len([item for item in REGISTRY.list() if item.feature == "core" or CONFIG.flow_enabled]),
-            "registry_version": REGISTRY_VERSION,
             "server_uptime_ms": max(0, int((time.time() - _SERVER_STARTED_AT) * 1000)),
             "project_path": (_orchestrator.session_manager.active.project_path
                              if _orchestrator and _orchestrator.session_manager.active else ""),
         }
+        payload.update(tool_summary)
         payload.update(version_payload())
         return JSONResponse(payload)
 

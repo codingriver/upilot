@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System.Text;
+using System.Threading.Tasks;
 using UnityEditor;
 
 namespace CodingRiver.UPilot
@@ -27,6 +28,16 @@ namespace CodingRiver.UPilot
         Starting,
         Restarting,
         Stopping,
+    }
+
+    internal enum UPilotRepairAction
+    {
+        None,
+        WaitForStatus,
+        RestartBridge,
+        RestartServer,
+        SwitchPorts,
+        StartServices,
     }
 
     internal readonly struct UPilotMainSnapshot
@@ -98,14 +109,57 @@ namespace CodingRiver.UPilot
                     mcpStatus.IsRunning);
             }
 
-            if (mcpStatus.IsRunning && !mcpStatus.ProcessId.HasValue)
+            return EvaluateServiceState(bridgeStatus, mcpStatus);
+        }
+
+        internal static UPilotMainSnapshot EvaluateServiceState(
+            BridgeStatus bridgeStatus,
+            McpServerStatus mcpStatus)
+        {
+            var mcpHealthy = mcpStatus.IsRunning &&
+                             mcpStatus.HttpPortListening &&
+                             mcpStatus.WsPortListening;
+            var ready = mcpHealthy && bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated;
+            if (ready)
+            {
+                return new UPilotMainSnapshot(
+                    UPilotMainState.Ready,
+                    "已就绪",
+                    "现在可以直接让 Agent 操作 Unity。",
+                    bridgeStatus.IsStarted,
+                    mcpStatus.IsRunning);
+            }
+
+            if (mcpStatus.IsRunning && mcpStatus.DiagnosisPending)
+            {
+                return new UPilotMainSnapshot(
+                    UPilotMainState.CheckingStatus,
+                    "正在确认服务",
+                    "端口已启动，正在确认 MCP 服务身份，请稍候。",
+                    bridgeStatus.IsStarted,
+                    true);
+            }
+
+            if (mcpStatus.IsRunning &&
+                mcpStatus.ProcessOwnership == McpProcessOwnership.Foreign)
             {
                 return new UPilotMainSnapshot(
                     UPilotMainState.NeedsRepair,
                     "端口被其他程序占用",
-                    "自动修复会切换到新的空闲端口并更新 Agent 配置。",
+                    "已确认端口属于其他程序，可以切换到新的空闲端口。",
                     bridgeStatus.IsStarted,
-                    mcpStatus.IsRunning);
+                    true);
+            }
+
+            if (mcpStatus.IsRunning &&
+                mcpStatus.ProcessOwnership == McpProcessOwnership.Unknown)
+            {
+                return new UPilotMainSnapshot(
+                    UPilotMainState.CheckingStatus,
+                    "服务身份尚未确认",
+                    "端口正在监听，但暂时无法确认所属进程。UPilot 不会自动切换端口。",
+                    bridgeStatus.IsStarted,
+                    true);
             }
 
             if (mcpStatus.IsRunning && !mcpHealthy)
@@ -115,17 +169,7 @@ namespace CodingRiver.UPilot
                     "服务未能正常启动",
                     "自动修复会清理当前连接并重新启动服务。",
                     bridgeStatus.IsStarted,
-                    mcpStatus.IsRunning);
-            }
-
-            if (ready)
-            {
-                return new UPilotMainSnapshot(
-                    UPilotMainState.Ready,
-                    "已就绪",
-                    "现在可以直接让 Agent 操作 Unity。",
-                    bridgeStatus.IsStarted,
-                    mcpStatus.IsRunning);
+                    true);
             }
 
             if (!mcpStatus.IsRunning && !bridgeStatus.IsStarted)
@@ -213,10 +257,7 @@ namespace CodingRiver.UPilot
             manager.InvalidateStatusCache();
         }
 
-        public static string AutoRepair(
-            BridgeStatus bridgeStatus,
-            McpServerStatus mcpStatus,
-            AgentMcpConfigStatus[] agentConfigs)
+        public static async Task<string> AutoRepairAsync(AgentMcpConfigStatus[] agentConfigs)
         {
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
                 return UPilotUpdateService.ServiceStartBlockedMessage;
@@ -240,21 +281,40 @@ namespace CodingRiver.UPilot
                     return "未能自动找到服务文件，请打开高级设置检查 Python 入口。";
             }
 
-            if (mcpStatus.IsRunning && !mcpStatus.ProcessId.HasValue)
+            var mcpStatus = await manager.GetFreshStatusAsync();
+            var bridgeStatus = UPilotBridge.Instance.GetStatus();
+            var repairAction = DetermineRepairAction(bridgeStatus, mcpStatus);
+            if (repairAction == UPilotRepairAction.None)
+                return "服务已经恢复，无需修复。";
+
+            if (repairAction == UPilotRepairAction.WaitForStatus)
+                return "服务身份仍在确认，暂不切换端口。请稍候后刷新状态。";
+
+            if (repairAction == UPilotRepairAction.SwitchPorts)
             {
                 BeginOperation(UPilotServiceOperation.Restarting);
                 SwitchToAvailablePortsAndRestart(agentConfigs);
                 return "已切换到空闲端口并重新启动。";
             }
 
-            if (mcpStatus.IsRunning &&
-                (!mcpStatus.HttpPortListening || !mcpStatus.WsPortListening))
+            if (repairAction == UPilotRepairAction.RestartServer)
             {
                 BeginOperation(UPilotServiceOperation.Restarting);
                 UPilotBridge.Instance.Stop();
                 manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
                 manager.InvalidateStatusCache();
                 return "服务正在重新启动。";
+            }
+
+            if (repairAction == UPilotRepairAction.RestartBridge)
+            {
+                BeginOperation(UPilotServiceOperation.Restarting);
+                if (!bridgeStatus.IsStarted)
+                    UPilotBridge.Instance.EnsureStarted();
+                else
+                    UPilotBridge.Instance.Restart();
+                manager.InvalidateStatusCache();
+                return "正在重新连接 Unity Bridge。";
             }
 
             BeginOperation(
@@ -273,6 +333,31 @@ namespace CodingRiver.UPilot
             manager.InvalidateStatusCache();
 
             return "正在重新连接 Unity。";
+        }
+
+        internal static UPilotRepairAction DetermineRepairAction(
+            BridgeStatus bridgeStatus,
+            McpServerStatus mcpStatus)
+        {
+            var mcpHealthy = mcpStatus.IsRunning &&
+                             mcpStatus.HttpPortListening &&
+                             mcpStatus.WsPortListening;
+            var ready = mcpHealthy && bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated;
+            if (ready)
+                return UPilotRepairAction.None;
+            if (mcpStatus.IsRunning && mcpStatus.DiagnosisPending)
+                return UPilotRepairAction.WaitForStatus;
+            if (mcpStatus.IsRunning &&
+                mcpStatus.ProcessOwnership == McpProcessOwnership.Foreign)
+                return UPilotRepairAction.SwitchPorts;
+            if (mcpStatus.IsRunning &&
+                mcpStatus.ProcessOwnership == McpProcessOwnership.Unknown)
+                return UPilotRepairAction.WaitForStatus;
+            if (mcpStatus.IsRunning && !mcpHealthy)
+                return UPilotRepairAction.RestartServer;
+            if (mcpHealthy && (!bridgeStatus.IsStarted || !bridgeStatus.IsAuthenticated))
+                return UPilotRepairAction.RestartBridge;
+            return UPilotRepairAction.StartServices;
         }
 
         private static UPilotMainSnapshot? EvaluateOperation(

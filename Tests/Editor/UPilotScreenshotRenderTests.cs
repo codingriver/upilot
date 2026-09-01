@@ -2,6 +2,7 @@
 // UPilot Editor tests
 // -----------------------------------------------------------------------
 
+using System.Reflection;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -20,6 +21,29 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(descriptor.msaaSamples, Is.EqualTo(1));
             Assert.That(descriptor.useDynamicScale, Is.False);
             Assert.That(descriptor.useMipMap, Is.False);
+        }
+
+        [Test]
+        public void FindCameraIncludesInactiveCameras()
+        {
+            var cameraName = "UPilotInactiveScreenshotCamera_" + System.Guid.NewGuid().ToString("N");
+            var gameObject = new GameObject(cameraName);
+            try
+            {
+                var camera = gameObject.AddComponent<Camera>();
+                gameObject.SetActive(false);
+
+                var findCamera = typeof(UPilotScreenshotService).GetMethod(
+                    "FindCamera",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                Assert.That(findCamera, Is.Not.Null);
+                Assert.That(findCamera.Invoke(null, new object[] { cameraName }), Is.SameAs(camera));
+            }
+            finally
+            {
+                Object.DestroyImmediate(gameObject);
+            }
         }
 
         [Test]

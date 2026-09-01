@@ -192,7 +192,7 @@ UPilot 会自动处理以下内容：
 - 启动 Unity Bridge 和 MCP 服务。
 - 写入所选 Agent 的项目级 MCP 连接。
 - 写入或更新 UPilot 管理的 Agent 规则。
-- 为 Codex 同步 UPilot Skill。
+- 同步 UPilot Skill：Codex 与 Cursor 使用共享的 `.agents/skills` 安装，Claude Code 使用 `.claude/skills` 安装。
 
 已有配置文件中的其他 MCP 服务和用户内容会尽量保留。UPilot 管理的内容使用独立标记或独立配置项进行更新。
 
@@ -254,7 +254,11 @@ Codex 还会使用项目中的 `AGENTS.md` 和 `.agents/skills/upilot-unity-mcp`
 }
 ```
 
-Claude Code 的 UPilot 使用规则会同步到项目规则文件中。
+Claude Code 的 UPilot 使用规则会同步到项目规则文件中，按需工作流安装在：
+
+```text
+.claude/skills/upilot-unity-mcp
+```
 
 ### Cursor
 
@@ -282,6 +286,12 @@ Cursor 的 UPilot 规则位于：
 .cursor/rules/upilot-unity-mcp.mdc
 ```
 
+Cursor 官方支持项目级 `.agents/skills`，因此与 Codex 共享：
+
+```text
+.agents/skills/upilot-unity-mcp
+```
+
 手动修改配置后，请重启或刷新 Agent 客户端。
 
 ## 如何确认安装成功
@@ -293,7 +303,7 @@ Cursor 的 UPilot 规则位于：
 - 顶部状态为 **已就绪**。
 - 主界面显示 MCP 地址。
 - 常用 Agent 显示 **MCP 已配置**。
-- Codex 显示 Skill 状态，Claude Code 和 Cursor 显示规则状态。
+- Codex、Claude Code 和 Cursor 都显示独立的规则、MCP 配置与 Skill 状态。
 
 ### 在浏览器中检查服务
 
@@ -368,7 +378,7 @@ http://127.0.0.1:8011/health
 
 ![UPilot 已就绪主界面](Documentation~/images/upilot-main-window.png)
 
-*主界面集中显示服务状态、MCP 地址以及各 Agent 的配置状态。*
+*主界面优先显示整体状态、Agent 是否可用和 MCP 地址；版本、端口与内部连接信息收纳在“运行详情”中。*
 
 ### 服务状态
 
@@ -379,7 +389,7 @@ http://127.0.0.1:8011/health
 
 ### 重启 UPilot
 
-服务已就绪时，点击 **重启 UPilot**。重启会同时重建 MCP 服务和 Unity 连接，常用于：
+服务已就绪时，点击右上角 **⋮ > 重新启动**。重启会同时重建 MCP 服务和 Unity 连接，常用于：
 
 - Agent 突然无法调用工具。
 - Unity 重新加载脚本后连接未恢复。
@@ -390,17 +400,35 @@ http://127.0.0.1:8011/health
 
 ### Agent 配置
 
-主界面会列出 Codex、Claude Code 和 Cursor，并分别显示 MCP 与 Skill/规则状态。
+主界面会列出 Codex、Claude Code 和 Cursor，默认只显示“已就绪”“需更新”“未配置”或“异常”等最终状态。展开任意 Agent 后，都会以相同顺序和相同视觉权重显示三项：**Agent 规则**、**MCP 配置**、**Skill 技能**。
+
+每一项都提供 Tooltip：鼠标悬停时会显示可用的绝对文件/目录路径、当前版本与目标版本、MCP 当前/目标 URL、内容哈希、错误或适用性说明。状态检查与更新入口彼此独立，不再把 Agent 规则和 Skill 合并成一个状态。
+
+**MCP 配置** Tooltip 会区分已注册、当前可用和当前可调用的 MCP 工具数量，并显示工具注册表版本及主要分类。可调用数量会受到 Unity 连接、功能开关和项目写入授权影响。
+
+**Skill 技能** Tooltip 显示该 Agent 项目级 Skill 根目录、已安装 Skill 数量和名称、UPilot Skill 数量、能力覆盖，以及 Skill 文档实际引用的 MCP 工具数量和主要关联工具。Skill 数量与 MCP 工具数量是两个不同维度，不应共用同一个数字。
 
 - **配置**：当前 Agent 还没有 UPilot MCP 配置，点击后新增配置。
 - **更新配置**：当前 Agent 已有 UPilot 配置。点击后会二次确认，只更新该 Agent 的 UPilot MCP 配置项。
-- **更新 Skill**：为 Codex 更新 UPilot Skill。
-- **更新规则**：为 Claude Code 或 Cursor 更新 UPilot 规则。
+- **更新规则**：为当前 Agent 更新对应的 UPilot Agent 规则。
+- **更新 Skill**：更新当前 Agent 使用的 UPilot Skill；Cursor 与 Codex 的操作会更新同一个 `.agents/skills` 受管安装。
 - **更新全部**：更新已有的 UPilot MCP 连接条目，并重新同步全部 UPilot Skill/AGENT 规则。
+- **检查配置**：位于“更新全部”右侧的下拉菜单中，只刷新状态，不修改文件。
+- **强制重新配置全部**：重新写入已配置 Agent 的 MCP 地址，并重新生成 UPilot Skill/Agent 规则；执行前会明确提示可能替换各 Agent Skill 的本地修改。
 
 “更新全部”不会为尚未配置 MCP 的 Agent 自动新增连接。如果之后开始使用新的 Agent，请在对应一行点击 **配置**。
 
+Claude Code、Codex 和 Cursor 都支持 UPilot Skill。Claude Code 使用 `.claude/skills`；Cursor 官方可发现 `.agents/skills`，因此默认与 Codex 共享同一安装，避免维护第三份 Skill 内容。Cursor 的 Tooltip 会列出其可发现的项目级 Skill 目录，并按 Skill 名称去重统计。
+
 如果 Skill/规则包含本地修改，强制更新可能覆盖 UPilot 管理的内容。确认前请先保存需要保留的自定义内容。
+
+### 授权与运行详情
+
+已授权时，主界面不再常驻显示授权状态、授权时间或撤销按钮。未授权时，状态卡下方会显示“需要授权”提示和 **允许授权** 按钮；Agent 仍可执行只读检查，但修改脚本、资源和项目设置前需要授权。
+
+授权时间、撤销授权和完整项目路径位于 **高级设置 > Agent > Agent 操作授权**。
+
+展开主界面的 **运行详情** 可以查看运行状态、UPM/服务版本、运行方式、发布通道、**MCP 端口**、**Unity Bridge 端口**和 Bridge 连接状态。Unity Bridge 端口仅用于 MCP Server 与 Unity Editor 的内部连接，不能配置为 Agent 的 MCP 地址。
 
 ### Skill/规则模板维护
 
@@ -419,9 +447,10 @@ AGENTS.md
 CLAUDE.md
 .cursor/rules/upilot-unity-mcp.mdc
 .agents/skills/upilot-unity-mcp/AGENTS.md.template
+.claude/skills/upilot-unity-mcp/AGENTS.md.template
 ```
 
-`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter；Codex Skill 目录会复制 `skills/upilot-unity-mcp/`，因此也会带上 `AGENTS.md.template`。
+`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter。Skill 只维护 `skills/upilot-unity-mcp/` 一份主源，安装时生成 `.agents/skills` 和 `.claude/skills` 受管副本；Cursor 直接复用 `.agents/skills`。
 
 main 分支维护规则：
 

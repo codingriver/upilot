@@ -11,6 +11,7 @@ using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
@@ -18,6 +19,13 @@ using Debug = UnityEngine.Debug;
 
 namespace CodingRiver.UPilot
 {
+    public enum McpProcessOwnership
+    {
+        Unknown,
+        CurrentUPilot,
+        Foreign,
+    }
+
     public struct McpServerStatus
     {
         public bool IsRunning;
@@ -33,6 +41,20 @@ namespace CodingRiver.UPilot
         public string BuildCommit;
         public string BuildChannel;
         public string RuntimeMode;
+        public bool ToolCountsKnown;
+        public bool DetailedToolCountsKnown;
+        public int RegisteredToolCount;
+        public int AvailableToolCount;
+        public int CallableToolCount;
+        public int ToolRegistryVersion;
+        public string ToolCategorySummary;
+        public McpProcessOwnership ProcessOwnership;
+        public string ProcessOwnershipEvidence;
+        public bool HealthResponded;
+        public bool HealthIdentifiesUPilot;
+        public bool DiagnosisPending;
+        public int ConsecutiveIdentityMisses;
+        public long IdentityPendingSinceUtcMs;
     }
 
     public sealed class UPilotMcpServerManager
@@ -132,9 +154,14 @@ namespace CodingRiver.UPilot
         // ── Cached status (background refresh) ────────────────────────────────
 
         private const int RefreshIntervalMs = 2000;
+        private const int IdentityGraceMs = 8000;
+        private const int IdentityFailureThreshold = 3;
         private readonly object _statusLock = new();
         private McpServerStatus _cachedStatus;
-        private volatile bool _refreshRunning;
+        private int _refreshRunning;
+        private int _statusGeneration;
+        private int _consecutiveIdentityMisses;
+        private long _identityPendingSinceMs;
         private long _lastRefreshMs;
         private bool _restartPending;
         private bool _startInProgress;
@@ -146,6 +173,79 @@ namespace CodingRiver.UPilot
         {
             Timeout = TimeSpan.FromSeconds(2)
         };
+
+        private readonly struct ServerStatsProbe
+        {
+            public ServerStatsProbe(
+                int wsCount,
+                int httpCount,
+                string version,
+                string protocol,
+                string commit,
+                string channel,
+                bool toolCountsKnown,
+                bool detailedToolCountsKnown,
+                int registeredToolCount,
+                int availableToolCount,
+                int callableToolCount,
+                int toolRegistryVersion,
+                string toolCategorySummary,
+                bool responded,
+                bool identifiesUPilot)
+            {
+                WsCount = wsCount;
+                HttpCount = httpCount;
+                Version = version;
+                Protocol = protocol;
+                Commit = commit;
+                Channel = channel;
+                ToolCountsKnown = toolCountsKnown;
+                DetailedToolCountsKnown = detailedToolCountsKnown;
+                RegisteredToolCount = registeredToolCount;
+                AvailableToolCount = availableToolCount;
+                CallableToolCount = callableToolCount;
+                ToolRegistryVersion = toolRegistryVersion;
+                ToolCategorySummary = toolCategorySummary;
+                Responded = responded;
+                IdentifiesUPilot = identifiesUPilot;
+            }
+
+            public int WsCount { get; }
+            public int HttpCount { get; }
+            public string Version { get; }
+            public string Protocol { get; }
+            public string Commit { get; }
+            public string Channel { get; }
+            public bool ToolCountsKnown { get; }
+            public bool DetailedToolCountsKnown { get; }
+            public int RegisteredToolCount { get; }
+            public int AvailableToolCount { get; }
+            public int CallableToolCount { get; }
+            public int ToolRegistryVersion { get; }
+            public string ToolCategorySummary { get; }
+            public bool Responded { get; }
+            public bool IdentifiesUPilot { get; }
+        }
+
+        private readonly struct McpProcessProbe
+        {
+            public McpProcessProbe(
+                McpProcessOwnership ownership,
+                int? processId,
+                string commandLine,
+                string evidence)
+            {
+                Ownership = ownership;
+                ProcessId = processId;
+                CommandLine = commandLine;
+                Evidence = evidence;
+            }
+
+            public McpProcessOwnership Ownership { get; }
+            public int? ProcessId { get; }
+            public string CommandLine { get; }
+            public string Evidence { get; }
+        }
 
         private static string ResolveDefaultPythonEntry()
         {
@@ -413,69 +513,156 @@ namespace CodingRiver.UPilot
         public McpServerStatus GetStatus()
         {
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            if (!_refreshRunning && (now - _lastRefreshMs > RefreshIntervalMs))
-            {
-                // Ensure the async state machine starts on a background thread,
-                // so the main thread is never blocked by synchronous work before
-                // the first await inside RefreshStatusAsync.
-                Task.Run(RefreshStatusAsync);
-            }
+            if (now - _lastRefreshMs > RefreshIntervalMs)
+                RequestBackgroundStatusRefresh();
             lock (_statusLock) { return _cachedStatus; }
         }
 
         public void InvalidateStatusCache()
         {
+            Interlocked.Increment(ref _statusGeneration);
             lock (_statusLock)
+            {
                 _cachedStatus = default;
+                _consecutiveIdentityMisses = 0;
+                _identityPendingSinceMs = 0;
+            }
             _lastRefreshMs = 0;
         }
 
-        private async Task RefreshStatusAsync()
+        public async Task<McpServerStatus> GetFreshStatusAsync()
         {
-            if (_refreshRunning) return;
-            _refreshRunning = true;
+            while (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
+                await Task.Delay(25);
+
+            var generation = Interlocked.Increment(ref _statusGeneration);
+            var httpPort = HttpPort;
+            var wsPort = WsPort;
             try
             {
-                var status = new McpServerStatus();
-                var httpTask = IsPortListeningAsync("127.0.0.1", HttpPort);
-                var wsTask = IsPortListeningAsync("127.0.0.1", WsPort);
+                return await Task.Run(() => RefreshStatusAsync(httpPort, wsPort, generation));
+            }
+            finally
+            {
+                Volatile.Write(ref _refreshRunning, 0);
+            }
+        }
+
+        private void RequestBackgroundStatusRefresh()
+        {
+            if (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
+                return;
+
+            var generation = Volatile.Read(ref _statusGeneration);
+            var httpPort = HttpPort;
+            var wsPort = WsPort;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await RefreshStatusAsync(httpPort, wsPort, generation);
+                }
+                finally
+                {
+                    Volatile.Write(ref _refreshRunning, 0);
+                }
+            });
+        }
+
+        private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort, int generation)
+        {
+            var status = new McpServerStatus();
+            try
+            {
+                var httpTask = IsPortListeningAsync("127.0.0.1", httpPort);
+                var wsTask = IsPortListeningAsync("127.0.0.1", wsPort);
                 status.HttpPortListening = await httpTask;
                 status.WsPortListening = await wsTask;
                 status.IsRunning = status.HttpPortListening || status.WsPortListening;
 
                 if (status.IsRunning)
                 {
-                    var (pid, cmdLine) = await Task.Run(() => FindMcpProcessByPorts());
-                    if (pid.HasValue)
-                    {
-                        status.ProcessId = pid;
-                        status.ProcessCommandLine = cmdLine;
-                    }
-                    var (wsCount, httpCount, version, protocol, commit, channel) = await FetchServerStatsAsync();
-                    status.WsClientCount = wsCount;
-                    status.HttpClientCount = httpCount;
-                    status.ServerVersion = version;
-                    status.ProtocolVersion = protocol;
-                    status.BuildCommit = commit;
-                    status.BuildChannel = channel;
-                }
-                // Runtime mode depends on Unity package metadata. The UI resolves it on
-                // the main thread instead of caching a fallback from this worker thread.
+                    var process = ProbeMcpProcessOwnership(httpPort, wsPort);
+                    status.ProcessOwnership = process.Ownership;
+                    status.ProcessId = process.ProcessId;
+                    status.ProcessCommandLine = process.CommandLine;
+                    status.ProcessOwnershipEvidence = process.Evidence;
 
-                lock (_statusLock) { _cachedStatus = status; }
+                    var stats = await FetchServerStatsAsync(httpPort);
+                    status.WsClientCount = stats.WsCount;
+                    status.HttpClientCount = stats.HttpCount;
+                    status.ServerVersion = stats.Version;
+                    status.ProtocolVersion = stats.Protocol;
+                    status.BuildCommit = stats.Commit;
+                    status.BuildChannel = stats.Channel;
+                    status.ToolCountsKnown = stats.ToolCountsKnown;
+                    status.DetailedToolCountsKnown = stats.DetailedToolCountsKnown;
+                    status.RegisteredToolCount = stats.RegisteredToolCount;
+                    status.AvailableToolCount = stats.AvailableToolCount;
+                    status.CallableToolCount = stats.CallableToolCount;
+                    status.ToolRegistryVersion = stats.ToolRegistryVersion;
+                    status.ToolCategorySummary = stats.ToolCategorySummary;
+                    status.HealthResponded = stats.Responded;
+                    status.HealthIdentifiesUPilot = stats.IdentifiesUPilot;
+
+                    if (stats.IdentifiesUPilot && status.ProcessOwnership == McpProcessOwnership.Unknown)
+                    {
+                        status.ProcessOwnership = McpProcessOwnership.CurrentUPilot;
+                        status.ProcessOwnershipEvidence = "UPilot 健康检查响应";
+                    }
+                    else if (stats.IdentifiesUPilot && status.ProcessOwnership == McpProcessOwnership.Foreign)
+                    {
+                        status.ProcessOwnership = McpProcessOwnership.Unknown;
+                        status.ProcessOwnershipEvidence = "健康检查与端口进程证据暂不一致";
+                    }
+                }
             }
             catch (Exception ex)
             {
+                status.ErrorMessage = ex.Message;
                 Debug.LogError($"[UPilotMcpServerManager] Status refresh failed: {ex.Message}");
             }
-            finally
+
+            var refreshedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            lock (_statusLock)
             {
-                _lastRefreshMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                _refreshRunning = false;
+                if (generation != Volatile.Read(ref _statusGeneration))
+                    return status;
+
+                UpdateDiagnosisTracking(ref status, refreshedAt);
+                _cachedStatus = status;
+                _lastRefreshMs = refreshedAt;
             }
+
+            return status;
         }
 
-        private async Task<(int wsCount, int httpCount, string version, string protocol, string commit, string channel)> FetchServerStatsAsync()
+        private void UpdateDiagnosisTracking(ref McpServerStatus status, long nowMs)
+        {
+            var settled = !status.IsRunning ||
+                          (status.HttpPortListening &&
+                           status.WsPortListening &&
+                           status.ProcessOwnership == McpProcessOwnership.CurrentUPilot);
+            if (settled)
+            {
+                _consecutiveIdentityMisses = 0;
+                _identityPendingSinceMs = 0;
+                status.DiagnosisPending = false;
+                return;
+            }
+
+            if (_identityPendingSinceMs <= 0)
+                _identityPendingSinceMs = nowMs;
+            _consecutiveIdentityMisses++;
+
+            status.ConsecutiveIdentityMisses = _consecutiveIdentityMisses;
+            status.IdentityPendingSinceUtcMs = _identityPendingSinceMs;
+            status.DiagnosisPending =
+                _consecutiveIdentityMisses < IdentityFailureThreshold ||
+                nowMs - _identityPendingSinceMs < IdentityGraceMs;
+        }
+
+        private async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort)
         {
             int wsCount = 0;
             int httpCount = 0;
@@ -483,19 +670,46 @@ namespace CodingRiver.UPilot
             string protocol = "";
             string commit = "";
             string channel = "";
+            bool toolCountsKnown = false;
+            bool detailedToolCountsKnown = false;
+            int registeredToolCount = 0;
+            int availableToolCount = 0;
+            int callableToolCount = 0;
+            int toolRegistryVersion = 0;
+            string toolCategorySummary = "";
+            bool responded = false;
+            bool identifiesUPilot = false;
             try
             {
-                var url = $"http://127.0.0.1:{HttpPort}/stats";
+                var url = $"http://127.0.0.1:{httpPort}/stats";
                 var response = await _httpClient.GetAsync(url);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
+                    responded = true;
+                    identifiesUPilot |= IsUPilotServerPayload(json);
                     wsCount = ParseIntFromJson(json, "ws_connections");
                     httpCount = ParseIntFromJson(json, "http_sessions");
                     version = ParseStringFromJson(json, "server_version");
                     protocol = ParseStringFromJson(json, "protocol_version");
                     commit = ParseStringFromJson(json, "build_commit");
                     channel = ParseStringFromJson(json, "build_channel");
+                    toolCountsKnown = HasJsonProperty(json, "tool_count") ||
+                                      HasJsonProperty(json, "available_tool_count");
+                    detailedToolCountsKnown = HasJsonProperty(json, "registered_tool_count") &&
+                                              HasJsonProperty(json, "available_tool_count") &&
+                                              HasJsonProperty(json, "callable_tool_count");
+                    availableToolCount = HasJsonProperty(json, "available_tool_count")
+                        ? ParseIntFromJson(json, "available_tool_count")
+                        : ParseIntFromJson(json, "tool_count");
+                    registeredToolCount = detailedToolCountsKnown
+                        ? ParseIntFromJson(json, "registered_tool_count")
+                        : availableToolCount;
+                    callableToolCount = detailedToolCountsKnown
+                        ? ParseIntFromJson(json, "callable_tool_count")
+                        : availableToolCount;
+                    toolRegistryVersion = ParseIntFromJson(json, "registry_version");
+                    toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
                 }
             }
             catch
@@ -504,22 +718,83 @@ namespace CodingRiver.UPilot
 
             try
             {
-                var url = $"http://127.0.0.1:{HttpPort}/health";
+                var url = $"http://127.0.0.1:{httpPort}/health";
                 var response = await _httpClient.GetAsync(url);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
+                    responded = true;
+                    identifiesUPilot |= IsUPilotServerPayload(json);
                     if (string.IsNullOrEmpty(version)) version = ParseStringFromJson(json, "server_version");
                     if (string.IsNullOrEmpty(protocol)) protocol = ParseStringFromJson(json, "protocol_version");
                     if (string.IsNullOrEmpty(commit)) commit = ParseStringFromJson(json, "build_commit");
                     if (string.IsNullOrEmpty(channel)) channel = ParseStringFromJson(json, "build_channel");
+
+                    var healthToolCountsKnown = HasJsonProperty(json, "tool_count") ||
+                                                HasJsonProperty(json, "available_tool_count");
+                    var healthDetailedToolCountsKnown = HasJsonProperty(json, "registered_tool_count") &&
+                                                        HasJsonProperty(json, "available_tool_count") &&
+                                                        HasJsonProperty(json, "callable_tool_count");
+                    if (healthDetailedToolCountsKnown)
+                    {
+                        toolCountsKnown = true;
+                        detailedToolCountsKnown = true;
+                        registeredToolCount = ParseIntFromJson(json, "registered_tool_count");
+                        availableToolCount = ParseIntFromJson(json, "available_tool_count");
+                        callableToolCount = ParseIntFromJson(json, "callable_tool_count");
+                    }
+                    else if (!toolCountsKnown && healthToolCountsKnown)
+                    {
+                        toolCountsKnown = true;
+                        availableToolCount = HasJsonProperty(json, "available_tool_count")
+                            ? ParseIntFromJson(json, "available_tool_count")
+                            : ParseIntFromJson(json, "tool_count");
+                        registeredToolCount = availableToolCount;
+                        callableToolCount = availableToolCount;
+                    }
+
+                    if (toolRegistryVersion <= 0)
+                        toolRegistryVersion = ParseIntFromJson(json, "registry_version");
+                    if (string.IsNullOrEmpty(toolCategorySummary))
+                        toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
                 }
             }
             catch
             {
             }
 
-            return (wsCount, httpCount, version, protocol, commit, channel);
+            return new ServerStatsProbe(
+                wsCount,
+                httpCount,
+                version,
+                protocol,
+                commit,
+                channel,
+                toolCountsKnown,
+                detailedToolCountsKnown,
+                registeredToolCount,
+                availableToolCount,
+                callableToolCount,
+                toolRegistryVersion,
+                toolCategorySummary,
+                responded,
+                identifiesUPilot);
+        }
+
+        private static bool HasJsonProperty(string json, string key)
+        {
+            return !string.IsNullOrEmpty(json) &&
+                   json.IndexOf("\"" + key + "\"", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsUPilotServerPayload(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return false;
+
+            return json.IndexOf("\"server_version\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   json.IndexOf("\"protocol_version\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   json.IndexOf("\"build_channel\"", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public async Task<string> WaitForServerVersionAsync(string expectedVersion, int timeoutMs = 10000)
@@ -528,8 +803,8 @@ namespace CodingRiver.UPilot
             string latestVersion = "";
             while (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < deadline)
             {
-                var stats = await FetchServerStatsAsync();
-                latestVersion = stats.version;
+                var stats = await FetchServerStatsAsync(HttpPort);
+                latestVersion = stats.Version;
                 if (!string.IsNullOrWhiteSpace(latestVersion) &&
                     (string.IsNullOrWhiteSpace(expectedVersion) ||
                      UPilotServerRuntimeService.CompareVersions(latestVersion, expectedVersion) >= 0))
@@ -913,6 +1188,98 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private McpProcessProbe ProbeMcpProcessOwnership(int httpPort, int wsPort)
+        {
+            if (IsTrackedProcessAlive() && _trackedProcessId.HasValue)
+            {
+                var trackedPid = _trackedProcessId.Value;
+                return new McpProcessProbe(
+                    McpProcessOwnership.CurrentUPilot,
+                    trackedPid,
+                    SafeGetCommandLine(trackedPid),
+                    "已跟踪的 UPilot 进程");
+            }
+
+            var portsByPid = SafeGetListeningPortsByPid(out var ownerQuerySucceeded);
+            if (!ownerQuerySucceeded)
+            {
+                return new McpProcessProbe(
+                    McpProcessOwnership.Unknown,
+                    null,
+                    null,
+                    "端口归属查询暂不可用");
+            }
+
+            var candidatePids = new HashSet<int>();
+            var hasHttpOwner = false;
+            var hasWsOwner = false;
+            foreach (var entry in portsByPid)
+            {
+                if (entry.Value.Contains(httpPort))
+                {
+                    hasHttpOwner = true;
+                    candidatePids.Add(entry.Key);
+                }
+                if (entry.Value.Contains(wsPort))
+                {
+                    hasWsOwner = true;
+                    candidatePids.Add(entry.Key);
+                }
+            }
+
+            if (candidatePids.Count == 0)
+            {
+                return new McpProcessProbe(
+                    McpProcessOwnership.Unknown,
+                    null,
+                    null,
+                    "监听端口尚未映射到进程");
+            }
+
+            int? firstPid = null;
+            string firstCommandLine = null;
+            var allCommandLinesReadable = true;
+            foreach (var pid in candidatePids)
+            {
+                var commandLine = SafeGetCommandLine(pid);
+                if (!firstPid.HasValue)
+                {
+                    firstPid = pid;
+                    firstCommandLine = commandLine;
+                }
+
+                if (!IsUsableCommandLine(commandLine))
+                {
+                    allCommandLinesReadable = false;
+                    continue;
+                }
+
+                if (IsCurrentProjectMcpCommandLine(commandLine, httpPort, wsPort))
+                {
+                    return new McpProcessProbe(
+                        McpProcessOwnership.CurrentUPilot,
+                        pid,
+                        commandLine,
+                        "监听端口与 UPilot 启动参数匹配");
+                }
+            }
+
+            if (hasHttpOwner && hasWsOwner && allCommandLinesReadable)
+            {
+                return new McpProcessProbe(
+                    McpProcessOwnership.Foreign,
+                    firstPid,
+                    firstCommandLine,
+                    "监听端口属于非当前 UPilot 进程");
+            }
+
+            return new McpProcessProbe(
+                McpProcessOwnership.Unknown,
+                firstPid,
+                firstCommandLine,
+                allCommandLinesReadable ? "端口进程证据尚不完整" : "进程命令行暂不可读");
+        }
+
         private (int? pid, string cmdLine) FindMcpProcessByPorts()
         {
             var processes = FindCurrentProjectMcpProcesses();
@@ -1023,6 +1390,16 @@ namespace CodingRiver.UPilot
                 || cmdLine.IndexOf("upilot-mcp", StringComparison.OrdinalIgnoreCase) >= 0
                 || cmdLine.IndexOf("upilot_mcp", StringComparison.OrdinalIgnoreCase) >= 0
                 || cmdLine.IndexOf("upilot-mcp-server", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsUsableCommandLine(string commandLine)
+        {
+            if (string.IsNullOrWhiteSpace(commandLine))
+                return false;
+
+            return commandLine != "(读取命令行失败)" &&
+                   commandLine != "(空)" &&
+                   commandLine != "(当前平台未实现命令行读取)";
         }
 
         private static Dictionary<int, List<int>> SafeGetListeningPortsByPid(out bool success)

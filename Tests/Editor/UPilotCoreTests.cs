@@ -645,19 +645,60 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void AgentSetupExposesSupportedMcpAndRuleStatusesInSameOrder()
+        public void AgentSetupExposesMcpRuleAndSkillStatusesInSameOrder()
         {
             var mcpStatuses = UPilotAgentSetup.GetMcpConfigStatuses();
             var ruleStatuses = UPilotAgentSetup.GetRuleConfigStatuses();
+            var skillStatuses = UPilotAgentSetup.GetSkillConfigStatuses();
 
             Assert.That(mcpStatuses.Length, Is.EqualTo(3));
             Assert.That(ruleStatuses.Length, Is.EqualTo(3));
+            Assert.That(skillStatuses.Length, Is.EqualTo(3));
             Assert.That(mcpStatuses[0].ClientName, Is.EqualTo("Codex"));
             Assert.That(mcpStatuses[1].ClientName, Is.EqualTo("Claude Code"));
             Assert.That(mcpStatuses[2].ClientName, Is.EqualTo("Cursor"));
             Assert.That(ruleStatuses[0].ClientName, Is.EqualTo("Codex"));
             Assert.That(ruleStatuses[1].ClientName, Is.EqualTo("Claude Code"));
             Assert.That(ruleStatuses[2].ClientName, Is.EqualTo("Cursor"));
+            Assert.That(skillStatuses[0].ClientName, Is.EqualTo("Codex"));
+            Assert.That(skillStatuses[1].ClientName, Is.EqualTo("Claude Code"));
+            Assert.That(skillStatuses[2].ClientName, Is.EqualTo("Cursor"));
+            Assert.That(skillStatuses[0].IsApplicable, Is.True);
+            Assert.That(skillStatuses[0].InstalledSkillCount, Is.GreaterThanOrEqualTo(1));
+            Assert.That(skillStatuses[0].InstalledSkillNames, Does.Contain("upilot-unity-mcp"));
+            Assert.That(skillStatuses[0].UpilotSkillCount, Is.EqualTo(1));
+            Assert.That(skillStatuses[0].AssociatedToolCount, Is.GreaterThan(0));
+            Assert.That(skillStatuses[0].PrimaryToolNames, Does.Contain("unity_mcp_status"));
+            Assert.That(skillStatuses[0].CapabilityLabels, Is.Not.Empty);
+            Assert.That(skillStatuses[1].IsApplicable, Is.True);
+            Assert.That(skillStatuses[2].IsApplicable, Is.True);
+            Assert.That(skillStatuses[1].State, Is.EqualTo(AgentSkillConfigState.Current));
+            Assert.That(skillStatuses[2].State, Is.EqualTo(AgentSkillConfigState.Current));
+            Assert.That(skillStatuses[1].InstalledSkillNames, Does.Contain("upilot-unity-mcp"));
+            Assert.That(skillStatuses[2].InstalledSkillNames, Does.Contain("upilot-unity-mcp"));
+            Assert.That(skillStatuses[1].AssociatedToolCount, Is.GreaterThan(0));
+            Assert.That(skillStatuses[2].AssociatedToolCount, Is.GreaterThan(0));
+            Assert.That(skillStatuses[0].ConfigPath, Is.EqualTo(skillStatuses[2].ConfigPath));
+            Assert.That(skillStatuses[2].ApplicabilityExplanation, Does.Contain("共享"));
+            Assert.That(skillStatuses[2].SkillRootPaths, Is.Not.Empty);
+            Assert.That(skillStatuses[1].IsSatisfied, Is.True);
+            Assert.That(skillStatuses[2].IsSatisfied, Is.True);
+        }
+
+        [Test]
+        public void AgentSkillInstallPathsUseClaudeNativeDirectoryAndCursorSharedDirectory()
+        {
+            var projectRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "upilot-skill-paths"));
+            var codex = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "Codex");
+            var claude = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "Claude Code");
+            var cursor = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "Cursor");
+
+            Assert.That(codex, Does.Contain(Path.Combine(".agents", "skills", "upilot-unity-mcp")));
+            Assert.That(claude, Does.Contain(Path.Combine(".claude", "skills", "upilot-unity-mcp")));
+            Assert.That(cursor, Is.EqualTo(codex));
+            Assert.That(
+                UPilotAgentSetup.GetAgentSkillDiscoveryRoots(projectRoot, "Cursor"),
+                Does.Contain(Path.Combine(projectRoot, ".cursor", "skills")));
         }
 
         [Test]
@@ -669,6 +710,103 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Enum.IsDefined(typeof(UPilotMainState), UPilotMainState.Updating), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Restarting), Is.True);
             Assert.That(Enum.IsDefined(typeof(UPilotServiceOperation), UPilotServiceOperation.Stopping), Is.True);
+        }
+
+        [Test]
+        public void MainStateKeepsReadyWhenPidIsTemporarilyMissing()
+        {
+            var bridge = new BridgeStatus
+            {
+                IsStarted = true,
+                IsWsOpen = true,
+                IsAuthenticated = true,
+            };
+            var mcp = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessId = null,
+                ProcessOwnership = McpProcessOwnership.Unknown,
+                DiagnosisPending = true,
+            };
+
+            var snapshot = UPilotQuickStart.EvaluateServiceState(bridge, mcp);
+
+            Assert.That(snapshot.State, Is.EqualTo(UPilotMainState.Ready));
+        }
+
+        [Test]
+        public void MainStateTreatsUnconfirmedOwnershipAsChecking()
+        {
+            var bridge = new BridgeStatus { IsStarted = true };
+            var mcp = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.Unknown,
+                DiagnosisPending = true,
+            };
+
+            var snapshot = UPilotQuickStart.EvaluateServiceState(bridge, mcp);
+
+            Assert.That(snapshot.State, Is.EqualTo(UPilotMainState.CheckingStatus));
+            Assert.That(snapshot.Message, Does.Contain("确认 MCP 服务身份"));
+        }
+
+        [Test]
+        public void MainStateRequiresConfirmedForeignOwnershipForPortRepair()
+        {
+            var bridge = new BridgeStatus { IsStarted = true };
+            var mcp = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.Foreign,
+                DiagnosisPending = false,
+            };
+
+            var snapshot = UPilotQuickStart.EvaluateServiceState(bridge, mcp);
+
+            Assert.That(snapshot.State, Is.EqualTo(UPilotMainState.NeedsRepair));
+            Assert.That(snapshot.Message, Does.Contain("已确认"));
+        }
+
+        [Test]
+        public void RepairRoutingSwitchesPortsOnlyForConfirmedForeignOwnership()
+        {
+            var disconnectedBridge = new BridgeStatus { IsStarted = true };
+            var healthyCurrent = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+            };
+            var unknown = healthyCurrent;
+            unknown.ProcessOwnership = McpProcessOwnership.Unknown;
+            var foreign = healthyCurrent;
+            foreign.ProcessOwnership = McpProcessOwnership.Foreign;
+            var partial = healthyCurrent;
+            partial.WsPortListening = false;
+
+            Assert.That(
+                UPilotQuickStart.DetermineRepairAction(disconnectedBridge, unknown),
+                Is.EqualTo(UPilotRepairAction.WaitForStatus));
+            Assert.That(
+                UPilotQuickStart.DetermineRepairAction(disconnectedBridge, foreign),
+                Is.EqualTo(UPilotRepairAction.SwitchPorts));
+            Assert.That(
+                UPilotQuickStart.DetermineRepairAction(disconnectedBridge, partial),
+                Is.EqualTo(UPilotRepairAction.RestartServer));
+            Assert.That(
+                UPilotQuickStart.DetermineRepairAction(disconnectedBridge, healthyCurrent),
+                Is.EqualTo(UPilotRepairAction.RestartBridge));
+            Assert.That(
+                UPilotQuickStart.DetermineRepairAction(default, default),
+                Is.EqualTo(UPilotRepairAction.StartServices));
         }
 
         [Test]

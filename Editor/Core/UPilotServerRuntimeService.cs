@@ -1030,7 +1030,7 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static async Task<bool> CleanupOrQuarantineFailedTargetAsync(
+        private static bool CleanupOrQuarantineFailedTarget(
             string targetPath,
             CancellationToken token)
         {
@@ -1224,7 +1224,7 @@ namespace CodingRiver.UPilot
                 try
                 {
                     if (File.Exists(finalPath) &&
-                        !await CleanupOrQuarantineFailedTargetAsync(finalPath, token))
+                        !CleanupOrQuarantineFailedTarget(finalPath, token))
                     {
                         throw new UPilotDownloadUserActionException(
                             "无法删除或隔离不完整的 MCP 服务文件。请关闭占用该文件的程序后重新更新。");
@@ -1260,7 +1260,7 @@ namespace CodingRiver.UPilot
                     var hardError = IsDiskFullException(ex);
                     LogFileOperationFailure("Copy", attempt, ex, verifiedPath, finalPath, hardError);
                     if (File.Exists(finalPath) &&
-                        !await CleanupOrQuarantineFailedTargetAsync(finalPath, token))
+                        !CleanupOrQuarantineFailedTarget(finalPath, token))
                     {
                         throw new UPilotDownloadUserActionException(
                             "复制失败后无法删除或隔离不完整的 MCP 服务文件。请关闭占用该文件的程序后重新更新。",

@@ -654,3 +654,26 @@ UPilot 通用开发：
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 增加已编译业务探针，经 `unity_reflection_call` 输出唯一标记；`unity_console_search_logs(excludeUPilot=true)` 返回该日志，同时排除 UPilot 基础设施主动产生的日志，并报告稳定的来源判定与过滤数量。
 - 项目清单双向引用：`D:\MA\xclient\TODO_UPilot.mcd` 中“`excludeUPilot` 会误过滤由 Reflection 触发的业务日志”条目。
 - 当前状态：待处理。
+
+### [已完成][P1] 更新或 Unity 重启后短暂误报“端口被其他程序占用”并诱导换端口
+
+- 发现时间：2026-09-01。
+- 来源任务/测试：`D:\upilot\Tests~\UPilotTest` 在 UPilot 版本更新完成、Domain Reload 或 Unity 重启后的主窗口状态观察。
+- 现象/问题：MCP HTTP/WS 端口已经监听、Bridge 随后可正常恢复，但主窗口会短暂显示红色“需修复”，文案为“自动修复会切换到新的空闲端口并更新 Agent 配置”；等待下一轮状态刷新后通常自行变为就绪。用户若在此窗口期点击自动修复，会无必要地切换端口并重写 Agent 配置。
+- 根因证据：`UPilotQuickStart.Evaluate` 仅凭 `mcpStatus.IsRunning && !mcpStatus.ProcessId.HasValue` 就判定“端口被其他程序占用”，且该分支排在 `ready` 之前；Domain Reload/Unity 重启会清空 `UPilotMcpServerManager._trackedProcessId` 和 `UPilotQuickStart._operation`，恢复流程又直接调用 Manager，缺少跨 Reload 的启动宽限态。首轮后台刷新已探测到端口监听，但 PID 仍依赖 `netstat`、进程枚举、`wmic` 命令行读取及精确端口参数匹配，任一瞬时失败都会返回空 PID；2 秒后的刷新成功时状态自行恢复。截图中 UPM/服务版本均为 `0.3.28`，说明不是版本不一致。
+- 影响范围：包更新恢复、Domain Reload、Unity 重启、已有外部 MCP 进程重新附着，以及 Windows 进程命令行查询暂时不可用的场景；会制造假故障、端口漂移、Agent 配置噪声和不必要的服务重启。
+- 建议改进：将“端口监听但 PID 未识别”建模为 `CheckingStatus/ProcessIdentityPending`，要求连续多次或超过有界宽限期仍无法通过 `/health`/`/stats` 的 UPilot 身份、期望版本/通道、Bridge 认证和端口归属验证后，才报告真实端口冲突；把 `ready`/服务身份验证置于 PID 冲突判定之前。将更新恢复/Bootstrap 的启动状态跨 Domain Reload 持久化或由 Manager 暴露结构化 transition 状态，并避免单次 PID 探测失败触发换端口自动修复。
+- 最小回归：构造 `IsRunning=true`、HTTP/WS 均监听、Bridge 已认证、`ProcessId=null` 的首轮快照，应显示检查中或就绪而非需修复；连续失败超过宽限期且 health/stats 身份不匹配时才显示端口冲突；验证更新恢复和 Unity 重启期间不会重写 Agent URL，真实外部端口占用仍可准确诊断并执行显式修复。
+- 完成结果：新增 `CurrentUPilot/Foreign/Unknown` 进程归属模型、8 秒且至少 3 次探测的身份确认宽限、`/stats`/`/health` UPilot 身份交叉验证、单飞刷新与状态代际保护。主状态先判断 Bridge 认证和双端口健康，PID 暂缺时保持“已就绪”或“正在确认服务”；自动修复在执行前强制获取新鲜状态，只有明确 `Foreign` 才切换端口，未知身份只等待，当前服务局部异常按原端口重启，MCP 健康但 Bridge 断开时只重连 Bridge。主窗口补充进程归属、监听、PID、健康检查和确认进度，并防止重复修复点击。
+- 验收证据：Unity 6000.6.0a2 安全编译完成，0 错误、0 警告；规范项目定向 EditMode 验收 4/4 通过，覆盖 PID 暂缺仍就绪、未知归属显示检查中、只有确认外部进程才提示端口修复，以及各类修复动作路由。验收摘要：`Tests~/UPilotTest/Log/UPilotAcceptance/20260901-174809/summary.json`，112251 bytes，SHA256 `5d3cffd9f17c0c3491f20a034628d94639d1555a2eb6b28328cd7f00cb476cd9`。Domain Reload 后真实窗口显示绿色“已就绪”，MCP 地址保持 `http://127.0.0.1:8011/mcp`；截图：`Tests~/UPilotTest/Log/UPilotScreenshots/port-ownership-fix-final.png`，46434 bytes，760×760，SHA256 `7f5f8bc44f1dcee4008cdaabf7279a2ac8bed77e7cea7dea187cfe2c52293835`，`pixelSourceVerified=true`、`occlusionSensitive=false`、未降级。
+- 当前状态：已完成。
+
+### [待处理][P2] EditorWindow 截图无法包含 Unity 原生 Tooltip 临时窗口
+
+- 发现时间：2026-09-01。
+- 来源任务/测试：验收主窗口 Agent 三项展开态，以及 `MCP 配置`、`Skill 技能` 的诊断 Tooltip。
+- 现象/问题：`unity_mouse_event` 可把鼠标移动到目标控件，Tooltip 内容也有 C# 定向测试覆盖；但 `unity_screenshot_save(source=editorWindow, degrade=none)` 使用 `Win32.PrintWindow` 只捕获主 EditorWindow，Unity 原生 Tooltip 属于独立临时窗口，因此悬停前后截图 SHA256 完全相同，无法生成 Tooltip 的真实像素证据。
+- 影响范围：所有依赖 Unity IMGUI/原生 Tooltip、Popup 或临时浮层的 UI 验收；Agent 只能证明 Tooltip 文本构造正确，不能证明实际悬停显示、排版、截断和屏幕边界行为。
+- 建议改进：为截图/窗口验收增加显式 `includeTransientWindows` 或 Tooltip 专用模式，按 Unity PID 枚举并验证临时窗口所有权，将目标 EditorWindow 与受信任 Tooltip/Popup 合成截图；返回临时窗口句柄、类型/类名、匹配来源和像素验证字段，默认仍保持严格不降级。
+- 证据/复现：主窗口截图 `Tests~/UPilotTest/Log/UPilotScreenshots/agent-tooltip-main.png` 与悬停 `MCP 配置` 后的 `agent-mcp-tooltip.png` 均为 760×760、46434 bytes，SHA256 同为 `7f5f8bc44f1dcee4008cdaabf7279a2ac8bed77e7cea7dea187cfe2c52293835`；两次均返回 `pixelSourceVerified=true`、`occlusionSensitive=false`、`degraded=false`。
+- 当前状态：待处理；本次 Tooltip 文本与数据口径由定向 EditMode 测试和真实运行数据读取完成验收。

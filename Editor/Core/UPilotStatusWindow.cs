@@ -1332,7 +1332,7 @@ namespace CodingRiver.UPilot
 
                 _wsHostInput = EditorGUILayout.TextField("主机地址", _wsHostInput);
                 _wsPortInput = EditorGUILayout.IntField("Unity WS 端口", _wsPortInput);
-                _httpPortInput = EditorGUILayout.IntField("MCP HTTP 端口", _httpPortInput);
+                _httpPortInput = EditorGUILayout.IntField(UPilotMainWindow.McpPortLabel, _httpPortInput);
 
                 using (new EditorGUI.DisabledScope(status.IsStarted))
                 {

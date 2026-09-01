@@ -446,8 +446,8 @@ namespace CodingRiver.UPilot
                         }
                         if (cam == null)
                         {
-                            // Also check disabled cameras via FindObjectsOfType(true)
-                            foreach (var c in UnityEngine.Object.FindObjectsOfType<Camera>(true))
+                            // Also check disabled cameras without paying for InstanceID sorting.
+                            foreach (var c in FindCamerasIncludingInactive())
                             {
                                 if (string.Equals(c.name, camName, StringComparison.OrdinalIgnoreCase))
                                 {
@@ -1202,6 +1202,15 @@ namespace CodingRiver.UPilot
             };
         }
 
+        private static Camera[] FindCamerasIncludingInactive()
+        {
+#if UNITY_6000_6_OR_NEWER
+            return UnityEngine.Object.FindObjectsByType<Camera>(FindObjectsInactive.Include);
+#else
+            return UnityEngine.Object.FindObjectsByType<Camera>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+#endif
+        }
+
         private static Camera FindCamera(string camName)
         {
             if (string.IsNullOrEmpty(camName))
@@ -1217,7 +1226,7 @@ namespace CodingRiver.UPilot
                 }
             }
 
-            foreach (var c in UnityEngine.Object.FindObjectsOfType<Camera>(true))
+            foreach (var c in FindCamerasIncludingInactive())
             {
                 if (string.Equals(c.name, camName, StringComparison.OrdinalIgnoreCase))
                 {

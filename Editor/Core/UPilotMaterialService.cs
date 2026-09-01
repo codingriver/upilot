@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace CodingRiver.UPilot
 {
@@ -143,7 +144,7 @@ namespace CodingRiver.UPilot
                         instanceId = UPilotEntityIds.ToWireId(shader),
                         imported = AssetImporter.GetAtPath(path) != null,
                         supported = shader.isSupported,
-                        propertyCount = ShaderUtil.GetPropertyCount(shader),
+                        propertyCount = shader.GetPropertyCount(),
                         dependencies = AssetDatabase.GetDependencies(path, false).Where(item => !string.Equals(item, path, StringComparison.OrdinalIgnoreCase)).ToList(),
                     };
                     if (includeMessages) ReadShaderMessages(shader, p.includeWarnings, result);
@@ -399,32 +400,32 @@ namespace CodingRiver.UPilot
                     // Read shader properties
                     if (mat.shader != null)
                     {
-                        int propCount = ShaderUtil.GetPropertyCount(mat.shader);
+                        int propCount = mat.shader.GetPropertyCount();
                         for (int i = 0; i < propCount; i++)
                         {
-                            string propName = ShaderUtil.GetPropertyName(mat.shader, i);
-                            var propType = ShaderUtil.GetPropertyType(mat.shader, i);
+                            string propName = mat.shader.GetPropertyName(i);
+                            var propType = mat.shader.GetPropertyType(i);
                             string typeStr;
                             string valueStr;
 
                             switch (propType)
                             {
-                                case ShaderUtil.ShaderPropertyType.Color:
+                                case ShaderPropertyType.Color:
                                     typeStr  = "Color";
                                     var c = mat.GetColor(propName);
                                     valueStr = $"({c.r},{c.g},{c.b},{c.a})";
                                     break;
-                                case ShaderUtil.ShaderPropertyType.Vector:
+                                case ShaderPropertyType.Vector:
                                     typeStr  = "Vector";
                                     var v = mat.GetVector(propName);
                                     valueStr = $"({v.x},{v.y},{v.z},{v.w})";
                                     break;
-                                case ShaderUtil.ShaderPropertyType.Float:
-                                case ShaderUtil.ShaderPropertyType.Range:
+                                case ShaderPropertyType.Float:
+                                case ShaderPropertyType.Range:
                                     typeStr  = "Float";
                                     valueStr = mat.GetFloat(propName).ToString("G");
                                     break;
-                                case ShaderUtil.ShaderPropertyType.TexEnv:
+                                case ShaderPropertyType.Texture:
                                     typeStr = "Texture";
                                     var tex = mat.GetTexture(propName);
                                     valueStr = tex != null ? AssetDatabase.GetAssetPath(tex) : "";
@@ -503,9 +504,9 @@ namespace CodingRiver.UPilot
 
             // Try to detect property type
             int propIdx = -1;
-            for (int i = 0; i < ShaderUtil.GetPropertyCount(mat.shader); i++)
+            for (int i = 0; i < mat.shader.GetPropertyCount(); i++)
             {
-                if (ShaderUtil.GetPropertyName(mat.shader, i) == propName)
+                if (mat.shader.GetPropertyName(i) == propName)
                 {
                     propIdx = i;
                     break;
@@ -514,24 +515,24 @@ namespace CodingRiver.UPilot
 
             if (propIdx < 0) return;
 
-            var propType = ShaderUtil.GetPropertyType(mat.shader, propIdx);
+            var propType = mat.shader.GetPropertyType(propIdx);
             switch (propType)
             {
-                case ShaderUtil.ShaderPropertyType.Color:
+                case ShaderPropertyType.Color:
                     if (TryParseColor(value, out var color))
                         mat.SetColor(propName, color);
                     break;
-                case ShaderUtil.ShaderPropertyType.Vector:
+                case ShaderPropertyType.Vector:
                     if (TryParseVector4(value, out var vec))
                         mat.SetVector(propName, vec);
                     break;
-                case ShaderUtil.ShaderPropertyType.Float:
-                case ShaderUtil.ShaderPropertyType.Range:
+                case ShaderPropertyType.Float:
+                case ShaderPropertyType.Range:
                     if (float.TryParse(value, System.Globalization.NumberStyles.Float,
                                        System.Globalization.CultureInfo.InvariantCulture, out float f))
                         mat.SetFloat(propName, f);
                     break;
-                case ShaderUtil.ShaderPropertyType.TexEnv:
+                case ShaderPropertyType.Texture:
                     var tex = AssetDatabase.LoadAssetAtPath<Texture>(value);
                     mat.SetTexture(propName, tex); // null clears it
                     break;

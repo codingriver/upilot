@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -15,6 +16,7 @@ namespace CodingRiver.UPilot
         private McpServerStatus _mcpStatus;
         private AgentMcpConfigStatus[] _agentConfigs = Array.Empty<AgentMcpConfigStatus>();
         private AgentRuleConfigStatus[] _ruleConfigs = Array.Empty<AgentRuleConfigStatus>();
+        private AgentSkillConfigStatus[] _skillConfigs = Array.Empty<AgentSkillConfigStatus>();
         private UPilotMainSnapshot _snapshot;
         private UPilotMainState _lastState;
         private double _stateChangedAt;
@@ -30,6 +32,10 @@ namespace CodingRiver.UPilot
         private bool _updateStopScheduled;
         private bool _updateStopInProgress;
         private bool _updateStopFailed;
+        private bool _runtimeDetailsExpanded;
+        private bool _repairInProgress;
+        private bool _statusRefreshInProgress;
+        private string _expandedAgentClient = "";
         private double _lastUpdateStopAttempt;
         private Vector2 _mainScroll;
 
@@ -37,12 +43,11 @@ namespace CodingRiver.UPilot
         private GUIStyle _titleStyle;
         private GUIStyle _messageStyle;
         private GUIStyle _sectionTitleStyle;
-        private GUIStyle _tableHeaderStyle;
-        private GUIStyle _infoLabelStyle;
-        private GUIStyle _infoValueStyle;
         private bool _stylesInitialized;
 
         private const double UpdateStopRetryCooldownSeconds = 2d;
+        internal const string McpPortLabel = "MCP 端口";
+        internal const string UnityBridgePortLabel = "Unity Bridge 端口";
 
         [MenuItem("UPilot/UPilot", false, 200)]
         public static void Open()
@@ -232,32 +237,6 @@ namespace CodingRiver.UPilot
                 alignment = TextAnchor.MiddleLeft,
                 fontSize = 11,
             };
-            _tableHeaderStyle = new GUIStyle(EditorStyles.miniLabel)
-            {
-                alignment = TextAnchor.MiddleLeft,
-                fixedHeight = 22,
-                normal =
-                {
-                    textColor = EditorGUIUtility.isProSkin
-                        ? new Color(0.58f, 0.58f, 0.58f)
-                        : new Color(0.38f, 0.38f, 0.38f),
-                },
-            };
-            _infoLabelStyle = new GUIStyle(EditorStyles.miniLabel)
-            {
-                fixedHeight = 15,
-                normal =
-                {
-                    textColor = EditorGUIUtility.isProSkin
-                        ? new Color(0.58f, 0.58f, 0.58f)
-                        : new Color(0.38f, 0.38f, 0.38f),
-                },
-            };
-            _infoValueStyle = new GUIStyle(EditorStyles.label)
-            {
-                fontSize = 11,
-                fixedHeight = 18,
-            };
         }
 
         private void RefreshSnapshot()
@@ -280,8 +259,38 @@ namespace CodingRiver.UPilot
 
                 _lastState = next.State;
                 _stateChangedAt = EditorApplication.timeSinceStartup;
+                if (next.State == UPilotMainState.NeedsRepair)
+                    _runtimeDetailsExpanded = true;
             }
             _snapshot = next;
+        }
+
+        private async void RefreshRuntimeStatus()
+        {
+            if (_statusRefreshInProgress)
+                return;
+
+            _statusRefreshInProgress = true;
+            Repaint();
+            try
+            {
+                await UPilotMcpServerManager.Instance.GetFreshStatusAsync();
+                if (this == null)
+                    return;
+                RefreshSnapshot();
+                ShowNotice("运行状态已刷新");
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("刷新 UPilot 运行状态失败", ex);
+                ShowExceptionNotice("刷新 UPilot 运行状态失败", ex);
+            }
+            finally
+            {
+                _statusRefreshInProgress = false;
+                if (this != null)
+                    Repaint();
+            }
         }
 
         private UPilotMainSnapshot GetDisplaySnapshot()
@@ -401,6 +410,7 @@ namespace CodingRiver.UPilot
             _lastAgentRefresh = EditorApplication.timeSinceStartup;
             _agentConfigs = UPilotAgentSetup.GetMcpConfigStatuses();
             _ruleConfigs = UPilotAgentSetup.GetRuleConfigStatuses();
+            _skillConfigs = UPilotAgentSetup.GetSkillConfigStatuses();
 
             if (force && !_agentAdviceNoticeShown && HasAgentIntegrationIssues())
             {
@@ -544,14 +554,14 @@ namespace CodingRiver.UPilot
 
         private void DrawOperationsDashboard(UPilotMainSnapshot snapshot)
         {
-            DrawVersionSection(snapshot);
+            DrawWriteAccessBanner();
             EditorGUILayout.Space(8);
-            DrawSectionTitleBar("MCP 连接");
-            EditorGUILayout.Space(4);
-            DrawMcpEndpoint();
-            EditorGUILayout.Space(10);
             using (new EditorGUI.DisabledScope(IsServiceTransitioning(snapshot.State)))
                 DrawAgentConfigurationList();
+            EditorGUILayout.Space(10);
+            DrawMcpEndpoint();
+            EditorGUILayout.Space(10);
+            DrawRuntimeDetails(snapshot);
         }
 
         private void DrawStatusActionBar(UPilotMainSnapshot snapshot)
@@ -579,7 +589,8 @@ namespace CodingRiver.UPilot
             GUI.color = previous;
             EditorGUI.LabelField(stateRect, GetStateLabel(snapshot.State), EditorStyles.boldLabel);
 
-            if (snapshot.State != UPilotMainState.SetupRequired)
+            if (snapshot.State != UPilotMainState.SetupRequired &&
+                snapshot.State != UPilotMainState.Ready)
                 DrawServiceAction(actionRect, snapshot);
             if (GUI.Button(menuRect, "⋮"))
                 ShowMoreMenu(snapshot);
@@ -594,6 +605,13 @@ namespace CodingRiver.UPilot
 
         private void DrawServiceAction(Rect rect, UPilotMainSnapshot snapshot)
         {
+            if (_repairInProgress)
+            {
+                using (new EditorGUI.DisabledScope(true))
+                    GUI.Button(rect, "检查中…");
+                return;
+            }
+
             if (snapshot.State == UPilotMainState.Stopped)
             {
                 if (GUI.Button(rect, "启动"))
@@ -689,51 +707,142 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void DrawVersionSection(UPilotMainSnapshot snapshot)
+        private void DrawWriteAccessBanner()
         {
-            var serverVersion = string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动/旧版" : _mcpStatus.ServerVersion;
-            var runtimeMode = GetRuntimeModeLabel(snapshot.State);
-            var channel = UPilotServerRuntimeService.ResolveUpdateChannel();
-            var compatibility = UPilotServerRuntimeService.IsSourceChannel(channel)
-                ? "source / 本机 Python"
-                : "release 清单兼容";
-            if (!string.IsNullOrWhiteSpace(_mcpStatus.BuildChannel) &&
-                !string.Equals(_mcpStatus.BuildChannel, channel, StringComparison.OrdinalIgnoreCase))
-            {
-                compatibility += "；服务上报通道：" + _mcpStatus.BuildChannel;
-            }
-            var writeApproved = UPilotProjectConfig.Current.safety?.writeAccessApproved == true;
+            var safety = UPilotProjectConfig.Current.safety;
+            if (!ShouldShowWriteAccessBanner(safety))
+                return;
 
-            DrawSectionTitleBar("运行信息");
-            EditorGUILayout.Space(4);
-            var compact = position.width < 620f;
-            using (new EditorGUILayout.HorizontalScope())
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                DrawInfoColumn("UPM", UPilotServerRuntimeService.UpmVersion, compact ? 62 : 82);
-                DrawInfoColumn("服务", serverVersion, compact ? 84 : 100);
-                DrawInfoColumn("运行方式", runtimeMode, compact ? 96 : 130);
-                DrawInfoColumn(new GUIContent("通道", compatibility), channel, compact ? 72 : 92);
-                DrawInfoColumn("授权", UPilotWriteAccessUi.GetStatusLabel(writeApproved), compact ? 56 : 76);
-                GUILayout.FlexibleSpace();
-            }
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    var icon = EditorGUIUtility.IconContent("console.warnicon.sml");
+                    GUILayout.Label(icon, GUILayout.Width(24f), GUILayout.Height(24f));
+                    using (new EditorGUILayout.VerticalScope())
+                    {
+                        EditorGUILayout.LabelField("需要授权", EditorStyles.boldLabel);
+                        EditorGUILayout.LabelField(
+                            "Agent 当前只能查看项目。允许授权后，才能修改脚本、资源和项目设置。",
+                            _messageStyle);
+                    }
 
-            DrawWriteAccessControls(UPilotProjectConfig.Current.safety);
+                    GUILayout.Space(8f);
+                    var change = UPilotWriteAccessUi.DrawActionButton(false, 88f, 28f);
+                    if (change != UPilotWriteAccessChange.None)
+                    {
+                        ShowNotice(UPilotWriteAccessUi.GetSuccessMessage(change));
+                        RefreshSnapshot();
+                        Repaint();
+                    }
+                }
+            }
         }
 
-        private void DrawWriteAccessControls(UPilotSafetyConfig safety)
+        internal static bool ShouldShowWriteAccessBanner(UPilotSafetyConfig safety)
         {
-            var writeApproved = safety?.writeAccessApproved == true;
+            return safety?.writeAccessApproved != true;
+        }
+
+        private void DrawRuntimeDetails(UPilotMainSnapshot snapshot)
+        {
+            var headerRect = EditorGUILayout.GetControlRect(false, 28f);
+            DrawBandBackground(headerRect);
+            DrawBandAccent(headerRect);
+            var foldoutRect = new Rect(headerRect.x + 8f, headerRect.y + 3f, headerRect.width - 16f, 22f);
+            _runtimeDetailsExpanded = EditorGUI.Foldout(
+                foldoutRect,
+                _runtimeDetailsExpanded,
+                "运行详情",
+                true,
+                EditorStyles.foldoutHeader);
+            if (!_runtimeDetailsExpanded)
+                return;
+
+            var serverVersion = string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动/旧版" : _mcpStatus.ServerVersion;
+            var upmVersion = UPilotServerRuntimeService.UpmVersion;
+            var bridge = UPilotBridge.Instance;
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                DrawRuntimeDetailRow("运行状态", GetStateLabel(snapshot.State));
+                DrawRuntimeDetailRow(McpPortLabel, bridge.HttpPort.ToString());
+                DrawRuntimeDetailRow(UnityBridgePortLabel, bridge.WsPort.ToString());
+                DrawRuntimeDetailRow("Unity Bridge 状态", GetBridgeStatusLabel(_bridgeStatus));
+                DrawRuntimeDetailRow("MCP HTTP 监听", GetListeningStateLabel(_mcpStatus.HttpPortListening));
+                DrawRuntimeDetailRow("MCP WS 监听", GetListeningStateLabel(_mcpStatus.WsPortListening));
+                DrawRuntimeDetailRow("进程归属", GetProcessOwnershipLabel(_mcpStatus.ProcessOwnership));
+                DrawRuntimeDetailRow("进程 PID", _mcpStatus.ProcessId?.ToString() ?? "未识别");
+                DrawRuntimeDetailRow("健康检查", GetHealthStatusLabel(_mcpStatus));
+                if (!string.IsNullOrWhiteSpace(_mcpStatus.ProcessOwnershipEvidence))
+                    DrawRuntimeDetailRow("身份依据", _mcpStatus.ProcessOwnershipEvidence);
+                if (_mcpStatus.DiagnosisPending)
+                    DrawRuntimeDetailRow("确认进度", $"第 {_mcpStatus.ConsecutiveIdentityMisses} 次探测");
+                EditorGUILayout.Space(3f);
+                if (string.Equals(upmVersion, serverVersion, StringComparison.OrdinalIgnoreCase))
+                {
+                    DrawRuntimeDetailRow("版本", upmVersion);
+                }
+                else
+                {
+                    DrawRuntimeDetailRow("UPM 版本", upmVersion);
+                    DrawRuntimeDetailRow("服务版本", serverVersion);
+                }
+
+                DrawRuntimeDetailRow("运行方式", GetRuntimeModeLabel(snapshot.State));
+                DrawRuntimeDetailRow("发布通道", UPilotServerRuntimeService.ResolveUpdateChannel());
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.FlexibleSpace();
+                    using (new EditorGUI.DisabledScope(_statusRefreshInProgress))
+                    {
+                        var label = _statusRefreshInProgress ? "刷新中…" : "刷新状态";
+                        if (GUILayout.Button(label, GUILayout.Width(76f), GUILayout.Height(22f)))
+                            RefreshRuntimeStatus();
+                    }
+                }
+            }
+        }
+
+        private static void DrawRuntimeDetailRow(string label, string value)
+        {
             using (new EditorGUILayout.HorizontalScope())
             {
-                EditorGUILayout.LabelField(
-                    UPilotWriteAccessUi.GetCompactDescription(safety),
-                    EditorStyles.miniLabel,
-                    GUILayout.ExpandWidth(true));
-                GUILayout.FlexibleSpace();
-                var change = UPilotWriteAccessUi.DrawActionButton(writeApproved, 76f, 22f);
-                if (change != UPilotWriteAccessChange.None)
-                    ShowNotice(UPilotWriteAccessUi.GetSuccessMessage(change));
+                EditorGUILayout.LabelField(label, EditorStyles.miniLabel, GUILayout.Width(120f));
+                EditorGUILayout.LabelField(value, EditorStyles.label);
             }
+        }
+
+        internal static string GetBridgeStatusLabel(BridgeStatus status)
+        {
+            if (status.IsAuthenticated)
+                return "已连接";
+            if (status.IsStarted)
+                return "连接中";
+            return "未启动";
+        }
+
+        internal static string GetProcessOwnershipLabel(McpProcessOwnership ownership)
+        {
+            if (ownership == McpProcessOwnership.CurrentUPilot)
+                return "当前 UPilot";
+            if (ownership == McpProcessOwnership.Foreign)
+                return "其他程序";
+            return "确认中";
+        }
+
+        private static string GetListeningStateLabel(bool listening)
+        {
+            return listening ? "正常" : "未监听";
+        }
+
+        private static string GetHealthStatusLabel(McpServerStatus status)
+        {
+            if (status.HealthIdentifiesUPilot)
+                return "UPilot 响应正常";
+            if (status.HealthResponded)
+                return "已响应，但身份不匹配";
+            return "无响应";
         }
 
         private static string GetRuntimeModeLabel(UPilotMainState state)
@@ -745,62 +854,72 @@ namespace CodingRiver.UPilot
             return UPilotServerRuntimeService.Instance.RuntimeModeLabel;
         }
 
-        private void DrawInfoColumn(string label, string value, float width)
-        {
-            DrawInfoColumn(new GUIContent(label), value, width);
-        }
-
-        private void DrawInfoColumn(GUIContent label, string value, float width)
-        {
-            using (new EditorGUILayout.VerticalScope(GUILayout.Width(width)))
-            {
-                EditorGUILayout.LabelField(label, _infoLabelStyle, GUILayout.Width(width));
-                EditorGUILayout.LabelField(value, _infoValueStyle, GUILayout.Width(width));
-            }
-        }
-
         private void DrawAgentConfigurationList()
         {
             var toolbarRect = EditorGUILayout.GetControlRect(false, 30f);
-            const float checkWidth = 82f;
             const float updateWidth = 96f;
-            const float gap = 6f;
+            const float menuWidth = 24f;
             DrawBandBackground(toolbarRect);
             DrawBandAccent(toolbarRect);
-            var updateRect = new Rect(toolbarRect.xMax - 6f - updateWidth, toolbarRect.y + 3f, updateWidth, 24f);
-            var checkRect = new Rect(updateRect.x - gap - checkWidth, toolbarRect.y + 3f, checkWidth, 24f);
-            var titleRect = new Rect(toolbarRect.x + 10f, toolbarRect.y + 3f, Mathf.Max(70f, checkRect.x - toolbarRect.x - 16f), 24f);
+            var menuRect = new Rect(toolbarRect.xMax - 6f - menuWidth, toolbarRect.y + 3f, menuWidth, 24f);
+            var updateRect = new Rect(menuRect.x - updateWidth, toolbarRect.y + 3f, updateWidth, 24f);
+            var titleRect = new Rect(toolbarRect.x + 10f, toolbarRect.y + 3f, Mathf.Max(70f, updateRect.x - toolbarRect.x - 16f), 24f);
 
-            EditorGUI.LabelField(titleRect, "Agent 配置", _sectionTitleStyle);
-            if (GUI.Button(checkRect, "检查配置"))
-            {
-                RefreshAgentConfigs(force: true);
-                var checkedIssueCount = CountAgentIntegrationIssues();
-                if (checkedIssueCount == 0)
-                {
-                    ShowNotice("检查完成，所有 Agent 配置已是最新");
-                }
-                else
-                {
-                    var confirmationCount = CountCustomizedRuleConfigs();
-                    ShowNotice(
-                        confirmationCount == checkedIssueCount
-                            ? $"检查完成，有 {checkedIssueCount} 项内容需要确认"
-                            : $"检查完成，有 {checkedIssueCount} 项配置需要处理",
-                        MessageType.Warning);
-                }
-            }
+            EditorGUI.LabelField(titleRect, "Agent", _sectionTitleStyle);
 
             var issueCount = CountAgentIntegrationIssues();
-            var updateLabel = issueCount > 0 ? $"处理 {issueCount} 项" : "更新全部";
+            var updateLabel = GetAgentUpdateButtonLabel(issueCount);
             if (GUI.Button(updateRect, updateLabel))
                 UpdateAllAgentIntegrations();
+            if (GUI.Button(menuRect, "▾"))
+                ShowAgentBulkUpdateMenu();
 
             DrawAgentIntegrationAdvice();
-            DrawAgentTableHeader();
 
             foreach (var mcpStatus in _agentConfigs)
-                DrawAgentConfigurationRow(mcpStatus, FindRuleStatus(mcpStatus.ClientName));
+            {
+                DrawAgentConfigurationRow(
+                    mcpStatus,
+                    FindRuleStatus(mcpStatus.ClientName),
+                    FindSkillStatus(mcpStatus.ClientName));
+            }
+        }
+
+        internal static string GetAgentUpdateButtonLabel(int issueCount)
+        {
+            return issueCount > 0 ? $"更新 {issueCount} 项" : "更新全部";
+        }
+
+        private void ShowAgentBulkUpdateMenu()
+        {
+            var menu = new GenericMenu();
+            menu.AddItem(new GUIContent("检查配置"), false, CheckAgentIntegrations);
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("强制重新配置全部…"), false, ForceUpdateAllAgentIntegrations);
+            menu.ShowAsContext();
+        }
+
+        private void CheckAgentIntegrations()
+        {
+            RefreshAgentConfigs(force: true);
+            var checkedIssueCount = CountAgentIntegrationIssues();
+            if (checkedIssueCount == 0)
+            {
+                ShowNotice("检查完成，已配置的 Agent 均为最新");
+                return;
+            }
+
+            var confirmationCount = CountCustomizedRuleConfigs();
+            ShowNotice(
+                confirmationCount == checkedIssueCount
+                    ? $"检查完成，有 {checkedIssueCount} 项内容需要确认"
+                    : $"检查完成，有 {checkedIssueCount} 项配置需要更新",
+                MessageType.Warning);
+        }
+
+        private void ForceUpdateAllAgentIntegrations()
+        {
+            UpdateAllAgentIntegrations(forceAll: true);
         }
 
         private void DrawAgentIntegrationAdvice()
@@ -808,29 +927,18 @@ namespace CodingRiver.UPilot
             var messageType = BuildAgentIntegrationAdvice(out var message);
             if (messageType == MessageType.Info)
             {
-                EditorGUILayout.LabelField("所有 Agent 配置已是最新", _messageStyle);
+                EditorGUILayout.LabelField("已配置的 Agent 均为最新", _messageStyle);
                 return;
             }
 
             EditorGUILayout.HelpBox(message, messageType);
         }
 
-        private void DrawAgentTableHeader()
-        {
-            EditorGUILayout.Space(2);
-            var row = EditorGUILayout.GetControlRect(false, 22f);
-            GetAgentColumnRects(row, 72f, out var agentRect, out var mcpRect, out var ruleRect, out var actionRect);
-            EditorGUI.LabelField(agentRect, "Agent", _tableHeaderStyle);
-            EditorGUI.LabelField(mcpRect, "MCP 状态", _tableHeaderStyle);
-            EditorGUI.LabelField(ruleRect, "Skill / 规则", _tableHeaderStyle);
-            EditorGUI.LabelField(actionRect, "操作", _tableHeaderStyle);
-            DrawTableSeparator();
-        }
-
         private MessageType BuildAgentIntegrationAdvice(out string message)
         {
             AgentMcpConfigStatus? firstMcpIssue = null;
             AgentRuleConfigStatus? firstRuleIssue = null;
+            AgentSkillConfigStatus? firstSkillIssue = null;
             var issueCount = 0;
             var hasErrors = false;
 
@@ -856,9 +964,21 @@ namespace CodingRiver.UPilot
                     hasErrors = true;
             }
 
+            var seenSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var status in _skillConfigs)
+            {
+                if (!NeedsSkillUpdate(status) || !seenSkillPaths.Add(GetSkillIssueKey(status)))
+                    continue;
+
+                issueCount++;
+                firstSkillIssue ??= status;
+                if (status.State == AgentSkillConfigState.Error)
+                    hasErrors = true;
+            }
+
             if (issueCount == 0)
             {
-                message = "所有 Agent 配置已是最新";
+                message = "已配置的 Agent 均为最新";
                 return MessageType.Info;
             }
 
@@ -874,19 +994,39 @@ namespace CodingRiver.UPilot
                 if (status.State == AgentRuleConfigState.Customized)
                 {
                     message = $"{status.ClientName} 内容需要确认\n" +
-                              $"检测到 {status.ClientName} 的 UPilot {GetRuleLabel(status.ClientName)} 有本地修改。" +
+                              $"检测到 {status.ClientName} 的 UPilot Agent 规则有本地修改。" +
                               "当前仍可正常使用，更新时可以选择保留或替换。";
                     return MessageType.Warning;
                 }
 
                 if (status.State == AgentRuleConfigState.Missing)
                 {
-                    message = $"{status.ClientName} 尚未安装 UPilot {GetRuleLabel(status.ClientName)}\n" +
+                    message = $"{status.ClientName} 尚未同步 UPilot Agent 规则\n" +
                               "完成安装后即可使用最新的 Agent 配置。";
                     return MessageType.Warning;
                 }
 
-                message = $"{status.ClientName} 有新内容可用\n更新后可使用最新的 UPilot {GetRuleLabel(status.ClientName)}。";
+                message = $"{status.ClientName} 有新内容可用\n更新后可使用最新的 UPilot Agent 规则。";
+                return MessageType.Warning;
+            }
+
+            if (issueCount == 1 && firstSkillIssue.HasValue)
+            {
+                var status = firstSkillIssue.Value;
+                if (status.State == AgentSkillConfigState.Customized)
+                {
+                    message = $"{status.ClientName} Skill 内容需要确认\n" +
+                              "检测到已安装的 UPilot Skill 有本地修改。当前仍可使用，更新时可以选择保留或替换。";
+                    return MessageType.Warning;
+                }
+
+                if (status.State == AgentSkillConfigState.Missing)
+                {
+                    message = $"{status.ClientName} 尚未安装 UPilot Skill\n安装后即可使用 Skill 提供的工作流与工具说明。";
+                    return MessageType.Warning;
+                }
+
+                message = $"{status.ClientName} Skill 有新版本\n更新后可使用最新的 UPilot 工作流与工具说明。";
                 return MessageType.Warning;
             }
 
@@ -921,6 +1061,13 @@ namespace CodingRiver.UPilot
                     issueCount++;
             }
 
+            var seenSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var status in _skillConfigs)
+            {
+                if (NeedsSkillUpdate(status) && seenSkillPaths.Add(GetSkillIssueKey(status)))
+                    issueCount++;
+            }
+
             return issueCount;
         }
 
@@ -930,6 +1077,13 @@ namespace CodingRiver.UPilot
             foreach (var status in _ruleConfigs)
             {
                 if (status.HasLocalCustomization)
+                    count++;
+            }
+
+            var seenSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var status in _skillConfigs)
+            {
+                if (status.HasLocalCustomization && seenSkillPaths.Add(GetSkillIssueKey(status)))
                     count++;
             }
 
@@ -950,83 +1104,191 @@ namespace CodingRiver.UPilot
             return status.State != AgentRuleConfigState.Current;
         }
 
+        private static bool NeedsSkillUpdate(AgentSkillConfigStatus status)
+        {
+            return !status.IsSatisfied;
+        }
+
+        private static string GetSkillIssueKey(AgentSkillConfigStatus status)
+        {
+            return string.IsNullOrEmpty(status.ConfigPath)
+                ? status.ClientName
+                : status.ConfigPath;
+        }
+
         private void DrawAgentConfigurationRow(
             AgentMcpConfigStatus mcpStatus,
-            AgentRuleConfigStatus ruleStatus)
+            AgentRuleConfigStatus ruleStatus,
+            AgentSkillConfigStatus skillStatus)
         {
-            var expandedActions = position.width >= 760f;
-            var actionWidth = expandedActions ? 166f : 72f;
-            var row = EditorGUILayout.GetControlRect(false, 32f);
-            GetAgentColumnRects(row, actionWidth, out var agentRect, out var mcpRect, out var ruleRect, out var actionRect);
+            var expanded = string.Equals(_expandedAgentClient, mcpStatus.ClientName, StringComparison.Ordinal);
+            var row = EditorGUILayout.GetControlRect(false, 30f);
+            var foldoutRect = new Rect(row.x + 2f, row.y + 3f, Mathf.Max(100f, row.width - 110f), 24f);
+            var nextExpanded = EditorGUI.Foldout(
+                foldoutRect,
+                expanded,
+                mcpStatus.ClientName,
+                true,
+                EditorStyles.foldout);
+            if (nextExpanded != expanded)
+                _expandedAgentClient = nextExpanded ? mcpStatus.ClientName : "";
 
-            EditorGUI.LabelField(agentRect, mcpStatus.ClientName, EditorStyles.boldLabel);
-            DrawStatusCell(mcpRect, GetCompactMcpState(mcpStatus), mcpStatus.IsConfigured);
-            DrawStatusCell(ruleRect, GetRuleStateText(ruleStatus), ruleStatus.State == AgentRuleConfigState.Current);
-
-            if (expandedActions)
-            {
-                var configRect = new Rect(actionRect.x, actionRect.y + 4f, 76f, 24f);
-                var ruleButtonRect = new Rect(configRect.xMax + 6f, configRect.y, 84f, 24f);
-                var configLabel = mcpStatus.HasUPilotEntry ? "更新配置" : "配置";
-                if (GUI.Button(configRect, configLabel))
-                    UpdateAgentMcpConfig(mcpStatus);
-
-                var ruleLabel = mcpStatus.ClientName == "Codex" ? "更新 Skill" : "更新规则";
-                if (GUI.Button(ruleButtonRect, ruleLabel))
-                    UpdateAgentRuleConfig(ruleStatus);
-            }
-            else
-            {
-                var buttonRect = new Rect(actionRect.x, actionRect.y + 4f, actionRect.width, 24f);
-                if (GUI.Button(buttonRect, "管理 ▾"))
-                    ShowAgentConfigurationMenu(mcpStatus, ruleStatus);
-            }
-
+            var statusText = GetAgentOverallStateText(mcpStatus, ruleStatus, skillStatus);
+            var statusReady = IsAgentIntegrationReady(mcpStatus, ruleStatus, skillStatus);
+            var statusRect = new Rect(row.xMax - 96f, row.y, 96f, row.height);
+            DrawStatusCell(
+                statusRect,
+                statusText,
+                statusReady,
+                HasAgentIntegrationError(mcpStatus, ruleStatus, skillStatus));
             DrawTableSeparator();
+
+            if (!nextExpanded)
+                return;
+
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            {
+                DrawAgentDetailRow(
+                    "Agent 规则",
+                    GetRuleStateText(ruleStatus),
+                    GetRuleDetailState(ruleStatus),
+                    ruleStatus.State == AgentRuleConfigState.Missing ? "同步规则" : "更新规则",
+                    () => UpdateAgentRuleConfig(ruleStatus),
+                    BuildRuleTooltip(ruleStatus));
+                DrawAgentDetailRow(
+                    "MCP 配置",
+                    GetCompactMcpState(mcpStatus),
+                    GetMcpDetailState(mcpStatus),
+                    mcpStatus.HasUPilotEntry ? "更新配置" : "配置",
+                    () => UpdateAgentMcpConfig(mcpStatus),
+                    BuildMcpTooltip(mcpStatus, _mcpStatus));
+                DrawAgentDetailRow(
+                    "Skill 技能",
+                    GetSkillStateText(skillStatus),
+                    GetSkillDetailState(skillStatus),
+                    skillStatus.IsApplicable
+                        ? skillStatus.State == AgentSkillConfigState.Missing ? "安装 Skill" : "更新 Skill"
+                        : "",
+                    skillStatus.IsApplicable ? () => UpdateAgentSkillConfig(skillStatus) : (Action)null,
+                    BuildSkillTooltip(skillStatus));
+            }
         }
 
-        private static void GetAgentColumnRects(
-            Rect row,
-            float actionWidth,
-            out Rect agentRect,
-            out Rect mcpRect,
-            out Rect ruleRect,
-            out Rect actionRect)
+        internal static string[] GetAgentDetailLabels()
         {
-            const float gap = 6f;
-            var contentWidth = Mathf.Max(240f, row.width - actionWidth - gap * 3f);
-            var agentWidth = Mathf.Max(84f, contentWidth * 0.27f);
-            var mcpWidth = Mathf.Max(88f, contentWidth * 0.27f);
-            var ruleWidth = Mathf.Max(100f, contentWidth - agentWidth - mcpWidth);
-
-            agentRect = new Rect(row.x, row.y, agentWidth, row.height);
-            mcpRect = new Rect(agentRect.xMax + gap, row.y, mcpWidth, row.height);
-            ruleRect = new Rect(mcpRect.xMax + gap, row.y, ruleWidth, row.height);
-            actionRect = new Rect(row.xMax - actionWidth, row.y, actionWidth, row.height);
+            return new[] { "Agent 规则", "MCP 配置", "Skill 技能" };
         }
 
-        private static void DrawStatusCell(Rect rect, string value, bool ready)
+        private enum AgentDetailState
+        {
+            Ready,
+            NeedsAttention,
+            Error,
+            Unavailable,
+        }
+
+        private static void DrawAgentDetailRow(
+            string label,
+            string value,
+            AgentDetailState state,
+            string actionLabel,
+            Action action,
+            string tooltip)
+        {
+            var row = EditorGUILayout.GetControlRect(false, 26f);
+            const float labelWidth = 96f;
+            const float dotWidth = 16f;
+            const float actionWidth = 88f;
+            const float gap = 6f;
+            var labelRect = new Rect(row.x, row.y + 2f, labelWidth, 22f);
+            var dotRect = new Rect(labelRect.xMax, row.y + 2f, dotWidth, 22f);
+            var actionRect = new Rect(row.xMax - actionWidth, row.y + 2f, actionWidth, 22f);
+            var valueRect = new Rect(
+                dotRect.xMax,
+                row.y + 2f,
+                Mathf.Max(40f, actionRect.x - dotRect.xMax - gap),
+                22f);
+
+            var content = new GUIContent(label, tooltip);
+            EditorGUI.LabelField(labelRect, content, EditorStyles.label);
+            var previous = GUI.color;
+            switch (state)
+            {
+                case AgentDetailState.Ready:
+                    GUI.color = new Color(0.25f, 0.82f, 0.38f);
+                    break;
+                case AgentDetailState.Error:
+                    GUI.color = new Color(0.95f, 0.30f, 0.25f);
+                    break;
+                case AgentDetailState.Unavailable:
+                    GUI.color = EditorGUIUtility.isProSkin
+                        ? new Color(0.55f, 0.55f, 0.55f)
+                        : new Color(0.42f, 0.42f, 0.42f);
+                    break;
+                default:
+                    GUI.color = new Color(1f, 0.65f, 0.15f);
+                    break;
+            }
+
+            EditorGUI.LabelField(dotRect, new GUIContent("●", tooltip));
+            GUI.color = previous;
+            EditorGUI.LabelField(valueRect, new GUIContent(value, tooltip), EditorStyles.label);
+            if (action == null || string.IsNullOrEmpty(actionLabel))
+            {
+                var centered = new GUIStyle(EditorStyles.label) { alignment = TextAnchor.MiddleCenter };
+                EditorGUI.LabelField(actionRect, new GUIContent("—", tooltip), centered);
+                return;
+            }
+
+            if (GUI.Button(actionRect, new GUIContent(actionLabel, tooltip)))
+                action.Invoke();
+        }
+
+        internal static string GetAgentOverallStateText(
+            AgentMcpConfigStatus mcpStatus,
+            AgentRuleConfigStatus ruleStatus,
+            AgentSkillConfigStatus skillStatus)
+        {
+            if (HasAgentIntegrationError(mcpStatus, ruleStatus, skillStatus))
+                return "异常";
+            if (!mcpStatus.FileExists && !mcpStatus.HasUPilotEntry)
+                return "未配置";
+            if (IsAgentIntegrationReady(mcpStatus, ruleStatus, skillStatus))
+                return "已就绪";
+            return "需更新";
+        }
+
+        private static bool IsAgentIntegrationReady(
+            AgentMcpConfigStatus mcpStatus,
+            AgentRuleConfigStatus ruleStatus,
+            AgentSkillConfigStatus skillStatus)
+        {
+            return mcpStatus.IsConfigured && ruleStatus.IsCurrent && skillStatus.IsSatisfied;
+        }
+
+        private static bool HasAgentIntegrationError(
+            AgentMcpConfigStatus mcpStatus,
+            AgentRuleConfigStatus ruleStatus,
+            AgentSkillConfigStatus skillStatus)
+        {
+            return !string.IsNullOrEmpty(mcpStatus.ErrorMessage) ||
+                   ruleStatus.State == AgentRuleConfigState.Error ||
+                   skillStatus.State == AgentSkillConfigState.Error;
+        }
+
+        private static void DrawStatusCell(Rect rect, string value, bool ready, bool error = false)
         {
             var dotRect = new Rect(rect.x, rect.y, 14f, rect.height);
             var labelRect = new Rect(dotRect.xMax, rect.y, Mathf.Max(0f, rect.width - dotRect.width), rect.height);
             var previous = GUI.color;
-            GUI.color = ready ? new Color(0.25f, 0.82f, 0.38f) : new Color(1f, 0.65f, 0.15f);
+            GUI.color = error
+                ? new Color(0.95f, 0.30f, 0.25f)
+                : ready
+                    ? new Color(0.25f, 0.82f, 0.38f)
+                    : new Color(1f, 0.65f, 0.15f);
             EditorGUI.LabelField(dotRect, "●");
             GUI.color = previous;
             EditorGUI.LabelField(labelRect, value);
-        }
-
-        private void ShowAgentConfigurationMenu(
-            AgentMcpConfigStatus mcpStatus,
-            AgentRuleConfigStatus ruleStatus)
-        {
-            var menu = new GenericMenu();
-            var configLabel = mcpStatus.HasUPilotEntry ? "更新 MCP 配置" : "写入 MCP 配置";
-            menu.AddItem(new GUIContent(configLabel), false, () => UpdateAgentMcpConfig(mcpStatus));
-
-            var ruleLabel = mcpStatus.ClientName == "Codex" ? "更新 Skill" : "更新规则";
-            menu.AddItem(new GUIContent(ruleLabel), false, () => UpdateAgentRuleConfig(ruleStatus));
-            menu.ShowAsContext();
         }
 
         private static void DrawTableSeparator()
@@ -1036,15 +1298,6 @@ namespace CodingRiver.UPilot
                 ? new Color(1f, 1f, 1f, 0.08f)
                 : new Color(0f, 0f, 0f, 0.12f);
             EditorGUI.DrawRect(rect, color);
-        }
-
-        private void DrawSectionTitleBar(string title)
-        {
-            var rect = EditorGUILayout.GetControlRect(false, 26f);
-            DrawBandBackground(rect);
-            DrawBandAccent(rect);
-            var labelRect = new Rect(rect.x + 10f, rect.y + 2f, rect.width - 16f, 22f);
-            EditorGUI.LabelField(labelRect, title, _sectionTitleStyle);
         }
 
         private static void DrawBandBackground(Rect rect)
@@ -1076,6 +1329,21 @@ namespace CodingRiver.UPilot
             return new AgentRuleConfigStatus(clientName, "", AgentRuleConfigState.Missing);
         }
 
+        private AgentSkillConfigStatus FindSkillStatus(string clientName)
+        {
+            foreach (var status in _skillConfigs)
+            {
+                if (status.ClientName == clientName)
+                    return status;
+            }
+
+            return new AgentSkillConfigStatus(
+                clientName,
+                "",
+                AgentSkillConfigState.Error,
+                "Skill 状态尚未加载");
+        }
+
         private static string GetCompactMcpState(AgentMcpConfigStatus status)
         {
             if (status.IsConfigured) return "已配置";
@@ -1091,9 +1359,209 @@ namespace CodingRiver.UPilot
             return status.StateText;
         }
 
-        private static string GetRuleLabel(string clientName)
+        private static string GetSkillStateText(AgentSkillConfigStatus status)
         {
-            return clientName == "Codex" ? "Skill" : "规则";
+            return status.StateText;
+        }
+
+        private static AgentDetailState GetMcpDetailState(AgentMcpConfigStatus status)
+        {
+            if (!string.IsNullOrEmpty(status.ErrorMessage)) return AgentDetailState.Error;
+            return status.IsConfigured ? AgentDetailState.Ready : AgentDetailState.NeedsAttention;
+        }
+
+        private static AgentDetailState GetRuleDetailState(AgentRuleConfigStatus status)
+        {
+            if (status.State == AgentRuleConfigState.Error) return AgentDetailState.Error;
+            return status.IsCurrent ? AgentDetailState.Ready : AgentDetailState.NeedsAttention;
+        }
+
+        private static AgentDetailState GetSkillDetailState(AgentSkillConfigStatus status)
+        {
+            if (status.State == AgentSkillConfigState.NotProvided) return AgentDetailState.Unavailable;
+            if (status.State == AgentSkillConfigState.Error) return AgentDetailState.Error;
+            return status.IsCurrent ? AgentDetailState.Ready : AgentDetailState.NeedsAttention;
+        }
+
+        internal static string BuildMcpTooltip(AgentMcpConfigStatus status)
+        {
+            return BuildMcpTooltip(status, default);
+        }
+
+        internal static string BuildMcpTooltip(
+            AgentMcpConfigStatus status,
+            McpServerStatus serverStatus)
+        {
+            var text = new System.Text.StringBuilder();
+            text.Append("状态：").Append(GetCompactMcpState(status));
+            AppendTooltipLine(text, "配置文件", status.ConfigPath);
+            AppendTooltipLine(text, "当前 URL", status.ConfiguredUrl);
+            AppendTooltipLine(text, "目标 URL", UPilotAgentSetup.McpUrl);
+            if (serverStatus.ToolCountsKnown)
+            {
+                if (serverStatus.DetailedToolCountsKnown)
+                {
+                    AppendTooltipLine(text, "已注册 MCP 工具", serverStatus.RegisteredToolCount + " 个");
+                    AppendTooltipLine(text, "当前可用", serverStatus.AvailableToolCount + " 个");
+                    AppendTooltipLine(text, "当前可调用", serverStatus.CallableToolCount + " 个");
+                }
+                else
+                {
+                    AppendTooltipLine(text, "当前可用 MCP 工具", serverStatus.AvailableToolCount + " 个");
+                    AppendTooltipLine(text, "工具计数说明", "当前 MCP Server 版本未区分注册数量和可调用数量");
+                }
+
+                if (serverStatus.ToolRegistryVersion > 0)
+                    AppendTooltipLine(text, "工具注册表版本", serverStatus.ToolRegistryVersion.ToString());
+                AppendTooltipLine(
+                    text,
+                    "主要工具分类",
+                    FormatMcpCategorySummary(serverStatus.ToolCategorySummary, 8));
+                AppendTooltipLine(
+                    text,
+                    "数量说明",
+                    "可调用数量会受 Unity 连接、功能开关和写入授权影响");
+            }
+            else
+            {
+                AppendTooltipLine(text, "MCP 工具数量", "服务尚未提供；更新或重启 MCP Server 后刷新状态");
+            }
+            AppendTooltipLine(text, "错误", status.ErrorMessage);
+            return text.ToString();
+        }
+
+        internal static string BuildRuleTooltip(AgentRuleConfigStatus status)
+        {
+            var text = new System.Text.StringBuilder();
+            text.Append("状态：").Append(GetRuleStateText(status));
+            var paths = status.ConfigPaths ?? Array.Empty<string>();
+            for (var i = 0; i < paths.Length; i++)
+                AppendTooltipLine(text, paths.Length == 1 ? "规则文件" : $"规则文件 {i + 1}", paths[i]);
+            AppendTooltipLine(text, "模板源文件", status.SourcePath);
+            AppendVersionTooltipLines(text, status.InstalledVersion, status.TargetVersion);
+            AppendTooltipLine(text, "当前内容 SHA256", status.ContentHash);
+            AppendTooltipLine(text, "目标内容 SHA256", status.ExpectedHash);
+            AppendTooltipLine(text, "错误", status.ErrorMessage);
+            return text.ToString();
+        }
+
+        internal static string BuildSkillTooltip(AgentSkillConfigStatus status)
+        {
+            var text = new System.Text.StringBuilder();
+            text.Append("状态：").Append(GetSkillStateText(status));
+            var roots = status.SkillRootPaths ?? Array.Empty<string>();
+            if (roots.Length == 0)
+            {
+                AppendTooltipLine(text, "项目级 Skill 根目录", status.SkillRootPath);
+            }
+            else
+            {
+                for (var i = 0; i < roots.Length; i++)
+                {
+                    AppendTooltipLine(
+                        text,
+                        roots.Length == 1 ? "项目级 Skill 根目录" : $"Skill 发现目录 {i + 1}",
+                        roots[i]);
+                }
+            }
+            AppendTooltipLine(text, "项目级 Skill 数量", status.InstalledSkillCount + " 个");
+            AppendTooltipLine(text, "已安装 Skill", FormatLimitedList(status.InstalledSkillNames, 8));
+            AppendTooltipLine(text, "UPilot Skill 数量", status.UpilotSkillCount + " 个");
+            AppendTooltipLine(text, "安装目录", status.ConfigPath);
+            AppendTooltipLine(text, "Skill 源目录", status.SourcePath);
+            if (status.IsApplicable)
+            {
+                AppendTooltipLine(
+                    text,
+                    "Skill 当前版本",
+                    status.InstalledVersion > 0 ? status.InstalledVersion.ToString() : "未检测到");
+                AppendTooltipLine(
+                    text,
+                    "Skill 目标版本",
+                    status.TargetVersion > 0 ? status.TargetVersion.ToString() : "未提供");
+            }
+            AppendTooltipLine(text, "能力覆盖", FormatLimitedList(status.CapabilityLabels, 10));
+            AppendTooltipLine(text, "Skill 引用的 MCP 工具", status.AssociatedToolCount + " 个");
+            AppendTooltipLine(text, "主要关联工具", FormatLimitedList(status.PrimaryToolNames, 10));
+            AppendTooltipLine(text, "记录 SHA256", status.RecordedHash);
+            AppendTooltipLine(text, "当前 SHA256", status.ContentHash);
+            AppendTooltipLine(text, "说明", status.ApplicabilityExplanation);
+            AppendTooltipLine(text, "错误", status.ErrorMessage);
+            return text.ToString();
+        }
+
+        private static string FormatMcpCategorySummary(string summary, int maxItems)
+        {
+            if (string.IsNullOrWhiteSpace(summary))
+                return "";
+            var values = summary.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            var count = Math.Min(values.Length, Math.Max(1, maxItems));
+            var result = new string[count];
+            for (var i = 0; i < count; i++)
+            {
+                var pair = values[i].Split(new[] { ':' }, 2);
+                var name = pair.Length > 0 ? GetMcpCategoryLabel(pair[0]) : values[i];
+                result[i] = pair.Length == 2 ? name + " " + pair[1] : name;
+            }
+
+            var text = string.Join("、", result);
+            if (values.Length > count)
+                text += $"，另 {values.Length - count} 类";
+            return text;
+        }
+
+        private static string GetMcpCategoryLabel(string category)
+        {
+            switch ((category ?? "").Trim().ToLowerInvariant())
+            {
+                case "asset": return "资源";
+                case "editor": return "编辑器";
+                case "flow": return "Flow";
+                case "console": return "控制台";
+                case "operation": return "长任务";
+                case "scene": return "场景";
+                case "test": return "测试";
+                case "screenshot": return "截图";
+                case "compile": return "编译";
+                case "script": return "脚本";
+                case "prefab": return "Prefab";
+                case "gameobject": return "GameObject";
+                case "component": return "组件";
+                case "reflection": return "反射";
+                case "package": return "包管理";
+                case "material": return "材质";
+                case "build": return "构建";
+                default: return category;
+            }
+        }
+
+        private static string FormatLimitedList(string[] values, int maxItems)
+        {
+            if (values == null || values.Length == 0)
+                return "";
+            var count = Math.Min(values.Length, Math.Max(1, maxItems));
+            var displayed = new string[count];
+            Array.Copy(values, displayed, count);
+            var text = string.Join("、", displayed);
+            if (values.Length > count)
+                text += $"，另 {values.Length - count} 项";
+            return text;
+        }
+
+        private static void AppendVersionTooltipLines(
+            System.Text.StringBuilder text,
+            int installedVersion,
+            int targetVersion)
+        {
+            AppendTooltipLine(text, "当前版本", installedVersion > 0 ? installedVersion.ToString() : "未检测到");
+            AppendTooltipLine(text, "目标版本", targetVersion > 0 ? targetVersion.ToString() : "未提供");
+        }
+
+        private static void AppendTooltipLine(System.Text.StringBuilder text, string label, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return;
+            text.Append('\n').Append(label).Append("：").Append(value);
         }
 
         private void UpdateAgentMcpConfig(AgentMcpConfigStatus status)
@@ -1128,12 +1596,10 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                var force = status.State == AgentRuleConfigState.Customized ||
-                            status.State == AgentRuleConfigState.Current;
                 if (status.State == AgentRuleConfigState.Customized)
                 {
                     var choice = EditorUtility.DisplayDialogComplex(
-                        $"如何处理 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
+                        $"如何处理 {status.ClientName} Agent 规则？",
                         $"当前内容经过本地修改。更新为 UPilot 最新版本会替换这些修改。",
                         "更新为最新版本",
                         "取消",
@@ -1144,7 +1610,7 @@ namespace CodingRiver.UPilot
                 else if (status.State != AgentRuleConfigState.Missing)
                 {
                     var confirmed = EditorUtility.DisplayDialog(
-                        $"更新 {status.ClientName} {GetRuleLabel(status.ClientName)}？",
+                        $"更新 {status.ClientName} Agent 规则？",
                         $"将更新为 UPilot 提供的最新内容。",
                         "更新",
                         "取消");
@@ -1152,10 +1618,10 @@ namespace CodingRiver.UPilot
                         return;
                 }
 
-                var result = UPilotAgentSetup.UpdateAgentRules(status.ClientName, force);
+                var result = UPilotAgentSetup.UpdateAgentRules(status.ClientName);
                 Debug.Log($"[UPilot] {status.ClientName} rules:\n{result}");
                 RefreshAgentConfigs(force: true);
-                ShowNotice(status.ClientName == "Codex" ? "Skill 已更新" : "规则已更新");
+                ShowNotice("Agent 规则已更新");
             }
             catch (Exception ex)
             {
@@ -1164,32 +1630,103 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private void UpdateAgentSkillConfig(AgentSkillConfigStatus status)
+        {
+            if (!status.IsApplicable)
+                return;
+
+            try
+            {
+                var force = status.State == AgentSkillConfigState.Customized ||
+                            status.State == AgentSkillConfigState.Current;
+                if (status.State == AgentSkillConfigState.Customized)
+                {
+                    var choice = EditorUtility.DisplayDialogComplex(
+                        $"如何处理 {status.ClientName} Skill？",
+                        "当前 Skill 有本地修改。更新为 UPilot 最新版本会替换这些修改。",
+                        "更新为最新版本",
+                        "取消",
+                        "保留当前内容");
+                    if (choice != 0)
+                        return;
+                }
+                else if (status.State != AgentSkillConfigState.Missing)
+                {
+                    var confirmed = EditorUtility.DisplayDialog(
+                        $"更新 {status.ClientName} Skill？",
+                        "将更新为 UPilot 提供的最新 Skill 内容。",
+                        "更新",
+                        "取消");
+                    if (!confirmed)
+                        return;
+                }
+
+                var result = UPilotAgentSetup.UpdateAgentSkill(status.ClientName, force);
+                Debug.Log($"[UPilot] {status.ClientName} Skill:\n{result}");
+                RefreshAgentConfigs(force: true);
+                ShowNotice("Skill 已更新");
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException(status.ClientName + " Skill 更新失败", ex);
+                ShowExceptionNotice(status.ClientName + " Skill 更新失败", ex);
+            }
+        }
+
         private void UpdateAllAgentIntegrations()
+        {
+            UpdateAllAgentIntegrations(forceAll: false);
+        }
+
+        private void UpdateAllAgentIntegrations(bool forceAll)
         {
             try
             {
-                var hasCustomizedRules = false;
+                var hasCustomizedContent = false;
                 foreach (var status in _ruleConfigs)
                 {
                     if (status.HasLocalCustomization)
                     {
-                        hasCustomizedRules = true;
+                        hasCustomizedContent = true;
                         break;
                     }
                 }
 
-                var overwriteCustomizedRules = true;
-                if (hasCustomizedRules)
+                if (!hasCustomizedContent)
+                {
+                    foreach (var status in _skillConfigs)
+                    {
+                        if (!status.HasLocalCustomization)
+                            continue;
+                        hasCustomizedContent = true;
+                        break;
+                    }
+                }
+
+                var overwriteCustomizedSkill = forceAll;
+                if (forceAll)
+                {
+                    var confirmed = EditorUtility.DisplayDialog(
+                        "强制重新配置所有 Agent？",
+                        "将重新写入已配置 Agent 的 MCP 地址，并重新生成 UPilot Skill 和 Agent 规则。\n\n" +
+                        "UPilot 管理范围以外的用户配置不会被修改；各 Agent Skill 中的本地修改会被替换。\n\n" +
+                        "完成后，已打开的 Agent 客户端可能需要刷新工具列表。",
+                        "重新配置全部",
+                        "取消");
+                    if (!confirmed)
+                        return;
+                }
+                else if (hasCustomizedContent)
                 {
                     var choice = EditorUtility.DisplayDialogComplex(
                         "如何处理本地修改？",
-                        "检测到 Codex 的 UPilot Skill 有本地修改。你可以保留这些修改并处理其他配置，也可以替换为最新版本。",
+                        "检测到 UPilot Agent 规则或 Skill 有本地修改。你可以保留这些修改并处理其他配置，也可以替换为最新版本。",
                         "更新为最新版本",
                         "取消",
                         "保留本地修改");
                     if (choice == 1)
                         return;
-                    overwriteCustomizedRules = choice == 0;
+                    overwriteCustomizedSkill = choice == 0;
                 }
                 else if (!EditorUtility.DisplayDialog(
                              "处理 Agent 配置？",
@@ -1207,12 +1744,15 @@ namespace CodingRiver.UPilot
                         continue;
                     result += UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false) + "\n";
                 }
-                result += UPilotAgentSetup.UpdateAllAgentRules(overwriteCustomizedRules);
+                result += UPilotAgentSetup.UpdateAllAgentRules() + "\n";
+                result += UPilotAgentSetup.UpdateAllAgentSkills(overwriteCustomizedSkill);
                 Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
                 ShowNotice(
-                    hasCustomizedRules && !overwriteCustomizedRules
+                    forceAll
+                        ? "已重新配置 MCP、Skill 和 Agent 规则；请按需刷新 Agent 工具列表"
+                        : hasCustomizedContent && !overwriteCustomizedSkill
                         ? "其他配置已处理，本地修改已保留"
                         : "Agent 配置已更新");
             }
@@ -1272,8 +1812,13 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void RepairUPilot()
+        private async void RepairUPilot()
         {
+            if (_repairInProgress)
+                return;
+
+            _repairInProgress = true;
+            Repaint();
             try
             {
                 if (UPilotUpdateService.Instance.IsServiceStartBlocked)
@@ -1282,8 +1827,11 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                var message = UPilotQuickStart.AutoRepair(_bridgeStatus, _mcpStatus, _agentConfigs);
+                var message = await UPilotQuickStart.AutoRepairAsync(_agentConfigs);
+                if (this == null)
+                    return;
                 RefreshAgentConfigs(force: true);
+                RefreshSnapshot();
                 _stateChangedAt = EditorApplication.timeSinceStartup;
                 ShowNotice(message);
             }
@@ -1291,6 +1839,12 @@ namespace CodingRiver.UPilot
             {
                 ReportMainWindowException("自动修复 UPilot 失败", ex);
                 ShowExceptionNotice("自动修复 UPilot 失败", ex);
+            }
+            finally
+            {
+                _repairInProgress = false;
+                if (this != null)
+                    Repaint();
             }
         }
 

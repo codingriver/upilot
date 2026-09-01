@@ -20,14 +20,16 @@ namespace CodingRiver.UPilot
 
     internal static class UPilotWriteAccessUi
     {
+        internal const string DetailedTitle = "Agent 操作授权";
+
         internal static string GetStatusLabel(bool approved)
         {
-            return approved ? "已允许" : "Safe";
+            return approved ? "已允许" : "未授权（只读）";
         }
 
         internal static string GetActionLabel(bool approved)
         {
-            return approved ? "撤销授权" : "允许写入";
+            return approved ? "撤销授权" : "允许授权";
         }
 
         internal static string GetCompactDescription(UPilotSafetyConfig safety)
@@ -83,7 +85,7 @@ namespace CodingRiver.UPilot
                 ? confirmDialog(
                     "允许 Agent 写入当前项目？",
                     BuildApprovalDialogMessage(UPilotProjectConfig.ProjectRoot),
-                    "允许写入",
+                    "允许授权",
                     "取消")
                 : confirmDialog(
                     "撤销写入授权？",
@@ -132,7 +134,7 @@ namespace CodingRiver.UPilot
                 {
                     using (new EditorGUILayout.VerticalScope())
                     {
-                        EditorGUILayout.LabelField("项目写入权限", EditorStyles.miniBoldLabel);
+                        EditorGUILayout.LabelField(DetailedTitle, EditorStyles.miniBoldLabel);
                         EditorGUILayout.LabelField(
                             approved ? "已允许 Agent 修改当前项目" : "Safe 模式：写入工具会被拒绝",
                             EditorStyles.wordWrappedMiniLabel);

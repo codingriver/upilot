@@ -22,7 +22,7 @@ namespace CodingRiver.UPilot
                 EditorGUI.BeginChangeCheck();
                 _setupHost = EditorGUILayout.TextField("Host", _setupHost);
                 _setupWsPort = EditorGUILayout.IntField("Unity Bridge WS 端口", _setupWsPort);
-                _setupHttpPort = EditorGUILayout.IntField("MCP HTTP 端口", _setupHttpPort);
+                _setupHttpPort = EditorGUILayout.IntField(McpPortLabel, _setupHttpPort);
                 if (EditorGUI.EndChangeCheck())
                     EvaluateSetupPorts();
 

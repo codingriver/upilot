@@ -22,9 +22,11 @@ namespace CodingRiver.UPilot
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
                 _setupWriteAgentRules = EditorGUILayout.ToggleLeft(
-                    "写入 Agent 识别规则（AGENTS.md、CLAUDE.md、Cursor rule、Codex Skill）",
+                    "写入 Agent 识别规则与 Skill（Codex、Claude Code、Cursor）",
                     _setupWriteAgentRules);
-                EditorGUILayout.LabelField("已有文件只追加或更新 UPilot 管理块，保留其它内容。", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(
+                    "规则保留其它内容；Codex 与 Cursor 共享 .agents/skills，Claude Code 使用 .claude/skills。",
+                    EditorStyles.miniLabel);
             }
 
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))

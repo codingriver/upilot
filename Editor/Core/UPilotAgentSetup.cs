@@ -22,7 +22,8 @@ namespace CodingRiver.UPilot
             bool fileExists,
             bool hasUPilotEntry,
             bool usesCurrentUrl,
-            string errorMessage = "")
+            string errorMessage = "",
+            string configuredUrl = "")
         {
             ClientName = clientName;
             ConfigPath = configPath;
@@ -30,6 +31,7 @@ namespace CodingRiver.UPilot
             HasUPilotEntry = hasUPilotEntry;
             UsesCurrentUrl = usesCurrentUrl;
             ErrorMessage = errorMessage ?? "";
+            ConfiguredUrl = configuredUrl ?? "";
         }
 
         public string ClientName { get; }
@@ -38,6 +40,7 @@ namespace CodingRiver.UPilot
         public bool HasUPilotEntry { get; }
         public bool UsesCurrentUrl { get; }
         public string ErrorMessage { get; }
+        public string ConfiguredUrl { get; }
         public bool IsConfigured => FileExists && HasUPilotEntry && UsesCurrentUrl && string.IsNullOrEmpty(ErrorMessage);
 
         public string StateText
@@ -68,18 +71,36 @@ namespace CodingRiver.UPilot
             string clientName,
             string configPath,
             AgentRuleConfigState state,
-            string errorMessage = "")
+            string errorMessage = "",
+            string[] configPaths = null,
+            int installedVersion = 0,
+            int targetVersion = 0,
+            string sourcePath = "",
+            string contentHash = "",
+            string expectedHash = "")
         {
             ClientName = clientName;
             ConfigPath = configPath;
             State = state;
             ErrorMessage = errorMessage ?? "";
+            ConfigPaths = configPaths ?? (string.IsNullOrEmpty(configPath) ? Array.Empty<string>() : new[] { configPath });
+            InstalledVersion = installedVersion;
+            TargetVersion = targetVersion;
+            SourcePath = sourcePath ?? "";
+            ContentHash = contentHash ?? "";
+            ExpectedHash = expectedHash ?? "";
         }
 
         public string ClientName { get; }
         public string ConfigPath { get; }
         public AgentRuleConfigState State { get; }
         public string ErrorMessage { get; }
+        public string[] ConfigPaths { get; }
+        public int InstalledVersion { get; }
+        public int TargetVersion { get; }
+        public string SourcePath { get; }
+        public string ContentHash { get; }
+        public string ExpectedHash { get; }
         public bool IsCurrent => State == AgentRuleConfigState.Current;
         public bool HasLocalCustomization => State == AgentRuleConfigState.Customized;
 
@@ -89,11 +110,103 @@ namespace CodingRiver.UPilot
             {
                 if (State == AgentRuleConfigState.Error) return "读取失败";
                 if (State == AgentRuleConfigState.Missing)
-                    return ClientName == "Codex" ? "未安装" : "未同步";
+                    return "未同步";
                 if (State == AgentRuleConfigState.UpdateAvailable) return "有新版本";
                 if (State == AgentRuleConfigState.Customized)
                     return "需要确认";
-                return ClientName == "Codex" ? "已安装" : "已同步";
+                return "已同步";
+            }
+        }
+    }
+
+    public enum AgentSkillConfigState
+    {
+        NotProvided,
+        Missing,
+        Current,
+        UpdateAvailable,
+        Customized,
+        Error,
+    }
+
+    public readonly struct AgentSkillConfigStatus
+    {
+        public AgentSkillConfigStatus(
+            string clientName,
+            string configPath,
+            AgentSkillConfigState state,
+            string errorMessage = "",
+            string sourcePath = "",
+            int installedVersion = 0,
+            int targetVersion = 0,
+            string recordedHash = "",
+            string contentHash = "",
+            string applicabilityExplanation = "",
+            string skillRootPath = "",
+            int installedSkillCount = 0,
+            string[] installedSkillNames = null,
+            int upilotSkillCount = 0,
+            string[] capabilityLabels = null,
+            int associatedToolCount = 0,
+            string[] primaryToolNames = null,
+            string[] skillRootPaths = null)
+        {
+            ClientName = clientName;
+            ConfigPath = configPath ?? "";
+            State = state;
+            ErrorMessage = errorMessage ?? "";
+            SourcePath = sourcePath ?? "";
+            InstalledVersion = installedVersion;
+            TargetVersion = targetVersion;
+            RecordedHash = recordedHash ?? "";
+            ContentHash = contentHash ?? "";
+            ApplicabilityExplanation = applicabilityExplanation ?? "";
+            SkillRootPath = skillRootPath ?? "";
+            InstalledSkillCount = installedSkillCount;
+            InstalledSkillNames = installedSkillNames ?? Array.Empty<string>();
+            UpilotSkillCount = upilotSkillCount;
+            CapabilityLabels = capabilityLabels ?? Array.Empty<string>();
+            AssociatedToolCount = associatedToolCount;
+            PrimaryToolNames = primaryToolNames ?? Array.Empty<string>();
+            SkillRootPaths = skillRootPaths ??
+                             (string.IsNullOrEmpty(SkillRootPath)
+                                 ? Array.Empty<string>()
+                                 : new[] { SkillRootPath });
+        }
+
+        public string ClientName { get; }
+        public string ConfigPath { get; }
+        public AgentSkillConfigState State { get; }
+        public string ErrorMessage { get; }
+        public string SourcePath { get; }
+        public int InstalledVersion { get; }
+        public int TargetVersion { get; }
+        public string RecordedHash { get; }
+        public string ContentHash { get; }
+        public string ApplicabilityExplanation { get; }
+        public string SkillRootPath { get; }
+        public string[] SkillRootPaths { get; }
+        public int InstalledSkillCount { get; }
+        public string[] InstalledSkillNames { get; }
+        public int UpilotSkillCount { get; }
+        public string[] CapabilityLabels { get; }
+        public int AssociatedToolCount { get; }
+        public string[] PrimaryToolNames { get; }
+        public bool IsApplicable => State != AgentSkillConfigState.NotProvided;
+        public bool IsCurrent => State == AgentSkillConfigState.Current;
+        public bool IsSatisfied => State == AgentSkillConfigState.Current || State == AgentSkillConfigState.NotProvided;
+        public bool HasLocalCustomization => State == AgentSkillConfigState.Customized;
+
+        public string StateText
+        {
+            get
+            {
+                if (State == AgentSkillConfigState.NotProvided) return "当前未提供";
+                if (State == AgentSkillConfigState.Error) return "读取失败";
+                if (State == AgentSkillConfigState.Missing) return "未安装";
+                if (State == AgentSkillConfigState.UpdateAvailable) return "有新版本";
+                if (State == AgentSkillConfigState.Customized) return "需要确认";
+                return "已安装";
             }
         }
     }
@@ -106,7 +219,7 @@ namespace CodingRiver.UPilot
         private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
         private const int AgentRulesTemplateVersion = 22;
-        private const int SkillInstallTemplateVersion = 17;
+        private const int SkillInstallTemplateVersion = 18;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
@@ -136,6 +249,17 @@ namespace CodingRiver.UPilot
                 InspectCodexRuleConfig(projectRoot),
                 InspectClaudeRuleConfig(projectRoot),
                 InspectCursorRuleConfig(projectRoot),
+            };
+        }
+
+        public static AgentSkillConfigStatus[] GetSkillConfigStatuses()
+        {
+            var projectRoot = GetProjectRoot();
+            return new[]
+            {
+                InspectSkillConfig(projectRoot, "Codex"),
+                InspectSkillConfig(projectRoot, "Claude Code"),
+                InspectSkillConfig(projectRoot, "Cursor"),
             };
         }
 
@@ -197,7 +321,7 @@ namespace CodingRiver.UPilot
                 overwriteExisting,
                 result);
 
-            CopySkillInstall(projectRoot, overwriteExisting, result);
+            CopyAllSkillInstalls(projectRoot, overwriteExisting, result);
 
             return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
         }
@@ -231,7 +355,7 @@ namespace CodingRiver.UPilot
             return "Unsupported Agent: " + clientName;
         }
 
-        public static string UpdateAgentRules(string clientName, bool forceSkillOverwrite)
+        public static string UpdateAgentRules(string clientName)
         {
             var projectRoot = GetProjectRoot();
             var result = new StringBuilder();
@@ -239,7 +363,6 @@ namespace CodingRiver.UPilot
             if (clientName == "Codex")
             {
                 WriteSharedAgentsRule(projectRoot, result);
-                CopySkillInstall(projectRoot, forceSkillOverwrite, result);
             }
             else if (clientName == "Claude Code")
             {
@@ -266,7 +389,27 @@ namespace CodingRiver.UPilot
             return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
         }
 
-        public static string UpdateAllAgentRules(bool forceCodexSkillOverwrite)
+        public static string UpdateAgentRules(string clientName, bool forceSkillOverwrite)
+        {
+            var result = UpdateAgentRules(clientName);
+            var skillResult = UpdateAgentSkill(clientName, forceSkillOverwrite);
+            return CombineResults(result, skillResult);
+        }
+
+        public static string UpdateAgentSkill(string clientName, bool forceOverwrite)
+        {
+            var projectRoot = GetProjectRoot();
+            var target = GetAgentSkillInstallPath(projectRoot, clientName);
+            if (string.IsNullOrEmpty(target))
+                return "Unsupported Agent: " + clientName;
+
+            var result = new StringBuilder();
+            CopySkillInstall(target, clientName, forceOverwrite, result);
+            MarkAgentRulesHandledForCurrentProject();
+            return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
+        }
+
+        public static string UpdateAllAgentRules()
         {
             var projectRoot = GetProjectRoot();
             var result = new StringBuilder();
@@ -280,7 +423,21 @@ namespace CodingRiver.UPilot
                 Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc"),
                 overwriteExisting: false,
                 result);
-            CopySkillInstall(projectRoot, forceCodexSkillOverwrite, result);
+            MarkAgentRulesHandledForCurrentProject();
+            return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
+        }
+
+        public static string UpdateAllAgentRules(bool forceCodexSkillOverwrite)
+        {
+            return CombineResults(
+                UpdateAllAgentRules(),
+                UpdateAllAgentSkills(forceCodexSkillOverwrite));
+        }
+
+        public static string UpdateAllAgentSkills(bool forceCustomizedSkillOverwrite)
+        {
+            var result = new StringBuilder();
+            CopyAllSkillInstalls(GetProjectRoot(), forceCustomizedSkillOverwrite, result);
             MarkAgentRulesHandledForCurrentProject();
             return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
         }
@@ -302,53 +459,45 @@ namespace CodingRiver.UPilot
 
         private static AgentRuleConfigStatus InspectCodexRuleConfig(string projectRoot)
         {
-            var skillPath = Path.Combine(projectRoot, ".agents", "skills", SkillName);
+            var path = Path.Combine(projectRoot, "AGENTS.md");
             try
             {
-                var agentsState = InspectManagedRuleFile(
-                    Path.Combine(projectRoot, "AGENTS.md"),
-                    BuildAgentsMd());
-                if (!Directory.Exists(skillPath))
-                    return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Missing);
-
-                if (!TryReadSkillInstallMetadata(skillPath, out var templateVersion, out var contentHash) ||
-                    !string.Equals(contentHash, ComputeSkillInstallHash(skillPath), StringComparison.OrdinalIgnoreCase))
-                {
-                    return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Customized);
-                }
-
-                if (templateVersion < SkillInstallTemplateVersion ||
-                    agentsState != AgentRuleConfigState.Current)
-                {
-                    return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.UpdateAvailable);
-                }
-
-                return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Current);
+                var expected = BuildAgentsMd();
+                return CreateRuleStatus(
+                    "Codex",
+                    new[] { path },
+                    new[] { InspectManagedRuleFile(path, expected) },
+                    path,
+                    new[] { expected });
             }
             catch (Exception ex)
             {
-                return new AgentRuleConfigStatus("Codex", skillPath, AgentRuleConfigState.Error, ex.Message);
+                return CreateRuleErrorStatus("Codex", new[] { path }, ex);
             }
         }
 
         private static AgentRuleConfigStatus InspectClaudeRuleConfig(string projectRoot)
         {
             var path = Path.Combine(projectRoot, "CLAUDE.md");
+            var agentsPath = Path.Combine(projectRoot, "AGENTS.md");
             try
             {
-                var agentsState = InspectManagedRuleFile(
-                    Path.Combine(projectRoot, "AGENTS.md"),
-                    BuildAgentsMd());
-                var claudeState = InspectManagedRuleFile(path, "@AGENTS.md\n");
-                if (agentsState == AgentRuleConfigState.Missing || claudeState == AgentRuleConfigState.Missing)
-                    return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.Missing);
-                if (agentsState != AgentRuleConfigState.Current || claudeState != AgentRuleConfigState.Current)
-                    return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.UpdateAvailable);
-                return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.Current);
+                var expectedAgents = BuildAgentsMd();
+                const string expectedClaude = "@AGENTS.md\n";
+                return CreateRuleStatus(
+                    "Claude Code",
+                    new[] { agentsPath, path },
+                    new[]
+                    {
+                        InspectManagedRuleFile(agentsPath, expectedAgents),
+                        InspectManagedRuleFile(path, expectedClaude),
+                    },
+                    agentsPath,
+                    new[] { expectedAgents, expectedClaude });
             }
             catch (Exception ex)
             {
-                return new AgentRuleConfigStatus("Claude Code", path, AgentRuleConfigState.Error, ex.Message);
+                return CreateRuleErrorStatus("Claude Code", new[] { agentsPath, path }, ex);
             }
         }
 
@@ -357,13 +506,381 @@ namespace CodingRiver.UPilot
             var path = Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc");
             try
             {
-                var state = InspectManagedRuleFile(path, BuildAgentsMd());
-                return new AgentRuleConfigStatus("Cursor", path, state);
+                var expected = BuildAgentsMd();
+                return CreateRuleStatus(
+                    "Cursor",
+                    new[] { path },
+                    new[] { InspectManagedRuleFile(path, expected) },
+                    path,
+                    new[] { expected });
             }
             catch (Exception ex)
             {
-                return new AgentRuleConfigStatus("Cursor", path, AgentRuleConfigState.Error, ex.Message);
+                return CreateRuleErrorStatus("Cursor", new[] { path }, ex);
             }
+        }
+
+        private static AgentRuleConfigStatus CreateRuleStatus(
+            string clientName,
+            string[] paths,
+            AgentRuleConfigState[] states,
+            string versionPath,
+            string[] expectedContents)
+        {
+            var state = AgentRuleConfigState.Current;
+            foreach (var candidate in states)
+            {
+                if (candidate == AgentRuleConfigState.Missing)
+                {
+                    state = AgentRuleConfigState.Missing;
+                    break;
+                }
+
+                if (candidate != AgentRuleConfigState.Current)
+                    state = AgentRuleConfigState.UpdateAvailable;
+            }
+
+            return new AgentRuleConfigStatus(
+                clientName,
+                paths.Length > 0 ? paths[0] : "",
+                state,
+                configPaths: paths,
+                installedVersion: ReadManagedRuleVersion(versionPath),
+                targetVersion: AgentRulesTemplateVersion,
+                sourcePath: GetAgentRulesTemplatePath(),
+                contentHash: ComputeFilesHash(paths),
+                expectedHash: ComputeTextHash(BuildExpectedManagedContent(expectedContents)));
+        }
+
+        private static AgentRuleConfigStatus CreateRuleErrorStatus(string clientName, string[] paths, Exception ex)
+        {
+            return new AgentRuleConfigStatus(
+                clientName,
+                paths.Length > 0 ? paths[0] : "",
+                AgentRuleConfigState.Error,
+                ex.Message,
+                paths,
+                targetVersion: AgentRulesTemplateVersion,
+                sourcePath: GetAgentRulesTemplatePath());
+        }
+
+        private static AgentSkillConfigStatus InspectSkillConfig(string projectRoot, string clientName)
+        {
+            var target = GetAgentSkillInstallPath(projectRoot, clientName);
+            var roots = GetAgentSkillDiscoveryRoots(projectRoot, clientName);
+            var source = Path.Combine(ResolvePackageRoot(), "skills", SkillName);
+            var explanation = GetAgentSkillApplicabilityExplanation(clientName);
+
+            try
+            {
+                var inventory = InspectSkillInventory(roots, target);
+                if (!Directory.Exists(target))
+                {
+                    return CreateSkillStatus(
+                        clientName,
+                        target,
+                        AgentSkillConfigState.Missing,
+                        inventory,
+                        sourcePath: source,
+                        targetVersion: SkillInstallTemplateVersion,
+                        applicabilityExplanation: explanation);
+                }
+
+                var contentHash = ComputeSkillInstallHash(target);
+                if (!TryReadSkillInstallMetadata(target, out var templateVersion, out var recordedHash))
+                {
+                    return CreateSkillStatus(
+                        clientName,
+                        target,
+                        AgentSkillConfigState.Customized,
+                        inventory,
+                        sourcePath: source,
+                        targetVersion: SkillInstallTemplateVersion,
+                        contentHash: contentHash,
+                        applicabilityExplanation: explanation);
+                }
+
+                if (!string.Equals(recordedHash, contentHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return CreateSkillStatus(
+                        clientName,
+                        target,
+                        AgentSkillConfigState.Customized,
+                        inventory,
+                        sourcePath: source,
+                        installedVersion: templateVersion,
+                        targetVersion: SkillInstallTemplateVersion,
+                        recordedHash: recordedHash,
+                        contentHash: contentHash,
+                        applicabilityExplanation: explanation);
+                }
+
+                var state = templateVersion < SkillInstallTemplateVersion
+                    ? AgentSkillConfigState.UpdateAvailable
+                    : AgentSkillConfigState.Current;
+                return CreateSkillStatus(
+                    clientName,
+                    target,
+                    state,
+                    inventory,
+                    sourcePath: source,
+                    installedVersion: templateVersion,
+                    targetVersion: SkillInstallTemplateVersion,
+                    recordedHash: recordedHash,
+                    contentHash: contentHash,
+                    applicabilityExplanation: explanation);
+            }
+            catch (Exception ex)
+            {
+                var emptyInventory = new SkillInventory(
+                    roots,
+                    Array.Empty<string>(),
+                    0,
+                    Array.Empty<string>(),
+                    0,
+                    Array.Empty<string>());
+                return CreateSkillStatus(
+                    clientName,
+                    target,
+                    AgentSkillConfigState.Error,
+                    emptyInventory,
+                    errorMessage: ex.Message,
+                    sourcePath: source,
+                    targetVersion: SkillInstallTemplateVersion,
+                    applicabilityExplanation: explanation);
+            }
+        }
+
+        private static string GetAgentSkillApplicabilityExplanation(string clientName)
+        {
+            if (clientName == "Claude Code")
+                return "Claude Code 使用项目级 .claude/skills 目录加载 UPilot Skill。";
+            if (clientName == "Cursor")
+                return "Cursor 使用官方支持的 .agents/skills 目录，与 Codex 共享同一受管 UPilot Skill；项目 Skill 数量按 Cursor 可发现目录去重统计。";
+            return "Codex 使用项目级 .agents/skills 目录加载 UPilot Skill。";
+        }
+
+        private readonly struct SkillInventory
+        {
+            public SkillInventory(
+                string[] rootPaths,
+                string[] names,
+                int upilotSkillCount,
+                string[] capabilityLabels,
+                int associatedToolCount,
+                string[] primaryToolNames)
+            {
+                RootPaths = rootPaths ?? Array.Empty<string>();
+                RootPath = RootPaths.Length > 0 ? RootPaths[0] : "";
+                Names = names ?? Array.Empty<string>();
+                UpilotSkillCount = upilotSkillCount;
+                CapabilityLabels = capabilityLabels ?? Array.Empty<string>();
+                AssociatedToolCount = associatedToolCount;
+                PrimaryToolNames = primaryToolNames ?? Array.Empty<string>();
+            }
+
+            public string RootPath { get; }
+            public string[] RootPaths { get; }
+            public string[] Names { get; }
+            public int UpilotSkillCount { get; }
+            public string[] CapabilityLabels { get; }
+            public int AssociatedToolCount { get; }
+            public string[] PrimaryToolNames { get; }
+        }
+
+        private static AgentSkillConfigStatus CreateSkillStatus(
+            string clientName,
+            string configPath,
+            AgentSkillConfigState state,
+            SkillInventory inventory,
+            string errorMessage = "",
+            string sourcePath = "",
+            int installedVersion = 0,
+            int targetVersion = 0,
+            string recordedHash = "",
+            string contentHash = "",
+            string applicabilityExplanation = "")
+        {
+            return new AgentSkillConfigStatus(
+                clientName,
+                configPath,
+                state,
+                errorMessage,
+                sourcePath,
+                installedVersion,
+                targetVersion,
+                recordedHash,
+                contentHash,
+                applicabilityExplanation,
+                inventory.RootPath,
+                inventory.Names.Length,
+                inventory.Names,
+                inventory.UpilotSkillCount,
+                inventory.CapabilityLabels,
+                inventory.AssociatedToolCount,
+                inventory.PrimaryToolNames,
+                inventory.RootPaths);
+        }
+
+        internal static string GetAgentSkillInstallPath(string projectRoot, string clientName)
+        {
+            var root = GetPrimaryAgentSkillRoot(projectRoot, clientName);
+            return string.IsNullOrEmpty(root) ? "" : Path.Combine(root, SkillName);
+        }
+
+        private static string GetPrimaryAgentSkillRoot(string projectRoot, string clientName)
+        {
+            if (clientName == "Codex" || clientName == "Cursor")
+                return Path.Combine(projectRoot, ".agents", "skills");
+            if (clientName == "Claude Code")
+                return Path.Combine(projectRoot, ".claude", "skills");
+            return "";
+        }
+
+        internal static string[] GetAgentSkillDiscoveryRoots(string projectRoot, string clientName)
+        {
+            if (clientName == "Codex")
+                return new[] { Path.Combine(projectRoot, ".agents", "skills") };
+            if (clientName == "Claude Code")
+                return new[] { Path.Combine(projectRoot, ".claude", "skills") };
+            if (clientName == "Cursor")
+            {
+                return new[]
+                {
+                    Path.Combine(projectRoot, ".agents", "skills"),
+                    Path.Combine(projectRoot, ".cursor", "skills"),
+                    Path.Combine(projectRoot, ".claude", "skills"),
+                    Path.Combine(projectRoot, ".codex", "skills"),
+                };
+            }
+            return Array.Empty<string>();
+        }
+
+        private static SkillInventory InspectSkillInventory(string[] skillRoots, string upilotSkillPath)
+        {
+            var names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            var visibleRoots = new List<string>();
+            foreach (var skillRoot in skillRoots ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrEmpty(skillRoot) || !Directory.Exists(skillRoot))
+                    continue;
+                visibleRoots.Add(skillRoot);
+
+                var skillFiles = Directory.GetFiles(skillRoot, "SKILL.md", SearchOption.AllDirectories);
+                Array.Sort(skillFiles, StringComparer.OrdinalIgnoreCase);
+                foreach (var skillFile in skillFiles)
+                {
+                    var directory = Path.GetDirectoryName(skillFile) ?? "";
+                    names.Add(ReadSkillName(skillFile, Path.GetFileName(directory)));
+                }
+            }
+
+            var primaryRoot = string.IsNullOrEmpty(upilotSkillPath)
+                ? ""
+                : Path.GetDirectoryName(upilotSkillPath) ?? "";
+            if (!string.IsNullOrEmpty(primaryRoot) &&
+                !visibleRoots.Exists(path => string.Equals(path, primaryRoot, StringComparison.OrdinalIgnoreCase)))
+            {
+                visibleRoots.Insert(0, primaryRoot);
+            }
+
+            var tools = string.IsNullOrEmpty(upilotSkillPath) || !Directory.Exists(upilotSkillPath)
+                ? Array.Empty<string>()
+                : CollectSkillToolNames(upilotSkillPath);
+            var installedNames = new List<string>(names).ToArray();
+            return new SkillInventory(
+                visibleRoots.ToArray(),
+                installedNames,
+                Array.Exists(
+                    installedNames,
+                    name => string.Equals(name, SkillName, StringComparison.OrdinalIgnoreCase)) ? 1 : 0,
+                InferSkillCapabilities(tools),
+                tools.Length,
+                TakeFirst(tools, 10));
+        }
+
+        private static string ReadSkillName(string skillFile, string fallback)
+        {
+            try
+            {
+                var text = File.ReadAllText(skillFile, Encoding.UTF8);
+                var match = Regex.Match(text, "(?m)^name:\\s*([^\\r\\n]+)\\s*$");
+                if (match.Success)
+                    return match.Groups[1].Value.Trim().Trim('\'', '"');
+            }
+            catch
+            {
+            }
+            return fallback ?? "(unnamed)";
+        }
+
+        private static string[] CollectSkillToolNames(string skillPath)
+        {
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var files = Directory.GetFiles(skillPath, "*.md", SearchOption.AllDirectories);
+            Array.Sort(files, (left, right) =>
+            {
+                var leftPrimary = string.Equals(Path.GetFileName(left), "SKILL.md", StringComparison.OrdinalIgnoreCase);
+                var rightPrimary = string.Equals(Path.GetFileName(right), "SKILL.md", StringComparison.OrdinalIgnoreCase);
+                if (leftPrimary != rightPrimary)
+                    return leftPrimary ? -1 : 1;
+                return StringComparer.OrdinalIgnoreCase.Compare(left, right);
+            });
+
+            foreach (var file in files)
+            {
+                var text = File.ReadAllText(file, Encoding.UTF8);
+                var matches = Regex.Matches(text, "(?<![A-Za-z0-9_])(unity_[a-z0-9_]+|reflection_eval)(?![A-Za-z0-9_])");
+                foreach (Match match in matches)
+                {
+                    var name = match.Groups[1].Value;
+                    if (seen.Add(name))
+                        result.Add(name);
+                }
+            }
+            return result.ToArray();
+        }
+
+        private static string[] InferSkillCapabilities(string[] tools)
+        {
+            var result = new List<string>();
+            AddCapabilityIfAny(result, tools, "连接与工具发现", "mcp", "ensure", "capabilities", "tools_find", "type_exists");
+            AddCapabilityIfAny(result, tools, "脚本与编译", "script", "compile", "sync_after_disk_write");
+            AddCapabilityIfAny(result, tools, "测试、构建与长任务", "test", "build", "operation", "task");
+            AddCapabilityIfAny(result, tools, "场景与对象", "scene", "gameobject", "component", "prefab", "selection");
+            AddCapabilityIfAny(result, tools, "资源与渲染", "asset", "material", "shader", "texture", "package");
+            AddCapabilityIfAny(result, tools, "截图与窗口验收", "screenshot", "editor_window", "verify_window");
+            AddCapabilityIfAny(result, tools, "诊断与故障恢复", "console", "hang", "profiler", "navmesh", "monohook");
+            return result.ToArray();
+        }
+
+        private static void AddCapabilityIfAny(
+            List<string> result,
+            string[] tools,
+            string label,
+            params string[] markers)
+        {
+            foreach (var tool in tools ?? Array.Empty<string>())
+            {
+                foreach (var marker in markers)
+                {
+                    if (tool.IndexOf(marker, StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                    result.Add(label);
+                    return;
+                }
+            }
+        }
+
+        private static string[] TakeFirst(string[] values, int count)
+        {
+            if (values == null || values.Length == 0 || count <= 0)
+                return Array.Empty<string>();
+            var length = Math.Min(values.Length, count);
+            var result = new string[length];
+            Array.Copy(values, result, length);
+            return result;
         }
 
         private static AgentRuleConfigState InspectManagedRuleFile(string path, string content)
@@ -398,6 +915,81 @@ namespace CodingRiver.UPilot
             return (value ?? "").Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
+        private static int ReadManagedRuleVersion(string path)
+        {
+            if (!File.Exists(path))
+                return 0;
+
+            var text = File.ReadAllText(path, Encoding.UTF8);
+            var pattern = Regex.Escape(ManagedBlockStart) + ".*?" + Regex.Escape(ManagedBlockEnd);
+            var managedBlock = Regex.Match(text, pattern, RegexOptions.Singleline);
+            if (!managedBlock.Success)
+                return 0;
+
+            var version = Regex.Match(managedBlock.Value, "(?m)^rulesVersion:\\s*(\\d+)\\s*$");
+            return version.Success && int.TryParse(version.Groups[1].Value, out var parsed)
+                ? parsed
+                : 0;
+        }
+
+        private static string ComputeFilesHash(string[] paths)
+        {
+            var content = new StringBuilder();
+            foreach (var path in paths ?? Array.Empty<string>())
+            {
+                if (File.Exists(path))
+                {
+                    var text = File.ReadAllText(path, Encoding.UTF8);
+                    var pattern = Regex.Escape(ManagedBlockStart) + ".*?" + Regex.Escape(ManagedBlockEnd);
+                    var managedBlock = Regex.Match(text, pattern, RegexOptions.Singleline);
+                    if (managedBlock.Success)
+                        content.Append(managedBlock.Value);
+                }
+                content.Append("\n---\n");
+            }
+
+            return ComputeTextHash(content.ToString());
+        }
+
+        private static string BuildExpectedManagedContent(string[] expectedContents)
+        {
+            var content = new StringBuilder();
+            foreach (var expected in expectedContents ?? Array.Empty<string>())
+                content.Append(WrapManagedBlock(expected)).Append("\n---\n");
+            return content.ToString();
+        }
+
+        private static string ComputeTextHash(string content)
+        {
+            using var sha256 = SHA256.Create();
+            var bytes = Encoding.UTF8.GetBytes(NormalizeRuleForComparison(content ?? ""));
+            var hash = sha256.ComputeHash(bytes);
+            var result = new StringBuilder(hash.Length * 2);
+            foreach (var b in hash)
+                result.Append(b.ToString("x2"));
+            return result.ToString();
+        }
+
+        private static string GetAgentRulesTemplatePath()
+        {
+            return Path.Combine(ResolvePackageRoot(), "skills", SkillName, AgentRulesTemplateFileName);
+        }
+
+        private static string CombineResults(string first, string second)
+        {
+            var firstHasChanges = !string.IsNullOrWhiteSpace(first) &&
+                                  !string.Equals(first, "No changes needed.", StringComparison.Ordinal);
+            var secondHasChanges = !string.IsNullOrWhiteSpace(second) &&
+                                   !string.Equals(second, "No changes needed.", StringComparison.Ordinal);
+            if (!firstHasChanges && !secondHasChanges)
+                return "No changes needed.";
+            if (!firstHasChanges)
+                return second;
+            if (!secondHasChanges)
+                return first;
+            return first.TrimEnd() + "\n" + second.TrimEnd();
+        }
+
         private static AgentMcpConfigStatus InspectTomlConfig(string clientName, string path)
         {
             if (!File.Exists(path))
@@ -415,7 +1007,13 @@ namespace CodingRiver.UPilot
                 var urlMatch = Regex.Match(section.Value, "(?m)^\\s*url\\s*=\\s*\"([^\"]+)\"");
                 var usesCurrentUrl = urlMatch.Success &&
                                      string.Equals(urlMatch.Groups[1].Value, McpUrl, StringComparison.OrdinalIgnoreCase);
-                return new AgentMcpConfigStatus(clientName, path, true, true, usesCurrentUrl);
+                return new AgentMcpConfigStatus(
+                    clientName,
+                    path,
+                    true,
+                    true,
+                    usesCurrentUrl,
+                    configuredUrl: urlMatch.Success ? urlMatch.Groups[1].Value : "");
             }
             catch (Exception ex)
             {
@@ -459,7 +1057,13 @@ namespace CodingRiver.UPilot
                 var urlMatch = Regex.Match(upilotBody, "\"url\"\\s*:\\s*\"([^\"]+)\"");
                 var usesCurrentUrl = urlMatch.Success &&
                                      string.Equals(urlMatch.Groups[1].Value, McpUrl, StringComparison.OrdinalIgnoreCase);
-                return new AgentMcpConfigStatus(clientName, path, true, true, usesCurrentUrl);
+                return new AgentMcpConfigStatus(
+                    clientName,
+                    path,
+                    true,
+                    true,
+                    usesCurrentUrl,
+                    configuredUrl: urlMatch.Success ? urlMatch.Groups[1].Value : "");
             }
             catch (Exception ex)
             {
@@ -662,15 +1266,30 @@ namespace CodingRiver.UPilot
             result.AppendLine("Updated UPilot block in " + NormalizePathForLog(path));
         }
 
-        private static void CopySkillInstall(string projectRoot, bool overwriteExisting, StringBuilder result)
+        private static void CopyAllSkillInstalls(string projectRoot, bool overwriteExisting, StringBuilder result)
         {
-            var target = Path.Combine(projectRoot, ".agents", "skills", SkillName);
+            var installedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var clientName in new[] { "Codex", "Claude Code", "Cursor" })
+            {
+                var target = GetAgentSkillInstallPath(projectRoot, clientName);
+                if (string.IsNullOrEmpty(target) || !installedTargets.Add(target))
+                    continue;
+                CopySkillInstall(target, clientName, overwriteExisting, result);
+            }
+        }
+
+        private static void CopySkillInstall(
+            string target,
+            string clientName,
+            bool overwriteExisting,
+            StringBuilder result)
+        {
             var source = Path.Combine(ResolvePackageRoot(), "skills", SkillName);
             LogAgentRulesFileProcessing(
                 "Begin Skill install",
                 target,
                 source,
-                $"targetExists={Directory.Exists(target)}; sourceExists={Directory.Exists(source)}; overwriteExisting={overwriteExisting}; templateVersion={SkillInstallTemplateVersion}");
+                $"client={clientName}; targetExists={Directory.Exists(target)}; sourceExists={Directory.Exists(source)}; overwriteExisting={overwriteExisting}; templateVersion={SkillInstallTemplateVersion}");
             if (Directory.Exists(target) && !overwriteExisting)
             {
                 var isUnmodifiedManagedInstall = TryReadSkillInstallMetadata(

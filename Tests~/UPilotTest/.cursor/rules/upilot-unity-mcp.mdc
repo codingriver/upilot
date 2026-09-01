@@ -7,9 +7,9 @@ alwaysApply: true
 # UPilot Unity MCP
 
 rulesVersion: 22
-upilotPackageVersion: 0.3.27
+upilotPackageVersion: 0.3.28
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-08-31T13:01:25Z
+generatedAt: 2026-09-01T08:10:35Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
