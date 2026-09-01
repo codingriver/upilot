@@ -22,10 +22,10 @@ namespace CodingRiver.UPilot
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
                 _setupWriteAgentRules = EditorGUILayout.ToggleLeft(
-                    "写入 Agent 识别规则与 Skill（Codex、Claude Code、Cursor）",
+                    "写入 Agent 识别规则与 Skill（Codex、Claude Code、Cursor、OpenCode）",
                     _setupWriteAgentRules);
                 EditorGUILayout.LabelField(
-                    "规则保留其它内容；Codex 与 Cursor 共享 .agents/skills，Claude Code 使用 .claude/skills。",
+                    "规则保留其它内容；Codex、Cursor、OpenCode 共享 .agents/skills，Claude Code 使用 .claude/skills。",
                     EditorStyles.miniLabel);
             }
 
@@ -35,6 +35,7 @@ namespace CodingRiver.UPilot
                 _setupWriteCodexConfig = EditorGUILayout.ToggleLeft("Codex 项目配置", _setupWriteCodexConfig);
                 _setupWriteClaudeConfig = EditorGUILayout.ToggleLeft("Claude Code 项目配置", _setupWriteClaudeConfig);
                 _setupWriteCursorConfig = EditorGUILayout.ToggleLeft("Cursor 项目配置", _setupWriteCursorConfig);
+                _setupWriteOpenCodeConfig = EditorGUILayout.ToggleLeft("OpenCode 项目配置", _setupWriteOpenCodeConfig);
                 EditorGUILayout.LabelField("只更新名为 upilot 的服务，保留其它 MCP 服务。", EditorStyles.miniLabel);
             }
 
@@ -115,6 +116,8 @@ namespace CodingRiver.UPilot
                     Debug.Log("[UPilot] First setup Claude MCP config:\n" + UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
                 if (_setupWriteCursorConfig)
                     Debug.Log("[UPilot] First setup Cursor MCP config:\n" + UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                if (_setupWriteOpenCodeConfig)
+                    Debug.Log("[UPilot] First setup OpenCode MCP config:\n" + UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
 
                 UPilotAgentSetup.MarkAgentRulesHandledForCurrentProject();
 

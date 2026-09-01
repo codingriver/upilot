@@ -56,6 +56,7 @@ namespace CodingRiver.UPilot
         private bool _setupWriteCodexConfig = true;
         private bool _setupWriteClaudeConfig = true;
         private bool _setupWriteCursorConfig = true;
+        private bool _setupWriteOpenCodeConfig = true;
         private bool _setupStartAfterSetup = true;
         private bool _setupApproveProjectWrites = SetupApprovesProjectWritesByDefault;
 

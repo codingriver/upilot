@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -23,7 +24,8 @@ namespace CodingRiver.UPilot
             bool hasUPilotEntry,
             bool usesCurrentUrl,
             string errorMessage = "",
-            string configuredUrl = "")
+            string configuredUrl = "",
+            string configurationIssue = "")
         {
             ClientName = clientName;
             ConfigPath = configPath;
@@ -32,6 +34,7 @@ namespace CodingRiver.UPilot
             UsesCurrentUrl = usesCurrentUrl;
             ErrorMessage = errorMessage ?? "";
             ConfiguredUrl = configuredUrl ?? "";
+            ConfigurationIssue = configurationIssue ?? "";
         }
 
         public string ClientName { get; }
@@ -41,7 +44,10 @@ namespace CodingRiver.UPilot
         public bool UsesCurrentUrl { get; }
         public string ErrorMessage { get; }
         public string ConfiguredUrl { get; }
-        public bool IsConfigured => FileExists && HasUPilotEntry && UsesCurrentUrl && string.IsNullOrEmpty(ErrorMessage);
+        public string ConfigurationIssue { get; }
+        public bool IsConfigured => FileExists && HasUPilotEntry && UsesCurrentUrl &&
+                                    string.IsNullOrEmpty(ErrorMessage) &&
+                                    string.IsNullOrEmpty(ConfigurationIssue);
 
         public string StateText
         {
@@ -51,6 +57,7 @@ namespace CodingRiver.UPilot
                 if (!FileExists) return "未配置";
                 if (!HasUPilotEntry) return "缺少 UPilot 配置";
                 if (!UsesCurrentUrl) return "端口已变化，需更新";
+                if (!string.IsNullOrEmpty(ConfigurationIssue)) return ConfigurationIssue;
                 return "已配置";
             }
         }
@@ -77,7 +84,8 @@ namespace CodingRiver.UPilot
             int targetVersion = 0,
             string sourcePath = "",
             string contentHash = "",
-            string expectedHash = "")
+            string expectedHash = "",
+            string[] issuePaths = null)
         {
             ClientName = clientName;
             ConfigPath = configPath;
@@ -89,6 +97,10 @@ namespace CodingRiver.UPilot
             SourcePath = sourcePath ?? "";
             ContentHash = contentHash ?? "";
             ExpectedHash = expectedHash ?? "";
+            IssuePaths = issuePaths ??
+                         (state == AgentRuleConfigState.Current
+                             ? Array.Empty<string>()
+                             : ConfigPaths);
         }
 
         public string ClientName { get; }
@@ -101,6 +113,7 @@ namespace CodingRiver.UPilot
         public string SourcePath { get; }
         public string ContentHash { get; }
         public string ExpectedHash { get; }
+        public string[] IssuePaths { get; }
         public bool IsCurrent => State == AgentRuleConfigState.Current;
         public bool HasLocalCustomization => State == AgentRuleConfigState.Customized;
 
@@ -126,6 +139,7 @@ namespace CodingRiver.UPilot
         Current,
         UpdateAvailable,
         Customized,
+        Conflict,
         Error,
     }
 
@@ -149,7 +163,9 @@ namespace CodingRiver.UPilot
             string[] capabilityLabels = null,
             int associatedToolCount = 0,
             string[] primaryToolNames = null,
-            string[] skillRootPaths = null)
+            string[] skillRootPaths = null,
+            string[] duplicateSkillPaths = null,
+            string skillConflictSummary = "")
         {
             ClientName = clientName;
             ConfigPath = configPath ?? "";
@@ -172,6 +188,8 @@ namespace CodingRiver.UPilot
                              (string.IsNullOrEmpty(SkillRootPath)
                                  ? Array.Empty<string>()
                                  : new[] { SkillRootPath });
+            DuplicateSkillPaths = duplicateSkillPaths ?? Array.Empty<string>();
+            SkillConflictSummary = skillConflictSummary ?? "";
         }
 
         public string ClientName { get; }
@@ -192,10 +210,14 @@ namespace CodingRiver.UPilot
         public string[] CapabilityLabels { get; }
         public int AssociatedToolCount { get; }
         public string[] PrimaryToolNames { get; }
+        public string[] DuplicateSkillPaths { get; }
+        public string SkillConflictSummary { get; }
+        public bool HasSkillConflict => State == AgentSkillConfigState.Conflict;
         public bool IsApplicable => State != AgentSkillConfigState.NotProvided;
         public bool IsCurrent => State == AgentSkillConfigState.Current;
         public bool IsSatisfied => State == AgentSkillConfigState.Current || State == AgentSkillConfigState.NotProvided;
-        public bool HasLocalCustomization => State == AgentSkillConfigState.Customized;
+        public bool HasLocalCustomization => State == AgentSkillConfigState.Customized ||
+                                             State == AgentSkillConfigState.Conflict;
 
         public string StateText
         {
@@ -206,6 +228,7 @@ namespace CodingRiver.UPilot
                 if (State == AgentSkillConfigState.Missing) return "未安装";
                 if (State == AgentSkillConfigState.UpdateAvailable) return "有新版本";
                 if (State == AgentSkillConfigState.Customized) return "需要确认";
+                if (State == AgentSkillConfigState.Conflict) return "发现冲突";
                 return "已安装";
             }
         }
@@ -219,7 +242,8 @@ namespace CodingRiver.UPilot
         private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
         private const int AgentRulesTemplateVersion = 22;
-        private const int SkillInstallTemplateVersion = 18;
+        private const int SkillInstallTemplateVersion = 19;
+        private const int OpenCodeMcpTimeoutMs = 30000;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
@@ -238,6 +262,7 @@ namespace CodingRiver.UPilot
                 InspectTomlConfig("Codex", Path.Combine(projectRoot, ".codex", "config.toml")),
                 InspectJsonConfig("Claude Code", Path.Combine(projectRoot, ".mcp.json")),
                 InspectJsonConfig("Cursor", Path.Combine(projectRoot, ".cursor", "mcp.json")),
+                InspectOpenCodeConfig("OpenCode", ResolveOpenCodeConfigPath(projectRoot)),
             };
         }
 
@@ -249,6 +274,7 @@ namespace CodingRiver.UPilot
                 InspectCodexRuleConfig(projectRoot),
                 InspectClaudeRuleConfig(projectRoot),
                 InspectCursorRuleConfig(projectRoot),
+                InspectOpenCodeRuleConfig(projectRoot),
             };
         }
 
@@ -260,6 +286,7 @@ namespace CodingRiver.UPilot
                 InspectSkillConfig(projectRoot, "Codex"),
                 InspectSkillConfig(projectRoot, "Claude Code"),
                 InspectSkillConfig(projectRoot, "Cursor"),
+                InspectSkillConfig(projectRoot, "OpenCode"),
             };
         }
 
@@ -294,6 +321,13 @@ namespace CodingRiver.UPilot
         {
             var result = WriteCursorMcpConfig(promptBeforeOverwrite: true);
             ReportResult("Cursor MCP config", result);
+        }
+
+        [MenuItem("UPilot/Advanced/Agent Setup/Write OpenCode MCP Config", false, 323)]
+        public static void MenuWriteOpenCodeMcpConfig()
+        {
+            var result = WriteOpenCodeMcpConfig(promptBeforeOverwrite: true);
+            ReportResult("OpenCode MCP config", result);
         }
 
         public static string WriteAgentRules(bool overwriteExisting)
@@ -344,6 +378,12 @@ namespace CodingRiver.UPilot
             return WriteJsonMcpConfig(path, includeType: false, promptBeforeOverwrite);
         }
 
+        public static string WriteOpenCodeMcpConfig(bool promptBeforeOverwrite)
+        {
+            var path = ResolveOpenCodeConfigPath(GetProjectRoot());
+            return WriteOpenCodeJsonMcpConfig(path, promptBeforeOverwrite);
+        }
+
         public static string WriteAgentMcpConfig(string clientName, bool promptBeforeOverwrite)
         {
             if (clientName == "Codex")
@@ -352,6 +392,8 @@ namespace CodingRiver.UPilot
                 return WriteClaudeCodeMcpConfig(promptBeforeOverwrite);
             if (clientName == "Cursor")
                 return WriteCursorMcpConfig(promptBeforeOverwrite);
+            if (clientName == "OpenCode")
+                return WriteOpenCodeMcpConfig(promptBeforeOverwrite);
             return "Unsupported Agent: " + clientName;
         }
 
@@ -379,6 +421,10 @@ namespace CodingRiver.UPilot
                     Path.Combine(projectRoot, ".cursor", "rules", "upilot-unity-mcp.mdc"),
                     overwriteExisting: false,
                     result);
+            }
+            else if (clientName == "OpenCode")
+            {
+                WriteSharedAgentsRule(projectRoot, result);
             }
             else
             {
@@ -520,6 +566,25 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private static AgentRuleConfigStatus InspectOpenCodeRuleConfig(string projectRoot)
+        {
+            var path = Path.Combine(projectRoot, "AGENTS.md");
+            try
+            {
+                var expected = BuildAgentsMd();
+                return CreateRuleStatus(
+                    "OpenCode",
+                    new[] { path },
+                    new[] { InspectManagedRuleFile(path, expected) },
+                    path,
+                    new[] { expected });
+            }
+            catch (Exception ex)
+            {
+                return CreateRuleErrorStatus("OpenCode", new[] { path }, ex);
+            }
+        }
+
         private static AgentRuleConfigStatus CreateRuleStatus(
             string clientName,
             string[] paths,
@@ -528,15 +593,19 @@ namespace CodingRiver.UPilot
             string[] expectedContents)
         {
             var state = AgentRuleConfigState.Current;
-            foreach (var candidate in states)
+            var issuePaths = new List<string>();
+            for (var i = 0; i < states.Length; i++)
             {
+                var candidate = states[i];
+                if (candidate != AgentRuleConfigState.Current && i < paths.Length)
+                    issuePaths.Add(paths[i]);
                 if (candidate == AgentRuleConfigState.Missing)
                 {
                     state = AgentRuleConfigState.Missing;
-                    break;
+                    continue;
                 }
 
-                if (candidate != AgentRuleConfigState.Current)
+                if (candidate != AgentRuleConfigState.Current && state != AgentRuleConfigState.Missing)
                     state = AgentRuleConfigState.UpdateAvailable;
             }
 
@@ -549,7 +618,8 @@ namespace CodingRiver.UPilot
                 targetVersion: AgentRulesTemplateVersion,
                 sourcePath: GetAgentRulesTemplatePath(),
                 contentHash: ComputeFilesHash(paths),
-                expectedHash: ComputeTextHash(BuildExpectedManagedContent(expectedContents)));
+                expectedHash: ComputeTextHash(BuildExpectedManagedContent(expectedContents)),
+                issuePaths: issuePaths.ToArray());
         }
 
         private static AgentRuleConfigStatus CreateRuleErrorStatus(string clientName, string[] paths, Exception ex)
@@ -561,7 +631,8 @@ namespace CodingRiver.UPilot
                 ex.Message,
                 paths,
                 targetVersion: AgentRulesTemplateVersion,
-                sourcePath: GetAgentRulesTemplatePath());
+                sourcePath: GetAgentRulesTemplatePath(),
+                issuePaths: paths);
         }
 
         private static AgentSkillConfigStatus InspectSkillConfig(string projectRoot, string clientName)
@@ -618,6 +689,8 @@ namespace CodingRiver.UPilot
                 var state = templateVersion < SkillInstallTemplateVersion
                     ? AgentSkillConfigState.UpdateAvailable
                     : AgentSkillConfigState.Current;
+                if (inventory.HasUpilotSkillConflict)
+                    state = AgentSkillConfigState.Conflict;
                 return CreateSkillStatus(
                     clientName,
                     target,
@@ -638,7 +711,9 @@ namespace CodingRiver.UPilot
                     0,
                     Array.Empty<string>(),
                     0,
-                    Array.Empty<string>());
+                    Array.Empty<string>(),
+                    Array.Empty<string>(),
+                    "");
                 return CreateSkillStatus(
                     clientName,
                     target,
@@ -657,6 +732,8 @@ namespace CodingRiver.UPilot
                 return "Claude Code 使用项目级 .claude/skills 目录加载 UPilot Skill。";
             if (clientName == "Cursor")
                 return "Cursor 使用官方支持的 .agents/skills 目录，与 Codex 共享同一受管 UPilot Skill；项目 Skill 数量按 Cursor 可发现目录去重统计。";
+            if (clientName == "OpenCode")
+                return "OpenCode 使用官方支持的 .agents/skills 目录，与 Codex、Cursor 共享同一受管 UPilot Skill；同时检查 .claude/skills 与 .opencode/skills 中的同名 Skill 冲突。";
             return "Codex 使用项目级 .agents/skills 目录加载 UPilot Skill。";
         }
 
@@ -668,7 +745,9 @@ namespace CodingRiver.UPilot
                 int upilotSkillCount,
                 string[] capabilityLabels,
                 int associatedToolCount,
-                string[] primaryToolNames)
+                string[] primaryToolNames,
+                string[] duplicateSkillPaths,
+                string skillConflictSummary)
             {
                 RootPaths = rootPaths ?? Array.Empty<string>();
                 RootPath = RootPaths.Length > 0 ? RootPaths[0] : "";
@@ -677,6 +756,8 @@ namespace CodingRiver.UPilot
                 CapabilityLabels = capabilityLabels ?? Array.Empty<string>();
                 AssociatedToolCount = associatedToolCount;
                 PrimaryToolNames = primaryToolNames ?? Array.Empty<string>();
+                DuplicateSkillPaths = duplicateSkillPaths ?? Array.Empty<string>();
+                SkillConflictSummary = skillConflictSummary ?? "";
             }
 
             public string RootPath { get; }
@@ -686,6 +767,9 @@ namespace CodingRiver.UPilot
             public string[] CapabilityLabels { get; }
             public int AssociatedToolCount { get; }
             public string[] PrimaryToolNames { get; }
+            public string[] DuplicateSkillPaths { get; }
+            public string SkillConflictSummary { get; }
+            public bool HasUpilotSkillConflict => !string.IsNullOrEmpty(SkillConflictSummary);
         }
 
         private static AgentSkillConfigStatus CreateSkillStatus(
@@ -719,7 +803,9 @@ namespace CodingRiver.UPilot
                 inventory.CapabilityLabels,
                 inventory.AssociatedToolCount,
                 inventory.PrimaryToolNames,
-                inventory.RootPaths);
+                inventory.RootPaths,
+                inventory.DuplicateSkillPaths,
+                inventory.SkillConflictSummary);
         }
 
         internal static string GetAgentSkillInstallPath(string projectRoot, string clientName)
@@ -730,7 +816,7 @@ namespace CodingRiver.UPilot
 
         private static string GetPrimaryAgentSkillRoot(string projectRoot, string clientName)
         {
-            if (clientName == "Codex" || clientName == "Cursor")
+            if (clientName == "Codex" || clientName == "Cursor" || clientName == "OpenCode")
                 return Path.Combine(projectRoot, ".agents", "skills");
             if (clientName == "Claude Code")
                 return Path.Combine(projectRoot, ".claude", "skills");
@@ -753,6 +839,15 @@ namespace CodingRiver.UPilot
                     Path.Combine(projectRoot, ".codex", "skills"),
                 };
             }
+            if (clientName == "OpenCode")
+            {
+                return new[]
+                {
+                    Path.Combine(projectRoot, ".agents", "skills"),
+                    Path.Combine(projectRoot, ".claude", "skills"),
+                    Path.Combine(projectRoot, ".opencode", "skills"),
+                };
+            }
             return Array.Empty<string>();
         }
 
@@ -760,6 +855,8 @@ namespace CodingRiver.UPilot
         {
             var names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
             var visibleRoots = new List<string>();
+            var upilotPaths = new List<string>();
+            var upilotHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var skillRoot in skillRoots ?? Array.Empty<string>())
             {
                 if (string.IsNullOrEmpty(skillRoot) || !Directory.Exists(skillRoot))
@@ -771,7 +868,12 @@ namespace CodingRiver.UPilot
                 foreach (var skillFile in skillFiles)
                 {
                     var directory = Path.GetDirectoryName(skillFile) ?? "";
-                    names.Add(ReadSkillName(skillFile, Path.GetFileName(directory)));
+                    var name = ReadSkillName(skillFile, Path.GetFileName(directory));
+                    names.Add(name);
+                    if (!string.Equals(name, SkillName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    upilotPaths.Add(directory);
+                    upilotHashes.Add(ComputeSkillInstallHash(directory));
                 }
             }
 
@@ -788,6 +890,9 @@ namespace CodingRiver.UPilot
                 ? Array.Empty<string>()
                 : CollectSkillToolNames(upilotSkillPath);
             var installedNames = new List<string>(names).ToArray();
+            var conflictSummary = upilotPaths.Count > 1 && upilotHashes.Count > 1
+                ? $"发现 {upilotPaths.Count} 个同名 UPilot Skill，且内容 SHA256 不一致。请同步或移除冲突副本。"
+                : "";
             return new SkillInventory(
                 visibleRoots.ToArray(),
                 installedNames,
@@ -796,7 +901,9 @@ namespace CodingRiver.UPilot
                     name => string.Equals(name, SkillName, StringComparison.OrdinalIgnoreCase)) ? 1 : 0,
                 InferSkillCapabilities(tools),
                 tools.Length,
-                TakeFirst(tools, 10));
+                TakeFirst(tools, 10),
+                upilotPaths.ToArray(),
+                conflictSummary);
         }
 
         private static string ReadSkillName(string skillFile, string fallback)
@@ -1071,6 +1178,73 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private static AgentMcpConfigStatus InspectOpenCodeConfig(string clientName, string path)
+        {
+            if (!File.Exists(path))
+                return new AgentMcpConfigStatus(clientName, path, false, false, false);
+
+            try
+            {
+                var text = File.ReadAllText(path, Encoding.UTF8);
+                var masked = MaskJsonComments(text);
+                var rootOpen = masked.IndexOf('{');
+                if (rootOpen < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false, "OpenCode 配置缺少根对象");
+                var rootClose = FindMatchingBrace(masked, rootOpen);
+                if (rootClose < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false, "OpenCode 配置根对象格式无效");
+
+                var mcpMatch = FindDirectJsonProperty(masked, rootOpen, rootClose, "mcp");
+                if (!mcpMatch.Success)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false);
+                var mcpOpen = FindJsonObjectValueOpen(masked, mcpMatch);
+                if (mcpOpen < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false, "OpenCode mcp 配置格式无效");
+                var mcpClose = FindMatchingBrace(masked, mcpOpen);
+                if (mcpClose < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false, "OpenCode mcp 配置格式无效");
+
+                var upilotMatch = FindDirectJsonProperty(masked, mcpOpen, mcpClose, "upilot");
+                if (!upilotMatch.Success)
+                    return new AgentMcpConfigStatus(clientName, path, true, false, false);
+                var upilotOpen = FindJsonObjectValueOpen(masked, upilotMatch);
+                if (upilotOpen < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, true, false, "OpenCode UPilot 配置格式无效");
+                var upilotClose = FindMatchingBrace(masked, upilotOpen);
+                if (upilotClose < 0)
+                    return new AgentMcpConfigStatus(clientName, path, true, true, false, "OpenCode UPilot 配置格式无效");
+
+                var body = masked.Substring(upilotOpen, upilotClose - upilotOpen + 1);
+                var urlMatch = Regex.Match(body, "\"url\"\\s*:\\s*\"([^\"]+)\"");
+                var typeMatch = Regex.Match(body, "\"type\"\\s*:\\s*\"([^\"]+)\"");
+                var enabledMatch = Regex.Match(body, "\"enabled\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+                var timeoutMatch = Regex.Match(body, "\"timeout\"\\s*:\\s*(\\d+)");
+                var configuredUrl = urlMatch.Success ? urlMatch.Groups[1].Value : "";
+                var usesCurrentUrl = urlMatch.Success &&
+                                     string.Equals(configuredUrl, McpUrl, StringComparison.OrdinalIgnoreCase);
+                var issues = new List<string>();
+                if (!typeMatch.Success || !string.Equals(typeMatch.Groups[1].Value, "remote", StringComparison.OrdinalIgnoreCase))
+                    issues.Add("连接类型需设为 remote");
+                if (enabledMatch.Success && string.Equals(enabledMatch.Groups[1].Value, "false", StringComparison.OrdinalIgnoreCase))
+                    issues.Add("配置当前已禁用");
+                if (!timeoutMatch.Success || !int.TryParse(timeoutMatch.Groups[1].Value, out var timeout) || timeout < OpenCodeMcpTimeoutMs)
+                    issues.Add($"工具发现超时需至少为 {OpenCodeMcpTimeoutMs} ms");
+
+                return new AgentMcpConfigStatus(
+                    clientName,
+                    path,
+                    true,
+                    true,
+                    usesCurrentUrl,
+                    configuredUrl: configuredUrl,
+                    configurationIssue: string.Join("；", issues));
+            }
+            catch (Exception ex)
+            {
+                return new AgentMcpConfigStatus(clientName, path, true, false, false, ex.Message);
+            }
+        }
+
         private static void EnsureAgentRulesOnce()
         {
             try
@@ -1148,6 +1322,36 @@ namespace CodingRiver.UPilot
 
             var original = File.ReadAllText(path, Encoding.UTF8);
             var updated = UpsertJsonMcpServer(original, includeType);
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+            return "Updated UPilot entry in " + NormalizePathForLog(path);
+        }
+
+        private static string WriteOpenCodeJsonMcpConfig(string path, bool promptBeforeOverwrite)
+        {
+            if (!File.Exists(path))
+            {
+                EnsureParentDirectory(path);
+                File.WriteAllText(path, BuildOpenCodeMcpJson(), new UTF8Encoding(false));
+                return "Wrote " + NormalizePathForLog(path);
+            }
+
+            if (promptBeforeOverwrite)
+            {
+                var ok = EditorUtility.DisplayDialog(
+                    "Update OpenCode UPilot MCP config?",
+                    "This will update only the mcp.upilot entry in:\n\n" + path,
+                    "Update",
+                    "Cancel");
+                if (!ok)
+                    return "Cancelled.";
+            }
+
+            var original = File.ReadAllText(path, Encoding.UTF8);
+            if (!TryUpsertOpenCodeMcpServer(original, out var updated, out var error))
+                throw new InvalidDataException("OpenCode 配置未更新：" + error);
+            if (string.Equals(original, updated, StringComparison.Ordinal))
+                return "Kept existing " + NormalizePathForLog(path);
+
             File.WriteAllText(path, updated, new UTF8Encoding(false));
             return "Updated UPilot entry in " + NormalizePathForLog(path);
         }
@@ -1269,7 +1473,7 @@ namespace CodingRiver.UPilot
         private static void CopyAllSkillInstalls(string projectRoot, bool overwriteExisting, StringBuilder result)
         {
             var installedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var clientName in new[] { "Codex", "Claude Code", "Cursor" })
+            foreach (var clientName in new[] { "Codex", "Claude Code", "Cursor", "OpenCode" })
             {
                 var target = GetAgentSkillInstallPath(projectRoot, clientName);
                 if (string.IsNullOrEmpty(target) || !installedTargets.Add(target))
@@ -1663,6 +1867,28 @@ namespace CodingRiver.UPilot
                    indent + "}";
         }
 
+        private static string BuildOpenCodeMcpJson()
+        {
+            return "{\n" +
+                   "  \"$schema\": \"https://opencode.ai/config.json\",\n" +
+                   "  \"mcp\": {\n" +
+                   BuildOpenCodeMcpServerEntry(4) + "\n" +
+                   "  }\n" +
+                   "}\n";
+        }
+
+        private static string BuildOpenCodeMcpServerEntry(int indentSpaces)
+        {
+            var indent = new string(' ', indentSpaces);
+            var inner = new string(' ', indentSpaces + 2);
+            return indent + "\"upilot\": {\n" +
+                   inner + "\"type\": \"remote\",\n" +
+                   inner + $"\"url\": \"{McpUrl}\",\n" +
+                   inner + "\"enabled\": true,\n" +
+                   inner + $"\"timeout\": {OpenCodeMcpTimeoutMs}\n" +
+                   indent + "}";
+        }
+
         private static string WrapManagedBlock(string content)
         {
             return ManagedBlockStart + "\n" +
@@ -1747,15 +1973,264 @@ namespace CodingRiver.UPilot
             return original.Insert(rootClose, block);
         }
 
+        private static bool TryUpsertOpenCodeMcpServer(string original, out string updated, out string error)
+        {
+            updated = original;
+            error = "";
+            if (string.IsNullOrWhiteSpace(original))
+            {
+                updated = BuildOpenCodeMcpJson();
+                return true;
+            }
+
+            var masked = MaskJsonComments(original);
+            var rootOpen = masked.IndexOf('{');
+            if (rootOpen < 0)
+            {
+                error = "缺少 JSON 根对象";
+                return false;
+            }
+            var rootClose = FindMatchingBrace(masked, rootOpen);
+            if (rootClose < 0)
+            {
+                error = "JSON 根对象未闭合";
+                return false;
+            }
+
+            var mcpMatch = FindDirectJsonProperty(masked, rootOpen, rootClose, "mcp");
+            if (!mcpMatch.Success)
+            {
+                updated = InsertJsonObjectProperty(
+                    original,
+                    masked,
+                    rootOpen,
+                    rootClose,
+                    "  \"mcp\": {\n" + BuildOpenCodeMcpServerEntry(4) + "\n  }");
+                return true;
+            }
+
+            var mcpOpen = FindJsonObjectValueOpen(masked, mcpMatch);
+            if (mcpOpen < 0)
+            {
+                error = "mcp 必须是 JSON 对象";
+                return false;
+            }
+            var mcpClose = FindMatchingBrace(masked, mcpOpen);
+            if (mcpClose < 0)
+            {
+                error = "mcp 对象未闭合";
+                return false;
+            }
+
+            var upilotMatch = FindDirectJsonProperty(masked, mcpOpen, mcpClose, "upilot");
+            if (!upilotMatch.Success)
+            {
+                var indent = GetLineIndentation(original, mcpClose) + "  ";
+                updated = InsertJsonObjectProperty(
+                    original,
+                    masked,
+                    mcpOpen,
+                    mcpClose,
+                    BuildOpenCodeMcpServerEntry(indent.Length));
+                return true;
+            }
+
+            var upilotOpen = FindJsonObjectValueOpen(masked, upilotMatch);
+            if (upilotOpen < 0)
+            {
+                error = "mcp.upilot 必须是 JSON 对象";
+                return false;
+            }
+            var upilotClose = FindMatchingBrace(masked, upilotOpen);
+            if (upilotClose < 0)
+            {
+                error = "mcp.upilot 对象未闭合";
+                return false;
+            }
+
+            var replacementStart = GetJsonPropertyLineStart(original, upilotMatch.Index);
+            var indentText = original.Substring(replacementStart, upilotMatch.Index - replacementStart);
+            updated = original.Substring(0, replacementStart) +
+                      BuildOpenCodeMcpServerEntry(indentText.Length) +
+                      original.Substring(upilotClose + 1);
+            return true;
+        }
+
+        private static Match FindDirectJsonProperty(
+            string maskedJson,
+            int objectOpen,
+            int objectClose,
+            string propertyName)
+        {
+            var matches = Regex.Matches(
+                maskedJson.Substring(objectOpen + 1, objectClose - objectOpen - 1),
+                "\"" + Regex.Escape(propertyName) + "\"\\s*:");
+            foreach (Match relative in matches)
+            {
+                var absoluteIndex = objectOpen + 1 + relative.Index;
+                if (GetJsonObjectDepth(maskedJson, objectOpen, absoluteIndex) != 1)
+                    continue;
+                var regex = new Regex(
+                    "\"" + Regex.Escape(propertyName) + "\"\\s*:",
+                    RegexOptions.None,
+                    TimeSpan.FromSeconds(1));
+                return regex.Match(maskedJson, absoluteIndex);
+            }
+            return Match.Empty;
+        }
+
+        private static int GetJsonObjectDepth(string maskedJson, int objectOpen, int targetIndex)
+        {
+            var depth = 0;
+            var inString = false;
+            var escape = false;
+            for (var i = objectOpen; i < targetIndex; i++)
+            {
+                var c = maskedJson[i];
+                if (inString)
+                {
+                    if (escape) escape = false;
+                    else if (c == '\\') escape = true;
+                    else if (c == '"') inString = false;
+                    continue;
+                }
+                if (c == '"') inString = true;
+                else if (c == '{') depth++;
+                else if (c == '}') depth--;
+            }
+            return depth;
+        }
+
+        private static int FindJsonObjectValueOpen(string maskedJson, Match propertyMatch)
+        {
+            if (!propertyMatch.Success)
+                return -1;
+            var index = propertyMatch.Index + propertyMatch.Length;
+            while (index < maskedJson.Length && char.IsWhiteSpace(maskedJson[index]))
+                index++;
+            return index < maskedJson.Length && maskedJson[index] == '{' ? index : -1;
+        }
+
+        private static string InsertJsonObjectProperty(
+            string original,
+            string masked,
+            int objectOpen,
+            int objectClose,
+            string propertyText)
+        {
+            var hasProperties = Regex.Matches(masked.Substring(objectOpen + 1, objectClose - objectOpen - 1), "\"(?:\\\\.|[^\"])*\"\\s*:")
+                .Cast<Match>()
+                .Any(match => GetJsonObjectDepth(masked, objectOpen, objectOpen + 1 + match.Index) == 1);
+            var lastSignificant = GetLastSignificantJsonChar(masked, objectOpen + 1, objectClose);
+            var prefix = hasProperties && lastSignificant != ',' ? ",\n" : "\n";
+            var suffix = "\n" + GetLineIndentation(original, objectClose);
+            return original.Insert(objectClose, prefix + propertyText + suffix);
+        }
+
+        private static char GetLastSignificantJsonChar(string masked, int start, int end)
+        {
+            for (var i = end - 1; i >= start; i--)
+            {
+                if (!char.IsWhiteSpace(masked[i]))
+                    return masked[i];
+            }
+            return '\0';
+        }
+
+        private static int GetJsonPropertyLineStart(string text, int propertyStart)
+        {
+            var lineStart = text.LastIndexOf('\n', Math.Max(0, propertyStart - 1));
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            for (var i = lineStart; i < propertyStart; i++)
+            {
+                if (!char.IsWhiteSpace(text[i]))
+                    return propertyStart;
+            }
+            return lineStart;
+        }
+
+        private static string GetLineIndentation(string text, int index)
+        {
+            var lineStart = text.LastIndexOf('\n', Math.Max(0, index - 1));
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            var cursor = lineStart;
+            while (cursor < text.Length && cursor < index && (text[cursor] == ' ' || text[cursor] == '\t'))
+                cursor++;
+            return text.Substring(lineStart, cursor - lineStart);
+        }
+
+        private static string MaskJsonComments(string text)
+        {
+            var chars = (text ?? "").ToCharArray();
+            var inString = false;
+            var escape = false;
+            for (var i = 0; i < chars.Length; i++)
+            {
+                var c = chars[i];
+                if (inString)
+                {
+                    if (escape) escape = false;
+                    else if (c == '\\') escape = true;
+                    else if (c == '"') inString = false;
+                    continue;
+                }
+                if (c == '"')
+                {
+                    inString = true;
+                    continue;
+                }
+                if (c != '/' || i + 1 >= chars.Length)
+                    continue;
+                if (chars[i + 1] == '/')
+                {
+                    chars[i] = chars[i + 1] = ' ';
+                    i += 2;
+                    while (i < chars.Length && chars[i] != '\n' && chars[i] != '\r')
+                        chars[i++] = ' ';
+                    i--;
+                }
+                else if (chars[i + 1] == '*')
+                {
+                    chars[i] = chars[i + 1] = ' ';
+                    i += 2;
+                    while (i + 1 < chars.Length && !(chars[i] == '*' && chars[i + 1] == '/'))
+                    {
+                        if (chars[i] != '\n' && chars[i] != '\r') chars[i] = ' ';
+                        i++;
+                    }
+                    if (i + 1 < chars.Length)
+                        chars[i] = chars[i + 1] = ' ';
+                    i++;
+                }
+            }
+            return new string(chars);
+        }
+
         private static int FindMatchingBrace(string text, int openIndex)
         {
             var depth = 0;
             var inString = false;
             var escape = false;
+            var inLineComment = false;
+            var inBlockComment = false;
 
             for (var i = openIndex; i < text.Length; i++)
             {
                 var c = text[i];
+                if (inLineComment)
+                {
+                    if (c == '\n' || c == '\r') inLineComment = false;
+                    continue;
+                }
+                if (inBlockComment)
+                {
+                    if (c == '*' && i + 1 < text.Length && text[i + 1] == '/')
+                    {
+                        inBlockComment = false;
+                        i++;
+                    }
+                    continue;
+                }
                 if (inString)
                 {
                     if (escape)
@@ -1777,6 +2252,22 @@ namespace CodingRiver.UPilot
                 {
                     inString = true;
                     continue;
+                }
+
+                if (c == '/' && i + 1 < text.Length)
+                {
+                    if (text[i + 1] == '/')
+                    {
+                        inLineComment = true;
+                        i++;
+                        continue;
+                    }
+                    if (text[i + 1] == '*')
+                    {
+                        inBlockComment = true;
+                        i++;
+                        continue;
+                    }
                 }
 
                 if (c == '{')
@@ -1809,6 +2300,13 @@ namespace CodingRiver.UPilot
         private static string GetProjectRoot()
         {
             return Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
+        }
+
+        private static string ResolveOpenCodeConfigPath(string projectRoot)
+        {
+            var jsonPath = Path.Combine(projectRoot, "opencode.json");
+            var jsoncPath = Path.Combine(projectRoot, "opencode.jsonc");
+            return File.Exists(jsonPath) || !File.Exists(jsoncPath) ? jsonPath : jsoncPath;
         }
 
         private static string FindParentAgentRulesRelativePath(string projectRoot)

@@ -1,6 +1,6 @@
 # UPilot
 
-让 Codex、Claude Code、Cursor 等 AI Agent 直接操作 Unity Editor。
+让 Codex、Claude Code、Cursor、OpenCode 等 AI Agent 直接操作 Unity Editor。
 
 UPilot 会在 Unity 中启动本地 MCP 服务，并为常见 Agent 自动写入项目级连接配置。配置完成后，你可以直接让 Agent 查看场景、检查编译错误、读取 Console、修改 GameObject、管理资源、运行测试或构建任务。
 
@@ -73,7 +73,7 @@ UPilot > UPilot
 
 然后：
 
-1. 选择你正在使用的 Agent：`Codex`、`Claude` 或 `Cursor`，支持多选。
+1. 选择你正在使用的 Agent：`Codex`、`Claude Code`、`Cursor` 或 `OpenCode`，支持多选。
 2. 点击 **配置并启动**。
 3. 等待界面显示 **已就绪**。
 
@@ -107,7 +107,7 @@ UPilot 会自动选择可用端口、写入所选 Agent 的 MCP 配置，并同�
 |---|---|
 | Unity | 2022.3 或更高版本 |
 | Python | 3.11 或更高版本 |
-| Agent | Codex、Claude Code、Cursor，或支持 Streamable HTTP MCP 的客户端 |
+| Agent | Codex、Claude Code、Cursor、OpenCode，或支持 Streamable HTTP MCP 的客户端 |
 | 网络 | 首次通过 Git 和 pip 安装时需要访问 GitHub 与 Python 包源 |
 
 UPilot 默认只监听本机地址 `127.0.0.1`。Unity Editor 必须保持打开，Agent 才能操作当前项目。
@@ -180,7 +180,7 @@ python -c "import mcp, websockets, yaml, PIL; print('UPilot Python dependencies 
 
 ![UPilot 首次配置界面](Documentation~/images/upilot-first-setup.png)
 
-*Codex、Claude 和 Cursor 可以单选或多选。*
+*Codex、Claude Code、Cursor 和 OpenCode 可以单选或多选。*
 
 选择多个 Agent 时，UPilot 会同时写入这些 Agent 的项目级 MCP 配置。之后也可以在主界面的 **Agent 配置** 区域单独添加其他 Agent。
 
@@ -192,7 +192,7 @@ UPilot 会自动处理以下内容：
 - 启动 Unity Bridge 和 MCP 服务。
 - 写入所选 Agent 的项目级 MCP 连接。
 - 写入或更新 UPilot 管理的 Agent 规则。
-- 同步 UPilot Skill：Codex 与 Cursor 使用共享的 `.agents/skills` 安装，Claude Code 使用 `.claude/skills` 安装。
+- 同步 UPilot Skill：Codex、Cursor 与 OpenCode 使用共享的 `.agents/skills` 安装，Claude Code 使用 `.claude/skills` 安装。
 
 已有配置文件中的其他 MCP 服务和用户内容会尽量保留。UPilot 管理的内容使用独立标记或独立配置项进行更新。
 
@@ -210,7 +210,7 @@ http://127.0.0.1:8011/mcp
 
 不要把 Unity Bridge 的 WebSocket 地址配置给 Agent。WebSocket 仅供 UPilot 内部连接使用。
 
-## Codex、Claude Code 与 Cursor
+## Codex、Claude Code、Cursor 与 OpenCode
 
 推荐通过 Unity 的 UPilot 界面自动配置。以下内容仅用于检查配置或自动配置不可用时手动处理。
 
@@ -292,6 +292,38 @@ Cursor 官方支持项目级 `.agents/skills`，因此与 Codex 共享：
 .agents/skills/upilot-unity-mcp
 ```
 
+### OpenCode
+
+项目配置文件优先使用：
+
+```text
+opencode.json
+```
+
+如果项目已经使用 `opencode.jsonc`，UPilot 会保留该文件并只更新其中的 `mcp.upilot`：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "upilot": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8011/mcp",
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}
+```
+
+OpenCode 原生读取项目根目录 `AGENTS.md`，并与 Codex、Cursor 共享：
+
+```text
+.agents/skills/upilot-unity-mcp
+```
+
+OpenCode 还会发现 `.claude/skills` 和 `.opencode/skills`。如果多个目录存在同名 `upilot-unity-mcp`，UPilot 会比较内容哈希；内容不同会显示为 Skill 冲突，不能标记为已就绪。
+
 手动修改配置后，请重启或刷新 Agent 客户端。
 
 ## 如何确认安装成功
@@ -303,7 +335,7 @@ Cursor 官方支持项目级 `.agents/skills`，因此与 Codex 共享：
 - 顶部状态为 **已就绪**。
 - 主界面显示 MCP 地址。
 - 常用 Agent 显示 **MCP 已配置**。
-- Codex、Claude Code 和 Cursor 都显示独立的规则、MCP 配置与 Skill 状态。
+- Codex、Claude Code、Cursor 和 OpenCode 都显示独立的规则、MCP 配置与 Skill 状态。
 
 ### 在浏览器中检查服务
 
@@ -400,7 +432,7 @@ http://127.0.0.1:8011/health
 
 ### Agent 配置
 
-主界面会列出 Codex、Claude Code 和 Cursor，默认只显示“已就绪”“需更新”“未配置”或“异常”等最终状态。展开任意 Agent 后，都会以相同顺序和相同视觉权重显示三项：**Agent 规则**、**MCP 配置**、**Skill 技能**。
+主界面会列出 Codex、Claude Code、Cursor 和 OpenCode，默认只显示“已就绪”“需更新”“未配置”或“异常”等最终状态。展开任意 Agent 后，都会以相同顺序和相同视觉权重显示三项：**Agent 规则**、**MCP 配置**、**Skill 技能**。
 
 每一项都提供 Tooltip：鼠标悬停时会显示可用的绝对文件/目录路径、当前版本与目标版本、MCP 当前/目标 URL、内容哈希、错误或适用性说明。状态检查与更新入口彼此独立，不再把 Agent 规则和 Skill 合并成一个状态。
 
@@ -411,14 +443,14 @@ http://127.0.0.1:8011/health
 - **配置**：当前 Agent 还没有 UPilot MCP 配置，点击后新增配置。
 - **更新配置**：当前 Agent 已有 UPilot 配置。点击后会二次确认，只更新该 Agent 的 UPilot MCP 配置项。
 - **更新规则**：为当前 Agent 更新对应的 UPilot Agent 规则。
-- **更新 Skill**：更新当前 Agent 使用的 UPilot Skill；Cursor 与 Codex 的操作会更新同一个 `.agents/skills` 受管安装。
+- **更新 Skill**：更新当前 Agent 使用的 UPilot Skill；Codex、Cursor 与 OpenCode 的操作会更新同一个 `.agents/skills` 受管安装。
 - **更新全部**：更新已有的 UPilot MCP 连接条目，并重新同步全部 UPilot Skill/AGENT 规则。
 - **检查配置**：位于“更新全部”右侧的下拉菜单中，只刷新状态，不修改文件。
 - **强制重新配置全部**：重新写入已配置 Agent 的 MCP 地址，并重新生成 UPilot Skill/Agent 规则；执行前会明确提示可能替换各 Agent Skill 的本地修改。
 
 “更新全部”不会为尚未配置 MCP 的 Agent 自动新增连接。如果之后开始使用新的 Agent，请在对应一行点击 **配置**。
 
-Claude Code、Codex 和 Cursor 都支持 UPilot Skill。Claude Code 使用 `.claude/skills`；Cursor 官方可发现 `.agents/skills`，因此默认与 Codex 共享同一安装，避免维护第三份 Skill 内容。Cursor 的 Tooltip 会列出其可发现的项目级 Skill 目录，并按 Skill 名称去重统计。
+Claude Code、Codex、Cursor 和 OpenCode 都支持 UPilot Skill。Claude Code 使用 `.claude/skills`；Codex、Cursor 和 OpenCode 默认共享 `.agents/skills`，避免重复维护。Cursor 与 OpenCode 的 Tooltip 会列出其可发现的项目级 Skill 目录，按 Skill 名称去重统计，并在同名副本内容哈希不一致时显示冲突。
 
 如果 Skill/规则包含本地修改，强制更新可能覆盖 UPilot 管理的内容。确认前请先保存需要保留的自定义内容。
 
@@ -450,7 +482,7 @@ CLAUDE.md
 .claude/skills/upilot-unity-mcp/AGENTS.md.template
 ```
 
-`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter。Skill 只维护 `skills/upilot-unity-mcp/` 一份主源，安装时生成 `.agents/skills` 和 `.claude/skills` 受管副本；Cursor 直接复用 `.agents/skills`。
+`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter；OpenCode 原生复用 `AGENTS.md`。Skill 只维护 `skills/upilot-unity-mcp/` 一份主源，安装时生成 `.agents/skills` 和 `.claude/skills` 受管副本；Cursor 与 OpenCode 直接复用 `.agents/skills`。
 
 main 分支维护规则：
 

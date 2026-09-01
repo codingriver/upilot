@@ -26,7 +26,10 @@ After server tool registration changes, restart or refresh the MCP client so its
 - Codex: `.agents/skills/upilot-unity-mcp`
 - Claude Code: `.claude/skills/upilot-unity-mcp`
 - Cursor: `.agents/skills/upilot-unity-mcp`
+- OpenCode: `.agents/skills/upilot-unity-mcp`
 
-Cursor officially discovers both `.agents/skills` and `.cursor/skills`, and also reads compatible Claude/Codex directories. UPilot uses `.agents/skills` as the shared Codex/Cursor install to reduce managed copies. If multiple compatible roots contain a Skill with the same name, keep their contents identical and refresh Cursor after updates.
+Cursor officially discovers both `.agents/skills` and `.cursor/skills`, and also reads compatible Claude/Codex directories. UPilot uses `.agents/skills` as the shared Codex/Cursor/OpenCode install to reduce managed copies. If multiple compatible roots contain a Skill with the same name, keep their contents identical and refresh the affected client after updates.
+
+OpenCode project MCP config belongs in `opencode.json` (or an existing `opencode.jsonc`) under `mcp.upilot` with `type: "remote"`, the project HTTP `/mcp` URL, `enabled: true`, and a tool-discovery timeout of at least 30000 ms. OpenCode natively reads project `AGENTS.md` and discovers `.agents/skills`, `.claude/skills`, and `.opencode/skills`. UPilot shares the `.agents/skills` copy with Codex and Cursor. When `.claude/skills` also contains `upilot-unity-mcp`, keep the physical copies byte-equivalent or disable OpenCode's Claude Skill compatibility with `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`; different hashes are a conflict, not a second Skill.
 
 The shared Skill contains on-demand tool routing, safety, compile/test, long-operation, recovery, and evidence workflows. Keep stable project-wide constraints in Agent rules instead of duplicating the Skill body there.

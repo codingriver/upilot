@@ -651,18 +651,23 @@ namespace CodingRiver.UPilot.Tests
             var ruleStatuses = UPilotAgentSetup.GetRuleConfigStatuses();
             var skillStatuses = UPilotAgentSetup.GetSkillConfigStatuses();
 
-            Assert.That(mcpStatuses.Length, Is.EqualTo(3));
-            Assert.That(ruleStatuses.Length, Is.EqualTo(3));
-            Assert.That(skillStatuses.Length, Is.EqualTo(3));
+            Assert.That(mcpStatuses.Length, Is.EqualTo(4));
+            Assert.That(ruleStatuses.Length, Is.EqualTo(4));
+            Assert.That(skillStatuses.Length, Is.EqualTo(4));
             Assert.That(mcpStatuses[0].ClientName, Is.EqualTo("Codex"));
             Assert.That(mcpStatuses[1].ClientName, Is.EqualTo("Claude Code"));
             Assert.That(mcpStatuses[2].ClientName, Is.EqualTo("Cursor"));
+            Assert.That(mcpStatuses[3].ClientName, Is.EqualTo("OpenCode"));
             Assert.That(ruleStatuses[0].ClientName, Is.EqualTo("Codex"));
             Assert.That(ruleStatuses[1].ClientName, Is.EqualTo("Claude Code"));
             Assert.That(ruleStatuses[2].ClientName, Is.EqualTo("Cursor"));
+            Assert.That(ruleStatuses[3].ClientName, Is.EqualTo("OpenCode"));
+            Assert.That(ruleStatuses[3].ConfigPath, Is.EqualTo(ruleStatuses[0].ConfigPath));
+            Assert.That(ruleStatuses[3].IssuePaths, Is.EqualTo(ruleStatuses[0].IssuePaths));
             Assert.That(skillStatuses[0].ClientName, Is.EqualTo("Codex"));
             Assert.That(skillStatuses[1].ClientName, Is.EqualTo("Claude Code"));
             Assert.That(skillStatuses[2].ClientName, Is.EqualTo("Cursor"));
+            Assert.That(skillStatuses[3].ClientName, Is.EqualTo("OpenCode"));
             Assert.That(skillStatuses[0].IsApplicable, Is.True);
             Assert.That(skillStatuses[0].InstalledSkillCount, Is.GreaterThanOrEqualTo(1));
             Assert.That(skillStatuses[0].InstalledSkillNames, Does.Contain("upilot-unity-mcp"));
@@ -683,6 +688,12 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(skillStatuses[2].SkillRootPaths, Is.Not.Empty);
             Assert.That(skillStatuses[1].IsSatisfied, Is.True);
             Assert.That(skillStatuses[2].IsSatisfied, Is.True);
+            Assert.That(skillStatuses[3].IsApplicable, Is.True);
+            Assert.That(skillStatuses[3].State, Is.EqualTo(AgentSkillConfigState.Current));
+            Assert.That(skillStatuses[3].ConfigPath, Is.EqualTo(skillStatuses[0].ConfigPath));
+            Assert.That(skillStatuses[3].InstalledSkillNames, Does.Contain("upilot-unity-mcp"));
+            Assert.That(skillStatuses[3].UpilotSkillCount, Is.EqualTo(1));
+            Assert.That(skillStatuses[3].ApplicabilityExplanation, Does.Contain("OpenCode"));
         }
 
         [Test]
@@ -692,13 +703,191 @@ namespace CodingRiver.UPilot.Tests
             var codex = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "Codex");
             var claude = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "Claude Code");
             var cursor = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "Cursor");
+            var openCode = UPilotAgentSetup.GetAgentSkillInstallPath(projectRoot, "OpenCode");
 
             Assert.That(codex, Does.Contain(Path.Combine(".agents", "skills", "upilot-unity-mcp")));
             Assert.That(claude, Does.Contain(Path.Combine(".claude", "skills", "upilot-unity-mcp")));
             Assert.That(cursor, Is.EqualTo(codex));
+            Assert.That(openCode, Is.EqualTo(codex));
             Assert.That(
                 UPilotAgentSetup.GetAgentSkillDiscoveryRoots(projectRoot, "Cursor"),
                 Does.Contain(Path.Combine(projectRoot, ".cursor", "skills")));
+            Assert.That(
+                UPilotAgentSetup.GetAgentSkillDiscoveryRoots(projectRoot, "OpenCode"),
+                Does.Contain(Path.Combine(projectRoot, ".opencode", "skills")));
+            Assert.That(
+                UPilotAgentSetup.GetAgentSkillDiscoveryRoots(projectRoot, "OpenCode"),
+                Does.Contain(Path.Combine(projectRoot, ".claude", "skills")));
+        }
+
+        [Test]
+        public void OpenCodeJsonUpsertPreservesJsoncCommentsAndOtherSettings()
+        {
+            var original = "{\n" +
+                           "  // keep this comment\n" +
+                           "  \"model\": \"anthropic/test\",\n" +
+                           "  \"mcp\": {\n" +
+                           "    \"other\": { \"type\": \"remote\", \"url\": \"https://example.com/mcp\" },\n" +
+                           "    \"upilot\": { \"type\": \"local\", \"url\": \"http://127.0.0.1:9999/mcp\", \"enabled\": false }\n" +
+                           "  }\n" +
+                           "}\n";
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "TryUpsertOpenCodeMcpServer",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var args = new object[] { original, null, null };
+
+            var ok = (bool)method.Invoke(null, args);
+            var updated = (string)args[1];
+
+            Assert.That(ok, Is.True, args[2] as string);
+            Assert.That(updated, Does.Contain("// keep this comment"));
+            Assert.That(updated, Does.Contain("\"model\": \"anthropic/test\""));
+            Assert.That(updated, Does.Contain("https://example.com/mcp"));
+            Assert.That(updated, Does.Contain("\"type\": \"remote\""));
+            Assert.That(updated, Does.Contain(UPilotAgentSetup.McpUrl));
+            Assert.That(updated, Does.Contain("\"enabled\": true"));
+            Assert.That(updated, Does.Contain("\"timeout\": 30000"));
+            Assert.That(updated, Does.Not.Contain("127.0.0.1:9999"));
+        }
+
+        [Test]
+        public void OpenCodeJsonUpsertRejectsInvalidMcpShapeWithoutReplacingFile()
+        {
+            const string original = "{ \"model\": \"test\", \"mcp\": [] }\n";
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "TryUpsertOpenCodeMcpServer",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var args = new object[] { original, null, null };
+
+            var ok = (bool)method.Invoke(null, args);
+
+            Assert.That(ok, Is.False);
+            Assert.That(args[1], Is.EqualTo(original));
+            Assert.That(args[2] as string, Does.Contain("mcp 必须是 JSON 对象"));
+        }
+
+        [Test]
+        public void OpenCodeJsonUpsertAddsMcpWithoutRemovingJsoncContent()
+        {
+            var original = "{\n" +
+                           "  // retained project setting\n" +
+                           "  \"model\": \"anthropic/test\"\n" +
+                           "}\n";
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                "TryUpsertOpenCodeMcpServer",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var args = new object[] { original, null, null };
+
+            var ok = (bool)method.Invoke(null, args);
+            var updated = (string)args[1];
+
+            Assert.That(ok, Is.True, args[2] as string);
+            Assert.That(updated, Does.Contain("// retained project setting"));
+            Assert.That(updated, Does.Contain("\"model\": \"anthropic/test\""));
+            Assert.That(updated, Does.Contain("\"mcp\""));
+            Assert.That(updated, Does.Contain("\"upilot\""));
+            Assert.That(updated, Does.Contain(UPilotAgentSetup.McpUrl));
+            Assert.That(updated, Does.Contain("\"timeout\": 30000"));
+        }
+
+        [Test]
+        public void OpenCodeInspectionReportsDisabledLocalAndLowTimeoutConfiguration()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-opencode-config-" + Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "opencode.jsonc");
+            Directory.CreateDirectory(directory);
+            try
+            {
+                File.WriteAllText(
+                    path,
+                    "{\n" +
+                    "  // valid JSONC comment\n" +
+                    "  \"mcp\": {\n" +
+                    "    \"upilot\": {\n" +
+                    "      \"type\": \"local\",\n" +
+                    "      \"url\": \"" + UPilotAgentSetup.McpUrl + "\",\n" +
+                    "      \"enabled\": false,\n" +
+                    "      \"timeout\": 1000\n" +
+                    "    }\n" +
+                    "  }\n" +
+                    "}\n");
+                var inspect = typeof(UPilotAgentSetup).GetMethod(
+                    "InspectOpenCodeConfig",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                var status = (AgentMcpConfigStatus)inspect.Invoke(null, new object[] { "OpenCode", path });
+
+                Assert.That(status.HasUPilotEntry, Is.True);
+                Assert.That(status.UsesCurrentUrl, Is.True);
+                Assert.That(status.IsConfigured, Is.False);
+                Assert.That(status.ConfigurationIssue, Does.Contain("remote"));
+                Assert.That(status.ConfigurationIssue, Does.Contain("已禁用"));
+                Assert.That(status.ConfigurationIssue, Does.Contain("30000"));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void OpenCodeConfigPathKeepsExistingJsoncWhenJsonIsAbsent()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-opencode-path-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var jsoncPath = Path.Combine(directory, "opencode.jsonc");
+            File.WriteAllText(jsoncPath, "{}\n");
+            try
+            {
+                var resolve = typeof(UPilotAgentSetup).GetMethod(
+                    "ResolveOpenCodeConfigPath",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                var resolved = (string)resolve.Invoke(null, new object[] { directory });
+
+                Assert.That(resolved, Is.EqualTo(jsoncPath));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void OpenCodeSkillStatusDetectsDifferentSameNameCopies()
+        {
+            var projectRoot = Path.Combine(Path.GetTempPath(), "upilot-opencode-skill-conflict-" + Guid.NewGuid().ToString("N"));
+            var agentsSkill = Path.Combine(projectRoot, ".agents", "skills", "upilot-unity-mcp");
+            var claudeSkill = Path.Combine(projectRoot, ".claude", "skills", "upilot-unity-mcp");
+            Directory.CreateDirectory(agentsSkill);
+            Directory.CreateDirectory(claudeSkill);
+            try
+            {
+                File.WriteAllText(Path.Combine(agentsSkill, "SKILL.md"), "---\nname: upilot-unity-mcp\ndescription: agents\n---\n");
+                File.WriteAllText(Path.Combine(claudeSkill, "SKILL.md"), "---\nname: upilot-unity-mcp\ndescription: claude changed\n---\n");
+                var writeMetadata = typeof(UPilotAgentSetup).GetMethod(
+                    "WriteSkillInstallMetadata",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                writeMetadata.Invoke(null, new object[] { agentsSkill });
+                var inspect = typeof(UPilotAgentSetup).GetMethod(
+                    "InspectSkillConfig",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+
+                var status = (AgentSkillConfigStatus)inspect.Invoke(null, new object[] { projectRoot, "OpenCode" });
+
+                Assert.That(status.State, Is.EqualTo(AgentSkillConfigState.Conflict));
+                Assert.That(status.UpilotSkillCount, Is.EqualTo(1));
+                Assert.That(status.DuplicateSkillPaths.Length, Is.EqualTo(2));
+                Assert.That(status.SkillConflictSummary, Does.Contain("SHA256 不一致"));
+                Assert.That(status.IsSatisfied, Is.False);
+            }
+            finally
+            {
+                if (Directory.Exists(projectRoot))
+                    Directory.Delete(projectRoot, recursive: true);
+            }
         }
 
         [Test]

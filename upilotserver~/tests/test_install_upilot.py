@@ -127,6 +127,7 @@ def test_skill_only_installs_editor_compatible_metadata_without_touching_manifes
     )
     assert claude_metadata["templateVersion"] == 27
     assert claude_metadata["contentSha256"] == install_upilot._skill_content_hash(claude_target)
+    assert not (project / ".opencode" / "skills" / install_upilot.SKILL_NAME).exists()
     assert manifest_path.read_bytes() == original_manifest
 
 
@@ -173,6 +174,29 @@ def test_claude_skill_uses_native_project_directory(tmp_path: Path) -> None:
 
     assert (project / ".claude" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
     assert not (project / ".agents" / "skills" / install_upilot.SKILL_NAME).exists()
+
+
+def test_opencode_skill_reuses_agents_directory_without_opencode_copy(tmp_path: Path) -> None:
+    upilot_dir = tmp_path / "upilot"
+    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
+    source.mkdir(parents=True)
+    source.joinpath("SKILL.md").write_text("# fixture\n", encoding="utf-8")
+    setup = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
+    setup.parent.mkdir(parents=True)
+    setup.write_text("private const int SkillInstallTemplateVersion = 30;\n", encoding="utf-8")
+    project = _unity_project(tmp_path)
+
+    assert install_upilot.main([
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+        "--skill-client", "opencode",
+    ]) == 0
+
+    assert (project / ".agents" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
+    assert not (project / ".opencode" / "skills" / install_upilot.SKILL_NAME).exists()
+    assert not (project / ".claude" / "skills" / install_upilot.SKILL_NAME).exists()
 
 
 def test_local_upm_and_remote_ref_are_mutually_exclusive(tmp_path: Path) -> None:

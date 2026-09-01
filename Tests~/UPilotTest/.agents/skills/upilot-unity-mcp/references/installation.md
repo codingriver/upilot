@@ -3,7 +3,7 @@
 1. Verify the Unity project root contains `Packages/manifest.json`.
 2. Add `io.github.codingriver.upilot` using an explicit stable release tag. For automated installation, pass the intended tag with `--upm-ref`, or use `--use-local-upm` when validating a local checkout.
 3. If running the MCP Server from Python instead of the packaged executable, install the Python package from `upilotserver~` with `--setup-python`.
-4. Install the shared repository Skill for the intended clients. Codex and Cursor use `.agents/skills/upilot-unity-mcp`; Claude Code uses `.claude/skills/upilot-unity-mcp`.
+4. Install the shared repository Skill for the intended clients. Codex, Cursor, and OpenCode use `.agents/skills/upilot-unity-mcp`; Claude Code uses `.claude/skills/upilot-unity-mcp`.
 5. Configure one MCP service named `upilot` at `http://127.0.0.1:8011/mcp`.
 6. Open Unity and verify project identity with `unity_mcp_status`.
 
@@ -15,7 +15,7 @@ python skills/upilot-unity-mcp/scripts/install_upilot.py \
   --upm-ref <STABLE_RELEASE_TAG>
 ```
 
-The installer targets all three supported Agents by default. Limit installation by repeating `--skill-client`, for example `--skill-client claude` or `--skill-client codex --skill-client cursor`. Cursor deliberately shares the `.agents/skills` copy with Codex instead of creating a third managed copy under `.cursor/skills`.
+The installer targets all four supported Agents by default. Limit installation by repeating `--skill-client`, for example `--skill-client opencode` or `--skill-client codex --skill-client cursor --skill-client opencode`. Codex, Cursor, and OpenCode deliberately share the `.agents/skills` copy instead of creating separate managed copies under `.cursor/skills` or `.opencode/skills`.
 
 For a local repository checkout, replace `--upm-ref` with `--use-local-upm`. The installer deliberately has no default UPM version and does not infer one from `package.json`: a remote install must name its tag, branch, or commit explicitly, while the MCP Server may be distributed and versioned independently as an executable.
 

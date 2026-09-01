@@ -217,16 +217,16 @@ def install_skill(args: argparse.Namespace, upilot_dir: Path) -> None:
     if not source.is_dir():
         raise SystemExit(f"source skill not found: {source}")
 
-    clients = set(args.skill_client or ("codex", "claude", "cursor"))
+    clients = set(args.skill_client or ("codex", "claude", "cursor", "opencode"))
     targets: list[Path] = []
     unity_project = Path(args.unity_project).expanduser().resolve() if args.unity_project else Path.cwd()
     if args.install_skill in {"repo", "both"}:
-        if clients.intersection({"codex", "cursor"}):
+        if clients.intersection({"codex", "cursor", "opencode"}):
             targets.append(unity_project / ".agents" / "skills" / SKILL_NAME)
         if "claude" in clients:
             targets.append(unity_project / ".claude" / "skills" / SKILL_NAME)
     if args.install_skill in {"user", "both"}:
-        if clients.intersection({"codex", "cursor"}):
+        if clients.intersection({"codex", "cursor", "opencode"}):
             targets.append(Path.home() / ".agents" / "skills" / SKILL_NAME)
         if "claude" in clients:
             targets.append(Path.home() / ".claude" / "skills" / SKILL_NAME)
@@ -311,10 +311,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skill-client",
         action="append",
-        choices=["codex", "claude", "cursor"],
+        choices=["codex", "claude", "cursor", "opencode"],
         help=(
             "Agent that should discover the installed Skill; repeat for multiple Agents. "
-            "Defaults to all. Codex and Cursor share .agents/skills; Claude uses .claude/skills."
+            "Defaults to all. Codex, Cursor, and OpenCode share .agents/skills; Claude uses .claude/skills."
         ),
     )
     parser.add_argument("--skill-only", action="store_true", help="Synchronize Skill content without modifying Packages/manifest.json")

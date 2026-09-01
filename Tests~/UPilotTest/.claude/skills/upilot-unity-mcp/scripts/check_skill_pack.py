@@ -119,6 +119,7 @@ def check_repository_consistency() -> None:
     agent_reference = (REPO_ROOT / "Documentation~" / "AgentRules" / "AGENTS.upilot.md").read_text(encoding="utf-8")
     skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     installation = (ROOT / "references" / "installation.md").read_text(encoding="utf-8")
+    client_configs = (ROOT / "references" / "client-configs.md").read_text(encoding="utf-8")
     installer = (ROOT / "scripts" / "install_upilot.py").read_text(encoding="utf-8")
     release_builder = (REPO_ROOT / "upilotserver~" / "deploy" / "build_release.py").read_text(encoding="utf-8")
     mcp_example_path = REPO_ROOT / "upilotserver~" / "mcp.example.json"
@@ -158,8 +159,9 @@ def check_repository_consistency() -> None:
         "local UPM documentation": (installation, "--use-local-upm"),
         "HTTP installer config": (installer, "url = {toml_string(f'http://127.0.0.1:{args.http_port}/mcp')}"),
         "Claude Skill install": (installer, 'targets.append(unity_project / ".claude" / "skills" / SKILL_NAME)'),
-        "shared Codex Cursor Skill install": (installer, 'clients.intersection({"codex", "cursor"})'),
-        "multi-client Skill documentation": (installation, "Codex and Cursor use `.agents/skills/upilot-unity-mcp`; Claude Code uses `.claude/skills/upilot-unity-mcp`"),
+        "shared Codex Cursor OpenCode Skill install": (installer, 'clients.intersection({"codex", "cursor", "opencode"})'),
+        "multi-client Skill documentation": (installation, "Codex, Cursor, and OpenCode use `.agents/skills/upilot-unity-mcp`; Claude Code uses `.claude/skills/upilot-unity-mcp`"),
+        "OpenCode MCP documentation": (client_configs, "OpenCode project MCP config belongs in `opencode.json`"),
         "explicit remote ref error": (installer, "Remote UPM installation requires --upm-ref"),
         "repository skill entry": (repo_entry, "../../../skills/upilot-unity-mcp/SKILL.md"),
         "repository UPilot Tracer discovery": (repo_entry, "optional UPilot Tracer diagnostics"),

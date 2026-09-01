@@ -953,9 +953,10 @@ namespace CodingRiver.UPilot
                     hasErrors = true;
             }
 
+            var seenRulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var status in _ruleConfigs)
             {
-                if (!NeedsRuleUpdate(status))
+                if (!NeedsRuleUpdate(status) || !seenRulePaths.Add(GetRuleIssueKey(status)))
                     continue;
 
                 issueCount++;
@@ -1020,6 +1021,15 @@ namespace CodingRiver.UPilot
                     return MessageType.Warning;
                 }
 
+                if (status.State == AgentSkillConfigState.Conflict)
+                {
+                    message = $"{status.ClientName} Skill 发现同名冲突\n" +
+                              (string.IsNullOrEmpty(status.SkillConflictSummary)
+                                  ? "请同步或移除内容不同的重复 Skill。"
+                                  : status.SkillConflictSummary);
+                    return MessageType.Error;
+                }
+
                 if (status.State == AgentSkillConfigState.Missing)
                 {
                     message = $"{status.ClientName} 尚未安装 UPilot Skill\n安装后即可使用 Skill 提供的工作流与工具说明。";
@@ -1033,7 +1043,9 @@ namespace CodingRiver.UPilot
             if (issueCount == 1 && firstMcpIssue.HasValue)
             {
                 var status = firstMcpIssue.Value;
-                message = $"{status.ClientName} 连接地址需要更新\n当前连接可能无法使用，处理后会同步到最新地址。";
+                message = !string.IsNullOrEmpty(status.ConfigurationIssue)
+                    ? $"{status.ClientName} MCP 配置需要更新\n{status.ConfigurationIssue}。"
+                    : $"{status.ClientName} 连接地址需要更新\n当前连接可能无法使用，处理后会同步到最新地址。";
                 return MessageType.Warning;
             }
 
@@ -1055,9 +1067,10 @@ namespace CodingRiver.UPilot
                     issueCount++;
             }
 
+            var seenRulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var status in _ruleConfigs)
             {
-                if (NeedsRuleUpdate(status))
+                if (NeedsRuleUpdate(status) && seenRulePaths.Add(GetRuleIssueKey(status)))
                     issueCount++;
             }
 
@@ -1074,9 +1087,10 @@ namespace CodingRiver.UPilot
         private int CountCustomizedRuleConfigs()
         {
             var count = 0;
+            var seenRulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var status in _ruleConfigs)
             {
-                if (status.HasLocalCustomization)
+                if (status.HasLocalCustomization && seenRulePaths.Add(GetRuleIssueKey(status)))
                     count++;
             }
 
@@ -1096,7 +1110,9 @@ namespace CodingRiver.UPilot
                 return true;
             if (!status.FileExists)
                 return false;
-            return !status.HasUPilotEntry || !status.UsesCurrentUrl;
+            return !status.HasUPilotEntry ||
+                   !status.UsesCurrentUrl ||
+                   !string.IsNullOrEmpty(status.ConfigurationIssue);
         }
 
         private static bool NeedsRuleUpdate(AgentRuleConfigStatus status)
@@ -1114,6 +1130,14 @@ namespace CodingRiver.UPilot
             return string.IsNullOrEmpty(status.ConfigPath)
                 ? status.ClientName
                 : status.ConfigPath;
+        }
+
+        private static string GetRuleIssueKey(AgentRuleConfigStatus status)
+        {
+            var issuePaths = status.IssuePaths ?? Array.Empty<string>();
+            if (issuePaths.Length > 0)
+                return string.Join("|", issuePaths);
+            return status.ClientName + "|" + status.ConfigPath;
         }
 
         private void DrawAgentConfigurationRow(
@@ -1273,7 +1297,8 @@ namespace CodingRiver.UPilot
         {
             return !string.IsNullOrEmpty(mcpStatus.ErrorMessage) ||
                    ruleStatus.State == AgentRuleConfigState.Error ||
-                   skillStatus.State == AgentSkillConfigState.Error;
+                   skillStatus.State == AgentSkillConfigState.Error ||
+                   skillStatus.State == AgentSkillConfigState.Conflict;
         }
 
         private static void DrawStatusCell(Rect rect, string value, bool ready, bool error = false)
@@ -1348,6 +1373,7 @@ namespace CodingRiver.UPilot
         {
             if (status.IsConfigured) return "已配置";
             if (status.HasUPilotEntry && !status.UsesCurrentUrl) return "需要更新";
+            if (!string.IsNullOrEmpty(status.ConfigurationIssue)) return "需要更新";
             if (!string.IsNullOrEmpty(status.ErrorMessage)) return "异常";
             return "未配置";
         }
@@ -1379,7 +1405,8 @@ namespace CodingRiver.UPilot
         private static AgentDetailState GetSkillDetailState(AgentSkillConfigStatus status)
         {
             if (status.State == AgentSkillConfigState.NotProvided) return AgentDetailState.Unavailable;
-            if (status.State == AgentSkillConfigState.Error) return AgentDetailState.Error;
+            if (status.State == AgentSkillConfigState.Error || status.State == AgentSkillConfigState.Conflict)
+                return AgentDetailState.Error;
             return status.IsCurrent ? AgentDetailState.Ready : AgentDetailState.NeedsAttention;
         }
 
@@ -1397,6 +1424,7 @@ namespace CodingRiver.UPilot
             AppendTooltipLine(text, "配置文件", status.ConfigPath);
             AppendTooltipLine(text, "当前 URL", status.ConfiguredUrl);
             AppendTooltipLine(text, "目标 URL", UPilotAgentSetup.McpUrl);
+            AppendTooltipLine(text, "配置问题", status.ConfigurationIssue);
             if (serverStatus.ToolCountsKnown)
             {
                 if (serverStatus.DetailedToolCountsKnown)
@@ -1467,6 +1495,11 @@ namespace CodingRiver.UPilot
             AppendTooltipLine(text, "项目级 Skill 数量", status.InstalledSkillCount + " 个");
             AppendTooltipLine(text, "已安装 Skill", FormatLimitedList(status.InstalledSkillNames, 8));
             AppendTooltipLine(text, "UPilot Skill 数量", status.UpilotSkillCount + " 个");
+            var duplicatePaths = status.DuplicateSkillPaths ?? Array.Empty<string>();
+            AppendTooltipLine(text, "同名 UPilot Skill 副本", duplicatePaths.Length + " 个");
+            for (var i = 0; i < duplicatePaths.Length; i++)
+                AppendTooltipLine(text, $"同名副本 {i + 1}", duplicatePaths[i]);
+            AppendTooltipLine(text, "Skill 冲突", status.SkillConflictSummary);
             AppendTooltipLine(text, "安装目录", status.ConfigPath);
             AppendTooltipLine(text, "Skill 源目录", status.SourcePath);
             if (status.IsApplicable)
@@ -1638,12 +1671,16 @@ namespace CodingRiver.UPilot
             try
             {
                 var force = status.State == AgentSkillConfigState.Customized ||
+                            status.State == AgentSkillConfigState.Conflict ||
                             status.State == AgentSkillConfigState.Current;
-                if (status.State == AgentSkillConfigState.Customized)
+                if (status.State == AgentSkillConfigState.Customized ||
+                    status.State == AgentSkillConfigState.Conflict)
                 {
                     var choice = EditorUtility.DisplayDialogComplex(
                         $"如何处理 {status.ClientName} Skill？",
-                        "当前 Skill 有本地修改。更新为 UPilot 最新版本会替换这些修改。",
+                        status.State == AgentSkillConfigState.Conflict
+                            ? "发现多个同名 UPilot Skill 且内容不同。更新会重新生成 UPilot 管理的 Skill 副本；其它目录中的自定义副本仍需单独处理。"
+                            : "当前 Skill 有本地修改。更新为 UPilot 最新版本会替换这些修改。",
                         "更新为最新版本",
                         "取消",
                         "保留当前内容");

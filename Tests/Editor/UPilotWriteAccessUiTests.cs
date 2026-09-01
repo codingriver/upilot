@@ -153,6 +153,18 @@ namespace CodingRiver.UPilot.Tests
             var missingMcp = new AgentMcpConfigStatus("Codex", "config", false, false, false);
             var failedRule = new AgentRuleConfigStatus("Codex", "rules", AgentRuleConfigState.Error, "failed");
             var failedSkill = new AgentSkillConfigStatus("Codex", "skill", AgentSkillConfigState.Error, "failed");
+            var conflictingSkill = new AgentSkillConfigStatus(
+                "OpenCode",
+                "skill",
+                AgentSkillConfigState.Conflict,
+                skillConflictSummary: "duplicate hashes differ");
+            var incompleteMcp = new AgentMcpConfigStatus(
+                "OpenCode",
+                "opencode.json",
+                true,
+                true,
+                true,
+                configurationIssue: "timeout too low");
 
             Assert.That(
                 UPilotMainWindow.GetAgentOverallStateText(readyMcp, currentRule, currentSkill),
@@ -175,6 +187,39 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 UPilotMainWindow.GetAgentOverallStateText(readyMcp, currentRule, failedSkill),
                 Is.EqualTo("异常"));
+            Assert.That(
+                UPilotMainWindow.GetAgentOverallStateText(readyMcp, currentRule, conflictingSkill),
+                Is.EqualTo("异常"));
+            Assert.That(
+                UPilotMainWindow.GetAgentOverallStateText(incompleteMcp, currentRule, currentSkill),
+                Is.EqualTo("需更新"));
+        }
+
+        [Test]
+        public void SharedAgentRuleIssueUsesOnePhysicalPathKey()
+        {
+            var agentsPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "upilot", "AGENTS.md"));
+            var codex = new AgentRuleConfigStatus(
+                "Codex",
+                agentsPath,
+                AgentRuleConfigState.UpdateAvailable,
+                configPaths: new[] { agentsPath },
+                issuePaths: new[] { agentsPath });
+            var openCode = new AgentRuleConfigStatus(
+                "OpenCode",
+                agentsPath,
+                AgentRuleConfigState.UpdateAvailable,
+                configPaths: new[] { agentsPath },
+                issuePaths: new[] { agentsPath });
+            var method = typeof(UPilotMainWindow).GetMethod(
+                "GetRuleIssueKey",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var codexKey = (string)method.Invoke(null, new object[] { codex });
+            var openCodeKey = (string)method.Invoke(null, new object[] { openCode });
+
+            Assert.That(openCodeKey, Is.EqualTo(codexKey));
+            Assert.That(codexKey, Is.EqualTo(agentsPath));
         }
 
         [Test]
@@ -224,7 +269,13 @@ namespace CodingRiver.UPilot.Tests
                 {
                     Path.GetDirectoryName(skillPath),
                     Path.GetFullPath(Path.Combine(Path.GetTempPath(), "upilot", "compatible-skills")),
-                });
+                },
+                duplicateSkillPaths: new[]
+                {
+                    skillPath,
+                    Path.GetFullPath(Path.Combine(Path.GetTempPath(), "upilot", "compatible-skills", "upilot-unity-mcp")),
+                },
+                skillConflictSummary: "duplicate hashes differ");
 
             var serverStatus = new McpServerStatus
             {
@@ -264,6 +315,8 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(skillTooltip, Does.Contain("upilot-unity-mcp"));
             Assert.That(skillTooltip, Does.Contain("Skill 引用的 MCP 工具：12 个"));
             Assert.That(skillTooltip, Does.Contain("unity_mcp_status"));
+            Assert.That(skillTooltip, Does.Contain("同名 UPilot Skill 副本：2 个"));
+            Assert.That(skillTooltip, Does.Contain("duplicate hashes differ"));
         }
     }
 }

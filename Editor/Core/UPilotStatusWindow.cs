@@ -789,6 +789,10 @@ namespace CodingRiver.UPilot
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     DrawAgentConfigButton("Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("OpenCode", () => UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
+                }
+                using (new EditorGUILayout.HorizontalScope())
+                {
                     if (GUILayout.Button("写入规则", GUILayout.Height(22)))
                     {
                         Debug.Log("[UPilot] Agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
@@ -803,6 +807,7 @@ namespace CodingRiver.UPilot
                     DrawAgentConfigButton("Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
                     DrawAgentConfigButton("Claude", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
                     DrawAgentConfigButton("Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("OpenCode", () => UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
                     if (GUILayout.Button("写入规则", GUILayout.Height(22)))
                     {
                         Debug.Log("[UPilot] Agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
@@ -1525,6 +1530,8 @@ namespace CodingRiver.UPilot
                     HandleAgentConfigResult("Claude Code", UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
                 else if (clientName == "Cursor")
                     HandleAgentConfigResult("Cursor", UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                else if (clientName == "OpenCode")
+                    HandleAgentConfigResult("OpenCode", UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
             }
             catch (Exception ex)
             {

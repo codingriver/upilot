@@ -192,10 +192,15 @@ namespace CodingRiver.UPilot
 
         public static string ConfigureAndStart(bool codex, bool claudeCode, bool cursor)
         {
+            return ConfigureAndStart(codex, claudeCode, cursor, openCode: false);
+        }
+
+        public static string ConfigureAndStart(bool codex, bool claudeCode, bool cursor, bool openCode)
+        {
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
                 return UPilotUpdateService.ServiceStartBlockedMessage;
 
-            if (!codex && !claudeCode && !cursor)
+            if (!codex && !claudeCode && !cursor && !openCode)
                 codex = true;
 
             EnsureAvailablePortsWhenStopped();
@@ -208,6 +213,8 @@ namespace CodingRiver.UPilot
                 result.AppendLine(UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: false));
             if (cursor)
                 result.AppendLine(UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: false));
+            if (openCode)
+                result.AppendLine(UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: false));
 
             UPilotAgentSetup.MarkAgentRulesHandledForCurrentProject();
             UPilotSetupState.MarkCompleted();
@@ -502,6 +509,8 @@ namespace CodingRiver.UPilot
                     UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: false);
                 else if (status.ClientName == "Cursor")
                     UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: false);
+                else if (status.ClientName == "OpenCode")
+                    UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: false);
             }
         }
     }
