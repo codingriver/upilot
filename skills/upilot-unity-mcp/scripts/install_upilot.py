@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -77,13 +78,37 @@ def load_manifest(path: Path) -> dict:
     return data
 
 
-def save_manifest(path: Path, data: dict, dry_run: bool) -> None:
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+def _manifest_style(path: Path) -> tuple[str, bool, str]:
+    raw = path.read_bytes()
+    has_bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    newline = "\r\n" if "\r\n" in text else ("\r" if "\r" in text else "\n")
+    return text, has_bom, newline
+
+
+def save_manifest(path: Path, data: dict, dry_run: bool, *, has_bom: bool = False, newline: str = "\n") -> None:
+    text = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").replace("\n", newline)
     if dry_run:
         print(f"Would write {path}")
         print(text)
         return
-    path.write_text(text, encoding="utf-8")
+    encoded = text.encode("utf-8")
+    if has_bom:
+        encoded = b"\xef\xbb\xbf" + encoded
+    path.write_bytes(encoded)
+
+
+def _equivalent_local_upm_reference(value: str, unity_project: Path, upilot_dir: Path) -> bool:
+    if not str(value).startswith("file:"):
+        return False
+    raw_path = str(value)[5:].replace("/", os.sep)
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = unity_project / "Packages" / candidate
+    try:
+        return candidate.resolve() == upilot_dir.resolve()
+    except OSError:
+        return False
 
 
 def ensure_upilot_repo(args: argparse.Namespace) -> Path:
@@ -118,11 +143,13 @@ def setup_python_env(upilot_dir: Path, venv: Path, python: str, dry_run: bool) -
 def update_unity_manifest(args: argparse.Namespace, upilot_dir: Path) -> None:
     unity_project = Path(args.unity_project).expanduser().resolve()
     manifest_path = unity_project / "Packages" / "manifest.json"
+    _, has_bom, newline = _manifest_style(manifest_path)
     data = load_manifest(manifest_path)
     deps = data["dependencies"]
+    original_dependency = str(deps.get(UPM_PACKAGE) or "")
 
     if args.use_local_upm:
-        value = "file:" + upilot_dir.as_posix()
+        value = original_dependency if _equivalent_local_upm_reference(original_dependency, unity_project, upilot_dir) else "file:" + upilot_dir.as_posix()
     else:
         upm_ref = str(args.upm_ref or "").strip()
         if not upm_ref:
@@ -141,8 +168,46 @@ def update_unity_manifest(args: argparse.Namespace, upilot_dir: Path) -> None:
         if isinstance(testables, list) and "com.unity.inputsystem" not in testables:
             testables.append("com.unity.inputsystem")
 
-    save_manifest(manifest_path, data, args.dry_run)
+    if value == original_dependency and not args.enable_flow:
+        print(f"Unity manifest preserved (equivalent UPM reference): {manifest_path}")
+        return
+    save_manifest(manifest_path, data, args.dry_run, has_bom=has_bom, newline=newline)
     print(f"Unity manifest configured: {manifest_path}")
+
+
+def _skill_template_version(upilot_dir: Path) -> int:
+    setup_path = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
+    match = re.search(r"SkillInstallTemplateVersion\s*=\s*(\d+)", setup_path.read_text(encoding="utf-8"))
+    if not match:
+        raise SystemExit(f"SkillInstallTemplateVersion not found: {setup_path}")
+    return int(match.group(1))
+
+
+def _skill_content_hash(target: Path) -> str:
+    digest = hashlib.sha256()
+    files = sorted(
+        (path for path in target.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(target).as_posix().lower(),
+    )
+    for path in files:
+        relative = path.relative_to(target).as_posix()
+        if path.name == ".upilot-install.json" or "__pycache__" in path.parts or path.suffix.lower() in {".pyc", ".pyo"}:
+            continue
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _write_skill_metadata(target: Path, upilot_dir: Path) -> None:
+    metadata = {
+        "templateVersion": _skill_template_version(upilot_dir),
+        "contentSha256": _skill_content_hash(target),
+    }
+    target.joinpath(".upilot-install.json").write_text(
+        json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
 
 
 def install_skill(args: argparse.Namespace, upilot_dir: Path) -> None:
@@ -171,6 +236,7 @@ def install_skill(args: argparse.Namespace, upilot_dir: Path) -> None:
         if not args.dry_run:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source, target, ignore=shutil.ignore_patterns("*.meta"))
+            _write_skill_metadata(target, upilot_dir)
 
 
 def toml_string(value: str) -> str:
@@ -235,6 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--venv", help="Python venv path; default is upilotserver~/.venv")
     parser.add_argument("--install-skill", choices=["none", "repo", "user", "both"], default="repo")
+    parser.add_argument("--skill-only", action="store_true", help="Synchronize Skill content without modifying Packages/manifest.json")
     parser.add_argument("--write-codex-mcp", choices=["none", "project", "user"], default="none")
     parser.add_argument("--http-port", type=parse_port, default=8011, help="Public Streamable HTTP MCP port")
     parser.add_argument("--mcp-name", type=parse_mcp_name, default="upilot", help="Codex MCP registration name")
@@ -263,11 +330,13 @@ def main(argv: list[str] | None = None) -> int:
         venv = Path(args.venv).expanduser().resolve() if args.venv else upilot_dir / "upilotserver~" / ".venv"
         setup_python_env(upilot_dir, venv, args.python, args.dry_run)
 
-    if args.unity_project:
+    if args.unity_project and not args.skill_only:
         update_unity_manifest(args, upilot_dir)
     elif args.write_codex_mcp != "none":
         raise SystemExit("--write-codex-mcp requires --unity-project")
 
+    if args.skill_only and args.install_skill == "none":
+        raise SystemExit("--skill-only requires --install-skill repo, user, or both")
     install_skill(args, upilot_dir)
     write_codex_mcp(args)
 

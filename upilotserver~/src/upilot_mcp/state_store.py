@@ -23,6 +23,7 @@ class CompileSnapshot:
     status: str = "idle"
     phase: str = "idle"
     compile_request_id: str = ""
+    initial_session_id: str = ""
     error_count: int = 0
     warning_count: int = 0
     started_at: int = 0
@@ -97,6 +98,7 @@ class StateStore:
             self.compile.unity_accepted_at = 0
             self.compile.started_at = 0
             self.compile.finished_at = 0
+            self.compile.initial_session_id = self.editor.session_id
         if incoming_request_id:
             self.compile.compile_request_id = incoming_request_id
         status = str(payload.get("status", "")).strip().lower()
@@ -186,6 +188,9 @@ class StateStore:
         errors = payload.get("errors") or []
         self.compile.errors = list(errors)
         self.compile.error_count = int(payload.get("total", len(self.compile.errors)))
+        self.compile.warning_count = int(
+            payload.get("currentCompileWarningCount", payload.get("warningCount", self.compile.warning_count))
+        )
         if self.compile.status in ("finished", "completed") or self.compile.phase in (
             "verifying",
             "completed",

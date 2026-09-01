@@ -370,7 +370,7 @@ namespace CodingRiver.UPilot
             LastHeartbeatSentAt = _lastHeartbeatSentAt,
             IsCompiling         = CurrentIsCompiling(),
             LastErrorCount      = _compileService.LastErrorCount,
-            PlayModeState       = _playInputService.CurrentPlayModeChangedPayload().state,
+            PlayModeState       = CachedPlayModeChangedPayload().state,
             McpLabel            = _mcpLabelFromServer ?? "",
             McpServerHost       = string.IsNullOrEmpty(_mcpHostFromServer) ? _wsHost : _mcpHostFromServer,
             McpServerPort       = _mcpPortFromServer > 0 ? _mcpPortFromServer : _wsPort,
@@ -1203,7 +1203,7 @@ namespace CodingRiver.UPilot
                     blocked = true,
                     blockedReason = "PlayMode",
                     nextAction = "Exit PlayMode after user confirmation, then retry the compile wait.",
-                    playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                    playModeState = CachedPlayModeChangedPayload().state,
                     compilePhase = _compileService.Phase,
                 }, token);
                 return;
@@ -1272,7 +1272,7 @@ namespace CodingRiver.UPilot
                     blocked = true,
                     blockedReason = "CompileErrors",
                     nextAction = "Read compile.errors.get and fix the reported compiler errors.",
-                    playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                    playModeState = CachedPlayModeChangedPayload().state,
                     compilePhase = _compileService.Phase,
                 }, token);
                 return;
@@ -1283,7 +1283,7 @@ namespace CodingRiver.UPilot
                     ok = true,
                     state = "compile_idle",
                     status = "ready",
-                    playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                    playModeState = CachedPlayModeChangedPayload().state,
                     compilePhase = _compileService.Phase,
                 }, token);
         }
@@ -1308,7 +1308,7 @@ namespace CodingRiver.UPilot
 
             var result = await resultTcs.Task;
             await SendResultAsync(id, "playmode.set", result, token);
-            await SendPlayModeChangedEventAsync(token);
+            await SendPlayModeChangedEventAsync(new PlayModeChangedPayload { state = result.state }, token);
         }
 
         private async Task HandleMouseEventAsync(string id, string json, CancellationToken token)
@@ -1644,12 +1644,19 @@ namespace CodingRiver.UPilot
                 "editor.state", payload, token);
         }
 
-        private async Task SendPlayModeChangedEventAsync(CancellationToken token)
+        private PlayModeChangedPayload CachedPlayModeChangedPayload()
+        {
+            return new PlayModeChangedPayload { state = _cachedPlayModeState };
+        }
+
+        private async Task SendPlayModeChangedEventAsync(
+            PlayModeChangedPayload payload,
+            CancellationToken token)
         {
             await SendEventAsync(
                 $"evt-playmode-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                 "playmode.changed",
-                _playInputService.CurrentPlayModeChangedPayload(),
+                payload ?? CachedPlayModeChangedPayload(),
                 token);
         }
 
@@ -1673,7 +1680,9 @@ namespace CodingRiver.UPilot
                 "sys.playmode.changed", "PlayMode状态变更",
                 $"state={change}");
             if (_cts == null || _cts.IsCancellationRequested) return;
-            _ = SendPlayModeChangedEventAsync(_cts.Token);
+            var payload = _playInputService.CurrentPlayModeChangedPayload();
+            _cachedPlayModeState = payload.state;
+            _ = SendPlayModeChangedEventAsync(payload, _cts.Token);
         }
 
         private static string GetFocusStateString()
@@ -1707,7 +1716,7 @@ namespace CodingRiver.UPilot
                     {
                         phase = "starting",
                         isCompiling = isCompiling,
-                        playModeState = _playInputService.CurrentPlayModeChangedPayload().state,
+                        playModeState = CachedPlayModeChangedPayload().state,
                         compilePhase = _compileService?.Phase ?? "domain_reload",
                         compileRequestId = _compileService?.LastRequestId ?? string.Empty,
                     };

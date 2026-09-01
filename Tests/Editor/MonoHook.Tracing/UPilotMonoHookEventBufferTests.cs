@@ -5,6 +5,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
@@ -116,17 +117,21 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void TelemetryCapturesSampledStackTraceOnlyForSelectedPoint()
+        public void TelemetryCapturesSampledStackTraceForSelectedPointsWithPerPointSampling()
         {
             var settings = UPilotMonoHookSettings.instance;
             int oldFrames = settings.stackTraceMaxFrames;
             int oldSample = settings.stackTraceSampleEveryN;
-            bool oldCapture = settings.ShouldCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive);
+            var oldMode = settings.stackTraceCaptureMode;
+            bool oldSetActiveCapture = settings.points.First(point => point.Id == UPilotMonoHookPointId.GameObjectSetActive).CaptureStackTrace;
+            bool oldPositionCapture = settings.points.First(point => point.Id == UPilotMonoHookPointId.TransformPosition).CaptureStackTrace;
             try
             {
                 settings.stackTraceMaxFrames = 4;
                 settings.stackTraceSampleEveryN = 2;
+                settings.stackTraceCaptureMode = UPilotStackTraceCaptureMode.SelectedPoints;
                 settings.SetCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive, true);
+                settings.SetCaptureStackTrace(UPilotMonoHookPointId.TransformPosition, true);
                 UPilotMonoHookTelemetry.Clear();
 
                 var sink = UPilotMonoHookRegistry.Instance.Context.EventSink;
@@ -137,14 +142,17 @@ namespace CodingRiver.UPilot.Tests
                 var events = UPilotMonoHookTelemetry.Snapshot(3);
                 Assert.That(events[0].stackTrace, Is.Not.Empty);
                 Assert.That(events[1].stackTrace, Is.Null.Or.Empty);
-                Assert.That(events[2].stackTrace, Is.Null.Or.Empty);
+                Assert.That(events[2].stackTrace, Is.Not.Empty);
                 Assert.That(events[0].stackTrace.Split('\n').Length, Is.LessThanOrEqualTo(4));
+                Assert.That(events[2].stackTrace.Split('\n').Length, Is.LessThanOrEqualTo(4));
             }
             finally
             {
                 settings.stackTraceMaxFrames = oldFrames;
                 settings.stackTraceSampleEveryN = oldSample;
-                settings.SetCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive, oldCapture);
+                settings.stackTraceCaptureMode = oldMode;
+                settings.SetCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive, oldSetActiveCapture);
+                settings.SetCaptureStackTrace(UPilotMonoHookPointId.TransformPosition, oldPositionCapture);
                 UPilotMonoHookTelemetry.Clear();
             }
         }

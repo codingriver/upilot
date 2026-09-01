@@ -17,6 +17,7 @@ namespace CodingRiver.UPilot
     {
         private int _selectedFilterProfile;
         private string _filterTestResult = string.Empty;
+        private bool _showPointFilterOverrides;
         private readonly Dictionary<string, bool> _expandedFilterRules = new Dictionary<string, bool>(StringComparer.Ordinal);
 
         private void DrawFilterProfiles(UPilotMonoHookSettings settings)
@@ -47,8 +48,51 @@ namespace CodingRiver.UPilot
                 settings.SaveSettings();
             }
 
+            EditorGUI.BeginChangeCheck();
+            settings.pointFilterOverridesEnabled = EditorGUILayout.ToggleLeft(
+                new GUIContent(
+                    "启用点位独立过滤器",
+                    "关闭时所有点位使用全局过滤器；开启后，仅配置了覆盖项的点位使用独立过滤器，其余点位仍继承全局。"),
+                settings.pointFilterOverridesEnabled);
+            if (EditorGUI.EndChangeCheck())
+                settings.SaveSettings();
+
+            if (settings.pointFilterOverridesEnabled)
+            {
+                _showPointFilterOverrides = EditorGUILayout.Foldout(
+                    _showPointFilterOverrides,
+                    "点位过滤器覆盖",
+                    true);
+                if (_showPointFilterOverrides)
+                {
+                    var overrideIds = new List<string> { string.Empty };
+                    var overrideLabels = new List<string> { "继承全局" };
+                    overrideIds.AddRange(profileIds);
+                    overrideLabels.AddRange(profileLabels);
+                    foreach (var group in UPilotMonoHookCatalog.All.GroupBy(definition => definition.CategoryId))
+                    {
+                        EditorGUILayout.LabelField(group.First().CategoryDisplayName, EditorStyles.miniBoldLabel);
+                        foreach (var definition in group)
+                        {
+                            string configuredId = settings.GetConfiguredFilterProfileId(definition.Id);
+                            int configuredIndex = overrideIds.IndexOf(configuredId);
+                            if (configuredIndex < 0) configuredIndex = 0;
+                            int nextIndex = EditorGUILayout.Popup(
+                                definition.DisplayName,
+                                configuredIndex,
+                                overrideLabels.ToArray());
+                            if (nextIndex != configuredIndex)
+                            {
+                                settings.SetFilterProfileId(definition.Id, overrideIds[nextIndex]);
+                                settings.SaveSettings();
+                            }
+                        }
+                    }
+                }
+            }
+
             EditorGUILayout.HelpBox(
-                "规则内条件按 AND 组合；多个包含规则按 OR 组合；排除规则优先。点位默认继承全局过滤器，也可以在点位行单独选择。过滤会在堆栈采集和 Console 输出之前执行。",
+                "规则内条件按 AND 组合；多个包含规则按 OR 组合；排除规则优先。点位覆盖为空时继承全局过滤器；有效过滤器会在堆栈采集、事件缓存和 Console 输出之前执行。",
                 MessageType.None);
 
             EditorGUILayout.BeginHorizontal();

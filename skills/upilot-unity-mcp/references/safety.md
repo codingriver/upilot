@@ -29,4 +29,6 @@
 
 ## Reflection
 
-Use `unity_reflection_call` first. After a real failure, use one bounded `reflection_eval` expression or add a stable compiled helper. Do not repeatedly probe unsupported syntax.
+- `unity_reflection_call` may invoke arbitrary state-changing methods, requires project write access, is non-idempotent, and must never be retried automatically.
+- Inspect the exact type, method, target instance, and arguments before calling it. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for read-only discovery.
+- After a real `unity_reflection_call` failure, use one bounded `reflection_eval` expression or add a stable compiled helper. Do not repeatedly probe unsupported syntax.

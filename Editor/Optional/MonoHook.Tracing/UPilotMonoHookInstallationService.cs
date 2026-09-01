@@ -28,6 +28,8 @@ namespace CodingRiver.UPilot
             new Dictionary<string, List<MethodHook>>(StringComparer.Ordinal);
         private static readonly Dictionary<string, string> LifecycleFilterSignatures =
             new Dictionary<string, string>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, Dictionary<Type, Action<MonoBehaviour>>> LifecycleProxyDispatch =
+            new Dictionary<string, Dictionary<Type, Action<MonoBehaviour>>>(StringComparer.Ordinal);
         private static readonly Dictionary<string, UPilotMonoHookCoverage> CoverageByPoint =
             new Dictionary<string, UPilotMonoHookCoverage>(StringComparer.Ordinal);
         private static readonly Dictionary<string, bool> AppliedHookAllSafeOverloadsByPoint =
@@ -54,6 +56,7 @@ namespace CodingRiver.UPilot
         private static int _consoleDroppedCount;
         private static int _perObjectDroppedCount;
         private static int _duplicateDroppedCount;
+        private static int _traceFailureCount;
         private static readonly Dictionary<string, double> PerObjectRateWindowStarts =
             new Dictionary<string, double>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> PerObjectRateWindowCounts =
@@ -73,6 +76,7 @@ namespace CodingRiver.UPilot
         public static int ConsoleDroppedCount => _consoleDroppedCount;
         public static int PerObjectDroppedCount => _perObjectDroppedCount;
         public static int DuplicateDroppedCount => _duplicateDroppedCount;
+        public static int TraceFailureCount => _traceFailureCount;
 
         internal static bool SupportsHookAllSafeOverloads(string pointId)
         {
@@ -98,7 +102,20 @@ namespace CodingRiver.UPilot
 
         internal static long Publish(UPilotMonoHookEvent hookEvent)
         {
-            if (hookEvent == null) throw new ArgumentNullException(nameof(hookEvent));
+            try
+            {
+                return PublishCore(hookEvent);
+            }
+            catch
+            {
+                _traceFailureCount++;
+                return 0;
+            }
+        }
+
+        private static long PublishCore(UPilotMonoHookEvent hookEvent)
+        {
+            if (hookEvent == null) return 0;
 
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
@@ -167,6 +184,7 @@ namespace CodingRiver.UPilot
             _consoleDroppedCount = 0;
             _perObjectDroppedCount = 0;
             _duplicateDroppedCount = 0;
+            _traceFailureCount = 0;
             PerObjectRateWindowStarts.Clear();
             PerObjectRateWindowCounts.Clear();
             LastEventTimes.Clear();
@@ -975,11 +993,31 @@ namespace CodingRiver.UPilot
             UninstallLifecycle(pointId);
 
             var installed = new List<MethodHook>();
-            var seenTargets = new HashSet<MethodBase>();
+            var proxyByTarget = new Dictionary<MethodBase, UPilotMonoHookProxyFactory.ProxyEntry>();
+            var dispatch = new Dictionary<Type, Action<MonoBehaviour>>();
+            var details = new List<UPilotMonoHookInstallEntry>();
             var samples = new List<string>();
             int candidateCount = 0;
             int skippedCount = 0;
             int failedCount = 0;
+            string replacement;
+            string proxyTemplateName;
+            switch (methodName)
+            {
+                case "Awake": replacement = nameof(AwakeReplacement); proxyTemplateName = nameof(AwakeProxy); break;
+                case "OnEnable": replacement = nameof(OnEnableReplacement); proxyTemplateName = nameof(OnEnableProxy); break;
+                case "Start": replacement = nameof(StartReplacement); proxyTemplateName = nameof(StartProxy); break;
+                case "Update": replacement = nameof(UpdateReplacement); proxyTemplateName = nameof(UpdateProxy); break;
+                case "FixedUpdate": replacement = nameof(FixedUpdateReplacement); proxyTemplateName = nameof(FixedUpdateProxy); break;
+                case "LateUpdate": replacement = nameof(LateUpdateReplacement); proxyTemplateName = nameof(LateUpdateProxy); break;
+                case "OnDisable": replacement = nameof(OnDisableReplacement); proxyTemplateName = nameof(OnDisableProxy); break;
+                case "OnDestroy": replacement = nameof(OnDestroyReplacement); proxyTemplateName = nameof(OnDestroyProxy); break;
+                default: throw new ArgumentOutOfRangeException(nameof(methodName), methodName, "Unsupported lifecycle method.");
+            }
+
+            var proxyTemplate = typeof(UPilotMonoHookInstallationService).GetMethod(
+                proxyTemplateName,
+                BindingFlags.Static | BindingFlags.NonPublic);
             foreach (var type in GetMonoBehaviourTypes())
             {
                 var target = type.GetMethod(
@@ -987,13 +1025,20 @@ namespace CodingRiver.UPilot
                     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                     null, Type.EmptyTypes, null);
                 if (target == null || target.ReturnType != typeof(void)) continue;
-                if (!seenTargets.Add(target)) continue;
                 candidateCount++;
 
                 if (!UPilotMonoHookLifecycleFilter.Includes(type, UPilotMonoHookSettings.instance, pointId, out var filterReason))
                 {
                     skippedCount++;
-                    AddCoverageSample(samples, type.FullName + "：" + filterReason);
+                    string reason = type.FullName + "：" + filterReason;
+                    AddCoverageSample(samples, reason);
+                    details.Add(new UPilotMonoHookInstallEntry(
+                        type.FullName,
+                        target.DeclaringType?.FullName,
+                        BuildMethodSignature(target),
+                        BuildTargetMethodId(target),
+                        "Skipped",
+                        filterReason));
                     continue;
                 }
 
@@ -1001,55 +1046,84 @@ namespace CodingRiver.UPilot
                 {
                     skippedCount++;
                     AddCoverageSample(samples, type.FullName + "：" + skipReason);
+                    details.Add(new UPilotMonoHookInstallEntry(
+                        type.FullName,
+                        target.DeclaringType?.FullName,
+                        BuildMethodSignature(target),
+                        BuildTargetMethodId(target),
+                        "Skipped",
+                        skipReason));
                     continue;
-                }
-
-                string replacement;
-                string proxy;
-                switch (methodName)
-                {
-                    case "Awake": replacement = nameof(AwakeReplacement); proxy = nameof(AwakeProxy); break;
-                    case "OnEnable": replacement = nameof(OnEnableReplacement); proxy = nameof(OnEnableProxy); break;
-                    case "Start": replacement = nameof(StartReplacement); proxy = nameof(StartProxy); break;
-                    case "Update": replacement = nameof(UpdateReplacement); proxy = nameof(UpdateProxy); break;
-                    case "FixedUpdate": replacement = nameof(FixedUpdateReplacement); proxy = nameof(FixedUpdateProxy); break;
-                    case "LateUpdate": replacement = nameof(LateUpdateReplacement); proxy = nameof(LateUpdateProxy); break;
-                    case "OnDisable": replacement = nameof(OnDisableReplacement); proxy = nameof(OnDisableProxy); break;
-                    case "OnDestroy": replacement = nameof(OnDestroyReplacement); proxy = nameof(OnDestroyProxy); break;
-                    default: throw new ArgumentOutOfRangeException(nameof(methodName), methodName, "Unsupported lifecycle method.");
                 }
 
                 try
                 {
-                    var hook = CreateHook(target, replacement, proxy, "UPilot.MonoHook." + pointId + "." + type.FullName);
-                    installed.Add(hook);
+                    if (!proxyByTarget.TryGetValue(target, out var proxyEntry))
+                    {
+                        if (proxyTemplate == null)
+                            throw new MissingMethodException(typeof(UPilotMonoHookInstallationService).FullName, proxyTemplateName);
+                        proxyEntry = UPilotMonoHookProxyFactory.GetOrCreate(target, proxyTemplate);
+                        proxyByTarget.Add(target, proxyEntry);
+                        var hook = CreateHook(
+                            target,
+                            replacement,
+                            proxyEntry.Method,
+                            "UPilot.MonoHook." + pointId + "." + type.FullName);
+                        installed.Add(hook);
+                    }
+
+                    var original = (Action<MonoBehaviour>)Delegate.CreateDelegate(
+                        typeof(Action<MonoBehaviour>),
+                        proxyEntry.Method);
+                    dispatch[type] = original;
+                    details.Add(new UPilotMonoHookInstallEntry(
+                        type.FullName,
+                        target.DeclaringType?.FullName,
+                        BuildMethodSignature(target),
+                        BuildTargetMethodId(target),
+                        "Installed",
+                        "",
+                        proxyEntry.Key));
                 }
                 catch (Exception ex)
                 {
                     failedCount++;
-                    AddCoverageSample(samples, type.FullName + "：" + ex.GetBaseException().Message);
+                    string reason = ex.GetBaseException().Message;
+                    AddCoverageSample(samples, type.FullName + "：" + reason);
+                    details.Add(new UPilotMonoHookInstallEntry(
+                        type.FullName,
+                        target.DeclaringType?.FullName,
+                        BuildMethodSignature(target),
+                        BuildTargetMethodId(target),
+                        "Failed",
+                        reason));
                 }
             }
 
             LifecycleHooks[pointId] = installed;
+            LifecycleProxyDispatch[pointId] = dispatch;
             LifecycleFilterSignatures[pointId] = filterSignature;
             CoverageByPoint[pointId] = new UPilotMonoHookCoverage(
                 candidateCount,
                 installed.Count,
                 skippedCount,
                 failedCount,
-                samples);
+                samples,
+                details);
             if (installed.Count == 0)
                 throw new InvalidOperationException(CoverageByPoint[pointId].BuildSummary());
         }
 
         private static void UninstallLifecycle(string pointId)
         {
-            if (!LifecycleHooks.TryGetValue(pointId, out var hooks)) return;
-            foreach (var hook in hooks)
-                hook.Uninstall();
+            if (LifecycleHooks.TryGetValue(pointId, out var hooks))
+            {
+                foreach (var hook in hooks)
+                    hook.Uninstall();
+            }
             LifecycleHooks.Remove(pointId);
             LifecycleFilterSignatures.Remove(pointId);
+            LifecycleProxyDispatch.Remove(pointId);
             CoverageByPoint.Remove(pointId);
         }
 
@@ -1066,6 +1140,56 @@ namespace CodingRiver.UPilot
                 settings.lifecycleTypeExcludes ?? string.Empty,
                 UPilotTraceFilterEngine.GetProfileSignature(pointId, settings),
             });
+        }
+
+        private static string BuildTargetMethodId(MethodBase target)
+        {
+            if (target == null) return string.Empty;
+            string moduleId = target.Module?.ModuleVersionId.ToString("N") ?? string.Empty;
+            string declaringType = target.DeclaringType?.AssemblyQualifiedName ?? string.Empty;
+            return moduleId + "|" + declaringType + "|" + target.MetadataToken.ToString("X8");
+        }
+
+        private static string BuildMethodSignature(MethodBase target)
+        {
+            if (target == null) return string.Empty;
+            var parameters = target.GetParameters()
+                .Select(parameter => parameter.ParameterType?.Name ?? string.Empty);
+            return target.Name + "(" + string.Join(",", parameters) + ")";
+        }
+
+        private static bool TryGetLifecycleProxy(
+            string pointId,
+            MonoBehaviour instance,
+            out Action<MonoBehaviour> proxy)
+        {
+            proxy = null;
+            if (instance == null || !LifecycleProxyDispatch.TryGetValue(pointId, out var dispatch))
+                return false;
+
+            var type = instance.GetType();
+            while (type != null && typeof(MonoBehaviour).IsAssignableFrom(type))
+            {
+                if (dispatch.TryGetValue(type, out proxy))
+                    return proxy != null;
+                type = type.BaseType;
+            }
+            return false;
+        }
+
+        private static void InvokeLifecycleOriginal(string pointId, MonoBehaviour instance)
+        {
+            if (instance == null) return;
+            if (TryGetLifecycleProxy(pointId, instance, out var proxy))
+            {
+                proxy(instance);
+                return;
+            }
+
+            // A missing dispatch entry means installation state and runtime type
+            // discovery diverged. Never call a shared proxy that may point at a
+            // different type; fail closed and keep the diagnostic counter visible.
+            _traceFailureCount++;
         }
 
         private static bool TryGetBehaviourEnabledSetter(out MethodInfo target, out string reason)
@@ -1251,13 +1375,19 @@ namespace CodingRiver.UPilot
 
         private static MethodHook CreateHook(MethodBase target, string replacementName, string proxyName, string tag)
         {
+            var flags = BindingFlags.Static | BindingFlags.NonPublic;
+            var proxy = typeof(UPilotMonoHookInstallationService).GetMethod(proxyName, flags);
+            return CreateHook(target, replacementName, proxy, tag);
+        }
+
+        private static MethodHook CreateHook(MethodBase target, string replacementName, MethodInfo proxy, string tag)
+        {
             var existing = HookPool.GetHook(target);
             if (existing != null && existing.isHooked)
                 throw new InvalidOperationException("目标方法已被其他 MonoHook 占用：" + target.DeclaringType + "." + target.Name);
 
             var flags = BindingFlags.Static | BindingFlags.NonPublic;
             var replacement = typeof(UPilotMonoHookInstallationService).GetMethod(replacementName, flags);
-            var proxy = typeof(UPilotMonoHookInstallationService).GetMethod(proxyName, flags);
             var hook = new MethodHook(target, replacement, proxy, tag);
             hook.Install();
             if (!hook.isHooked)
@@ -1314,6 +1444,36 @@ namespace CodingRiver.UPilot
             _insideHook = true;
             try
             {
+                RecordCore(
+                    kind,
+                    target,
+                    componentType,
+                    before,
+                    after,
+                    phase,
+                    methodSignature);
+            }
+            catch
+            {
+                // Tracing is observational. A filter, stack, object lookup, or
+                // buffer failure must never change the original Unity call.
+                _traceFailureCount++;
+            }
+            finally
+            {
+                _insideHook = false;
+            }
+        }
+
+        private static void RecordCore(
+            string kind,
+            UnityEngine.Object target,
+            string componentType,
+            string before,
+            string after,
+            string phase,
+            string methodSignature)
+        {
                 if (!UPilotTraceFilterEngine.Evaluate(
                         kind,
                         target,
@@ -1333,7 +1493,7 @@ namespace CodingRiver.UPilot
                         EditorApplication.isPlaying ? "PlayMode" : "EditMode",
                         GetObjectId(target)))
                 {
-                    return;
+                        return;
                 }
                 var gameObject = target as GameObject;
                 var component = target as Component;
@@ -1361,11 +1521,6 @@ namespace CodingRiver.UPilot
                     target = target,
                     filterEvaluated = true,
                 });
-            }
-            finally
-            {
-                _insideHook = false;
-            }
         }
 
         private static string TryGetGlobalObjectId(UnityEngine.Object target)
@@ -1933,7 +2088,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void AwakeReplacement(MonoBehaviour __this)
         {
-            AwakeProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleAwake, __this);
             Record("lifecycle.awake", __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -1946,7 +2101,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void StartReplacement(MonoBehaviour __this)
         {
-            StartProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleStart, __this);
             Record("lifecycle.start", __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -1959,7 +2114,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void UpdateReplacement(MonoBehaviour __this)
         {
-            UpdateProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleUpdate, __this);
             Record(UPilotMonoHookPointId.LifecycleUpdate, __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -1972,7 +2127,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void FixedUpdateReplacement(MonoBehaviour __this)
         {
-            FixedUpdateProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleFixedUpdate, __this);
             Record(UPilotMonoHookPointId.LifecycleFixedUpdate, __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -1985,7 +2140,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void LateUpdateReplacement(MonoBehaviour __this)
         {
-            LateUpdateProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleLateUpdate, __this);
             Record(UPilotMonoHookPointId.LifecycleLateUpdate, __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -1998,7 +2153,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void OnEnableReplacement(MonoBehaviour __this)
         {
-            OnEnableProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleOnEnable, __this);
             Record("lifecycle.onEnable", __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -2011,7 +2166,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void OnDisableReplacement(MonoBehaviour __this)
         {
-            OnDisableProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleOnDisable, __this);
             Record("lifecycle.onDisable", __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 
@@ -2024,7 +2179,7 @@ namespace CodingRiver.UPilot
         [MethodImpl(MethodImplOptions.NoOptimization)]
         private static void OnDestroyReplacement(MonoBehaviour __this)
         {
-            OnDestroyProxy(__this);
+            InvokeLifecycleOriginal(UPilotMonoHookPointId.LifecycleOnDestroy, __this);
             Record("lifecycle.onDestroy", __this, __this != null ? __this.GetType().FullName : string.Empty);
         }
 

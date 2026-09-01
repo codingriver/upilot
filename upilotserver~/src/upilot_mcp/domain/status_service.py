@@ -15,13 +15,18 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from ..config import CONFIG, diagnose_client_configs
+from ..config import CONFIG, diagnose_client_configs, refresh_config_if_changed
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
 from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
-from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
+from ..tool_registry import (
+    REGISTRY,
+    REGISTRY_VERSION,
+    dispatch_public_tool,
+    proxy_argument_schema,
+)
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -321,7 +326,8 @@ class StatusDomainService:
         availability: str = "all",
         limit: int = 20,
     ) -> list[dict]:
-        return REGISTRY.find(
+        refresh_config_if_changed()
+        items = REGISTRY.find(
             query=query,
             category=category,
             availability=availability,
@@ -331,6 +337,11 @@ class StatusDomainService:
             server_ready=self.server.is_ready(),
             write_access_approved=CONFIG.write_access_approved,
         )
+        for item in items:
+            method = getattr(self, str(item.get("facade_method") or ""), None)
+            if method is not None:
+                item["proxyArguments"] = proxy_argument_schema(method)
+        return items
 
     def _last_command_succeeded(self, command_name: str) -> bool | None:
         matches = [item for item in self.server.state.commands.values() if item.name == command_name]

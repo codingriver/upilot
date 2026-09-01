@@ -8,7 +8,8 @@ namespace CodingRiver.UPilot
     internal abstract class UPilotBuiltInMonoHookPointBase :
         UPilotMonoHookPointBase,
         IUPilotMonoHookCoverageProvider,
-        IUPilotMonoHookOverloadPolicyProvider
+        IUPilotMonoHookOverloadPolicyProvider,
+        IUPilotMonoHookExecutionPolicyProvider
     {
         private bool _hookAllSafeOverloads;
 
@@ -25,6 +26,11 @@ namespace CodingRiver.UPilot
         }
         public bool IsHookAllSafeOverloadsApplied =>
             UPilotMonoHookInstallationService.IsHookAllSafeOverloadsApplied(PointId);
+
+        public bool GuaranteesPassThrough => true;
+        public bool SupportsInterception => false;
+        public UPilotMonoHookExecutionMode ExecutionMode { get; set; } =
+            UPilotMonoHookExecutionMode.PassThrough;
 
         public override UPilotMonoHookSupport CheckSupport(UPilotMonoHookContext context)
         {

@@ -60,10 +60,10 @@ async def unity_test_force_reset():
     r = await _get_facade().test_force_reset()
     return _log_tool_result("unity_test_force_reset", _payload(r))
 
-@mcp.tool(description="列出 Unity 项目中所有可用的测试用例。")
-async def unity_test_list(testMode: str = "EditMode"):
-    _log_tool_call("unity_test_list", {"testMode": testMode})
-    r = await _get_facade().test_list(test_mode=testMode)
+@mcp.tool(description="列出 Unity 项目中可用测试，并返回程序集边界、发现数量与过滤命中数量。")
+async def unity_test_list(testMode: str = "EditMode", testFilter: str = ""):
+    _log_tool_call("unity_test_list", {"testMode": testMode, "testFilter": testFilter})
+    r = await _get_facade().test_list(test_mode=testMode, test_filter=testFilter)
     return _log_tool_result("unity_test_list", _payload(r))
 
 @mcp.tool(description="一键执行 UPilot 包标准验收：校验规范项目、停止活动 Console capture、安全编译、测试发现与运行、错误检查并写入带 hash 的 JSON 报告。")

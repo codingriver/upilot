@@ -50,8 +50,15 @@ namespace MyProject.EditorTracing
         CategoryOrder = 1000,
         Order = 10,
         DefaultEnabled = false)]
-    internal sealed class CustomSetValueHookPoint : UPilotMethodHookPointBase
+    internal sealed class CustomSetValueHookPoint :
+        UPilotMethodHookPointBase,
+        IUPilotMonoHookExecutionPolicyProvider
     {
+        public bool GuaranteesPassThrough => true;
+        public bool SupportsInterception => false;
+        public UPilotMonoHookExecutionMode ExecutionMode { get; set; } =
+            UPilotMonoHookExecutionMode.PassThrough;
+
         private static readonly string PointId =
             UPilotMonoHookPointIdentity.FromProviderType(
                 typeof(CustomSetValueHookPoint));
@@ -161,6 +168,8 @@ namespace MyProject.EditorTracing
 ```
 
 `SetValueProxy` 的方法体不会被正常直接执行。Hook 安装后，Replacement 通过 Proxy 调用原始目标；如果业务代码直接调用 Proxy，它抛出异常是预期保护行为。
+
+默认执行策略是 `PassThrough`：Replacement 必须调用 Proxy，并保持原始参数、返回值、异常和调用次数。追踪过滤、堆栈采集、事件缓冲或 Console 输出失败时，UPilot 会丢弃追踪结果，但不能阻断原始业务调用。只有确实需要改变行为时，才声明 `SupportsInterception = true` 并在追踪器中逐点选择 `Intercept`；内置点位不会进入该模式。
 
 ## 3. 特性字段
 
@@ -272,7 +281,7 @@ static void SetValueProxy(MyComponent __this, int value)
 - 重载方法必须用明确参数类型调用 `GetMethod`，不要只按方法名匹配。
 - Replacement 和 Proxy 建议添加 `MethodImplOptions.NoOptimization`。
 - 自己控制的 Target 建议添加 `MethodImplOptions.NoInlining`，并避免过短的方法体。
-- 需要执行原始逻辑时提供 Proxy；不需要调用原始逻辑时可以传 `null`，但要明确这会完全替代目标行为。
+- 默认 `PassThrough` 策略必须提供 Proxy 并执行原始逻辑；只有点位显式支持 `Intercept` 时才允许传 `null` 或改变原始行为。Provider 可读取 `ExecutionMode`，按当前逐点配置选择实现路径。
 - 不要尝试绕过 `InternalCall`、Native、Injected、抽象、开放泛型或不可读 IL 的 Unsupported 结果。
 - 同一个目标方法不能同时被多个 MonoHook 占用。
 
@@ -289,7 +298,7 @@ static void SetValueProxy(MyComponent __this, int value)
 
 实例目标还可以根据实际对象填写 `objectName`、`instanceId`、`hierarchyPath` 和 `scenePath`。
 
-EventSink 会统一处理事件序号、UTC 时间、事件速率限制、未变化值抑制、按点位堆栈采样和可选 Console 输出。自定义 Provider 不应直接调用 `Debug.Log` 代替事件发布。
+EventSink 会统一处理事件序号、UTC 时间、事件速率限制、未变化值抑制、按模式生效的堆栈采样和可选 Console 输出。自定义 Provider 不应直接调用 `Debug.Log` 代替事件发布。
 
 ## 7. 手动验收
 
@@ -299,7 +308,7 @@ EventSink 会统一处理事件序号、UTC 时间、事件速率限制、未变
 4. 勾选点位并点击“应用”。只勾选但不应用不会安装 Hook。
 5. 执行 `Tools > MonoHook Demo > Call SetValue`。
 6. 在事件日志中确认出现 `myproject.custom.set-value`，值从 `10` 变为 `11`。
-7. 如需调用堆栈，开启该点位右侧的堆栈选项，再次调用菜单。
+7. 如需调用堆栈，在“配置与日志 > 追踪采集”中选择“仅指定点位”并勾选自定义点位，或选择“所有已启用点位”；再用全局默认过滤器或显式点位覆盖控制采集范围，然后再次调用菜单。
 8. 取消勾选并点击“应用”，再次调用菜单，确认不再产生该点位事件。
 
 测试结束后应恢复原配置。不要默认开启自定义点位、堆栈或 Console 输出。

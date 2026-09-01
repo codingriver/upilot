@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -174,9 +175,37 @@ namespace CodingRiver.UPilot
         public long scannedCount;
         public bool scanComplete;
         public double elapsedMs;
+        public long managedMemoryBeforeBytes;
+        public long managedMemoryAfterBytes;
+        public long managedMemoryDeltaBytes;
+        public long processWorkingSetBeforeBytes;
+        public long processWorkingSetAfterBytes;
+        public long processWorkingSetDeltaBytes;
+        public string processWorkingSetSource;
         public string indexPath;
         public bool indexUsed;
         public bool indexCreated;
+        public int bufferedRecordCount;
+        public long diskSnapshotNextSequence;
+        public ConsoleCaptureEffectiveQuery effectiveQuery;
+        public string[] matchedFields = Array.Empty<string>();
+        public string[] ignoredArguments = Array.Empty<string>();
+        public string indexStatus;
+    }
+
+    [Serializable]
+    public sealed class ConsoleCaptureEffectiveQuery
+    {
+        public long fromSequence;
+        public long toSequence;
+        public string logType;
+        public bool includeStackTrace;
+        public string[] contains = Array.Empty<string>();
+        public bool containsAll;
+        public string regex;
+        public bool newestFirst;
+        public int count;
+        public bool stableSnapshot = true;
     }
 
     [Serializable]
@@ -267,6 +296,29 @@ namespace CodingRiver.UPilot
     /// </summary>
     public sealed class UPilotConsoleCaptureService
     {
+#if UNITY_EDITOR_WIN
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessMemoryCounters
+        {
+            public uint cb;
+            public uint pageFaultCount;
+            public UIntPtr peakWorkingSetSize;
+            public UIntPtr workingSetSize;
+            public UIntPtr quotaPeakPagedPoolUsage;
+            public UIntPtr quotaPagedPoolUsage;
+            public UIntPtr quotaPeakNonPagedPoolUsage;
+            public UIntPtr quotaNonPagedPoolUsage;
+            public UIntPtr pagefileUsage;
+            public UIntPtr peakPagefileUsage;
+        }
+
+        [DllImport("psapi.dll", SetLastError = true)]
+        private static extern bool GetProcessMemoryInfo(
+            IntPtr process,
+            out ProcessMemoryCounters counters,
+            uint size);
+#endif
+
         private const string CaptureRootRelative = "Log/UPilotConsole";
         private const string ActiveDirectorySessionKey = "UPilot.ConsoleCapture.ActiveDirectory";
         private const string CleanupTokenSessionKey = "UPilot.ConsoleCapture.CleanupToken";
@@ -288,6 +340,7 @@ namespace CodingRiver.UPilot
         {
             public ConsoleCaptureManifest Manifest;
             public string Error;
+            public int BufferedRecordCount;
         }
 
         private sealed class ConsoleCaptureLiteralScanResult
@@ -454,6 +507,8 @@ namespace CodingRiver.UPilot
                 var result = await Task.Run(
                     () => ReadCaptureFiles(preparation.Manifest, payload, token),
                     token).ConfigureAwait(false);
+                result.bufferedRecordCount = preparation.BufferedRecordCount;
+                result.diskSnapshotNextSequence = preparation.Manifest.nextSequence;
                 await _bridge.SendResultAsync(id, "console.capture.read", result, token);
             }
             catch (Exception ex)
@@ -578,12 +633,25 @@ namespace CodingRiver.UPilot
         private static ConsoleCaptureReadPreparation PrepareReadCapture(ConsoleCaptureReadPayload payload)
         {
             TryRecoverActiveSession();
-            FlushActiveCapture(true);
             var manifest = ResolveManifest(payload.sessionId);
             if (manifest == null)
                 return new ConsoleCaptureReadPreparation { Error = "未找到日志采集会话" };
 
-            return new ConsoleCaptureReadPreparation { Manifest = manifest };
+            int buffered = 0;
+            lock (CaptureLock)
+            {
+                if (s_active != null && s_active.Manifest.sessionId == manifest.sessionId)
+                {
+                    buffered = s_active.Pending.Count;
+                    if (buffered > 0)
+                        manifest.nextSequence = s_active.Pending.Peek().sequence;
+                }
+            }
+            return new ConsoleCaptureReadPreparation
+            {
+                Manifest = manifest,
+                BufferedRecordCount = buffered,
+            };
         }
 
         private static ConsoleCaptureReadResult ReadCaptureFiles(
@@ -592,6 +660,8 @@ namespace CodingRiver.UPilot
             CancellationToken token)
         {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            long managedMemoryBeforeBytes = GC.GetTotalMemory(false);
+            long processWorkingSetBeforeBytes = ReadProcessWorkingSetBytes(out string processWorkingSetSourceBefore);
             int count = Math.Max(1, Math.Min(payload.count, 5000));
             var matches = new List<ConsoleCaptureRecord>(count);
             var newestMatches = payload.newestFirst
@@ -745,6 +815,8 @@ namespace CodingRiver.UPilot
                 : string.Empty;
             long nextSequence = matches.Count > 0 ? matches.Max(item => item.sequence) : payload.afterSequence;
             stopwatch.Stop();
+            long managedMemoryAfterBytes = GC.GetTotalMemory(false);
+            long processWorkingSetAfterBytes = ReadProcessWorkingSetBytes(out string processWorkingSetSourceAfter);
             return new ConsoleCaptureReadResult
             {
                 ok = true,
@@ -765,10 +837,90 @@ namespace CodingRiver.UPilot
                 scannedCount = scannedCount,
                 scanComplete = true,
                 elapsedMs = stopwatch.Elapsed.TotalMilliseconds,
+                managedMemoryBeforeBytes = managedMemoryBeforeBytes,
+                managedMemoryAfterBytes = managedMemoryAfterBytes,
+                managedMemoryDeltaBytes = managedMemoryAfterBytes - managedMemoryBeforeBytes,
+                processWorkingSetBeforeBytes = processWorkingSetBeforeBytes,
+                processWorkingSetAfterBytes = processWorkingSetAfterBytes,
+                processWorkingSetDeltaBytes = processWorkingSetAfterBytes - processWorkingSetBeforeBytes,
+                processWorkingSetSource = processWorkingSetSourceBefore == processWorkingSetSourceAfter
+                    ? processWorkingSetSourceBefore
+                    : processWorkingSetSourceBefore + "->" + processWorkingSetSourceAfter,
                 indexPath = indexPath,
                 indexUsed = sparseIndex != null,
                 indexCreated = indexCreated,
+                indexStatus = indexCreated ? "created" : (sparseIndex != null ? "used" : "unavailable"),
+                effectiveQuery = new ConsoleCaptureEffectiveQuery
+                {
+                    fromSequence = rangeFrom,
+                    toSequence = snapshotTo,
+                    logType = payload.logType ?? string.Empty,
+                    includeStackTrace = payload.includeStackTrace,
+                    contains = payload.contains ?? Array.Empty<string>(),
+                    containsAll = payload.containsAll,
+                    regex = payload.regex ?? string.Empty,
+                    newestFirst = payload.newestFirst,
+                    count = count,
+                },
+                matchedFields = BuildMatchedQueryFields(payload),
+                ignoredArguments = Array.Empty<string>(),
             };
+        }
+
+        private static long ReadProcessWorkingSetBytes(out string source)
+        {
+            try
+            {
+                using var process = System.Diagnostics.Process.GetCurrentProcess();
+                process.Refresh();
+                long bytes = process.WorkingSet64;
+                if (bytes > 0)
+                {
+                    source = "System.Diagnostics.Process.WorkingSet64";
+                    return bytes;
+                }
+
+#if UNITY_EDITOR_WIN
+                var counters = new ProcessMemoryCounters
+                {
+                    cb = (uint)Marshal.SizeOf<ProcessMemoryCounters>(),
+                };
+                if (GetProcessMemoryInfo(process.Handle, out counters, counters.cb))
+                {
+                    ulong nativeBytes = counters.workingSetSize.ToUInt64();
+                    if (nativeBytes > 0 && nativeBytes <= long.MaxValue)
+                    {
+                        source = "Windows.GetProcessMemoryInfo.WorkingSetSize";
+                        return (long)nativeBytes;
+                    }
+                }
+#endif
+
+                long privateBytes = process.PrivateMemorySize64;
+                if (privateBytes > 0)
+                {
+                    source = "System.Diagnostics.Process.PrivateMemorySize64Fallback";
+                    return privateBytes;
+                }
+            }
+            catch
+            {
+                // Fall through to the thread-safe managed heap counter.
+            }
+
+            source = "GC.GetTotalMemory";
+            return Math.Max(1, GC.GetTotalMemory(false));
+        }
+
+        private static string[] BuildMatchedQueryFields(ConsoleCaptureReadPayload payload)
+        {
+            var fields = new List<string>();
+            if (!string.IsNullOrWhiteSpace(payload.logType)) fields.Add("logType");
+            if (payload.contains != null && payload.contains.Length > 0) fields.Add("contains");
+            if (!string.IsNullOrWhiteSpace(payload.regex)) fields.Add("regex");
+            if (payload.fromSequence >= 0 || payload.afterSequence >= 0) fields.Add("fromSequence");
+            if (payload.toSequence >= 0) fields.Add("toSequence");
+            return fields.ToArray();
         }
 
         private static ConsoleCaptureResult StopCapture(string sessionId)
@@ -1219,21 +1371,10 @@ namespace CodingRiver.UPilot
                 long requestedOffset = FindReadOffset(segment, scanFrom);
                 byte[] bytes = File.ReadAllBytes(file);
                 int searchStart = requestedOffset > int.MaxValue ? bytes.Length : Math.Max(0, (int)requestedOffset);
-                var lineStarts = new HashSet<int>();
-                foreach (byte[] needle in needleBytes)
-                {
-                    int match = searchStart;
-                    while ((match = IndexOfBytesBoyerMoore(bytes, match, bytes.Length, needle, true)) >= 0)
-                    {
-                        int lineStart = match;
-                        while (lineStart > searchStart && bytes[lineStart - 1] != (byte)'\n') lineStart--;
-                        lineStarts.Add(lineStart);
-                        match += Math.Max(1, needle.Length);
-                    }
-                }
+                List<int> lineStarts = FindCandidateLineStarts(bytes, searchStart, needleBytes);
 
                 bool pageFull = false;
-                foreach (int lineStart in lineStarts.OrderBy(value => value))
+                foreach (int lineStart in lineStarts)
                 {
                     token.ThrowIfCancellationRequested();
                     int lineEnd = lineStart;
@@ -1264,6 +1405,41 @@ namespace CodingRiver.UPilot
                     result.ScannedCount += segmentTo - segmentFrom + 1;
                 }
                 if (pageFull) return result;
+            }
+            return result;
+        }
+
+        private static List<int> FindCandidateLineStarts(byte[] bytes, int searchStart, byte[][] needles)
+        {
+            var result = new List<int>();
+            if (bytes == null || needles == null || needles.Length == 0) return result;
+            var groups = new List<byte[]>[256];
+            foreach (byte[] needle in needles)
+            {
+                if (needle == null || needle.Length == 0) continue;
+                byte first = FoldAscii(needle[0], true);
+                groups[first] ??= new List<byte[]>();
+                groups[first].Add(needle);
+            }
+
+            int lineStart = Math.Max(0, searchStart);
+            int lastAddedLine = -1;
+            for (int index = lineStart; index < bytes.Length; index++)
+            {
+                if (bytes[index] == (byte)'\n')
+                {
+                    lineStart = index + 1;
+                    continue;
+                }
+                List<byte[]> candidates = groups[FoldAscii(bytes[index], true)];
+                if (candidates == null || lastAddedLine == lineStart) continue;
+                foreach (byte[] needle in candidates)
+                {
+                    if (!BytesEqualAt(bytes, index, bytes.Length, needle, true)) continue;
+                    result.Add(lineStart);
+                    lastAddedLine = lineStart;
+                    break;
+                }
             }
             return result;
         }
@@ -1327,24 +1503,40 @@ namespace CodingRiver.UPilot
 
         private static string[] GetRawLinePrefilterNeedles(ConsoleCaptureReadPayload payload)
         {
-            if (payload == null || string.IsNullOrWhiteSpace(payload.regex)
-                || (payload.contains?.Length ?? 0) > 0)
-                return null;
+            if (payload == null) return null;
+            string[] contains = (payload.contains ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (contains.Length > 0)
+            {
+                if (contains.Any(value => !IsAsciiLiteral(value))) return null;
+                return payload.containsAll
+                    ? new[] { contains.OrderByDescending(value => value.Length).First() }
+                    : contains;
+            }
+            if (string.IsNullOrWhiteSpace(payload.regex)) return null;
             string[] values = payload.regex.Split('|');
             if (values.Length == 0) return null;
             foreach (string value in values)
             {
-                if (string.IsNullOrEmpty(value)) return null;
-                foreach (char current in value)
-                {
-                    if (!(current >= 'a' && current <= 'z')
-                        && !(current >= 'A' && current <= 'Z')
-                        && !(current >= '0' && current <= '9')
-                        && current != '_' && current != '-' && current != '.' && current != ':' && current != '/')
-                        return null;
-                }
+                if (!IsAsciiLiteral(value)) return null;
             }
             return values;
+        }
+
+        private static bool IsAsciiLiteral(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return false;
+            foreach (char current in value)
+            {
+                if (!(current >= 'a' && current <= 'z')
+                    && !(current >= 'A' && current <= 'Z')
+                    && !(current >= '0' && current <= '9')
+                    && current != '_' && current != '-' && current != '.' && current != ':' && current != '/')
+                    return false;
+            }
+            return true;
         }
 
         private static bool RawLineContainsAny(string line, string[] needles)

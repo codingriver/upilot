@@ -17,8 +17,15 @@ namespace CodingRiver.UPilot.Samples.MonoHookTracing
         CategoryDisplayName = "Sample Custom",
         CategoryOrder = 1000,
         Order = 10)]
-    public sealed class CustomValueHookPoint : UPilotMethodHookPointBase
+    public sealed class CustomValueHookPoint :
+        UPilotMethodHookPointBase,
+        IUPilotMonoHookExecutionPolicyProvider
     {
+        public bool GuaranteesPassThrough => true;
+        public bool SupportsInterception => false;
+        public UPilotMonoHookExecutionMode ExecutionMode { get; set; } =
+            UPilotMonoHookExecutionMode.PassThrough;
+
         private static IUPilotMonoHookEventSink _eventSink;
 
         protected override IEnumerable<UPilotMonoHookBinding> CreateBindings(UPilotMonoHookContext context)

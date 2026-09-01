@@ -47,7 +47,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 17
+_UPILOT_RULES_VERSION = 22
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
@@ -89,6 +89,49 @@ def _extract_operation_payload(result: ToolResponse) -> dict:
     return data
 
 
+def _operation_path_get(value: object, path: object) -> tuple[bool, object]:
+    """Read a small dot/bracket path without evaluating user input."""
+    if not isinstance(path, str) or not path.strip():
+        return False, None
+    text = path.strip()
+    if text == "$":
+        return True, value
+    if text.startswith("$."):
+        text = text[2:]
+    text = text.replace("[", ".").replace("]", "")
+    current = value
+    for segment in (part for part in text.split(".") if part):
+        if isinstance(current, dict) and segment in current:
+            current = current[segment]
+            continue
+        if isinstance(current, (list, tuple)) and segment.isdigit():
+            index = int(segment)
+            if 0 <= index < len(current):
+                current = current[index]
+                continue
+        return False, None
+    return True, current
+
+
+def _operation_parse_object(value: object) -> tuple[dict, str]:
+    if isinstance(value, dict):
+        return value, ""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "(null)":
+            return {}, ""
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as ex:
+            return {}, f"Operation result is not valid JSON: {ex.msg} at position {ex.pos}."
+        if isinstance(parsed, dict):
+            return parsed, ""
+        return {}, f"Operation result JSON must be an object, got {type(parsed).__name__}."
+    if value is None:
+        return {}, ""
+    return {}, f"Operation result must be an object or JSON object string, got {type(value).__name__}."
+
+
 def _normalize_status(value: object) -> str:
     text = str(value or "").strip()
     return text or "Running"
@@ -120,6 +163,16 @@ def _operation_cleanup_pending(payload: dict | None) -> bool:
         return True
     unresolved = payload.get("unresolvedResources")
     return isinstance(unresolved, (list, tuple, set, dict)) and len(unresolved) > 0
+
+
+def _operation_cleanup_state_is_explicit(payload: dict | None) -> bool:
+    """Return True only when the project explicitly reports its cleanup state."""
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        key in payload
+        for key in ("cleanupPending", "cleanupStatus", "cleanupSucceeded", "activeLeaseCount", "unresolvedResources")
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -425,6 +478,11 @@ class TaskDomainService:
             if fields is not None and (not isinstance(fields, list) or not all(isinstance(item, str) for item in fields)):
                 errors.append({"path": "artifactRules.fromStatusFields", "code": "type", "message": "fromStatusFields must be an array of field names."})
 
+        for field in ("resultPath", "statusPath", "phasePath", "errorPath", "detailPath", "progressPath", "failureSignaturePath", "artifactsPath"):
+            value = job_spec.get(field)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                errors.append({"path": field, "code": "type", "message": f"{field} must be a non-empty path string."})
+
         valid = not errors
         data = {
             "valid": valid,
@@ -529,6 +587,7 @@ class TaskDomainService:
             "lastStatusData": {},
             "lastStatusAt": 0,
             "changes": [],
+            "milestones": [],
             "artifacts": {},
             "consoleCapture": {},
             "timing": {
@@ -578,7 +637,16 @@ class TaskDomainService:
             await self._operation_stop_console_capture(state)
             return fail(request_id, "OPERATION_START_FAILED", state["error"], self._public_operation_state(state))
 
-        payload = _extract_operation_payload(start_result)
+        payload, payload_error = self._operation_adapt_payload(start_result, start_call, job_spec)
+        if payload_error:
+            state["status"] = "Failed"
+            state["phase"] = "StartResultInvalid"
+            state["error"] = payload_error
+            state["failureSignature"] = "OperationResultInvalid"
+            state["endedAt"] = now_ms()
+            await self._operation_stop_console_capture(state)
+            self._finalize_operation_timing(state)
+            return fail(request_id, "OPERATION_RESULT_INVALID", payload_error, self._public_operation_state(state))
         if payload:
             state["startData"] = payload
             self._merge_operation_status(state, payload)
@@ -642,7 +710,17 @@ class TaskDomainService:
             self._finalize_operation_timing(state)
             return fail(request_id, "OPERATION_STATUS_FAILED", state["error"], self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
-        payload = _extract_operation_payload(result)
+        payload, payload_error = self._operation_adapt_payload(result, status_call, state["jobSpec"])
+        if payload_error:
+            state["status"] = "Failed"
+            state["phase"] = "StatusResultInvalid"
+            state["error"] = payload_error
+            state["failureSignature"] = "OperationResultInvalid"
+            state["endedAt"] = now_ms()
+            await self._operation_stop_console_capture(state)
+            await self.operation_collect_artifacts(operation_id)
+            self._finalize_operation_timing(state)
+            return fail(request_id, "OPERATION_RESULT_INVALID", payload_error, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
         if payload:
             self._merge_operation_status(state, payload)
         mapping = state["jobSpec"].get("terminalStatusMapping")
@@ -768,10 +846,32 @@ class TaskDomainService:
         state["cancelRequestedAt"] = state.get("cancelRequestedAt") or now_ms()
         state["cancelAttemptCount"] = int(state.get("cancelAttemptCount") or 0) + 1
         state["cancelAccepted"] = bool(result.ok)
-        state["cleanupPending"] = bool(result.ok)
-        state["status"] = "CancelRequested" if result.ok else "Running"
-        state["phase"] = "Stopping" if result.ok else "CancelFailed"
+        cancel_payload, cancel_payload_error = self._operation_adapt_payload(result, cancel_call, state["jobSpec"])
+        cleanup_state_explicit = _operation_cleanup_state_is_explicit(cancel_payload)
+        cleanup_pending = _operation_cleanup_pending(cancel_payload) if cleanup_state_explicit else bool(result.ok)
+        state["cleanupPending"] = cleanup_pending
+        cancel_status = _normalize_status(cancel_payload.get("status")) if cancel_payload and "status" in cancel_payload else ""
+        cancel_terminal = (
+            bool(cancel_status)
+            and _is_terminal_status(cancel_status, state["jobSpec"].get("terminalStatusMapping"))
+            and cleanup_state_explicit
+            and not cleanup_pending
+        )
+        if result.ok and cancel_terminal:
+            self._merge_operation_status(state, cancel_payload)
+            if cancel_status.lower() in {"canceled", "cancelled", "aborted"}:
+                state["status"] = "Canceled"
+            elif _is_success_status(cancel_status, state["jobSpec"].get("terminalStatusMapping")):
+                state["status"] = "Succeeded"
+            else:
+                state["status"] = "Failed"
+            state["endedAt"] = now_ms()
+        else:
+            state["status"] = "CancelRequested" if result.ok else "Running"
+            state["phase"] = "Stopping" if result.ok else "CancelFailed"
         state["error"] = "" if result.ok else (result.error.message if result.error else "cancelCall failed")
+        if cancel_payload_error:
+            state["cancelResultParseError"] = cancel_payload_error
         if not result.ok:
             state["failureSignature"] = result.error.code if result.error else "CancelCallFailed"
         state["updatedAt"] = now_ms()
@@ -860,6 +960,7 @@ class TaskDomainService:
                 target_instance_path=str(call.get("targetInstancePath") or call.get("target_instance_path") or ""),
                 target_static_type_name=str(call.get("targetStaticTypeName") or call.get("target_static_type_name") or ""),
                 target_static_member_path=str(call.get("targetStaticMemberPath") or call.get("target_static_member_path") or ""),
+                async_after_sec=0,
             )
         if kind in {"mcp", "tool", "mcp_tool"}:
             tool_name = str(call.get("toolName") or call.get("name") or "")
@@ -876,6 +977,51 @@ class TaskDomainService:
                 return fail(request_id, "INVALID_OPERATION_CALL", "native payload must be an object.", {"call": call})
             return await self.dispatcher.call(request_id, route, payload, timeout_ms=timeout_ms)
         return fail(request_id, "UNSUPPORTED_OPERATION_CALL", f"Unsupported operation call kind: {kind}", {"call": call})
+
+    @staticmethod
+    def _operation_adapt_payload(result: ToolResponse, call: dict | None, job_spec: dict | None) -> tuple[dict, str]:
+        """Normalize direct and reflection results, then apply optional jobSpec field paths."""
+        if not result.ok or not isinstance(result.data, dict):
+            return {}, ""
+        call = call if isinstance(call, dict) else {}
+        spec = job_spec if isinstance(job_spec, dict) else {}
+        data = result.data
+        kind = str(call.get("kind") or call.get("type") or "").strip().lower()
+        result_path = call.get("resultPath", spec.get("resultPath"))
+
+        if result_path:
+            found, selected = _operation_path_get(data, result_path)
+            if not found:
+                return {}, f"Configured resultPath was not found: {result_path}"
+            payload, parse_error = _operation_parse_object(selected)
+        elif kind == "reflection" and "result" in data:
+            payload, parse_error = _operation_parse_object(data.get("result"))
+        else:
+            payload, parse_error = _extract_operation_payload(result), ""
+        if parse_error:
+            return {}, parse_error
+
+        field_paths = {
+            "status": "statusPath",
+            "phase": "phasePath",
+            "error": "errorPath",
+            "detail": "detailPath",
+            "progress": "progressPath",
+            "failureSignature": "failureSignaturePath",
+            "artifacts": "artifactsPath",
+        }
+        adapted = dict(payload)
+        for target, path_field in field_paths.items():
+            path = call.get(path_field, spec.get(path_field))
+            if not path:
+                continue
+            found, selected = _operation_path_get(payload, path)
+            if not found:
+                found, selected = _operation_path_get(data, path)
+            if not found:
+                return {}, f"Configured {path_field} was not found: {path}"
+            adapted[target] = selected
+        return adapted, ""
 
     def _resolve_operation_call(self, call: dict | None, state: dict) -> dict | None:
         """Resolve exact ${start.*}/${status.*}/${operation.*} placeholders in a call."""
@@ -961,12 +1107,74 @@ class TaskDomainService:
             pass
         if isinstance(payload.get("artifacts"), dict):
             state["artifactHints"] = payload["artifacts"]
+        self._merge_operation_milestones(state, payload)
+
+    @staticmethod
+    def _merge_operation_milestones(state: dict, payload: dict) -> None:
+        incoming = payload.get("milestones")
+        if isinstance(payload.get("milestone"), dict):
+            incoming = [payload["milestone"], *(incoming if isinstance(incoming, list) else [])]
+        if not isinstance(incoming, list):
+            return
+        milestones = state.setdefault("milestones", [])
+        for item in incoming:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            reached_at = int(item.get("reachedAt") or item.get("timestamp") or now_ms())
+            occurrence_id = str(item.get("occurrenceId") or f"{name}:{reached_at}")
+            normalized = {
+                "name": name,
+                "occurrenceId": occurrence_id,
+                "operationId": state.get("operationId", ""),
+                "reachedAt": reached_at,
+                "source": str(item.get("source") or "project-status"),
+                "valid": bool(item.get("valid", True)),
+                "invalidatedAt": int(item.get("invalidatedAt") or 0),
+                "invalidatedReason": str(item.get("invalidatedReason") or ""),
+                "invalidateOnFailure": bool(item.get("invalidateOnFailure", False)),
+            }
+            if isinstance(item.get("evidence"), dict):
+                normalized["evidence"] = item["evidence"]
+            existing = next(
+                (entry for entry in milestones if entry.get("occurrenceId") == occurrence_id),
+                None,
+            )
+            if existing is None:
+                milestones.append(normalized)
+            else:
+                for field in (
+                    "source",
+                    "valid",
+                    "invalidatedAt",
+                    "invalidatedReason",
+                    "invalidateOnFailure",
+                ):
+                    if field not in item:
+                        normalized[field] = existing.get(field, normalized[field])
+                existing.update(normalized)
+        milestones.sort(key=lambda entry: (int(entry.get("reachedAt") or 0), str(entry.get("occurrenceId") or "")))
+        if len(milestones) > 500:
+            del milestones[:-500]
+
+    @staticmethod
+    def _invalidate_milestones_on_failure(state: dict) -> None:
+        invalidated_at = int(state.get("endedAt") or now_ms())
+        reason = str(state.get("failureSignature") or state.get("error") or "OperationFailed")
+        for milestone in state.get("milestones") or []:
+            if milestone.get("valid", True) and milestone.get("invalidateOnFailure"):
+                milestone["valid"] = False
+                milestone["invalidatedAt"] = invalidated_at
+                milestone["invalidatedReason"] = reason
 
     def _mark_repeat_failure(self, state: dict) -> None:
         if str(state.get("status", "")).lower() not in _DEFAULT_OPERATION_FAILURE:
             self._operation_failure_history.clear()
             setattr(self, "_operation_last_failure_signature", "")
             return
+        self._invalidate_milestones_on_failure(state)
         signature = str(state.get("failureSignature") or "")
         if not signature:
             return
@@ -1051,6 +1259,7 @@ class TaskDomainService:
     ) -> dict:
         level = self._normalize_operation_detail_level(detail_level)
         max_chars = max(128, min(int(max_tail_chars or 2000), 1000000))
+        truncated: list[str] = []
         public = {
             "operationId": state.get("operationId"),
             "displayName": state.get("displayName"),
@@ -1077,13 +1286,14 @@ class TaskDomainService:
             "artifacts": state.get("artifacts") or {},
             "artifactErrors": state.get("artifactErrors") or [],
             "timing": state.get("timing") or {},
+            "milestones": self._bounded_operation_value(state.get("milestones") or [], max_chars, "milestones", truncated),
+            "milestoneCount": len(state.get("milestones") or []),
             "responseDetailLevel": level,
             "rawStateAvailable": True,
         }
         status_data = state.get("lastStatusData") or {}
         if isinstance(status_data.get("metrics"), dict):
             public["metrics"] = status_data["metrics"]
-        truncated: list[str] = []
         capture = state.get("consoleCapture") or {}
         if level == "summary":
             public["consoleCapture"] = {key: capture.get(key) for key in (

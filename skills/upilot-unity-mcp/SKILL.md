@@ -23,9 +23,11 @@ Use the unified execution state: require `ready=true`, `authoritative=true`, and
 
 - In a UPilot context, `Tracer`, `追踪器`, and `the tracer` mean UPilot Tracer (`UPilot 追踪器`); MonoHook is only the internal implementation technology.
 - The Tracer is manually controlled. Trace points, stack capture, and Console output default to disabled; do not enable, apply, or consume events unless explicitly requested.
+- A Hook is a technical method replacement, but the default per-point execution mode is `PassThrough`: built-in points must call the original method with unchanged arguments, return semantics, exceptions, and call count. Per-point `Intercept` is opt-in and only valid when the Provider declares interception support; tracing failures are isolated and must not block the original call.
+- `自动注入追踪点位` is the master opt-in switch and defaults to disabled. Its Domain Reload and PlayMode timing switches take effect only while the master switch is enabled; manual `应用` remains available when automatic injection is off. Do not enable any automatic injection setting implicitly.
 - Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor/root/direct-child, scene/resource path, Layer/Tag, Active/enabled, required-component state, Prefab/source path, selection, point/method/phase/event source, EditMode/PlayMode, object identity, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
 - Optional global/per-object rate limits and duplicate suppression are disabled by default; when enabled, report their dropped counters separately from filter rejections.
-- Point-specific profiles override the global profile; empty point selection inherits the global profile. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
+- Target filtering uses one global default profile plus optional explicit per-point overrides; an empty point override inherits the global profile. Stack capture uses `Disabled`, `SelectedPoints`, or `AllEnabledPoints`, and defaults to `Disabled`. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
 - Keep high-frequency points, stack capture, and Console output bounded; use filter statistics and rejection reasons before widening the scope.
 
 Use Streamable HTTP such as `http://127.0.0.1:8011/mcp` as the only third-party AI client transport. Never configure an AI client with a WebSocket URL, the internal Bridge port, stdio, or a command that launches the MCP Server. WebSocket transport is internal to MCP Server <-> Unity Bridge.
@@ -38,7 +40,7 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 - If a native tool is absent from the client list, query `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable. When an exact tool is registered and callable but not injected, use `unity_tool_call` with its documented arguments.
 - Refresh the MCP client after tool registration or optional-feature changes.
 - Prefer the narrowest semantic tool.
-- Call existing compiled methods with `unity_reflection_call`. Fall back to one bounded `reflection_eval` expression only after an actual reflection-call failure.
+- Call existing compiled methods with `unity_reflection_call`. It is a generic, write-authorized, non-idempotent execution entry point because the target method may mutate project or runtime state; inspect the target and never retry it automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery. Fall back to one bounded `reflection_eval` expression only after an actual reflection-call failure.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
 

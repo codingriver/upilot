@@ -24,8 +24,18 @@ namespace CodingRiver.UPilot
     {
         public bool setMasterEnabled;
         public bool masterEnabled;
+        public bool updateAutoInjectEnabled;
+        public bool autoInjectEnabled;
+        public bool updateAutoApplyOnPlayMode;
+        public bool autoApplyOnPlayMode;
         public string[] pointIds;
+        public bool updatePointEnabled;
         public bool enabled;
+        public bool updateExecutionMode;
+        public UPilotMonoHookExecutionMode executionMode;
+        public bool setStackTraceCaptureMode;
+        public UPilotStackTraceCaptureMode stackTraceCaptureMode;
+        public bool updatePointStackTraceSelection;
         public bool updateCaptureStackTrace;
         public bool captureStackTrace;
         public bool updatePerObjectRateLimit;
@@ -36,6 +46,8 @@ namespace CodingRiver.UPilot
         public int duplicateEventWindowMilliseconds;
         public bool setGlobalFilterProfile;
         public string globalFilterProfileId;
+        public bool updatePointFilterOverridesEnabled;
+        public bool pointFilterOverridesEnabled;
         public bool updatePointFilterProfile;
         public string pointFilterProfileId;
         public bool replaceFilterProfiles;
@@ -58,6 +70,18 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public sealed class UPilotMonoHookTracingInstallEntryPayload
+    {
+        public string targetTypeName;
+        public string declaringTypeName;
+        public string methodSignature;
+        public string targetMethodId;
+        public string status;
+        public string reason;
+        public string trampolineKey;
+    }
+
+    [Serializable]
     public sealed class UPilotMonoHookTracingPointPayload
     {
         public string pointId;
@@ -65,17 +89,29 @@ namespace CodingRiver.UPilot
         public string categoryId;
         public bool highFrequency;
         public bool configuredEnabled;
-        public bool captureStackTrace;
+        public string configuredExecutionMode;
+        public string appliedExecutionMode;
+        public bool guaranteesPassThrough;
+        public bool supportsInterception;
+        public bool captureStackTraceSelected;
+        public bool captureStackTraceEffective;
         public string configuredFilterProfileId;
-        public string configuredFilterProfileName;
         public string effectiveFilterProfileId;
-        public string effectiveFilterProfileName;
         public long filterEvaluated;
         public long filterAccepted;
         public long filterRejected;
         public string filterLastReason;
         public string installState;
         public string message;
+        public int candidateCount;
+        public int installedCount;
+        public int installedTypeCount;
+        public int installedMethodCount;
+        public int trampolineCount;
+        public int skippedCount;
+        public int failedCount;
+        public List<UPilotMonoHookTracingInstallEntryPayload> entries =
+            new List<UPilotMonoHookTracingInstallEntryPayload>();
     }
 
     [Serializable]
@@ -83,15 +119,20 @@ namespace CodingRiver.UPilot
     {
         public bool ok = true;
         public bool masterEnabled;
+        public bool autoInjectEnabled;
         public bool autoApplyOnEditorLoad;
+        public bool autoApplyOnPlayMode;
         public int maxEventsPerSecond;
         public bool enablePerObjectRateLimit;
         public int maxEventsPerObjectPerSecond;
         public bool suppressDuplicateEvents;
         public int duplicateEventWindowMilliseconds;
+        public bool captureStackTrace;
+        public string stackTraceCaptureMode;
         public int stackTraceMaxFrames;
         public int stackTraceSampleEveryN;
         public string globalFilterProfileId;
+        public bool pointFilterOverridesEnabled;
         public List<UPilotTraceFilterProfile> filterProfiles = new List<UPilotTraceFilterProfile>();
         public List<UPilotTraceFilterStatistics> filterStatistics = new List<UPilotTraceFilterStatistics>();
         public int eventCount;
@@ -99,6 +140,7 @@ namespace CodingRiver.UPilot
         public int consoleDroppedCount;
         public int perObjectDroppedCount;
         public int duplicateDroppedCount;
+        public int traceFailureCount;
         public List<UPilotMonoHookTracingPointPayload> points = new List<UPilotMonoHookTracingPointPayload>();
     }
 
@@ -190,20 +232,26 @@ namespace CodingRiver.UPilot
             var result = new UPilotMonoHookTracingStatusPayload
             {
                 masterEnabled = settings.masterEnabled,
+                autoInjectEnabled = settings.autoInjectEnabled,
                 autoApplyOnEditorLoad = settings.autoApplyOnEditorLoad,
+                autoApplyOnPlayMode = settings.autoApplyOnPlayMode,
                 maxEventsPerSecond = settings.maxEventsPerSecond,
                 enablePerObjectRateLimit = settings.enablePerObjectRateLimit,
                 maxEventsPerObjectPerSecond = settings.maxEventsPerObjectPerSecond,
                 suppressDuplicateEvents = settings.suppressDuplicateEvents,
                 duplicateEventWindowMilliseconds = settings.duplicateEventWindowMilliseconds,
+                captureStackTrace = settings.captureStackTrace,
+                stackTraceCaptureMode = settings.stackTraceCaptureMode.ToString(),
                 stackTraceMaxFrames = settings.stackTraceMaxFrames,
                 stackTraceSampleEveryN = settings.stackTraceSampleEveryN,
                 globalFilterProfileId = settings.globalFilterProfileId,
+                pointFilterOverridesEnabled = settings.pointFilterOverridesEnabled,
                 eventCount = UPilotMonoHookTelemetry.Count,
                 droppedCount = UPilotMonoHookTelemetry.DroppedCount,
                 consoleDroppedCount = UPilotMonoHookTelemetry.ConsoleDroppedCount,
                 perObjectDroppedCount = UPilotMonoHookTelemetry.PerObjectDroppedCount,
                 duplicateDroppedCount = UPilotMonoHookTelemetry.DuplicateDroppedCount,
+                traceFailureCount = UPilotMonoHookTelemetry.TraceFailureCount,
             };
             result.filterProfiles.AddRange(settings.filterProfiles ?? new List<UPilotTraceFilterProfile>());
             result.filterStatistics.AddRange(UPilotTraceFilterEngine.SnapshotStatistics());
@@ -211,9 +259,9 @@ namespace CodingRiver.UPilot
             foreach (var definition in UPilotMonoHookCatalog.All)
             {
                 _controller.Runtime.TryGetValue(definition.Id, out var runtime);
-                string configuredFilterId = settings.GetConfiguredFilterProfileId(definition.Id);
                 string effectiveFilterId = settings.GetEffectiveFilterProfileId(definition.Id);
                 var filterStats = UPilotTraceFilterEngine.GetStatistics(definition.Id, effectiveFilterId);
+                var coverage = runtime?.Coverage;
                 result.points.Add(new UPilotMonoHookTracingPointPayload
                 {
                     pointId = definition.Id,
@@ -221,18 +269,47 @@ namespace CodingRiver.UPilot
                     categoryId = definition.CategoryId,
                     highFrequency = definition.HighFrequency,
                     configuredEnabled = settings.IsConfiguredEnabled(definition.Id),
-                    captureStackTrace = settings.ShouldCaptureStackTrace(definition.Id),
-                    configuredFilterProfileId = configuredFilterId,
-                    configuredFilterProfileName = settings.FindFilterProfile(configuredFilterId)?.Name ?? string.Empty,
+                    configuredExecutionMode = settings.GetExecutionMode(definition.Id).ToString(),
+                    appliedExecutionMode = runtime?.AppliedExecutionMode.ToString() ?? UPilotMonoHookExecutionMode.PassThrough.ToString(),
+                    guaranteesPassThrough = runtime?.GuaranteesPassThrough ?? false,
+                    supportsInterception = runtime?.SupportsInterception ?? false,
+                    captureStackTraceSelected = settings.points.FirstOrDefault(point =>
+                        point != null && string.Equals(point.Id, definition.Id, StringComparison.Ordinal))?.CaptureStackTrace ?? false,
+                    captureStackTraceEffective = settings.ShouldCaptureStackTrace(definition.Id),
+                    configuredFilterProfileId = settings.GetConfiguredFilterProfileId(definition.Id),
                     effectiveFilterProfileId = effectiveFilterId,
-                    effectiveFilterProfileName = settings.FindFilterProfile(effectiveFilterId)?.Name ?? string.Empty,
                     filterEvaluated = filterStats?.evaluated ?? 0,
                     filterAccepted = filterStats?.accepted ?? 0,
                     filterRejected = filterStats?.rejected ?? 0,
                     filterLastReason = filterStats?.lastReason ?? string.Empty,
                     installState = runtime?.InstallState.ToString() ?? UPilotMonoHookInstallState.NotInstalled.ToString(),
                     message = runtime?.Message ?? string.Empty,
+                    candidateCount = coverage?.CandidateCount ?? 0,
+                    installedCount = coverage?.InstalledCount ?? 0,
+                    installedTypeCount = coverage?.InstalledTypeCount ?? 0,
+                    installedMethodCount = coverage?.InstalledMethodCount ?? 0,
+                    trampolineCount = coverage?.TrampolineCount ?? 0,
+                    skippedCount = coverage?.SkippedCount ?? 0,
+                    failedCount = coverage?.FailedCount ?? 0,
                 });
+                var point = result.points[result.points.Count - 1];
+                if (coverage?.Entries != null)
+                {
+                    foreach (var entry in coverage.Entries)
+                    {
+                        if (entry == null) continue;
+                        point.entries.Add(new UPilotMonoHookTracingInstallEntryPayload
+                        {
+                            targetTypeName = entry.TargetTypeName,
+                            declaringTypeName = entry.DeclaringTypeName,
+                            methodSignature = entry.MethodSignature,
+                            targetMethodId = entry.TargetMethodId,
+                            status = entry.Status,
+                            reason = entry.Reason,
+                            trampolineKey = entry.TrampolineKey,
+                        });
+                    }
+                }
             }
             return result;
         }
@@ -271,10 +348,19 @@ namespace CodingRiver.UPilot
                 !string.Equals(payload.pointFilterProfileId, UPilotTraceFilterProfileIds.None, StringComparison.Ordinal) &&
                 !availableProfileIds.Contains(payload.pointFilterProfileId))
                 throw new ArgumentException("未知追踪器过滤器：" + payload.pointFilterProfileId);
-
+            if ((payload.updatePointStackTraceSelection || payload.updatePointFilterProfile) && pointIds.Length == 0)
+                throw new ArgumentException("更新点位堆栈或过滤器覆盖时必须提供 pointIds。");
             var result = new UPilotMonoHookTracingConfigureResultPayload();
             if (payload.setMasterEnabled)
                 settings.masterEnabled = payload.masterEnabled;
+            if (payload.updateAutoInjectEnabled)
+                settings.autoInjectEnabled = payload.autoInjectEnabled;
+            if (payload.updateAutoApplyOnPlayMode)
+                settings.autoApplyOnPlayMode = payload.autoApplyOnPlayMode;
+            if (payload.setStackTraceCaptureMode)
+                settings.stackTraceCaptureMode = payload.stackTraceCaptureMode;
+            else if (payload.updateCaptureStackTrace)
+                settings.SetCaptureStackTrace(payload.captureStackTrace);
             if (payload.updatePerObjectRateLimit)
             {
                 settings.enablePerObjectRateLimit = payload.enablePerObjectRateLimit;
@@ -289,16 +375,21 @@ namespace CodingRiver.UPilot
                 settings.globalFilterProfileId = string.IsNullOrEmpty(payload.globalFilterProfileId)
                     ? UPilotTraceFilterProfileIds.None
                     : payload.globalFilterProfileId;
+            if (payload.updatePointFilterOverridesEnabled)
+                settings.pointFilterOverridesEnabled = payload.pointFilterOverridesEnabled;
             if (payload.replaceFilterProfiles && payload.filterProfiles != null)
                 settings.filterProfiles = payload.filterProfiles.ToList();
             settings.EnsureDefaults();
             foreach (var pointId in pointIds)
             {
-                settings.SetEnabled(pointId, payload.enabled);
-                if (payload.updateCaptureStackTrace)
+                if (payload.updatePointEnabled)
+                    settings.SetEnabled(pointId, payload.enabled);
+                if (payload.updateExecutionMode)
+                    settings.SetExecutionMode(pointId, payload.executionMode);
+                if (payload.updatePointStackTraceSelection)
                     settings.SetCaptureStackTrace(pointId, payload.captureStackTrace);
                 if (payload.updatePointFilterProfile)
-                    settings.SetFilterProfileId(pointId, payload.pointFilterProfileId ?? string.Empty);
+                    settings.SetFilterProfileId(pointId, payload.pointFilterProfileId);
                 result.changedPointIds.Add(pointId);
             }
             if (payload.resetFilterStatistics)

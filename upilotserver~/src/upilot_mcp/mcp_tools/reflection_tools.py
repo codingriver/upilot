@@ -42,8 +42,21 @@ async def unity_reflection_find(
     r = await _get_facade().reflection_find(type_name=typeName, method_name=methodName)
     return _log_tool_result("unity_reflection_find", _payload(r))
 
+
 @mcp.tool(
-    description="通过反射调用已编译并加载的 Unity/C# 方法。不是脚本执行器；适合稳定业务入口和静态/实例方法调用。调用前可用 unity_reflection_find 确认类型和方法；复杂多步逻辑应放进项目 helper 方法。"
+    description="只读检查已加载 C#/Unity 类型是否存在；返回完整类型名、程序集、可见性和短名冲突候选，不枚举方法成员。"
+)
+async def unity_type_exists(typeName: str):
+    _log_tool_call("unity_type_exists", {"typeName": typeName})
+    r = await _get_facade().type_exists(type_name=typeName)
+    return _log_tool_result("unity_type_exists", _payload(r))
+
+@mcp.tool(
+    description=(
+        "通过反射调用已编译并加载的 Unity/C# 方法。目标方法可能修改场景、资源或运行时状态，"
+        "因此需要项目写入授权且不得自动重试。不是脚本执行器；稳定只读检查优先使用 "
+        "unity_type_exists、unity_reflection_find 或专用语义工具，复杂多步逻辑应放进项目 helper 方法。"
+    )
 )
 async def unity_reflection_call(
     typeName: str,
@@ -53,6 +66,9 @@ async def unity_reflection_call(
     targetInstancePath: str = "",
     targetStaticTypeName: str = "",
     targetStaticMemberPath: str = "",
+    asyncAfterSec: float = 25.0,
+    operationTimeoutSec: float = 600.0,
+    forceAsync: bool = False,
 ):
     _log_tool_call(
         "unity_reflection_call",
@@ -66,6 +82,9 @@ async def unity_reflection_call(
             "targetStaticMemberPath": targetStaticMemberPath,
         },
     )
+    rejected = _reject_write_if_unapproved("unity_reflection_call")
+    if rejected is not None:
+        return rejected
     r = await _get_facade().reflection_call(
         type_name=typeName,
         method_name=methodName,
@@ -74,8 +93,30 @@ async def unity_reflection_call(
         target_instance_path=targetInstancePath,
         target_static_type_name=targetStaticTypeName,
         target_static_member_path=targetStaticMemberPath,
+        async_after_sec=asyncAfterSec,
+        operation_timeout_sec=operationTimeoutSec,
+        force_async=forceAsync,
     )
     return _log_tool_result("unity_reflection_call", _payload(r))
+
+@mcp.tool(description="查询自动脱离同步窗口的长反射调用；只轮询 Server 本地任务，不会重复执行 Unity 方法。")
+async def unity_reflection_operation_status(operationId: str):
+    r = await _get_facade().reflection_operation_status(operation_id=operationId)
+    return _log_tool_result("unity_reflection_operation_status", _payload(r))
+
+@mcp.tool(description="等待长反射调用的终态；等待窗口结束不等于原调用超时。")
+async def unity_reflection_operation_wait(operationId: str, timeoutSec: float = 30.0, pollIntervalSec: float = 0.5):
+    r = await _get_facade().reflection_operation_wait(
+        operation_id=operationId,
+        timeout_sec=timeoutSec,
+        poll_interval_sec=pollIntervalSec,
+    )
+    return _log_tool_result("unity_reflection_operation_wait", _payload(r))
+
+@mcp.tool(description="长反射调用取消能力查询。任意 Unity 主线程方法开始后不可安全中断，本工具不会伪造取消成功。")
+async def unity_reflection_operation_cancel(operationId: str):
+    r = await _get_facade().reflection_operation_cancel(operation_id=operationId)
+    return _log_tool_result("unity_reflection_operation_cancel", _payload(r))
 
 @mcp.tool(
     description=(
@@ -121,7 +162,7 @@ _DESTRUCTIVE_TOOLS = {
     "unity_gameobject_delete", "unity_gameobject_move",
     "unity_gameobject_duplicate", "unity_component_add",
     "unity_component_remove", "unity_component_modify",
-    "unity_batch_execute", "reflection_eval",
+    "unity_batch_execute", "unity_reflection_call", "reflection_eval",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}

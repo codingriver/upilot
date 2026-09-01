@@ -27,9 +27,10 @@ from .tool_facade import McpToolFacade
 from .models import ToolResponse
 from .protocol import new_id
 from .responses import fail, ok
-from .config import CONFIG
+from .config import CONFIG, refresh_config_if_changed
 from .tool_registry import REGISTRY, REGISTRY_VERSION, register_public_tool
 from .version import version_payload
+from .wire_ids import stringify_wire_ids
 
 logger = logging.getLogger("upilot.mcp")
 stdio_logger = logging.getLogger("upilot.stdio")
@@ -354,6 +355,7 @@ async def _run_http_server(
     # Add a simple health endpoint for liveness probes
     async def health_endpoint(request):
         from starlette.responses import JSONResponse
+        config_status = refresh_config_if_changed()
         session = _orchestrator.session_manager.active if _orchestrator else None
         now_ms = int(time.time() * 1000)
         heartbeat_at = int(session.last_heartbeat_at) if session else 0
@@ -365,6 +367,7 @@ async def _run_http_server(
             "heartbeat_age_ms": max(0, now_ms - heartbeat_at) if heartbeat_at else None,
             "tool_count": len([item for item in REGISTRY.list() if item.feature == "core" or CONFIG.flow_enabled]),
             "registry_version": REGISTRY_VERSION,
+            "server_pid": os.getpid(),
             "server_uptime_ms": max(0, int((time.time() - _SERVER_STARTED_AT) * 1000)),
             "http_port": http_port,
             "ws_port": _orchestrator.port if _orchestrator else CONFIG.ws_port,
@@ -372,6 +375,7 @@ async def _run_http_server(
             "write_access_approved": CONFIG.write_access_approved,
             "timestamp": time.time(),
         }
+        payload.update(config_status)
         payload.update(version_payload())
         return JSONResponse(payload)
 
@@ -531,7 +535,7 @@ def _response_context() -> dict[str, Any]:
 
 def _payload(r) -> CallToolResult:
     response_context = getattr(r, "context", None) or _response_context()
-    structured = {
+    structured = stringify_wire_ids({
         "schemaVersion": 2,
         "ok": r.ok,
         "data": r.data,
@@ -548,7 +552,7 @@ def _payload(r) -> CallToolResult:
         ),
         "requestId": r.request_id,
         "timestamp": r.timestamp,
-    }
+    })
     text_payload = json.dumps(structured, ensure_ascii=False)
     return CallToolResult(
         content=[TextContent(type="text", text=text_payload)],
@@ -581,12 +585,33 @@ async def _unity_is_playmode() -> bool:
 
 
 async def _reject_compile_in_playmode(tool_name: str):
-    is_playmode = await _unity_is_playmode()
     execution = (
         _facade.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
         if _facade is not None
         else {}
     )
+    compile_phase = str(execution.get("compilePhase") or "").lower()
+    active_compile_recovery = compile_phase in {
+        "queued", "compiling", "domain_reload", "verifying"
+    }
+    completed_reload_recovery = bool(
+        tool_name == "unity_safe_compile_and_wait"
+        and execution.get("compileRequestId")
+        and compile_phase in {"completed", "failed"}
+        and (not execution.get("authoritative") or execution.get("isStale"))
+    )
+    safe_compile_recovery = (
+        tool_name in {"unity_safe_compile_and_wait", "unity_sync_after_disk_write"}
+        and (active_compile_recovery or completed_reload_recovery)
+        and not _state_is_playmode(str(execution.get("playModeState") or ""))
+    )
+    # Do not perform a live Editor query while recovering an existing compile:
+    # that query itself waits for Domain Reload reconnect and can erase the
+    # evidence needed by the workflow to attach to the original request.
+    if safe_compile_recovery:
+        return None
+
+    is_playmode = await _unity_is_playmode()
     if is_playmode:
         detail = {
             **execution,
@@ -609,7 +634,7 @@ async def _reject_compile_in_playmode(tool_name: str):
             ),
         )
 
-    if _facade is not None and (
+    if _facade is not None and not safe_compile_recovery and (
         not execution.get("authoritative")
         or execution.get("isStale")
         or execution.get("playModeState") != "edit"
@@ -634,6 +659,7 @@ async def _reject_compile_in_playmode(tool_name: str):
 
 
 def _reject_write_if_unapproved(tool_name: str):
+    refresh_config_if_changed()
     if CONFIG.write_access_approved:
         return None
     return _log_tool_result(

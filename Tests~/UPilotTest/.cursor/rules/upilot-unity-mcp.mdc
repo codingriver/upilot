@@ -6,10 +6,10 @@ alwaysApply: true
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 17
+rulesVersion: 22
 upilotPackageVersion: 0.3.27
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-08-27T13:27:15Z
+generatedAt: 2026-08-31T13:01:25Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -46,7 +46,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Distinguish server registration, client tool-list injection, and a successful real call; they are different states.
 - If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable. Treat `registered`, `available`, and `callableNow` as separate states and follow `unavailableReason` / `nextAction`.
 - After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.
-- Use the narrowest dedicated semantic tool. Use `unity_reflection_call` for existing compiled entry points.
+- Use the narrowest dedicated semantic tool. `unity_reflection_call` is a generic, write-authorized, non-idempotent execution entry point because the target method may mutate project or runtime state; inspect the exact target and arguments and never retry it automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery.
 - Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
@@ -66,12 +66,14 @@ Project-specific business rules outside this controlled UPilot block take preced
 ## Optional UPilot Tracer
 
 - In a UPilot context, interpret `Tracer`, `追踪器`, or `the tracer` as UPilot Tracer (`UPilot 追踪器`). Use MonoHook only for the internal implementation technology or preserved compatibility identifiers.
-- UPilot Tracer is optional and manually controlled. All trace points, per-point stack capture, and Console output default to disabled.
+- UPilot Tracer is optional and manually controlled. All trace points, stack capture, and Console output default to disabled.
+- Physical Hooks are technical replacements, not business interception by default. Each point uses `PassThrough` unless explicitly changed; built-in Providers must preserve original arguments, return semantics, exceptions, and call count. `Intercept` is allowed only for a Provider that declares support, and tracing-path failures must never block the original call.
+- `自动注入追踪点位` is the master opt-in setting and defaults to disabled. Domain Reload and PlayMode timing switches are subordinate and cannot inject while it is off; manual `应用` is unaffected. Enable automatic injection only when explicitly requested.
 - Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
 - `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
 - Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor/root/direct-child, scene/resource path, Layer/Tag, Active/enabled, required-component state, Prefab/source path, selection, point/method/phase/event source, EditMode/PlayMode, object identity, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
 - Optional global/per-object rate limits and duplicate suppression are disabled by default; when enabled, report their dropped counters separately from filter rejections.
-- Point-specific filter profiles override the global profile; an empty point profile inherits global filtering. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
+- Target filtering uses a global default profile plus optional per-point overrides; an empty point override inherits the global profile. Stack capture uses `Disabled`, `SelectedPoints`, or `AllEnabledPoints` and defaults to disabled. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
 - Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 - Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
 

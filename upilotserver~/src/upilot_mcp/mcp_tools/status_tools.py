@@ -14,6 +14,7 @@ from ..protocol import new_id
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, register_public_tool
 from .. import mcp_stdio_server as runtime
+from ..wire_ids import WireIdInput
 
 mcp = runtime.mcp
 _get_facade = runtime._get_facade
@@ -253,7 +254,7 @@ async def unity_drag_drop(
     toX: float,
     toY: float,
     assetPaths: list[str] | None = None,
-    gameObjectIds: list[int] | None = None,
+    gameObjectIds: list[WireIdInput] | None = None,
     customData: str = "",
     modifiers: list[str] | None = None,
 ):
@@ -607,7 +608,7 @@ async def unity_editor_execute_command(commandName: str):
     description="导航 Unity SceneView 视图（聚焦对象、设置视角、正交/透视切换等）。"
 )
 async def unity_sceneview_navigate(
-    lookAtInstanceId: int = 0,
+    lookAtInstanceId: WireIdInput = 0,
     pivot: dict | None = None,
     size: float = -1,
     rotation: dict | None = None,

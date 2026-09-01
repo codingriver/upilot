@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import threading
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class UPilotConfig:
     schema_version: int = 2
     http_host: str = "127.0.0.1"
@@ -67,6 +70,75 @@ def load_config() -> UPilotConfig:
 
 
 CONFIG = load_config()
+_CONFIG_LOCK = threading.Lock()
+_CONFIG_LAST_DISK_HASH = ""
+_CONFIG_LAST_LOADED_AT = int(time.time() * 1000)
+_CONFIG_LOAD_ERROR = ""
+
+
+def _config_file_hash(path: Path) -> str:
+    if not path.is_file():
+        return "missing"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _runtime_config_hash(config: UPilotConfig) -> str:
+    payload = {name: getattr(config, name) for name in config.__slots__}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
+    """Hot-reload safe fields while reporting endpoint changes that need restart."""
+    global _CONFIG_LAST_DISK_HASH, _CONFIG_LAST_LOADED_AT, _CONFIG_LOAD_ERROR
+    path = _project_config_path()
+    with _CONFIG_LOCK:
+        try:
+            disk_hash = _config_file_hash(path)
+        except OSError as ex:
+            _CONFIG_LOAD_ERROR = str(ex)
+            disk_hash = "unreadable"
+
+        disk_config = None
+        if force or disk_hash != _CONFIG_LAST_DISK_HASH:
+            try:
+                disk_config = load_config()
+                for field in ("context_stale_ms", "flow_enabled", "write_access_approved"):
+                    setattr(CONFIG, field, getattr(disk_config, field))
+                _CONFIG_LAST_DISK_HASH = disk_hash
+                _CONFIG_LAST_LOADED_AT = int(time.time() * 1000)
+                _CONFIG_LOAD_ERROR = ""
+            except (OSError, ValueError, TypeError) as ex:
+                _CONFIG_LOAD_ERROR = str(ex)
+
+        if disk_config is None:
+            try:
+                disk_config = load_config()
+            except (OSError, ValueError, TypeError):
+                disk_config = CONFIG
+
+        restart_fields = ("http_host", "http_port", "ws_host", "ws_port")
+        changed_restart_fields = [
+            field for field in restart_fields
+            if getattr(disk_config, field) != getattr(CONFIG, field)
+        ]
+        restart_required = bool(changed_restart_fields)
+        return {
+            "configPath": str(path),
+            "diskConfigHash": disk_hash,
+            "runtimeConfigHash": _runtime_config_hash(CONFIG),
+            "configLastLoadedAt": _CONFIG_LAST_LOADED_AT,
+            "diskConfigChanged": restart_required or bool(_CONFIG_LOAD_ERROR),
+            "restartRequired": restart_required,
+            "restartFields": changed_restart_fields,
+            "configLoadError": _CONFIG_LOAD_ERROR,
+            "writeAccessApproved": CONFIG.write_access_approved,
+            "flowEnabled": CONFIG.flow_enabled,
+        }
+
+
+refresh_config_if_changed(force=True)
 
 
 def diagnose_client_configs(project_root: Path | None = None) -> dict[str, Any]:

@@ -12,9 +12,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 566be69573a4f644ab3556a8260c72c2, type: 3}
   m_Name: 
   m_EditorClassIdentifier: UPilot.Editor::CodingRiver.UPilot.UPilotMonoHookSettings
-  schemaVersion: 8
+  schemaVersion: 12
   masterEnabled: 1
+  autoInjectEnabled: 0
   autoApplyOnEditorLoad: 0
+  autoApplyOnPlayMode: 0
   suppressUnchangedValues: 1
   maxEventsPerSecond: 10000
   enablePerObjectRateLimit: 0
@@ -23,6 +25,8 @@ MonoBehaviour:
   duplicateEventWindowMilliseconds: 100
   logEventsToConsole: 1
   maxConsoleLogsPerSecond: 200
+  captureStackTrace: 0
+  stackTraceCaptureMode: 0
   stackTraceMaxFrames: 16
   stackTraceSampleEveryN: 1
   lifecycleAssemblyIncludes: 
@@ -32,6 +36,7 @@ MonoBehaviour:
   lifecycleTypeIncludes: 
   lifecycleTypeExcludes: 
   globalFilterProfileId: __none__
+  pointFilterOverridesEnabled: 0
   filterProfiles:
   - Id: builtin.scene-objects
     Name: "\u573A\u666F\u4E1A\u52A1\u5BF9\u8C61"
@@ -40,9 +45,9 @@ MonoBehaviour:
     Rules:
     - Id: 3396c1e04428433a93993693e0c636fe
       Name: "\u5305\u542B\u573A\u666F\u5BF9\u8C61"
-      Enabled: 1
+      Enabled: 0
       Effect: 0
-      ObjectScope: 1
+      ObjectScope: 0
       AssemblyPatterns: 
       NamespacePatterns: 
       TypePatterns: 
@@ -190,181 +195,223 @@ MonoBehaviour:
   points:
   - Id: lifecycle.awake
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: lifecycle.onEnable
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: lifecycle.start
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: lifecycle.onDisable
     Enabled: 1
-    CaptureStackTrace: 1
-    HookAllSafeOverloads: 0
-    FilterProfileId: 
-  - Id: lifecycle.onDestroy
-    Enabled: 0
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
+    FilterProfileId: 
+  - Id: lifecycle.onDestroy
+    Enabled: 1
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: gameObject.instantiate
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: gameObject.destroy
-    Enabled: 0
-    CaptureStackTrace: 1
+    Enabled: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: gameObject.setActive
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: component.behaviourEnabled
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.position
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.localPosition
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.rotation
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.localRotation
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.eulerAngles
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.localEulerAngles
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.localScale
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.setParent
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.setSiblingIndex
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: tests.custom.attribute-provider
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.setPositionAndRotation
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.setLocalPositionAndRotation
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: gameObject.addComponent
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.translate
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.rotate
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.rotateAround
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.lookAt
-    Enabled: 0
+    Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.setAsFirstSibling
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.setAsLastSibling
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: transform.detachChildren
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: lifecycle.update
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: lifecycle.fixedUpdate
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: lifecycle.lateUpdate
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: component.rendererEnabled
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: component.colliderEnabled
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: component.collider2DEnabled
     Enabled: 1
     CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 
   - Id: provider:UPilot.MonoHook.Tracing.Editor.Tests:CodingRiver.UPilot.Tests.ImplicitIdTestHookPoint
     Enabled: 1
-    CaptureStackTrace: 1
+    CaptureStackTrace: 0
     HookAllSafeOverloads: 0
+    ExecutionMode: 0
+    FilterProfileId: 
+  - Id: tests.custom.unsafe-execution-policy
+    Enabled: 1
+    CaptureStackTrace: 0
+    HookAllSafeOverloads: 0
+    ExecutionMode: 0
     FilterProfileId: 

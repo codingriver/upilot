@@ -20,7 +20,7 @@ UPilot > Advanced > 追踪器
 ProjectSettings/UPilotMonoHookSettings.asset
 ```
 
-Domain Reload 后自动应用默认关闭，可在窗口的“运行保护”区域手动开启。
+“自动注入追踪点位”是统一总开关，默认关闭。Domain Reload 和进入 PlayMode 是其下属时机开关：总开关关闭时两者都不会自动注入，已排队的 PlayMode 注入也会取消；子选项值会保留，手动点击“应用”不受影响。进入 PlayMode 自动注入开启后，会在进入 PlayMode 前应用一次，并在发生 Domain Reload 时使用会话标记恢复，避免丢失最早的 `Awake`/`OnEnable` 追踪。
 
 生命周期点位可以按程序集、命名空间和类型分别设置包含/排除范围。规则支持逗号、分号或换行分隔，并支持 `*`、`?` 通配符；空包含规则表示不过滤，排除规则优先。范围修改后再次点击“应用”，已安装的生命周期 Hook 会按新范围重新安装。
 
@@ -37,7 +37,9 @@ Domain Reload 后自动应用默认关闭，可在窗口的“运行保护”区
 
 追踪器还提供全局事件限流、可选单对象限流和可选重复事件抑制；新增低噪声选项默认关闭。它们产生的丢弃计数与过滤拒绝独立统计。
 
-点位行可以单独绑定过滤器，未绑定时继承全局过滤器。对象名称和 Hierarchy 条件属于事件级过滤：底层方法可能仍被 Hook，但事件会在堆栈采集、缓冲和 Console 输出之前被拒绝；生命周期类型条件在满足条件时还可以缩小实际安装候选。
+追踪器使用一个全局默认过滤器，并可显式开启点位独立覆盖。点位覆盖为空时继承全局配置，关闭覆盖总开关时所有点位统一使用全局过滤器。对象名称和 Hierarchy 条件属于事件级过滤：底层方法可能仍被 Hook，但事件会在堆栈采集、缓冲和 Console 输出之前被拒绝；生命周期类型条件在满足条件时还可以缩小实际安装候选。
+
+内置点位采用“技术拦截、业务透传”模型：Replacement 只负责进入追踪逻辑，随后通过 Proxy 调用原始方法，不修改参数、返回值或调用次数。点位的执行策略默认是 `PassThrough`；`Intercept` 仅作为逐点预留策略，只有 Provider 明确声明支持时才允许安装，内置点位不会进入该模式。过滤、堆栈、缓冲或 Console 失败会被隔离并计入“追踪失败”，不能阻断原始调用。
 
 InstanceID 只适合当前 Unity 会话；需要长期保存时优先使用名称、Hierarchy、Prefab 路径或 GlobalObjectId。内置事件来源为 `EditMode`/`PlayMode`，不等同于调用者堆栈。
 
@@ -80,9 +82,9 @@ InstanceID 只适合当前 Unity 会话；需要长期保存时优先使用名�
 - 修改前后的值
 - 可选调用堆栈
 
-窗口支持文本筛选、清空和事件 JSONL 导出。“导出诊断”会为每个点位输出配置状态、安装状态、candidate/installed/skipped/failed 统计和最多 5 条样例。调用堆栈按点位单独开启，默认全部关闭；全局只提供最大帧数和每 N 条采样一次两个保护参数。
+窗口支持文本筛选、清空和事件 JSONL 导出。“导出诊断”会为每个点位输出配置状态、安装状态、candidate/installed/skipped/failed 统计、生命周期类型/目标方法/trampoline 数量、完整安装条目和最多 5 条样例。点位列表仅显示启用状态、名称、高频标记和简短安装状态；点击安装状态会打开可滚动详情弹板，列出当前安装快照、目标类型、方法、声明类型、trampoline、跳过和失败原因，并支持复制全部。安全重载和透传/拦截策略集中在“配置与日志 > 点位高级配置”。生命周期点位按实际 `MethodBase` 复用独立 trampoline，不会为实例对象创建 Proxy。调用堆栈提供“不采集”“仅指定点位”“所有已启用点位”三种模式，默认不采集；最大帧数和每 N 条采样一次用于控制采集开销。
 
-“事件日志”标题右侧提供“输出到 Console”开关，默认关闭且切换后立即生效，不需要重新应用追踪点位。Console 日志使用固定 `[UPilot][Trace]` 前缀并包含 pointId、阶段、帧号、Scene、对象层级、组件类型、实际方法签名和修改前后值；开启点位堆栈后会追加 `Hook caller`。Console 使用独立的每秒日志上限，超过上限只丢弃 Console 输出，不影响内存事件和 JSONL 导出。
+“事件日志”标题右侧提供“输出到 Console”开关，默认关闭且切换后立即生效，不需要重新应用追踪点位。Console 日志使用固定 `[UPilot][Trace]` 前缀并包含 pointId、阶段、帧号、Scene、对象层级、组件类型、实际方法签名和修改前后值；开启点位堆栈后会追加 `Hook caller`。Console 使用独立的每秒日志上限，超过上限只丢弃 Console 输出，不影响内存事件和 JSONL 导出。窗口同时显示追踪失败计数，用于识别“业务调用成功但日志路径异常”的情况。
 
 ## 自定义点位
 
@@ -102,8 +104,15 @@ UPilot.MonoHook.Tracing.Contracts.Editor
     "custom",
     CategoryDisplayName = "Custom",
     DefaultEnabled = false)]
-internal sealed class ExampleHookPoint : UPilotMethodHookPointBase
+internal sealed class ExampleHookPoint :
+    UPilotMethodHookPointBase,
+    IUPilotMonoHookExecutionPolicyProvider
 {
+    public bool GuaranteesPassThrough => true;
+    public bool SupportsInterception => false;
+    public UPilotMonoHookExecutionMode ExecutionMode { get; set; } =
+        UPilotMonoHookExecutionMode.PassThrough;
+
     protected override IEnumerable<UPilotMonoHookBinding> CreateBindings(
         UPilotMonoHookContext context)
     {
@@ -114,7 +123,7 @@ internal sealed class ExampleHookPoint : UPilotMethodHookPointBase
 
 省略 ID 时，Registry 会使用程序集简单名和 Provider 完整类型名生成 `provider:<assembly>:<namespace.type>`。发布事件时使用 `UPilotMonoHookPointIdentity.FromProviderType(typeof(ExampleHookPoint))` 可取得相同 ID。需要跨类名、命名空间或程序集重构保持配置兼容时，仍应通过三参数构造函数或 `Id = "stable.id"` 显式指定稳定 ID。
 
-Provider 必须具有无参构造方法。最终点位 ID 必须全局唯一；重复 ID、无法创建的 Provider 和不安全目标会在窗口中显示明确状态。
+Provider 必须具有无参构造方法。最终点位 ID 必须全局唯一；重复 ID、无法创建的 Provider 和不安全目标会在窗口中显示明确状态。若使用默认 `PassThrough` 策略，Provider 还应实现 `IUPilotMonoHookExecutionPolicyProvider` 并声明 `GuaranteesPassThrough = true`；否则点位不会安装。`ExecutionMode` 会收到窗口当前逐点选择的策略，Provider 应据此选择透传或拦截实现。需要真正改变参数、返回值或是否调用原方法时，必须显式选择 `Intercept`，并由 Provider 声明 `SupportsInterception = true`。
 
 Package Manager 的 Samples 中提供 `UPilot Tracer Custom Provider` 示例，导入后会自动发现 `Sample Custom / Sample SetValue` 点位；该示例同样默认关闭。
 
@@ -144,6 +153,7 @@ UPILOT_DISABLE_MONOHOOK_TRACING
 - 不强制 Hook Unity 6 的不安全 Native/Injected 入口。
 - 不同 Unity 版本的托管包装层不同；被识别为 `InternalCall`、短方法或不可读方法体的点位会显示 Unsupported，并在专项测试中以明确原因条件跳过。
 - 程序集重载和 Unity 退出前会卸载已安装 Hook。
-- 只有显式开启“Domain Reload 后自动应用”时，保存的启用点位才会在重载完成且 Editor 恢复就绪后重新安装。
+- 只有显式开启“自动注入追踪点位”总开关及对应的 Domain Reload/PlayMode 时机开关时，保存的启用点位才会在相应时机重新安装；手动“应用”不受总开关影响。
+- 追踪失败不会向业务调用抛出异常；内置点位始终优先保证原始方法透传。
 - 高频 Transform 点位应结合事件速率限制使用。
 - 高频 Update 系列点位同样默认关闭，应结合事件速率限制使用；调用堆栈建议保持关闭或提高采样间隔。

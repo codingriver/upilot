@@ -31,7 +31,8 @@ namespace CodingRiver.UPilot.Tests
                 point.Enabled,
                 point.CaptureStackTrace,
                 point.HookAllSafeOverloads,
-                point.FilterProfileId)).ToList();
+                point.FilterProfileId,
+                point.ExecutionMode)).ToList();
             UPilotMonoHookTelemetry.Clear();
         }
 

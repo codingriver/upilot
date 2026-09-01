@@ -46,6 +46,43 @@ def _json_dumps_or_empty(value: object | None) -> str:
         return ""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
+
+def _serialized_property_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _normalize_component_property_writes(properties: dict) -> list[dict[str, str]]:
+    if not isinstance(properties, dict) or not properties:
+        raise ValueError("properties must be a non-empty object keyed by SerializedProperty path.")
+    return [
+        {"propertyPath": str(path), "value": _serialized_property_value(value)}
+        for path, value in properties.items()
+    ]
+
+
+def _require_mutation_success(response: ToolResponse, tool_name: str) -> ToolResponse:
+    if not response.ok:
+        return response
+    data = response.data if isinstance(response.data, dict) else {}
+    if data.get("ok") is True and data.get("verified") is True:
+        return response
+    return fail(
+        response.request_id,
+        "RESULT_CONTRACT_VIOLATION",
+        f"{tool_name} returned an outer success without verified data.ok=true.",
+        {"tool": tool_name, "bridgeData": data},
+        context=response.context,
+        timing=response.timing,
+    )
+
 class ResourceDomainService:
     def _active_project_root(self) -> Path | None:
         session = self.server.session_manager.active
@@ -185,7 +222,7 @@ class ResourceDomainService:
         rejected = self._reject_write_if_unapproved(request_id, "unity_asset_copy")
         if rejected is not None:
             return rejected
-        return await self.dispatcher.call(
+        response = await self.dispatcher.call(
             request_id,
             "asset.copy",
             {
@@ -193,13 +230,14 @@ class ResourceDomainService:
                 "destinationPath": destination_path,
             },
         )
+        return _require_mutation_success(response, "unity_asset_copy")
 
     async def asset_move(self, source_path: str, destination_path: str) -> ToolResponse:
         request_id = new_id("req")
         rejected = self._reject_write_if_unapproved(request_id, "unity_asset_move")
         if rejected is not None:
             return rejected
-        return await self.dispatcher.call(
+        response = await self.dispatcher.call(
             request_id,
             "asset.move",
             {
@@ -207,6 +245,7 @@ class ResourceDomainService:
                 "destinationPath": destination_path,
             },
         )
+        return _require_mutation_success(response, "unity_asset_move")
 
     async def asset_delete(self, asset_path: str) -> ToolResponse:
         request_id = new_id("req")
@@ -233,6 +272,54 @@ class ResourceDomainService:
         """
         logger = logging.getLogger("upilot.facade")
         request_id = new_id("req")
+
+        # External disk writes can make Unity start importing/compiling before
+        # the client reaches this workflow.  In that state a refresh command
+        # cannot safely cross the Domain Reload transport gap and starting a
+        # second compile is redundant.  Report an authoritative attachment so
+        # the caller can continue with unity_safe_compile_and_wait.
+        server = getattr(self, "server", None)
+        state = getattr(server, "state", None)
+        compile_state = getattr(state, "compile", None)
+        editor_state = getattr(state, "editor", None)
+        compile_phase = str(getattr(compile_state, "phase", "") or "").lower()
+        compile_active = bool(
+            trigger_compile
+            and (
+                compile_phase in {"queued", "compiling", "domain_reload", "verifying"}
+                or bool(getattr(editor_state, "is_compiling", False))
+            )
+        )
+        if compile_active:
+            return ok(
+                request_id,
+                {
+                    "delayS": delay_s,
+                    "triggerCompile": True,
+                    "status": "compiling",
+                    "refreshed": False,
+                    "refreshSkipped": True,
+                    "refreshSkipReason": "compile_already_active",
+                    "compileStarted": False,
+                    "compiled": False,
+                    "compileCompleted": False,
+                    "compileAlreadyRunning": True,
+                    "attachedToExistingCompile": True,
+                    "nextAction": "unity_safe_compile_and_wait",
+                    "compileState": {
+                        "status": getattr(compile_state, "status", "compiling"),
+                        "phase": getattr(compile_state, "phase", compile_phase),
+                        "errorCount": getattr(compile_state, "error_count", 0),
+                        "warningCount": getattr(compile_state, "warning_count", 0),
+                        "commandQueuedAt": getattr(compile_state, "command_queued_at", 0),
+                        "unityAcceptedAt": getattr(compile_state, "unity_accepted_at", 0),
+                        "startedAt": getattr(compile_state, "started_at", 0),
+                        "finishedAt": getattr(compile_state, "finished_at", 0),
+                        "lastProgressAt": getattr(compile_state, "last_progress_at", 0),
+                        "compileRequestId": getattr(compile_state, "compile_request_id", ""),
+                    },
+                },
+            )
         await asyncio.sleep(max(0.0, delay_s))
         refresh_r = await self.asset_refresh()
         payload: dict = {
@@ -486,9 +573,11 @@ class ResourceDomainService:
         component_type: str = "",
         component_index: int = 0,
         max_depth: int = 10,
+        max_nodes: int = 500,
+        continuation_token: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
-        payload: dict = {"maxDepth": max_depth}
+        payload: dict = {"maxDepth": max_depth, "maxNodes": max_nodes}
         if asset_path:
             payload["assetPath"] = asset_path
         if game_object_id:
@@ -497,6 +586,8 @@ class ResourceDomainService:
             payload["componentType"] = component_type
         if component_index:
             payload["componentIndex"] = component_index
+        if continuation_token:
+            payload["continuationToken"] = continuation_token
         return await self.dispatcher.call(request_id, "asset.getData", payload)
 
     async def asset_modify_data(
@@ -544,6 +635,32 @@ class ResourceDomainService:
             payload,
         )
 
+    async def prefab_physics_audit(
+        self,
+        prefab_paths: list[str],
+        max_results_per_prefab: int = 1000,
+        sort_by: str = "colliderCount",
+        descending: bool = True,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        if not prefab_paths:
+            return fail(
+                request_id,
+                "INVALID_PREFAB_PATHS",
+                "prefabPaths must contain at least one prefab path.",
+                {},
+            )
+        return await self.dispatcher.call(
+            request_id,
+            "prefab.physicsAudit",
+            {
+                "prefabPaths": prefab_paths,
+                "maxResultsPerPrefab": max_results_per_prefab,
+                "sortBy": sort_by,
+                "descending": descending,
+            },
+        )
+
     async def prefab_create(
         self, source_game_object_id: int, prefab_path: str
     ) -> ToolResponse:
@@ -587,7 +704,8 @@ class ResourceDomainService:
         rejected = self._reject_write_if_unapproved(request_id, "unity_prefab_save")
         if rejected is not None:
             return rejected
-        return await self.dispatcher.call(request_id, "prefab.save", {})
+        response = await self.dispatcher.call(request_id, "prefab.save", {})
+        return _require_mutation_success(response, "unity_prefab_save")
 
     async def material_create(
         self, material_path: str, shader_name: str = "Standard"
@@ -803,7 +921,8 @@ class ResourceDomainService:
         return await self.dispatcher.call(request_id, "gameobject.create", payload)
 
     async def gameobject_find(
-        self, name: str = "", tag: str = "", instance_id: int = 0
+        self, name: str = "", tag: str = "", instance_id: int | str = 0,
+        component_type: str = "", include_inactive: bool = True, limit: int = 100,
     ) -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {}
@@ -813,6 +932,10 @@ class ResourceDomainService:
             payload["tag"] = tag
         if instance_id:
             payload["instanceId"] = instance_id
+        if component_type:
+            payload["componentType"] = component_type
+        payload["includeInactive"] = include_inactive
+        payload["limit"] = max(1, min(int(limit), 1000))
         return await self.dispatcher.call(request_id, "gameobject.find", payload)
 
     async def gameobject_modify(
@@ -1028,13 +1151,22 @@ class ResourceDomainService:
         rejected = self._reject_write_if_unapproved(request_id, "unity_component_modify")
         if rejected is not None:
             return rejected
+        try:
+            property_writes = _normalize_component_property_writes(properties)
+        except ValueError as ex:
+            return fail(
+                request_id,
+                "COMPONENT_MODIFY_INVALID_PROPERTIES",
+                str(ex),
+                {"componentType": component_type},
+            )
         return await self.dispatcher.call(
             request_id,
             "component.modify",
             {
                 "gameObjectId": game_object_id,
                 "componentType": component_type,
-                "properties": properties,
+                "properties": property_writes,
                 "componentIndex": component_index,
             },
         )

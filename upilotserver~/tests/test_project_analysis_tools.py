@@ -106,6 +106,42 @@ def test_asset_dependencies_route_is_read_only() -> None:
     assert result.ok
 
 
+def test_hang_pid_resolution_replaces_stale_session_pid_from_editor_state(tmp_path: Path) -> None:
+    service = _Service(tmp_path)
+    service.server.session_manager.active.process_id = 111
+    service.server.state.editor.process_id = 222
+    service._process_exists = lambda pid: pid == 222
+    service._discover_unity_pid_for_project = lambda _root: 0
+
+    pid, diagnostics = service._resolve_live_unity_pid()
+
+    assert pid == 222
+    assert diagnostics["pidSource"] == "editorState"
+    assert diagnostics["pidRefreshed"] is True
+    assert diagnostics["staleProcessIds"] == [111]
+    assert diagnostics["projectIdentityVerified"] is True
+    assert service.server.session_manager.active.process_id == 222
+    assert service.server.state.editor.process_id == 222
+
+
+def test_hang_pid_resolution_discovers_project_process_after_all_cached_pids_stale(tmp_path: Path) -> None:
+    service = _Service(tmp_path)
+    service.server.session_manager.active.process_id = 111
+    service.server.state.editor.process_id = 222
+    service._process_exists = lambda _pid: False
+    service._discover_unity_pid_for_project = lambda root: 333 if root == tmp_path.resolve() else 0
+
+    pid, diagnostics = service._resolve_live_unity_pid()
+
+    assert pid == 333
+    assert diagnostics["pidSource"] == "processDiscovery"
+    assert diagnostics["pidRefreshed"] is True
+    assert diagnostics["staleProcessIds"] == [111, 222]
+    assert diagnostics["projectIdentityVerified"] is True
+    assert service.server.session_manager.active.process_id == 333
+    assert service.server.state.editor.process_id == 333
+
+
 def test_csv_get_and_confirmed_patch_preserve_gbk_crlf(tmp_path: Path) -> None:
     config_dir = tmp_path / "Assets" / "Config"
     config_dir.mkdir(parents=True)

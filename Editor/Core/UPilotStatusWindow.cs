@@ -1440,6 +1440,9 @@ namespace CodingRiver.UPilot
                     }
                 }
 
+                DrawProjectWriteAccessSection();
+                EditorGUILayout.Space(4);
+
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     EditorGUILayout.LabelField("MCP 地址：" + UPilotAgentSetup.McpUrl, EditorStyles.miniLabel);
@@ -1473,6 +1476,13 @@ namespace CodingRiver.UPilot
                     ShowToast("Agent 识别规则已检查/写入");
                 }
             }
+        }
+
+        private void DrawProjectWriteAccessSection()
+        {
+            var change = UPilotWriteAccessUi.DrawDetailedControl();
+            if (change != UPilotWriteAccessChange.None)
+                ShowToast(UPilotWriteAccessUi.GetSuccessMessage(change));
         }
 
         private void DrawAgentConfigStatusRow(AgentMcpConfigStatus status)

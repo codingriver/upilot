@@ -70,7 +70,8 @@ namespace CodingRiver.UPilot.Tests
                     point.Enabled,
                     point.CaptureStackTrace,
                     point.HookAllSafeOverloads,
-                    knownFilterProfileIds.Contains(point.FilterProfileId) ? point.FilterProfileId : string.Empty))
+                    knownFilterProfileIds.Contains(point.FilterProfileId) ? point.FilterProfileId : string.Empty,
+                    point.ExecutionMode))
                 .ToList();
             _oldSelection = Selection.activeObject;
             _oldPerObjectRateLimit = _settings.enablePerObjectRateLimit;
@@ -398,7 +399,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void LegacyLifecyclePatternsMigrateToPointFilterProfile()
+        public void LegacyLifecyclePatternsMigrateToGlobalFilterProfile()
         {
             _settings.schemaVersion = 6;
             _settings.filterProfiles = new List<UPilotTraceFilterProfile>();
@@ -410,7 +411,7 @@ namespace CodingRiver.UPilot.Tests
             _settings.EnsureDefaults();
 
             Assert.That(_settings.FindFilterProfile(UPilotTraceFilterProfileIds.LegacyLifecycle), Is.Not.Null);
-            Assert.That(_settings.GetConfiguredFilterProfileId(UPilotMonoHookPointId.LifecycleUpdate),
+            Assert.That(_settings.globalFilterProfileId,
                 Is.EqualTo(UPilotTraceFilterProfileIds.LegacyLifecycle));
             Assert.That(_settings.lifecycleTypeIncludes, Is.Empty);
         }

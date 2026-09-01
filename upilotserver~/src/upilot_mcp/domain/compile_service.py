@@ -73,6 +73,10 @@ class CompileDomainService:
             "suspectedStuck": execution["suspectedStuck"],
             "errorCount": compile_state.error_count,
             "warningCount": compile_state.warning_count,
+            "currentCompileWarningCount": compile_state.warning_count,
+            "historicalWarningCount": 0,
+            "importerWarningCount": 0,
+            "diagnosticSource": "compile-request-snapshot",
             "blocked": execution["blocked"],
             "blockedReason": execution["blockedReason"],
             "nextAction": execution["nextAction"],
@@ -165,6 +169,11 @@ class CompileDomainService:
         compile_state = self.server.state.compile
         compile_state.phase = "queued"
         compile_state.status = "queued"
+        manager = getattr(self.server, "session_manager", None)
+        active_session = getattr(manager, "active", None)
+        compile_state.initial_session_id = str(
+            getattr(active_session, "session_id", "") or ""
+        )
         compile_state.command_queued_at = now_ms()
         compile_state.unity_accepted_at = 0
         compile_state.started_at = 0
@@ -248,6 +257,10 @@ class CompileDomainService:
             data.setdefault("source", "live")
             data.setdefault("mode", "strict_live")
             data.setdefault("compileRequestId", compile_request_id)
+            data["currentCompileWarningCount"] = int(data.get("warningCount") or 0)
+            data.setdefault("historicalWarningCount", 0)
+            data.setdefault("importerWarningCount", 0)
+            data.setdefault("diagnosticSource", "compile.errors.get")
             return ok(request_id, data)
 
         # live 拉取失败：按要求视为“无报错”，并附加辅助诊断信息
@@ -261,6 +274,11 @@ class CompileDomainService:
                 "source": "live",
                 "mode": "strict_live",
                 "liveFetch": "failed_as_empty",
+                "warningCount": 0,
+                "currentCompileWarningCount": 0,
+                "historicalWarningCount": 0,
+                "importerWarningCount": 0,
+                "diagnosticSource": "compile.errors.get-unavailable",
                 "diagnostics": {
                     "libraryDllLatestWriteMs": dll_mtime_ms,
                     "libraryDllExists": dll_mtime_ms > 0,
@@ -501,6 +519,7 @@ class CompileDomainService:
         poll_interval_s: float = 1.0,
         prefer_events: bool = True,
         post_compile_delay_s: float = 3.0,
+        attach_compile_request_id: str = "",
     ) -> ToolResponse:
         """Robust compile wait with post-compile cooldown and double-verification.
 
@@ -518,24 +537,79 @@ class CompileDomainService:
         import time
 
         request_id = new_id("req")
+        workflow_started = time.monotonic()
+
+        def active_session_id() -> str:
+            manager = getattr(self.server, "session_manager", None)
+            session = getattr(manager, "active", None)
+            return str(getattr(session, "session_id", "") or "")
+
+        invocation_session_id = active_session_id()
 
         # Step 1: attach to an automatic/current compile, otherwise trigger one.
         attached_to_existing = False
-        state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
-        if state_r.ok and state_r.data and bool(state_r.data.get("isCompiling", False)):
+        compile_state = self.server.state.compile
+        initial_compile_phase = str(compile_state.phase or "").lower()
+        editor_state = getattr(self.server.state, "editor", None)
+        observed_active_compile = bool(
+            initial_compile_phase in {"queued", "compiling", "domain_reload", "verifying"}
+            or bool(getattr(editor_state, "is_compiling", False))
+        )
+        initial_session_id = invocation_session_id
+        if (
+            (attach_compile_request_id or observed_active_compile)
+            and getattr(compile_state, "initial_session_id", "")
+        ):
+            initial_session_id = str(compile_state.initial_session_id)
+        if attach_compile_request_id:
             attached_to_existing = True
-            compile_r = ok(request_id, {"status": "attached", "compileRequestId": self.server.state.compile.compile_request_id})
-            self.server.state.compile.phase = "compiling"
+            compile_r = ok(
+                request_id,
+                {
+                    "status": "attached",
+                    "compileRequestId": attach_compile_request_id,
+                    "phase": initial_compile_phase,
+                    "attachmentSource": "tool_invocation_snapshot",
+                },
+            )
+        elif observed_active_compile:
+            attached_to_existing = True
+            compile_r = ok(
+                request_id,
+                {
+                    "status": "attached",
+                    "compileRequestId": compile_state.compile_request_id,
+                    "phase": initial_compile_phase,
+                },
+            )
         else:
-            compile_r = await self.compile()
-            if not compile_r.ok and compile_r.error and compile_r.error.code == "EDITOR_BUSY":
-                verify_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
-                if verify_r.ok and verify_r.data and bool(verify_r.data.get("isCompiling", False)):
-                    attached_to_existing = True
-                    compile_r = ok(request_id, {"status": "attached", "compileRequestId": self.server.state.compile.compile_request_id})
-                    self.server.state.compile.phase = "compiling"
-            if not compile_r.ok:
-                return compile_r
+            state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
+            if state_r.ok and state_r.data and bool(state_r.data.get("isCompiling", False)):
+                attached_to_existing = True
+                compile_r = ok(
+                    request_id,
+                    {
+                        "status": "attached",
+                        "compileRequestId": self.server.state.compile.compile_request_id,
+                        "phase": str(self.server.state.compile.phase or "compiling"),
+                    },
+                )
+            else:
+                compile_r = await self.compile()
+                if not compile_r.ok and compile_r.error and compile_r.error.code == "EDITOR_BUSY":
+                    verify_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
+                    if verify_r.ok and verify_r.data and bool(verify_r.data.get("isCompiling", False)):
+                        attached_to_existing = True
+                        compile_r = ok(
+                            request_id,
+                            {
+                                "status": "attached",
+                                "compileRequestId": self.server.state.compile.compile_request_id,
+                                "phase": str(self.server.state.compile.phase or "compiling"),
+                            },
+                        )
+                if not compile_r.ok:
+                    return compile_r
 
         compile_request_id = (
             compile_r.data.get("compileRequestId", "") if compile_r.data else ""
@@ -557,7 +631,16 @@ class CompileDomainService:
             and wait_r.error
             and wait_r.error.code == "COMPILE_ERROR"
         )
-        if not wait_r.ok and not wait_reported_compile_error:
+        wait_interrupted_by_reload = bool(
+            not wait_r.ok
+            and wait_r.error
+            and wait_r.error.code in {"UNITY_NOT_CONNECTED", "COMMAND_TIMEOUT"}
+            and (
+                not self.server.is_ready()
+                or str(self.server.state.compile.phase or "").lower() in {"domain_reload", "verifying"}
+            )
+        )
+        if not wait_r.ok and not wait_reported_compile_error and not wait_interrupted_by_reload:
             return wait_r
 
         if wait_r.data and wait_r.data.get("status") == "timeout":
@@ -578,7 +661,7 @@ class CompileDomainService:
             if wait_r.data
             else (wait_r.error.detail if wait_r.error else {})
         )
-        remaining_after_wait = timeout_s - float(wait_detail.get("elapsedS", 0))
+        remaining_after_wait = max(0.0, timeout_s - (time.monotonic() - workflow_started))
         actual_delay = min(post_compile_delay_s, max(0.5, remaining_after_wait * 0.1))
         if actual_delay > 0:
             await asyncio.sleep(actual_delay)
@@ -602,6 +685,21 @@ class CompileDomainService:
                     {"compileRequestId": compile_request_id},
                 )
 
+        if wait_interrupted_by_reload:
+            remaining_wait = max(0.1, timeout_s - (time.monotonic() - workflow_started))
+            wait_r = await self.compile_wait(
+                timeout_s=remaining_wait,
+                poll_interval_s=poll_interval_s,
+                prefer_events=prefer_events,
+            )
+            if not wait_r.ok and not (
+                wait_r.error and wait_r.error.code == "COMPILE_ERROR"
+            ):
+                return wait_r
+            wait_reported_compile_error = wait_reported_compile_error or bool(
+                not wait_r.ok and wait_r.error and wait_r.error.code == "COMPILE_ERROR"
+            )
+
         # Step 5: Double-verify compile errors (reads from disk on Unity side)
         errors_r = await self.compile_errors(compile_request_id)
         if errors_r.ok and errors_r.data:
@@ -621,6 +719,13 @@ class CompileDomainService:
                 )
 
         # Step 6: Success
+        final_session_id = active_session_id()
+        session_changed_during_compile = bool(
+            initial_session_id
+            and final_session_id
+            and initial_session_id != final_session_id
+        )
+        reconnected_after_reload = reconnected_after_reload or session_changed_during_compile
         return ok(
             request_id,
             {
@@ -629,6 +734,10 @@ class CompileDomainService:
                 "compileRequestId": compile_request_id,
                 "postCompileDelayS": actual_delay,
                 "reconnectedAfterReload": reconnected_after_reload,
+                "sessionChangedDuringCompile": session_changed_during_compile,
+                "initialSessionId": initial_session_id,
+                "finalSessionId": final_session_id,
+                "waitInterruptedByReload": wait_interrupted_by_reload,
                 "errorsVerified": True,
                 "errorTotal": 0,
                 "attachedToExistingCompile": attached_to_existing,

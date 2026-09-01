@@ -10,13 +10,23 @@ using UnityEditor;
 
 namespace CodingRiver.UPilot
 {
+    public enum UPilotStackTraceCaptureMode
+    {
+        Disabled,
+        SelectedPoints,
+        AllEnabledPoints,
+    }
+
     [Serializable]
     public sealed class UPilotMonoHookPointState
     {
         public string Id;
         public bool Enabled;
+        // Used when stackTraceCaptureMode is SelectedPoints.
         public bool CaptureStackTrace;
         public bool HookAllSafeOverloads;
+        public UPilotMonoHookExecutionMode ExecutionMode;
+        // Empty means inheriting the global filter profile.
         public string FilterProfileId;
 
         public UPilotMonoHookPointState() { }
@@ -26,12 +36,14 @@ namespace CodingRiver.UPilot
             bool enabled,
             bool captureStackTrace = false,
             bool hookAllSafeOverloads = false,
-            string filterProfileId = "")
+            string filterProfileId = "",
+            UPilotMonoHookExecutionMode executionMode = UPilotMonoHookExecutionMode.PassThrough)
         {
             Id = id;
             Enabled = enabled;
             CaptureStackTrace = captureStackTrace;
             HookAllSafeOverloads = hookAllSafeOverloads;
+            ExecutionMode = executionMode;
             FilterProfileId = filterProfileId ?? string.Empty;
         }
     }
@@ -43,11 +55,13 @@ namespace CodingRiver.UPilot
     public sealed class UPilotMonoHookSettings : ScriptableSingleton<UPilotMonoHookSettings>
     {
         private const string AssetPath = "ProjectSettings/UPilotMonoHookSettings.asset";
-        public const int CurrentSchemaVersion = 8;
+        public const int CurrentSchemaVersion = 12;
 
         public int schemaVersion = CurrentSchemaVersion;
         public bool masterEnabled = true;
+        public bool autoInjectEnabled;
         public bool autoApplyOnEditorLoad;
+        public bool autoApplyOnPlayMode;
         public bool suppressUnchangedValues = true;
         public int maxEventsPerSecond = 1000;
         public bool enablePerObjectRateLimit;
@@ -56,6 +70,10 @@ namespace CodingRiver.UPilot
         public int duplicateEventWindowMilliseconds = 100;
         public bool logEventsToConsole;
         public int maxConsoleLogsPerSecond = 50;
+        // Kept for serialized/source compatibility. The effective policy is
+        // stackTraceCaptureMode; this mirrors whether capture is globally active.
+        public bool captureStackTrace;
+        public UPilotStackTraceCaptureMode stackTraceCaptureMode;
         public int stackTraceMaxFrames = 16;
         public int stackTraceSampleEveryN = 1;
         public string lifecycleAssemblyIncludes = string.Empty;
@@ -65,6 +83,7 @@ namespace CodingRiver.UPilot
         public string lifecycleTypeIncludes = string.Empty;
         public string lifecycleTypeExcludes = string.Empty;
         public string globalFilterProfileId = UPilotTraceFilterProfileIds.None;
+        public bool pointFilterOverridesEnabled;
         public List<UPilotTraceFilterProfile> filterProfiles = new List<UPilotTraceFilterProfile>();
         public List<UPilotMonoHookPointState> points = new List<UPilotMonoHookPointState>();
 
@@ -77,6 +96,16 @@ namespace CodingRiver.UPilot
                 suppressDuplicateEvents = false;
                 duplicateEventWindowMilliseconds = 100;
             }
+            if (schemaVersion < 9)
+                autoApplyOnPlayMode = false;
+            if (schemaVersion < 10)
+                autoInjectEnabled = autoApplyOnEditorLoad || autoApplyOnPlayMode;
+            if (schemaVersion < 11)
+                captureStackTrace = false;
+            if (schemaVersion < 12)
+                stackTraceCaptureMode = captureStackTrace
+                    ? UPilotStackTraceCaptureMode.AllEnabledPoints
+                    : UPilotStackTraceCaptureMode.Disabled;
             if (points == null)
                 points = new List<UPilotMonoHookPointState>();
 
@@ -90,6 +119,7 @@ namespace CodingRiver.UPilot
             // Preserve settings for temporarily unavailable custom providers so their
             // choices return when the defining Editor assembly is restored.
             points.RemoveAll(p => p == null || string.IsNullOrEmpty(p.Id));
+            captureStackTrace = stackTraceCaptureMode != UPilotStackTraceCaptureMode.Disabled;
             maxEventsPerSecond = Math.Max(1, maxEventsPerSecond);
             maxEventsPerObjectPerSecond = Math.Max(1, Math.Min(10000, maxEventsPerObjectPerSecond));
             duplicateEventWindowMilliseconds = Math.Max(1, Math.Min(60000, duplicateEventWindowMilliseconds));
@@ -168,13 +198,9 @@ namespace CodingRiver.UPilot
                 filterProfiles.Add(profile);
             }
 
-            foreach (var definition in UPilotMonoHookCatalog.All)
-            {
-                if (!string.Equals(definition.CategoryId, UPilotMonoHookCategoryId.Lifecycle, StringComparison.Ordinal)) continue;
-                var point = points.FirstOrDefault(item => string.Equals(item.Id, definition.Id, StringComparison.Ordinal));
-                if (point != null && string.IsNullOrEmpty(point.FilterProfileId))
-                    point.FilterProfileId = profile.Id;
-            }
+            if (string.IsNullOrEmpty(globalFilterProfileId) ||
+                string.Equals(globalFilterProfileId, UPilotTraceFilterProfileIds.None, StringComparison.Ordinal))
+                globalFilterProfileId = profile.Id;
 
             lifecycleAssemblyIncludes = string.Empty;
             lifecycleAssemblyExcludes = string.Empty;
@@ -266,19 +292,42 @@ namespace CodingRiver.UPilot
             point.Enabled = enabled;
         }
 
+        public bool ShouldCaptureStackTrace()
+        {
+            EnsureDefaults();
+            return stackTraceCaptureMode != UPilotStackTraceCaptureMode.Disabled;
+        }
+
+        public void SetCaptureStackTrace(bool capture)
+        {
+            EnsureDefaults();
+            stackTraceCaptureMode = capture
+                ? UPilotStackTraceCaptureMode.AllEnabledPoints
+                : UPilotStackTraceCaptureMode.Disabled;
+            captureStackTrace = capture;
+        }
+
         public bool ShouldCaptureStackTrace(string id)
         {
             EnsureDefaults();
-            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
-            return point != null && point.CaptureStackTrace;
+            switch (stackTraceCaptureMode)
+            {
+                case UPilotStackTraceCaptureMode.SelectedPoints:
+                    var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+                    return point != null && point.CaptureStackTrace;
+                case UPilotStackTraceCaptureMode.AllEnabledPoints:
+                    return IsConfiguredEnabled(id);
+                default:
+                    return false;
+            }
         }
 
         public void SetCaptureStackTrace(string id, bool capture)
         {
             EnsureDefaults();
             var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
-            if (point == null) return;
-            point.CaptureStackTrace = capture;
+            if (point != null)
+                point.CaptureStackTrace = capture;
         }
 
         public bool ShouldHookAllSafeOverloads(string id)
@@ -296,6 +345,21 @@ namespace CodingRiver.UPilot
             point.HookAllSafeOverloads = hookAllSafeOverloads;
         }
 
+        public UPilotMonoHookExecutionMode GetExecutionMode(string id)
+        {
+            EnsureDefaults();
+            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+            return point?.ExecutionMode ?? UPilotMonoHookExecutionMode.PassThrough;
+        }
+
+        public void SetExecutionMode(string id, UPilotMonoHookExecutionMode mode)
+        {
+            EnsureDefaults();
+            var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
+            if (point != null)
+                point.ExecutionMode = mode;
+        }
+
         public string GetConfiguredFilterProfileId(string id)
         {
             EnsureDefaults();
@@ -307,13 +371,20 @@ namespace CodingRiver.UPilot
         {
             EnsureDefaults();
             var point = points.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.Ordinal));
-            if (point != null) point.FilterProfileId = filterProfileId ?? string.Empty;
+            if (point != null)
+                point.FilterProfileId = filterProfileId ?? string.Empty;
         }
 
         public string GetEffectiveFilterProfileId(string id)
         {
-            string configured = GetConfiguredFilterProfileId(id);
-            return string.IsNullOrEmpty(configured) ? globalFilterProfileId : configured;
+            EnsureDefaults();
+            if (pointFilterOverridesEnabled)
+            {
+                string configured = GetConfiguredFilterProfileId(id);
+                if (!string.IsNullOrEmpty(configured))
+                    return configured;
+            }
+            return globalFilterProfileId;
         }
 
         public UPilotTraceFilterProfile ResolveFilterProfile(string pointId)
@@ -355,7 +426,9 @@ namespace CodingRiver.UPilot
         public void ResetToDefaults()
         {
             masterEnabled = true;
+            autoInjectEnabled = false;
             autoApplyOnEditorLoad = false;
+            autoApplyOnPlayMode = false;
             suppressUnchangedValues = true;
             maxEventsPerSecond = 1000;
             enablePerObjectRateLimit = false;
@@ -364,6 +437,8 @@ namespace CodingRiver.UPilot
             duplicateEventWindowMilliseconds = 100;
             logEventsToConsole = false;
             maxConsoleLogsPerSecond = 50;
+            captureStackTrace = false;
+            stackTraceCaptureMode = UPilotStackTraceCaptureMode.Disabled;
             stackTraceMaxFrames = 16;
             stackTraceSampleEveryN = 1;
             lifecycleAssemblyIncludes = string.Empty;
@@ -373,6 +448,7 @@ namespace CodingRiver.UPilot
             lifecycleTypeIncludes = string.Empty;
             lifecycleTypeExcludes = string.Empty;
             globalFilterProfileId = UPilotTraceFilterProfileIds.None;
+            pointFilterOverridesEnabled = false;
             filterProfiles = new List<UPilotTraceFilterProfile>();
             points = new List<UPilotMonoHookPointState>();
             EnsureDefaults();

@@ -121,6 +121,67 @@ def test_compile_playmode_rejection_exposes_blocked_reason(monkeypatch) -> None:
     assert detail["nextAction"]
 
 
+def test_sync_precheck_allows_active_domain_reload_recovery(monkeypatch) -> None:
+    from upilot_mcp import mcp_stdio_server as runtime
+
+    async def _must_not_query_live_playmode() -> bool:
+        raise AssertionError("active compile recovery must not wait for a live PlayMode query")
+
+    class _State:
+        @staticmethod
+        def execution_state(stale_after_ms: int) -> dict:
+            return {
+                "authoritative": False,
+                "isStale": True,
+                "playModeState": "unknown",
+                "compilePhase": "domain_reload",
+            }
+
+    class _Server:
+        state = _State()
+
+    class _Facade:
+        server = _Server()
+
+    monkeypatch.setattr(runtime, "_unity_is_playmode", _must_not_query_live_playmode)
+    monkeypatch.setattr(runtime, "_facade", _Facade())
+
+    result = asyncio.run(runtime._reject_compile_in_playmode("unity_sync_after_disk_write"))
+
+    assert result is None
+
+
+def test_safe_compile_precheck_allows_stale_completed_reload_recovery(monkeypatch) -> None:
+    from upilot_mcp import mcp_stdio_server as runtime
+
+    async def _must_not_query_live_playmode() -> bool:
+        raise AssertionError("stale completed recovery must preserve the invocation snapshot")
+
+    class _State:
+        @staticmethod
+        def execution_state(stale_after_ms: int) -> dict:
+            return {
+                "authoritative": False,
+                "isStale": True,
+                "playModeState": "edit",
+                "compilePhase": "completed",
+                "compileRequestId": "req-completed-reload",
+            }
+
+    class _Server:
+        state = _State()
+
+    class _Facade:
+        server = _Server()
+
+    monkeypatch.setattr(runtime, "_unity_is_playmode", _must_not_query_live_playmode)
+    monkeypatch.setattr(runtime, "_facade", _Facade())
+
+    result = asyncio.run(runtime._reject_compile_in_playmode("unity_safe_compile_and_wait"))
+
+    assert result is None
+
+
 def test_dispatcher_preserves_authoritative_bridge_context() -> None:
     context = {
         "connected": True,
@@ -369,6 +430,228 @@ def test_safe_compile_verifies_persistent_errors_after_transient_wait_error() ->
     assert result.data["errorTotal"] == 0
 
 
+def test_safe_compile_resumes_wait_after_domain_reload_disconnect() -> None:
+    from types import SimpleNamespace
+
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+    state.compile.phase = "domain_reload"
+    state.compile.compile_request_id = "req-reload"
+    service = CompileDomainService()
+    session = SimpleNamespace(session_id="session-before-reload")
+    service.server = SimpleNamespace(
+        state=state,
+        is_ready=lambda: True,
+        session_manager=SimpleNamespace(active=session),
+    )
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict) -> ToolResponse:
+            assert name == "resource.editorState"
+            return ok(request_id, {"isCompiling": False})
+
+    service.dispatcher = _Dispatcher()
+    waits = 0
+
+    compile_calls = 0
+
+    async def _compile() -> ToolResponse:
+        nonlocal compile_calls
+        compile_calls += 1
+        return ok("req-compile", {"compileRequestId": "req-reload"})
+
+    async def _compile_wait(**_kwargs) -> ToolResponse:
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            return fail("req-wait", "UNITY_NOT_CONNECTED", "domain reload")
+        state.compile.phase = "completed"
+        session.session_id = "session-after-reload"
+        return ok("req-wait-2", {"status": "completed", "elapsedS": 0.1})
+
+    async def _compile_errors(_compile_request_id: str = "") -> ToolResponse:
+        return ok("req-errors", {"total": 0, "errors": [], "source": "persistent"})
+
+    service.compile = _compile
+    service.compile_wait = _compile_wait
+    service.compile_errors = _compile_errors
+
+    result = asyncio.run(service.safe_compile_and_wait(timeout_s=5, post_compile_delay_s=0))
+
+    assert result.ok
+    assert compile_calls == 0
+    assert waits == 2
+    assert result.data["attachedToExistingCompile"] is True
+    assert result.data["compileRequestId"] == "req-reload"
+    assert result.data["waitInterruptedByReload"] is True
+    assert result.data["reconnectedAfterReload"] is True
+    assert result.data["sessionChangedDuringCompile"] is True
+    assert result.data["initialSessionId"] == "session-before-reload"
+    assert result.data["finalSessionId"] == "session-after-reload"
+    assert result.data["errorsVerified"] is True
+
+
+def test_safe_compile_preserves_explicit_invocation_compile_identity() -> None:
+    from types import SimpleNamespace
+
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    state.compile.status = "finished"
+    state.compile.phase = "completed"
+    state.compile.compile_request_id = "req-snapshot"
+    state.compile.initial_session_id = "session-before"
+    state.compile.finished_at = 100
+    state.editor.connected = True
+    state.editor.authoritative = False
+    state.editor.play_mode_state = "edit"
+    service = CompileDomainService()
+    service.server = SimpleNamespace(
+        state=state,
+        is_ready=lambda: True,
+        session_manager=SimpleNamespace(active=SimpleNamespace(session_id="session-after")),
+    )
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict) -> ToolResponse:
+            raise AssertionError("explicit attachment must not re-query before preserving identity")
+
+    service.dispatcher = _Dispatcher()
+
+    async def _compile() -> ToolResponse:
+        raise AssertionError("explicit attachment must not start a second compile")
+
+    async def _compile_wait(**_kwargs) -> ToolResponse:
+        return ok("req-wait", {"status": "completed", "elapsedS": 0.1})
+
+    async def _compile_errors(compile_request_id: str = "") -> ToolResponse:
+        assert compile_request_id == "req-snapshot"
+        return ok("req-errors", {"total": 0, "errors": [], "source": "persistent"})
+
+    service.compile = _compile
+    service.compile_wait = _compile_wait
+    service.compile_errors = _compile_errors
+
+    result = asyncio.run(
+        service.safe_compile_and_wait(
+            timeout_s=5,
+            post_compile_delay_s=0,
+            attach_compile_request_id="req-snapshot",
+        )
+    )
+
+    assert result.ok
+    assert result.data["attachedToExistingCompile"] is True
+    assert result.data["compileRequestId"] == "req-snapshot"
+    assert result.data["initialSessionId"] == "session-before"
+    assert result.data["finalSessionId"] == "session-after"
+    assert result.data["sessionChangedDuringCompile"] is True
+    assert result.data["reconnectedAfterReload"] is True
+
+
+def test_project_config_hot_reloads_write_access_and_reports_restart_fields(tmp_path: Path, monkeypatch) -> None:
+    from upilot_mcp import config as config_module
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"mcp":{"httpPort":8011,"wsPort":8765},"safety":{"writeAccessApproved":false}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UPILOT_CONFIG", str(config_path))
+    original = {
+        name: getattr(config_module.CONFIG, name)
+        for name in config_module.CONFIG.__slots__
+    }
+    try:
+        first = config_module.refresh_config_if_changed(force=True)
+        assert config_module.CONFIG.write_access_approved is False
+        assert first["restartRequired"] is False
+
+        config_path.write_text(
+            '{"mcp":{"httpPort":8011,"wsPort":8765},"safety":{"writeAccessApproved":true}}',
+            encoding="utf-8",
+        )
+        second = config_module.refresh_config_if_changed()
+        assert config_module.CONFIG.write_access_approved is True
+        assert second["writeAccessApproved"] is True
+        assert second["diskConfigChanged"] is False
+        assert second["diskConfigHash"] != first["diskConfigHash"]
+
+        config_path.write_text(
+            '{"mcp":{"httpPort":8999,"wsPort":8765},"safety":{"writeAccessApproved":true}}',
+            encoding="utf-8",
+        )
+        third = config_module.refresh_config_if_changed()
+        assert third["restartRequired"] is True
+        assert third["diskConfigChanged"] is True
+        assert third["restartFields"] == ["http_port"]
+        assert config_module.CONFIG.http_port == 8011
+    finally:
+        for name, value in original.items():
+            setattr(config_module.CONFIG, name, value)
+        config_module.refresh_config_if_changed(force=True)
+
+
+def test_long_reflection_call_returns_single_pollable_operation_without_reexecution() -> None:
+    from upilot_mcp.domain.reflection_service import ReflectionDomainService
+
+    calls = 0
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None) -> ToolResponse:
+            nonlocal calls
+            calls += 1
+            assert name == "reflection.call"
+            assert timeout_ms == 30000
+            await asyncio.sleep(0.03)
+            return ok(request_id, {"result": "done"})
+
+    async def scenario():
+        service = ReflectionDomainService()
+        service.dispatcher = _Dispatcher()
+        started = await service.reflection_call(
+            "Fixture",
+            "LongCall",
+            async_after_sec=0.001,
+            operation_timeout_sec=5,
+        )
+        assert started.ok
+        operation_id = started.data["operationId"]
+        assert started.data["status"] == "Running"
+        assert started.data["executedOnce"] is True
+
+        waited = await service.reflection_operation_wait(operation_id, timeout_sec=1, poll_interval_sec=0.005)
+        assert waited.ok
+        assert waited.data["status"] == "Succeeded"
+        assert waited.data["result"]["result"] == "done"
+
+    asyncio.run(scenario())
+    assert calls == 1
+
+
+def test_running_reflection_operation_rejects_unsafe_cancel_explicitly() -> None:
+    from upilot_mcp.domain.reflection_service import ReflectionDomainService
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None) -> ToolResponse:
+            await asyncio.sleep(0.1)
+            return ok(request_id, {"result": "done"})
+
+    async def scenario():
+        service = ReflectionDomainService()
+        service.dispatcher = _Dispatcher()
+        started = await service.reflection_call("Fixture", "LongCall", force_async=True)
+        canceled = await service.reflection_operation_cancel(started.data["operationId"])
+        assert canceled.ok is False
+        assert canceled.error.code == "CANCEL_UNSUPPORTED"
+        assert canceled.error.detail["executionMayContinue"] is True
+        await service.reflection_operation_wait(started.data["operationId"], timeout_sec=1, poll_interval_sec=0.01)
+
+    asyncio.run(scenario())
+
+
 def test_prefab_query_components_tool_is_read_only_in_source_registry() -> None:
     tools_path = Path(__file__).parents[1] / "src" / "upilot_mcp" / "mcp_tools" / "resource_tools.py"
     text = tools_path.read_text(encoding="utf-8")
@@ -398,6 +681,98 @@ def test_generic_tool_call_routes_registered_tools_and_blocks_recursion() -> Non
     assert result.ok and result.data == {"value": "proxied"}
     assert not recursive.ok
     assert recursive.error and recursive.error.code == "RECURSIVE_TOOL_CALL"
+
+
+def test_generic_tool_call_maps_public_camel_case_by_target_signature() -> None:
+    class _ProxyFacade:
+        async def capture(
+            self,
+            exclude_upilot: bool = True,
+            include_stack_trace: bool = False,
+            test_filter: str = "",
+            timeout_sec: int = 0,
+            asset_path: str = "",
+        ) -> ToolResponse:
+            return ok(
+                "proxy",
+                {
+                    "excludeUPilot": exclude_upilot,
+                    "includeStackTrace": include_stack_trace,
+                    "testFilter": test_filter,
+                    "timeoutSec": timeout_sec,
+                    "assetPath": asset_path,
+                },
+            )
+
+    register_public_tool(
+        "unity_contract_proxy_arguments", facade_method="capture", category="test"
+    )
+    service = StatusDomainService.__new__(StatusDomainService)
+    service.capture = _ProxyFacade().capture
+
+    result = asyncio.run(
+        service.tool_call(
+            "unity_contract_proxy_arguments",
+            {
+                "excludeUPilot": False,
+                "includeStackTrace": True,
+                "testFilter": "Example.Tests",
+                "timeoutSec": 45,
+                "assetPath": "Assets/Example.prefab",
+            },
+        )
+    )
+
+    assert result.ok
+    assert result.data == {
+        "excludeUPilot": False,
+        "includeStackTrace": True,
+        "testFilter": "Example.Tests",
+        "timeoutSec": 45,
+        "assetPath": "Assets/Example.prefab",
+    }
+
+
+def test_generic_tool_call_rejects_unknown_arguments_with_schema() -> None:
+    register_public_tool(
+        "unity_contract_proxy_schema", facade_method="echo", category="test"
+    )
+    service = StatusDomainService.__new__(StatusDomainService)
+    service.echo = _Facade().echo
+
+    result = asyncio.run(
+        service.tool_call("unity_contract_proxy_schema", {"unexpectedField": 1})
+    )
+
+    assert not result.ok
+    assert result.error and result.error.code == "INVALID_TOOL_ARGUMENTS"
+    assert result.error.detail["unknownArguments"] == ["unexpectedField"]
+    assert result.error.detail["expectedArguments"][0]["name"] == "value"
+
+
+def test_tools_find_exposes_proxy_argument_schema() -> None:
+    register_public_tool(
+        "unity_contract_proxy_find", facade_method="echo", category="test"
+    )
+    service = StatusDomainService.__new__(StatusDomainService)
+    service.echo = _Facade().echo
+    service.server = type(
+        "Server",
+        (),
+        {
+            "session_manager": type("Sessions", (), {"is_connected": lambda self: True})(),
+            "is_ready": lambda self: True,
+        },
+    )()
+
+    result = asyncio.run(service.tools_find(query="unity_contract_proxy_find"))
+
+    assert result.ok
+    assert result.data["exactMatch"] is True
+    schema = result.data["exactMatches"][0]["proxyArguments"]
+    assert schema == [
+        {"name": "value", "camelCase": "value", "required": False, "default": ""}
+    ]
 
 
 def test_console_search_query_alias_is_forwarded_strictly() -> None:
@@ -467,7 +842,7 @@ def test_dispatcher_preserves_bridge_timing_and_round_trip() -> None:
     assert result.timing["roundTripMs"] >= 0
 
 
-def test_sync_after_disk_write_reports_compiling_as_partial_success() -> None:
+def test_sync_after_disk_write_attaches_to_active_compile_without_duplicate_refresh() -> None:
     from upilot_mcp.domain.resource_service import ResourceDomainService
 
     service = ResourceDomainService.__new__(ResourceDomainService)
@@ -503,9 +878,12 @@ def test_sync_after_disk_write_reports_compiling_as_partial_success() -> None:
     result = asyncio.run(service.sync_after_disk_write(delay_s=0, trigger_compile=True))
     assert result.ok is True
     assert result.data["status"] == "compiling"
-    assert result.data["refreshed"] is True
+    assert result.data["refreshed"] is False
+    assert result.data["refreshSkipped"] is True
+    assert result.data["refreshSkipReason"] == "compile_already_active"
     assert result.data["compileAlreadyRunning"] is True
-    assert result.data["nextAction"] == "unity_compile_wait"
+    assert result.data["attachedToExistingCompile"] is True
+    assert result.data["nextAction"] == "unity_safe_compile_and_wait"
 
 
 def test_sync_after_disk_write_confirms_editor_idle_before_reporting_complete() -> None:
@@ -604,7 +982,8 @@ def test_sync_after_disk_write_does_not_report_false_compile_completion() -> Non
     assert result.data["status"] == "compiling"
     assert result.data["compiled"] is False
     assert result.data["compileCompleted"] is False
-    assert result.data["nextAction"] == "unity_compile_wait"
+    assert result.data["nextAction"] == "unity_safe_compile_and_wait"
+    assert result.data["attachedToExistingCompile"] is True
     assert result.data["compileState"]["phase"] == "accepted"
 
 
@@ -1050,6 +1429,8 @@ def test_test_and_flow_cancellation_tools_are_registered() -> None:
 
 
 def test_monohook_tracing_tools_are_registered_with_safe_defaults() -> None:
+    import inspect
+
     from upilot_mcp.mcp_tools import monohook_tools  # noqa: F401
     from upilot_mcp.tool_registry import REGISTRY
 
@@ -1061,6 +1442,18 @@ def test_monohook_tracing_tools_are_registered_with_safe_defaults() -> None:
     assert configure is not None and configure.destructive is True
     assert configure.requires_write_access is True
     assert events is not None and events.destructive is False
+    signature = inspect.signature(monohook_tools.unity_monohook_tracing_configure)
+    assert signature.parameters["updateAutoInjectEnabled"].default is False
+    assert signature.parameters["autoInjectEnabled"].default is False
+    assert signature.parameters["updateCaptureStackTrace"].default is False
+    assert signature.parameters["setStackTraceCaptureMode"].default is False
+    assert signature.parameters["stackTraceCaptureMode"].default == "Disabled"
+    assert signature.parameters["updatePointStackTraceSelection"].default is False
+    assert signature.parameters["updatePointFilterOverridesEnabled"].default is False
+    assert signature.parameters["pointFilterOverridesEnabled"].default is False
+    assert signature.parameters["updatePointFilterProfile"].default is False
+    assert signature.parameters["updatePointEnabled"].default is False
+    assert signature.parameters["pointFilterProfileId"].default == ""
 
 
 def test_monohook_tracing_domain_service_forwards_apply_default_false() -> None:
@@ -1112,6 +1505,66 @@ def test_monohook_tracing_domain_service_forwards_noise_controls() -> None:
     assert payload["maxEventsPerObjectPerSecond"] == 4
     assert payload["updateDuplicateSuppression"] is True
     assert payload["duplicateEventWindowMilliseconds"] == 250
+
+
+def test_monohook_tracing_domain_service_forwards_stack_mode_and_point_overrides() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            self.calls.append((command, payload, timeout_ms))
+            return ok(request_id, {"ok": True})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    asyncio.run(service.monohook_tracing_configure(
+        point_ids=["lifecycle.update"],
+        set_stack_trace_capture_mode=True,
+        stack_trace_capture_mode="SelectedPoints",
+        update_point_stack_trace_selection=True,
+        capture_stack_trace=True,
+        update_point_filter_overrides_enabled=True,
+        point_filter_overrides_enabled=True,
+        update_point_filter_profile=True,
+        point_filter_profile_id="scene-objects",
+    ))
+
+    _, payload, _ = service.dispatcher.calls[0]
+    assert payload["setStackTraceCaptureMode"] is True
+    assert payload["stackTraceCaptureMode"] == "SelectedPoints"
+    assert payload["updatePointStackTraceSelection"] is True
+    assert payload["captureStackTrace"] is True
+    assert payload["updatePointFilterOverridesEnabled"] is True
+    assert payload["pointFilterOverridesEnabled"] is True
+    assert payload["updatePointFilterProfile"] is True
+    assert payload["pointFilterProfileId"] == "scene-objects"
+
+
+def test_monohook_tracing_domain_service_forwards_auto_injection_switch() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            self.calls.append((command, payload, timeout_ms))
+            return ok(request_id, {"ok": True})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    asyncio.run(service.monohook_tracing_configure(
+        update_auto_inject_enabled=True,
+        auto_inject_enabled=True,
+    ))
+
+    _, payload, _ = service.dispatcher.calls[0]
+    assert payload["updateAutoInjectEnabled"] is True
+    assert payload["autoInjectEnabled"] is True
+    assert payload["apply"] is False
 
 
 def test_test_domain_service_forwards_staged_stop_commands() -> None:

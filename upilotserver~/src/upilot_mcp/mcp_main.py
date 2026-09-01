@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
+import json
 import logging
 import os
 import sys
@@ -52,6 +54,21 @@ def _cli() -> None:
             f"protocol={payload['protocol_version']}"
         )
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "compile":
+        parser = argparse.ArgumentParser(prog="upilot compile")
+        parser.add_argument("--project", required=True, help="Unity project root to attach and compile.")
+        parser.add_argument("--http-port", type=int, default=None, help="Override the project HTTP MCP port.")
+        parser.add_argument("--timeout", type=float, default=600.0, help="Compile timeout in seconds.")
+        args = parser.parse_args(sys.argv[2:])
+        from .compile_driver import run_compile_driver
+
+        result = run_compile_driver(
+            args.project,
+            http_port=args.http_port,
+            timeout_s=max(1.0, args.timeout),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise SystemExit(0 if result.get("ok") else 1)
     _setup_logging()
     asyncio.run(main())
 

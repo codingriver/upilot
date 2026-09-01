@@ -42,11 +42,15 @@ namespace CodingRiver.UPilot.Tests
     public sealed class UPilotMonoHookSettingsTests
     {
         private bool _masterEnabled;
+        private bool _autoInjectEnabled;
         private bool _autoApplyOnEditorLoad;
+        private bool _autoApplyOnPlayMode;
         private bool _suppressUnchangedValues;
         private int _maxEventsPerSecond;
         private bool _logEventsToConsole;
         private int _maxConsoleLogsPerSecond;
+        private bool _captureStackTrace;
+        private UPilotStackTraceCaptureMode _stackTraceCaptureMode;
         private int _stackTraceMaxFrames;
         private int _stackTraceSampleEveryN;
         private string _lifecycleAssemblyIncludes;
@@ -55,6 +59,8 @@ namespace CodingRiver.UPilot.Tests
         private string _lifecycleNamespaceExcludes;
         private string _lifecycleTypeIncludes;
         private string _lifecycleTypeExcludes;
+        private string _globalFilterProfileId;
+        private bool _pointFilterOverridesEnabled;
         private List<UPilotMonoHookPointState> _points;
 
         [SetUp]
@@ -63,11 +69,15 @@ namespace CodingRiver.UPilot.Tests
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
             _masterEnabled = settings.masterEnabled;
+            _autoInjectEnabled = settings.autoInjectEnabled;
             _autoApplyOnEditorLoad = settings.autoApplyOnEditorLoad;
+            _autoApplyOnPlayMode = settings.autoApplyOnPlayMode;
             _suppressUnchangedValues = settings.suppressUnchangedValues;
             _maxEventsPerSecond = settings.maxEventsPerSecond;
             _logEventsToConsole = settings.logEventsToConsole;
             _maxConsoleLogsPerSecond = settings.maxConsoleLogsPerSecond;
+            _captureStackTrace = settings.captureStackTrace;
+            _stackTraceCaptureMode = settings.stackTraceCaptureMode;
             _stackTraceMaxFrames = settings.stackTraceMaxFrames;
             _stackTraceSampleEveryN = settings.stackTraceSampleEveryN;
             _lifecycleAssemblyIncludes = settings.lifecycleAssemblyIncludes;
@@ -76,13 +86,16 @@ namespace CodingRiver.UPilot.Tests
             _lifecycleNamespaceExcludes = settings.lifecycleNamespaceExcludes;
             _lifecycleTypeIncludes = settings.lifecycleTypeIncludes;
             _lifecycleTypeExcludes = settings.lifecycleTypeExcludes;
+            _globalFilterProfileId = settings.globalFilterProfileId;
+            _pointFilterOverridesEnabled = settings.pointFilterOverridesEnabled;
             _points = settings.points
                 .Select(point => new UPilotMonoHookPointState(
                     point.Id,
                     point.Enabled,
                     point.CaptureStackTrace,
                     point.HookAllSafeOverloads,
-                    point.FilterProfileId))
+                    point.FilterProfileId,
+                    point.ExecutionMode))
                 .ToList();
             // Each settings test exercises catalog defaults independently. The
             // project asset may intentionally contain a user's enabled points,
@@ -96,11 +109,15 @@ namespace CodingRiver.UPilot.Tests
         {
             var settings = UPilotMonoHookSettings.instance;
             settings.masterEnabled = _masterEnabled;
+            settings.autoInjectEnabled = _autoInjectEnabled;
             settings.autoApplyOnEditorLoad = _autoApplyOnEditorLoad;
+            settings.autoApplyOnPlayMode = _autoApplyOnPlayMode;
             settings.suppressUnchangedValues = _suppressUnchangedValues;
             settings.maxEventsPerSecond = _maxEventsPerSecond;
             settings.logEventsToConsole = _logEventsToConsole;
             settings.maxConsoleLogsPerSecond = _maxConsoleLogsPerSecond;
+            settings.captureStackTrace = _captureStackTrace;
+            settings.stackTraceCaptureMode = _stackTraceCaptureMode;
             settings.stackTraceMaxFrames = _stackTraceMaxFrames;
             settings.stackTraceSampleEveryN = _stackTraceSampleEveryN;
             settings.lifecycleAssemblyIncludes = _lifecycleAssemblyIncludes;
@@ -109,6 +126,8 @@ namespace CodingRiver.UPilot.Tests
             settings.lifecycleNamespaceExcludes = _lifecycleNamespaceExcludes;
             settings.lifecycleTypeIncludes = _lifecycleTypeIncludes;
             settings.lifecycleTypeExcludes = _lifecycleTypeExcludes;
+            settings.globalFilterProfileId = _globalFilterProfileId;
+            settings.pointFilterOverridesEnabled = _pointFilterOverridesEnabled;
             settings.points = _points;
             settings.EnsureDefaults();
         }
@@ -205,6 +224,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(settings.points.All(point => !point.Enabled), Is.True);
             Assert.That(settings.points.All(point => !point.CaptureStackTrace), Is.True);
             Assert.That(settings.points.All(point => !point.HookAllSafeOverloads), Is.True);
+            Assert.That(settings.points.All(point => point.ExecutionMode == UPilotMonoHookExecutionMode.PassThrough), Is.True);
             Assert.That(settings.IsConfiguredEnabled(UPilotMonoHookPointId.LifecycleOnEnable), Is.False);
             Assert.That(settings.IsConfiguredEnabled(UPilotMonoHookPointId.TransformPosition), Is.False);
         }
@@ -239,7 +259,9 @@ namespace CodingRiver.UPilot.Tests
         public void RuntimeProtectionSettingsAreClampedAndRemainOptIn()
         {
             var settings = UPilotMonoHookSettings.instance;
+            settings.autoInjectEnabled = false;
             settings.autoApplyOnEditorLoad = false;
+            settings.autoApplyOnPlayMode = false;
             settings.maxEventsPerSecond = 0;
             settings.enablePerObjectRateLimit = false;
             settings.suppressDuplicateEvents = false;
@@ -250,7 +272,9 @@ namespace CodingRiver.UPilot.Tests
 
             settings.EnsureDefaults();
 
+            Assert.That(settings.autoInjectEnabled, Is.False);
             Assert.That(settings.autoApplyOnEditorLoad, Is.False);
+            Assert.That(settings.autoApplyOnPlayMode, Is.False);
             Assert.That(settings.maxEventsPerSecond, Is.EqualTo(1));
             Assert.That(settings.logEventsToConsole, Is.False);
             Assert.That(settings.maxConsoleLogsPerSecond, Is.EqualTo(1));
@@ -261,15 +285,61 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void StackTraceCaptureIsConfiguredPerPointAndDefaultsOff()
+        public void SchemaNineMigrationPreservesPreviouslyEnabledAutomaticInjection()
         {
             var settings = UPilotMonoHookSettings.instance;
-            Assert.That(settings.ShouldCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive), Is.False);
+            settings.schemaVersion = 9;
+            settings.autoInjectEnabled = false;
+            settings.autoApplyOnEditorLoad = true;
+            settings.autoApplyOnPlayMode = false;
 
-            settings.SetCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive, true);
+            settings.EnsureDefaults();
 
-            Assert.That(settings.ShouldCaptureStackTrace(UPilotMonoHookPointId.GameObjectSetActive), Is.True);
-            Assert.That(settings.ShouldCaptureStackTrace(UPilotMonoHookPointId.TransformPosition), Is.False);
+            Assert.That(settings.schemaVersion, Is.EqualTo(UPilotMonoHookSettings.CurrentSchemaVersion));
+            Assert.That(settings.autoInjectEnabled, Is.True);
+        }
+
+        [Test]
+        public void StackTraceCaptureSupportsDisabledSelectedAndAllEnabledModes()
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            string selectedPoint = UPilotMonoHookPointId.GameObjectSetActive;
+            string otherPoint = UPilotMonoHookPointId.TransformPosition;
+            settings.stackTraceCaptureMode = UPilotStackTraceCaptureMode.Disabled;
+            Assert.That(settings.ShouldCaptureStackTrace(), Is.False);
+            Assert.That(settings.ShouldCaptureStackTrace(selectedPoint), Is.False);
+
+            settings.stackTraceCaptureMode = UPilotStackTraceCaptureMode.SelectedPoints;
+            settings.SetCaptureStackTrace(selectedPoint, true);
+            Assert.That(settings.ShouldCaptureStackTrace(selectedPoint), Is.True);
+            Assert.That(settings.ShouldCaptureStackTrace(otherPoint), Is.False);
+
+            settings.stackTraceCaptureMode = UPilotStackTraceCaptureMode.AllEnabledPoints;
+            settings.SetEnabled(selectedPoint, true);
+            settings.SetEnabled(otherPoint, false);
+            Assert.That(settings.ShouldCaptureStackTrace(), Is.True);
+            Assert.That(settings.ShouldCaptureStackTrace(selectedPoint), Is.True);
+            Assert.That(settings.ShouldCaptureStackTrace(otherPoint), Is.False);
+        }
+
+        [Test]
+        public void PointFilterSelectionOverridesGlobalOnlyWhenEnabled()
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            var point = settings.points.First(item => item.Id == UPilotMonoHookPointId.GameObjectSetActive);
+            point.FilterProfileId = UPilotTraceFilterProfileIds.CurrentSelection;
+            settings.globalFilterProfileId = UPilotTraceFilterProfileIds.SceneObjects;
+
+            Assert.That(settings.GetConfiguredFilterProfileId(point.Id), Is.EqualTo(UPilotTraceFilterProfileIds.CurrentSelection));
+            Assert.That(settings.GetEffectiveFilterProfileId(point.Id),
+                Is.EqualTo(UPilotTraceFilterProfileIds.SceneObjects));
+
+            settings.pointFilterOverridesEnabled = true;
+
+            Assert.That(settings.GetEffectiveFilterProfileId(point.Id),
+                Is.EqualTo(UPilotTraceFilterProfileIds.CurrentSelection));
+            Assert.That(settings.GetEffectiveFilterProfileId(UPilotMonoHookPointId.TransformPosition),
+                Is.EqualTo(UPilotTraceFilterProfileIds.SceneObjects));
         }
 
         [Test]
@@ -282,6 +352,22 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(settings.ShouldHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy), Is.True);
             Assert.That(settings.ShouldHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectInstantiate), Is.False);
+        }
+
+        [Test]
+        public void ExecutionModeDefaultsToPassThroughAndCanBeConfiguredPerPoint()
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            Assert.That(settings.GetExecutionMode(UPilotMonoHookPointId.GameObjectSetActive),
+                Is.EqualTo(UPilotMonoHookExecutionMode.PassThrough));
+
+            settings.SetExecutionMode(UPilotMonoHookPointId.GameObjectSetActive,
+                UPilotMonoHookExecutionMode.Intercept);
+
+            Assert.That(settings.GetExecutionMode(UPilotMonoHookPointId.GameObjectSetActive),
+                Is.EqualTo(UPilotMonoHookExecutionMode.Intercept));
+            Assert.That(settings.GetExecutionMode(UPilotMonoHookPointId.TransformPosition),
+                Is.EqualTo(UPilotMonoHookExecutionMode.PassThrough));
         }
 
         [Test]

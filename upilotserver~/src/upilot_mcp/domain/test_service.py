@@ -55,12 +55,150 @@ class TestDomainService:
         self, test_mode: str = "EditMode", test_filter: str = ""
     ) -> ToolResponse:
         request_id = new_id("req")
+        scene_state = await self.dispatcher.call(
+            new_id("req"), "scene.list", {}, timeout_ms=30000
+        )
+        if not scene_state.ok:
+            source_error = scene_state.error
+            return fail(
+                request_id,
+                "TEST_PREFLIGHT_FAILED",
+                "Could not verify whether open Unity scenes have unsaved changes.",
+                {
+                    "blockedReason": "SceneStateUnavailable",
+                    "sourceError": (
+                        {
+                            "code": source_error.code,
+                            "message": source_error.message,
+                            "detail": source_error.detail,
+                        }
+                        if source_error
+                        else None
+                    ),
+                    "nextAction": "Restore the Unity Bridge connection, call unity_scene_list, and retry without saving or discarding scenes automatically.",
+                },
+            )
+
+        dirty_scenes = [
+            {
+                "scenePath": str(scene.get("scenePath") or ""),
+                "sceneName": str(scene.get("sceneName") or ""),
+                "isActive": bool(scene.get("isActive", False)),
+            }
+            for scene in ((scene_state.data or {}).get("scenes") or [])
+            if bool(scene.get("isDirty", False))
+        ]
+        if dirty_scenes:
+            return fail(
+                request_id,
+                "UNSAVED_SCENES",
+                "Unity tests were not started because one or more open scenes have unsaved changes.",
+                {
+                    "blockedReason": "UnsavedScenes",
+                    "dirtySceneCount": len(dirty_scenes),
+                    "dirtyScenes": dirty_scenes,
+                    "requestedTestMode": test_mode,
+                    "requestedTestFilter": test_filter,
+                    "nextAction": "Ask the user whether to save, discard, or cancel. Do not change scene state automatically.",
+                },
+            )
+
+        normalized_filter = test_filter
+        filter_diagnostics: dict[str, object] = {
+            "requestedTestFilter": test_filter,
+            "normalizedTestFilter": test_filter,
+            "filterResolution": "unchanged",
+        }
+        if self._is_short_test_class_filter(test_filter):
+            listed = await self.test_list(test_mode=test_mode)
+            if not listed.ok:
+                source_error = listed.error
+                return fail(
+                    request_id,
+                    "TEST_FILTER_DISCOVERY_FAILED",
+                    "Could not resolve the short test class filter against Unity Test Runner discovery.",
+                    {
+                        **filter_diagnostics,
+                        "sourceError": (
+                            {
+                                "code": source_error.code,
+                                "message": source_error.message,
+                                "detail": source_error.detail,
+                            }
+                            if source_error
+                            else None
+                        ),
+                        "nextAction": "Call unity_test_list without a filter, inspect discovered test names, then retry with a fully qualified class or test name.",
+                    },
+                )
+
+            listed_data = listed.data or {}
+            tests = [str(item) for item in (listed_data.get("tests") or []) if item]
+            class_names = sorted({self._test_class_name(item) for item in tests if self._test_class_name(item)})
+            matches = [
+                class_name
+                for class_name in class_names
+                if class_name.rsplit(".", 1)[-1] == test_filter
+            ]
+            filter_diagnostics.update(
+                {
+                    "discoveredTestCount": int(listed_data.get("discoveredCount") or len(tests)),
+                    "discoveredClassCount": len(class_names),
+                    "filterCandidates": matches,
+                }
+            )
+            if not matches:
+                return fail(
+                    request_id,
+                    "TEST_FILTER_NO_MATCH",
+                    f"No discovered test class matches short name '{test_filter}'.",
+                    {
+                        **filter_diagnostics,
+                        "noTestsReason": "FilterSyntaxOrScopeMismatch",
+                        "nextAction": "Call unity_test_list without a filter and use a returned fully qualified class or test name.",
+                    },
+                )
+            if len(matches) > 1:
+                return fail(
+                    request_id,
+                    "TEST_FILTER_AMBIGUOUS",
+                    f"Short test class name '{test_filter}' matches multiple discovered classes.",
+                    {
+                        **filter_diagnostics,
+                        "nextAction": "Retry with one fully qualified class name from filterCandidates.",
+                    },
+                )
+            normalized_filter = matches[0]
+            filter_diagnostics.update(
+                {
+                    "normalizedTestFilter": normalized_filter,
+                    "filterResolution": "short_class_to_fully_qualified_class",
+                }
+            )
+
         payload: dict = {"testMode": test_mode}
-        if test_filter:
-            payload["testFilter"] = test_filter
-        return await self.dispatcher.call(
+        if normalized_filter:
+            payload["testFilter"] = normalized_filter
+        result = await self.dispatcher.call(
             request_id, "test.run", payload, timeout_ms=300000
         )
+        if result.data is not None:
+            result.data.update(filter_diagnostics)
+        elif result.error is not None:
+            result.error.detail.update(filter_diagnostics)
+        return result
+
+    @staticmethod
+    def _is_short_test_class_filter(test_filter: str) -> bool:
+        value = test_filter.strip()
+        return bool(value) and "." not in value and not value.lower().startswith("regex:")
+
+    @staticmethod
+    def _test_class_name(test_name: str) -> str:
+        value = test_name.strip()
+        if "." not in value:
+            return ""
+        return value.rsplit(".", 1)[0]
 
     async def test_results(self, run_guid: str = "") -> ToolResponse:
         request_id = new_id("req")
@@ -91,10 +229,10 @@ class TestDomainService:
             request_id, "test.force_cleanup", payload, timeout_ms=30000
         )
 
-    async def test_list(self, test_mode: str = "EditMode") -> ToolResponse:
+    async def test_list(self, test_mode: str = "EditMode", test_filter: str = "") -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
-            request_id, "test.list", {"testMode": test_mode}
+            request_id, "test.list", {"testMode": test_mode, "testFilter": test_filter}
         )
 
     async def upilot_acceptance_run(
@@ -542,7 +680,11 @@ class TestDomainService:
     async def monohook_tracing_configure(
         self,
         point_ids: list[str] | None = None,
+        update_point_enabled: bool = False,
         enabled: bool = False,
+        set_stack_trace_capture_mode: bool = False,
+        stack_trace_capture_mode: str = "Disabled",
+        update_point_stack_trace_selection: bool = False,
         update_capture_stack_trace: bool = False,
         capture_stack_trace: bool = False,
         update_per_object_rate_limit: bool = False,
@@ -553,8 +695,12 @@ class TestDomainService:
         duplicate_event_window_milliseconds: int = 100,
         set_master_enabled: bool = False,
         master_enabled: bool = True,
+        update_auto_inject_enabled: bool = False,
+        auto_inject_enabled: bool = False,
         set_global_filter_profile: bool = False,
         global_filter_profile_id: str = "",
+        update_point_filter_overrides_enabled: bool = False,
+        point_filter_overrides_enabled: bool = False,
         update_point_filter_profile: bool = False,
         point_filter_profile_id: str = "",
         replace_filter_profiles: bool = False,
@@ -567,7 +713,11 @@ class TestDomainService:
             "monohook.tracing.configure",
             {
                 "pointIds": point_ids or [],
+                "updatePointEnabled": update_point_enabled,
                 "enabled": enabled,
+                "setStackTraceCaptureMode": set_stack_trace_capture_mode,
+                "stackTraceCaptureMode": stack_trace_capture_mode,
+                "updatePointStackTraceSelection": update_point_stack_trace_selection,
                 "updateCaptureStackTrace": update_capture_stack_trace,
                 "captureStackTrace": capture_stack_trace,
                 "updatePerObjectRateLimit": update_per_object_rate_limit,
@@ -578,8 +728,12 @@ class TestDomainService:
                 "duplicateEventWindowMilliseconds": duplicate_event_window_milliseconds,
                 "setMasterEnabled": set_master_enabled,
                 "masterEnabled": master_enabled,
+                "updateAutoInjectEnabled": update_auto_inject_enabled,
+                "autoInjectEnabled": auto_inject_enabled,
                 "setGlobalFilterProfile": set_global_filter_profile,
                 "globalFilterProfileId": global_filter_profile_id,
+                "updatePointFilterOverridesEnabled": update_point_filter_overrides_enabled,
+                "pointFilterOverridesEnabled": point_filter_overrides_enabled,
                 "updatePointFilterProfile": update_point_filter_profile,
                 "pointFilterProfileId": point_filter_profile_id,
                 "replaceFilterProfiles": replace_filter_profiles,

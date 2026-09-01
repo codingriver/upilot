@@ -14,6 +14,7 @@ from ..protocol import new_id
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, register_public_tool
 from .. import mcp_stdio_server as runtime
+from ..wire_ids import WireIdInput
 
 mcp = runtime.mcp
 _get_facade = runtime._get_facade
@@ -168,13 +169,15 @@ async def unity_asset_find_built_in(query: str = "", assetType: str = ""):
     r = await _get_facade().asset_find_built_in(query=query, asset_type=assetType)
     return _log_tool_result("unity_asset_find_built_in", _payload(r))
 
-@mcp.tool(description="获取 Unity 资源的序列化属性数据（SerializedObject 深度读取）。")
+@mcp.tool(description="获取 Unity 资源的序列化属性树；maxDepth 控制 Generic/数组展开，maxNodes 与 continuationToken 提供有界分页。")
 async def unity_asset_get_data(
     assetPath: str = "",
-    gameObjectId: int = 0,
+    gameObjectId: WireIdInput = 0,
     componentType: str = "",
     componentIndex: int = 0,
     maxDepth: int = 10,
+    maxNodes: int = 500,
+    continuationToken: str = "",
 ):
     _log_tool_call(
         "unity_asset_get_data",
@@ -184,6 +187,8 @@ async def unity_asset_get_data(
             "componentType": componentType,
             "componentIndex": componentIndex,
             "maxDepth": maxDepth,
+            "maxNodes": maxNodes,
+            "continuationToken": continuationToken,
         },
     )
     r = await _get_facade().asset_get_data(
@@ -192,6 +197,8 @@ async def unity_asset_get_data(
         component_type=componentType,
         component_index=componentIndex,
         max_depth=maxDepth,
+        max_nodes=maxNodes,
+        continuation_token=continuationToken,
     )
     return _log_tool_result("unity_asset_get_data", _payload(r))
 
@@ -201,7 +208,7 @@ async def unity_asset_get_data(
 async def unity_asset_modify_data(
     properties: list[dict],
     assetPath: str = "",
-    gameObjectId: int = 0,
+    gameObjectId: WireIdInput = 0,
     componentType: str = "",
     componentIndex: int = 0,
 ):
@@ -256,8 +263,38 @@ async def unity_prefab_query_components(
     )
     return _log_tool_result("unity_prefab_query_components", _payload(r))
 
+
+@mcp.tool(
+    description=(
+        "只读批量审计 Prefab 的 3D/2D Collider、Trigger、Rigidbody、Layer、Active、Enabled "
+        "及 Collider-Rigidbody 绑定关系；隔离加载资源，不进入 Prefab 编辑模式。"
+    )
+)
+async def unity_prefab_physics_audit(
+    prefabPaths: list[str],
+    maxResultsPerPrefab: int = 1000,
+    sortBy: str = "colliderCount",
+    descending: bool = True,
+):
+    _log_tool_call(
+        "unity_prefab_physics_audit",
+        {
+            "prefabPaths": prefabPaths,
+            "maxResultsPerPrefab": maxResultsPerPrefab,
+            "sortBy": sortBy,
+            "descending": descending,
+        },
+    )
+    r = await _get_facade().prefab_physics_audit(
+        prefab_paths=prefabPaths,
+        max_results_per_prefab=maxResultsPerPrefab,
+        sort_by=sortBy,
+        descending=descending,
+    )
+    return _log_tool_result("unity_prefab_physics_audit", _payload(r))
+
 @mcp.tool(description="将场景中的 GameObject 创建为 Prefab 资源。")
-async def unity_prefab_create(sourceGameObjectId: int, prefabPath: str):
+async def unity_prefab_create(sourceGameObjectId: WireIdInput, prefabPath: str):
     _log_tool_call(
         "unity_prefab_create",
         {"sourceGameObjectId": sourceGameObjectId, "prefabPath": prefabPath},
@@ -268,7 +305,7 @@ async def unity_prefab_create(sourceGameObjectId: int, prefabPath: str):
     return _log_tool_result("unity_prefab_create", _payload(r))
 
 @mcp.tool(description="在场景中实例化指定路径的 Prefab。")
-async def unity_prefab_instantiate(prefabPath: str, parentId: int = 0):
+async def unity_prefab_instantiate(prefabPath: str, parentId: WireIdInput = 0):
     _log_tool_call(
         "unity_prefab_instantiate", {"prefabPath": prefabPath, "parentId": parentId}
     )
@@ -325,7 +362,7 @@ async def unity_material_modify(materialPath: str, properties: dict):
 
 @mcp.tool(description="将材质分配给场景中 GameObject 的渲染器。")
 async def unity_material_assign(
-    targetGameObjectId: int, materialPath: str, materialIndex: int = 0
+    targetGameObjectId: WireIdInput, materialPath: str, materialIndex: int = 0
 ):
     _log_tool_call(
         "unity_material_assign",
@@ -499,7 +536,7 @@ async def resource_console_summary():
 @mcp.tool(description="在 Unity 场景中创建新的 GameObject。")
 async def unity_gameobject_create(
     name: str = "New GameObject",
-    parentId: int = 0,
+    parentId: WireIdInput = 0,
     primitiveType: str = "",
 ):
     _log_tool_call(
@@ -515,25 +552,26 @@ async def unity_gameobject_create(
     description="在 Unity 场景中查找 GameObject，支持按名称、标签或 InstanceID 查找。"
 )
 async def unity_gameobject_find(
-    name: str = "", tag: str = "", instanceId: int = 0
+    name: str = "", tag: str = "", instanceId: WireIdInput = 0,
+    componentType: str = "", includeInactive: bool = True, limit: int = 100
 ):
     _log_tool_call(
-        "unity_gameobject_find", {"name": name, "tag": tag, "instanceId": instanceId}
+        "unity_gameobject_find", {"name": name, "tag": tag, "instanceId": instanceId, "componentType": componentType, "includeInactive": includeInactive, "limit": limit}
     )
-    r = await _get_facade().gameobject_find(name=name, tag=tag, instance_id=instanceId)
+    r = await _get_facade().gameobject_find(name=name, tag=tag, instance_id=instanceId, component_type=componentType, include_inactive=includeInactive, limit=limit)
     return _log_tool_result("unity_gameobject_find", _payload(r))
 
 @mcp.tool(
     description="修改 Unity 场景中 GameObject 的属性（名称、标签、层级、激活状态等）。"
 )
 async def unity_gameobject_modify(
-    instanceId: int,
+    instanceId: WireIdInput,
     name: str | None = None,
     tag: str | None = None,
     layer: int | None = None,
     activeSelf: bool | None = None,
     isStatic: bool | None = None,
-    parentId: int | None = None,
+    parentId: WireIdInput | None = None,
 ):
     _log_tool_call(
         "unity_gameobject_modify",
@@ -561,14 +599,14 @@ async def unity_gameobject_modify(
 @mcp.tool(
     description="销毁 Unity 场景中的 GameObject。破坏性操作：调用前先用 find/list/get 确认 instanceId 属于目标对象；不会删除磁盘资源，但会修改当前场景，之后需要 scene_save 才会持久化。"
 )
-async def unity_gameobject_delete(instanceId: int):
+async def unity_gameobject_delete(instanceId: WireIdInput):
     _log_tool_call("unity_gameobject_delete", {"instanceId": instanceId})
     r = await _get_facade().gameobject_delete(instance_id=instanceId)
     return _log_tool_result("unity_gameobject_delete", _payload(r))
 
 @mcp.tool(description="修改 Unity 场景中 GameObject 的变换（位置、旋转、缩放）。")
 async def unity_gameobject_move(
-    instanceId: int,
+    instanceId: WireIdInput,
     position: dict | None = None,
     rotation: dict | None = None,
     scale: dict | None = None,
@@ -591,7 +629,7 @@ async def unity_gameobject_move(
     return _log_tool_result("unity_gameobject_move", _payload(r))
 
 @mcp.tool(description="复制 Unity 场景中的 GameObject（包含所有子对象和组件）。")
-async def unity_gameobject_duplicate(instanceId: int):
+async def unity_gameobject_duplicate(instanceId: WireIdInput):
     _log_tool_call("unity_gameobject_duplicate", {"instanceId": instanceId})
     r = await _get_facade().gameobject_duplicate(instance_id=instanceId)
     return _log_tool_result("unity_gameobject_duplicate", _payload(r))
@@ -671,7 +709,7 @@ async def unity_scene_ensure_test(
 @mcp.tool(
     description="在指定 GameObject 上添加组件。会修改场景或 Prefab 实例；先确认 gameObjectId 和 componentType，添加后需要保存场景/Prefab 才持久化。"
 )
-async def unity_component_add(gameObjectId: int, componentType: str):
+async def unity_component_add(gameObjectId: WireIdInput, componentType: str):
     _log_tool_call(
         "unity_component_add",
         {"gameObjectId": gameObjectId, "componentType": componentType},
@@ -685,7 +723,7 @@ async def unity_component_add(gameObjectId: int, componentType: str):
     description="从指定 GameObject 上移除组件。破坏性场景修改：先用 unity_component_list/get 确认 componentType 与 componentIndex，尤其同类型多组件时。之后需要 scene/prefab 保存才会持久化。"
 )
 async def unity_component_remove(
-    gameObjectId: int, componentType: str, componentIndex: int = 0
+    gameObjectId: WireIdInput, componentType: str, componentIndex: int = 0
 ):
     _log_tool_call(
         "unity_component_remove",
@@ -704,7 +742,7 @@ async def unity_component_remove(
 
 @mcp.tool(description="获取指定 GameObject 上组件的序列化属性。")
 async def unity_component_get(
-    gameObjectId: int, componentType: str, componentIndex: int = 0
+    gameObjectId: WireIdInput, componentType: str, componentIndex: int = 0
 ):
     _log_tool_call(
         "unity_component_get",
@@ -725,7 +763,7 @@ async def unity_component_get(
     description="修改指定 GameObject 上组件的序列化属性。会改变场景或 Prefab 实例状态；先用 unity_component_get 查看属性路径和值，谨慎处理同类型多组件 componentIndex。"
 )
 async def unity_component_modify(
-    gameObjectId: int,
+    gameObjectId: WireIdInput,
     componentType: str,
     properties: dict,
     componentIndex: int = 0,
@@ -748,7 +786,7 @@ async def unity_component_modify(
     return _log_tool_result("unity_component_modify", _payload(r))
 
 @mcp.tool(description="列出指定 GameObject 上的所有组件。")
-async def unity_component_list(gameObjectId: int):
+async def unity_component_list(gameObjectId: WireIdInput):
     _log_tool_call("unity_component_list", {"gameObjectId": gameObjectId})
     r = await _get_facade().component_list(game_object_id=gameObjectId)
     return _log_tool_result("unity_component_list", _payload(r))
@@ -792,7 +830,7 @@ async def unity_selection_get():
     description="设置 Unity 编辑器的选中项（支持 InstanceID 列表或资源路径列表）。"
 )
 async def unity_selection_set(
-    gameObjectIds: list[int] | None = None,
+    gameObjectIds: list[WireIdInput] | None = None,
     assetPaths: list[str] | None = None,
 ):
     _log_tool_call(

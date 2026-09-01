@@ -75,6 +75,13 @@ namespace CodingRiver.UPilot
         public bool   includesSceneGui;
         public bool   includesHandles;
         public long   capturedAtUtcMs;
+        public int    requestedWidth;
+        public int    requestedHeight;
+        public int    actualColorWidth;
+        public int    actualColorHeight;
+        public int    actualDepthWidth;
+        public int    actualDepthHeight;
+        public int    renderRetryCount;
     }
 
     [Serializable]
@@ -140,6 +147,13 @@ namespace CodingRiver.UPilot
             public string matchedFullTypeName;
             public ulong matchedInstanceId;
             public long capturedAtUtcMs;
+            public int requestedWidth;
+            public int requestedHeight;
+            public int actualColorWidth;
+            public int actualColorHeight;
+            public int actualDepthWidth;
+            public int actualDepthHeight;
+            public int renderRetryCount;
         }
 
     // ── Service ─────────────────────────────────────────────────────────────────
@@ -308,12 +322,9 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    var capture = new ScreenshotBytesResult
-                    {
-                        Bytes = RenderCameraToBytes(cam, w, h, fmt, qual),
-                        Width = w,
-                        Height = h
-                    };
+                    var capture = FromCameraRender(
+                        RenderCamera(cam, w, h, fmt, qual),
+                        "gameView-camera");
                     CacheRecentGameView(capture);
                     tcs.SetResult(capture);
                 }
@@ -630,7 +641,7 @@ namespace CodingRiver.UPilot
                     path = targetPath, source = capture.Source, bytes = info.Length,
                     width = capture.Width, height = capture.Height, format = "png", sha256 = ComputeSha256(capture.Bytes),
                     overwritten = payload.overwrite, degraded = capture.Degraded, degradeReason = capture.DegradeReason,
-                    requestedSource = "sceneView", captureApi = capture.CaptureApi, windowHandle = capture.WindowHandle,
+                    requestedSource = payload.source, captureApi = capture.CaptureApi, windowHandle = capture.WindowHandle,
                     unityProcessId = capture.UnityProcessId, foreground = capture.Foreground,
                     occlusionSensitive = capture.OcclusionSensitive, pixelSourceVerified = capture.PixelSourceVerified,
                     repaintRequestedAtUtcMs = capture.RepaintRequestedAtUtcMs,
@@ -638,6 +649,10 @@ namespace CodingRiver.UPilot
                     includesSceneGui = capture.IncludesSceneGui, includesHandles = capture.IncludesHandles,
                     matchedFullTypeName = capture.MatchedFullTypeName, matchedInstanceId = capture.MatchedInstanceId,
                     capturedAtUtcMs = capture.CapturedAtUtcMs,
+                    requestedWidth = capture.RequestedWidth, requestedHeight = capture.RequestedHeight,
+                    actualColorWidth = capture.ActualColorWidth, actualColorHeight = capture.ActualColorHeight,
+                    actualDepthWidth = capture.ActualDepthWidth, actualDepthHeight = capture.ActualDepthHeight,
+                    renderRetryCount = capture.RenderRetryCount,
                 };
                 return true;
             }
@@ -808,6 +823,27 @@ namespace CodingRiver.UPilot
             public string MatchedFullTypeName;
             public ulong MatchedInstanceId;
             public long CapturedAtUtcMs;
+            public int RequestedWidth;
+            public int RequestedHeight;
+            public int ActualColorWidth;
+            public int ActualColorHeight;
+            public int ActualDepthWidth;
+            public int ActualDepthHeight;
+            public int RenderRetryCount;
+        }
+
+        internal sealed class CameraRenderCapture
+        {
+            public byte[] Bytes;
+            public int RequestedWidth;
+            public int RequestedHeight;
+            public int Width;
+            public int Height;
+            public int ColorWidth;
+            public int ColorHeight;
+            public int DepthWidth;
+            public int DepthHeight;
+            public int RetryCount;
         }
 
         private static long s_sceneViewRepaintSequence;
@@ -902,6 +938,14 @@ namespace CodingRiver.UPilot
                     Width = capture.Width,
                     Height = capture.Height,
                     Source = "recentGameView",
+                    CaptureApi = capture.CaptureApi,
+                    RequestedWidth = capture.RequestedWidth,
+                    RequestedHeight = capture.RequestedHeight,
+                    ActualColorWidth = capture.ActualColorWidth,
+                    ActualColorHeight = capture.ActualColorHeight,
+                    ActualDepthWidth = capture.ActualDepthWidth,
+                    ActualDepthHeight = capture.ActualDepthHeight,
+                    RenderRetryCount = capture.RenderRetryCount,
                 };
             }
         }
@@ -913,13 +957,9 @@ namespace CodingRiver.UPilot
             {
                 var cam = GetGameViewCamera();
                 if (cam == null) return;
-                CacheRecentGameView(new ScreenshotBytesResult
-                {
-                    Bytes = RenderCameraToBytes(cam, 640, 360, "png", 75),
-                    Width = 640,
-                    Height = 360,
-                    Source = "recentGameView",
-                });
+                CacheRecentGameView(FromCameraRender(
+                    RenderCamera(cam, 640, 360, "png", 75),
+                    "recentGameView"));
             }
             catch (Exception ex)
             {
@@ -941,6 +981,14 @@ namespace CodingRiver.UPilot
                         Width = s_recentGameViewCapture.Width,
                         Height = s_recentGameViewCapture.Height,
                         Source = "recentGameView",
+                        CaptureApi = s_recentGameViewCapture.CaptureApi,
+                        RequestedWidth = s_recentGameViewCapture.RequestedWidth,
+                        RequestedHeight = s_recentGameViewCapture.RequestedHeight,
+                        ActualColorWidth = s_recentGameViewCapture.ActualColorWidth,
+                        ActualColorHeight = s_recentGameViewCapture.ActualColorHeight,
+                        ActualDepthWidth = s_recentGameViewCapture.ActualDepthWidth,
+                        ActualDepthHeight = s_recentGameViewCapture.ActualDepthHeight,
+                        RenderRetryCount = s_recentGameViewCapture.RenderRetryCount,
                     };
                 }
             }
@@ -955,34 +1003,80 @@ namespace CodingRiver.UPilot
 
         private static byte[] RenderCameraToBytes(Camera cam, int w, int h, string format, int quality)
         {
-            var rt = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
-            rt.antiAliasing = 1;
+            return RenderCamera(cam, w, h, format, quality).Bytes;
+        }
+
+        internal static RenderTextureDescriptor BuildCameraRenderDescriptor(int width, int height)
+        {
+            return new RenderTextureDescriptor(
+                Mathf.Max(1, width),
+                Mathf.Max(1, height),
+                RenderTextureFormat.ARGB32,
+                24)
+            {
+                msaaSamples = 1,
+                useMipMap = false,
+                autoGenerateMips = false,
+                useDynamicScale = false,
+                volumeDepth = 1,
+            };
+        }
+
+        internal static CameraRenderCapture RenderCamera(
+            Camera cam,
+            int requestedWidth,
+            int requestedHeight,
+            string format,
+            int quality)
+        {
+            if (cam == null)
+                throw new ArgumentNullException(nameof(cam));
+            var descriptor = BuildCameraRenderDescriptor(requestedWidth, requestedHeight);
+            var rt = new RenderTexture(descriptor);
+            rt.Create();
+            if (!rt.IsCreated() || rt.width != descriptor.width || rt.height != descriptor.height)
+                throw new InvalidOperationException(
+                    $"Failed to create fixed screenshot render target {descriptor.width}x{descriptor.height}; "
+                    + $"actual={rt.width}x{rt.height}.");
 
             var prevRT  = cam.targetTexture;
             var prevActive = RenderTexture.active;
+            var previousDynamicResolution = cam.allowDynamicResolution;
 
             try
             {
+                cam.allowDynamicResolution = false;
                 cam.targetTexture = rt;
                 cam.Render();
 
                 RenderTexture.active = rt;
-                var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-                tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-                tex.Apply();
-
-                byte[] bytes;
-                if (format == "jpg")
-                    bytes = tex.EncodeToJPG(quality);
-                else
-                    bytes = tex.EncodeToPNG();
-
-                UnityEngine.Object.DestroyImmediate(tex);
-                return bytes;
+                var tex = new Texture2D(descriptor.width, descriptor.height, TextureFormat.RGBA32, false);
+                try
+                {
+                    tex.ReadPixels(new Rect(0, 0, descriptor.width, descriptor.height), 0, 0);
+                    tex.Apply();
+                    return new CameraRenderCapture
+                    {
+                        Bytes = format == "jpg" ? tex.EncodeToJPG(quality) : tex.EncodeToPNG(),
+                        RequestedWidth = requestedWidth,
+                        RequestedHeight = requestedHeight,
+                        Width = descriptor.width,
+                        Height = descriptor.height,
+                        ColorWidth = rt.width,
+                        ColorHeight = rt.height,
+                        DepthWidth = rt.width,
+                        DepthHeight = rt.height,
+                    };
+                }
+                finally
+                {
+                    UnityEngine.Object.DestroyImmediate(tex);
+                }
             }
             finally
             {
                 cam.targetTexture  = prevRT;
+                cam.allowDynamicResolution = previousDynamicResolution;
                 RenderTexture.active = prevActive;
                 rt.Release();
                 UnityEngine.Object.DestroyImmediate(rt);
@@ -1047,17 +1141,12 @@ namespace CodingRiver.UPilot
                 return null;
             }
 
-            var result = new ScreenshotBytesResult
-            {
-                Bytes = RenderCameraToBytes(cam, w, h, format, quality),
-                Width = w,
-                Height = h,
-                Source = source == "gameView" ? "gameView-camera" : (source == "sceneView" ? "sceneView-camera" : source),
-                Degraded = source == "sceneView",
-                DegradeReason = source == "sceneView" ? "EditorWindow pixel capture unavailable; camera render excludes Handles and overlays." : "",
-                CaptureApi = "Camera.Render",
-                PixelSourceVerified = source != "sceneView",
-            };
+            var result = FromCameraRender(
+                RenderCamera(cam, w, h, format, quality),
+                source == "gameView" ? "gameView-camera" : (source == "sceneView" ? "sceneView-camera" : source));
+            result.Degraded = source == "sceneView";
+            result.DegradeReason = source == "sceneView" ? "EditorWindow pixel capture unavailable; camera render excludes Handles and overlays." : "";
+            result.PixelSourceVerified = source != "sceneView";
             if (source == "gameView") CacheRecentGameView(result);
             return result;
         }
@@ -1074,6 +1163,25 @@ namespace CodingRiver.UPilot
             };
         }
 
+        private static ScreenshotBytesResult FromCameraRender(CameraRenderCapture rendered, string source)
+        {
+            return new ScreenshotBytesResult
+            {
+                Bytes = rendered.Bytes,
+                Width = rendered.Width,
+                Height = rendered.Height,
+                Source = source,
+                CaptureApi = "Camera.Render(RenderTextureDescriptor)",
+                RequestedWidth = rendered.RequestedWidth,
+                RequestedHeight = rendered.RequestedHeight,
+                ActualColorWidth = rendered.ColorWidth,
+                ActualColorHeight = rendered.ColorHeight,
+                ActualDepthWidth = rendered.DepthWidth,
+                ActualDepthHeight = rendered.DepthHeight,
+                RenderRetryCount = rendered.RetryCount,
+            };
+        }
+
         private static ScreenshotResultPayload BuildScreenshotPayload(ScreenshotBytesResult result, string format)
         {
             return new ScreenshotResultPayload
@@ -1087,6 +1195,10 @@ namespace CodingRiver.UPilot
                 repaintObservedAtUtcMs = result.RepaintObservedAtUtcMs, repaintSequence = result.RepaintSequence,
                 includesSceneGui = result.IncludesSceneGui, includesHandles = result.IncludesHandles,
                 matchedFullTypeName = result.MatchedFullTypeName, matchedInstanceId = result.MatchedInstanceId,
+                requestedWidth = result.RequestedWidth, requestedHeight = result.RequestedHeight,
+                actualColorWidth = result.ActualColorWidth, actualColorHeight = result.ActualColorHeight,
+                actualDepthWidth = result.ActualDepthWidth, actualDepthHeight = result.ActualDepthHeight,
+                renderRetryCount = result.RenderRetryCount,
             };
         }
 

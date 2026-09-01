@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -22,7 +23,7 @@ namespace CodingRiver.UPilot
     [Serializable] public class TestRunPayload     { public string testMode = "EditMode"; public string testFilter = ""; }
 
     [Serializable] public class TestListMessage    { public TestListPayload payload; }
-    [Serializable] public class TestListPayload    { public string testMode = "EditMode"; }
+    [Serializable] public class TestListPayload    { public string testMode = "EditMode"; public string testFilter = ""; }
 
     [Serializable] public class TestCancelMessage  { public TestCancelPayload payload; }
     [Serializable] public class TestCancelPayload  { public string runGuid = ""; }
@@ -69,6 +70,22 @@ namespace CodingRiver.UPilot
         public int    skipped;
         public bool   noTests;
         public string discoveryStatus;
+        public string requestedFilter;
+        public int    discoveredCount;
+        public int    matchedCount;
+        public int    discoveredAssemblyCount;
+        public List<string> discoveredAssemblies = new List<string>();
+        public string outcomeStatus;
+        public string cleanupStatus;
+        public bool   cleanupSucceeded;
+        public bool   resultAuthoritative = true;
+        public string terminalReason;
+        public long   firstProgressDeadlineAt;
+        public bool   firstProgressObserved;
+        public bool   suspectedStuck;
+        public string watchdogState;
+        public string failureSignature;
+        public string nextAction;
         public List<TestResultItemPayload> results = new List<TestResultItemPayload>();
     }
 
@@ -76,6 +93,12 @@ namespace CodingRiver.UPilot
     public class TestListResultPayload
     {
         public string testMode;
+        public string requestedFilter;
+        public string discoveryStatus;
+        public int discoveredCount;
+        public int matchedCount;
+        public int assemblyCount;
+        public List<string> assemblies = new List<string>();
         public List<string> tests = new List<string>();
     }
 
@@ -96,6 +119,9 @@ namespace CodingRiver.UPilot
         private long _forceStopDeadline;
         private bool _forceStopRequested;
         private long _recoveryDeadline;
+        private int _recoveryInactiveObservations;
+        private long _nextRecoveryProbeAt;
+        private const long FirstProgressTimeoutMs = 15000;
         private static bool s_recoveryCallbackAttached;
 
         private static string PersistenceDirectory => Path.GetFullPath(
@@ -197,6 +223,12 @@ namespace CodingRiver.UPilot
                         startedAt = startedAt,
                         lastProgressAt = startedAt,
                         isRunning = true,
+                        requestedFilter = p.testFilter ?? string.Empty,
+                        firstProgressDeadlineAt = startedAt + FirstProgressTimeoutMs,
+                        firstProgressObserved = false,
+                        watchdogState = "waiting_first_progress",
+                        cleanupStatus = "not_started",
+                        outcomeStatus = "pending",
                     };
                     _activeRunGuid = null;
                     _pendingTerminalStatus = null;
@@ -317,6 +349,8 @@ namespace CodingRiver.UPilot
                     _lastResults.status = "running";
                     _lastResults.phase = "running";
                     PersistSnapshot();
+                    EditorApplication.update -= TestProgressWatchdog;
+                    EditorApplication.update += TestProgressWatchdog;
                     tcs.SetResult(_lastResults);
                 }
                 catch (Exception ex)
@@ -430,7 +464,12 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    var result = new TestListResultPayload { testMode = mode };
+                    var result = new TestListResultPayload
+                    {
+                        testMode = mode,
+                        requestedFilter = p.testFilter ?? string.Empty,
+                        discoveryStatus = "discovering",
+                    };
 
                     // Use the same authoritative discovery tree as TestRunnerApi.Execute.
                     // Assembly reflection cannot reproduce parameterized/generated FullName
@@ -453,8 +492,18 @@ namespace CodingRiver.UPilot
                     {
                         try
                         {
-                            CollectDiscoveredLeafTests(root, result.tests);
-                            result.tests.Sort(StringComparer.Ordinal);
+                            var allTests = new List<string>();
+                            var assemblies = new HashSet<string>(StringComparer.Ordinal);
+                            CollectDiscoveredLeafTests(root, allTests, assemblies);
+                            allTests.Sort(StringComparer.Ordinal);
+                            result.discoveredCount = allTests.Count;
+                            result.assemblies = assemblies.OrderBy(item => item, StringComparer.Ordinal).ToList();
+                            result.assemblyCount = result.assemblies.Count;
+                            result.tests = FilterDiscoveredTests(allTests, result.requestedFilter);
+                            result.matchedCount = result.tests.Count;
+                            result.discoveryStatus = result.discoveredCount == 0
+                                ? "no_tests"
+                                : (result.matchedCount == 0 ? "filter_no_match" : "tests_discovered");
                             tcs.TrySetResult(result);
                         }
                         catch (Exception ex)
@@ -562,12 +611,22 @@ namespace CodingRiver.UPilot
             return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
-        private static void CollectDiscoveredLeafTests(object node, List<string> tests)
+        private static void CollectDiscoveredLeafTests(object node, List<string> tests, HashSet<string> assemblies)
         {
             if (node == null)
                 return;
 
             Type nodeType = node.GetType();
+            bool isTestAssembly = (bool)(nodeType.GetProperty("IsTestAssembly")?.GetValue(node) ?? false);
+            if (isTestAssembly)
+            {
+                string assemblyName = Convert.ToString(nodeType.GetProperty("Name")?.GetValue(node));
+                if (string.IsNullOrWhiteSpace(assemblyName))
+                    assemblyName = Convert.ToString(nodeType.GetProperty("FullName")?.GetValue(node));
+                if (!string.IsNullOrWhiteSpace(assemblyName))
+                    assemblies.Add(assemblyName);
+            }
+
             bool isSuite = (bool)(nodeType.GetProperty("IsSuite")?.GetValue(node) ?? false);
             var children = nodeType.GetProperty("Children")?.GetValue(node) as IEnumerable;
             bool hasChildren = false;
@@ -576,7 +635,7 @@ namespace CodingRiver.UPilot
                 foreach (object child in children)
                 {
                     hasChildren = true;
-                    CollectDiscoveredLeafTests(child, tests);
+                    CollectDiscoveredLeafTests(child, tests, assemblies);
                 }
             }
 
@@ -585,7 +644,29 @@ namespace CodingRiver.UPilot
                 string fullName = nodeType.GetProperty("FullName")?.GetValue(node) as string;
                 if (!string.IsNullOrEmpty(fullName))
                     tests.Add(fullName);
+                string assemblyName = Convert.ToString(GetProperty(node, "AssemblyName"));
+                if (string.IsNullOrWhiteSpace(assemblyName))
+                {
+                    object typeInfo = GetProperty(node, "TypeInfo");
+                    object assembly = GetProperty(typeInfo, "Assembly");
+                    assemblyName = Convert.ToString(GetProperty(assembly, "Name"));
+                }
+                if (!string.IsNullOrWhiteSpace(assemblyName))
+                    assemblies.Add(assemblyName);
             }
+        }
+
+        private static List<string> FilterDiscoveredTests(List<string> tests, string testFilter)
+        {
+            if (string.IsNullOrWhiteSpace(testFilter))
+                return new List<string>(tests);
+            const string regexPrefix = "regex:";
+            if (testFilter.StartsWith(regexPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var regex = new Regex(testFilter.Substring(regexPrefix.Length), RegexOptions.CultureInvariant);
+                return tests.Where(name => regex.IsMatch(name)).ToList();
+            }
+            return tests.Where(name => string.Equals(name, testFilter, StringComparison.Ordinal)).ToList();
         }
 
         private sealed class TestListCallback<T>
@@ -643,6 +724,7 @@ namespace CodingRiver.UPilot
         {
             if (_lastResults != null)
             {
+                MarkFirstProgressObserved();
                 _lastResults.status = "running";
                 _lastResults.phase = "running";
                 _lastResults.lastProgressAt = NowMs();
@@ -658,6 +740,7 @@ namespace CodingRiver.UPilot
             if (Convert.ToBoolean(GetProperty(test, "IsSuite") ?? false))
                 return;
 
+            MarkFirstProgressObserved();
             _lastResults.currentTest = Convert.ToString(GetProperty(test, "FullName"))
                 ?? Convert.ToString(GetProperty(test, "Name"))
                 ?? string.Empty;
@@ -682,6 +765,8 @@ namespace CodingRiver.UPilot
                 var results = new List<TestResultItemPayload>();
                 CollectLeafResults(rootResult, results);
                 _pendingTerminalStatus = ApplyRunResults(_lastResults, results, _lastResults.cancelRequested);
+                _lastResults.outcomeStatus = _pendingTerminalStatus;
+                _lastResults.resultAuthoritative = true;
             }
             catch (Exception ex)
             {
@@ -700,6 +785,7 @@ namespace CodingRiver.UPilot
             {
                 _lastResults.status = "cleanup";
                 _lastResults.phase = "cleanup";
+                _lastResults.cleanupStatus = "running";
                 _lastResults.cleanupPending = true;
                 _lastResults.cleanupStartedAt = _lastResults.cleanupStartedAt > 0
                     ? _lastResults.cleanupStartedAt
@@ -767,6 +853,7 @@ namespace CodingRiver.UPilot
             EditorApplication.update -= CleanupActiveRunFromUpdate;
             EditorApplication.update -= ReattachPersistedRun;
             EditorApplication.update -= RecoveredRunWatchdog;
+            EditorApplication.update -= TestProgressWatchdog;
             s_recoveryCallbackAttached = false;
             EditorApplication.delayCall -= CleanupActiveRun;
             _cleanupScheduled = false;
@@ -810,6 +897,8 @@ namespace CodingRiver.UPilot
                     _lastResults.phase = _lastResults.status;
                     _lastResults.endedAt = NowMs();
                     _lastResults.unresolvedResources.Clear();
+                    _lastResults.cleanupSucceeded = _lastResults.cleanupErrors.Count == 0;
+                    _lastResults.cleanupStatus = _lastResults.cleanupSucceeded ? "completed" : "failed";
                     PersistSnapshot(clearActivePointer: true);
                 }
 
@@ -956,7 +1045,11 @@ namespace CodingRiver.UPilot
             if (active)
             {
                 _lastResults.phase = "recovering_after_reload";
-                _recoveryDeadline = NowMs() + 10000;
+                _lastResults.resultAuthoritative = false;
+                _lastResults.terminalReason = string.Empty;
+                _recoveryDeadline = NowMs() + 30000;
+                _recoveryInactiveObservations = 0;
+                _nextRecoveryProbeAt = _recoveryDeadline;
             }
         }
 
@@ -985,7 +1078,11 @@ namespace CodingRiver.UPilot
                 _activeCallback = callback;
                 _lastResults.phase = "running_recovered";
                 _lastResults.lastProgressAt = NowMs();
+                _lastResults.resultAuthoritative = false;
                 PersistSnapshot();
+                _recoveryDeadline = NowMs() + 30000;
+                _recoveryInactiveObservations = 0;
+                _nextRecoveryProbeAt = _recoveryDeadline;
                 s_recoveryCallbackAttached = true;
                 EditorApplication.update -= ReattachPersistedRun;
                 EditorApplication.update += RecoveredRunWatchdog;
@@ -1004,12 +1101,15 @@ namespace CodingRiver.UPilot
             EditorApplication.update -= ReattachPersistedRun;
             EditorApplication.update -= RecoveredRunWatchdog;
             s_recoveryCallbackAttached = false;
-            _lastResults.status = "failed";
-            _lastResults.phase = "orphaned_after_reload";
+            _lastResults.status = "aborted";
+            _lastResults.phase = "callback_not_recovered";
+            _lastResults.outcomeStatus = "unknown";
+            _lastResults.resultAuthoritative = false;
+            _lastResults.terminalReason = "Test Runner callback was not recovered after Domain Reload; assertion outcome is unknown.";
             _lastResults.cleanupPending = false;
             _lastResults.isRunning = false;
             _lastResults.endedAt = NowMs();
-            _lastResults.cleanupErrors.Add("The persisted Test Runner job was no longer active after Domain Reload before a terminal callback was recovered.");
+            _lastResults.cleanupErrors.Add(_lastResults.terminalReason);
             _isRunning = false;
             _activeRunGuid = null;
             PersistSnapshot(clearActivePointer: true);
@@ -1023,8 +1123,68 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            if (NowMs() >= _recoveryDeadline && !IsFrameworkRunActive(_activeRunGuid))
+            long now = NowMs();
+            if (now < _nextRecoveryProbeAt)
+                return;
+            if (IsFrameworkRunActive(_activeRunGuid))
+            {
+                _recoveryInactiveObservations = 0;
+                _nextRecoveryProbeAt = now + 1000;
+                return;
+            }
+            _recoveryInactiveObservations++;
+            _nextRecoveryProbeAt = now + 1000;
+            if (_recoveryInactiveObservations >= 3)
                 MarkRecoveredRunOrphaned();
+        }
+
+        private void MarkFirstProgressObserved()
+        {
+            EditorApplication.update -= TestProgressWatchdog;
+            if (_lastResults == null)
+                return;
+            _lastResults.firstProgressObserved = true;
+            _lastResults.watchdogState = "progress_observed";
+            _lastResults.suspectedStuck = false;
+            _lastResults.failureSignature = string.Empty;
+            _lastResults.nextAction = string.Empty;
+        }
+
+        private void TestProgressWatchdog()
+        {
+            if (!_isRunning || _lastResults == null || _lastResults.firstProgressObserved)
+            {
+                EditorApplication.update -= TestProgressWatchdog;
+                return;
+            }
+            long now = NowMs();
+            if (!ApplyFirstProgressTimeout(_lastResults, now))
+                return;
+
+            EditorApplication.update -= TestProgressWatchdog;
+            PersistSnapshot();
+            try
+            {
+                RequestCancel(force: true);
+            }
+            catch (Exception ex)
+            {
+                _lastResults.cleanupErrors.Add($"first-progress-watchdog: {ex.GetType().Name}: {ex.Message}");
+                _pendingTerminalStatus = "aborted";
+                FinalizeCancelledRun();
+            }
+        }
+
+        internal static bool ApplyFirstProgressTimeout(TestRunResultPayload payload, long now)
+        {
+            if (payload == null || payload.firstProgressObserved || now < payload.firstProgressDeadlineAt)
+                return false;
+            payload.suspectedStuck = true;
+            payload.watchdogState = "first_progress_timeout";
+            payload.failureSignature = "TestRunner.FirstProgressTimeout";
+            payload.nextAction = "Inspect unity_hang_status; UPilot requested bounded Test Runner cancellation and cleanup.";
+            payload.lastProgressAt = now;
+            return true;
         }
 
         private static bool IsFrameworkRunActive(string runGuid)

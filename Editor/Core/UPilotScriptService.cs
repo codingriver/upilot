@@ -5,6 +5,8 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -243,6 +245,11 @@ namespace CodingRiver.UPilot
                 try
                 {
                     bool ok = AssetDatabase.DeleteAsset(p.scriptPath);
+                    if (ok)
+                    {
+                        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                        RefreshGeneratedProjectFiles();
+                    }
                     tcs.SetResult(ok);
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
@@ -256,12 +263,36 @@ namespace CodingRiver.UPilot
                     await _bridge.SendErrorAsync(id, "SCRIPT_DELETE_FAILED", $"Failed to delete: {p.scriptPath}", token, "script.delete");
                     return;
                 }
-                await _bridge.SendResultAsync(id, "script.delete", new GenericOkPayload(), token);
+                await _bridge.SendResultAsync(id, "script.delete", new GenericOkPayload
+                {
+                    ok = true,
+                    state = "deleted_project_files_refreshed",
+                }, token);
             }
             catch (Exception ex)
             {
                 await _bridge.SendErrorAsync(id, "SCRIPT_DELETE_FAILED", ex.Message, token, "script.delete");
             }
+        }
+
+        internal static bool RefreshGeneratedProjectFiles()
+        {
+            Type syncType = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType("UnityEditor.SyncVS.SyncSolution"))
+                .FirstOrDefault(type => type != null);
+            MethodInfo sync = syncType?.GetMethod(
+                "Sync",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                null,
+                Type.EmptyTypes,
+                null);
+            if (sync == null)
+            {
+                Debug.LogWarning("[UPilot] Unity project-file generator was not found after script deletion.");
+                return false;
+            }
+            sync.Invoke(null, null);
+            return true;
         }
     }
 }

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable
+import inspect
 import re
 
 from .models import ToolResponse
 from .protocol import new_id
 from .responses import fail
-from .config import CONFIG
+from .config import CONFIG, refresh_config_if_changed
 
 
 ToolHandler = Callable[..., Awaitable[ToolResponse]]
@@ -233,6 +234,7 @@ def register_public_tool(
 
 
 async def dispatch_public_tool(facade: Any, public_name: str, args: dict[str, Any]) -> ToolResponse:
+    refresh_config_if_changed()
     descriptor = REGISTRY.resolve(public_name)
     if descriptor is None:
         return fail(new_id("req"), "UNKNOWN_TOOL", f"Unknown MCP tool: {public_name}", {"tool": public_name})
@@ -258,9 +260,112 @@ async def dispatch_public_tool(facade: Any, public_name: str, args: dict[str, An
             f"MCP tool has no facade handler: {public_name}",
             {"tool": public_name, "facadeMethod": descriptor.facade_method},
         )
-    normalized_args = {_camel_to_snake(key): value for key, value in args.items()}
+    normalized_args, argument_error = _normalize_proxy_arguments(method, args)
+    if argument_error:
+        return fail(
+            new_id("req"),
+            "INVALID_TOOL_ARGUMENTS",
+            f"Invalid arguments for MCP tool: {public_name}",
+            {
+                "tool": public_name,
+                "facadeMethod": descriptor.facade_method,
+                **argument_error,
+            },
+        )
     return await method(**normalized_args)
 
 
-def _camel_to_snake(value: str) -> str:
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
+def proxy_argument_schema(method: Any) -> list[dict[str, Any]]:
+    """Describe the arguments accepted by unity_tool_call for one bound facade method."""
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return []
+    result: list[dict[str, Any]] = []
+    for parameter in signature.parameters.values():
+        if parameter.name == "self" or parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
+        entry: dict[str, Any] = {
+            "name": parameter.name,
+            "camelCase": _snake_to_camel(parameter.name),
+            "required": parameter.default is inspect.Parameter.empty,
+        }
+        if parameter.default is not inspect.Parameter.empty:
+            entry["default"] = parameter.default
+        result.append(entry)
+    return result
+
+
+def _normalize_proxy_arguments(
+    method: Any, args: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return dict(args), None
+
+    parameters = {
+        name: parameter
+        for name, parameter in signature.parameters.items()
+        if name != "self"
+    }
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    folded_names: dict[str, list[str]] = {}
+    for name, parameter in parameters.items():
+        if parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
+        folded_names.setdefault(_fold_argument_name(name), []).append(name)
+
+    normalized: dict[str, Any] = {}
+    unknown: list[str] = []
+    duplicates: list[str] = []
+    for supplied_name, value in args.items():
+        target_name = supplied_name if supplied_name in parameters else ""
+        if not target_name:
+            matches = folded_names.get(_fold_argument_name(supplied_name), [])
+            if len(matches) == 1:
+                target_name = matches[0]
+        if not target_name and accepts_kwargs:
+            target_name = supplied_name
+        if not target_name:
+            unknown.append(supplied_name)
+            continue
+        if target_name in normalized:
+            duplicates.append(supplied_name)
+            continue
+        normalized[target_name] = value
+
+    if unknown or duplicates:
+        return normalized, {
+            "unknownArguments": unknown,
+            "duplicateArguments": duplicates,
+            "expectedArguments": proxy_argument_schema(method),
+            "nextAction": "Use the target tool argument names returned by unity_tools_find.",
+        }
+    try:
+        signature.bind(**normalized)
+    except TypeError as exc:
+        return normalized, {
+            "bindingError": str(exc),
+            "expectedArguments": proxy_argument_schema(method),
+            "nextAction": "Supply all required target tool arguments using the returned schema.",
+        }
+    return normalized, None
+
+
+def _fold_argument_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _snake_to_camel(value: str) -> str:
+    head, *tail = value.split("_")
+    return head + "".join(part[:1].upper() + part[1:] for part in tail)

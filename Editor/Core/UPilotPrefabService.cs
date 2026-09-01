@@ -271,7 +271,7 @@ namespace CodingRiver.UPilot
 
         private async Task HandleSaveAsync(string id, string json, CancellationToken token)
         {
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<AssetMutationResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
@@ -283,33 +283,14 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    // Save the prefab stage
-                    // Use PrefabUtility.SaveAsPrefabAsset on the root object
-                    var root = stage.prefabContentsRoot;
-                    if (root == null)
-                    {
-                        tcs.SetException(new Exception("Prefab stage has no root object."));
-                        return;
-                    }
-
-                    bool success;
-                    PrefabUtility.SaveAsPrefabAsset(root, stage.assetPath, out success);
-                    if (!success)
-                    {
-                        tcs.SetException(new Exception("Failed to save prefab."));
-                        return;
-                    }
-
-                    AssetDatabase.SaveAssets();
-                    tcs.SetResult(true);
+                    tcs.SetResult(SavePrefabStage(stage));
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
             });
 
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "prefab.save", new GenericOkPayload { status = "ok" }, token);
+                await _bridge.SendResultAsync(id, "prefab.save", await tcs.Task, token);
             }
             catch (Exception ex)
             {
@@ -318,6 +299,28 @@ namespace CodingRiver.UPilot
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────
+
+        internal static AssetMutationResultPayload SavePrefabStage(PrefabStage stage)
+        {
+            if (stage == null)
+                throw new InvalidOperationException("Not in Prefab editing mode.");
+            var root = stage.prefabContentsRoot;
+            if (root == null)
+                throw new InvalidOperationException("Prefab stage has no root object.");
+
+            var path = stage.assetPath;
+            var guid = AssetDatabase.AssetPathToGUID(path);
+            PrefabUtility.SaveAsPrefabAsset(root, path, out var success);
+            if (!success)
+                throw new InvalidOperationException($"Failed to save prefab: {path}");
+            AssetDatabase.SaveAssets();
+
+            var result = UPilotAssetService.BuildAssetMutationResult("prefab.save", path, path, guid);
+            result.guidPreserved = string.Equals(guid, result.destinationGuid, StringComparison.Ordinal);
+            if (!result.verified || !result.guidPreserved)
+                throw new InvalidOperationException($"Saved prefab could not be verified: {path}");
+            return result;
+        }
 
         private static void EnsureFolder(string folderPath)
         {

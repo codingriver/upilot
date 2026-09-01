@@ -105,8 +105,8 @@ namespace CodingRiver.UPilot
         private const string SkillName = "upilot-unity-mcp";
         private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
-        private const int AgentRulesTemplateVersion = 17;
-        private const int SkillInstallTemplateVersion = 12;
+        private const int AgentRulesTemplateVersion = 22;
+        private const int SkillInstallTemplateVersion = 17;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";

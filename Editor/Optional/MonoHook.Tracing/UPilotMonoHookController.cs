@@ -31,6 +31,10 @@ namespace CodingRiver.UPilot
         public bool SupportsHookAllSafeOverloads;
         public bool ConfiguredHookAllSafeOverloads;
         public bool AppliedHookAllSafeOverloads;
+        public UPilotMonoHookExecutionMode ConfiguredExecutionMode;
+        public UPilotMonoHookExecutionMode AppliedExecutionMode;
+        public bool GuaranteesPassThrough;
+        public bool SupportsInterception;
     }
 
     public sealed class UPilotMonoHookApplyReport
@@ -41,6 +45,18 @@ namespace CodingRiver.UPilot
         public readonly List<string> Partial = new List<string>();
         public readonly List<string> Unsupported = new List<string>();
         public readonly List<string> Failed = new List<string>();
+    }
+
+    [Serializable]
+    public sealed class UPilotMonoHookDiagnosticInstallEntry
+    {
+        public string targetTypeName;
+        public string declaringTypeName;
+        public string methodSignature;
+        public string targetMethodId;
+        public string status;
+        public string reason;
+        public string trampolineKey;
     }
 
     [Serializable]
@@ -55,6 +71,10 @@ namespace CodingRiver.UPilot
         public bool supportsHookAllSafeOverloads;
         public bool configuredHookAllSafeOverloads;
         public bool appliedHookAllSafeOverloads;
+        public string configuredExecutionMode;
+        public string appliedExecutionMode;
+        public bool guaranteesPassThrough;
+        public bool supportsInterception;
         public string configuredFilterProfileId;
         public string configuredFilterProfileName;
         public string effectiveFilterProfileId;
@@ -67,9 +87,14 @@ namespace CodingRiver.UPilot
         public string message;
         public int candidateCount;
         public int installedCount;
+        public int installedTypeCount;
+        public int installedMethodCount;
+        public int trampolineCount;
         public int skippedCount;
         public int failedCount;
         public List<string> samples = new List<string>();
+        public List<UPilotMonoHookDiagnosticInstallEntry> entries =
+            new List<UPilotMonoHookDiagnosticInstallEntry>();
     }
 
     public sealed class UPilotMonoHookController
@@ -122,6 +147,7 @@ namespace CodingRiver.UPilot
 
                 state.ConfiguredEnabled = settings.IsConfiguredEnabled(definition.Id);
                 state.ConfiguredHookAllSafeOverloads = settings.ShouldHookAllSafeOverloads(definition.Id);
+                state.ConfiguredExecutionMode = settings.GetExecutionMode(definition.Id);
                 RefreshPointState(definition.Id, state);
             }
         }
@@ -199,6 +225,10 @@ namespace CodingRiver.UPilot
                     supportsHookAllSafeOverloads = state.SupportsHookAllSafeOverloads,
                     configuredHookAllSafeOverloads = state.ConfiguredHookAllSafeOverloads,
                     appliedHookAllSafeOverloads = state.AppliedHookAllSafeOverloads,
+                    configuredExecutionMode = state.ConfiguredExecutionMode.ToString(),
+                    appliedExecutionMode = state.AppliedExecutionMode.ToString(),
+                    guaranteesPassThrough = state.GuaranteesPassThrough,
+                    supportsInterception = state.SupportsInterception,
                     configuredFilterProfileId = configuredProfileId,
                     configuredFilterProfileName = configuredProfile?.Name ?? string.Empty,
                     effectiveFilterProfileId = effectiveProfileId,
@@ -211,12 +241,38 @@ namespace CodingRiver.UPilot
                     message = state.Message ?? string.Empty,
                     candidateCount = coverage?.CandidateCount ?? 0,
                     installedCount = coverage?.InstalledCount ?? 0,
+                    installedTypeCount = coverage?.InstalledTypeCount ?? 0,
+                    installedMethodCount = coverage?.InstalledMethodCount ?? 0,
+                    trampolineCount = coverage?.TrampolineCount ?? 0,
                     skippedCount = coverage?.SkippedCount ?? 0,
                     failedCount = coverage?.FailedCount ?? 0,
                     samples = coverage == null ? new List<string>() : new List<string>(coverage.Samples),
+                    entries = BuildDiagnosticEntries(coverage),
                 });
             }
             return records;
+        }
+
+        private static List<UPilotMonoHookDiagnosticInstallEntry> BuildDiagnosticEntries(
+            UPilotMonoHookCoverage coverage)
+        {
+            var entries = new List<UPilotMonoHookDiagnosticInstallEntry>();
+            if (coverage?.Entries == null) return entries;
+            foreach (var entry in coverage.Entries)
+            {
+                if (entry == null) continue;
+                entries.Add(new UPilotMonoHookDiagnosticInstallEntry
+                {
+                    targetTypeName = entry.TargetTypeName,
+                    declaringTypeName = entry.DeclaringTypeName,
+                    methodSignature = entry.MethodSignature,
+                    targetMethodId = entry.TargetMethodId,
+                    status = entry.Status,
+                    reason = entry.Reason,
+                    trampolineKey = entry.TrampolineKey,
+                });
+            }
+            return entries;
         }
 
         public int ExportDiagnosticsJsonLines(string path)
@@ -257,6 +313,7 @@ namespace CodingRiver.UPilot
             }
 
             ConfigureOverloadPolicy(pointId, descriptor.Provider, state);
+            ConfigureExecutionPolicy(pointId, descriptor.Provider, state);
 
             if (descriptor.Provider.IsInstalled)
             {
@@ -300,10 +357,14 @@ namespace CodingRiver.UPilot
             if (_installers.ContainsKey(pointId)) return false;
             var descriptor = _registry.Find(pointId);
             var policy = descriptor?.Provider as IUPilotMonoHookOverloadPolicyProvider;
-            return policy != null &&
+            bool overloadPending = policy != null &&
                    policy.SupportsHookAllSafeOverloads &&
                    policy.IsHookAllSafeOverloadsApplied !=
                    UPilotMonoHookSettings.instance.ShouldHookAllSafeOverloads(pointId);
+            bool executionPending = _runtime.TryGetValue(pointId, out var state) &&
+                                     state.AppliedExecutionMode !=
+                                     UPilotMonoHookSettings.instance.GetExecutionMode(pointId);
+            return overloadPending || executionPending;
         }
 
         private static void ConfigureOverloadPolicy(
@@ -362,6 +423,12 @@ namespace CodingRiver.UPilot
                 }
 
                 ConfigureOverloadPolicy(pointId, descriptor.Provider, state);
+                ConfigureExecutionPolicy(pointId, descriptor.Provider, state);
+                if (!CanInstallWithExecutionMode(pointId, descriptor.Provider, out var executionReason))
+                {
+                    MarkUnsupported(pointId, state, report, executionReason);
+                    return;
+                }
 
                 var result = descriptor.Provider.Install(_registry.Context);
                 switch (result.Status)
@@ -482,6 +549,7 @@ namespace CodingRiver.UPilot
             }
             var coverage = GetCoverage(provider);
             state.Coverage = coverage;
+            state.AppliedExecutionMode = UPilotMonoHookSettings.instance.GetExecutionMode(state.PointId);
             if (coverage != null && coverage.IsPartial)
             {
                 state.InstallState = UPilotMonoHookInstallState.PartiallyInstalled;
@@ -493,6 +561,51 @@ namespace CodingRiver.UPilot
             state.Message = coverage != null ? coverage.BuildSummary() : "已安装";
         }
 
+        private static void ConfigureExecutionPolicy(
+            string pointId,
+            IUPilotMonoHookPointProvider provider,
+            UPilotMonoHookPointRuntimeState state = null)
+        {
+            var policy = provider as IUPilotMonoHookExecutionPolicyProvider;
+            var configured = UPilotMonoHookSettings.instance.GetExecutionMode(pointId);
+            if (policy != null)
+                policy.ExecutionMode = configured;
+            bool guaranteesPassThrough = policy != null && policy.GuaranteesPassThrough;
+            bool supportsInterception = policy != null && policy.SupportsInterception;
+            if (state == null) return;
+            state.GuaranteesPassThrough = guaranteesPassThrough;
+            state.SupportsInterception = supportsInterception;
+        }
+
+        private static bool CanInstallWithExecutionMode(
+            string pointId,
+            IUPilotMonoHookPointProvider provider,
+            out string reason)
+        {
+            reason = string.Empty;
+            var configured = UPilotMonoHookSettings.instance.GetExecutionMode(pointId);
+            var policy = provider as IUPilotMonoHookExecutionPolicyProvider;
+
+            if (configured == UPilotMonoHookExecutionMode.PassThrough)
+            {
+                if (policy != null && policy.GuaranteesPassThrough)
+                    return true;
+                reason = "默认仅允许透传打点；Provider 未声明 GuaranteesPassThrough。";
+                return false;
+            }
+
+            if (configured == UPilotMonoHookExecutionMode.Intercept)
+            {
+                if (policy != null && policy.SupportsInterception)
+                    return true;
+                reason = "该点位未声明支持行为拦截。";
+                return false;
+            }
+
+            reason = "未知的点位执行策略：" + configured;
+            return false;
+        }
+
         private static UPilotMonoHookCoverage GetCoverage(IUPilotMonoHookPointProvider provider)
         {
             return (provider as IUPilotMonoHookCoverageProvider)?.Coverage;
@@ -501,12 +614,32 @@ namespace CodingRiver.UPilot
 
     internal static class UPilotMonoHookAutoApply
     {
+        private const string PendingPlayModeApplyKey = "UPilot.MonoHook.Tracing.PendingPlayModeApply";
+
         internal static string LastResult { get; private set; } = "未调度";
 
         [InitializeOnLoadMethod]
         private static void ScheduleApplySavedConfiguration()
         {
             LastResult = "已调度";
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+
+            var settings = UPilotMonoHookSettings.instance;
+            settings.EnsureDefaults();
+            if (!settings.autoInjectEnabled)
+            {
+                CancelPendingPlayModeApply("已跳过：自动注入关闭");
+                return;
+            }
+
+            if (SessionState.GetBool(PendingPlayModeApplyKey, false))
+            {
+                EditorApplication.delayCall -= ApplyPendingPlayModeConfiguration;
+                EditorApplication.delayCall += ApplyPendingPlayModeConfiguration;
+                return;
+            }
+
             EditorApplication.update -= ApplyWhenEditorIsReady;
             EditorApplication.update += ApplyWhenEditorIsReady;
         }
@@ -517,29 +650,155 @@ namespace CodingRiver.UPilot
                 return;
 
             EditorApplication.update -= ApplyWhenEditorIsReady;
-            ApplySavedConfiguration();
+            var settings = UPilotMonoHookSettings.instance;
+            settings.EnsureDefaults();
+            if (!settings.autoInjectEnabled)
+            {
+                CancelPendingPlayModeApply("已跳过：自动注入关闭");
+                return;
+            }
+            if (SessionState.GetBool(PendingPlayModeApplyKey, false))
+                ApplyPlayModeConfiguration(true);
+            else
+                ApplySavedConfiguration();
         }
 
         internal static void ApplySavedConfiguration()
         {
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
+            if (!settings.autoInjectEnabled)
+            {
+                CancelPendingPlayModeApply("已跳过：自动注入关闭");
+                return;
+            }
             if (!settings.autoApplyOnEditorLoad)
             {
-                LastResult = "已跳过：自动应用关闭";
+                LastResult = "已跳过：Domain Reload 自动注入关闭";
                 return;
             }
 
             try
             {
                 var report = new UPilotMonoHookController().Apply(false);
-                LastResult = $"已应用：启用 {report.Enabled.Count}，部分 {report.Partial.Count}，失败 {report.Failed.Count}";
+                LastResult = $"已自动注入：启用 {report.Enabled.Count}，部分 {report.Partial.Count}，失败 {report.Failed.Count}";
             }
             catch (Exception ex)
             {
                 LastResult = "失败：" + ex.Message;
-                Debug.LogWarning("[UPilot Trace] 自动应用失败：" + ex.Message);
+                Debug.LogWarning("[UPilot Trace] 自动注入失败：" + ex.Message);
             }
+        }
+
+        private static void OnPlayModeStateChanged(PlayModeStateChange state)
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            settings.EnsureDefaults();
+
+            if (!settings.autoInjectEnabled)
+            {
+                CancelPendingPlayModeApply("已跳过：自动注入关闭");
+                return;
+            }
+
+            if (state == PlayModeStateChange.ExitingEditMode)
+            {
+                if (!settings.autoApplyOnPlayMode)
+                {
+                    SessionState.SetBool(PendingPlayModeApplyKey, false);
+                    return;
+                }
+
+                // Keep the marker until EnteredPlayMode. If a Domain Reload occurs,
+                // the marker survives and the new editor domain reapplies the hooks.
+                SessionState.SetBool(PendingPlayModeApplyKey, true);
+                ApplyPlayModeConfiguration(false);
+                return;
+            }
+
+            if (state == PlayModeStateChange.EnteredPlayMode)
+            {
+                if (settings.autoApplyOnPlayMode &&
+                    SessionState.GetBool(PendingPlayModeApplyKey, false))
+                {
+                    ApplyPlayModeConfiguration(true);
+                }
+                return;
+            }
+
+            if (state == PlayModeStateChange.EnteredEditMode)
+                SessionState.SetBool(PendingPlayModeApplyKey, false);
+        }
+
+        private static void ApplyPendingPlayModeConfiguration()
+        {
+            EditorApplication.delayCall -= ApplyPendingPlayModeConfiguration;
+            var settings = UPilotMonoHookSettings.instance;
+            settings.EnsureDefaults();
+            if (!settings.autoInjectEnabled || !settings.autoApplyOnPlayMode)
+            {
+                CancelPendingPlayModeApply(!settings.autoInjectEnabled
+                    ? "已跳过：自动注入关闭"
+                    : "已跳过：PlayMode 自动注入关闭");
+                return;
+            }
+            if (!SessionState.GetBool(PendingPlayModeApplyKey, false))
+                return;
+
+            if (!EditorApplication.isPlaying && !EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                SessionState.SetBool(PendingPlayModeApplyKey, false);
+                LastResult = "已取消：PlayMode 未继续";
+                return;
+            }
+
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                EditorApplication.delayCall += ApplyPendingPlayModeConfiguration;
+                return;
+            }
+
+            ApplyPlayModeConfiguration(true);
+        }
+
+        private static void ApplyPlayModeConfiguration(bool clearPendingMarker)
+        {
+            var settings = UPilotMonoHookSettings.instance;
+            settings.EnsureDefaults();
+            if (!settings.autoInjectEnabled || !settings.autoApplyOnPlayMode)
+            {
+                CancelPendingPlayModeApply(!settings.autoInjectEnabled
+                    ? "已跳过：自动注入关闭"
+                    : "已跳过：PlayMode 自动注入关闭");
+                return;
+            }
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                EditorApplication.delayCall -= ApplyPendingPlayModeConfiguration;
+                EditorApplication.delayCall += ApplyPendingPlayModeConfiguration;
+                return;
+            }
+
+            try
+            {
+                var report = new UPilotMonoHookController().Apply(false);
+                LastResult = $"PlayMode 自动注入：启用 {report.Enabled.Count}，部分 {report.Partial.Count}，失败 {report.Failed.Count}";
+                if (clearPendingMarker)
+                    SessionState.SetBool(PendingPlayModeApplyKey, false);
+            }
+            catch (Exception ex)
+            {
+                LastResult = "PlayMode 自动注入失败：" + ex.Message;
+                Debug.LogWarning("[UPilot Trace] PlayMode 自动注入失败：" + ex.Message);
+            }
+        }
+
+        private static void CancelPendingPlayModeApply(string result)
+        {
+            SessionState.SetBool(PendingPlayModeApplyKey, false);
+            EditorApplication.delayCall -= ApplyPendingPlayModeConfiguration;
+            EditorApplication.update -= ApplyWhenEditorIsReady;
+            LastResult = result;
         }
     }
 }

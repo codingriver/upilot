@@ -142,14 +142,35 @@ async def unity_safe_compile_and_wait(
             "postCompileDelayS": postCompileDelayS,
         },
     )
+    facade = _get_facade()
+    invocation_state = facade.server.state.execution_state(
+        stale_after_ms=CONFIG.context_stale_ms
+    )
+    invocation_phase = str(invocation_state.get("compilePhase") or "").lower()
+    invocation_compile_request_id = str(
+        invocation_state.get("compileRequestId") or ""
+    )
+    attach_compile_request_id = ""
+    if invocation_compile_request_id and (
+        invocation_phase in {"queued", "compiling", "domain_reload", "verifying"}
+        or (
+            invocation_phase in {"completed", "failed"}
+            and (
+                not invocation_state.get("authoritative")
+                or invocation_state.get("isStale")
+            )
+        )
+    ):
+        attach_compile_request_id = invocation_compile_request_id
     rejected = await _reject_compile_in_playmode("unity_safe_compile_and_wait")
     if rejected is not None:
         return rejected
-    r = await _get_facade().safe_compile_and_wait(
+    r = await facade.safe_compile_and_wait(
         timeout_s=timeoutS,
         poll_interval_s=pollIntervalS,
         prefer_events=preferEvents,
         post_compile_delay_s=postCompileDelayS,
+        attach_compile_request_id=attach_compile_request_id,
     )
     return _log_tool_result("unity_safe_compile_and_wait", _payload(r))
 

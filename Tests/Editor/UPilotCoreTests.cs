@@ -64,6 +64,46 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void ReflectionTypeQueryResolvesExactTypeWithoutMemberEnumeration()
+        {
+            var method = typeof(UPilotReflectionService).GetMethod(
+                "FindTypes",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var exact = (List<Type>)method.Invoke(null, new object[] { typeof(GameObject).FullName });
+            var shortName = (List<Type>)method.Invoke(null, new object[] { nameof(GameObject) });
+
+            Assert.That(exact, Has.Count.EqualTo(1));
+            Assert.That(exact[0], Is.EqualTo(typeof(GameObject)));
+            Assert.That(shortName, Does.Contain(typeof(GameObject)));
+        }
+
+        [Test]
+        public void GameObjectInfoIncludesHierarchyAndComponentTypes()
+        {
+            var root = new GameObject("UPilotFindRoot");
+            var child = new GameObject("UPilotFindChild");
+            try
+            {
+                child.transform.SetParent(root.transform, false);
+                child.AddComponent<BoxCollider>();
+                var buildInfo = typeof(UPilotGameObjectService).GetMethod(
+                    "BuildInfo",
+                    BindingFlags.Public | BindingFlags.Static);
+
+                var info = (GameObjectInfoPayload)buildInfo.Invoke(null, new object[] { child });
+
+                Assert.That(info.hierarchyPath, Is.EqualTo("UPilotFindRoot/UPilotFindChild"));
+                Assert.That(info.componentTypes, Does.Contain(typeof(Transform).FullName));
+                Assert.That(info.componentTypes, Does.Contain(typeof(BoxCollider).FullName));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(root);
+            }
+        }
+
+        [Test]
         public void ScreenshotPathRejectsOutsideProjectByDefault()
         {
             var method = typeof(UPilotScreenshotService).GetMethod("ResolveSavePath", BindingFlags.NonPublic | BindingFlags.Static);
@@ -343,6 +383,18 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(File.Exists(first.indexPath), Is.True);
                 Assert.That(first.effectiveFromSequence, Is.EqualTo(5));
                 Assert.That(first.effectiveToSequence, Is.EqualTo(30));
+                Assert.That(first.effectiveQuery.fromSequence, Is.EqualTo(5));
+                Assert.That(first.effectiveQuery.toSequence, Is.EqualTo(30));
+                Assert.That(first.effectiveQuery.contains, Is.EqualTo(new[] { "RewardPending", "SkillTrapCast" }));
+                Assert.That(first.matchedFields, Does.Contain("contains"));
+                Assert.That(first.matchedFields, Does.Contain("fromSequence"));
+                Assert.That(first.matchedFields, Does.Contain("toSequence"));
+                Assert.That(first.ignoredArguments, Is.Empty);
+                Assert.That(new[] { "created", "used" }, Does.Contain(first.indexStatus));
+                Assert.That(first.managedMemoryBeforeBytes, Is.GreaterThan(0));
+                Assert.That(first.managedMemoryAfterBytes, Is.GreaterThan(0));
+                Assert.That(first.processWorkingSetBeforeBytes, Is.GreaterThan(0));
+                Assert.That(first.processWorkingSetAfterBytes, Is.GreaterThan(0));
             }
             finally
             {
@@ -474,7 +526,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
             Assert.That(text, Does.Contain("Optional UPilot Tracer"));
             Assert.That(text, Does.Contain("`追踪器`, or `the tracer` as UPilot Tracer (`UPilot 追踪器`)"));
-            Assert.That(text, Does.Contain("All trace points, per-point stack capture, and Console output default to disabled"));
+            Assert.That(text, Does.Contain("All trace points, global stack capture, and Console output default to disabled"));
             Assert.That(text, Does.Contain("saves without applying by default"));
             Assert.That(text, Does.Contain("Do not use Native, InternalCall, injected"));
             Assert.That(text, Does.Contain("restore the original configuration"));
@@ -1430,6 +1482,92 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(restored.total, Is.EqualTo(2));
             Assert.That(restored.results.Single().message, Is.EqualTo("expected failure"));
             Assert.That(restored.results.Single().stackTrace, Is.EqualTo("stack evidence"));
+        }
+
+        [Test]
+        public void TestRunnerOutcomeAndCleanupEvidenceRemainSeparate()
+        {
+            var payload = new TestRunResultPayload
+            {
+                cleanupStatus = "failed",
+                cleanupSucceeded = false,
+                cleanupErrors = new List<string> { "callback-unregister" },
+            };
+            string outcome = UPilotTestService.ApplyRunResults(payload, new List<TestResultItemPayload>
+            {
+                new TestResultItemPayload { testName = "Fixture.Pass", testStatus = "Passed" },
+            }, false);
+
+            Assert.That(outcome, Is.EqualTo("completed"));
+            Assert.That(payload.passed, Is.EqualTo(1));
+            Assert.That(payload.failed, Is.Zero);
+            Assert.That(payload.cleanupStatus, Is.EqualTo("failed"));
+            Assert.That(payload.cleanupErrors, Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public void TestRunnerRecoverySnapshotCanRepresentUnknownOutcomeWithoutFalseFailure()
+        {
+            var payload = new TestRunResultPayload
+            {
+                status = "aborted",
+                phase = "callback_not_recovered",
+                outcomeStatus = "unknown",
+                resultAuthoritative = false,
+                terminalReason = "callback was not recovered",
+            };
+
+            var restored = JsonUtility.FromJson<TestRunResultPayload>(JsonUtility.ToJson(payload));
+
+            Assert.That(restored.status, Is.EqualTo("aborted"));
+            Assert.That(restored.outcomeStatus, Is.EqualTo("unknown"));
+            Assert.That(restored.resultAuthoritative, Is.False);
+            Assert.That(restored.failed, Is.Zero);
+        }
+
+        [Test]
+        public void TestRunnerFirstProgressWatchdogProducesBoundedDiagnosticState()
+        {
+            var payload = new TestRunResultPayload
+            {
+                firstProgressDeadlineAt = 1000,
+                firstProgressObserved = false,
+                watchdogState = "waiting_first_progress",
+            };
+
+            Assert.That(UPilotTestService.ApplyFirstProgressTimeout(payload, 999), Is.False);
+            Assert.That(UPilotTestService.ApplyFirstProgressTimeout(payload, 1000), Is.True);
+            Assert.That(payload.suspectedStuck, Is.True);
+            Assert.That(payload.watchdogState, Is.EqualTo("first_progress_timeout"));
+            Assert.That(payload.failureSignature, Is.EqualTo("TestRunner.FirstProgressTimeout"));
+            Assert.That(payload.nextAction, Does.Contain("unity_hang_status"));
+            Assert.That(payload.lastProgressAt, Is.EqualTo(1000));
+        }
+
+        [Test]
+        public void ProfilerTerminalElapsedTimeIsFrozenAcrossStatusReads()
+        {
+            Type serviceType = typeof(UPilotRuntimeDiagnosticsService);
+            MethodInfo start = serviceType.GetMethod("StartProfiler", BindingFlags.NonPublic | BindingFlags.Static);
+            MethodInfo stop = serviceType.GetMethod("StopProfiler", BindingFlags.NonPublic | BindingFlags.Static);
+            MethodInfo status = serviceType.GetMethod("GetProfilerStatus", BindingFlags.NonPublic | BindingFlags.Static);
+            var started = (ProfilerCaptureResultPayload)start.Invoke(null, new object[]
+            {
+                new ProfilerCaptureStartPayload { durationSec = 1f, title = "elapsed-freeze-test" },
+            });
+            var terminal = (ProfilerCaptureResultPayload)stop.Invoke(null, new object[] { started.captureId, "Stopped" });
+            double elapsed = terminal.elapsedSec;
+            var queried = (ProfilerCaptureResultPayload)status.Invoke(null, new object[] { started.captureId });
+
+            Assert.That(terminal.elapsedFrozen, Is.True);
+            Assert.That(queried.elapsedSec, Is.EqualTo(elapsed).Within(0.000001d));
+            Assert.That(queried.elapsedSource, Is.EqualTo("EditorApplication.timeSinceStartup"));
+        }
+
+        [Test]
+        public void ScriptProjectFileRefreshEntryPointIsAvailable()
+        {
+            Assert.DoesNotThrow(() => UPilotScriptService.RefreshGeneratedProjectFiles());
         }
 
         [Test]

@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -458,9 +459,9 @@ class ProjectAnalysisDomainService:
     async def hang_status(self, sample_window_sec: float = 0.5):
         request_id = new_id("req")
         session = self.server.session_manager.active
-        pid = int(session.process_id if session else 0) or int(self.server.state.editor.process_id or 0)
+        pid, pid_diagnostics = await asyncio.to_thread(self._resolve_live_unity_pid)
         if pid <= 0:
-            return fail(request_id, "UNITY_PROCESS_UNKNOWN", "Unity processId is not available; reconnect a Bridge that reports processId.")
+            return fail(request_id, "UNITY_PROCESS_UNKNOWN", "A live Unity processId matching the connected project was not found.", pid_diagnostics)
         editor = self.server.state.editor
         now = now_ms()
         cpu_percent = await asyncio.to_thread(self._sample_process_cpu_percent, pid, max(0.1, min(sample_window_sec, 3.0)))
@@ -471,6 +472,7 @@ class ProjectAnalysisDomainService:
             request_id,
             {
                 "processId": pid,
+                **pid_diagnostics,
                 "processCpuPercent": cpu_percent,
                 "mainThreadHeartbeatAt": editor.last_main_thread_pump_at,
                 "mainThreadHeartbeatAgeMs": pump_age,
@@ -525,10 +527,9 @@ class ProjectAnalysisDomainService:
         request_id = new_id("req")
         if os.name != "nt":
             return fail(request_id, "HANG_DUMP_UNSUPPORTED", "Non-terminating dump capture is currently supported on Windows only.")
-        session = self.server.session_manager.active
-        pid = int(session.process_id if session else 0) or int(self.server.state.editor.process_id or 0)
+        pid, pid_diagnostics = await asyncio.to_thread(self._resolve_live_unity_pid)
         if pid <= 0:
-            return fail(request_id, "UNITY_PROCESS_UNKNOWN", "Unity processId is not available.")
+            return fail(request_id, "UNITY_PROCESS_UNKNOWN", "A live Unity processId matching the connected project was not found.", pid_diagnostics)
         root = self._analysis_project_root()
         if root is None:
             return fail(request_id, "UNITY_PROJECT_UNKNOWN", "Unity project path is not available.")
@@ -545,7 +546,98 @@ class ProjectAnalysisDomainService:
         if not success:
             return fail(request_id, "HANG_DUMP_FAILED", f"MiniDumpWriteDump failed with Win32 error {error_code}.", {"path": str(target), "processId": pid})
         data = target.read_bytes()
-        return ok(request_id, {"path": str(target), "processId": pid, "dumpType": dump_type, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "processTerminated": False})
+        return ok(request_id, {"path": str(target), "processId": pid, **pid_diagnostics, "dumpType": dump_type, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "processTerminated": False})
+
+    def _resolve_live_unity_pid(self) -> tuple[int, dict[str, Any]]:
+        session = self.server.session_manager.active
+        candidates = [
+            ("session", int(session.process_id if session else 0)),
+            ("editorState", int(self.server.state.editor.process_id or 0)),
+        ]
+        stale = []
+        for source, candidate in candidates:
+            if candidate <= 0:
+                continue
+            if self._process_exists(candidate):
+                if session is not None and int(session.process_id or 0) != candidate:
+                    session.process_id = candidate
+                if int(self.server.state.editor.process_id or 0) != candidate:
+                    self.server.state.editor.process_id = candidate
+                return candidate, {
+                    "pidSource": source,
+                    "pidRefreshed": source != "session",
+                    "staleProcessIds": stale,
+                    "projectIdentityVerified": True,
+                }
+            stale.append(candidate)
+
+        root = self._analysis_project_root()
+        discovered = self._discover_unity_pid_for_project(root) if root is not None else 0
+        if discovered > 0:
+            if session is not None:
+                session.process_id = discovered
+            self.server.state.editor.process_id = discovered
+            return discovered, {
+                "pidSource": "processDiscovery",
+                "pidRefreshed": True,
+                "staleProcessIds": stale,
+                "projectIdentityVerified": True,
+            }
+        return 0, {
+            "pidSource": "unavailable",
+            "pidRefreshed": False,
+            "staleProcessIds": stale,
+            "projectPath": str(root or ""),
+            "nextAction": "Reconnect the project Bridge or restart the managed MCP Server, then retry hang diagnostics.",
+        }
+
+    @staticmethod
+    def _process_exists(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _discover_unity_pid_for_project(project_root: Path | None) -> int:
+        if os.name != "nt" or project_root is None:
+            return 0
+        command = (
+            "@(Get-CimInstance Win32_Process -Filter \"Name='Unity.exe'\" | "
+            "Select-Object ProcessId,CommandLine) | ConvertTo-Json -Compress"
+        )
+        try:
+            completed = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if completed.returncode != 0 or not completed.stdout.strip():
+                return 0
+            parsed = json.loads(completed.stdout)
+            rows = parsed if isinstance(parsed, list) else [parsed]
+            expected = os.path.normcase(os.path.normpath(str(project_root)))
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                command_line = str(row.get("CommandLine") or "")
+                normalized = os.path.normcase(os.path.normpath(command_line.replace('"', "")))
+                if expected in normalized:
+                    return int(row.get("ProcessId") or 0)
+        except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+            return 0
+        return 0
 
     @staticmethod
     def _write_windows_minidump(pid: int, target: Path, dump_type: str) -> tuple[bool, int]:

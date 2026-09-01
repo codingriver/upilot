@@ -43,18 +43,87 @@ namespace CodingRiver.UPilot
     [Serializable] public class AssetFindResultPayload { public List<AssetInfoPayload> assets = new List<AssetInfoPayload>(); }
     [Serializable] public class AssetFolderResultPayload { public string folderPath; }
 
+    [Serializable]
+    public class AssetMutationResultPayload
+    {
+        public bool ok = true;
+        public string status = "ok";
+        public string operation;
+        public string sourcePath;
+        public string destinationPath;
+        public string sourceGuid;
+        public string destinationGuid;
+        public bool guidPreserved;
+        public string assetType;
+        public string sha256;
+        public bool saved;
+        public bool verified;
+    }
+
     [Serializable] public class AssetGetDataMessage { public AssetGetDataPayload payload; }
-    [Serializable] public class AssetGetDataPayload { public string assetPath = ""; public ulong gameObjectId; public string componentType = ""; public int componentIndex; public int maxDepth = 10; }
+    [Serializable]
+    public class AssetGetDataPayload
+    {
+        public string assetPath = "";
+        public ulong gameObjectId;
+        public string componentType = "";
+        public int componentIndex;
+        public int maxDepth = 10;
+        public int maxNodes = 500;
+        public string continuationToken = "";
+    }
 
     [Serializable] public class AssetModifyDataMessage { public AssetModifyDataPayload payload; }
     [Serializable] public class AssetModifyDataPayload { public string assetPath = ""; public ulong gameObjectId; public string componentType = ""; public int componentIndex; public List<SerializedPropertyWrite> properties = new List<SerializedPropertyWrite>(); }
 
     [Serializable] public class SerializedPropertyWrite { public string propertyPath = ""; public string value = ""; }
 
-    [Serializable] public class SerializedPropertyInfo { public string propertyPath; public string type; public string value; public int depth; public bool hasChildren; public bool isArray; public int arraySize; }
+    [Serializable]
+    public class SerializedPropertyInfo
+    {
+        public string propertyPath;
+        public string type;
+        public string value;
+        public int depth;
+        public bool hasChildren;
+        public bool isArray;
+        public int arraySize;
+        public bool truncated;
+        public string truncateReason;
+        public string managedReferenceType;
+        public string objectReferencePath;
+        public string objectReferenceGuid;
+    }
 
-    [Serializable] public class AssetGetDataResultPayload { public string targetType; public List<SerializedPropertyInfo> properties = new List<SerializedPropertyInfo>(); }
-    [Serializable] public class AssetModifyDataResultPayload { public bool ok; public int modifiedCount; public List<string> errors = new List<string>(); }
+    [Serializable]
+    public class AssetGetDataResultPayload
+    {
+        public string targetType;
+        public int maxDepth;
+        public int maxNodes;
+        public int returnedCount;
+        public int scannedCount;
+        public bool truncated;
+        public bool depthTruncated;
+        public string continuationToken;
+        public string nextContinuationToken;
+        public List<SerializedPropertyInfo> properties = new List<SerializedPropertyInfo>();
+    }
+    [Serializable]
+    public class AssetModifyDataResultPayload
+    {
+        public bool ok;
+        public int modifiedCount;
+        public bool assetTarget;
+        public bool dirtyApplied;
+        public bool saved;
+        public bool reimported;
+        public bool persistenceVerified;
+        public string sha256Before = "";
+        public string sha256After = "";
+        public List<SerializedPropertyChangePayload> changes = new List<SerializedPropertyChangePayload>();
+        public List<string> errors = new List<string>();
+    }
 
     [Serializable] public class AssetFindBuiltInMessage  { public AssetFindBuiltInPayload payload; }
     [Serializable] public class AssetFindBuiltInPayload  { public string query = ""; public string assetType = ""; }
@@ -105,6 +174,59 @@ namespace CodingRiver.UPilot
         public bool readOnly = true;
         public bool changedEditorState = false;
         public List<PrefabComponentMatchPayload> matches = new List<PrefabComponentMatchPayload>();
+    }
+
+    [Serializable] public class PrefabPhysicsAuditMessage { public PrefabPhysicsAuditPayload payload; }
+    [Serializable]
+    public class PrefabPhysicsAuditPayload
+    {
+        public List<string> prefabPaths = new List<string>();
+        public int maxResultsPerPrefab = 1000;
+        public string sortBy = "colliderCount";
+        public bool descending = true;
+    }
+    [Serializable] public class PhysicsCountPayload { public string key; public int count; }
+    [Serializable]
+    public class PrefabPhysicsComponentPayload
+    {
+        public string gameObjectPath;
+        public string componentType;
+        public int layer;
+        public string layerName;
+        public bool gameObjectActiveSelf;
+        public bool gameObjectActiveInHierarchy;
+        public bool componentEnabled;
+        public bool isTrigger;
+        public string attachedRigidbodyPath;
+        public string attachedRigidbodyType;
+    }
+    [Serializable]
+    public class PrefabPhysicsAssetAuditPayload
+    {
+        public bool ok = true;
+        public string prefabPath;
+        public string error;
+        public int colliderCount;
+        public int triggerCount;
+        public int rigidbodyCount;
+        public int enabledColliderCount;
+        public int activeColliderCount;
+        public bool truncated;
+        public List<PhysicsCountPayload> typeCounts = new List<PhysicsCountPayload>();
+        public List<PhysicsCountPayload> layerCounts = new List<PhysicsCountPayload>();
+        public List<PrefabPhysicsComponentPayload> components = new List<PrefabPhysicsComponentPayload>();
+    }
+    [Serializable]
+    public class PrefabPhysicsAuditResultPayload
+    {
+        public bool ok = true;
+        public bool readOnly = true;
+        public bool changedEditorState = false;
+        public int prefabCount;
+        public int failedPrefabCount;
+        public string sortBy;
+        public bool descending;
+        public List<PrefabPhysicsAssetAuditPayload> prefabs = new List<PrefabPhysicsAssetAuditPayload>();
     }
 
     [Serializable] public class AssetSubresourcesMessage { public AssetSubresourcesPayload payload; }
@@ -185,6 +307,7 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("asset.modifyData",    HandleModifyDataAsync);
             _bridge.Router.Register("asset.findBuiltIn",   HandleFindBuiltInAsync);
             _bridge.Router.Register("prefab.queryComponents", HandlePrefabQueryComponentsAsync);
+            _bridge.Router.Register("prefab.physicsAudit", HandlePrefabPhysicsAuditAsync);
             _bridge.Router.Register("asset.subresourcesList", HandleSubresourcesListAsync);
             _bridge.Router.Register("asset.dependencies", HandleAssetDependenciesAsync);
             _bridge.Router.Register("animator.controllerInspect", HandleAnimatorControllerInspectAsync);
@@ -418,34 +541,19 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<AssetMutationResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    if (!File.Exists(p.sourcePath) && !Directory.Exists(p.sourcePath))
-                    {
-                        tcs.SetException(new Exception($"Source does not exist: {p.sourcePath}"));
-                        return;
-                    }
-
-                    bool ok = AssetDatabase.CopyAsset(p.sourcePath, p.destinationPath);
-                    if (!ok)
-                    {
-                        tcs.SetException(new Exception($"CopyAsset failed: {p.sourcePath} -> {p.destinationPath}"));
-                        return;
-                    }
-
-                    AssetDatabase.SaveAssets();
-                    tcs.SetResult(true);
+                    tcs.SetResult(CopyAsset(p.sourcePath, p.destinationPath));
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
             });
 
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "asset.copy", new GenericOkPayload { status = "ok" }, token);
+                await _bridge.SendResultAsync(id, "asset.copy", await tcs.Task, token);
             }
             catch (Exception ex)
             {
@@ -466,28 +574,19 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<AssetMutationResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    string err = AssetDatabase.MoveAsset(p.sourcePath, p.destinationPath);
-                    if (!string.IsNullOrEmpty(err))
-                    {
-                        tcs.SetException(new Exception($"MoveAsset failed: {err}"));
-                        return;
-                    }
-
-                    AssetDatabase.SaveAssets();
-                    tcs.SetResult(true);
+                    tcs.SetResult(MoveAsset(p.sourcePath, p.destinationPath));
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
             });
 
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "asset.move", new GenericOkPayload { status = "ok" }, token);
+                await _bridge.SendResultAsync(id, "asset.move", await tcs.Task, token);
             }
             catch (Exception ex)
             {
@@ -645,33 +744,11 @@ namespace CodingRiver.UPilot
                         throw new Exception("Either assetPath or gameObjectId+componentType must be provided.");
                     }
 
-                    var result = new AssetGetDataResultPayload
-                    {
-                        targetType = so.targetObject != null ? so.targetObject.GetType().Name : "Unknown",
-                    };
-
-                    var iterator = so.GetIterator();
-                    bool enterChildren = true;
-                    while (iterator.NextVisible(enterChildren))
-                    {
-                        enterChildren = false;
-                        var prop = iterator.Copy();
-                        if (prop.depth > p.maxDepth)
-                            continue;
-
-                        result.properties.Add(new SerializedPropertyInfo
-                        {
-                            propertyPath = prop.propertyPath,
-                            type = prop.propertyType.ToString(),
-                            value = GetSerializedPropertyDisplayValue(prop),
-                            depth = prop.depth,
-                            hasChildren = prop.hasChildren,
-                            isArray = prop.isArray,
-                            arraySize = prop.isArray ? prop.arraySize : 0,
-                        });
-                    }
-
-                    tcs.TrySetResult(result);
+                    tcs.TrySetResult(ReadSerializedProperties(
+                        so,
+                        p.maxDepth,
+                        p.maxNodes,
+                        p.continuationToken));
                 }
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
@@ -773,6 +850,53 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private async Task HandlePrefabPhysicsAuditAsync(string id, string json, CancellationToken token)
+        {
+            var msg = JsonUtility.FromJson<PrefabPhysicsAuditMessage>(json);
+            var p = msg?.payload ?? new PrefabPhysicsAuditPayload();
+            if (p.prefabPaths == null || p.prefabPaths.Count == 0)
+            {
+                await _bridge.SendErrorAsync(
+                    id,
+                    "INVALID_PREFAB_PATHS",
+                    "prefabPaths must contain at least one prefab path.",
+                    token,
+                    "prefab.physicsAudit");
+                return;
+            }
+
+            var tcs = new TaskCompletionSource<PrefabPhysicsAuditResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    tcs.TrySetResult(AuditPrefabPhysics(
+                        p.prefabPaths,
+                        p.maxResultsPerPrefab,
+                        p.sortBy,
+                        p.descending));
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+
+            try
+            {
+                await _bridge.SendResultAsync(id, "prefab.physicsAudit", await tcs.Task, token);
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(
+                    id,
+                    "PREFAB_PHYSICS_AUDIT_FAILED",
+                    ex.Message,
+                    token,
+                    "prefab.physicsAudit");
+            }
+        }
+
         // ── asset.modifyData ───────────────────────────────────────────────────
 
         private async Task HandleModifyDataAsync(string id, string json, CancellationToken token)
@@ -786,6 +910,8 @@ namespace CodingRiver.UPilot
                 try
                 {
                     SerializedObject so;
+                    UnityEngine.Object target;
+                    var assetTarget = false;
                     if (p.gameObjectId != 0)
                     {
                         var go = UPilotEntityIds.GameObjectFromWireId(p.gameObjectId);
@@ -799,7 +925,8 @@ namespace CodingRiver.UPilot
                         if (comp == null)
                             throw new Exception($"Component not found: {p.componentType}[{p.componentIndex}]");
 
-                        so = new SerializedObject(comp);
+                        target = comp;
+                        so = new SerializedObject(target);
                     }
                     else if (!string.IsNullOrEmpty(p.assetPath))
                     {
@@ -807,47 +934,16 @@ namespace CodingRiver.UPilot
                         if (asset == null)
                             throw new Exception($"Asset not found: {p.assetPath}");
 
-                        so = new SerializedObject(asset);
+                        target = asset;
+                        assetTarget = true;
+                        so = new SerializedObject(target);
                     }
                     else
                     {
                         throw new Exception("Either assetPath or gameObjectId+componentType must be provided.");
                     }
 
-                    var result = new AssetModifyDataResultPayload { ok = true };
-
-                    so.Update();
-                    if (p.properties != null)
-                    {
-                        foreach (var write in p.properties)
-                        {
-                            if (write == null || string.IsNullOrEmpty(write.propertyPath))
-                            {
-                                result.errors.Add("Invalid property write: empty propertyPath.");
-                                continue;
-                            }
-
-                            var prop = so.FindProperty(write.propertyPath);
-                            if (prop == null)
-                            {
-                                result.errors.Add($"Property not found: {write.propertyPath}");
-                                continue;
-                            }
-
-                            try
-                            {
-                                SetSerializedPropertyValue(prop, write.value ?? string.Empty);
-                                result.modifiedCount++;
-                            }
-                            catch (Exception ex)
-                            {
-                                result.errors.Add($"{write.propertyPath}: {ex.Message}");
-                            }
-                        }
-                    }
-
-                    so.ApplyModifiedProperties();
-                    tcs.TrySetResult(result);
+                    tcs.TrySetResult(ApplyModifyData(so, target, assetTarget ? p.assetPath : "", p.properties));
                 }
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
@@ -1232,6 +1328,479 @@ namespace CodingRiver.UPilot
                 default:
                     return "(unsupported)";
             }
+        }
+
+        private static string ComputeAssetSha256(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath) || !File.Exists(assetPath))
+                return "";
+            using (var stream = File.OpenRead(assetPath))
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+        }
+
+        internal static AssetMutationResultPayload CopyAsset(string sourcePath, string destinationPath)
+        {
+            EnsureAssetExists(sourcePath, "Source");
+            if (AssetExists(destinationPath))
+                throw new InvalidOperationException($"Destination already exists: {destinationPath}");
+
+            var sourceGuid = AssetDatabase.AssetPathToGUID(sourcePath);
+            if (!AssetDatabase.CopyAsset(sourcePath, destinationPath))
+                throw new InvalidOperationException($"CopyAsset failed: {sourcePath} -> {destinationPath}");
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(
+                destinationPath,
+                ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+            try
+            {
+                var result = BuildAssetMutationResult("asset.copy", sourcePath, destinationPath, sourceGuid);
+                if (!result.verified)
+                    throw new InvalidOperationException(
+                        $"Copied asset could not be verified: {destinationPath}; "
+                        + $"destinationGuid={result.destinationGuid}; assetType={result.assetType}; "
+                        + $"fileExists={File.Exists(destinationPath)}; metaExists={File.Exists(destinationPath + ".meta")}");
+                if (string.Equals(result.sourceGuid, result.destinationGuid, StringComparison.Ordinal))
+                    throw new InvalidOperationException($"Copied asset unexpectedly reused source GUID: {destinationPath}");
+                return result;
+            }
+            catch
+            {
+                AssetDatabase.DeleteAsset(destinationPath);
+                AssetDatabase.SaveAssets();
+                throw;
+            }
+        }
+
+        internal static AssetMutationResultPayload MoveAsset(string sourcePath, string destinationPath)
+        {
+            EnsureAssetExists(sourcePath, "Source");
+            if (AssetExists(destinationPath))
+                throw new InvalidOperationException($"Destination already exists: {destinationPath}");
+
+            var sourceGuid = AssetDatabase.AssetPathToGUID(sourcePath);
+            var error = AssetDatabase.MoveAsset(sourcePath, destinationPath);
+            if (!string.IsNullOrEmpty(error))
+                throw new InvalidOperationException($"MoveAsset failed: {error}");
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(
+                destinationPath,
+                ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+            try
+            {
+                var result = BuildAssetMutationResult("asset.move", sourcePath, destinationPath, sourceGuid);
+                if (!result.verified || AssetExists(sourcePath))
+                    throw new InvalidOperationException($"Moved asset could not be verified: {destinationPath}");
+                if (!result.guidPreserved)
+                    throw new InvalidOperationException($"Moved asset did not preserve GUID: {destinationPath}");
+                return result;
+            }
+            catch
+            {
+                if (AssetExists(destinationPath) && !AssetExists(sourcePath))
+                    AssetDatabase.MoveAsset(destinationPath, sourcePath);
+                AssetDatabase.SaveAssets();
+                throw;
+            }
+        }
+
+        internal static AssetMutationResultPayload BuildAssetMutationResult(
+            string operation,
+            string sourcePath,
+            string destinationPath,
+            string sourceGuid = "")
+        {
+            var assetType = AssetDatabase.GetMainAssetTypeAtPath(destinationPath);
+            var destinationGuid = AssetDatabase.AssetPathToGUID(destinationPath);
+            return new AssetMutationResultPayload
+            {
+                operation = operation,
+                sourcePath = sourcePath,
+                destinationPath = destinationPath,
+                sourceGuid = string.IsNullOrEmpty(sourceGuid)
+                    ? AssetDatabase.AssetPathToGUID(sourcePath)
+                    : sourceGuid,
+                destinationGuid = destinationGuid,
+                guidPreserved = !string.IsNullOrEmpty(sourceGuid)
+                    && string.Equals(sourceGuid, destinationGuid, StringComparison.Ordinal),
+                assetType = assetType != null ? assetType.FullName : "Unknown",
+                sha256 = ComputeAssetSha256(destinationPath),
+                saved = true,
+                verified = AssetExists(destinationPath) && !string.IsNullOrEmpty(destinationGuid),
+            };
+        }
+
+        private static bool AssetExists(string assetPath)
+        {
+            if (AssetDatabase.IsValidFolder(assetPath))
+                return true;
+            return !string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(assetPath))
+                && File.Exists(assetPath);
+        }
+
+        private static void EnsureAssetExists(string assetPath, string label)
+        {
+            if (!AssetExists(assetPath))
+                throw new InvalidOperationException($"{label} does not exist: {assetPath}");
+        }
+
+        internal static AssetGetDataResultPayload ReadSerializedProperties(
+            SerializedObject serializedObject,
+            int requestedMaxDepth,
+            int requestedMaxNodes,
+            string continuationToken)
+        {
+            if (serializedObject == null)
+                throw new ArgumentNullException(nameof(serializedObject));
+
+            var maxDepth = Mathf.Clamp(requestedMaxDepth, 0, 64);
+            var maxNodes = Mathf.Clamp(requestedMaxNodes <= 0 ? 500 : requestedMaxNodes, 1, 5000);
+            var offset = ParseSerializedPropertyContinuationToken(continuationToken);
+            var result = new AssetGetDataResultPayload
+            {
+                targetType = serializedObject.targetObject != null
+                    ? serializedObject.targetObject.GetType().Name
+                    : "Unknown",
+                maxDepth = maxDepth,
+                maxNodes = maxNodes,
+                continuationToken = continuationToken ?? "",
+            };
+
+            serializedObject.Update();
+            var iterator = serializedObject.GetIterator();
+            var enterChildren = true;
+            var visibleIndex = 0;
+            while (iterator.NextVisible(enterChildren))
+            {
+                var property = iterator.Copy();
+                var canEnterChildren = property.hasVisibleChildren && property.depth < maxDepth;
+                enterChildren = canEnterChildren;
+
+                if (visibleIndex < offset)
+                {
+                    visibleIndex++;
+                    continue;
+                }
+
+                if (result.properties.Count >= maxNodes)
+                {
+                    result.truncated = true;
+                    result.nextContinuationToken = CreateSerializedPropertyContinuationToken(visibleIndex);
+                    break;
+                }
+
+                var depthTruncated = property.hasVisibleChildren && property.depth >= maxDepth;
+                var info = new SerializedPropertyInfo
+                {
+                    propertyPath = property.propertyPath,
+                    type = property.propertyType.ToString(),
+                    value = UPilotSerializedPropertyUtility.GetDisplayValue(property),
+                    depth = property.depth,
+                    hasChildren = property.hasVisibleChildren,
+                    isArray = property.isArray,
+                    arraySize = property.isArray ? property.arraySize : 0,
+                    truncated = depthTruncated,
+                    truncateReason = depthTruncated ? "maxDepth" : "",
+                };
+                if (property.propertyType == SerializedPropertyType.ManagedReference)
+                    info.managedReferenceType = property.managedReferenceFullTypename ?? "";
+                if (property.propertyType == SerializedPropertyType.ObjectReference
+                    && property.objectReferenceValue != null)
+                {
+                    info.objectReferencePath = AssetDatabase.GetAssetPath(property.objectReferenceValue) ?? "";
+                    info.objectReferenceGuid = string.IsNullOrEmpty(info.objectReferencePath)
+                        ? ""
+                        : AssetDatabase.AssetPathToGUID(info.objectReferencePath);
+                }
+
+                result.properties.Add(info);
+                result.depthTruncated |= depthTruncated;
+                visibleIndex++;
+            }
+
+            result.returnedCount = result.properties.Count;
+            result.scannedCount = visibleIndex;
+            return result;
+        }
+
+        private static int ParseSerializedPropertyContinuationToken(string token)
+        {
+            if (string.IsNullOrEmpty(token))
+                return 0;
+            const string prefix = "v1:";
+            if (!token.StartsWith(prefix, StringComparison.Ordinal)
+                || !int.TryParse(
+                    token.Substring(prefix.Length),
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var offset)
+                || offset < 0)
+                throw new InvalidOperationException("Invalid asset.getData continuationToken.");
+            return offset;
+        }
+
+        private static string CreateSerializedPropertyContinuationToken(int offset)
+        {
+            return "v1:" + offset.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        internal static AssetModifyDataResultPayload ApplyModifyData(
+            SerializedObject serializedObject,
+            UnityEngine.Object target,
+            string assetPath,
+            IList<SerializedPropertyWrite> properties)
+        {
+            var assetTarget = !string.IsNullOrEmpty(assetPath);
+            var result = new AssetModifyDataResultPayload
+            {
+                ok = true,
+                assetTarget = assetTarget,
+                sha256Before = assetTarget ? ComputeAssetSha256(assetPath) : "",
+            };
+
+            var applied = UPilotSerializedPropertyUtility.Apply(
+                serializedObject,
+                target,
+                properties,
+                assetTarget ? "Modify Asset Data" : "Modify Component Data");
+            result.modifiedCount = applied.modifiedCount;
+            result.changes = applied.changes;
+
+            EditorUtility.SetDirty(target);
+            result.dirtyApplied = EditorUtility.IsDirty(target);
+            if (assetTarget)
+            {
+                AssetDatabase.SaveAssetIfDirty(target);
+                result.saved = true;
+                AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+                result.reimported = true;
+                result.sha256After = ComputeAssetSha256(assetPath);
+                result.persistenceVerified = VerifyPersistedChanges(assetPath, applied.changes);
+                if (!result.persistenceVerified)
+                    throw new Exception($"Saved asset verification failed after reimport: {assetPath}");
+            }
+            else
+            {
+                var component = target as Component;
+                if (component != null && component.gameObject.scene.IsValid())
+                    UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(component.gameObject.scene);
+                result.persistenceVerified = true;
+            }
+
+            return result;
+        }
+
+        internal static PrefabPhysicsAuditResultPayload AuditPrefabPhysics(
+            IList<string> prefabPaths,
+            int requestedMaxResultsPerPrefab,
+            string sortBy,
+            bool descending)
+        {
+            if (prefabPaths == null || prefabPaths.Count == 0)
+                throw new InvalidOperationException("prefabPaths must contain at least one prefab path.");
+
+            var maxResults = Mathf.Clamp(
+                requestedMaxResultsPerPrefab <= 0 ? 1000 : requestedMaxResultsPerPrefab,
+                1,
+                10000);
+            var result = new PrefabPhysicsAuditResultPayload
+            {
+                prefabCount = prefabPaths.Count,
+                sortBy = NormalizePhysicsSort(sortBy),
+                descending = descending,
+            };
+
+            foreach (var prefabPath in prefabPaths)
+                result.prefabs.Add(AuditSinglePrefabPhysics(prefabPath, maxResults));
+
+            result.failedPrefabCount = result.prefabs.Count(item => !item.ok);
+            result.prefabs.Sort((left, right) =>
+            {
+                var comparison = PhysicsSortValue(left, result.sortBy)
+                    .CompareTo(PhysicsSortValue(right, result.sortBy));
+                if (comparison == 0)
+                    comparison = string.Compare(left.prefabPath, right.prefabPath, StringComparison.Ordinal);
+                return descending ? -comparison : comparison;
+            });
+            return result;
+        }
+
+        private static PrefabPhysicsAssetAuditPayload AuditSinglePrefabPhysics(
+            string prefabPath,
+            int maxResults)
+        {
+            var item = new PrefabPhysicsAssetAuditPayload { prefabPath = prefabPath ?? "" };
+            GameObject root = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(prefabPath)
+                    || !prefabPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
+                    || AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath) == null)
+                    throw new InvalidOperationException($"Prefab not found: {prefabPath}");
+
+                root = PrefabUtility.LoadPrefabContents(prefabPath);
+                if (root == null)
+                    throw new InvalidOperationException($"Failed to load prefab contents: {prefabPath}");
+
+                var typeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                var layerCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var component in root.GetComponentsInChildren<Component>(true))
+                {
+                    if (component == null)
+                        continue;
+                    if (component is Rigidbody || component is Rigidbody2D)
+                    {
+                        item.rigidbodyCount++;
+                        IncrementCount(typeCounts, component.GetType().Name);
+                        continue;
+                    }
+
+                    var collider3D = component as Collider;
+                    var collider2D = component as Collider2D;
+                    if (collider3D == null && collider2D == null)
+                        continue;
+
+                    item.colliderCount++;
+                    var enabled = collider3D != null ? collider3D.enabled : collider2D.enabled;
+                    var trigger = collider3D != null ? collider3D.isTrigger : collider2D.isTrigger;
+                    if (enabled)
+                        item.enabledColliderCount++;
+                    if (component.gameObject.activeInHierarchy)
+                        item.activeColliderCount++;
+                    if (trigger)
+                        item.triggerCount++;
+                    IncrementCount(typeCounts, component.GetType().Name);
+                    IncrementCount(
+                        layerCounts,
+                        component.gameObject.layer.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        + ":"
+                        + LayerMask.LayerToName(component.gameObject.layer));
+
+                    if (item.components.Count >= maxResults)
+                    {
+                        item.truncated = true;
+                        continue;
+                    }
+
+                    Component attachedRigidbody;
+                    if (collider3D != null)
+                        attachedRigidbody = collider3D.attachedRigidbody
+                            ?? collider3D.GetComponentInParent<Rigidbody>();
+                    else
+                        attachedRigidbody = collider2D.attachedRigidbody
+                            ?? collider2D.GetComponentInParent<Rigidbody2D>();
+                    item.components.Add(new PrefabPhysicsComponentPayload
+                    {
+                        gameObjectPath = BuildRelativeGameObjectPath(root.transform, component.transform),
+                        componentType = component.GetType().FullName ?? component.GetType().Name,
+                        layer = component.gameObject.layer,
+                        layerName = LayerMask.LayerToName(component.gameObject.layer),
+                        gameObjectActiveSelf = component.gameObject.activeSelf,
+                        gameObjectActiveInHierarchy = component.gameObject.activeInHierarchy,
+                        componentEnabled = enabled,
+                        isTrigger = trigger,
+                        attachedRigidbodyPath = attachedRigidbody != null
+                            ? BuildRelativeGameObjectPath(root.transform, attachedRigidbody.transform)
+                            : "",
+                        attachedRigidbodyType = attachedRigidbody != null
+                            ? attachedRigidbody.GetType().FullName
+                            : "",
+                    });
+                }
+
+                item.typeCounts = ToCountPayloads(typeCounts);
+                item.layerCounts = ToCountPayloads(layerCounts);
+            }
+            catch (Exception ex)
+            {
+                item.ok = false;
+                item.error = ex.Message;
+            }
+            finally
+            {
+                if (root != null)
+                    PrefabUtility.UnloadPrefabContents(root);
+            }
+            return item;
+        }
+
+        private static string NormalizePhysicsSort(string sortBy)
+        {
+            switch (sortBy)
+            {
+                case "triggerCount":
+                case "rigidbodyCount":
+                case "prefabPath":
+                    return sortBy;
+                default:
+                    return "colliderCount";
+            }
+        }
+
+        private static int PhysicsSortValue(PrefabPhysicsAssetAuditPayload item, string sortBy)
+        {
+            switch (sortBy)
+            {
+                case "triggerCount": return item.triggerCount;
+                case "rigidbodyCount": return item.rigidbodyCount;
+                default: return item.colliderCount;
+            }
+        }
+
+        private static void IncrementCount(IDictionary<string, int> counts, string key)
+        {
+            counts.TryGetValue(key ?? "", out var count);
+            counts[key ?? ""] = count + 1;
+        }
+
+        private static List<PhysicsCountPayload> ToCountPayloads(IDictionary<string, int> counts)
+        {
+            return counts
+                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => new PhysicsCountPayload { key = pair.Key, count = pair.Value })
+                .ToList();
+        }
+
+        private static string BuildRelativeGameObjectPath(Transform root, Transform target)
+        {
+            if (root == null || target == null)
+                return "";
+            var names = new Stack<string>();
+            var current = target;
+            while (current != null)
+            {
+                names.Push(current.gameObject.name);
+                if (current == root)
+                    break;
+                current = current.parent;
+            }
+            return string.Join("/", names);
+        }
+
+        private static bool VerifyPersistedChanges(
+            string assetPath,
+            IList<SerializedPropertyChangePayload> changes)
+        {
+            var reloaded = AssetDatabase.LoadMainAssetAtPath(assetPath);
+            if (reloaded == null)
+                return false;
+            var serializedObject = new SerializedObject(reloaded);
+            serializedObject.Update();
+            foreach (var change in changes)
+            {
+                if (!change.modified)
+                    continue;
+                var property = serializedObject.FindProperty(change.propertyPath);
+                if (property == null
+                    || !string.Equals(
+                        UPilotSerializedPropertyUtility.GetDisplayValue(property),
+                        change.newValue,
+                        StringComparison.Ordinal))
+                    return false;
+            }
+            return true;
         }
 
         private static void WalkPrefabComponents(

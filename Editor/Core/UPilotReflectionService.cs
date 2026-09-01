@@ -18,6 +18,8 @@ namespace CodingRiver.UPilot
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
     [Serializable] public class ReflectionFindMessage  { public ReflectionFindPayload payload; }
+    [Serializable] public class TypeExistsMessage { public TypeExistsPayload payload; }
+    [Serializable] public class TypeExistsPayload { public string typeName = ""; }
     [Serializable]
     public class ReflectionFindPayload
     {
@@ -62,6 +64,18 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public class TypeExistsResultPayload
+    {
+        public bool exists;
+        public string requestedTypeName;
+        public string fullName;
+        public string assembly;
+        public bool isPublic;
+        public bool ambiguous;
+        public List<string> candidates = new();
+    }
+
+    [Serializable]
     public class ReflectionCallResultPayload
     {
         public string typeName;
@@ -81,6 +95,54 @@ namespace CodingRiver.UPilot
         {
             _bridge.Router.Register("reflection.find", HandleFindAsync);
             _bridge.Router.Register("reflection.call", HandleCallAsync);
+            _bridge.Router.Register("reflection.typeExists", HandleTypeExistsAsync);
+        }
+
+        private async Task HandleTypeExistsAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<TypeExistsMessage>(json)?.payload ?? new TypeExistsPayload();
+            if (string.IsNullOrWhiteSpace(payload.typeName))
+            {
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "typeName is required.", token, "reflection.typeExists");
+                return;
+            }
+
+            var tcs = new TaskCompletionSource<TypeExistsResultPayload>();
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    var candidates = FindTypes(payload.typeName);
+                    var result = new TypeExistsResultPayload
+                    {
+                        requestedTypeName = payload.typeName,
+                        exists = candidates.Count == 1,
+                        ambiguous = candidates.Count > 1,
+                        candidates = candidates
+                            .Select(type => $"{type.FullName}, {type.Assembly.GetName().Name}")
+                            .OrderBy(value => value, StringComparer.Ordinal)
+                            .ToList(),
+                    };
+                    if (candidates.Count == 1)
+                    {
+                        var type = candidates[0];
+                        result.fullName = type.FullName ?? type.Name;
+                        result.assembly = type.Assembly.GetName().Name;
+                        result.isPublic = type.IsPublic || type.IsNestedPublic;
+                    }
+                    tcs.SetResult(result);
+                }
+                catch (Exception ex) { tcs.SetException(ex); }
+            });
+
+            try
+            {
+                await _bridge.SendResultAsync(id, "reflection.typeExists", await tcs.Task, token);
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(id, "TYPE_QUERY_FAILED", ex.Message, token, "reflection.typeExists");
+            }
         }
 
         // ── reflection.find ─────────────────────────────────────────────────────
@@ -260,6 +322,29 @@ namespace CodingRiver.UPilot
                 catch { /* skip */ }
             }
             return null;
+        }
+
+        private static List<Type> FindTypes(string typeName)
+        {
+            var exact = new List<Type>();
+            var shortMatches = new List<Type>();
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = assembly.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(type => type != null).ToArray(); }
+                catch { continue; }
+                foreach (var type in types)
+                {
+                    if (type == null) continue;
+                    if (string.Equals(type.FullName, typeName, StringComparison.Ordinal) ||
+                        string.Equals(type.AssemblyQualifiedName, typeName, StringComparison.Ordinal))
+                        exact.Add(type);
+                    else if (string.Equals(type.Name, typeName, StringComparison.Ordinal))
+                        shortMatches.Add(type);
+                }
+            }
+            return exact.Count > 0 ? exact : shortMatches;
         }
 
         private static bool TryBindMethod(

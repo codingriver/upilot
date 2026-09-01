@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 namespace CodingRiver.UPilot
@@ -90,8 +91,20 @@ namespace CodingRiver.UPilot
     {
         public ulong gameObjectId;
         public string componentType = "";
-        public string properties = "{}"; // JSON string because JsonUtility can't handle dict
+        public List<SerializedPropertyWrite> properties = new();
         public int componentIndex;
+    }
+
+    [Serializable]
+    public class ComponentModifyResultPayload
+    {
+        public bool ok;
+        public int modifiedCount;
+        public string componentType;
+        public int componentIndex;
+        public bool enabled;
+        public List<ComponentPropertyPayload> properties = new();
+        public List<SerializedPropertyChangePayload> changes = new();
     }
 
     [Serializable]
@@ -347,7 +360,7 @@ namespace CodingRiver.UPilot
             var msg = JsonUtility.FromJson<ComponentModifyMessage>(json);
             var goId = msg?.payload?.gameObjectId ?? 0;
             var typeName = msg?.payload?.componentType ?? "";
-            var propsJson = msg?.payload?.properties ?? "{}";
+            var propertyWrites = msg?.payload?.properties ?? new List<SerializedPropertyWrite>();
             var compIndex = msg?.payload?.componentIndex ?? 0;
 
             if (string.IsNullOrEmpty(typeName))
@@ -356,7 +369,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<ComponentInfoPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<ComponentModifyResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
                 try
@@ -375,10 +388,26 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    // Parse properties JSON — use a wrapper to get dict-like access
-                    ApplyProperties(comp, propsJson);
+                    var applied = UPilotSerializedPropertyUtility.Apply(
+                        new SerializedObject(comp),
+                        comp,
+                        propertyWrites,
+                        "Modify Component Properties");
+                    EditorUtility.SetDirty(comp);
+                    if (comp.gameObject.scene.IsValid())
+                        EditorSceneManager.MarkSceneDirty(comp.gameObject.scene);
 
-                    tcs.TrySetResult(BuildComponentInfo(comp, compIndex));
+                    var info = BuildComponentInfo(comp, compIndex);
+                    tcs.TrySetResult(new ComponentModifyResultPayload
+                    {
+                        ok = true,
+                        modifiedCount = applied.modifiedCount,
+                        componentType = info.componentType,
+                        componentIndex = info.componentIndex,
+                        enabled = info.enabled,
+                        properties = info.properties,
+                        changes = applied.changes,
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -597,83 +626,6 @@ namespace CodingRiver.UPilot
                 case SerializedPropertyType.LayerMask:     return prop.intValue.ToString();
                 case SerializedPropertyType.ArraySize:     return prop.intValue.ToString();
                 default:                                   return $"<{prop.propertyType}>";
-            }
-        }
-
-        /// <summary>Apply properties from a JSON string to a component via SerializedObject.</summary>
-        private static void ApplyProperties(Component comp, string propsJson)
-        {
-            if (string.IsNullOrEmpty(propsJson) || propsJson == "{}") return;
-
-            var so = new SerializedObject(comp);
-            Undo.RecordObject(comp, "Modify Component Properties");
-
-            // Parse the JSON manually — JsonUtility doesn't support dict
-            // We parse simple key:value pairs from the flat JSON
-            var pairs = ParseSimpleJson(propsJson);
-
-            foreach (var kvp in pairs)
-            {
-                var prop = so.FindProperty(kvp.Key);
-                if (prop == null)
-                {
-                    Debug.LogWarning($"[UPilot] 属性 {kvp.Key} 不存在或不可写入");
-                    continue;
-                }
-
-                SetSerializedPropertyValue(prop, kvp.Value);
-            }
-
-            so.ApplyModifiedProperties();
-        }
-
-        /// <summary>Set a SerializedProperty value from a string.</summary>
-        private static void SetSerializedPropertyValue(SerializedProperty prop, string value)
-        {
-            switch (prop.propertyType)
-            {
-                case SerializedPropertyType.Integer:
-                    if (int.TryParse(value, out var iv)) prop.intValue = iv;
-                    break;
-                case SerializedPropertyType.Boolean:
-                    prop.boolValue = value == "true" || value == "1" || value == "True";
-                    break;
-                case SerializedPropertyType.Float:
-                    if (float.TryParse(value, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var fv))
-                        prop.floatValue = fv;
-                    break;
-                case SerializedPropertyType.String:
-                    prop.stringValue = value;
-                    break;
-                case SerializedPropertyType.Color:
-                    TryParseColor(value, out var color);
-                    prop.colorValue = color;
-                    break;
-                case SerializedPropertyType.Enum:
-                    // Try by name first, then by index
-                    var idx = Array.IndexOf(prop.enumNames, value);
-                    if (idx >= 0) prop.enumValueIndex = idx;
-                    else if (int.TryParse(value, out var ei)) prop.enumValueIndex = ei;
-                    break;
-                case SerializedPropertyType.Vector2:
-                    TryParseVec2(value, out var vec2);
-                    prop.vector2Value = vec2;
-                    break;
-                case SerializedPropertyType.Vector3:
-                    TryParseVec3(value, out var vec3);
-                    prop.vector3Value = vec3;
-                    break;
-                case SerializedPropertyType.Vector4:
-                    TryParseVec4(value, out var vec4);
-                    prop.vector4Value = vec4;
-                    break;
-                case SerializedPropertyType.LayerMask:
-                    if (int.TryParse(value, out var lm)) prop.intValue = lm;
-                    break;
-                default:
-                    Debug.LogWarning($"[UPilot] 不支持修改属性类型: {prop.propertyType} ({prop.name})");
-                    break;
             }
         }
 

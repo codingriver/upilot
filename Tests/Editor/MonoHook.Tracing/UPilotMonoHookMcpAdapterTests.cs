@@ -14,6 +14,8 @@ namespace CodingRiver.UPilot.Tests
     public sealed class UPilotMonoHookMcpAdapterTests
     {
         private bool _masterEnabled;
+        private bool _autoInjectEnabled;
+        private bool _autoApplyOnPlayMode;
         private List<UPilotMonoHookPointState> _points;
         private string _globalFilterProfileId;
         private List<UPilotTraceFilterProfile> _filterProfiles;
@@ -21,6 +23,9 @@ namespace CodingRiver.UPilot.Tests
         private int _maxEventsPerObjectPerSecond;
         private bool _suppressDuplicateEvents;
         private int _duplicateEventWindowMilliseconds;
+        private bool _captureStackTrace;
+        private UPilotStackTraceCaptureMode _stackTraceCaptureMode;
+        private bool _pointFilterOverridesEnabled;
 
         [SetUp]
         public void SetUp()
@@ -28,11 +33,16 @@ namespace CodingRiver.UPilot.Tests
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
             _masterEnabled = settings.masterEnabled;
+            _autoInjectEnabled = settings.autoInjectEnabled;
+            _autoApplyOnPlayMode = settings.autoApplyOnPlayMode;
             _globalFilterProfileId = settings.globalFilterProfileId;
             _enablePerObjectRateLimit = settings.enablePerObjectRateLimit;
             _maxEventsPerObjectPerSecond = settings.maxEventsPerObjectPerSecond;
             _suppressDuplicateEvents = settings.suppressDuplicateEvents;
             _duplicateEventWindowMilliseconds = settings.duplicateEventWindowMilliseconds;
+            _captureStackTrace = settings.captureStackTrace;
+            _stackTraceCaptureMode = settings.stackTraceCaptureMode;
+            _pointFilterOverridesEnabled = settings.pointFilterOverridesEnabled;
             _filterProfiles = (settings.filterProfiles ?? new List<UPilotTraceFilterProfile>())
                 .Where(profile => profile != null)
                 .Select(profile => JsonUtility.FromJson<UPilotTraceFilterProfile>(JsonUtility.ToJson(profile)))
@@ -45,7 +55,8 @@ namespace CodingRiver.UPilot.Tests
                     point.Enabled,
                     point.CaptureStackTrace,
                     point.HookAllSafeOverloads,
-                    knownFilterProfileIds.Contains(point.FilterProfileId) ? point.FilterProfileId : string.Empty))
+                    knownFilterProfileIds.Contains(point.FilterProfileId) ? point.FilterProfileId : string.Empty,
+                    point.ExecutionMode))
                 .ToList();
             new UPilotMonoHookController().UninstallAll();
         }
@@ -56,11 +67,16 @@ namespace CodingRiver.UPilot.Tests
             new UPilotMonoHookController().UninstallAll();
             var settings = UPilotMonoHookSettings.instance;
             settings.masterEnabled = _masterEnabled;
+            settings.autoInjectEnabled = _autoInjectEnabled;
+            settings.autoApplyOnPlayMode = _autoApplyOnPlayMode;
             settings.globalFilterProfileId = _globalFilterProfileId;
             settings.enablePerObjectRateLimit = _enablePerObjectRateLimit;
             settings.maxEventsPerObjectPerSecond = _maxEventsPerObjectPerSecond;
             settings.suppressDuplicateEvents = _suppressDuplicateEvents;
             settings.duplicateEventWindowMilliseconds = _duplicateEventWindowMilliseconds;
+            settings.captureStackTrace = _captureStackTrace;
+            settings.stackTraceCaptureMode = _stackTraceCaptureMode;
+            settings.pointFilterOverridesEnabled = _pointFilterOverridesEnabled;
             settings.filterProfiles = _filterProfiles;
             settings.points = _points;
             settings.EnsureDefaults();
@@ -76,6 +92,7 @@ namespace CodingRiver.UPilot.Tests
             var result = service.Configure(new UPilotMonoHookTracingConfigurePayload
             {
                 pointIds = new[] { UPilotMonoHookPointId.LifecycleUpdate },
+                updatePointEnabled = true,
                 enabled = true,
             });
 
@@ -123,30 +140,53 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void ConfigureCanAssignPointFilterProfileAndClearItToInheritGlobal()
+        public void ConfigureCanSetStackModeAndPointSelectionExplicitly()
+        {
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+            bool wasEnabled = UPilotMonoHookSettings.instance.IsConfiguredEnabled(UPilotMonoHookPointId.LifecycleUpdate);
+
+            var result = service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                setStackTraceCaptureMode = true,
+                stackTraceCaptureMode = UPilotStackTraceCaptureMode.SelectedPoints,
+                pointIds = new[] { UPilotMonoHookPointId.LifecycleUpdate },
+                updatePointStackTraceSelection = true,
+                captureStackTrace = true,
+            });
+
+            Assert.That(result.status.captureStackTrace, Is.True);
+            Assert.That(result.status.stackTraceCaptureMode,
+                Is.EqualTo(UPilotStackTraceCaptureMode.SelectedPoints.ToString()));
+            Assert.That(UPilotMonoHookSettings.instance.ShouldCaptureStackTrace(), Is.True);
+            Assert.That(UPilotMonoHookSettings.instance.ShouldCaptureStackTrace(UPilotMonoHookPointId.LifecycleUpdate), Is.True);
+            Assert.That(result.status.points.First(point => point.pointId == UPilotMonoHookPointId.LifecycleUpdate)
+                .captureStackTraceEffective, Is.True);
+            Assert.That(UPilotMonoHookSettings.instance.IsConfiguredEnabled(UPilotMonoHookPointId.LifecycleUpdate), Is.EqualTo(wasEnabled),
+                "仅更新堆栈选择不应改写点位启用状态。");
+        }
+
+        [Test]
+        public void ConfigureCanEnablePointFilterOverrideAndExposeEffectiveProfile()
         {
             var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
             var profile = new UPilotTraceFilterProfile { Id = "mcp.point", Name = "MCP 点位" };
-            service.Configure(new UPilotMonoHookTracingConfigurePayload
+            var result = service.Configure(new UPilotMonoHookTracingConfigurePayload
             {
                 replaceFilterProfiles = true,
                 filterProfiles = new[] { profile },
+                setGlobalFilterProfile = true,
+                globalFilterProfileId = UPilotTraceFilterProfileIds.None,
+                updatePointFilterOverridesEnabled = true,
+                pointFilterOverridesEnabled = true,
+                pointIds = new[] { UPilotMonoHookPointId.LifecycleUpdate },
                 updatePointFilterProfile = true,
                 pointFilterProfileId = profile.Id,
-                pointIds = new[] { UPilotMonoHookPointId.GameObjectDestroy },
             });
 
-            Assert.That(UPilotMonoHookSettings.instance.GetConfiguredFilterProfileId(UPilotMonoHookPointId.GameObjectDestroy),
-                Is.EqualTo(profile.Id));
-
-            service.Configure(new UPilotMonoHookTracingConfigurePayload
-            {
-                updatePointFilterProfile = true,
-                pointFilterProfileId = string.Empty,
-                pointIds = new[] { UPilotMonoHookPointId.GameObjectDestroy },
-            });
-            Assert.That(UPilotMonoHookSettings.instance.GetConfiguredFilterProfileId(UPilotMonoHookPointId.GameObjectDestroy),
-                Is.Empty);
+            var point = result.status.points.First(item => item.pointId == UPilotMonoHookPointId.LifecycleUpdate);
+            Assert.That(result.status.pointFilterOverridesEnabled, Is.True);
+            Assert.That(point.configuredFilterProfileId, Is.EqualTo(profile.Id));
+            Assert.That(point.effectiveFilterProfileId, Is.EqualTo(profile.Id));
         }
 
         [Test]
@@ -223,6 +263,33 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(result.status.maxEventsPerObjectPerSecond, Is.EqualTo(3));
             Assert.That(result.status.suppressDuplicateEvents, Is.True);
             Assert.That(result.status.duplicateEventWindowMilliseconds, Is.EqualTo(250));
+        }
+
+        [Test]
+        public void ConfigureCanControlAutoInjectionMasterSwitchAndExposeStatus()
+        {
+            var service = new UPilotMonoHookTracingMcpService(UPilotBridge.Instance);
+
+            var enabled = service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                updateAutoInjectEnabled = true,
+                autoInjectEnabled = true,
+                updateAutoApplyOnPlayMode = true,
+                autoApplyOnPlayMode = true,
+            });
+
+            Assert.That(enabled.status.autoInjectEnabled, Is.True);
+            Assert.That(enabled.status.autoApplyOnPlayMode, Is.True);
+
+            var disabled = service.Configure(new UPilotMonoHookTracingConfigurePayload
+            {
+                updateAutoInjectEnabled = true,
+                autoInjectEnabled = false,
+            });
+
+            Assert.That(disabled.status.autoInjectEnabled, Is.False);
+            Assert.That(disabled.status.autoApplyOnPlayMode, Is.True,
+                "关闭总开关应保留子选项，便于之后重新启用。");
         }
     }
 }

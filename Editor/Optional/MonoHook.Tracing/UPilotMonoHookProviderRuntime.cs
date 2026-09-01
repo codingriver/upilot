@@ -13,7 +13,7 @@ namespace CodingRiver.UPilot
     {
         public long Publish(UPilotMonoHookEvent hookEvent)
         {
-            if (hookEvent == null) throw new ArgumentNullException(nameof(hookEvent));
+            if (hookEvent == null) return 0;
             return UPilotMonoHookInstallationService.Publish(hookEvent);
         }
     }
@@ -52,4 +52,3 @@ namespace CodingRiver.UPilot
         public void Dispose() => Uninstall();
     }
 }
-

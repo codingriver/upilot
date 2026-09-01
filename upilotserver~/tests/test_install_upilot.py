@@ -73,6 +73,57 @@ def test_local_upm_install_does_not_require_ref(tmp_path: Path) -> None:
     assert _manifest_dependency(project) == "file:" + REPO_ROOT.as_posix()
 
 
+def test_local_upm_preserves_equivalent_relative_reference_and_manifest_bytes(tmp_path: Path) -> None:
+    project = tmp_path / "repo" / "Tests~" / "UPilotTest"
+    manifest_path = project / "Packages" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    original = (
+        b"\xef\xbb\xbf{\r\n"
+        b'  "dependencies": {\r\n'
+        b'    "io.github.codingriver.upilot": "file:../../.."\r\n'
+        b"  }\r\n"
+        b"}\r\n"
+    )
+    manifest_path.write_bytes(original)
+    upilot_dir = tmp_path / "repo"
+
+    assert install_upilot.main([
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--use-local-upm",
+        "--install-skill", "none",
+    ]) == 0
+
+    assert manifest_path.read_bytes() == original
+
+
+def test_skill_only_installs_editor_compatible_metadata_without_touching_manifest(tmp_path: Path) -> None:
+    upilot_dir = tmp_path / "upilot"
+    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
+    source.mkdir(parents=True)
+    source.joinpath("SKILL.md").write_text("# fixture\n", encoding="utf-8")
+    source.joinpath("helper.py").write_text("print('fixture')\n", encoding="utf-8")
+    setup = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
+    setup.parent.mkdir(parents=True)
+    setup.write_text("private const int SkillInstallTemplateVersion = 27;\n", encoding="utf-8")
+    project = _unity_project(tmp_path)
+    manifest_path = project / "Packages" / "manifest.json"
+    original_manifest = manifest_path.read_bytes()
+
+    assert install_upilot.main([
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+    ]) == 0
+
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    metadata = json.loads(target.joinpath(".upilot-install.json").read_text(encoding="utf-8"))
+    assert metadata["templateVersion"] == 27
+    assert metadata["contentSha256"] == install_upilot._skill_content_hash(target)
+    assert manifest_path.read_bytes() == original_manifest
+
+
 def test_local_upm_and_remote_ref_are_mutually_exclusive(tmp_path: Path) -> None:
     project = _unity_project(tmp_path)
 

@@ -2,6 +2,7 @@
     "name": "UPilot.MonoHook.Tracing.Editor",
     "rootNamespace": "CodingRiver.UPilot",
     "references": [
+        "UPilot.Editor",
         "UPilot.MonoHook.Editor",
         "UPilot.MonoHook.Tracing.Contracts.Editor"
     ],

@@ -46,6 +46,16 @@ class _OperationService(TaskDomainService):
         return ok("req-tool", {})
 
 
+class _ReflectionOperationService(_OperationService):
+    def __init__(self, project_path: Path, reflection_results: list[dict]) -> None:
+        super().__init__(project_path, [])
+        self._reflection_results = list(reflection_results)
+
+    async def reflection_call(self, **_kwargs):
+        payload = self._reflection_results.pop(0)
+        return ok("req-reflection", payload)
+
+
 def _replace_line(text: str, prefix: str, replacement: str) -> str:
     lines = text.splitlines()
     for index, line in enumerate(lines):
@@ -69,7 +79,7 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 17" in text
+    assert "rulesVersion: 19" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
@@ -125,7 +135,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "17"
+    assert checked.data["recommendedRulesVersion"] == "19"
     assert "rulesVersion differs" in checked.data["diffSummary"]
 
 
@@ -163,6 +173,93 @@ def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:
     assert waited.data["artifacts"]["reportPath"]["tail"] == "line2\nline3"
     assert waited.data["timing"]["totalWallMs"] >= 0
     assert waited.data["timing"]["projectElapsedMs"] == 1250
+
+
+def test_operation_parses_nested_reflection_business_status_and_artifacts(tmp_path: Path) -> None:
+    report = tmp_path / "reflection-report.json"
+    report.write_text("{}", encoding="utf-8")
+    service = _ReflectionOperationService(tmp_path, [
+        {"result": '{"status":"Running","phase":"Opening","operationId":"business-1"}'},
+        {"result": '{"status":"Succeeded","phase":"Complete","artifacts":{"summaryPath":"%s"}}' % str(report).replace("\\", "\\\\")},
+    ])
+    job_spec = {
+        "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
+        "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
+        "artifactRules": {"readReportTailLines": 1},
+        "timeoutSec": 5,
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    terminal = asyncio.run(service.operation_status(started.data["operationId"]))
+
+    assert terminal.ok
+    assert terminal.data["status"] == "Succeeded"
+    assert terminal.data["phase"] == "Complete"
+    assert terminal.data["terminal"] is True
+    assert terminal.data["artifacts"]["summaryPath"]["exists"] is True
+
+
+def test_operation_supports_explicit_result_and_field_paths(tmp_path: Path) -> None:
+    service = _ReflectionOperationService(tmp_path, [
+        {"envelope": {"business": '{"state":{"name":"Running","step":"Warmup"}}'}},
+        {"envelope": {"business": '{"state":{"name":"Done","step":"Complete"}}'}},
+    ])
+    job_spec = {
+        "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
+        "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
+        "resultPath": "envelope.business",
+        "statusPath": "state.name",
+        "phasePath": "state.step",
+        "terminalStatusMapping": {"success": ["Done"]},
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    terminal = asyncio.run(service.operation_status(started.data["operationId"]))
+
+    assert terminal.ok
+    assert terminal.data["status"] == "Succeeded"
+    assert terminal.data["phase"] == "Complete"
+
+
+def test_operation_invalid_reflection_json_is_a_diagnostic_terminal_failure(tmp_path: Path) -> None:
+    service = _ReflectionOperationService(tmp_path, [
+        {"result": '{"status":"Running"}'},
+        {"result": "{not-json"},
+    ])
+    job_spec = {
+        "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
+        "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    failed = asyncio.run(service.operation_status(started.data["operationId"]))
+
+    assert failed.ok is False
+    assert failed.error.code == "OPERATION_RESULT_INVALID"
+    assert failed.error.detail["status"] == "Failed"
+    assert failed.error.detail["phase"] == "StatusResultInvalid"
+    assert failed.error.detail["failureSignature"] == "OperationResultInvalid"
+    assert failed.error.detail["terminal"] is True
+
+
+def test_operation_cancel_accepts_nested_terminal_result(tmp_path: Path) -> None:
+    service = _ReflectionOperationService(tmp_path, [
+        {"result": '{"status":"Running","phase":"Work"}'},
+        {"result": '{"status":"Canceled","phase":"Canceled","cleanupPending":false}'},
+    ])
+    job_spec = {
+        "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
+        "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
+        "cancelCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Cancel"},
+    }
+
+    started = asyncio.run(service.operation_start(job_spec))
+    canceled = asyncio.run(service.operation_cancel(started.data["operationId"]))
+
+    assert canceled.ok
+    assert canceled.data["status"] == "Canceled"
+    assert canceled.data["terminal"] is True
+    assert canceled.data["cleanupPending"] is False
 
 
 def test_operation_validate_normalizes_without_starting_business(tmp_path: Path) -> None:

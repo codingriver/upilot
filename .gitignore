@@ -64,3 +64,4 @@ Tests~/*/sysinfo.txt
 !.github/**
 !.gitignore
 !.uiflow.json
+/Tests~/MonoHook2022Acceptance

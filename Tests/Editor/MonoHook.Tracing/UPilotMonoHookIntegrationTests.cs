@@ -16,6 +16,7 @@ namespace CodingRiver.UPilot.Tests
         private bool _masterEnabled;
         private bool _suppressUnchangedValues;
         private int _maxEventsPerSecond;
+        private string _globalFilterProfileId;
         private string _lifecycleAssemblyIncludes;
         private string _lifecycleAssemblyExcludes;
         private string _lifecycleNamespaceIncludes;
@@ -32,6 +33,7 @@ namespace CodingRiver.UPilot.Tests
             _masterEnabled = settings.masterEnabled;
             _suppressUnchangedValues = settings.suppressUnchangedValues;
             _maxEventsPerSecond = settings.maxEventsPerSecond;
+            _globalFilterProfileId = settings.globalFilterProfileId;
             _lifecycleAssemblyIncludes = settings.lifecycleAssemblyIncludes;
             _lifecycleAssemblyExcludes = settings.lifecycleAssemblyExcludes;
             _lifecycleNamespaceIncludes = settings.lifecycleNamespaceIncludes;
@@ -44,8 +46,16 @@ namespace CodingRiver.UPilot.Tests
                     point.Enabled,
                     point.CaptureStackTrace,
                     point.HookAllSafeOverloads,
-                    point.FilterProfileId))
+                    point.FilterProfileId,
+                    point.ExecutionMode))
                 .ToList();
+
+            // Integration tests validate physical installation and event plumbing,
+            // not a user's persisted target-filter selection. Keep the original
+            // values in _points/_globalFilterProfileId, then isolate this fixture
+            // from project-level filters so an unrelated saved profile cannot hide
+            // the event being asserted.
+            settings.globalFilterProfileId = UPilotTraceFilterProfileIds.None;
             UPilotMonoHookTelemetry.Clear();
         }
 
@@ -56,6 +66,7 @@ namespace CodingRiver.UPilot.Tests
             settings.masterEnabled = _masterEnabled;
             settings.suppressUnchangedValues = _suppressUnchangedValues;
             settings.maxEventsPerSecond = _maxEventsPerSecond;
+            settings.globalFilterProfileId = _globalFilterProfileId;
             settings.lifecycleAssemblyIncludes = _lifecycleAssemblyIncludes;
             settings.lifecycleAssemblyExcludes = _lifecycleAssemblyExcludes;
             settings.lifecycleNamespaceIncludes = _lifecycleNamespaceIncludes;

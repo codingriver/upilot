@@ -713,17 +713,26 @@ namespace CodingRiver.UPilot
                 DrawInfoColumn("服务", serverVersion, compact ? 84 : 100);
                 DrawInfoColumn("运行方式", runtimeMode, compact ? 96 : 130);
                 DrawInfoColumn(new GUIContent("通道", compatibility), channel, compact ? 72 : 92);
-                DrawInfoColumn("授权", writeApproved ? "已允许" : "Safe", compact ? 56 : 76);
+                DrawInfoColumn("授权", UPilotWriteAccessUi.GetStatusLabel(writeApproved), compact ? 56 : 76);
                 GUILayout.FlexibleSpace();
             }
 
-            if (writeApproved)
+            DrawWriteAccessControls(UPilotProjectConfig.Current.safety);
+        }
+
+        private void DrawWriteAccessControls(UPilotSafetyConfig safety)
+        {
+            var writeApproved = safety?.writeAccessApproved == true;
+            using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    GUILayout.FlexibleSpace();
-                    DrawRevokeWriteAccessButton(writeApproved);
-                }
+                EditorGUILayout.LabelField(
+                    UPilotWriteAccessUi.GetCompactDescription(safety),
+                    EditorStyles.miniLabel,
+                    GUILayout.ExpandWidth(true));
+                GUILayout.FlexibleSpace();
+                var change = UPilotWriteAccessUi.DrawActionButton(writeApproved, 76f, 22f);
+                if (change != UPilotWriteAccessChange.None)
+                    ShowNotice(UPilotWriteAccessUi.GetSuccessMessage(change));
             }
         }
 
@@ -747,23 +756,6 @@ namespace CodingRiver.UPilot
             {
                 EditorGUILayout.LabelField(label, _infoLabelStyle, GUILayout.Width(width));
                 EditorGUILayout.LabelField(value, _infoValueStyle, GUILayout.Width(width));
-            }
-        }
-
-        private void DrawRevokeWriteAccessButton(bool writeApproved)
-        {
-            if (!writeApproved)
-                return;
-
-            if (GUILayout.Button("撤销授权", GUILayout.Width(76), GUILayout.Height(22)) &&
-                EditorUtility.DisplayDialog(
-                    "撤销写入授权？",
-                    "撤销后，MCP 将回到 safe 模式并拒绝修改项目的工具。此操作会写入 .upilot/config.json。",
-                    "撤销",
-                    "取消"))
-            {
-                UPilotProjectConfig.RevokeProjectWriteAccess();
-                ShowNotice("已撤销写入授权");
             }
         }
 

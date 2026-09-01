@@ -46,6 +46,11 @@ namespace CodingRiver.UPilot
         public NavMeshBoundsPayload inferredWorldBounds;
         public string registrationMatrixSource = "surfaceTransform-inferred";
         public bool registrationTransformDirectlyObservable;
+        public string registrationState;
+        public long surfaceTransformVersion;
+        public long transformChangedAt;
+        public long transformObservedPreUpdateVersion;
+        public bool transformAwaitingPreUpdate;
     }
     [Serializable] public class NavMeshAgentSummaryPayload { public int total; public int enabled; public int active; public int onNavMesh; public int offNavMesh; }
     [Serializable] public class NavMeshTriangulationPayload { public int vertexCount; public int triangleCount; public int areaCount; public NavMeshBoundsPayload worldBounds; }
@@ -74,6 +79,9 @@ namespace CodingRiver.UPilot
         public float edgeDistance;
         public string matchingSurfacePath;
         public string matchingConfidence;
+        public int matchingNavMeshDataInstanceId;
+        public int matchingAgentTypeId;
+        public string registrationMatrixSource;
     }
     [Serializable] public class NavMeshSampleResultPayload { public bool ok = true; public float maxDistance; public int areaMask; public int agentTypeId; public List<NavMeshSampleItemPayload> samples = new(); }
 
@@ -90,6 +98,7 @@ namespace CodingRiver.UPilot
         public string telemetryTypeName = "";
         public string telemetryMethodName = "";
         public string baselineJsonPath = "";
+        public bool includeDefaultAiMarkers = true;
     }
     [Serializable] public class ProfilerCaptureStatusMessage { public ProfilerCaptureStatusPayload payload; }
     [Serializable] public class ProfilerCaptureStatusPayload { public string captureId = ""; }
@@ -133,6 +142,8 @@ namespace CodingRiver.UPilot
         public long endedAt;
         public float durationSec;
         public double elapsedSec;
+        public string elapsedSource;
+        public bool elapsedFrozen;
         public int sampleEveryFrames;
         public int sampleCount;
         public int droppedSamples;
@@ -145,6 +156,8 @@ namespace CodingRiver.UPilot
         public string lastTelemetryError;
         public List<string> unavailableCounters = new();
         public List<string> selectedMarkers = new();
+        public List<string> requestedMarkerPatterns = new();
+        public string markerDiscoverySource;
         public List<ProfilerMetricSummaryPayload> summaries = new();
         public List<ProfilerMarkerSummaryPayload> topMarkers = new();
         public List<ProfilerPeakFramePayload> peakFrames = new();
@@ -161,7 +174,16 @@ namespace CodingRiver.UPilot
         private static long _navMeshPreUpdateVersion;
         private static long _navMeshObservationVersion;
         private static string _lastNavMeshSignature = "";
+        private static readonly Dictionary<ulong, NavMeshTransformObservation> NavMeshTransformObservations = new();
         private static ProfilerCaptureState _profiler;
+
+        private sealed class NavMeshTransformObservation
+        {
+            public string signature;
+            public long version;
+            public long changedAt;
+            public long preUpdateVersionAtChange;
+        }
 
         private sealed class ProfilerCaptureState
         {
@@ -291,16 +313,53 @@ namespace CodingRiver.UPilot
                     transformLossyScale = new NavMeshVectorPayload(component.transform.lossyScale),
                     sourceBounds = ToBoundsPayload(localBounds),
                     inferredWorldBounds = ToBoundsPayload(TransformBounds(component.transform.localToWorldMatrix, localBounds)),
+                    registrationState = "not_registered",
                 };
                 var instance = GetMemberValue(component, "m_NavMeshDataInstance");
                 if (instance != null)
                 {
                     info.navMeshDataInstanceId = ConvertToInt(GetMemberValue(instance, "id"), 0);
                     info.navMeshDataInstanceValid = ConvertToBool(GetMemberValue(instance, "valid"));
+                    info.registrationState = info.navMeshDataInstanceValid ? "registered_inferred" : "instance_invalid";
                 }
+                ApplyNavMeshTransformObservation(info, component.transform, data);
                 result.Add(info);
             }
             return result.OrderBy(item => item.gameObjectPath, StringComparer.Ordinal).ToList();
+        }
+
+        private static void ApplyNavMeshTransformObservation(
+            NavMeshSurfaceInfoPayload info,
+            Transform transform,
+            NavMeshData data)
+        {
+            string signature = string.Join("|",
+                transform.position.ToString("R"),
+                transform.rotation.eulerAngles.ToString("R"),
+                transform.lossyScale.ToString("R"),
+                data != null ? UPilotEntityIds.ToWireId(data).ToString(CultureInfo.InvariantCulture) : "0");
+            if (!NavMeshTransformObservations.TryGetValue(info.instanceId, out var observation))
+            {
+                observation = new NavMeshTransformObservation
+                {
+                    signature = signature,
+                    version = 1,
+                    changedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    preUpdateVersionAtChange = _navMeshPreUpdateVersion,
+                };
+                NavMeshTransformObservations[info.instanceId] = observation;
+            }
+            else if (!string.Equals(observation.signature, signature, StringComparison.Ordinal))
+            {
+                observation.signature = signature;
+                observation.version++;
+                observation.changedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                observation.preUpdateVersionAtChange = _navMeshPreUpdateVersion;
+            }
+            info.surfaceTransformVersion = observation.version;
+            info.transformChangedAt = observation.changedAt;
+            info.transformObservedPreUpdateVersion = _navMeshPreUpdateVersion;
+            info.transformAwaitingPreUpdate = _navMeshPreUpdateVersion <= observation.preUpdateVersionAtChange;
         }
 
         private static NavMeshAgentSummaryPayload SummarizeAgents()
@@ -376,6 +435,9 @@ namespace CodingRiver.UPilot
                     {
                         item.matchingSurfacePath = matching.gameObjectPath;
                         item.matchingConfidence = "inferred-world-bounds";
+                        item.matchingNavMeshDataInstanceId = matching.navMeshDataInstanceId;
+                        item.matchingAgentTypeId = matching.agentTypeId;
+                        item.registrationMatrixSource = matching.registrationMatrixSource;
                     }
                 }
                 result.samples.Add(item);
@@ -398,6 +460,8 @@ namespace CodingRiver.UPilot
                     title = string.IsNullOrWhiteSpace(payload.title) ? "runtime-profiler" : payload.title.Trim(),
                     startedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     durationSec = duration,
+                    elapsedSource = "EditorApplication.timeSinceStartup",
+                    elapsedFrozen = false,
                     sampleEveryFrames = Mathf.Clamp(payload.sampleEveryFrames, 1, 600),
                     jsonPath = ResolveProfilerPath(payload.outputDirectory, payload.title, ".json"),
                     csvPath = ResolveProfilerPath(payload.outputDirectory, payload.title, ".csv"),
@@ -454,6 +518,20 @@ namespace CodingRiver.UPilot
                 .Where(item => !string.IsNullOrWhiteSpace(item.description.Name))
                 .ToList();
             var requested = new HashSet<string>(payload.markerNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+            state.result.markerDiscoverySource = "ProfilerRecorderHandle.GetAvailable";
+            if (payload.includeDefaultAiMarkers)
+            {
+                state.result.requestedMarkerPatterns.Add("NavMesh|Nav Mesh|AI|Animator");
+                foreach (var name in descriptions
+                    .Select(item => item.description.Name)
+                    .Where(name => name.IndexOf("NavMesh", StringComparison.OrdinalIgnoreCase) >= 0
+                        || name.IndexOf("Nav Mesh", StringComparison.OrdinalIgnoreCase) >= 0
+                        || name.StartsWith("AI", StringComparison.OrdinalIgnoreCase)
+                        || name.IndexOf("Animator", StringComparison.OrdinalIgnoreCase) >= 0))
+                    requested.Add(name);
+            }
+            foreach (string name in payload.markerNames ?? Array.Empty<string>())
+                state.result.requestedMarkerPatterns.Add(name);
             System.Text.RegularExpressions.Regex regex = null;
             if (!string.IsNullOrWhiteSpace(payload.markerNameRegex))
                 regex = new System.Text.RegularExpressions.Regex(payload.markerNameRegex, System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
@@ -556,7 +634,8 @@ namespace CodingRiver.UPilot
             if (_profiler == null) throw new InvalidOperationException("No profiler capture exists in this domain.");
             if (!string.IsNullOrWhiteSpace(captureId) && !string.Equals(captureId, _profiler.result.captureId, StringComparison.Ordinal))
                 throw new InvalidOperationException("Profiler capture not found: " + captureId);
-            _profiler.result.elapsedSec = EditorApplication.timeSinceStartup - _profiler.startedEditorTime;
+            if (_profiler.result.status == "Running")
+                _profiler.result.elapsedSec = EditorApplication.timeSinceStartup - _profiler.startedEditorTime;
             return CloneProfilerResult(_profiler.result, false);
         }
 
@@ -570,6 +649,7 @@ namespace CodingRiver.UPilot
             state.result.status = terminalStatus;
             state.result.endedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             state.result.elapsedSec = EditorApplication.timeSinceStartup - state.startedEditorTime;
+            state.result.elapsedFrozen = true;
             foreach (var recorder in state.recorders.Values) recorder.Dispose();
             state.recorders.Clear();
             state.result.summaries = BuildProfilerSummaries(state.result.samples);

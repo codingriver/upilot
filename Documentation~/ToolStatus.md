@@ -18,7 +18,7 @@
 - 工具重命名时，旧名若不保留兼容别名，应在 README 中明确说明。
 - 验收通过需要能追溯到测试、手工验收记录或 release checklist。
 - 破坏性工具即使“可用状态”为“是”，也需要在调用前确认目标和影响范围。
-- Roslyn 动态编译工具已从 MCP schema 中移除。稳定业务自动化使用 `unity_reflection_call`；表达式级诊断使用 `reflection_eval`。
+- Roslyn 动态编译工具已从 MCP schema 中移除。稳定业务自动化使用需要项目写入授权且禁止自动重试的 `unity_reflection_call`；只读发现使用 `unity_type_exists` / `unity_reflection_find`，表达式级诊断使用 `reflection_eval`。
 
 ## MCP 工具状态矩阵
 

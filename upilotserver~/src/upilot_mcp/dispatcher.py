@@ -9,6 +9,7 @@ from .models import ToolResponse
 from .protocol import new_id
 from .responses import fail, ok
 from .state_store import StateStore
+from .wire_ids import normalize_wire_ids_for_unity
 
 
 class CommandDispatcher:
@@ -61,6 +62,16 @@ class CommandDispatcher:
 
     async def call(self, request_id: str, name: str, payload: dict[str, Any], timeout_ms: int | None = None) -> ToolResponse:
         started = time.monotonic()
+        try:
+            payload = normalize_wire_ids_for_unity(payload)
+        except ValueError as exc:
+            return fail(
+                request_id,
+                "UNSAFE_WIRE_ID",
+                str(exc),
+                {"command": name, "nextAction": "Pass Unity wire IDs as decimal strings."},
+                timing={"totalMs": 0, "queueMs": 0, "bridgeMs": 0, "unityExecutionMs": 0},
+            )
         if not self.transport.is_ready():
             wait_s = env_float("UPILOT_CALL_WAIT_READY_S", 300.0)
             waiter = getattr(self.transport, "wait_until_ready", None)

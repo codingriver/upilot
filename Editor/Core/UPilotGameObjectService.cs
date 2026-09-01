@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -52,6 +53,9 @@ namespace CodingRiver.UPilot
         public string name = "";
         public string tag = "";
         public ulong instanceId;
+        public string componentType = "";
+        public bool includeInactive = true;
+        public int limit = 100;
     }
 
     [Serializable]
@@ -153,6 +157,8 @@ namespace CodingRiver.UPilot
         public bool activeSelf;
         public bool isStatic;
         public ulong parentId;
+        public string hierarchyPath;
+        public List<string> componentTypes = new();
         public TransformPayload transform;
     }
 
@@ -268,42 +274,26 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    // Find by tag
-                    if (!string.IsNullOrEmpty(p.tag))
+                    Type requiredComponentType = null;
+                    if (!string.IsNullOrWhiteSpace(p.componentType))
                     {
-                        try
-                        {
-                            var tagged = GameObject.FindGameObjectsWithTag(p.tag);
-                            foreach (var go in tagged)
-                            {
-                                if (!string.IsNullOrEmpty(p.name) && !go.name.Contains(p.name))
-                                    continue;
-                                result.gameObjects.Add(BuildInfo(go));
-                            }
-                        }
-                        catch
-                        {
-                            // Tag doesn't exist — return empty
-                        }
-                        tcs.TrySetResult(result);
-                        return;
+                        requiredComponentType = UPilotComponentService.ResolveComponentType(p.componentType);
+                        if (requiredComponentType == null)
+                            throw new Exception($"Component type not found or ambiguous: {p.componentType}");
                     }
 
-                    // Find by name (contains match across all loaded scenes)
-                    if (!string.IsNullOrEmpty(p.name))
-                    {
-                        var allObjects = Resources.FindObjectsOfTypeAll<GameObject>();
-                        foreach (var go in allObjects)
-                        {
-                            // Skip hidden/public objects
-                            if (go.hideFlags != HideFlags.None) continue;
-                            // Skip prefab assets (only scene objects)
-                            if (!go.scene.isLoaded && !go.scene.IsValid()) continue;
-
-                            if (go.name.Contains(p.name))
-                                result.gameObjects.Add(BuildInfo(go));
-                        }
-                    }
+                    int limit = Math.Max(1, Math.Min(p.limit <= 0 ? 100 : p.limit, 1000));
+                    var matches = Resources.FindObjectsOfTypeAll<GameObject>()
+                        .Where(go => go != null && go.hideFlags == HideFlags.None)
+                        .Where(go => go.scene.IsValid() && go.scene.isLoaded)
+                        .Where(go => p.includeInactive || go.activeInHierarchy)
+                        .Where(go => string.IsNullOrEmpty(p.name) || go.name.IndexOf(p.name, StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Where(go => string.IsNullOrEmpty(p.tag) || string.Equals(go.tag, p.tag, StringComparison.Ordinal))
+                        .Where(go => requiredComponentType == null || go.GetComponent(requiredComponentType) != null)
+                        .OrderBy(BuildHierarchyPath, StringComparer.Ordinal)
+                        .Take(limit);
+                    foreach (var go in matches)
+                        result.gameObjects.Add(BuildInfo(go));
 
                     tcs.TrySetResult(result);
                 }
@@ -556,6 +546,11 @@ namespace CodingRiver.UPilot
                 activeSelf = go.activeSelf,
                 isStatic = go.isStatic,
                 parentId = t.parent != null ? UPilotEntityIds.ToWireId(t.parent.gameObject) : 0,
+                hierarchyPath = BuildHierarchyPath(go),
+                componentTypes = go.GetComponents<Component>()
+                    .Where(component => component != null)
+                    .Select(component => component.GetType().FullName ?? component.GetType().Name)
+                    .ToList(),
                 transform = new TransformPayload
                 {
                     position = new Vec3Payload { x = t.localPosition.x, y = t.localPosition.y, z = t.localPosition.z },
@@ -563,6 +558,19 @@ namespace CodingRiver.UPilot
                     scale = new Vec3Payload { x = t.localScale.x, y = t.localScale.y, z = t.localScale.z },
                 },
             };
+        }
+
+        private static string BuildHierarchyPath(GameObject go)
+        {
+            if (go == null) return string.Empty;
+            var names = new Stack<string>();
+            var current = go.transform;
+            while (current != null)
+            {
+                names.Push(current.name);
+                current = current.parent;
+            }
+            return string.Join("/", names);
         }
 
         private static bool TryParsePrimitiveType(string value, out PrimitiveType result)
