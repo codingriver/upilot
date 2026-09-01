@@ -79,7 +79,7 @@ UPilot Agent 规则模板和配套 Skills 都是 UPilot 产品体验的一部分
 rulesVersion: 22
 upilotPackageVersion: 0.3.28
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-09-01T08:10:35Z
+generatedAt: 2026-09-01T11:51:17Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.

@@ -43,11 +43,21 @@ namespace CodingRiver.UPilot
         private GUIStyle _titleStyle;
         private GUIStyle _messageStyle;
         private GUIStyle _sectionTitleStyle;
+        private GUIStyle _mcpEndpointAddressStyle;
+        private GUIStyle _mcpEndpointButtonStyle;
         private bool _stylesInitialized;
+        private int _stylesRevision;
 
         private const double UpdateStopRetryCooldownSeconds = 2d;
+        private const int CurrentStylesRevision = 5;
         internal const string McpPortLabel = "MCP 端口";
         internal const string UnityBridgePortLabel = "Unity Bridge 端口";
+        internal const string McpEndpointTitle = "MCP 连接地址";
+        internal const string McpEndpointHint = "AI 客户端连接 UPilot 时使用此 HTTP 地址";
+        internal const int McpEndpointAddressFontSize = 16;
+        internal const int McpEndpointButtonFontSize = 13;
+        internal const float McpEndpointControlHeight = 32f;
+        internal const float McpEndpointButtonWidth = 104f;
 
         [MenuItem("UPilot/UPilot", false, 200)]
         public static void Open()
@@ -206,8 +216,19 @@ namespace CodingRiver.UPilot
 
         private void InitializeStyles()
         {
-            if (_stylesInitialized) return;
+            if (_stylesInitialized &&
+                _stylesRevision == CurrentStylesRevision &&
+                _cardStyle != null &&
+                _titleStyle != null &&
+                _messageStyle != null &&
+                _sectionTitleStyle != null &&
+                _mcpEndpointAddressStyle != null &&
+                _mcpEndpointButtonStyle != null)
+            {
+                return;
+            }
             _stylesInitialized = true;
+            _stylesRevision = CurrentStylesRevision;
 
             _cardStyle = new GUIStyle(GUI.skin.box)
             {
@@ -236,6 +257,24 @@ namespace CodingRiver.UPilot
             {
                 alignment = TextAnchor.MiddleLeft,
                 fontSize = 11,
+            };
+            _mcpEndpointAddressStyle = new GUIStyle(EditorStyles.textField)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                fontSize = McpEndpointAddressFontSize,
+                fontStyle = FontStyle.Bold,
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(9, 9, 4, 4),
+                fixedHeight = 0f,
+                stretchHeight = true,
+            };
+            _mcpEndpointButtonStyle = new GUIStyle(GUI.skin.button)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = McpEndpointButtonFontSize,
+                fontStyle = FontStyle.Bold,
+                fixedHeight = 0f,
+                stretchHeight = true,
             };
         }
 
@@ -556,10 +595,10 @@ namespace CodingRiver.UPilot
         {
             DrawWriteAccessBanner();
             EditorGUILayout.Space(8);
+            DrawMcpEndpoint();
+            EditorGUILayout.Space(8);
             using (new EditorGUI.DisabledScope(IsServiceTransitioning(snapshot.State)))
                 DrawAgentConfigurationList();
-            EditorGUILayout.Space(10);
-            DrawMcpEndpoint();
             EditorGUILayout.Space(10);
             DrawRuntimeDetails(snapshot);
         }
@@ -686,21 +725,39 @@ namespace CodingRiver.UPilot
         private void DrawMcpEndpoint()
         {
             var mcpUrl = UPilotAgentSetup.McpUrl;
-            var row = EditorGUILayout.GetControlRect(false, 24f);
-            const float labelWidth = 72f;
-            const float buttonWidth = 64f;
-            const float gap = 6f;
-            var labelRect = new Rect(row.x, row.y, labelWidth, row.height);
-            var buttonRect = new Rect(row.xMax - buttonWidth, row.y, buttonWidth, row.height);
-            var fieldRect = new Rect(
-                labelRect.xMax + gap,
-                row.y,
-                Mathf.Max(40f, buttonRect.x - labelRect.xMax - gap * 2f),
-                row.height);
+            var sectionRect = EditorGUILayout.GetControlRect(false, 86f);
+            var headerRect = new Rect(sectionRect.x, sectionRect.y, sectionRect.width, 30f);
+            const float horizontalPadding = 10f;
+            const float gap = 8f;
+            DrawBandBackground(headerRect);
+            DrawBandAccent(headerRect);
 
-            EditorGUI.LabelField(labelRect, "MCP 地址", _sectionTitleStyle);
-            EditorGUI.SelectableLabel(fieldRect, mcpUrl, EditorStyles.textField);
-            if (GUI.Button(buttonRect, "复制"))
+            var titleRect = new Rect(
+                headerRect.x + 10f,
+                headerRect.y + 3f,
+                headerRect.width - 20f,
+                24f);
+            var hintRect = new Rect(
+                sectionRect.x + horizontalPadding,
+                sectionRect.y + 32f,
+                sectionRect.width - horizontalPadding * 2f,
+                18f);
+            var buttonRect = new Rect(
+                sectionRect.xMax - horizontalPadding - McpEndpointButtonWidth,
+                sectionRect.y + 52f,
+                McpEndpointButtonWidth,
+                McpEndpointControlHeight);
+            var fieldRect = new Rect(
+                sectionRect.x + horizontalPadding,
+                sectionRect.y + 52f,
+                Mathf.Max(80f, buttonRect.x - sectionRect.x - horizontalPadding - gap),
+                McpEndpointControlHeight);
+
+            EditorGUI.LabelField(titleRect, McpEndpointTitle, _sectionTitleStyle);
+            EditorGUI.LabelField(hintRect, McpEndpointHint, _messageStyle);
+            EditorGUI.SelectableLabel(fieldRect, mcpUrl, _mcpEndpointAddressStyle);
+            var copyClicked = GUI.Button(buttonRect, "复制地址", _mcpEndpointButtonStyle);
+            if (copyClicked)
             {
                 EditorGUIUtility.systemCopyBuffer = mcpUrl;
                 ShowNotice("已复制 MCP 地址");

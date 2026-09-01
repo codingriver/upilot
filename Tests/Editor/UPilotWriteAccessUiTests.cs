@@ -119,9 +119,23 @@ namespace CodingRiver.UPilot.Tests
         {
             Assert.That(UPilotMainWindow.McpPortLabel, Is.EqualTo("MCP 端口"));
             Assert.That(UPilotMainWindow.UnityBridgePortLabel, Is.EqualTo("Unity Bridge 端口"));
+            Assert.That(UPilotMainWindow.McpEndpointTitle, Is.EqualTo("MCP 连接地址"));
+            Assert.That(UPilotMainWindow.McpEndpointHint, Does.Contain("AI 客户端"));
+            Assert.That(UPilotMainWindow.McpEndpointAddressFontSize, Is.EqualTo(16));
+            Assert.That(UPilotMainWindow.McpEndpointButtonFontSize, Is.EqualTo(13));
+            Assert.That(UPilotMainWindow.McpEndpointControlHeight, Is.EqualTo(32f));
+            Assert.That(UPilotMainWindow.McpEndpointButtonWidth, Is.EqualTo(104f));
             Assert.That(UPilotMainWindow.GetAgentUpdateButtonLabel(0), Is.EqualTo("更新全部"));
             Assert.That(UPilotMainWindow.GetAgentUpdateButtonLabel(3), Is.EqualTo("更新 3 项"));
 
+            Assert.That(
+                typeof(UPilotMainWindow).GetMethod(
+                    "DrawMcpEndpoint",
+                    BindingFlags.Instance | BindingFlags.NonPublic,
+                    null,
+                    Type.EmptyTypes,
+                    null),
+                Is.Not.Null);
             Assert.That(
                 typeof(UPilotMainWindow).GetMethod(
                     "DrawRuntimeDetails",
