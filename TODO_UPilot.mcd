@@ -364,9 +364,24 @@ UPilot 通用开发：
 - 来源任务/测试：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260829-05`。
 - 现象/问题：KingShotBattle 业务 Bridge 在空值时输出 `"failureDetail":`，标准 JSON 解析失败，状态轮询和产物收集需要文本修补。
 - 2026-08-29 复现补充：`D:\MA\xclient` 默认 Automation `workflowId=2026-08-29_19-12-07` 实际在约 41 秒完成并成功回到 EditMode，但 `GetWorkflowState` 与 `CollectWorkflowArtifacts.state` 仍输出 `"failureDetail":}`；标准解析器未识别终态，外部有界轮询持续到 13 分钟后才通过原始文本确认 `Succeeded`。业务结果成功，轮询效率和终态判定仍被非法 JSON 严重放大。
+- 2026-09-01 复现补充：`F:\xclient2` 的多目标 workflowId=`2026-09-01_21-29-02` 与持续开火 workflowId=`2026-09-01_21-38-12` 均成功，但 `GetWorkflowState()` 仍因空 `failureDetail` 生成非法 JSON，调用方只能正则解析。项目条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260829-05`，出现次数已更新为 2。
 - 建议改进：项目 Bridge 使用可靠 JSON 序列化；UPilot 反射/Operation 层对非法业务 JSON 返回字段位置和原始片段，避免误归因为通用状态机失败。
 - 验收标准：空值、中文、换行和引号均输出合法 JSON，业务 `GetWorkflowState`/`CollectWorkflowArtifacts` 可被标准解析器直接读取。
 - 当前状态：项目业务测试桥接负责序列化修复；通用 UPilot 仅评估增加非法业务 JSON 诊断。
+
+### [待处理][P1] Console Capture Stop 应返回服务端真实终态
+
+- 发现时间：2026-09-01
+- 来源任务/测试：`F:\xclient2\TODO_UPilot.mcd` / “Console Capture 读取导致 Unity Bridge 瞬时断连”。
+- 现象/问题：`unity_console_capture_stop` 因 `EditorContextStale`/30 秒超时返回失败，但随后 `unity_console_capture_list` 显示同一会话已经 `active=false`、`finishedAt` 已写入、summary 和 SHA256 已生成。客户端会把已完成的 Stop 误判为失败，并可能进行不必要的重试或遗留清理。
+- 影响范围：Unity Domain Reload、Editor Context 恢复窗口或大体量 Capture 收尾时的持久 Console Capture 生命周期判断。
+- 建议改进：Stop 的会话终结、文件刷新、summary 和哈希生成优先由 MCP Server 执行；Unity Context 不可用时仍返回服务端实际终态。若外层等待超时后检测到会话已停止，应返回 `ok=true`、`terminal=true`，并把 `EditorContextStale` 作为独立诊断字段，而不是失败状态。
+- 预期效率收益：避免每轮测试结束后的重复 Stop、状态恢复与人工核对，预计节省 1～3 分钟，并降低遗留 active capture 风险。
+- 优先级：P1
+- 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 模拟 Stop 期间 Unity Context Stale；工具仍完成服务端终结并一次返回 `active=false`、summary path、bytes、SHA256 和独立诊断；连续重复 Stop 幂等成功且不生成重复产物。
+- 相关工具与证据：`unity_console_capture_stop`、`unity_console_capture_list`；xclient2 sessionId=`console_20260901_211403_011_8465f050`；SHA256=`0c9493900e7bc1fc7884ae284cab56a09e1c7004a038a2f039e300e9cd9e758e`。
+- 项目侧双向引用：`F:\xclient2\TODO_UPilot.mcd` 的“2026-08-22 - Console Capture 读取导致 Unity Bridge 瞬时断连”。
+- 当前状态：待处理。
 
 ### [已完成] 通用长作业 jobSpec 只读预校验
 

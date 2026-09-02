@@ -15,12 +15,19 @@ namespace CodingRiver.UPilot
     {
         private string _message;
         private string _copyText;
+        private string _copyButtonText = "复制全部";
+        private string _copiedButtonText;
+        private float _copyButtonWidth = 90f;
         private string _confirmButtonText = "OK";
         private string _cancelButtonText;
         private bool _richText;
         private bool _showCancelButton;
         private bool _confirmed;
+        private bool _copied;
         private Vector2 _scroll;
+
+        private static readonly Vector2 DefaultMinimumSize = new Vector2(640f, 420f);
+        private static readonly Vector2 DefaultWindowSize = new Vector2(720f, 520f);
 
         public static void ShowDialog(string title, string message)
         {
@@ -36,6 +43,33 @@ namespace CodingRiver.UPilot
         public static void ShowDialog(string title, string message, bool richText, string copyText)
         {
             var window = CreateDialog(title, message, richText, copyText);
+            window.ShowUtility();
+        }
+
+        /// <summary>
+        /// Shows a configurable non-modal scrollable message window.
+        /// </summary>
+        public static void ShowDialog(
+            string title,
+            string message,
+            bool richText,
+            string copyText,
+            string copyButtonText,
+            string copiedButtonText,
+            string closeButtonText,
+            Vector2 windowSize)
+        {
+            var window = CreateDialog(
+                title,
+                message,
+                richText,
+                copyText,
+                windowSize,
+                windowSize);
+            window._copyButtonText = string.IsNullOrEmpty(copyButtonText) ? "复制全部" : copyButtonText;
+            window._copiedButtonText = copiedButtonText;
+            window._copyButtonWidth = 110f;
+            window._confirmButtonText = string.IsNullOrEmpty(closeButtonText) ? "关闭" : closeButtonText;
             window.ShowUtility();
         }
 
@@ -63,19 +97,22 @@ namespace CodingRiver.UPilot
             string title,
             string message,
             bool richText,
-            string copyText)
+            string copyText,
+            Vector2? minimumSize = null,
+            Vector2? windowSize = null)
         {
             var window = CreateInstance<UPilotScrollableDialog>();
             window.titleContent = new GUIContent(title);
             window._message = message ?? string.Empty;
             window._richText = richText;
             window._copyText = copyText ?? StripRichText(window._message);
-            window.minSize = new Vector2(640f, 420f);
+            window.minSize = minimumSize ?? DefaultMinimumSize;
+            var size = windowSize ?? DefaultWindowSize;
             window.position = new Rect(
-                Screen.currentResolution.width * 0.5f - 320f,
-                Screen.currentResolution.height * 0.5f - 260f,
-                720f,
-                520f);
+                Screen.currentResolution.width * 0.5f - size.x * 0.5f,
+                Screen.currentResolution.height * 0.5f - size.y * 0.5f,
+                size.x,
+                size.y);
             return window;
         }
 
@@ -131,8 +168,15 @@ namespace CodingRiver.UPilot
             using (new EditorGUILayout.HorizontalScope())
             {
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button("复制全部", GUILayout.Width(90f), GUILayout.Height(26f)))
+                var copyButtonText = _copied && !string.IsNullOrEmpty(_copiedButtonText)
+                    ? _copiedButtonText
+                    : _copyButtonText;
+                if (GUILayout.Button(copyButtonText, GUILayout.Width(_copyButtonWidth), GUILayout.Height(26f)))
+                {
                     EditorGUIUtility.systemCopyBuffer = _copyText;
+                    _copied = true;
+                    Repaint();
+                }
 
                 if (GUILayout.Button(_confirmButtonText, GUILayout.Width(90f), GUILayout.Height(26f)))
                 {

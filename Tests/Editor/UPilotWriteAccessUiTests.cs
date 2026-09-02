@@ -121,6 +121,18 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotMainWindow.UnityBridgePortLabel, Is.EqualTo("Unity Bridge 端口"));
             Assert.That(UPilotMainWindow.McpEndpointTitle, Is.EqualTo("MCP 连接地址"));
             Assert.That(UPilotMainWindow.McpEndpointHint, Does.Contain("AI 客户端"));
+            Assert.That(UPilotMainWindow.AiConnectionValidationMenuLabel, Is.EqualTo("验证 AI 连接状态"));
+            Assert.That(UPilotMainWindow.AiConnectionValidationPrompt, Does.Contain("unity_mcp_status"));
+            Assert.That(UPilotMainWindow.AiConnectionValidationSuccessCriteria, Does.Contain("connected=true"));
+            Assert.That(UPilotMainWindow.AiConnectionValidationSuccessCriteria, Does.Contain("serverReady=true"));
+            Assert.That(
+                UPilotMainWindow.AiConnectionValidationSuccessCriteria,
+                Does.Contain("paths.unityProjectAbsolute"));
+            var validationHelp = UPilotMainWindow.BuildAiConnectionValidationHelpMessage("D:\\ExampleProject");
+            Assert.That(validationHelp, Does.Contain(UPilotMainWindow.AiConnectionValidationPrompt));
+            Assert.That(validationHelp, Does.Contain(UPilotMainWindow.AiConnectionValidationSuccessCriteria));
+            Assert.That(validationHelp, Does.Contain("D:\\ExampleProject"));
+            Assert.That(validationHelp, Does.Not.Contain("<b>"));
             Assert.That(UPilotMainWindow.McpEndpointAddressFontSize, Is.EqualTo(16));
             Assert.That(UPilotMainWindow.McpEndpointButtonFontSize, Is.EqualTo(13));
             Assert.That(UPilotMainWindow.McpEndpointControlHeight, Is.EqualTo(32f));
@@ -139,6 +151,11 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 typeof(UPilotMainWindow).GetMethod(
                     "DrawRuntimeDetails",
+                    BindingFlags.Instance | BindingFlags.NonPublic),
+                Is.Not.Null);
+            Assert.That(
+                typeof(UPilotMainWindow).GetMethod(
+                    "ShowAiConnectionValidationHelp",
                     BindingFlags.Instance | BindingFlags.NonPublic),
                 Is.Not.Null);
             Assert.That(

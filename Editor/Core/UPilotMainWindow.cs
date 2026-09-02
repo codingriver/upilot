@@ -54,6 +54,11 @@ namespace CodingRiver.UPilot
         internal const string UnityBridgePortLabel = "Unity Bridge 端口";
         internal const string McpEndpointTitle = "MCP 连接地址";
         internal const string McpEndpointHint = "AI 客户端连接 UPilot 时使用此 HTTP 地址";
+        internal const string AiConnectionValidationMenuLabel = "验证 AI 连接状态";
+        internal const string AiConnectionValidationPrompt =
+            "请实际调用 UPilot 的 unity_mcp_status，打印所有输出。";
+        internal const string AiConnectionValidationSuccessCriteria =
+            "若返回 connected=true、serverReady=true，且 paths.unityProjectAbsolute 是当前工程，则说明连接正常。";
         internal const int McpEndpointAddressFontSize = 16;
         internal const int McpEndpointButtonFontSize = 13;
         internal const float McpEndpointControlHeight = 32f;
@@ -1971,8 +1976,36 @@ namespace CodingRiver.UPilot
                 UPilotUpdateService.Instance.CheckForUpdates(ShowNotice);
             });
             menu.AddSeparator("");
+            menu.AddItem(
+                new GUIContent(AiConnectionValidationMenuLabel),
+                false,
+                ShowAiConnectionValidationHelp);
             menu.AddItem(new GUIContent("高级设置"), false, UPilotStatusWindow.Open);
             menu.ShowAsContext();
+        }
+
+        private void ShowAiConnectionValidationHelp()
+        {
+            UPilotScrollableDialog.ShowDialog(
+                AiConnectionValidationMenuLabel,
+                BuildAiConnectionValidationHelpMessage(UPilotProjectConfig.ProjectRoot),
+                richText: false,
+                copyText: AiConnectionValidationPrompt,
+                copyButtonText: "复制验证指令",
+                copiedButtonText: "已复制",
+                closeButtonText: "关闭",
+                windowSize: new Vector2(560f, 320f));
+        }
+
+        internal static string BuildAiConnectionValidationHelpMessage(string projectRoot)
+        {
+            return
+                "界面“已就绪”仅表示本地服务正常，不代表 AI 已实际调用 UPilot。\n\n" +
+                "在 AI 客户端发送：\n" +
+                AiConnectionValidationPrompt + "\n\n" +
+                "验证成功标准：\n" +
+                AiConnectionValidationSuccessCriteria + "\n\n" +
+                "期望工程：\n" + (projectRoot ?? string.Empty);
         }
 
         private void DrawNotice(UPilotMainState state)
