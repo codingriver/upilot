@@ -25,7 +25,9 @@ namespace CodingRiver.UPilot
             bool usesCurrentUrl,
             string errorMessage = "",
             string configuredUrl = "",
-            string configurationIssue = "")
+            string configurationIssue = "",
+            bool isEnabled = true,
+            bool selectionInitialized = true)
         {
             ClientName = clientName;
             ConfigPath = configPath;
@@ -35,6 +37,8 @@ namespace CodingRiver.UPilot
             ErrorMessage = errorMessage ?? "";
             ConfiguredUrl = configuredUrl ?? "";
             ConfigurationIssue = configurationIssue ?? "";
+            IsEnabled = isEnabled;
+            SelectionInitialized = selectionInitialized;
         }
 
         public string ClientName { get; }
@@ -45,14 +49,18 @@ namespace CodingRiver.UPilot
         public string ErrorMessage { get; }
         public string ConfiguredUrl { get; }
         public string ConfigurationIssue { get; }
+        public bool IsEnabled { get; }
+        public bool SelectionInitialized { get; }
         public bool IsConfigured => FileExists && HasUPilotEntry && UsesCurrentUrl &&
                                     string.IsNullOrEmpty(ErrorMessage) &&
                                     string.IsNullOrEmpty(ConfigurationIssue);
+        public bool IsSatisfied => !IsEnabled || IsConfigured;
 
         public string StateText
         {
             get
             {
+                if (!IsEnabled) return "未启用";
                 if (!string.IsNullOrEmpty(ErrorMessage)) return "读取失败";
                 if (!FileExists) return "未配置";
                 if (!HasUPilotEntry) return "缺少 UPilot 配置";
@@ -241,12 +249,19 @@ namespace CodingRiver.UPilot
         private const string SkillName = "upilot-unity-mcp";
         private const string AgentRulesTemplateFileName = "AGENTS.md.template";
         private const string AutoSetupKeyPrefix = "CodingRiver.UPilot.AgentSetup.AutoRulesWritten.";
-        private const int AgentRulesTemplateVersion = 22;
-        private const int SkillInstallTemplateVersion = 19;
+        private const int AgentRulesTemplateVersion = 29;
+        private const int SkillInstallTemplateVersion = 29;
         private const int OpenCodeMcpTimeoutMs = 30000;
         private const string SkillInstallMetadataFileName = ".upilot-install.json";
         private const string ManagedBlockStart = "<!-- upilot:start -->";
         private const string ManagedBlockEnd = "<!-- upilot:end -->";
+        private static readonly string[] SupportedAgentClientIds =
+        {
+            "codex",
+            "claude-code",
+            "cursor",
+            "opencode",
+        };
 
         public static string McpUrl => GetMcpUrl(UPilotBridge.Instance.HttpPort);
         public static string HealthUrl => GetHealthUrl(UPilotBridge.Instance.HttpPort);
@@ -256,6 +271,31 @@ namespace CodingRiver.UPilot
 
         public static AgentMcpConfigStatus[] GetMcpConfigStatuses()
         {
+            var rawStatuses = GetRawMcpConfigStatuses();
+            var agentsConfig = UPilotProjectConfig.Current.agents ?? new UPilotAgentsConfig();
+            var selectedIds = ResolveEnabledAgentClientIds(rawStatuses, agentsConfig);
+            var selectionInitialized = agentsConfig.selectionInitialized;
+
+            // Existing projects predate the explicit selection field. Once recognized
+            // UPilot entries exist, persist that inferred choice so later file loss is
+            // reported as a missing configuration instead of silently disabling a client.
+            if (!selectionInitialized && rawStatuses.Any(status => status.HasUPilotEntry))
+            {
+                SetEnabledAgentClients(selectedIds);
+                selectionInitialized = true;
+            }
+
+            var selected = new HashSet<string>(selectedIds, StringComparer.Ordinal);
+            return rawStatuses
+                .Select(status => WithAgentSelection(
+                    status,
+                    selected.Contains(GetAgentClientId(status.ClientName)),
+                    selectionInitialized))
+                .ToArray();
+        }
+
+        private static AgentMcpConfigStatus[] GetRawMcpConfigStatuses()
+        {
             var projectRoot = GetProjectRoot();
             return new[]
             {
@@ -264,6 +304,96 @@ namespace CodingRiver.UPilot
                 InspectJsonConfig("Cursor", Path.Combine(projectRoot, ".cursor", "mcp.json")),
                 InspectOpenCodeConfig("OpenCode", ResolveOpenCodeConfigPath(projectRoot)),
             };
+        }
+
+        internal static string[] ResolveEnabledAgentClientIds(
+            AgentMcpConfigStatus[] rawStatuses,
+            UPilotAgentsConfig agentsConfig)
+        {
+            if (agentsConfig != null && agentsConfig.selectionInitialized)
+                return NormalizeAgentClientIds(agentsConfig.enabledClients);
+
+            var inferred = (rawStatuses ?? Array.Empty<AgentMcpConfigStatus>())
+                .Where(status => status.HasUPilotEntry)
+                .Select(status => GetAgentClientId(status.ClientName))
+                .Where(id => !string.IsNullOrEmpty(id))
+                .ToArray();
+            return inferred.Length > 0
+                ? NormalizeAgentClientIds(inferred)
+                : new[] { "codex" };
+        }
+
+        internal static string[] NormalizeAgentClientIds(IEnumerable<string> clientNamesOrIds)
+        {
+            var selected = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var value in clientNamesOrIds ?? Array.Empty<string>())
+            {
+                var id = GetAgentClientId(value);
+                if (!string.IsNullOrEmpty(id))
+                    selected.Add(id);
+            }
+
+            return SupportedAgentClientIds.Where(selected.Contains).ToArray();
+        }
+
+        public static void SetEnabledAgentClients(IEnumerable<string> clientNamesOrIds)
+        {
+            var config = UPilotProjectConfig.Current;
+            config.agents ??= new UPilotAgentsConfig();
+            config.agents.selectionInitialized = true;
+            config.agents.enabledClients = NormalizeAgentClientIds(clientNamesOrIds);
+            UPilotProjectConfig.Save(config);
+        }
+
+        public static void SetAgentEnabled(string clientNameOrId, bool enabled)
+        {
+            var id = GetAgentClientId(clientNameOrId);
+            if (string.IsNullOrEmpty(id))
+                throw new ArgumentException($"Unsupported Agent client: {clientNameOrId}", nameof(clientNameOrId));
+
+            var config = UPilotProjectConfig.Current;
+            config.agents ??= new UPilotAgentsConfig();
+            var selected = new HashSet<string>(
+                ResolveEnabledAgentClientIds(GetRawMcpConfigStatuses(), config.agents),
+                StringComparer.Ordinal);
+            if (enabled)
+                selected.Add(id);
+            else
+                selected.Remove(id);
+            SetEnabledAgentClients(selected);
+        }
+
+        public static string GetAgentClientId(string clientNameOrId)
+        {
+            switch ((clientNameOrId ?? "").Trim().ToLowerInvariant())
+            {
+                case "codex": return "codex";
+                case "claude":
+                case "claude code":
+                case "claude-code": return "claude-code";
+                case "cursor": return "cursor";
+                case "opencode":
+                case "open code": return "opencode";
+                default: return "";
+            }
+        }
+
+        private static AgentMcpConfigStatus WithAgentSelection(
+            AgentMcpConfigStatus status,
+            bool isEnabled,
+            bool selectionInitialized)
+        {
+            return new AgentMcpConfigStatus(
+                status.ClientName,
+                status.ConfigPath,
+                status.FileExists,
+                status.HasUPilotEntry,
+                status.UsesCurrentUrl,
+                status.ErrorMessage,
+                status.ConfiguredUrl,
+                status.ConfigurationIssue,
+                isEnabled,
+                selectionInitialized);
         }
 
         public static AgentRuleConfigStatus[] GetRuleConfigStatuses()
@@ -295,35 +425,30 @@ namespace CodingRiver.UPilot
             EditorApplication.delayCall += EnsureAgentRulesOnce;
         }
 
-        [MenuItem("UPilot/Advanced/Agent Setup/Write Agent Rules", false, 310)]
         public static void MenuWriteAgentRules()
         {
             var result = WriteAgentRules(overwriteExisting: false);
             ReportResult("Agent rules", result);
         }
 
-        [MenuItem("UPilot/Advanced/Agent Setup/Write Codex MCP Config", false, 320)]
         public static void MenuWriteCodexMcpConfig()
         {
             var result = WriteCodexMcpConfig(promptBeforeOverwrite: true);
             ReportResult("Codex MCP config", result);
         }
 
-        [MenuItem("UPilot/Advanced/Agent Setup/Write Claude Code MCP Config", false, 321)]
         public static void MenuWriteClaudeCodeMcpConfig()
         {
             var result = WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true);
             ReportResult("Claude Code MCP config", result);
         }
 
-        [MenuItem("UPilot/Advanced/Agent Setup/Write Cursor MCP Config", false, 322)]
         public static void MenuWriteCursorMcpConfig()
         {
             var result = WriteCursorMcpConfig(promptBeforeOverwrite: true);
             ReportResult("Cursor MCP config", result);
         }
 
-        [MenuItem("UPilot/Advanced/Agent Setup/Write OpenCode MCP Config", false, 323)]
         public static void MenuWriteOpenCodeMcpConfig()
         {
             var result = WriteOpenCodeMcpConfig(promptBeforeOverwrite: true);
@@ -938,7 +1063,7 @@ namespace CodingRiver.UPilot
             foreach (var file in files)
             {
                 var text = File.ReadAllText(file, Encoding.UTF8);
-                var matches = Regex.Matches(text, "(?<![A-Za-z0-9_])(unity_[a-z0-9_]+|reflection_eval)(?![A-Za-z0-9_])");
+                var matches = Regex.Matches(text, "(?<![A-Za-z0-9_])(unity_[a-z0-9_]+)(?![A-Za-z0-9_])");
                 foreach (Match match in matches)
                 {
                     var name = match.Groups[1].Value;
@@ -1621,12 +1746,12 @@ namespace CodingRiver.UPilot
 
             foreach (var file in files)
             {
-                if (string.Equals(Path.GetFileName(file), SkillInstallMetadataFileName, StringComparison.OrdinalIgnoreCase) ||
-                    ShouldSkipSkillInstallPath(file))
-                    continue;
-
                 var relativePath = file.Substring(target.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     .Replace('\\', '/');
+                if (string.Equals(Path.GetFileName(file), SkillInstallMetadataFileName, StringComparison.OrdinalIgnoreCase) ||
+                    relativePath.Split('/').Any(ShouldSkipSkillInstallPath))
+                    continue;
+
                 var pathBytes = Encoding.UTF8.GetBytes(relativePath);
                 sha256.TransformBlock(pathBytes, 0, pathBytes.Length, pathBytes, 0);
                 var separator = new byte[] { 0 };

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
+using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -202,6 +203,13 @@ namespace CodingRiver.UPilot
 
             if (!codex && !claudeCode && !cursor && !openCode)
                 codex = true;
+
+            var enabledAgentClients = new List<string>();
+            if (codex) enabledAgentClients.Add("Codex");
+            if (claudeCode) enabledAgentClients.Add("Claude Code");
+            if (cursor) enabledAgentClients.Add("Cursor");
+            if (openCode) enabledAgentClients.Add("OpenCode");
+            UPilotAgentSetup.SetEnabledAgentClients(enabledAgentClients);
 
             EnsureAvailablePortsWhenStopped();
 
@@ -500,7 +508,7 @@ namespace CodingRiver.UPilot
             if (statuses == null) return;
             foreach (var status in statuses)
             {
-                if (!status.FileExists && !status.HasUPilotEntry)
+                if (!status.IsEnabled || !status.HasUPilotEntry)
                     continue;
 
                 if (status.ClientName == "Codex")

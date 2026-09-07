@@ -1,7 +1,9 @@
 {
     "name": "UPilot.Editor",
     "rootNamespace": "CodingRiver.UPilot",
-    "references": [],
+    "references": [
+        "UPilot.Execution.Core"
+    ],
     "includePlatforms": [
         "Editor"
     ],

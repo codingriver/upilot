@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import base64
 import types
 from pathlib import Path
 
@@ -1089,35 +1090,32 @@ def test_compile_result_does_not_overwrite_completed_phase_with_accepted() -> No
     assert service.server.state.compile.phase == "completed"
 
 
-def test_screenshot_editor_window_fallbacks_include_degrade_metadata() -> None:
+def test_screenshot_editor_window_is_strict_snapshot_wrapper() -> None:
     from upilot_mcp.domain.screenshot_service import ScreenshotDomainService
 
-    class _Dispatcher:
-        async def call(self, request_id: str, name: str, payload: dict, **_: object) -> ToolResponse:
-            assert name == "screenshot.editorWindow"
-            return fail(request_id, "EDITOR_WINDOW_CAPTURE_UNAVAILABLE", "capture unavailable")
+    async def _windows(**_: object) -> ToolResponse:
+        return ok("req-windows", {"windows": [{
+            "instanceId": 42,
+            "title": "资源审计中心",
+            "fullTypeName": "Example.AssetAuditWindow",
+            "width": 900,
+            "height": 640,
+            "hasFocus": True,
+        }]})
 
-    async def _scene_view(**_: object) -> ToolResponse:
-        return ok(
-            "req-scene",
-            {
-                "imageData": "x" * 80,
-                "width": 320,
-                "height": 180,
-                "format": "png",
-            },
-        )
+    async def _capture(source: str, target: dict) -> ToolResponse:
+        assert source == "editorWindow"
+        assert target["instanceId"] == "42"
+        return ok("req-snapshot", {"source": source, "snapshot": {"snapshotId": "snapshot-1"}})
 
     service = ScreenshotDomainService.__new__(ScreenshotDomainService)
-    service.dispatcher = _Dispatcher()
-    service.screenshot_scene_view = _scene_view
+    service.editor_windows_list = _windows
+    service._capture_snapshot_screenshot = _capture
 
     result = asyncio.run(service.screenshot_editor_window("资源审计中心", degrade="auto"))
     assert result.ok is True
-    assert result.data["degraded"] is True
-    assert result.data["source"] == "sceneView"
-    assert result.data["degradeReason"] == "EDITOR_WINDOW_CAPTURE_UNAVAILABLE"
-    assert result.data["requestedWindowTitle"] == "资源审计中心"
+    assert result.data["source"] == "editorWindow"
+    assert result.data["snapshot"]["snapshotId"] == "snapshot-1"
 
 
 def test_screenshot_save_preserves_scene_view_repaint_evidence(tmp_path: Path) -> None:
@@ -1132,19 +1130,24 @@ def test_screenshot_save_preserves_scene_view_repaint_evidence(tmp_path: Path) -
         "matchedInstanceId": 99,
     }
 
-    class _Dispatcher:
-        async def call(self, request_id: str, name: str, payload: dict, **_: object) -> ToolResponse:
-            assert name == "screenshot.save"
-            return ok(request_id, {"path": payload["path"], "source": "sceneView", **evidence})
+    async def _scene_view(*_: object, **__: object) -> ToolResponse:
+        return ok("req-scene", {
+            "source": "sceneView",
+            "snapshot": {"snapshotId": "snapshot-scene"},
+            "imageData": base64.b64encode(b"snapshot-png-bytes").decode("ascii"),
+            **evidence,
+        })
 
     service = ScreenshotDomainService.__new__(ScreenshotDomainService)
-    service.dispatcher = _Dispatcher()
     service._resolve_screenshot_save_path = lambda *_: tmp_path / "scene-view.png"
+    service.screenshot_scene_view = _scene_view
 
     result = asyncio.run(service.screenshot_save(source="sceneView"))
     assert result.ok is True
     for key, value in evidence.items():
         assert result.data[key] == value
+    assert result.data["savedBy"] == "snapshot_wrapper"
+    assert (tmp_path / "scene-view.png").read_bytes() == b"snapshot-png-bytes"
 
 
 def test_png_pixel_stats_and_compare_are_structured(tmp_path: Path) -> None:
@@ -1386,7 +1389,7 @@ def test_mcp_tool_functions_do_not_declare_legacy_string_outputs() -> None:
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if not node.name.startswith("unity_") and node.name != "reflection_eval":
+            if not node.name.startswith("unity_"):
                 continue
             if isinstance(node.returns, ast.Name) and node.returns.id == "str":
                 offenders.append(f"{path.name}:{node.name}")
@@ -1401,7 +1404,7 @@ def test_mcp_server_is_only_a_runtime_composition_root() -> None:
         node.name
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and (node.name.startswith("unity_") or node.name == "reflection_eval")
+        and node.name.startswith("unity_")
     ]
 
     assert public_tools == []

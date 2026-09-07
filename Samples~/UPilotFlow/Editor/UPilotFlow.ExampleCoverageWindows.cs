@@ -410,7 +410,6 @@ namespace CodingRiver.UPilot.Flow.Examples
 
     public sealed class ExampleCoverageInputWindow : ExampleCoverageWindowBase
     {
-        [MenuItem("UPilot/Flow/Examples/Coverage Input Window")]
         public static void Open()
         {
             ExampleCoverageInputWindow window = GetWindow<ExampleCoverageInputWindow>();

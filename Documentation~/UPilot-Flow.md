@@ -44,6 +44,13 @@ steps:
 
 Flow 关闭时这些工具不注册。通过 `unity_capabilities_get` 查看关闭原因和启用条件。
 
+## Unity 菜单与示例
+
+- `UPilot > Flow > Test Runner` 打开 Flow 测试运行器。
+- `UPilot > Flow > Settings` 打开项目级 Flow 设置。
+- `UPilot > Flow > Enable` / `Disable` 管理可选模块状态。
+- Test Runner 工具栏中的 `Examples` 集中提供已导入 YAML、Examples 和 Samples 窗口入口；示例不再占用 `UPilot > Flow` 子菜单。
+
 ## Timeouts And Reports
 
 - 默认步骤超时：10000ms。

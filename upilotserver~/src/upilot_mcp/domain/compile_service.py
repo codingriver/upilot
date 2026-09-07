@@ -151,7 +151,12 @@ class CompileDomainService:
                 r.error.message if r.error else "unknown",
             )
 
-    async def compile(self) -> ToolResponse:
+    async def compile(
+        self,
+        *,
+        write_batch_id: str = "",
+        write_batch_created_at: int = 0,
+    ) -> ToolResponse:
         request_id = new_id("req")
         state_r, execution = await self._refresh_execution_state()
         if not state_r.ok:
@@ -167,8 +172,10 @@ class CompileDomainService:
                 execution,
             )
         compile_state = self.server.state.compile
-        compile_state.phase = "queued"
-        compile_state.status = "queued"
+        uses_v2_state = bool(self.server.state.producer_epoch)
+        if not uses_v2_state:
+            compile_state.phase = "queued"
+            compile_state.status = "queued"
         manager = getattr(self.server, "session_manager", None)
         active_session = getattr(manager, "active", None)
         compile_state.initial_session_id = str(
@@ -176,11 +183,24 @@ class CompileDomainService:
         )
         compile_state.command_queued_at = now_ms()
         compile_state.unity_accepted_at = 0
-        compile_state.started_at = 0
-        compile_state.finished_at = 0
-        compile_state.last_progress_at = compile_state.command_queued_at
+        if not uses_v2_state:
+            compile_state.started_at = 0
+            compile_state.finished_at = 0
+            compile_state.last_progress_at = compile_state.command_queued_at
+            compile_state.write_batch_id = write_batch_id
+            compile_state.write_batch_created_at = max(0, int(write_batch_created_at))
+            compile_state.terminal = False
+            compile_state.errors_verified = False
+            compile_state.verification_pending = True
         result = await self.dispatcher.call(
-            request_id, "compile.request", {"requestId": request_id}, timeout_ms=180000
+            request_id,
+            "compile.request",
+            {
+                "requestId": request_id,
+                "writeBatchId": write_batch_id,
+                "writeBatchCreatedAt": max(0, int(write_batch_created_at)),
+            },
+            timeout_ms=180000,
         )
 
         # If compile failed due to domain reload disconnect, wait for reconnect then return status
@@ -223,12 +243,16 @@ class CompileDomainService:
 
         if result.ok:
             compile_state.unity_accepted_at = now_ms()
-            terminal = bool(
+            if result.data:
+                compile_state.compile_operation_id = str(
+                    result.data.get("compileOperationId") or compile_state.compile_operation_id
+                )
+            terminal = bool(compile_state.terminal) if uses_v2_state else bool(
                 compile_state.finished_at
                 or compile_state.status in ("finished", "completed")
                 or compile_state.phase == "completed"
             )
-            if not terminal:
+            if not terminal and not uses_v2_state:
                 compile_state.status = (
                     "accepted"
                     if compile_state.status in ("idle", "queued")
@@ -236,6 +260,21 @@ class CompileDomainService:
                 )
                 compile_state.phase = "accepted"
                 compile_state.last_progress_at = compile_state.unity_accepted_at
+            execution = self.server.state.execution_state(
+                stale_after_ms=CONFIG.context_stale_ms
+            )
+            return ok(
+                request_id,
+                {
+                    **(result.data or {}),
+                    "status": str(execution.get("compilePhase") or "queued"),
+                    "phase": str(execution.get("compilePhase") or "queued"),
+                    "terminal": bool(execution.get("terminal")),
+                    "executionState": execution,
+                },
+                context=result.context,
+                timing=result.timing,
+            )
         return result
 
     async def compile_status(self, compile_request_id: str = "") -> ToolResponse:
@@ -243,11 +282,11 @@ class CompileDomainService:
         compile_state = self.server.state.compile
         data = self._compile_diagnostics()
         data["compileRequestId"] = compile_request_id or compile_state.compile_request_id
-        return ok(request_id, data)
+        return ok(request_id, data, context=data["executionState"])
 
     async def compile_errors(self, compile_request_id: str = "") -> ToolResponse:
         request_id = new_id("req")
-        # 强制 live：禁止回退缓存；若拉取失败视为无报错
+        # Force a live persisted error query. Transport failure is unknown, never "no errors".
         result = await self.dispatcher.call(
             request_id, "compile.errors.get", {}, timeout_ms=45000
         )
@@ -261,23 +300,28 @@ class CompileDomainService:
             data.setdefault("historicalWarningCount", 0)
             data.setdefault("importerWarningCount", 0)
             data.setdefault("diagnosticSource", "compile.errors.get")
-            return ok(request_id, data)
+            data["status"] = "failed" if int(data.get("total") or 0) > 0 else str(
+                data.get("status") or self.server.state.compile.status or "completed"
+            )
+            data["phase"] = "failed" if int(data.get("total") or 0) > 0 else str(
+                data.get("phase") or self.server.state.compile.phase or "completed"
+            )
+            data["terminal"] = bool(data.get("terminal", self.server.state.compile.terminal))
+            data["executionState"] = self.server.state.execution_state(
+                stale_after_ms=CONFIG.context_stale_ms
+            )
+            return ok(request_id, data, context=data["executionState"])
 
-        # live 拉取失败：按要求视为“无报错”，并附加辅助诊断信息
+        # A failed live query cannot prove a compile result.
         dll_mtime_ms = self._detect_library_dll_mtime()
-        return ok(
+        return fail(
             request_id,
+            result.error.code if result.error else "COMPILE_ERRORS_UNAVAILABLE",
+            result.error.message if result.error else "Could not query Unity's persisted compile errors.",
             {
-                "errors": [],
-                "total": 0,
                 "compileRequestId": compile_request_id,
                 "source": "live",
                 "mode": "strict_live",
-                "liveFetch": "failed_as_empty",
-                "warningCount": 0,
-                "currentCompileWarningCount": 0,
-                "historicalWarningCount": 0,
-                "importerWarningCount": 0,
                 "diagnosticSource": "compile.errors.get-unavailable",
                 "diagnostics": {
                     "libraryDllLatestWriteMs": dll_mtime_ms,
@@ -372,6 +416,9 @@ class CompileDomainService:
             compile_phase = str(execution.get("compilePhase") or "idle")
 
             if execution.get("blockedReason") == "PlayMode":
+                terminal_execution = self.server.state.execution_state(
+                    stale_after_ms=CONFIG.context_stale_ms
+                )
                 return ok(
                     request_id,
                     {
@@ -401,17 +448,22 @@ class CompileDomainService:
                 if errors_result.ok and errors_result.data:
                     error_total = int(errors_result.data.get("total") or 0)
                     if error_total > 0:
-                        return fail(
+                        failed_execution = self.server.state.execution_state(
+                            stale_after_ms=CONFIG.context_stale_ms
+                        )
+                        return ok(
                             request_id,
-                            "COMPILE_ERROR",
-                            "Unity compilation finished with errors.",
                             {
                                 **self._compile_diagnostics(),
+                                "status": "failed",
+                                "phase": "failed",
+                                "terminal": True,
                                 "pollCount": polls,
                                 "elapsedS": round(timeout_s - (deadline - time.monotonic()), 2),
                                 "reconnectedDuringWait": reconnect_waited,
                                 "errors": errors_result.data.get("errors") or [],
                             },
+                            context=failed_execution,
                         )
                     execution = self.server.state.execution_state(
                         stale_after_ms=CONFIG.context_stale_ms
@@ -423,22 +475,27 @@ class CompileDomainService:
                 and not editor_is_compiling
                 and compile_phase == "failed"
             ):
-                return fail(
+                failed_execution = self.server.state.execution_state(
+                    stale_after_ms=CONFIG.context_stale_ms
+                )
+                return ok(
                     request_id,
-                    "COMPILE_ERROR",
-                    "Unity compilation finished with errors.",
                     {
                         **self._compile_diagnostics(),
+                        "status": "failed",
+                        "phase": "failed",
+                        "terminal": True,
                         "pollCount": polls,
                         "elapsedS": round(timeout_s - (deadline - time.monotonic()), 2),
                         "reconnectedDuringWait": reconnect_waited,
                     },
+                    context=failed_execution,
                 )
 
             terminal_idle = (
                 context_ready
                 and not editor_is_compiling
-                and compile_phase not in ("queued", "compiling", "domain_reload", "verifying")
+                and compile_phase not in ("queued", "compiling", "compiler_finished", "domain_reload", "verifying")
             )
             if terminal_idle:
                 if polls == 1:
@@ -520,6 +577,9 @@ class CompileDomainService:
         prefer_events: bool = True,
         post_compile_delay_s: float = 3.0,
         attach_compile_request_id: str = "",
+        write_batch_id: str = "",
+        write_batch_created_at: int = 0,
+        compile_operation_id: str = "",
     ) -> ToolResponse:
         """Robust compile wait with post-compile cooldown and double-verification.
 
@@ -552,7 +612,7 @@ class CompileDomainService:
         initial_compile_phase = str(compile_state.phase or "").lower()
         editor_state = getattr(self.server.state, "editor", None)
         observed_active_compile = bool(
-            initial_compile_phase in {"queued", "compiling", "domain_reload", "verifying"}
+            initial_compile_phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}
             or bool(getattr(editor_state, "is_compiling", False))
         )
         initial_session_id = invocation_session_id
@@ -562,6 +622,13 @@ class CompileDomainService:
         ):
             initial_session_id = str(compile_state.initial_session_id)
         if attach_compile_request_id:
+            if compile_operation_id and compile_state.compile_operation_id != compile_operation_id:
+                return fail(
+                    request_id,
+                    "COMPILE_OPERATION_MISMATCH",
+                    "The requested compileOperationId does not match the active Unity compilation.",
+                    {"requestedCompileOperationId": compile_operation_id, "activeCompileOperationId": compile_state.compile_operation_id},
+                )
             attached_to_existing = True
             compile_r = ok(
                 request_id,
@@ -595,7 +662,14 @@ class CompileDomainService:
                     },
                 )
             else:
-                compile_r = await self.compile()
+                compile_r = await (
+                    self.compile(
+                        write_batch_id=write_batch_id,
+                        write_batch_created_at=write_batch_created_at,
+                    )
+                    if write_batch_id
+                    else self.compile()
+                )
                 if not compile_r.ok and compile_r.error and compile_r.error.code == "EDITOR_BUSY":
                     verify_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
                     if verify_r.ok and verify_r.data and bool(verify_r.data.get("isCompiling", False)):
@@ -630,6 +704,12 @@ class CompileDomainService:
             not wait_r.ok
             and wait_r.error
             and wait_r.error.code == "COMPILE_ERROR"
+        )
+        expected_compile_operation_id = str(
+            compile_operation_id
+            or (compile_r.data or {}).get("compileOperationId")
+            or self.server.state.compile.compile_operation_id
+            or ""
         )
         wait_interrupted_by_reload = bool(
             not wait_r.ok
@@ -705,20 +785,50 @@ class CompileDomainService:
         if errors_r.ok and errors_r.data:
             error_total = errors_r.data.get("total", 0)
             if error_total > 0:
-                return fail(
+                return ok(
                     request_id,
-                    "COMPILE_ERROR",
-                    f"编译失败，共 {error_total} 个错误",
                     {
+                        "status": "failed",
+                        "phase": "failed",
+                        "terminal": True,
                         "compileRequestId": compile_request_id,
                         "errors": errors_r.data.get("errors", []),
                         "errorTotal": error_total,
                         "source": errors_r.data.get("source", "unknown"),
                         "mode": errors_r.data.get("mode", "unknown"),
+                        "executionState": terminal_execution,
                     },
+                    context=terminal_execution,
                 )
 
-        # Step 6: Success
+        # Step 6: require the Unity-produced terminal identity/timestamp when a
+        # write batch was supplied. Legacy uncorrelated calls remain supported
+        # but explicitly report correlationVerified=false.
+        final_compile = self.server.state.compile
+        correlation_verified = bool(
+            write_batch_id
+            and final_compile.write_batch_id == write_batch_id
+            and final_compile.compile_operation_id
+            and final_compile.compile_operation_id == expected_compile_operation_id
+            and final_compile.terminal
+            and final_compile.errors_verified
+            and final_compile.last_compile_verified_at >= int(write_batch_created_at) > 0
+        )
+        if write_batch_id and not correlation_verified:
+            return fail(
+                request_id,
+                "COMPILE_CORRELATION_NOT_VERIFIED",
+                "Unity finished the workflow without proving that the registered write batch was the verified compilation input.",
+                {
+                    **self._compile_diagnostics(),
+                    "writeBatchId": write_batch_id,
+                    "writeBatchCreatedAt": write_batch_created_at,
+                    "compileOperationId": expected_compile_operation_id,
+                    "correlationVerified": False,
+                },
+            )
+
+        # Step 7: Success
         final_session_id = active_session_id()
         session_changed_during_compile = bool(
             initial_session_id
@@ -726,12 +836,19 @@ class CompileDomainService:
             and initial_session_id != final_session_id
         )
         reconnected_after_reload = reconnected_after_reload or session_changed_during_compile
+        final_execution = self.server.state.execution_state(
+            stale_after_ms=CONFIG.context_stale_ms
+        )
         return ok(
             request_id,
             {
                 **self._compile_diagnostics(),
                 "status": "success",
                 "compileRequestId": compile_request_id,
+                "compileOperationId": expected_compile_operation_id,
+                "writeBatchId": write_batch_id or final_compile.write_batch_id,
+                "writeBatchCreatedAt": write_batch_created_at or final_compile.write_batch_created_at,
+                "correlationVerified": correlation_verified,
                 "postCompileDelayS": actual_delay,
                 "reconnectedAfterReload": reconnected_after_reload,
                 "sessionChangedDuringCompile": session_changed_during_compile,
@@ -743,4 +860,5 @@ class CompileDomainService:
                 "attachedToExistingCompile": attached_to_existing,
                 "waitReportedCompileError": wait_reported_compile_error,
             },
+            context=final_execution,
         )

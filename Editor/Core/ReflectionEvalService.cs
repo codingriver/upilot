@@ -18,7 +18,7 @@ using UnityEngine;
 namespace CodingRiver.UPilot
 {
     /*
-     * reflection.eval / reflection_eval is a bounded, expression-only C# evaluator
+     * reflection.eval is the internal bounded, expression-only engine used by unity_reflection_call
      * for Unity Editor automation. It parses one C# expression statement, evaluates
      * it with reflection, and returns a formatted result.
      *

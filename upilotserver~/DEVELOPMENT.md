@@ -170,7 +170,10 @@ python -m pytest
 - WebSocket `8765` 是内部 Unity bridge 端口，不是面向 MCP client 的 endpoint；第三方 AI 客户端只使用 HTTP `/mcp`。
 - Python import module 为 `upilot_mcp`，对外发布名和命令为 `upilot-mcp`。
 - MCP 工具命名需要与实现路径保持一致。Roslyn 动态编译工具不再暴露，也不注册 Unity bridge `roslyn.*` 路由。
-- 稳定调用已有业务方法时应使用 `unity_reflection_call`；需要一条表达式级 eval 时使用 `reflection_eval`，对应 Unity bridge 路由 `reflection.eval`。
+- `unity_reflection_call` 是唯一公开反射执行入口：传 `typeName` + `methodName` 时转发 Unity bridge `reflection.call`，只传 `expression` 时转发内部 `reflection.eval` 引擎。两种请求形态在执行前互斥路由；不再提供独立表达式工具或兼容别名。
+- `csharp_eval`、`reflection_emit_type` 和 `execution_session` 必须通过 FastMCP 与 Registry 显式注册。四个执行入口的 tools/list 描述应说明请求形态、session/副作用/禁止重试边界，并为复杂参数提供 schema description；完整语法和错误恢复示例维护在 Skill 的 `references/execution-tools.md`，不要复制进 MCP 短描述。
+- C# 子集 profile 变更必须同步 Bridge capability、MCP schema、Agent Rules/Skill 版本和定向双 Unity 验收。V2 的逃逸 closure/async delegate 必须绑定 session，async void 永远拒绝；Registry 仍为 v5/187，不因语言节点增加而新增工具。
+- `unity_capabilities_get.execution` 透传 Unity Bridge 的 additive 能力字段。新增执行能力应同步更新 capability contract 测试；仅增加描述或 capability 字段不升级 Registry，只有工具集合或 Registry 语义变化才评估新版本。
 
 ## 排障
 

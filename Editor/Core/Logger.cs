@@ -149,6 +149,9 @@ namespace CodingRiver.UPilot
 
         private static bool ShouldLog(LogLevel level) => level >= MinLevel;
 
+        private static bool SuppressTransportConsole(string category) =>
+            UPilotTestService.Instance?.IsRunning == true && (category == "COMMAND" || category == "NETWORK");
+
         // ── 日志滚动 ──────────────────────────────────────────────────────────
 
         private const long MaxLogSize = 10L * 1024 * 1024; // 10 MB
@@ -289,7 +292,8 @@ namespace CodingRiver.UPilot
         {
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [{category,-8}] {message}");
-            WriteToUnityConsole($"[INFO ] [{category,-8}] {message}", LogType.Log);
+            if (!SuppressTransportConsole(category))
+                WriteToUnityConsole($"[INFO ] [{category,-8}] {message}", LogType.Log);
         }
 
         /// <summary>普通信息日志（带分类与标签）。</summary>
@@ -297,7 +301,8 @@ namespace CodingRiver.UPilot
         {
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [{category,-8}] {message}", tags);
-            WriteToUnityConsole($"[INFO ] [{category,-8}] {message}", LogType.Log, tags);
+            if (!SuppressTransportConsole(category))
+                WriteToUnityConsole($"[INFO ] [{category,-8}] {message}", LogType.Log, tags);
         }
 
         /// <summary>警告日志（带分类）。格式：[timestamp] [frame] [WARN ] [CATEGORY] message</summary>
@@ -399,7 +404,8 @@ namespace CodingRiver.UPilot
             var sign = isSend ? "SEND" : "RECV";
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [{category,-8}] [{sign}] {message}");
-            WriteToUnityConsole($"[INFO ] [{category,-8}] [{sign}] {message}", LogType.Log);
+            if (UPilotTestService.Instance?.IsRunning != true)
+                WriteToUnityConsole($"[INFO ] [{category,-8}] [{sign}] {message}", LogType.Log);
         }
 
         /// <summary>兼容旧网络日志接口。</summary>
@@ -408,7 +414,8 @@ namespace CodingRiver.UPilot
             var sign = isSend ? "SEND" : "RECV";
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [NET     ] [{sign}] {message}");
-            WriteToUnityConsole($"[INFO ] [NET     ] [{sign}] {message}", LogType.Log);
+            if (UPilotTestService.Instance?.IsRunning != true)
+                WriteToUnityConsole($"[INFO ] [NET     ] [{sign}] {message}", LogType.Log);
         }
 
         // ── 工具方法 ─────────────────────────────────────────────────────────

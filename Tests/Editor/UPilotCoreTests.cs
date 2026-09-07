@@ -166,13 +166,25 @@ namespace CodingRiver.UPilot.Tests
             var payload = new CompileErrorsPayload
             {
                 requestId = "compile-reload",
+                compileOperationId = "operation-1",
+                writeBatchId = "batch-1",
+                writeBatchCreatedAt = 90,
+                compileOrigin = "mcp",
                 status = "verifying",
                 phase = "verifying",
+                terminal = false,
+                verificationPending = true,
+                errorsVerified = false,
                 total = 0,
                 warningCount = 2,
                 startedAt = 100,
                 finishedAt = 200,
                 lastProgressAt = 250,
+                lastCompileRequestedAt = 95,
+                lastCompileStartedAt = 100,
+                lastCompilerFinishedAt = 200,
+                reloadId = "reload-1",
+                domainReloadObserved = true,
                 errors = new List<CompileErrorItemPayload>(),
             };
 
@@ -180,13 +192,51 @@ namespace CodingRiver.UPilot.Tests
                 JsonUtility.ToJson(payload));
 
             Assert.That(restored.requestId, Is.EqualTo("compile-reload"));
+            Assert.That(restored.compileOperationId, Is.EqualTo("operation-1"));
+            Assert.That(restored.writeBatchId, Is.EqualTo("batch-1"));
+            Assert.That(restored.writeBatchCreatedAt, Is.EqualTo(90));
+            Assert.That(restored.compileOrigin, Is.EqualTo("mcp"));
             Assert.That(restored.status, Is.EqualTo("verifying"));
             Assert.That(restored.phase, Is.EqualTo("verifying"));
             Assert.That(restored.warningCount, Is.EqualTo(2));
             Assert.That(restored.startedAt, Is.EqualTo(100));
             Assert.That(restored.finishedAt, Is.EqualTo(200));
             Assert.That(restored.lastProgressAt, Is.EqualTo(250));
+            Assert.That(restored.lastCompilerFinishedAt, Is.EqualTo(200));
+            Assert.That(restored.verificationPending, Is.True);
+            Assert.That(restored.terminal, Is.False);
+            Assert.That(restored.errorsVerified, Is.False);
+            Assert.That(restored.reloadId, Is.EqualTo("reload-1"));
+            Assert.That(restored.domainReloadObserved, Is.True);
             Assert.That(restored.errors, Is.Empty);
+        }
+
+        [Test]
+        public void HeartbeatSerializesCompleteExecutionStateResultCounts()
+        {
+            var message = new HeartbeatMessage
+            {
+                id = "heartbeat-1",
+                type = "heartbeat",
+                name = "session.heartbeat",
+                payload = new EditorExecutionStatePayload
+                {
+                    stateContractVersion = 2,
+                    snapshotId = "epoch:1:2",
+                    compilePhase = "failed",
+                    terminal = true,
+                    errorsVerified = true,
+                    errorCount = 2,
+                    warningCount = 3,
+                    preReloadPublishFailed = true,
+                },
+            };
+
+            var json = JsonUtility.ToJson(message);
+
+            Assert.That(json, Does.Contain("\"errorCount\":2"));
+            Assert.That(json, Does.Contain("\"warningCount\":3"));
+            Assert.That(json, Does.Contain("\"preReloadPublishFailed\":true"));
         }
 
         [Test]
@@ -303,6 +353,7 @@ namespace CodingRiver.UPilot.Tests
                     BindingFlags.NonPublic | BindingFlags.Static);
 
                 var result = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId });
+                var repeated = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId });
                 var persisted = JsonUtility.FromJson<ConsoleCaptureManifest>(
                     File.ReadAllText(manifestPath));
 
@@ -311,6 +362,9 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(persisted.active, Is.False);
                 Assert.That(persisted.finishedAtUtcMs, Is.GreaterThan(0));
                 Assert.That(persisted.sha256, Is.Not.Empty);
+                Assert.That(repeated.ok, Is.True);
+                Assert.That(repeated.session.active, Is.False);
+                Assert.That(repeated.session.sha256, Is.EqualTo(persisted.sha256));
                 Assert.That(File.Exists(summaryPath), Is.True);
             }
             finally
@@ -320,6 +374,58 @@ namespace CodingRiver.UPilot.Tests
                 if (Directory.Exists(directory))
                     Directory.Delete(directory, recursive: true);
             }
+        }
+
+        [Test]
+        public void ConsoleSummaryUsesSharedClassificationAndBoundedSamples()
+        {
+            var summary = new ConsoleSummaryPayload();
+            int[] modes = { 0, 1 << 9, 1 << 0, 1 << 1, 1 << 3 };
+            foreach (int mode in modes)
+            {
+                UPilotConsoleService.AddToSummary(summary, new ConsoleLogEntry
+                {
+                    logType = UPilotConsoleService.ModeToLogType(mode),
+                    message = "sample-" + mode,
+                }, samplesPerType: 1);
+            }
+            UPilotConsoleService.AddToSummary(summary, new ConsoleLogEntry
+            {
+                logType = "Error",
+                message = "second-error",
+            }, samplesPerType: 1);
+
+            Assert.That(summary.total, Is.EqualTo(6));
+            Assert.That(summary.logCount, Is.EqualTo(1));
+            Assert.That(summary.warningCount, Is.EqualTo(1));
+            Assert.That(summary.errorCount, Is.EqualTo(2));
+            Assert.That(summary.assertCount, Is.EqualTo(1));
+            Assert.That(summary.exceptionCount, Is.EqualTo(1));
+            Assert.That(summary.samples.Count, Is.EqualTo(5));
+        }
+
+        [Test]
+        public void ConsoleUPilotFilterKeepsBusinessLogsTriggeredThroughReflection()
+        {
+            const string reflectionStack =
+                "Business.Debug:WriteWarning()\n" +
+                "CodingRiver.UPilot.UPilotReflectionService:Invoke()";
+            const string loggerStack =
+                "UnityEngine.Debug:Log(object)\n" +
+                "CodingRiver.UPilot.Logger:WriteToUnityConsole(string,UnityEngine.LogType,string[])";
+
+            Assert.That(
+                UPilotConsoleService.IsUPilotOwnedLog("business UPilot integration warning", reflectionStack),
+                Is.False);
+            Assert.That(
+                UPilotConsoleService.IsUPilotOwnedLog("[INFO ] [COMMAND ] request", string.Empty),
+                Is.True);
+            Assert.That(
+                UPilotConsoleService.IsUPilotOwnedLog("ordinary message", loggerStack),
+                Is.True);
+            Assert.That(
+                UPilotConsoleService.IsUPilotOwnedLog("[UPilot Flow] infrastructure", string.Empty),
+                Is.True);
         }
 
         [Test]
@@ -520,13 +626,23 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("unity_capabilities_get"));
             Assert.That(text, Does.Contain("prefer an available UPilot semantic tool"));
             Assert.That(text, Does.Contain("Use `unity_tools_find` for targeted discovery"));
-            Assert.That(text, Does.Contain("prefer one `unity_safe_compile_and_wait` call"));
+            Assert.That(text, Does.Contain("`unity_reflection_call` is the single public generic reflection entry point"));
+            Assert.That(text, Does.Contain("pass `typeName` + `methodName`"));
+            Assert.That(text, Does.Contain("pass only `expression`"));
+            Assert.That(text, Does.Contain("`kind=auto` selects the engine"));
+            Assert.That(text, Does.Contain("never retries through the other engine"));
+            Assert.That(text, Does.Contain("No separate public reflection-expression alias is exposed"));
+            Assert.That(text, Does.Contain("unity_write_batch_register(paths, compileWhenEditMode=true)"));
+            Assert.That(text, Does.Contain("automatically performs one sync and one safe compile"));
+            Assert.That(text, Does.Contain("do not start a second manual sync or compile"));
+            Assert.That(text, Does.Contain("`compiler_finished`, `domain_reload`, and `verifying`"));
+            Assert.That(text, Does.Contain("`ok=true` with `status/phase=failed`"));
             Assert.That(text, Does.Contain("`ready`, `blocked`, `blockedReason`, `authoritative`, `isStale`, and `nextAction`"));
             Assert.That(text, Does.Contain("Do not infer readiness from raw `isPlaying` or `isCompiling`"));
             Assert.That(text, Does.Contain("Do not compile again when no code changed"));
             Assert.That(text, Does.Contain("Optional UPilot Tracer"));
             Assert.That(text, Does.Contain("`追踪器`, or `the tracer` as UPilot Tracer (`UPilot 追踪器`)"));
-            Assert.That(text, Does.Contain("All trace points, global stack capture, and Console output default to disabled"));
+            Assert.That(text, Does.Contain("All trace points, stack capture, and Console output default to disabled"));
             Assert.That(text, Does.Contain("saves without applying by default"));
             Assert.That(text, Does.Contain("Do not use Native, InternalCall, injected"));
             Assert.That(text, Does.Contain("restore the original configuration"));
@@ -1732,6 +1848,11 @@ namespace CodingRiver.UPilot.Tests
                 var cacheDirectory = Path.Combine(directory, "scripts", "__pycache__");
                 Directory.CreateDirectory(cacheDirectory);
                 File.WriteAllBytes(Path.Combine(cacheDirectory, "generated.pyc"), new byte[] { 1, 2, 3 });
+                File.WriteAllText(Path.Combine(cacheDirectory, "cache.json"), "{}");
+                File.WriteAllText(Path.Combine(directory, "SKILL.md.meta"), "ignored meta");
+                var ignoredDirectory = Path.Combine(directory, "ignored.meta");
+                Directory.CreateDirectory(ignoredDirectory);
+                File.WriteAllText(Path.Combine(ignoredDirectory, "content.txt"), "ignored directory");
                 var hashWithGeneratedCache = (string)hashMethod.Invoke(null, new object[] { directory });
                 Assert.That(hashWithGeneratedCache, Is.EqualTo(originalHash));
 

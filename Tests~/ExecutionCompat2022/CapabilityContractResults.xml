@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="1" result="Passed" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.1285911">
+  <test-suite type="TestSuite" id="1252" name="ExecutionCompat2022" fullname="ExecutionCompat2022" runstate="Runnable" testcasecount="219" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.128591" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties />
+    <test-suite type="Assembly" id="1387" name="UPilot.Editor.Tests.dll" fullname="D:/upilot/Tests~/ExecutionCompat2022/Library/ScriptAssemblies/UPilot.Editor.Tests.dll" runstate="Runnable" testcasecount="125" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.083416" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="88692" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+      </properties>
+      <test-suite type="TestSuite" id="1388" name="CodingRiver" fullname="CodingRiver" runstate="Runnable" testcasecount="125" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.078373" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1389" name="UPilot" fullname="CodingRiver.UPilot" runstate="Runnable" testcasecount="125" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.073300" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="1390" name="Tests" fullname="CodingRiver.UPilot.Tests" runstate="Runnable" testcasecount="125" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.065253" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestFixture" id="1327" name="UPilotExecutionCoreTests" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" testcasecount="25" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.055306" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-case id="1328" name="ExecutionCapabilitiesAdvertiseStructuredRecoveryAndCallbackIsolation" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ExecutionCapabilitiesAdvertiseStructuredRecoveryAndCallbackIsolation" methodname="ExecutionCapabilitiesAdvertiseStructuredRecoveryAndCallbackIsolation" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1606858742" result="Passed" start-time="2026-09-04 10:03:49Z" end-time="2026-09-04 10:03:49Z" duration="0.019199" asserts="0">
+                <properties />
+              </test-case>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

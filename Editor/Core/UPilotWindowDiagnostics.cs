@@ -155,6 +155,49 @@ namespace CodingRiver.UPilot
 #endif
         }
 
+        public static bool TryGetEditorWindowMinimized(
+            EditorWindow window,
+            out bool minimized,
+            out long windowHandle)
+        {
+            minimized = false;
+            windowHandle = 0;
+#if UNITY_EDITOR_WIN
+            if (window == null) return false;
+            var pos = window.position;
+            float scale = Mathf.Max(1f, EditorGUIUtility.pixelsPerPoint);
+            var target = new NativeRect
+            {
+                Left = Mathf.RoundToInt(pos.x * scale),
+                Top = Mathf.RoundToInt(pos.y * scale),
+                Right = Mathf.RoundToInt((pos.x + pos.width) * scale),
+                Bottom = Mathf.RoundToInt((pos.y + pos.height) * scale),
+            };
+            var hwnd = FindBestUnityWindow(target, Process.GetCurrentProcess().Id, includeMinimized: true);
+            if (hwnd == IntPtr.Zero) return false;
+            windowHandle = hwnd.ToInt64();
+            minimized = IsIconic(hwnd);
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        public static bool TryGetUnityEditorMinimized(out bool minimized, out long windowHandle)
+        {
+            minimized = false;
+            windowHandle = 0;
+#if UNITY_EDITOR_WIN
+            var hwnd = Process.GetCurrentProcess().MainWindowHandle;
+            if (hwnd == IntPtr.Zero) return false;
+            windowHandle = hwnd.ToInt64();
+            minimized = IsIconic(hwnd);
+            return true;
+#else
+            return false;
+#endif
+        }
+
 #if UNITY_EDITOR_WIN
         private static string CaptureEditorWindowWin(string windowTitle)
         {
@@ -283,6 +326,7 @@ namespace CodingRiver.UPilot
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
         [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] private static extern IntPtr GetWindowDC(IntPtr hwnd);
@@ -293,7 +337,7 @@ namespace CodingRiver.UPilot
         [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
 
-        private static IntPtr FindBestUnityWindow(NativeRect target, int processId)
+        private static IntPtr FindBestUnityWindow(NativeRect target, int processId, bool includeMinimized = false)
         {
             IntPtr best = IntPtr.Zero;
             long bestArea = long.MaxValue;
@@ -302,7 +346,7 @@ namespace CodingRiver.UPilot
             EnumWindows((hwnd, _) =>
             {
                 GetWindowThreadProcessId(hwnd, out uint owner);
-                if (owner != (uint)processId || !IsWindowVisible(hwnd) || !GetWindowRect(hwnd, out NativeRect rect)) return true;
+                if (owner != (uint)processId || (!includeMinimized && !IsWindowVisible(hwnd)) || !GetWindowRect(hwnd, out NativeRect rect)) return true;
                 if (cx < rect.Left || cx >= rect.Right || cy < rect.Top || cy >= rect.Bottom) return true;
                 long area = Math.Max(1, rect.Right - rect.Left) * (long)Math.Max(1, rect.Bottom - rect.Top);
                 if (area < bestArea) { best = hwnd; bestArea = area; }

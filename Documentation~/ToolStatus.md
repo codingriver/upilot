@@ -2,7 +2,7 @@
 
 本文档用于跟踪 UPilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 和 `unity_capabilities_get` 返回的实时 schema。
 
-最近同步：2026-08-15，`tools/list` 以当前 MCP 实时返回为准；本表已同步可信窗口截图、一键包验收、`no_tests`、紧凑 Operation 响应和 Shader 专项诊断。
+最近同步：2026-09-07，`tools/list` 以当前 MCP 实时返回为准；本表已同步 Snapshot schema v1、Registry v6 及三项集成修复的定向证据。
 
 ## 状态口径
 
@@ -14,11 +14,38 @@
 
 ## 维护建议
 
+### 2026-09-07 可靠性增量
+
+本轮源码与验收证据逐项记录在 `Documentation~/ReliabilityDelivery.md`，不能把历史通过记录自动继承为当前源码通过。
+
+| 工具/能力 | 改动范围 | 当前证据 |
+| --- | --- | --- |
+| `unity_test_list/run` | 新增精确 testNames/fixtures 并集；旧 testFilter 保留 | Python 契约及 Unity 选择器专项；最终证据见交付记录 |
+| `unity_prefab_patch` | 单普通 Prefab 单组件字段补丁；hash/token、备份、重载核验 | 首轮 Unity 保存/冲突拒绝专项通过；更多边界见交付记录 |
+| `unity_scene_summary` | 有界节点/组件/Camera/Light 摘要 | 编译及 Python 转发契约；联机证据见交付记录 |
+| `unity_task_start/status/cancel` | 测试/包验收持久身份与清理屏障；其余任务不宣称持久化 | SQLite 恢复/取消专项；真实重启证据见交付记录 |
+| 发布质量门禁 | 有界 Python/Skill 检查与源码身份报告；可选校验 Unity summary | 本地门禁通过；本轮未触发远端发布 |
+
+本轮最终证据：Unity 6000.6.0a2 定向 12/12、Python 73 项及 Skill 校验通过；源码绑定门禁已实际校验同源 Unity summary。运行中刷新 MCP Server 后原 taskId/runGuid 恢复成功，底层取消与清理屏障实测通过。详情、报告路径与 SHA256 见交付记录，不代表全工具或跨 Unity 版本验收。
+
+上述为前一阶段证据。三项集成修复的当前自动清单位于 `artifacts/integration-fixes/quality/tools.json`：Registry/实时暴露均为 198，本次没有新增工具，四项 `proxyHandlerGaps` 已归零，非空即使质量门禁失败。
+
+### 2026-09-07 三项集成修复
+
+| 工具/能力 | 最小改动 | 本次证据 |
+| --- | --- | --- |
+| `unity_compile_errors_get` | Registry 直接映射既有 `compile_errors` | 原生/代理真实调用的编译身份、验证状态和业务结果一致 |
+| Flow `run_file/run_suite/run_async` | wrapper 共用既有 TestDomainService；三个启动入口均非幂等 | 已启用的规范项目单样例原生/代理共 6/6 通过；每请求仅一次启动；失败/超时/禁止重试有 Python 回归 |
+| `unity_write_batch_register` | 可选 `deletedPaths`，完整变更清单与 SQLite 可空迁移 | 创建、移动、纯删除三个实测批次均 verified，各一次编译；合并/越界/旧记录/恢复有 Python 回归 |
+| Skill 自检/受控安装 | `--mode auto/source/installed --root`；模板 29、共用哈希排除规则 | 源包及两个安装副本独立自检通过；Unity 安装状态测试 3/3 |
+
+当前同源门禁 172 项 Python 测试通过，验证了本次 Unity 摘要；报告与完整 SHA256 见 `Documentation~/ReliabilityDelivery.md` 的 E4。未运行全量 EditMode、全量 Flow 样例或跨 Unity 版本验收。
+
 - 新增 MCP 工具时，同步更新本表。
 - 工具重命名时，旧名若不保留兼容别名，应在 README 中明确说明。
 - 验收通过需要能追溯到测试、手工验收记录或 release checklist。
 - 破坏性工具即使“可用状态”为“是”，也需要在调用前确认目标和影响范围。
-- Roslyn 动态编译工具已从 MCP schema 中移除。稳定业务自动化使用需要项目写入授权且禁止自动重试的 `unity_reflection_call`；只读发现使用 `unity_type_exists` / `unity_reflection_find`，表达式级诊断使用 `reflection_eval`。
+- Roslyn 动态编译工具已从 MCP schema 中移除。执行层由 `unity_reflection_call`、`csharp_eval`、`reflection_emit_type` 和 `execution_session` 组成，共享 typed value、binder、budget、handle 与 Domain Reload 生命周期；四者均要求写权限、non-idempotent 且禁止自动重试。`unity_capabilities_get.execution` 显式报告 V2 异常/closure/async/泛型/数组 profile、结构化错误详情、callback/session 策略和边界。
 
 ## MCP 工具状态矩阵
 
@@ -56,25 +83,27 @@
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
 | `unity_reflection_find` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功搜索 `UnityEngine.Application` 并返回方法列表。 |
-| `unity_reflection_call` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功调用 `UnityEngine.Application.get_unityVersion`。 |
-| `reflection_eval` | 是 | 是 | 是 | 执行一条受限 C# 表达式语句；支持链式访问、调用、运算符、赋值和 JSON 变量。不是脚本执行器，不支持局部变量、控制流、lambda/LINQ、async/await、任意对象构造或动态编译。 |
+| `unity_reflection_call` | 是 | 是 | 是 | 保留旧请求并新增 typed/named/ref/out/generic/targetHandle/await/resultMode；真实 MCP 已验证 `ref/out`、ValueTask 与 Emit instance handle 调用，expression 使用共享 interpreter，外部 `reflection_eval` 不存在。 |
+| `csharp_eval` | 是 | 是 | 是 | 自有 C# 子集 V2 与 Domain 内 DynamicMethod cache；支持同步异常、词法 closure、typed/block/async lambda、非主线程阻塞 await、实用级泛型推断、隐式/交错和 rank 1–4 数组、session-owned event。跨调用 async closure 使用当前调用预算/token，并由 session token 兜底，禁止保留已释放的 call CTS。禁止 async void；无 Roslyn/Unity Eval/CodeDom/mcs。 |
+| `reflection_emit_type` | 是 | 是 | 条件可用 | 结构化 spec 生成临时 CLR Type；同步 body 支持异常/泛型/数组并拒绝 async/closure；callback policy、custom accessor 和 cache/session 隔离保持不变。普通无 contract 方法不反射尚未完成的 MethodBuilder，兼容 Unity Mono 动态模块。Editor/JIT capability probe 通过时可用，不保存 DLL。 |
+| `execution_session` | 是 | 是 | 是 | `open/status/close` 管理变量 cell、逃逸 closure/async delegate、异步 operation、对象/type/delegate、事件订阅和 callback；close 取消 session token 并报告仍运行项目方法，动态类型等待 Domain Reload。 |
 
 ### 控制台、日志与诊断
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
 | `unity_console_mark_logs` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功标记 Unity Console 当前末尾游标。 |
-| `unity_console_tail_logs` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功从 Console 游标读取新增日志。 |
-| `unity_console_search_logs` | 是 | 契约通过，项目联机待补 | 是 | 兼容 `query/maxCount`，回显 `effectiveQuery/effectiveContains/matchedFields/scannedCount`，避免参数静默失效。 |
+| `unity_console_tail_logs` | 是 | 是 | 是 | 成功从 Console 游标读取新增日志；默认过滤返回 `excludedUPilotCount`。 |
+| `unity_console_search_logs` | 是 | 是 | 是 | 兼容 `query/maxCount`，回显有效查询与扫描统计；默认过滤按日志产生主体识别 UPilot，Reflection 触发的业务日志不再误删。 |
 | `unity_console_clear` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功清空 Unity Console。 |
 | `unity_console_capture_start` | 是 | 是 | 是 | 持久会话返回 `sessionId`，长 Operation 可自动关联。 |
-| `unity_console_capture_status` | 是 | 是 | 是 | 返回计数、文件大小、活动状态和写入错误。 |
+| `unity_console_capture_status` | 是 | 是 | 是 | 返回日志/排除/丢弃计数、文件大小、活动状态和写入错误。 |
 | `unity_console_capture_read` | 是 | 是 | 是 | 支持 `fromSequence/toSequence`、regex、稳定 snapshot、continuation token、总匹配数、扫描范围/计数和耗时；采集时增量维护稀疏索引。68,052,043 字节/23,648 条历史会话删除索引后最终冷启动首读 1.073 秒，5 模式实际 33 条全部返回；另以 210 条匹配验证 150 条分页上限，全程 sequence 无重复无丢失。 |
-| `unity_console_capture_stop` | 是 | 是 | 是 | 可幂等终结丢失 SessionState 指针的历史 active manifest；现场 5 MB 会话写出 summary/SHA256 后，F/D 活动会话均为 0。 |
+| `unity_console_capture_stop` | 是 | 是 | 是 | 可幂等终结历史 active manifest；正常响应明确 `terminal`，超时但 manifest 已完整时由 Server 返回真实成功终态、summary 元数据和原失败诊断。 |
 | `unity_console_capture_list` | 是 | 是 | 是 | 兼容顶层与 `session.sessionId` 结构并可列出历史会话。 |
 | `unity_console_capture_cleanup` | 是 | 待 apply 验收 | 条件可用 | 两阶段 dry-run/confirmToken 清理；apply 需要显式删除授权。 |
 | `unity_batch_diagnostics` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功一次性获取窗口布局、Console 摘要和编辑器状态。 |
-| `unity_verify_window` | 是 | 是 | 是 | 2026-08-02 契约测试补充：`windowMatch` 以 `unity_editor_windows_list` 为窗口存在性 truth；旧 `windowDiagnostics` 保留为 legacy 诊断。 |
+| `unity_verify_window` | 是 | 是 | 是 | `windowMatch` 以窗口列表为 truth；`consoleSummary` 与日志搜索共用分类器，返回 `startCount/endCount/stable` 和每类有界样例。 |
 | `unity_task_execute` | 是 | 是 | 是 | 2026-06-30 自动验收通过：通过看门狗包装成功执行 `unity_ensure_ready`。 |
 
 ### 编辑器窗口、菜单与输入
@@ -98,13 +127,23 @@
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `unity_screenshot_game_view` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功截取 320x180 Game 视图 PNG。 |
-| `unity_screenshot_scene_view` | 是 | 是 | 是 | 2026-08-15 联机返回 SceneView 精确 HWND、`PrintWindow`、`pixelSourceVerified=true/occlusionSensitive=false`；相机回退明确标记 degraded。 |
-| `unity_screenshot_camera` | 是 | 是 | 是 | 2026-06-30 自动验收通过：使用临时 Camera 成功截取 320x180 PNG。 |
-| `unity_screenshot_editor_window` | 是 | 是 | 是 | 2026-08-15 Console 窗口在非前台状态仍通过精确 Unity PID/HWND 离屏捕获，`pixelSourceVerified=true/occlusionSensitive=false`。 |
-| `unity_screenshot_save` | 是 | 是 | 是 | 可信窗口截图 `new-editor-window-trust.png`：1016x628、189877 bytes、SHA256 `98e18e25...fb9863`，完整返回像素来源元数据。 |
+| `unity_camera_list` | 是 | 是 | 是 | 列出活动/非活动 Camera，返回稳定字符串 ID、精确名称、Scene 与 hierarchy path。 |
+| `unity_snapshot_capture` | 是 | 是 | 是 | Snapshot schema v1；最多 16 targets/64M 输出像素，支持多 Camera 同帧、`allOrNothing/bestEffort`、严格 evidence policy、请求去重与持久作业。 |
+| `unity_snapshot_status` | 是 | 是 | 是 | 按 snapshotId 读取持久状态；Domain Reload 中断不会被合成为成功。 |
+| `unity_snapshot_cancel` | 是 | 契约通过 | 是 | 请求取消未终结作业；不回滚已生成的诊断产物。 |
+| `unity_snapshot_collect_artifacts` | 是 | 是 | 是 | 返回 Manifest 与有界 artifact 元数据，包括项目相对路径、bytes、尺寸、SHA256、role 与 `acceptedAsEvidence`。 |
+| `unity_snapshot_baseline_list` | 是 | Python 通过 | 是 | 列出 `.upilot/snapshots/baselines` 下受管 PNG 基线。 |
+| `unity_snapshot_baseline_compare` | 是 | Python 通过 | 是 | 校验 accepted Snapshot PNG 的 manifest/hash 后计算像素差比例与 8x8 luminance SSIM，并生成非验收型 diff/heatmap。 |
+| `unity_snapshot_baseline_update` | 是 | Python 通过 | 条件可用 | 固定 dry-run -> confirmToken -> apply；令牌绑定候选/现有哈希和 Snapshot artifact identity，绝不自动批准。 |
+| `unity_screenshot_game_view` | 是 | 是 | 条件可用 | Snapshot 薄包装；仅 PlayMode、Display 0、Color，通过 `WaitForEndOfFrame + ScreenCapture.CaptureScreenshotIntoRenderTexture` 获取最终合成。 |
+| `unity_screenshot_scene_view` | 是 | 是 | 是 | Snapshot 薄包装；精确 SceneView instanceId、真实 Repaint、Scene GUI/Handles、已验证且非遮挡敏感的像素，不允许 Camera fallback。 |
+| `unity_screenshot_camera` | 是 | 是 | 是 | Snapshot 薄包装；单 Camera Color。多 Camera 或 Raw/Linear Depth 直接使用 `unity_snapshot_capture`。 |
+| `unity_screenshot_editor_window` | 是 | 是 | 是 | Snapshot 薄包装；精确 Unity EditorWindow identity，无法取得可信非遮挡像素时失败。 |
+| `unity_screenshot_save` | 是 | Python 通过 | 是 | Snapshot 薄包装并复制 accepted Color artifact 到兼容路径；拒绝旧式静默 `fallbackSources`。 |
 | `unity_screenshot_pixel_stats` | 是 | Python 通过 | 是 | 只读工程内 PNG，返回区域近黑/透明比例与亮度/Alpha 直方图，不返回原始像素。 |
 | `unity_screenshot_compare` | 是 | Python 通过 | 是 | 比较同尺寸 PNG 的差异像素比例、平均通道差和近黑比例变化。 |
+
+Snapshot 深度 v1 支持 Built-in 与 URP 的 Raw Depth/Linear Depth Float EXR，可选 PNG preview；HDRP 暂不支持。2026-09-05 真实 Windows 最小化复验通过：Camera Color/Raw/Linear Depth 与 PlayMode GameView 均在 `editorMinimized=true` 时生成可信 artifact，SceneView 返回 `SNAPSHOT_EDITOR_MINIMIZED` 且零 artifact；多轮自动化矩阵仍列为待补。
 
 ### 纹理导入
 
@@ -253,15 +292,15 @@ KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
 | `unity_operation_collect_artifacts` | 是 | Python 通过 | 是 | 报告 tail 受 `maxTailChars` 限制并返回 `tailTruncated/tailOriginalChars`；保留 metadata、sha256。 |
 | `unity_agent_rules_check` | 是 | 是 | 是 | Python 单测覆盖只读检查；返回 recommendedBlock 和 diffSummary，不写文件。 |
 | `unity_agent_rules_install` | 是 | 是 | 是 | Python 单测覆盖 dry-run 与 apply；仅替换 upilot:start/end 受控块，apply=true 需要写权限。 |
-| `unity_compile_errors_get` | 是 | 是 | 是 | D/F 两个 Unity 2022 项目保留此前 live strict 错误 0 证据；当前本地候选在独立 Unity 2022 工程编译错误 0，F Bridge 现为断连。兼容别名为 `unity_compile_errors`。 |
+| `unity_compile_errors_get` | 是 | 是 | 是 | 2026-09-07 规范 Unity 6 项目原生/代理结果一致；Registry 直接映射 `compile_errors`，兼容名保留。历史 Unity 2022 结果不作为本次跨版本验收。 |
 
 ### 界面流程自动化
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `unity_upilot_flow_run_file` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_upilot_flow_run_suite` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_run_file` | 是 | 入口专项通过 | 条件可用 | 2026-09-07 原生/代理单样例通过；共用服务、非幂等；需 Unity 6+ 且启用 Flow，不代表引擎全量验收。 |
+| `unity_upilot_flow_run_suite` | 是 | 入口专项通过 | 条件可用 | 2026-09-07 原生/代理单文件目录通过；等待终态、非幂等；需 Unity 6+ 且启用 Flow。 |
 | `unity_upilot_flow_run_batch` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
 | `unity_upilot_flow_force_reset` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
-| `unity_upilot_flow_run_async` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |
+| `unity_upilot_flow_run_async` | 是 | 入口专项通过 | 条件可用 | 2026-09-07 原生/代理立即返回 executionId 后轮询成功；非幂等；需 Unity 6+ 且启用 Flow。 |
 | `unity_upilot_flow_results` | 是 | 专项验收中 | 是 | 需 Unity 6+ 且启用 UPILOT_ENABLE_FLOW；Unity 2022 返回 UIFLOW_UNAVAILABLE。 |

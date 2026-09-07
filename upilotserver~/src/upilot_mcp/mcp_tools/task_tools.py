@@ -72,7 +72,7 @@ async def unity_task_execute(
     )
     return _log_tool_result("unity_task_execute", _payload(r))
 
-@mcp.tool(description="异步启动一个公开 UPilot MCP 工具调用，立即返回 taskId。")
+@mcp.tool(description="异步启动工具并返回 taskId。测试/包验收要求 retryCount=0，持久保存 runGuid、期限和摘要并支持只观察式恢复；其他任务仍为内存任务。")
 async def unity_task_start(
     taskName: str,
     toolName: str,
@@ -91,12 +91,12 @@ async def unity_task_start(
     return _log_tool_result("unity_task_start", _payload(r))
 
 @mcp.tool(description="读取异步 UPilot 任务的状态、阶段、耗时、结果或错误。")
-async def unity_task_status(taskId: str):
-    _log_tool_call("unity_task_status", {"taskId": taskId})
-    r = await _get_facade().task_status(task_id=taskId)
+async def unity_task_status(taskId: str, detailLevel: str = "summary"):
+    _log_tool_call("unity_task_status", {"taskId": taskId, "detailLevel": detailLevel})
+    r = await _get_facade().task_status(task_id=taskId, detail_level=detailLevel)
     return _log_tool_result("unity_task_status", _payload(r))
 
-@mcp.tool(description="取消一个正在运行的异步 UPilot 任务。")
+@mcp.tool(description="请求底层测试取消并等待权威清理终态；返回 cancel_requested 不代表已停止。没有取消适配器的普通任务返回明确不支持，不伪造业务取消。")
 async def unity_task_cancel(taskId: str):
     _log_tool_call("unity_task_cancel", {"taskId": taskId})
     r = await _get_facade().task_cancel(task_id=taskId)
@@ -232,7 +232,7 @@ _NON_IDEMPOTENT_TOOLS = {
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue

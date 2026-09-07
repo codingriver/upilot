@@ -68,7 +68,7 @@ python -m pip install -e .
 包导入完成后，Unity 会自动打开 UPilot 设置界面。如果没有自动打开，请选择：
 
 ```text
-UPilot > UPilot
+UPilot > 打开 UPilot
 ```
 
 然后：
@@ -100,6 +100,14 @@ UPilot 会自动选择可用端口、写入所选 Agent 的 MCP 配置，并同�
 - 返回的 Unity 工程路径与当前项目一致
 
 现在可以开始使用 UPilot。
+
+## 受控执行工具
+
+UPilot 提供四个分工明确的执行入口：`unity_reflection_call` 调用一个已加载方法或一条受限表达式；`csharp_eval` 执行有预算的 UPilot C# 子集语句；`reflection_emit_type` 从结构化 spec 创建临时 CLR 类型；`execution_session` 管理跨调用变量、对象、类型和 delegate 句柄。它们不使用 Roslyn、Unity Eval/Compilation API、CodeDom 或 mcs。
+
+这些工具都可能产生副作用，需要项目写入授权，且不会被安全地自动重试。`csharp_eval` 的 `upilot-csharp-subset-v2` 支持 try/catch/finally/throw、引用语义 closure、typed/block/async lambda、Task/ValueTask await、实用级确定性泛型推断、隐式/交错及 rank 1–4 多维数组，以及由 persistent session 管理的事件和逃逸 delegate；明确禁止 async void。跨调用 closure 使用当前调用预算和取消上下文，独立的外部 delegate 调用由 session token 管理，不会引用已经释放的单次调用资源。取消和超时不会回滚已经发生的状态，基础设施错误不可被用户 catch，finally 使用独立有界清理预算。执行错误通过结构化 `stage/sourceSpan/diagnostics/candidates/cleanupDiagnostics/nextAction` 提供定位和恢复建议。
+
+Emit callback 可配置次数、重入和 `isolate|propagate` 异常策略，自定义 property accessor 使用同一同步受限 AST；动态 body 可用同步异常、泛型和数组节点，继续拒绝 async/await/closure。相同 spec 的缓存只复用 CLR Type，callback guard、诊断和清理 lease 仍按 session 与实例隔离；动态类型仅支持 Unity Editor/JIT，其程序集使用 `Run`，只能在 Domain Reload 时真正释放。可通过 `unity_capabilities_get.execution` 判断 V2 profile、异步/session 上限和 Emit runtime 是否可用。完整参数与示例见 `skills/upilot-unity-mcp/references/execution-tools.md`。
 
 ## 环境要求
 
@@ -330,7 +338,7 @@ OpenCode 还会发现 `.claude/skills` 和 `.opencode/skills`。如果多个目�
 
 ### 在 Unity 中确认
 
-打开 `UPilot > UPilot`，检查：
+打开 `UPilot > 打开 UPilot`，检查：
 
 - 顶部状态为 **已就绪**。
 - 主界面显示 MCP 地址。
@@ -406,7 +414,7 @@ http://127.0.0.1:8011/health
 
 ## 主界面说明
 
-通过 `UPilot > UPilot` 打开主界面。
+通过 `UPilot > 打开 UPilot` 打开主界面。
 
 ![UPilot 已就绪主界面](Documentation~/images/upilot-main-window.png)
 
@@ -444,11 +452,11 @@ http://127.0.0.1:8011/health
 - **更新配置**：当前 Agent 已有 UPilot 配置。点击后会二次确认，只更新该 Agent 的 UPilot MCP 配置项。
 - **更新规则**：为当前 Agent 更新对应的 UPilot Agent 规则。
 - **更新 Skill**：更新当前 Agent 使用的 UPilot Skill；Codex、Cursor 与 OpenCode 的操作会更新同一个 `.agents/skills` 受管安装。
-- **更新全部**：更新已有的 UPilot MCP 连接条目，并重新同步全部 UPilot Skill/AGENT 规则。
+- **更新全部**：更新已启用 Agent 的现有 UPilot MCP 连接条目，并重新同步共享的 UPilot Skill/AGENT 规则；若已启用 Agent 缺少 MCP 配置，会先提示选择“补齐并更新”或“仅更新现有”。
 - **检查配置**：位于“更新全部”右侧的下拉菜单中，只刷新状态，不修改文件。
-- **强制重新配置全部**：重新写入已配置 Agent 的 MCP 地址，并重新生成 UPilot Skill/Agent 规则；执行前会明确提示可能替换各 Agent Skill 的本地修改。
+- **强制重新配置全部已启用 Agent**：只为用户已启用的 Agent 创建或更新 MCP 配置，并重新生成共享的 UPilot Skill/Agent 规则；不会自动启用或写入未使用的客户端。
 
-“更新全部”不会为尚未配置 MCP 的 Agent 自动新增连接。如果之后开始使用新的 Agent，请在对应一行点击 **配置**。
+首次设置会保存用户勾选的 Agent；旧项目会从已有、可识别的 `mcp.upilot` 条目迁移启用状态，没有既有条目的全新项目默认只启用 Codex。未启用的客户端以中性 **未启用** 显示，不计入配置问题；在对应行点击 **启用并配置** 后才会写入其 MCP 配置。
 
 Claude Code、Codex、Cursor 和 OpenCode 都支持 UPilot Skill。Claude Code 使用 `.claude/skills`；Codex、Cursor 和 OpenCode 默认共享 `.agents/skills`，避免重复维护。Cursor 与 OpenCode 的 Tooltip 会列出其可发现的项目级 Skill 目录，按 Skill 名称去重统计，并在同名副本内容哈希不一致时显示冲突。
 
@@ -497,7 +505,7 @@ main 分支维护规则：
 普通使用不需要进入高级设置。需要停止服务、修改端口或查看详细诊断时，点击主界面的 **高级设置…**，或选择：
 
 ```text
-UPilot > Advanced Settings
+UPilot > 高级设置
 ```
 
 ![UPilot 高级设置界面](Documentation~/images/upilot-advanced-settings.png)
@@ -528,7 +536,7 @@ UPilot > Advanced Settings
 
 UPilot 首次配置或自动修复时会优先寻找空闲端口。多项目同时运行时：
 
-1. 分别打开每个项目的 `UPilot > UPilot`。
+1. 分别打开每个项目的 `UPilot > 打开 UPilot`。
 2. 确认每个项目显示的 MCP 地址不同。
 3. 在每个项目中更新对应 Agent 配置。
 4. 在 Agent 中调用 `unity_mcp_status`，核对 Unity 工程路径。
@@ -559,7 +567,7 @@ python -m pip install --upgrade "git+https://github.com/codingriver/upilot.git@<
 
 更新完成后：
 
-1. 打开 `UPilot > UPilot`。
+1. 打开 `UPilot > 打开 UPilot`。
 2. 点击 **更新全部**。
 3. 确认提示“将更新已有的 UPilot MCP 连接条目，重新同步全部 UPilot Skill/AGENT规则”。
 4. 重启 UPilot。
@@ -638,7 +646,7 @@ http://127.0.0.1:8011/health
 
 ## 卸载
 
-1. 在 `UPilot > Advanced Settings` 中点击红色 **停止**，并确认停止。
+1. 在 `UPilot > 高级设置` 中点击红色 **停止**，并确认停止。
 2. 在 Unity Package Manager 中选择 **UPilot**，点击 **Remove**。
 3. 如不再使用 Python 服务，可执行：
 

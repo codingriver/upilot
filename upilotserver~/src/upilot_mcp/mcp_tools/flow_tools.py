@@ -87,7 +87,7 @@ async def unity_upilot_flow_run_file(
             "debugOnFailure": debugOnFailure,
         },
     )
-    r = await _run_unity_upilot_flow_file(
+    r = await _get_facade().upilot_flow_run_file(
         yaml_path=yamlPath,
         headed=headed,
         report_output_path=reportOutputPath,
@@ -135,7 +135,7 @@ async def unity_upilot_flow_run_suite(
             "enableVerboseLog": enableVerboseLog,
         },
     )
-    r = await _run_unity_upilot_flow_suite(
+    r = await _get_facade().upilot_flow_run_suite(
         directory_path=directoryPath,
         headed=headed,
         report_output_path=reportOutputPath,
@@ -268,73 +268,22 @@ async def unity_upilot_flow_run_async(
             "debugOnFailure": debugOnFailure,
         },
     )
-    resolved = []
-    for p in yamlPaths:
-        rp = str(Path(p).expanduser().resolve())
-        if not Path(rp).is_file():
-            return _payload(
-                fail(
-                    new_id("upilot_flow"),
-                    "UIFLOW_YAML_NOT_FOUND",
-                    f"YAML file not found: {rp}",
-                    {"yamlPath": rp},
-                )
-            )
-        resolved.append(rp)
-
-    report_root = reportOutputPath.strip() or "Reports/UPilot/Flow"
-    run_resp = await _get_facade().upilot_flow_run(
-        yaml_paths=resolved,
+    r = await _get_facade().upilot_flow_run_async(
+        yaml_paths=yamlPaths,
+        batch_size=batchSize,
+        batch_offset=batchOffset,
         headed=headed,
+        report_output_path=reportOutputPath,
+        screenshot_path=screenshotPath,
         stop_on_first_failure=stopOnFirstFailure,
         continue_on_step_failure=continueOnStepFailure,
         screenshot_on_failure=screenshotOnFailure,
         default_timeout_ms=defaultTimeoutMs,
+        pre_step_delay_ms=preStepDelayMs,
         enable_verbose_log=enableVerboseLog,
-        report_path=report_root,
         debug_on_failure=debugOnFailure,
-        batch_size=batchSize,
-        batch_offset=batchOffset,
     )
-    if not run_resp.ok:
-        return _log_tool_result("unity_upilot_flow_run_async", _payload(run_resp))
-
-    run_data = run_resp.data or {}
-    execution_id = str(run_data.get("executionId") or "")
-    if not execution_id:
-        return _log_tool_result(
-            "unity_upilot_flow_run_async",
-            _payload(
-                fail(
-                    new_id("upilot_flow"),
-                    "UIFLOW_EXECUTION_ID_MISSING",
-                    "upilot_flow.run did not return executionId",
-                    {"response": run_data},
-                )
-            ),
-        )
-
-    return _log_tool_result(
-        "unity_upilot_flow_run_async",
-        json.dumps(
-            {
-                "ok": True,
-                "data": {
-                    "executionId": execution_id,
-                    "status": run_data.get("status", "queued"),
-                    "total": int(run_data.get("total") or 0),
-                    "hasMore": bool(run_data.get("hasMore")),
-                    "nextOffset": int(run_data.get("nextOffset") or 0),
-                    "totalAll": int(run_data.get("totalAll") or 0),
-                    "reportOutputPath": report_root,
-                    "screenshotPath": screenshotPath.strip() or str((Path(report_root) / "Screenshots").as_posix()),
-                },
-                "error": None,
-                "requestId": run_resp.request_id,
-                "timestamp": run_resp.timestamp,
-            }
-        ),
-    )
+    return _log_tool_result("unity_upilot_flow_run_async", _payload(r))
 
 @mcp.tool(
     description=(
@@ -390,213 +339,6 @@ async def unity_upilot_flow_cancel(executionId: str):
     _log_tool_call("unity_upilot_flow_cancel", {"executionId": executionId})
     r = await _get_facade().upilot_flow_cancel(execution_id=executionId)
     return _log_tool_result("unity_upilot_flow_cancel", _payload(r))
-
-async def _run_unity_upilot_flow_file(
-    yaml_path: str,
-    headed: bool,
-    report_output_path: str,
-    screenshot_path: str,
-    screenshot_on_failure: bool,
-    stop_on_first_failure: bool,
-    continue_on_step_failure: bool,
-    default_timeout_ms: int,
-    pre_step_delay_ms: int,
-    enable_verbose_log: bool,
-    debug_on_failure: bool,
-) -> ToolResponse:
-    resolved_yaml = str(Path(yaml_path).expanduser().resolve())
-    if not Path(resolved_yaml).is_file():
-        return fail(
-            new_id("upilot_flow"),
-            "UIFLOW_YAML_NOT_FOUND",
-            f"YAML file not found: {resolved_yaml}",
-            {"yamlPath": resolved_yaml},
-        )
-
-    report_root = report_output_path.strip() or "Reports/UPilot/Flow"
-    run_resp = await _get_facade().upilot_flow_run(
-        yaml_paths=[resolved_yaml],
-        headed=headed,
-        stop_on_first_failure=stop_on_first_failure,
-        continue_on_step_failure=continue_on_step_failure,
-        screenshot_on_failure=screenshot_on_failure,
-        default_timeout_ms=default_timeout_ms,
-        enable_verbose_log=enable_verbose_log,
-        report_path=report_root,
-        debug_on_failure=debug_on_failure,
-    )
-    if not run_resp.ok:
-        return run_resp
-
-    run_data = run_resp.data or {}
-    execution_id = str(run_data.get("executionId") or "")
-    if not execution_id:
-        return fail(
-            new_id("upilot_flow"),
-            "UIFLOW_EXECUTION_ID_MISSING",
-            "upilot_flow.run did not return executionId",
-            {"response": run_data},
-        )
-
-    deadline = time.monotonic() + max(60.0, default_timeout_ms / 1000.0 + 180.0)
-    last_data = run_data
-    last_status = ""
-    last_progress_log = time.monotonic()
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.5)
-        status_resp = await _get_facade().upilot_flow_results(execution_id)
-        if not status_resp.ok:
-            return status_resp
-        last_data = status_resp.data or {}
-        status = str(last_data.get("status") or "")
-        if status != last_status:
-            logger.info("[UPilot Flow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
-            last_status = status
-        elif time.monotonic() - last_progress_log >= 10.0:
-            current_yaml = last_data.get("currentYamlPath") or ""
-            current_case = last_data.get("currentCaseName") or ""
-            logger.info("[UPilot Flow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(60.0, default_timeout_ms / 1000.0 + 120.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
-            last_progress_log = time.monotonic()
-        if status in {"completed", "failed", "aborted"}:
-            case = ((last_data.get("cases") or [None])[0]) or {}
-            screenshots_root = screenshot_path.strip() or str(
-                (Path(report_root) / execution_id / "Screenshots").as_posix()
-            )
-            return ok(
-                new_id("upilot_flow"),
-                {
-                    "yamlPath": resolved_yaml,
-                    "reportOutputPath": str(last_data.get("reportPath") or report_root),
-                    "screenshotPath": screenshots_root,
-                    "result": {
-                        "executionId": execution_id,
-                        "status": status,
-                        "caseName": case.get("caseName")
-                        or last_data.get("currentCaseName")
-                        or Path(resolved_yaml).stem,
-                        "errorCode": case.get("errorCode")
-                        or last_data.get("errorCode")
-                        or "",
-                        "errorMessage": case.get("errorMessage")
-                        or last_data.get("errorMessage")
-                        or "",
-                        "reportPath": last_data.get("reportPath") or report_root,
-                        "raw": last_data,
-                    },
-                },
-            )
-
-    logger.error("[UPilot Flow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(60.0, default_timeout_ms / 1000.0 + 120.0), last_status)
-    await _get_facade().upilot_flow_cancel(execution_id)
-    return fail(
-        new_id("upilot_flow"),
-        "UIFLOW_WAIT_TIMEOUT",
-        f"Timed out waiting for upilot_flow execution: {execution_id}",
-        {"executionId": execution_id, "lastStatus": last_data.get("status")},
-    )
-
-async def _run_unity_upilot_flow_suite(
-    directory_path: str,
-    headed: bool,
-    report_output_path: str,
-    screenshot_path: str,
-    screenshot_on_failure: bool,
-    stop_on_first_failure: bool,
-    continue_on_step_failure: bool,
-    default_timeout_ms: int,
-    pre_step_delay_ms: int,
-    enable_verbose_log: bool,
-) -> ToolResponse:
-    resolved_dir = str(Path(directory_path).expanduser().resolve())
-    if not Path(resolved_dir).is_dir():
-        return fail(
-            new_id("upilot_flow"),
-            "UIFLOW_SUITE_DIR_NOT_FOUND",
-            f"Suite directory not found: {resolved_dir}",
-            {"directoryPath": resolved_dir},
-        )
-
-    report_root = report_output_path.strip() or "Reports/UPilot/Flow"
-    run_resp = await _get_facade().upilot_flow_run(
-        yaml_directory=resolved_dir,
-        headed=headed,
-        stop_on_first_failure=stop_on_first_failure,
-        continue_on_step_failure=continue_on_step_failure,
-        screenshot_on_failure=screenshot_on_failure,
-        default_timeout_ms=default_timeout_ms,
-        enable_verbose_log=enable_verbose_log,
-        report_path=report_root,
-    )
-    if not run_resp.ok:
-        return run_resp
-
-    run_data = run_resp.data or {}
-    execution_id = str(run_data.get("executionId") or "")
-    if not execution_id:
-        return fail(
-            new_id("upilot_flow"),
-            "UIFLOW_EXECUTION_ID_MISSING",
-            "upilot_flow.run did not return executionId",
-            {"response": run_data},
-        )
-
-    deadline = time.monotonic() + max(120.0, default_timeout_ms / 1000.0 + 360.0)
-    last_data = run_data
-    last_status = ""
-    last_progress_log = time.monotonic()
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.5)
-        status_resp = await _get_facade().upilot_flow_results(execution_id)
-        if not status_resp.ok:
-            return status_resp
-        last_data = status_resp.data or {}
-        status = str(last_data.get("status") or "")
-        if status != last_status:
-            logger.info("[UPilot Flow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
-            last_status = status
-        elif time.monotonic() - last_progress_log >= 10.0:
-            current_yaml = last_data.get("currentYamlPath") or ""
-            current_case = last_data.get("currentCaseName") or ""
-            logger.info("[UPilot Flow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(120.0, default_timeout_ms / 1000.0 + 300.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
-            last_progress_log = time.monotonic()
-        if status in {"completed", "failed", "aborted"}:
-            report_path = str(last_data.get("reportPath") or report_root)
-            screenshots_root = screenshot_path.strip() or str(
-                (Path(report_path) / "Screenshots").as_posix()
-            )
-            failed = int(last_data.get("failed") or 0)
-            errors = int(last_data.get("errors") or 0)
-            exit_code = (
-                0 if status == "completed" and failed == 0 and errors == 0 else 1
-            )
-            return ok(
-                new_id("upilot_flow"),
-                {
-                    "directoryPath": resolved_dir,
-                    "reportOutputPath": report_path,
-                    "screenshotPath": screenshots_root,
-                    "result": {
-                        "executionId": execution_id,
-                        "status": status,
-                        "total": int(last_data.get("total") or 0),
-                        "passed": int(last_data.get("passed") or 0),
-                        "failed": failed,
-                        "errors": errors,
-                        "skipped": int(last_data.get("skipped") or 0),
-                        "exitCode": exit_code,
-                        "raw": last_data,
-                    },
-                },
-            )
-
-    logger.error("[UPilot Flow] execution %s timed out after %.0fs, lastStatus=%s", execution_id[:8], max(120.0, default_timeout_ms / 1000.0 + 300.0), last_status)
-    await _get_facade().upilot_flow_cancel(execution_id)
-    return fail(
-        new_id("upilot_flow"),
-        "UIFLOW_WAIT_TIMEOUT",
-        f"Timed out waiting for upilot_flow execution: {execution_id}",
-        {"executionId": execution_id, "lastStatus": last_data.get("status")},
-    )
 
 async def _run_unity_upilot_flow_batch(
     yaml_paths: list[str],
@@ -723,16 +465,19 @@ _DESTRUCTIVE_TOOLS = {
     "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
+_NON_IDEMPOTENT_TOOLS = {
+    "unity_upilot_flow_run_file", "unity_upilot_flow_run_suite", "unity_upilot_flow_run_async",
+}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue
     register_public_tool(
         _name,
         destructive=_name in _DESTRUCTIVE_TOOLS,
-        idempotent=_name not in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in _DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS,
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
     )

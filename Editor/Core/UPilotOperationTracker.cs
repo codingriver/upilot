@@ -446,12 +446,12 @@ namespace CodingRiver.UPilot
             { "asset.getData",         "获取资源数据" },
             { "asset.modifyData",      "修改资源数据" },
             { "asset.findBuiltIn",     "查找内置资源" },
-            // screenshot
-            { "screenshot.gameView",     "截图游戏视图" },
-            { "screenshot.sceneView",    "截图场景视图" },
-            { "screenshot.camera",       "截图摄像机" },
-            { "screenshot.editorWindow", "截图编辑器窗口" },
-            { "screenshot.save",         "保存截图文件" },
+            // snapshot
+            { "snapshot.cameraList",    "列出截图摄像机" },
+            { "snapshot.start",         "启动统一截图" },
+            { "snapshot.status",        "查询截图状态" },
+            { "snapshot.cancel",        "取消统一截图" },
+            { "snapshot.collect",       "收集截图产物" },
             // prefab
             { "prefab.create",         "创建预制体" },
             { "prefab.instantiate",    "实例化预制体" },

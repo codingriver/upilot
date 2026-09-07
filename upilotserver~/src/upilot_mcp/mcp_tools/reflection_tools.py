@@ -53,22 +53,37 @@ async def unity_type_exists(typeName: str):
 
 @mcp.tool(
     description=(
-        "通过反射调用已编译并加载的 Unity/C# 方法。目标方法可能修改场景、资源或运行时状态，"
-        "因此需要项目写入授权且不得自动重试。不是脚本执行器；稳定只读检查优先使用 "
-        "unity_type_exists、unity_reflection_find 或专用语义工具，复杂多步逻辑应放进项目 helper 方法。"
+        "统一反射执行入口：传 typeName + methodName 时精确调用一个已编译方法；只传 expression 时执行"
+        "一条受限 C#-like 反射表达式。kind=auto 会在执行前按参数形态选择唯一引擎，不会失败后重试另一"
+        "引擎。表达式模式支持成员/索引/链式调用、常见运算符、三元、cast/as/is、赋值、隐式/交错及 rank 1–4 数组、"
+        "Vector2/3/4/Quaternion 构造和 JSON variables；仍不支持局部变量、控制流、lambda/LINQ、"
+        "async/await、类型定义或动态编译。目标可能修改场景、资源或运行时状态，因此需要项目写入授权且"
+        "不得自动重试；复杂多步逻辑使用 csharp_eval，需要稳定复用时使用已编译项目 helper。"
     )
 )
 async def unity_reflection_call(
-    typeName: str,
-    methodName: str,
-    parameters: list | None = None,
-    isStatic: bool = True,
-    targetInstancePath: str = "",
-    targetStaticTypeName: str = "",
-    targetStaticMemberPath: str = "",
-    asyncAfterSec: float = 25.0,
-    operationTimeoutSec: float = 600.0,
-    forceAsync: bool = False,
+    typeName: Annotated[str, Field(description="method 模式的已加载类型名；expression 模式必须留空。")]= "",
+    methodName: Annotated[str, Field(description="method 模式的方法名；expression 模式必须留空。")]= "",
+    parameters: Annotated[list | None, Field(description="旧版字符串/JSON 参数；与 typed arguments 互斥。")]= None,
+    isStatic: Annotated[bool, Field(description="旧版目标选择：true 调用静态方法，false 调用 targetInstancePath 解析的实例。")]= True,
+    targetInstancePath: Annotated[str, Field(description="旧版实例目标路径；不能与 targetHandle 混用。")]= "",
+    targetStaticTypeName: Annotated[str, Field(description="旧版静态成员路径起始类型；不能与 targetHandle 混用。")]= "",
+    targetStaticMemberPath: Annotated[str, Field(description="旧版静态成员路径；不能与 targetHandle 混用。")]= "",
+    asyncAfterSec: Annotated[float, Field(description="旧版长调用超过该同步窗口后转为 operation handle 的秒数。")]= 25.0,
+    operationTimeoutSec: Annotated[float, Field(description="长反射 operation 的总超时秒数。")]= 600.0,
+    forceAsync: Annotated[bool, Field(description="是否立即以长反射 operation 方式返回；不会重复执行目标方法。")]= False,
+    expression: Annotated[str, Field(description="expression 模式的一条受限表达式；不能同时传 typeName/methodName。")]= "",
+    variables: Annotated[dict | None, Field(description="expression 模式的 JSON 或 TypedValue 变量映射。")]= None,
+    options: Annotated[dict | None, Field(description="旧版 expression 选项；新调用通常留空。")]= None,
+    kind: Annotated[str, Field(description="auto、method 或 expression；auto 在执行前按互斥请求形态选择唯一引擎。")]= "auto",
+    arguments: Annotated[list | None, Field(description="typed/named 参数列表；每项可含 name、direction=in|ref|out 和 value；与 parameters 互斥。")]= None,
+    parameterTypeNames: Annotated[list[str] | None, Field(description="用于精确选择重载的参数类型名列表。")]= None,
+    genericTypeArguments: Annotated[list[str] | None, Field(description="显式闭合泛型方法的类型参数名列表。")]= None,
+    targetHandle: Annotated[str, Field(description="persistent session 中的实例 handle；强制 instance 调用且不能与旧路径目标混用。")]= "",
+    sessionId: Annotated[str, Field(description="targetHandle 或 handle 结果使用的 persistent session ID。")]= "",
+    awaitMode: Annotated[str, Field(description="awaitable 处理：auto、always 或 never。")]= "auto",
+    awaitTimeoutMs: Annotated[int, Field(description="等待 Task/ValueTask 的有界超时毫秒数。")]= 3000,
+    resultMode: Annotated[str, Field(description="结果编码：auto、inline、handle 或 legacyString；handle 结果需要 session。")]= "auto",
 ):
     _log_tool_call(
         "unity_reflection_call",
@@ -80,12 +95,24 @@ async def unity_reflection_call(
             "targetInstancePath": targetInstancePath,
             "targetStaticTypeName": targetStaticTypeName,
             "targetStaticMemberPath": targetStaticMemberPath,
+            "expression": expression,
+            "variables": variables,
+            "options": options,
+            "kind": kind,
+            "arguments": arguments,
+            "parameterTypeNames": parameterTypeNames,
+            "genericTypeArguments": genericTypeArguments,
+            "targetHandle": targetHandle,
+            "sessionId": sessionId,
+            "awaitMode": awaitMode,
+            "awaitTimeoutMs": awaitTimeoutMs,
+            "resultMode": resultMode,
         },
     )
     rejected = _reject_write_if_unapproved("unity_reflection_call")
     if rejected is not None:
         return rejected
-    r = await _get_facade().reflection_call(
+    call_kwargs = dict(
         type_name=typeName,
         method_name=methodName,
         parameters=parameters,
@@ -96,7 +123,28 @@ async def unity_reflection_call(
         async_after_sec=asyncAfterSec,
         operation_timeout_sec=operationTimeoutSec,
         force_async=forceAsync,
+        expression=expression,
+        variables=variables,
+        options=options,
+        kind=kind,
     )
+    if arguments is not None:
+        call_kwargs["arguments"] = arguments
+    if parameterTypeNames:
+        call_kwargs["parameter_type_names"] = parameterTypeNames
+    if genericTypeArguments:
+        call_kwargs["generic_type_arguments"] = genericTypeArguments
+    if targetHandle:
+        call_kwargs["target_handle"] = targetHandle
+    if sessionId:
+        call_kwargs["session_id"] = sessionId
+    if awaitMode != "auto":
+        call_kwargs["await_mode"] = awaitMode
+    if awaitTimeoutMs != 3000:
+        call_kwargs["await_timeout_ms"] = awaitTimeoutMs
+    if resultMode != "auto":
+        call_kwargs["result_mode"] = resultMode
+    r = await _get_facade().reflection_call(**call_kwargs)
     return _log_tool_result("unity_reflection_call", _payload(r))
 
 @mcp.tool(description="查询自动脱离同步窗口的长反射调用；只轮询 Server 本地任务，不会重复执行 Unity 方法。")
@@ -118,37 +166,6 @@ async def unity_reflection_operation_cancel(operationId: str):
     r = await _get_facade().reflection_operation_cancel(operation_id=operationId)
     return _log_tool_result("unity_reflection_operation_cancel", _payload(r))
 
-@mcp.tool(
-    description=(
-        "执行一条受限 C#-like 反射表达式，不是 C# 脚本/编译器。适合读属性、调用已有方法、"
-        "简单赋值和单表达式诊断，例如 `UnityEngine.Application.unityVersion`、"
-        "`Some.Type.Inst.Method(1, \"x\")`、`UnityEditor.EditorPrefs.SetInt(\"k\", 1)`。"
-        "只接受一条表达式语句，可带分号；支持成员/索引/链式调用、常见运算符、三元、cast/as/is、"
-        "null 条件访问、typed array、Vector2/3/4/Quaternion 构造。"
-        "不支持 var/局部变量、if/for/foreach/while/switch、lambda/LINQ、async/await、ref/out/in、"
-        "using/namespace/方法或类型定义、任意 new 对象、动态编译。遇到这些失败不要反复尝试，"
-        "改用已有专用工具、unity_reflection_call，或请用户添加稳定 helper 方法。"
-    ),
-)
-async def reflection_eval(
-    code: str,
-    variables: dict | None = None,
-    options: dict | None = None,
-):
-    _log_tool_call(
-        "reflection_eval",
-        {"code": code, "variables": variables, "options": options},
-    )
-    rejected = _reject_write_if_unapproved("reflection_eval")
-    if rejected is not None:
-        return rejected
-    r = await _get_facade().reflection_eval(
-        code=code,
-        variables=variables,
-        options=options,
-    )
-    return _log_tool_result("reflection_eval", _payload(r))
-
 _DESTRUCTIVE_TOOLS = {
     "unity_asset_delete", "unity_asset_move", "unity_asset_modify_data",
     "unity_asset_create_folder", "unity_asset_copy",
@@ -162,12 +179,12 @@ _DESTRUCTIVE_TOOLS = {
     "unity_gameobject_delete", "unity_gameobject_move",
     "unity_gameobject_duplicate", "unity_component_add",
     "unity_component_remove", "unity_component_modify",
-    "unity_batch_execute", "unity_reflection_call", "reflection_eval",
+    "unity_batch_execute", "unity_reflection_call",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue

@@ -191,7 +191,10 @@ def _skill_content_hash(target: Path) -> str:
     )
     for path in files:
         relative = path.relative_to(target).as_posix()
-        if path.name == ".upilot-install.json" or "__pycache__" in path.parts or path.suffix.lower() in {".pyc", ".pyo"}:
+        if path.name.lower() == ".upilot-install.json" or any(
+            part.lower() == "__pycache__" or part.lower().endswith((".meta", ".pyc", ".pyo"))
+            for part in path.relative_to(target).parts
+        ):
             continue
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")

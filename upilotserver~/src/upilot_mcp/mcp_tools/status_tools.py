@@ -336,7 +336,7 @@ async def unity_console_mark_logs():
 @mcp.tool(
     description=(
         "从 Unity 控制台游标之后读取新增日志，支持服务端过滤。"
-        "默认不返回堆栈并排除 upilot/MCP 自身日志。"
+        "默认不返回堆栈并排除 upilot/MCP 自身日志；返回 excludedUPilotCount 说明排除数量。"
     )
 )
 async def unity_console_tail_logs(
@@ -383,7 +383,7 @@ async def unity_console_tail_logs(
 @mcp.tool(
     description=(
         "搜索 Unity 控制台全量日志，支持关键词/正则和日志类型过滤。"
-        "默认不返回堆栈并排除 upilot/MCP 自身日志。"
+        "默认不返回堆栈并排除 upilot/MCP 自身日志；返回 excludedUPilotCount 说明排除数量。"
     )
 )
 async def unity_console_search_logs(
@@ -529,7 +529,7 @@ async def unity_console_capture_read(
     )
     return _log_tool_result("unity_console_capture_read", _payload(r))
 
-@mcp.tool(description="停止当前 Unity Console 持久化采集，刷新缓冲区并生成 summary.json 与 SHA256。")
+@mcp.tool(description="停止当前 Unity Console 持久化采集，刷新缓冲区并生成 summary.json 与 SHA256；返回真实 terminal 状态，超时后可从完整持久化 manifest 恢复终态。")
 async def unity_console_capture_stop(sessionId: str = ""):
     _log_tool_call("unity_console_capture_stop", {"sessionId": sessionId})
     r = await _get_facade().console_capture_stop(session_id=sessionId)
@@ -662,7 +662,7 @@ _NON_IDEMPOTENT_TOOLS = {
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue

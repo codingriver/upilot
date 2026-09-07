@@ -30,6 +30,38 @@ namespace CodingRiver.UPilot
 
     internal static class UPilotSerializedPropertyUtility
     {
+        public static SerializedPropertyApplyResult Preview(SerializedObject serializedObject, IList<SerializedPropertyWrite> writes)
+        {
+            if (writes == null || writes.Count == 0)
+                throw new InvalidOperationException("properties must contain at least one property write.");
+            serializedObject.Update();
+            ValidateAll(serializedObject, writes);
+            var result = new SerializedPropertyApplyResult { requestedCount = writes.Count };
+            try
+            {
+                foreach (var write in writes)
+                {
+                    var property = serializedObject.FindProperty(write.propertyPath);
+                    string before = GetDisplayValue(property);
+                    SetValue(property, write.value ?? "");
+                    string after = GetDisplayValue(property);
+                    bool modified = before != after;
+                    if (modified) result.modifiedCount++;
+                    result.changes.Add(new SerializedPropertyChangePayload
+                    {
+                        propertyPath = property.propertyPath, propertyType = property.propertyType.ToString(),
+                        oldValue = before, newValue = after, modified = modified,
+                    });
+                }
+                return result;
+            }
+            finally
+            {
+                // Discard the SerializedObject buffer; preview must not apply or add Undo.
+                serializedObject.Update();
+            }
+        }
+
         public static SerializedPropertyApplyResult Apply(
             SerializedObject serializedObject,
             UnityEngine.Object undoTarget,

@@ -54,9 +54,9 @@ namespace CodingRiver.UPilot
 
         private bool _setupWriteAgentRules = true;
         private bool _setupWriteCodexConfig = true;
-        private bool _setupWriteClaudeConfig = true;
-        private bool _setupWriteCursorConfig = true;
-        private bool _setupWriteOpenCodeConfig = true;
+        private bool _setupWriteClaudeConfig;
+        private bool _setupWriteCursorConfig;
+        private bool _setupWriteOpenCodeConfig;
         private bool _setupStartAfterSetup = true;
         private bool _setupApproveProjectWrites = SetupApprovesProjectWritesByDefault;
 
@@ -79,6 +79,12 @@ namespace CodingRiver.UPilot
             _setupCompletionMessage = "";
             _setupCompletionMessageType = MessageType.None;
 
+            var agentStatuses = UPilotAgentSetup.GetMcpConfigStatuses();
+            _setupWriteCodexConfig = IsSetupAgentEnabled(agentStatuses, "Codex");
+            _setupWriteClaudeConfig = IsSetupAgentEnabled(agentStatuses, "Claude Code");
+            _setupWriteCursorConfig = IsSetupAgentEnabled(agentStatuses, "Cursor");
+            _setupWriteOpenCodeConfig = IsSetupAgentEnabled(agentStatuses, "OpenCode");
+
             var bridge = UPilotBridge.Instance;
             _setupHost = string.IsNullOrWhiteSpace(bridge.WsHost)
                 ? UPilotBridge.DefaultWsHost
@@ -86,6 +92,17 @@ namespace CodingRiver.UPilot
             _setupWsPort = bridge.WsPort > 0 ? bridge.WsPort : UPilotBridge.DefaultWsPort;
             _setupHttpPort = bridge.HttpPort > 0 ? bridge.HttpPort : UPilotBridge.DefaultHttpPort;
             EvaluateSetupPorts();
+        }
+
+        private static bool IsSetupAgentEnabled(AgentMcpConfigStatus[] statuses, string clientName)
+        {
+            foreach (var status in statuses ?? Array.Empty<AgentMcpConfigStatus>())
+            {
+                if (string.Equals(status.ClientName, clientName, StringComparison.Ordinal))
+                    return status.IsEnabled;
+            }
+
+            return string.Equals(clientName, "Codex", StringComparison.Ordinal);
         }
 
         private void DrawSetupView()

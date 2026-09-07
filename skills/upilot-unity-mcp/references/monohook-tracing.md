@@ -4,7 +4,7 @@ UPilot Tracer (`UPilot 追踪器`) is an optional diagnostic feature for observi
 
 ## Manual Workflow
 
-- Open `UPilot > Advanced > 追踪器`.
+- Open `UPilot > 追踪器`.
 - Trace points, stack capture, and Console output all default to disabled.
 - Select only the points needed for the current investigation, then apply the configuration explicitly.
 - Physical Hooks are technical replacements; the default per-point execution mode is `PassThrough`, so built-in Providers must call the original method unchanged. `Intercept` is a separate opt-in mode and is available only when a Provider declares support; tracing-path failures are swallowed and counted rather than propagated to the business call.

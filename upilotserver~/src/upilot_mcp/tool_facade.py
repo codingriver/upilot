@@ -7,9 +7,11 @@ from .dispatcher import CommandDispatcher
 from .domain.build_service import BuildDomainService
 from .domain.analysis_service import ProjectAnalysisDomainService
 from .domain.compile_service import CompileDomainService
+from .domain.execution_service import ExecutionDomainService
 from .domain.reflection_service import ReflectionDomainService
 from .domain.resource_service import ResourceDomainService
 from .domain.screenshot_service import ScreenshotDomainService
+from .domain.snapshot_service import SnapshotDomainService
 from .domain.status_service import StatusDomainService
 from .domain.task_service import TaskDomainService
 from .domain.test_service import TestDomainService
@@ -22,10 +24,12 @@ class McpToolFacade(
     StatusDomainService,
     ProjectAnalysisDomainService,
     CompileDomainService,
+    ExecutionDomainService,
     ResourceDomainService,
     ReflectionDomainService,
     TaskDomainService,
     ScreenshotDomainService,
+    SnapshotDomainService,
     TestDomainService,
     BuildDomainService,
 ):
@@ -52,3 +56,10 @@ class McpToolFacade(
         self._async_task_handles: dict[str, asyncio.Task] = {}
         self._operations: dict[str, dict] = {}
         self._operation_failure_history: dict[str, int] = {}
+        self._write_batch_resume_task: asyncio.Task | None = None
+        server.on_editor_execution_state = self._on_execution_state_with_test_recovery
+
+    async def _on_execution_state_with_test_recovery(self, execution: dict) -> None:
+        await self._on_editor_execution_state(execution)
+        if execution.get("authoritative") and not execution.get("isStale"):
+            self._recover_test_jobs()

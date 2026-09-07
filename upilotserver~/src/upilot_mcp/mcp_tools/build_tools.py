@@ -68,7 +68,7 @@ _DESTRUCTIVE_TOOLS = {
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue

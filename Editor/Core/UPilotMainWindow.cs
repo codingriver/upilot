@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -64,7 +65,7 @@ namespace CodingRiver.UPilot
         internal const float McpEndpointControlHeight = 32f;
         internal const float McpEndpointButtonWidth = 104f;
 
-        [MenuItem("UPilot/UPilot", false, 200)]
+        [MenuItem("UPilot/打开 UPilot", false, 100)]
         public static void Open()
         {
             try
@@ -929,8 +930,8 @@ namespace CodingRiver.UPilot
 
             EditorGUI.LabelField(titleRect, "Agent", _sectionTitleStyle);
 
-            var issueCount = CountAgentIntegrationIssues();
-            var updateLabel = GetAgentUpdateButtonLabel(issueCount);
+            var affectedAgentCount = CountAgentsNeedingUpdate();
+            var updateLabel = GetAgentUpdateButtonLabel(affectedAgentCount);
             if (GUI.Button(updateRect, updateLabel))
                 UpdateAllAgentIntegrations();
             if (GUI.Button(menuRect, "▾"))
@@ -952,30 +953,100 @@ namespace CodingRiver.UPilot
             return issueCount > 0 ? $"更新 {issueCount} 项" : "更新全部";
         }
 
+        internal static string BuildForceAllAgentConfigurationMessage(AgentMcpConfigStatus[] statuses)
+        {
+            var enabledClients = (statuses ?? Array.Empty<AgentMcpConfigStatus>())
+                .Where(status => status.IsEnabled)
+                .Select(status => status.ClientName)
+                .ToArray();
+            var clientSummary = enabledClients.Length > 0
+                ? string.Join("、", enabledClients)
+                : "（无）";
+            return $"将为全部已启用 Agent（{clientSummary}）创建或更新项目 MCP 配置，" +
+                   "并重新生成共享的 UPilot Skill 和 Agent 规则。\n\n" +
+                   "未启用的 Agent 会被跳过，不会新增其 MCP 配置。\n\n" +
+                   "UPilot 管理范围以外的用户配置不会被修改；各 Agent Skill 中的本地修改会被替换。\n\n" +
+                   "完成后，已打开的 Agent 客户端可能需要刷新工具列表。";
+        }
+
+        internal static string[] GetBulkAgentMcpTargetClients(
+            AgentMcpConfigStatus[] statuses,
+            bool includeMissingEnabled)
+        {
+            var result = new List<string>();
+            foreach (var status in statuses ?? Array.Empty<AgentMcpConfigStatus>())
+            {
+                if (status.IsEnabled && (includeMissingEnabled || status.HasUPilotEntry))
+                    result.Add(status.ClientName);
+            }
+
+            return result.ToArray();
+        }
+
+        internal static string[] GetMissingEnabledAgentMcpTargets(AgentMcpConfigStatus[] statuses)
+        {
+            return (statuses ?? Array.Empty<AgentMcpConfigStatus>())
+                .Where(status => status.IsEnabled && !status.HasUPilotEntry)
+                .Select(status => status.ClientName)
+                .ToArray();
+        }
+
+        internal static string BuildMissingEnabledAgentMcpMessage(string[] missingClients)
+        {
+            var summary = string.Join("、", missingClients ?? Array.Empty<string>());
+            return $"已启用的 Agent 中，{summary} 尚未配置 UPilot MCP。\n\n" +
+                   "可以补齐缺失配置后一起更新，也可以只更新已有 MCP 配置。" +
+                   "未启用的 Agent 会保持不变。";
+        }
+
+        internal static string[] GetUnconfiguredAgentMcpTargets(
+            AgentMcpConfigStatus[] statuses,
+            string[] targetClients)
+        {
+            var failures = new List<string>();
+            foreach (var clientName in targetClients ?? Array.Empty<string>())
+            {
+                var configured = false;
+                foreach (var status in statuses ?? Array.Empty<AgentMcpConfigStatus>())
+                {
+                    if (!string.Equals(status.ClientName, clientName, StringComparison.Ordinal))
+                        continue;
+
+                    configured = status.IsConfigured;
+                    break;
+                }
+
+                if (!configured)
+                    failures.Add(clientName);
+            }
+
+            return failures.ToArray();
+        }
+
         private void ShowAgentBulkUpdateMenu()
         {
             var menu = new GenericMenu();
             menu.AddItem(new GUIContent("检查配置"), false, CheckAgentIntegrations);
             menu.AddSeparator("");
-            menu.AddItem(new GUIContent("强制重新配置全部…"), false, ForceUpdateAllAgentIntegrations);
+            menu.AddItem(new GUIContent("强制重新配置全部已启用 Agent…"), false, ForceUpdateAllAgentIntegrations);
             menu.ShowAsContext();
         }
 
         private void CheckAgentIntegrations()
         {
             RefreshAgentConfigs(force: true);
-            var checkedIssueCount = CountAgentIntegrationIssues();
-            if (checkedIssueCount == 0)
+            var affectedAgentCount = CountAgentsNeedingUpdate();
+            if (affectedAgentCount == 0)
             {
-                ShowNotice("检查完成，已配置的 Agent 均为最新");
+                ShowNotice("检查完成，已启用的 Agent 均为最新");
                 return;
             }
 
-            var confirmationCount = CountCustomizedRuleConfigs();
+            var confirmationCount = CountAgentsWithCustomizedContent();
             ShowNotice(
-                confirmationCount == checkedIssueCount
-                    ? $"检查完成，有 {checkedIssueCount} 项内容需要确认"
-                    : $"检查完成，有 {checkedIssueCount} 项配置需要更新",
+                confirmationCount == affectedAgentCount
+                    ? $"检查完成，有 {affectedAgentCount} 个 Agent 的内容需要确认"
+                    : $"检查完成，有 {affectedAgentCount} 个 Agent 需要更新",
                 MessageType.Warning);
         }
 
@@ -989,7 +1060,7 @@ namespace CodingRiver.UPilot
             var messageType = BuildAgentIntegrationAdvice(out var message);
             if (messageType == MessageType.Info)
             {
-                EditorGUILayout.LabelField("已配置的 Agent 均为最新", _messageStyle);
+                EditorGUILayout.LabelField("已启用的 Agent 均为最新", _messageStyle);
                 return;
             }
 
@@ -1001,7 +1072,6 @@ namespace CodingRiver.UPilot
             AgentMcpConfigStatus? firstMcpIssue = null;
             AgentRuleConfigStatus? firstRuleIssue = null;
             AgentSkillConfigStatus? firstSkillIssue = null;
-            var issueCount = 0;
             var hasErrors = false;
 
             foreach (var status in _agentConfigs)
@@ -1009,39 +1079,37 @@ namespace CodingRiver.UPilot
                 if (!NeedsMcpUpdate(status))
                     continue;
 
-                issueCount++;
                 firstMcpIssue ??= status;
                 if (!string.IsNullOrEmpty(status.ErrorMessage))
                     hasErrors = true;
             }
 
-            var seenRulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var status in _ruleConfigs)
             {
-                if (!NeedsRuleUpdate(status) || !seenRulePaths.Add(GetRuleIssueKey(status)))
+                if (!IsAgentClientEnabled(status.ClientName) ||
+                    !NeedsRuleUpdate(status))
                     continue;
 
-                issueCount++;
                 firstRuleIssue ??= status;
                 if (status.State == AgentRuleConfigState.Error)
                     hasErrors = true;
             }
 
-            var seenSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var status in _skillConfigs)
             {
-                if (!NeedsSkillUpdate(status) || !seenSkillPaths.Add(GetSkillIssueKey(status)))
+                if (!IsAgentClientEnabled(status.ClientName) ||
+                    !NeedsSkillUpdate(status))
                     continue;
 
-                issueCount++;
                 firstSkillIssue ??= status;
                 if (status.State == AgentSkillConfigState.Error)
                     hasErrors = true;
             }
 
-            if (issueCount == 0)
+            var affectedAgentCount = CountAgentsNeedingUpdate();
+            if (affectedAgentCount == 0)
             {
-                message = "已配置的 Agent 均为最新";
+                message = "已启用的 Agent 均为最新";
                 return MessageType.Info;
             }
 
@@ -1051,7 +1119,7 @@ namespace CodingRiver.UPilot
                 return MessageType.Error;
             }
 
-            if (issueCount == 1 && firstRuleIssue.HasValue)
+            if (affectedAgentCount == 1 && firstRuleIssue.HasValue)
             {
                 var status = firstRuleIssue.Value;
                 if (status.State == AgentRuleConfigState.Customized)
@@ -1073,7 +1141,7 @@ namespace CodingRiver.UPilot
                 return MessageType.Warning;
             }
 
-            if (issueCount == 1 && firstSkillIssue.HasValue)
+            if (affectedAgentCount == 1 && firstSkillIssue.HasValue)
             {
                 var status = firstSkillIssue.Value;
                 if (status.State == AgentSkillConfigState.Customized)
@@ -1102,79 +1170,116 @@ namespace CodingRiver.UPilot
                 return MessageType.Warning;
             }
 
-            if (issueCount == 1 && firstMcpIssue.HasValue)
+            if (affectedAgentCount == 1 && firstMcpIssue.HasValue)
             {
                 var status = firstMcpIssue.Value;
-                message = !string.IsNullOrEmpty(status.ConfigurationIssue)
+                message = !status.HasUPilotEntry
+                    ? $"{status.ClientName} 尚未配置 UPilot MCP\n普通更新时可以选择补齐，或只更新已有配置。"
+                    : !string.IsNullOrEmpty(status.ConfigurationIssue)
                     ? $"{status.ClientName} MCP 配置需要更新\n{status.ConfigurationIssue}。"
                     : $"{status.ClientName} 连接地址需要更新\n当前连接可能无法使用，处理后会同步到最新地址。";
                 return MessageType.Warning;
             }
 
-            message = $"有 {issueCount} 项 Agent 配置需要处理\n请查看下方标记的项目，处理时会先确认可能覆盖的内容。";
+            message = $"有 {affectedAgentCount} 个 Agent 需要更新\n请查看下方标记的项目，处理时会先确认可能覆盖的内容。";
             return MessageType.Warning;
         }
 
         private bool HasAgentIntegrationIssues()
         {
-            return CountAgentIntegrationIssues() > 0;
+            return CountAgentsNeedingUpdate() > 0;
         }
 
-        private int CountAgentIntegrationIssues()
+        private int CountAgentsNeedingUpdate()
         {
-            var issueCount = 0;
-            foreach (var status in _agentConfigs)
+            return CountAgentsNeedingUpdate(_agentConfigs, _ruleConfigs, _skillConfigs);
+        }
+
+        internal static int CountAgentsNeedingUpdate(
+            AgentMcpConfigStatus[] mcpStatuses,
+            AgentRuleConfigStatus[] ruleStatuses,
+            AgentSkillConfigStatus[] skillStatuses)
+        {
+            var affectedAgentCount = 0;
+            var rules = ruleStatuses ?? Array.Empty<AgentRuleConfigStatus>();
+            var skills = skillStatuses ?? Array.Empty<AgentSkillConfigStatus>();
+            foreach (var mcpStatus in mcpStatuses ?? Array.Empty<AgentMcpConfigStatus>())
             {
-                if (NeedsMcpUpdate(status))
-                    issueCount++;
+                if (!mcpStatus.IsEnabled)
+                    continue;
+
+                var hasRuleStatus = false;
+                var hasRuleIssue = false;
+                foreach (var ruleStatus in rules)
+                {
+                    if (!string.Equals(ruleStatus.ClientName, mcpStatus.ClientName, StringComparison.Ordinal))
+                        continue;
+                    hasRuleStatus = true;
+                    hasRuleIssue = NeedsRuleUpdate(ruleStatus);
+                    break;
+                }
+
+                var hasSkillStatus = false;
+                var hasSkillIssue = false;
+                foreach (var skillStatus in skills)
+                {
+                    if (!string.Equals(skillStatus.ClientName, mcpStatus.ClientName, StringComparison.Ordinal))
+                        continue;
+                    hasSkillStatus = true;
+                    hasSkillIssue = NeedsSkillUpdate(skillStatus);
+                    break;
+                }
+
+                if (NeedsMcpUpdate(mcpStatus) ||
+                    !hasRuleStatus || hasRuleIssue ||
+                    !hasSkillStatus || hasSkillIssue)
+                    affectedAgentCount++;
             }
 
-            var seenRulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return affectedAgentCount;
+        }
+
+        private int CountAgentsWithCustomizedContent()
+        {
+            var affectedClients = new HashSet<string>(StringComparer.Ordinal);
             foreach (var status in _ruleConfigs)
             {
-                if (NeedsRuleUpdate(status) && seenRulePaths.Add(GetRuleIssueKey(status)))
-                    issueCount++;
+                if (IsAgentClientEnabled(status.ClientName) &&
+                    status.HasLocalCustomization)
+                    affectedClients.Add(status.ClientName);
             }
 
-            var seenSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var status in _skillConfigs)
             {
-                if (NeedsSkillUpdate(status) && seenSkillPaths.Add(GetSkillIssueKey(status)))
-                    issueCount++;
+                if (IsAgentClientEnabled(status.ClientName) &&
+                    status.HasLocalCustomization)
+                    affectedClients.Add(status.ClientName);
             }
 
-            return issueCount;
+            return affectedClients.Count;
         }
 
-        private int CountCustomizedRuleConfigs()
+        internal static bool NeedsMcpUpdate(AgentMcpConfigStatus status)
         {
-            var count = 0;
-            var seenRulePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var status in _ruleConfigs)
-            {
-                if (status.HasLocalCustomization && seenRulePaths.Add(GetRuleIssueKey(status)))
-                    count++;
-            }
-
-            var seenSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var status in _skillConfigs)
-            {
-                if (status.HasLocalCustomization && seenSkillPaths.Add(GetSkillIssueKey(status)))
-                    count++;
-            }
-
-            return count;
-        }
-
-        private static bool NeedsMcpUpdate(AgentMcpConfigStatus status)
-        {
+            if (!status.IsEnabled)
+                return false;
             if (!string.IsNullOrEmpty(status.ErrorMessage))
                 return true;
-            if (!status.FileExists)
-                return false;
-            return !status.HasUPilotEntry ||
+            return !status.FileExists ||
+                   !status.HasUPilotEntry ||
                    !status.UsesCurrentUrl ||
                    !string.IsNullOrEmpty(status.ConfigurationIssue);
+        }
+
+        private bool IsAgentClientEnabled(string clientName)
+        {
+            foreach (var status in _agentConfigs ?? Array.Empty<AgentMcpConfigStatus>())
+            {
+                if (string.Equals(status.ClientName, clientName, StringComparison.Ordinal))
+                    return status.IsEnabled;
+            }
+
+            return false;
         }
 
         private static bool NeedsRuleUpdate(AgentRuleConfigStatus status)
@@ -1226,7 +1331,8 @@ namespace CodingRiver.UPilot
                 statusRect,
                 statusText,
                 statusReady,
-                HasAgentIntegrationError(mcpStatus, ruleStatus, skillStatus));
+                HasAgentIntegrationError(mcpStatus, ruleStatus, skillStatus),
+                !mcpStatus.IsEnabled);
             DrawTableSeparator();
 
             if (!nextExpanded)
@@ -1245,7 +1351,9 @@ namespace CodingRiver.UPilot
                     "MCP 配置",
                     GetCompactMcpState(mcpStatus),
                     GetMcpDetailState(mcpStatus),
-                    mcpStatus.HasUPilotEntry ? "更新配置" : "配置",
+                    !mcpStatus.IsEnabled
+                        ? "启用并配置"
+                        : mcpStatus.HasUPilotEntry ? "更新配置" : "配置",
                     () => UpdateAgentMcpConfig(mcpStatus),
                     BuildMcpTooltip(mcpStatus, _mcpStatus));
                 DrawAgentDetailRow(
@@ -1335,6 +1443,8 @@ namespace CodingRiver.UPilot
             AgentRuleConfigStatus ruleStatus,
             AgentSkillConfigStatus skillStatus)
         {
+            if (!mcpStatus.IsEnabled)
+                return "未启用";
             if (HasAgentIntegrationError(mcpStatus, ruleStatus, skillStatus))
                 return "异常";
             if (!mcpStatus.FileExists && !mcpStatus.HasUPilotEntry)
@@ -1349,7 +1459,7 @@ namespace CodingRiver.UPilot
             AgentRuleConfigStatus ruleStatus,
             AgentSkillConfigStatus skillStatus)
         {
-            return mcpStatus.IsConfigured && ruleStatus.IsCurrent && skillStatus.IsSatisfied;
+            return mcpStatus.IsEnabled && mcpStatus.IsConfigured && ruleStatus.IsCurrent && skillStatus.IsSatisfied;
         }
 
         private static bool HasAgentIntegrationError(
@@ -1357,18 +1467,29 @@ namespace CodingRiver.UPilot
             AgentRuleConfigStatus ruleStatus,
             AgentSkillConfigStatus skillStatus)
         {
+            if (!mcpStatus.IsEnabled)
+                return false;
             return !string.IsNullOrEmpty(mcpStatus.ErrorMessage) ||
                    ruleStatus.State == AgentRuleConfigState.Error ||
                    skillStatus.State == AgentSkillConfigState.Error ||
                    skillStatus.State == AgentSkillConfigState.Conflict;
         }
 
-        private static void DrawStatusCell(Rect rect, string value, bool ready, bool error = false)
+        private static void DrawStatusCell(
+            Rect rect,
+            string value,
+            bool ready,
+            bool error = false,
+            bool inactive = false)
         {
             var dotRect = new Rect(rect.x, rect.y, 14f, rect.height);
             var labelRect = new Rect(dotRect.xMax, rect.y, Mathf.Max(0f, rect.width - dotRect.width), rect.height);
             var previous = GUI.color;
-            GUI.color = error
+            GUI.color = inactive
+                ? EditorGUIUtility.isProSkin
+                    ? new Color(0.55f, 0.55f, 0.55f)
+                    : new Color(0.42f, 0.42f, 0.42f)
+                : error
                 ? new Color(0.95f, 0.30f, 0.25f)
                 : ready
                     ? new Color(0.25f, 0.82f, 0.38f)
@@ -1433,6 +1554,7 @@ namespace CodingRiver.UPilot
 
         private static string GetCompactMcpState(AgentMcpConfigStatus status)
         {
+            if (!status.IsEnabled) return "未启用";
             if (status.IsConfigured) return "已配置";
             if (status.HasUPilotEntry && !status.UsesCurrentUrl) return "需要更新";
             if (!string.IsNullOrEmpty(status.ConfigurationIssue)) return "需要更新";
@@ -1454,6 +1576,7 @@ namespace CodingRiver.UPilot
 
         private static AgentDetailState GetMcpDetailState(AgentMcpConfigStatus status)
         {
+            if (!status.IsEnabled) return AgentDetailState.Unavailable;
             if (!string.IsNullOrEmpty(status.ErrorMessage)) return AgentDetailState.Error;
             return status.IsConfigured ? AgentDetailState.Ready : AgentDetailState.NeedsAttention;
         }
@@ -1483,6 +1606,7 @@ namespace CodingRiver.UPilot
         {
             var text = new System.Text.StringBuilder();
             text.Append("状态：").Append(GetCompactMcpState(status));
+            AppendTooltipLine(text, "启用状态", status.IsEnabled ? "已启用" : "未启用");
             AppendTooltipLine(text, "配置文件", status.ConfigPath);
             AppendTooltipLine(text, "当前 URL", status.ConfiguredUrl);
             AppendTooltipLine(text, "目标 URL", UPilotAgentSetup.McpUrl);
@@ -1674,6 +1798,7 @@ namespace CodingRiver.UPilot
                         return;
                 }
 
+                UPilotAgentSetup.SetAgentEnabled(status.ClientName, true);
                 var result = UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false);
                 Debug.Log($"[UPilot] {status.ClientName} MCP config:\n{result}");
                 RefreshAgentConfigs(force: true);
@@ -1781,10 +1906,11 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                RefreshAgentConfigs(force: true);
                 var hasCustomizedContent = false;
                 foreach (var status in _ruleConfigs)
                 {
-                    if (status.HasLocalCustomization)
+                    if (IsAgentClientEnabled(status.ClientName) && status.HasLocalCustomization)
                     {
                         hasCustomizedContent = true;
                         break;
@@ -1795,7 +1921,7 @@ namespace CodingRiver.UPilot
                 {
                     foreach (var status in _skillConfigs)
                     {
-                        if (!status.HasLocalCustomization)
+                        if (!IsAgentClientEnabled(status.ClientName) || !status.HasLocalCustomization)
                             continue;
                         hasCustomizedContent = true;
                         break;
@@ -1803,19 +1929,37 @@ namespace CodingRiver.UPilot
                 }
 
                 var overwriteCustomizedSkill = forceAll;
+                var includeMissingEnabled = forceAll;
+                var ordinaryScopeConfirmed = false;
                 if (forceAll)
                 {
                     var confirmed = EditorUtility.DisplayDialog(
-                        "强制重新配置所有 Agent？",
-                        "将重新写入已配置 Agent 的 MCP 地址，并重新生成 UPilot Skill 和 Agent 规则。\n\n" +
-                        "UPilot 管理范围以外的用户配置不会被修改；各 Agent Skill 中的本地修改会被替换。\n\n" +
-                        "完成后，已打开的 Agent 客户端可能需要刷新工具列表。",
-                        "重新配置全部",
+                        "强制重新配置全部已启用 Agent？",
+                        BuildForceAllAgentConfigurationMessage(_agentConfigs),
+                        "重新配置已启用项",
                         "取消");
                     if (!confirmed)
                         return;
                 }
-                else if (hasCustomizedContent)
+                else
+                {
+                    var missingEnabledClients = GetMissingEnabledAgentMcpTargets(_agentConfigs);
+                    if (missingEnabledClients.Length > 0)
+                    {
+                        var choice = EditorUtility.DisplayDialogComplex(
+                            "部分已启用 Agent 缺少 MCP 配置",
+                            BuildMissingEnabledAgentMcpMessage(missingEnabledClients),
+                            "补齐并更新",
+                            "取消",
+                            "仅更新现有");
+                        if (choice == 1)
+                            return;
+                        includeMissingEnabled = choice == 0;
+                        ordinaryScopeConfirmed = true;
+                    }
+                }
+
+                if (!forceAll && hasCustomizedContent)
                 {
                     var choice = EditorUtility.DisplayDialogComplex(
                         "如何处理本地修改？",
@@ -1827,9 +1971,9 @@ namespace CodingRiver.UPilot
                         return;
                     overwriteCustomizedSkill = choice == 0;
                 }
-                else if (!EditorUtility.DisplayDialog(
+                else if (!forceAll && !ordinaryScopeConfirmed && !EditorUtility.DisplayDialog(
                              "处理 Agent 配置？",
-                             "将处理下方标记的连接和内容更新。",
+                             "将处理已启用 Agent 下方标记的连接和内容更新。",
                              "继续",
                              "取消"))
                 {
@@ -1837,20 +1981,72 @@ namespace CodingRiver.UPilot
                 }
 
                 var result = "";
-                foreach (var status in _agentConfigs)
+                var mcpTargetClients = GetBulkAgentMcpTargetClients(
+                    _agentConfigs,
+                    includeMissingEnabled);
+                var mcpWriteFailures = new List<string>();
+                foreach (var clientName in mcpTargetClients)
                 {
-                    if (!status.HasUPilotEntry)
-                        continue;
-                    result += UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false) + "\n";
+                    try
+                    {
+                        result += UPilotAgentSetup.WriteAgentMcpConfig(
+                            clientName,
+                            promptBeforeOverwrite: false) + "\n";
+                    }
+                    catch (Exception ex)
+                    {
+                        mcpWriteFailures.Add(clientName);
+                        result += $"Failed {clientName}: {ex.Message}\n";
+                        Debug.LogError($"[UPilot] {clientName} MCP config update failed: {ex}");
+                    }
                 }
-                result += UPilotAgentSetup.UpdateAllAgentRules() + "\n";
-                result += UPilotAgentSetup.UpdateAllAgentSkills(overwriteCustomizedSkill);
+                var enabledClientNames = (_agentConfigs ?? Array.Empty<AgentMcpConfigStatus>())
+                    .Where(status => status.IsEnabled)
+                    .Select(status => status.ClientName)
+                    .ToArray();
+                foreach (var clientName in enabledClientNames)
+                    result += UPilotAgentSetup.UpdateAgentRules(clientName) + "\n";
+
+                var updatedSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var clientName in enabledClientNames)
+                {
+                    var skillStatus = FindSkillStatus(clientName);
+                    if (!skillStatus.IsApplicable)
+                        continue;
+                    var skillKey = string.IsNullOrEmpty(skillStatus.ConfigPath)
+                        ? clientName
+                        : skillStatus.ConfigPath;
+                    if (!updatedSkillPaths.Add(skillKey))
+                        continue;
+                    result += UPilotAgentSetup.UpdateAgentSkill(
+                        clientName,
+                        overwriteCustomizedSkill) + "\n";
+                }
                 Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
+
+                var verificationFailures = GetUnconfiguredAgentMcpTargets(
+                    _agentConfigs,
+                    mcpTargetClients);
+                var failedClients = new HashSet<string>(
+                    mcpWriteFailures,
+                    StringComparer.Ordinal);
+                foreach (var clientName in verificationFailures)
+                    failedClients.Add(clientName);
+                if (failedClients.Count > 0)
+                {
+                    var failureSummary = string.Join("、", failedClients);
+                    Debug.LogError("[UPilot] Agent MCP configuration verification failed: " + failureSummary);
+                    ShowNotice(
+                        "以下 Agent 配置后仍未通过检查：" + failureSummary,
+                        MessageType.Error);
+                    return;
+                }
+
                 ShowNotice(
                     forceAll
-                        ? "已重新配置 MCP、Skill 和 Agent 规则；请按需刷新 Agent 工具列表"
+                        ? "已重新配置全部已启用 Agent 的 MCP，并更新共享 Skill 和 Agent 规则；请按需刷新工具列表"
                         : hasCustomizedContent && !overwriteCustomizedSkill
                         ? "其他配置已处理，本地修改已保留"
                         : "Agent 配置已更新");

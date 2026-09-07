@@ -79,15 +79,24 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 19" in text
+    assert "rulesVersion: 29" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
     assert "unity_safe_compile_and_wait" in text
+    assert "unity_write_batch_register" in text
+    assert "lastCompileVerifiedAt" in text
+    assert "writeBatchCreatedAt" in text
+    assert "do not call `unity_sync_after_disk_write`" in text
+    assert "`compile_queued`" in text
+    assert "`compiler_finished`" in text
+    assert "`domain_reload_starting`" in text
+    assert "`domain_reload_recovered/verifying`" in text
     assert "`nextSequence` as the next call's `afterSequence`" in text
     assert "unity_config_csv_patch" in text
     assert "unity_hang_status" in text
-    assert "fallbackSources" in text
+    assert "unity_snapshot_capture" in text
+    assert "never approve automatically" in text
     assert "Optional UPilot Tracer" in text
     assert "`追踪器`, or `the tracer` as UPilot Tracer (`UPilot 追踪器`)" in text
     assert "saves without applying by default" in text
@@ -135,7 +144,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "19"
+    assert checked.data["recommendedRulesVersion"] == "29"
     assert "rulesVersion differs" in checked.data["diffSummary"]
 
 

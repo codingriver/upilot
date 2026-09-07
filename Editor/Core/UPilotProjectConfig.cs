@@ -19,6 +19,7 @@ namespace CodingRiver.UPilot
         public UPilotRuntimeConfig runtime = new();
         public UPilotSafetyConfig safety = new();
         public UPilotUpdateConfig updates = new();
+        public UPilotAgentsConfig agents = new();
     }
 
     [Serializable]
@@ -69,6 +70,13 @@ namespace CodingRiver.UPilot
     {
         public string manifestUrl = "";
         public string channel = "auto";
+    }
+
+    [Serializable]
+    public sealed class UPilotAgentsConfig
+    {
+        public bool selectionInitialized;
+        public string[] enabledClients = Array.Empty<string>();
     }
 
     public static class UPilotProjectConfig

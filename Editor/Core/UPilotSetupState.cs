@@ -21,7 +21,6 @@ namespace CodingRiver.UPilot
             UPilotMainWindow.OpenSetup();
         }
 
-        [MenuItem("UPilot/Advanced/Reset Setup State", false, 251)]
         public static void ResetSetupState()
         {
             if (!EditorUtility.DisplayDialog(

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import struct
 from pathlib import Path
 from typing import Any
@@ -487,12 +488,26 @@ class WsOrchestratorServer(WsTransport):
             else:
                 self._suspend_or_fail_pending_on_disconnect(sid_log)
 
+    def _notify_editor_execution_state(self) -> None:
+        callback = getattr(self, "on_editor_execution_state", None)
+        if not callable(callback):
+            return
+        result = callback(self.state.execution_state())
+        if asyncio.iscoroutine(result):
+            asyncio.create_task(result)
+
     async def _handle_message(self, message, auth_box: list[str | None] | None = None) -> None:
         if message.session_id:
             self.session_manager.touch(message.session_id)
 
         if message.type == "hello" and message.name == "session.hello":
             self._cancel_reconnect_grace()
+            raw_project_for_state = str(message.payload.get("projectPath", "") or "").strip()
+            if raw_project_for_state:
+                try:
+                    self.state.configure_project(raw_project_for_state)
+                except (OSError, sqlite3.Error) as ex:
+                    logger.warning("Could not configure persistent Editor state: %s", ex)
             preserve_compile_snapshot = self._reconnected_after_domain_reload
             self._reconnected_after_domain_reload = False
             previous_process_id = self.state.editor.process_id
@@ -526,12 +541,15 @@ class WsOrchestratorServer(WsTransport):
                     message.session_id[:12],
                     len(self._pending),
                 )
-            if not preserve_compile_snapshot:
+            if not preserve_compile_snapshot and not self.state.producer_epoch:
                 self.state.compile = CompileSnapshot()
             if preserve_compile_snapshot and self.state.compile.status in (
                 "queued",
                 "accepted",
                 "compiling",
+                "compiler_finished",
+                "domain_reload",
+                "verifying",
             ):
                 self._compile_idle_event.clear()
             else:
@@ -604,7 +622,12 @@ class WsOrchestratorServer(WsTransport):
                 heartbeat_context.setdefault("sessionId", message.session_id)
                 heartbeat_context.setdefault("source", "bridge-heartbeat")
                 heartbeat_context.setdefault("authoritative", True)
-                self.state.update_editor_state(heartbeat_context)
+                if int(heartbeat_context.get("stateContractVersion") or 0) >= 2:
+                    accepted = self.state.update_editor_execution_state(heartbeat_context)
+                    if accepted:
+                        self._notify_editor_execution_state()
+                else:
+                    self.state.update_editor_state(heartbeat_context)
             return
 
         if message.type in ("result", "error"):
@@ -637,6 +660,18 @@ class WsOrchestratorServer(WsTransport):
                 message.name,
                 json.dumps(message.payload, ensure_ascii=False) if message.payload else "{}",
             )
+            if message.name == "editor.execution_state":
+                accepted = self.state.update_editor_execution_state(message.payload)
+                if not accepted:
+                    logger.debug("Rejected stale/duplicate execution snapshot: %s", message.payload.get("snapshotId"))
+                    return
+                phase = str(self.state.compile.phase or "").lower()
+                self._note_compile_busy(phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"})
+                if str(self.state.transition).lower() == "domain_reload_starting":
+                    self._domain_reloading = True
+                    self._extend_grace_for_domain_reload()
+                self._notify_editor_execution_state()
+                return
             if message.name == "domain_reload.starting":
                 logger.info(
                     "[%s] Domain reload starting — suspension mode (grace may extend)",
@@ -657,35 +692,42 @@ class WsOrchestratorServer(WsTransport):
                 self._extend_grace_for_domain_reload()
                 return
             if message.name == "compile.status":
-                self.state.update_compile_status(message.payload)
-                self._sync_compile_idle_from_compile_status(message.payload)
+                if not self.state.producer_epoch:
+                    self.state.update_compile_status(message.payload)
+                    self._sync_compile_idle_from_compile_status(message.payload)
             elif message.name == "compile.started":
-                self.state.update_compile_lifecycle(message.payload)
-                self._note_compile_busy(True)
+                if not self.state.producer_epoch:
+                    self.state.update_compile_lifecycle(message.payload)
+                    self._note_compile_busy(True)
             elif message.name == "compile.finished":
-                self.state.update_compile_lifecycle(message.payload)
-                self._note_compile_busy(False)
+                if not self.state.producer_epoch:
+                    self.state.update_compile_lifecycle(message.payload)
+                    self._note_compile_busy(False)
             elif message.name == "compile.pipeline.started":
-                self.state.update_compile_pipeline(message.payload)
-                self._note_compile_busy(True)
+                if not self.state.producer_epoch:
+                    self.state.update_compile_pipeline(message.payload)
+                    self._note_compile_busy(True)
             elif message.name == "compile.pipeline.finished":
-                self.state.update_compile_pipeline(message.payload)
-                self._note_compile_busy(False)
+                if not self.state.producer_epoch:
+                    self.state.update_compile_pipeline(message.payload)
+                    self._note_compile_busy(False)
             elif message.name == "compile.errors":
                 self.state.update_compile_errors(message.payload)
             elif message.name == "editor.state":
-                self.state.update_editor_state(message.payload)
+                if not self.state.producer_epoch:
+                    self.state.update_editor_state(message.payload)
             elif message.name == "playmode.changed":
-                state = str(message.payload.get("state", self.state.editor.play_mode_state))
-                self.state.update_editor_state(
-                    {
-                        "connected": True,
-                        "playModeState": state,
-                        "authoritative": True,
-                        "source": "playmode.changed",
-                        "sessionId": message.session_id,
-                    }
-                )
+                if not self.state.producer_epoch:
+                    state = str(message.payload.get("state", self.state.editor.play_mode_state))
+                    self.state.update_editor_state(
+                        {
+                            "connected": True,
+                            "playModeState": state,
+                            "authoritative": True,
+                            "source": "playmode.changed",
+                            "sessionId": message.session_id,
+                        }
+                    )
 
     async def _heartbeat_loop(self) -> None:
         while True:

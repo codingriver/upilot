@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,17 +79,23 @@ class _AcceptanceService(TestDomainService):
     async def ensure_ready(self, **_kwargs): return ok("ready", {"ready": True})
     async def console_capture_list(self, **_kwargs): return ok("captures", {"sessions": [{"sessionId": "old", "active": True}]})
     async def console_capture_stop(self, **_kwargs): return ok("stop", {"stopped": True})
-    async def safe_compile_and_wait(self, **_kwargs): return ok("compile", {"status": "completed", "errorTotal": 0})
+    async def safe_compile_and_wait(self, **_kwargs): return ok("compile", {"status": "success", "errorsVerified": True, "errorTotal": 0})
     async def test_list(self, **_kwargs): return ok("list", {"tests": ["UPilot.Test"]})
     async def test_run(self, **_kwargs): return ok("run", {"status": "started", "runGuid": "run-1"})
-    async def test_status(self):
+    async def test_results(self, run_guid=""):
         self.status_calls += 1
-        return ok("test-status", {"status": "completed", "cleanupPending": False, "total": 1, "passed": 1, "failed": 0, "noTests": False})
+        assert run_guid == "run-1"
+        return ok("test-status", {
+            "status": "completed", "runGuid": run_guid, "resultAuthoritative": True,
+            "cleanupPending": False, "cleanupSucceeded": True, "cleanupStatus": "completed",
+            "cleanupErrors": [], "unresolvedResources": [],
+            "total": 1, "passed": 1, "failed": 0, "noTests": False,
+        })
     async def compile_errors(self, *_args, **_kwargs): return ok("errors", {"total": 0, "errors": []})
     async def console_search_logs(self, **_kwargs): return ok("console", {"logs": []})
 
 
-def test_acceptance_stops_capture_and_writes_hashed_summary(monkeypatch, tmp_path: Path) -> None:
+def test_acceptance_stops_capture_and_checks_correlated_clean_result() -> None:
     expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
     service = _AcceptanceService(expected)
     result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
@@ -100,3 +107,53 @@ def test_acceptance_stops_capture_and_writes_hashed_summary(monkeypatch, tmp_pat
     assert result.data["discoveredTestCount"] == 1
     descriptor = REGISTRY.resolve("unity_upilot_acceptance_run")
     assert descriptor is not None and descriptor.idempotent is False
+
+
+@pytest.mark.parametrize("change", [
+    {"cleanupSucceeded": False, "cleanupStatus": "failed", "cleanupErrors": ["callback-unregister"]},
+    {"cleanupSucceeded": None},
+    {"cleanupPending": None},
+    {"cleanupErrors": None},
+    {"unresolvedResources": ["callback"]},
+    {"resultAuthoritative": False},
+    {"runGuid": "another-run"},
+    {"total": 0},
+    {"failed": None},
+])
+def test_acceptance_rejects_failed_or_missing_evidence(change) -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected)
+    original = service.test_results
+
+    async def altered(run_guid=""):
+        response = await original(run_guid)
+        response.data.update(change)
+        return response
+
+    service.test_results = altered
+    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.detail["acceptancePassed"] is False
+    assert result.error.detail["runGuid"] == "run-1"
+    observation = result.error.detail["steps"]["testStatus"]
+    observed = observation["data"] or (observation["error"] or {}).get("detail", {})
+    assert observed.items() >= change.items()
+
+
+@pytest.mark.parametrize("compile_data", [
+    {"status": "failed", "errorsVerified": True, "errorTotal": 1},
+    {"status": "completed", "errorTotal": 0},
+    {"status": "compiling", "errorsVerified": True, "errorTotal": 0},
+])
+def test_acceptance_does_not_treat_compile_transport_success_as_acceptance(compile_data) -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected)
+
+    async def compile_result(**_kwargs):
+        return ok("compile", compile_data)
+
+    service.safe_compile_and_wait = compile_result
+    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_COMPILE_FAILED"
+    assert service.status_calls == 0

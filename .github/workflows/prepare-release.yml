@@ -50,6 +50,21 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Install locked contract dependencies
+        run: |
+          python -m pip install uv
+          uv sync --directory upilotserver~ --frozen --extra dev
+
+      - name: Gate release source before version commit and tag
+        run: uv run --directory upilotserver~ --frozen --extra dev python scripts/check_release_quality.py
+
+      - name: Preserve source-bound quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upilot-pre-release-quality-${{ github.sha }}
+          path: artifacts/reliability-quality/
+
       - name: Synchronize version files
         run: python upilotserver~/deploy/sync_release_version.py "${{ steps.release.outputs.version }}"
 

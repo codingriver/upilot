@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, GameObjects, components, assets, prefabs, packages, tests, builds, screenshots, Editor windows, existing compiled reflection entry points, and long-running Unity task monitoring.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, and long-running Unity task monitoring.
 ---
 
 # UPilot Unity MCP
@@ -40,15 +40,23 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 - If a native tool is absent from the client list, query `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable. When an exact tool is registered and callable but not injected, use `unity_tool_call` with its documented arguments.
 - Refresh the MCP client after tool registration or optional-feature changes.
 - Prefer the narrowest semantic tool.
-- Call existing compiled methods with `unity_reflection_call`. It is a generic, write-authorized, non-idempotent execution entry point because the target method may mutate project or runtime state; inspect the target and never retry it automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery. Fall back to one bounded `reflection_eval` expression only after an actual reflection-call failure.
+- Use `unity_reflection_call` as the single public reflection execution entry point. Pass `typeName` + `methodName` for one structured compiled-method call, or pass only `expression` for one bounded C#-like reflection expression; `kind=auto` selects the engine from the request shape before execution and never retries through the other engine. The target may mutate project or runtime state, so inspect it and never retry automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery. No separate public reflection-expression alias is exposed.
+- Use `csharp_eval` for a bounded expression or multi-statement C# subset program. Use `reflection_emit_type` only when an actual temporary CLR type/interface implementation is required. Open `execution_session` before any result must survive the call, and always close it. These tools are write-gated, non-idempotent, and never automatically retried. Read `references/execution-tools.md` for schemas, examples, limits, and recovery.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
 
 ## Writes And Validation
 
 - Inspect the exact target before persistent or destructive work.
-- After one batch of disk writes, call `unity_sync_after_disk_write` once.
-- After C# or assembly-related changes, prefer one `unity_safe_compile_and_wait` call. It attaches to an existing compile and verifies errors after Domain Reload.
+- Treat Unity as the sole producer of Editor/compile facts and the MCP Server as the ordered latest-snapshot store. Expect fresh persisted snapshots immediately before a compile request (`compile_queued`), at compiler start (`compiling`), at compiler callback completion (`compiler_finished`, non-terminal until verification), immediately before Domain Reload (`domain_reload_starting`), immediately after reconnect (`domain_reload_recovered/verifying`), and after persisted error verification (`completed|failed`). Missing lifecycle evidence means unknown/recovering, not success.
+- Retain the current compile identity and terminal timestamps before C# or assembly-related disk writes; an old `completed` snapshot does not cover later edits.
+- Immediately after saving one batch of C#, asmdef, asmref, or rsp writes, call `unity_write_batch_register(paths, compileWhenEditMode=true)` once and retain its server-derived batch identity and creation time.
+- For deletions, include the absent paths in `deletedPaths`; represent a move as the existing destination in `paths` and the absent source in `deletedPaths`. Pure deletion uses `paths=[]`. Registration does not delete/move files; existing writes must still exist and all paths remain restricted to the project/local UPM roots. Use the returned merged change manifest/hash, not a last-call-only digest.
+- When that batch is registered during PlayMode, pause, or a mode transition, do not call sync or compile tools and do not exit PlayMode without user authorization. The Server durably defers the authorized batch and automatically performs one sync plus one safe compile after a fresh authoritative EditMode snapshot arrives.
+- Do not manually start a second sync or compile for an automatically authorized batch. Poll its execution state for a correlated terminal result. Use `unity_sync_after_disk_write` followed by one `unity_safe_compile_and_wait` only for legacy or explicitly manual flows.
+- Accept compilation for the current batch only when the terminal state identifies that write batch/compile operation, reports `errorsVerified=true`, and has `lastCompileVerifiedAt >= writeBatchCreatedAt`. Treat `lastCompilerFinishedAt` as a compiler-boundary observation, not verified completion. Until those fields are exposed, use the result of the one safe-compile call started after EditMode rather than cached compile state.
+- Treat envelope `ok` as protocol/tool success only; an observed compiler failure may be `ok=true/status=failed`. Decide the business result from phase, terminal verification, identities, timestamps, and structured errors.
+- Never claim the latest code was compiled from a historical `completed` state, an unchanged completion timestamp, or the absence of immediate Console errors.
 - Compile only after C# or assembly-related changes. Do not repeat compilation when no code changed.
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - For PlayMode tests, keep the returned `runGuid` and query `unity_test_results(runGuid=...)`; UPilot persists the run across Domain Reload and MCP reconnects.
@@ -99,14 +107,28 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 ## Acceptance Evidence
 
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
-- Prefer dedicated project-relative artifact or screenshot save tools that return metadata or hashes.
-- For screenshot fallback, pass ordered `fallbackSources` and report the actual `source`, `degraded`, and `degradeReason`.
-- Resolve EditorWindow targets with `unity_editor_windows_list`, reuse the exact Unity type/title identity, and never select an operating-system window by a matching title.
-- Trust EditorWindow/SceneView pixels only when `pixelSourceVerified=true` and `occlusionSensitive=false`; for SceneView evidence also require `matchedFullTypeName=UnityEditor.SceneView`, `includesSceneGui=true`, and `includesHandles=true`, then report repaint sequence/timestamps, `captureApi`, Unity PID, HWND, foreground state, and any degradation.
-- If capture falls back to base64 or OS-level automation, report the reason.
+- Prefer `unity_snapshot_capture`; the legacy `unity_screenshot_*` tools are compatibility wrappers over Snapshot schema v1.
+- Use exact IDs from `unity_camera_list` for multi-Camera or depth capture. Depth v1 supports Built-in/URP Raw Depth and Linear Depth Float EXR with optional PNG preview; HDRP is unsupported.
+- GameView Snapshot is PlayMode-only, Display 0, Color-only final composition. Camera and GameView are offscreen-capable while Unity is minimized; SceneView and EditorWindow fail fast when minimized.
+- Resolve SceneView/EditorWindow targets with `unity_editor_windows_list` and pass the exact Unity `instanceId`; never select an operating-system window by title. SceneView evidence also requires exact `UnityEditor.SceneView`, a completed Repaint, `includesSceneGui=true`, and `includesHandles=true`.
+- Trust a visual artifact only when `acceptedAsEvidence=true`, `pixelSourceVerified=true`, and `occlusionSensitive=false`; report its project-relative path, bytes, dimensions, SHA256, capture API, Unity PID/HWND, foreground/minimized state, degradation, and original error.
+- Snapshot baselines live under `.upilot/snapshots/baselines`. Update them only through `unity_snapshot_baseline_update` dry-run -> inspect -> explicit approval -> apply with the returned current-state `confirmToken`; never approve automatically. Use `unity_snapshot_baseline_compare` for pixel-difference ratio, SSIM, and diagnostic diff/heatmap artifacts.
 - Use `unity_shader_inspect` / `unity_shader_check_errors` for Shader-specific import, support, dependency, and compiler-message diagnostics.
 
-## Routing
+## Focused Reliability
+
+- Use `unity_test_list` and `unity_test_run` with exact `testNames` and/or fully qualified `fixtures` arrays for a union in one runGuid. Inspect per-selector match counts. Do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
+- Start long package acceptance through `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})`. Keep taskId and runGuid. Only tests/package acceptance use the project-isolated SQLite job records; other tasks and generic operations are not durable.
+- `unity_task_cancel` requests underlying test cancellation. It is not terminal until authoritative cleanup succeeds. Unsupported generic-task cancellation leaves both work and observation running.
+- A recovered test task observes its established runGuid and never replays start. `RecoveryRequired` means the outcome or cleanup is unproven, not success or cancellation. Inspect original evidence before any new run.
+- Acceptance requires a matching authoritative run, successful cleanup, verified compile evidence and unchanged checked source. Already verified compilation covering the current C# input timestamps is reused without a second compile.
+- `unity_prefab_patch` supports one ordinary non-nested prefab, one unambiguous child/component and supported existing value fields. Use `dryRun=true`, inspect old/new values and hashes, obtain explicit approval, then apply with the returned confirmToken and identical request.
+- Prefab patch v1 rejects an open target Prefab Mode, model/variant/nested prefabs, component/array structure changes, object-reference changes and numeric enums. It creates a temporary candidate only on apply, verifies the reload and preserves a backup; recovery is conditional on current asset/meta hashes. It is not a transaction over user callbacks.
+- Use `unity_scene_summary` before fetching a full hierarchy. Honor node/time/example budgets and `coverageComplete`/`truncationReason`; partial counts describe visited nodes only. Native per-node Unity API calls are not preemptible.
+
+## Reference Routing
+
+For execution-tool selection and typed values, read `references/execution-tools.md` on demand.
 
 - Installation: read `references/installation.md`.
 - Common flows: read `references/workflows.md`.

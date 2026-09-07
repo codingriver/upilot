@@ -26,3 +26,11 @@ The core install keeps optional features disabled. When the user explicitly requ
 Do not overwrite an existing skill or MCP registration without checking its current content.
 
 Unity Editor Agent Setup writes `.upilot-install.json` into every Skill directory that it manages. Later package versions may refresh a managed Skill automatically only when the recorded content hash still matches. Legacy, unmanaged, or locally customized Skill directories are preserved unless the user explicitly requests overwrite.
+
+Skill validation is read-only. Run `scripts/check_skill_pack.py` without arguments
+to detect source versus a managed installation, or pass `--mode source|installed`
+and `--root <SKILL_DIRECTORY>` explicitly. Source mode checks Unity `.meta` files
+and repository contracts. Installed mode checks required files, references and
+the recorded content hash without requiring Unity metadata or repository access.
+Unmanaged or changed installations are reported as unverified/failed; the checker
+never repairs files, changes endpoints or rewrites the installation marker.

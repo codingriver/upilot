@@ -38,7 +38,7 @@ namespace CodingRiver.UPilot
         private bool _showPointAdvancedSettings;
         private string _eventFilter = string.Empty;
 
-        [MenuItem("UPilot/Advanced/追踪器", false, 215)]
+        [MenuItem("UPilot/追踪器", false, 400)]
         public static void ShowWindow()
         {
             var window = GetWindow<UPilotMonoHookWindow>("UPilot 追踪器");

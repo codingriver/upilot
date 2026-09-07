@@ -20,10 +20,18 @@ namespace CodingRiver.UPilot
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
     [Serializable] public class TestRunMessage     { public TestRunPayload payload; }
-    [Serializable] public class TestRunPayload     { public string testMode = "EditMode"; public string testFilter = ""; }
+    [Serializable] public class TestRunPayload     { public string testMode = "EditMode"; public string testFilter = ""; public string[] testNames; public string[] fixtures; }
 
     [Serializable] public class TestListMessage    { public TestListPayload payload; }
-    [Serializable] public class TestListPayload    { public string testMode = "EditMode"; public string testFilter = ""; }
+    [Serializable] public class TestListPayload    { public string testMode = "EditMode"; public string testFilter = ""; public string[] testNames; public string[] fixtures; }
+
+    [Serializable]
+    public class TestSelectorMatchPayload
+    {
+        public string kind;
+        public string selector;
+        public int matchedCount;
+    }
 
     [Serializable] public class TestCancelMessage  { public TestCancelPayload payload; }
     [Serializable] public class TestCancelPayload  { public string runGuid = ""; }
@@ -73,6 +81,7 @@ namespace CodingRiver.UPilot
         public string requestedFilter;
         public int    discoveredCount;
         public int    matchedCount;
+        public List<TestSelectorMatchPayload> selectors = new List<TestSelectorMatchPayload>();
         public int    discoveredAssemblyCount;
         public List<string> discoveredAssemblies = new List<string>();
         public string outcomeStatus;
@@ -100,6 +109,7 @@ namespace CodingRiver.UPilot
         public int assemblyCount;
         public List<string> assemblies = new List<string>();
         public List<string> tests = new List<string>();
+        public List<TestSelectorMatchPayload> selectors = new List<TestSelectorMatchPayload>();
     }
 
     // ── Service ─────────────────────────────────────────────────────────────────
@@ -110,7 +120,8 @@ namespace CodingRiver.UPilot
 
         private readonly UPilotBridge _bridge;
         private TestRunResultPayload _lastResults;
-        private bool _isRunning;
+        private volatile bool _isRunning;
+        public bool IsRunning => _isRunning;
         private UnityEngine.Object _activeApi;
         private object _activeCallback;
         private string _activeRunGuid;
@@ -205,12 +216,42 @@ namespace CodingRiver.UPilot
             }
 
             string mode = NormalizeTestMode(p.testMode);
+            TestListResultPayload selection = null;
+            if (p.testNames != null || p.fixtures != null)
+            {
+                try
+                {
+                    selection = await DiscoverTestsAsync(id, mode, p.testFilter, p.testNames, p.fixtures);
+                }
+                catch (Exception ex)
+                {
+                    await _bridge.SendErrorAsync(id, "TEST_SELECTORS_INVALID", ex.Message, token, "test.run");
+                    return;
+                }
+                if (selection.matchedCount == 0)
+                {
+                    await _bridge.SendResultAsync(id, "test.run", new TestRunResultPayload
+                    {
+                        status = "no_tests", phase = "no_tests", testMode = mode, noTests = true,
+                        discoveryStatus = selection.discoveryStatus, selectors = selection.selectors,
+                        discoveredCount = selection.discoveredCount, matchedCount = 0,
+                        cleanupStatus = "completed", cleanupSucceeded = true,
+                        terminalReason = "No selector matched; TestRunnerApi.Execute was not called.",
+                    }, token);
+                    return;
+                }
+            }
             var filterDesc = p.testFilter ?? "(all)";
             opCtx?.Step("准备运行测试", $"mode={mode} filter={filterDesc}");
 
             var tcs = new TaskCompletionSource<TestRunResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
+                if (_isRunning)
+                {
+                    tcs.TrySetException(new InvalidOperationException("A test run is already in progress."));
+                    return;
+                }
                 try
                 {
                     _isRunning = true;
@@ -229,6 +270,9 @@ namespace CodingRiver.UPilot
                         watchdogState = "waiting_first_progress",
                         cleanupStatus = "not_started",
                         outcomeStatus = "pending",
+                        discoveredCount = selection?.discoveredCount ?? 0,
+                        matchedCount = selection?.matchedCount ?? 0,
+                        selectors = selection?.selectors ?? new List<TestSelectorMatchPayload>(),
                     };
                     _activeRunGuid = null;
                     _pendingTerminalStatus = null;
@@ -267,7 +311,14 @@ namespace CodingRiver.UPilot
                     // Set filter if specified. Preserve the historical exact-name
                     // behavior, while allowing class/namespace isolation through
                     // the Unity Test Framework's regex-capable groupNames field.
-                    if (!string.IsNullOrEmpty(p.testFilter))
+                    if (selection != null)
+                    {
+                        var testNamesField = filterType.GetField("testNames");
+                        if (testNamesField == null)
+                            throw new Exception("Test Filter.testNames field not found; refusing an unfiltered run.");
+                        testNamesField.SetValue(filter, selection.tests.ToArray());
+                    }
+                    else if (!string.IsNullOrEmpty(p.testFilter))
                     {
                         const string regexPrefix = "regex:";
                         if (p.testFilter.StartsWith(regexPrefix, StringComparison.OrdinalIgnoreCase))
@@ -456,9 +507,21 @@ namespace CodingRiver.UPilot
         {
             var msg = JsonUtility.FromJson<TestListMessage>(json);
             var p   = msg?.payload ?? new TestListPayload();
+            try
+            {
+                var result = await DiscoverTestsAsync(id, NormalizeTestMode(p.testMode), p.testFilter, p.testNames, p.fixtures);
+                await _bridge.SendResultAsync(id, "test.list", result, token);
+            }
+            catch (Exception ex)
+            {
+                await _bridge.SendErrorAsync(id, "TEST_LIST_FAILED", ex.Message, token, "test.list");
+            }
+        }
 
-            string mode = NormalizeTestMode(p.testMode);
-
+        private Task<TestListResultPayload> DiscoverTestsAsync(
+            string id, string mode, string testFilter, string[] testNames, string[] fixtures)
+        {
+            ValidateSelectors(testFilter, testNames, fixtures);
             var tcs = new TaskCompletionSource<TestListResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
@@ -467,7 +530,7 @@ namespace CodingRiver.UPilot
                     var result = new TestListResultPayload
                     {
                         testMode = mode,
-                        requestedFilter = p.testFilter ?? string.Empty,
+                        requestedFilter = testFilter ?? string.Empty,
                         discoveryStatus = "discovering",
                     };
 
@@ -492,19 +555,7 @@ namespace CodingRiver.UPilot
                     {
                         try
                         {
-                            var allTests = new List<string>();
-                            var assemblies = new HashSet<string>(StringComparer.Ordinal);
-                            CollectDiscoveredLeafTests(root, allTests, assemblies);
-                            allTests.Sort(StringComparer.Ordinal);
-                            result.discoveredCount = allTests.Count;
-                            result.assemblies = assemblies.OrderBy(item => item, StringComparer.Ordinal).ToList();
-                            result.assemblyCount = result.assemblies.Count;
-                            result.tests = FilterDiscoveredTests(allTests, result.requestedFilter);
-                            result.matchedCount = result.tests.Count;
-                            result.discoveryStatus = result.discoveredCount == 0
-                                ? "no_tests"
-                                : (result.matchedCount == 0 ? "filter_no_match" : "tests_discovered");
-                            tcs.TrySetResult(result);
+                            tcs.TrySetResult(ResolveTestSelection(root, mode, testFilter, testNames, fixtures));
                         }
                         catch (Exception ex)
                         {
@@ -526,15 +577,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.SetException(ex); }
             });
 
-            try
-            {
-                var payload = await tcs.Task;
-                await _bridge.SendResultAsync(id, "test.list", payload, token);
-            }
-            catch (Exception ex)
-            {
-                await _bridge.SendErrorAsync(id, "TEST_LIST_FAILED", ex.Message, token, "test.list");
-            }
+            return tcs.Task;
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────
@@ -611,12 +654,17 @@ namespace CodingRiver.UPilot
             return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
-        private static void CollectDiscoveredLeafTests(object node, List<string> tests, HashSet<string> assemblies)
+        private static void CollectDiscoveredLeafTests(
+            object node, List<string> tests, HashSet<string> assemblies,
+            Dictionary<string, HashSet<string>> fixtureTests = null, string fixtureName = "")
         {
             if (node == null)
                 return;
 
             Type nodeType = node.GetType();
+            string typeName = Convert.ToString(GetProperty(GetProperty(node, "TypeInfo"), "FullName"));
+            if (!string.IsNullOrWhiteSpace(typeName))
+                fixtureName = typeName;
             bool isTestAssembly = (bool)(nodeType.GetProperty("IsTestAssembly")?.GetValue(node) ?? false);
             if (isTestAssembly)
             {
@@ -635,7 +683,7 @@ namespace CodingRiver.UPilot
                 foreach (object child in children)
                 {
                     hasChildren = true;
-                    CollectDiscoveredLeafTests(child, tests, assemblies);
+                    CollectDiscoveredLeafTests(child, tests, assemblies, fixtureTests, fixtureName);
                 }
             }
 
@@ -643,7 +691,15 @@ namespace CodingRiver.UPilot
             {
                 string fullName = nodeType.GetProperty("FullName")?.GetValue(node) as string;
                 if (!string.IsNullOrEmpty(fullName))
+                {
                     tests.Add(fullName);
+                    if (fixtureTests != null && !string.IsNullOrEmpty(fixtureName))
+                    {
+                        if (!fixtureTests.TryGetValue(fixtureName, out var members))
+                            fixtureTests[fixtureName] = members = new HashSet<string>(StringComparer.Ordinal);
+                        members.Add(fullName);
+                    }
+                }
                 string assemblyName = Convert.ToString(GetProperty(node, "AssemblyName"));
                 if (string.IsNullOrWhiteSpace(assemblyName))
                 {
@@ -656,6 +712,65 @@ namespace CodingRiver.UPilot
             }
         }
 
+        public static void ValidateSelectors(string testFilter, string[] testNames, string[] fixtures)
+        {
+            if (testNames == null && fixtures == null) return;
+            if (!string.IsNullOrWhiteSpace(testFilter))
+                throw new ArgumentException("testFilter cannot be combined with testNames or fixtures.");
+            var selectors = (testNames ?? Array.Empty<string>()).Concat(fixtures ?? Array.Empty<string>()).ToArray();
+            if (selectors.Length == 0 || selectors.Length > 256 || selectors.Any(string.IsNullOrWhiteSpace))
+                throw new ArgumentException("Provide 1 to 256 non-empty exact selectors; empty arrays never mean all tests.");
+        }
+
+        public static TestListResultPayload ResolveTestSelection(
+            object root, string mode, string testFilter, string[] testNames = null, string[] fixtures = null)
+        {
+            ValidateSelectors(testFilter, testNames, fixtures);
+            var allTests = new List<string>();
+            var assemblies = new HashSet<string>(StringComparer.Ordinal);
+            var fixtureTests = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            CollectDiscoveredLeafTests(root, allTests, assemblies, fixtureTests);
+            var ambiguousNames = new HashSet<string>(
+                allTests.GroupBy(name => name, StringComparer.Ordinal).Where(group => group.Count() > 1).Select(group => group.Key),
+                StringComparer.Ordinal);
+            allTests = allTests.Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal).ToList();
+            var result = new TestListResultPayload
+            {
+                testMode = mode, requestedFilter = testFilter ?? "",
+                discoveredCount = allTests.Count,
+                assemblies = assemblies.OrderBy(name => name, StringComparer.Ordinal).ToList(),
+                assemblyCount = assemblies.Count,
+            };
+            if (testNames == null && fixtures == null)
+            {
+                result.tests = !string.IsNullOrWhiteSpace(testFilter) && fixtureTests.TryGetValue(testFilter, out var members)
+                    ? members.OrderBy(name => name, StringComparer.Ordinal).ToList()
+                    : FilterDiscoveredTests(allTests, testFilter);
+            }
+            else
+            {
+                var selected = new HashSet<string>(StringComparer.Ordinal);
+                foreach (string name in testNames ?? Array.Empty<string>())
+                {
+                    bool matched = allTests.BinarySearch(name, StringComparer.Ordinal) >= 0;
+                    result.selectors.Add(new TestSelectorMatchPayload { kind = "testName", selector = name, matchedCount = matched ? 1 : 0 });
+                    if (matched) selected.Add(name);
+                }
+                foreach (string fixture in fixtures ?? Array.Empty<string>())
+                {
+                    fixtureTests.TryGetValue(fixture, out var members);
+                    result.selectors.Add(new TestSelectorMatchPayload { kind = "fixture", selector = fixture, matchedCount = members?.Count ?? 0 });
+                    if (members != null) selected.UnionWith(members);
+                }
+                result.tests = selected.OrderBy(name => name, StringComparer.Ordinal).ToList();
+                if (selected.Any(ambiguousNames.Contains))
+                    throw new ArgumentException("Exact selectors matched duplicate full names across discovery nodes; assembly-qualified selection is not supported.");
+            }
+            result.matchedCount = result.tests.Count;
+            result.discoveryStatus = result.discoveredCount == 0 ? "no_tests" : (result.matchedCount == 0 ? "filter_no_match" : "tests_discovered");
+            return result;
+        }
+
         private static List<string> FilterDiscoveredTests(List<string> tests, string testFilter)
         {
             if (string.IsNullOrWhiteSpace(testFilter))
@@ -663,7 +778,7 @@ namespace CodingRiver.UPilot
             const string regexPrefix = "regex:";
             if (testFilter.StartsWith(regexPrefix, StringComparison.OrdinalIgnoreCase))
             {
-                var regex = new Regex(testFilter.Substring(regexPrefix.Length), RegexOptions.CultureInvariant);
+                var regex = new Regex(testFilter.Substring(regexPrefix.Length), RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
                 return tests.Where(name => regex.IsMatch(name)).ToList();
             }
             return tests.Where(name => string.Equals(name, testFilter, StringComparison.Ordinal)).ToList();

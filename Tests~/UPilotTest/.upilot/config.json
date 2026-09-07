@@ -27,5 +27,14 @@
     "updates": {
         "manifestUrl": "",
         "channel": "auto"
+    },
+    "agents": {
+        "selectionInitialized": true,
+        "enabledClients": [
+            "codex",
+            "claude-code",
+            "cursor",
+            "opencode"
+        ]
     }
 }

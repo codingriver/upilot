@@ -33,12 +33,13 @@ namespace CodingRiver.UPilot.Tests
                 var camera = gameObject.AddComponent<Camera>();
                 gameObject.SetActive(false);
 
-                var findCamera = typeof(UPilotScreenshotService).GetMethod(
-                    "FindCamera",
+                var findCameras = typeof(UPilotSnapshotService).GetMethod(
+                    "FindSceneCameras",
                     BindingFlags.NonPublic | BindingFlags.Static);
 
-                Assert.That(findCamera, Is.Not.Null);
-                Assert.That(findCamera.Invoke(null, new object[] { cameraName }), Is.SameAs(camera));
+                Assert.That(findCameras, Is.Not.Null);
+                var cameras = (Camera[])findCameras.Invoke(null, System.Array.Empty<object>());
+                Assert.That(cameras, Does.Contain(camera));
             }
             finally
             {

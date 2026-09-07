@@ -165,13 +165,4 @@ async def run_action(
             target_static_member_path=str(p.get("targetStaticMemberPath") or ""),
         )
 
-    if a == "reflection.eval":
-        variables = p.get("variables") if isinstance(p.get("variables"), dict) else None
-        options = p.get("options") if isinstance(p.get("options"), dict) else None
-        return await facade.reflection_eval(
-            code=str(p.get("code") or ""),
-            variables=variables,
-            options=options,
-        )
-
     return fail(new_id("e2e"), "E2E_UNKNOWN_ACTION", f"Unknown action: {a}", {"action": a})

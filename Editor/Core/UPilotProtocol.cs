@@ -34,6 +34,14 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class HeartbeatPayload
     {
+        public int stateContractVersion;
+        public string projectId;
+        public string producerEpoch;
+        public long domainGeneration;
+        public long sequence;
+        public string snapshotId;
+        public string transition;
+        public long observedAt;
         public bool connected;
         public bool authoritative;
         public bool isStale;
@@ -52,6 +60,23 @@ namespace CodingRiver.UPilot
         public string compileStatus;
         public string compilePhase;
         public string compileRequestId;
+        public string compileOperationId;
+        public string originatingCommandRequestId;
+        public string writeBatchId;
+        public string compileOrigin;
+        public bool terminal;
+        public bool verificationPending;
+        public bool errorsVerified;
+        public long lastCompileRequestedAt;
+        public long lastCompileStartedAt;
+        public long lastCompilerFinishedAt;
+        public long lastCompileVerifiedAt;
+        public long lastTerminalCompileAt;
+        public string reloadId;
+        public bool domainReloadObserved;
+        public string pendingWriteBatchId;
+        public long writeBatchCreatedAt;
+        public string compileDeferredReason;
         public long compileStartedAt;
         public long compileFinishedAt;
         public long lastProgressAt;
@@ -108,7 +133,7 @@ namespace CodingRiver.UPilot
         public string id;
         public string type;
         public string name;
-        public HeartbeatPayload payload;
+        public EditorExecutionStatePayload payload;
         public long timestamp;
         public string sessionId;
         public string protocolVersion = "1.0";
@@ -150,10 +175,44 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public class SourceSpanPayload
+    {
+        public int start;
+        public int length;
+        public int end;
+        public int line;
+        public int column;
+        public int endLine;
+        public int endColumn;
+    }
+
+    [Serializable]
+    public class ExecutionDiagnosticPayload
+    {
+        public string code;
+        public string message;
+        public string severity;
+        public SourceSpanPayload sourceSpan;
+    }
+
+    [Serializable]
     public class ErrorDetailPayload
     {
         public string commandId;
         public string commandName;
+        public string stage;
+        public string nextAction;
+        public bool sideEffectsMayHaveOccurred;
+        public string sessionId;
+        public string sourceSpanJson;
+        public string diagnosticsJson;
+        public string candidatesJson;
+        public SourceSpanPayload sourceSpan;
+        public ExecutionDiagnosticPayload[] diagnostics = Array.Empty<ExecutionDiagnosticPayload>();
+        public string[] candidates = Array.Empty<string>();
+        public string[] cleanupDiagnostics = Array.Empty<string>();
+        public string exceptionType;
+        public string stackTrace;
     }
 
     [Serializable]
@@ -204,6 +263,8 @@ namespace CodingRiver.UPilot
     public class CompileRequestPayload
     {
         public string requestId;
+        public string writeBatchId;
+        public long writeBatchCreatedAt;
     }
 
     [Serializable]
@@ -211,6 +272,8 @@ namespace CodingRiver.UPilot
     {
         public bool accepted;
         public string compileRequestId;
+        public string compileOperationId;
+        public string writeBatchId;
     }
 
     [Serializable]
@@ -238,13 +301,27 @@ namespace CodingRiver.UPilot
     public class CompileErrorsPayload
     {
         public string requestId;
+        public string compileOperationId;
+        public string writeBatchId;
+        public long writeBatchCreatedAt;
+        public string compileOrigin;
         public string status;
         public string phase;
+        public bool terminal;
+        public bool verificationPending;
+        public bool errorsVerified;
         public int total;
         public int warningCount;
         public long startedAt;
         public long finishedAt;
         public long lastProgressAt;
+        public long lastCompileRequestedAt;
+        public long lastCompileStartedAt;
+        public long lastCompilerFinishedAt;
+        public long lastCompileVerifiedAt;
+        public long lastTerminalCompileAt;
+        public string reloadId;
+        public bool domainReloadObserved;
         public List<CompileErrorItemPayload> errors = new();
     }
 
@@ -439,6 +516,19 @@ namespace CodingRiver.UPilot
         public string compilePhase;
         public string playModeState;
         public string activeScene;
+    }
+
+    /// <summary>
+    /// Authoritative, full Editor/compile snapshot produced only by Unity.
+    /// The server may add receive-time freshness metadata but must not invent
+    /// Unity lifecycle facts.
+    /// </summary>
+    [Serializable]
+    public class EditorExecutionStatePayload : EditorContextPayload
+    {
+        public int errorCount;
+        public int warningCount;
+        public bool preReloadPublishFailed;
     }
 
     [Serializable]

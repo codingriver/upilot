@@ -22,9 +22,18 @@ from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
+from ..source_identity import source_identity
+from ..test_job_context import TEST_JOB_CONTEXT, checkpoint
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+
+def _response_summary(response: ToolResponse) -> dict:
+    return {
+        "ok": response.ok, "data": response.data or {},
+        "error": ({"code": response.error.code, "message": response.error.message, "detail": response.error.detail} if response.error else None),
+    }
 
 
 def _normalize_reflection_parameters(parameters: list | None) -> list:
@@ -52,9 +61,14 @@ class TestDomainService:
     __test__ = False
 
     async def test_run(
-        self, test_mode: str = "EditMode", test_filter: str = ""
+        self, test_mode: str = "EditMode", test_filter: str = "",
+        test_names: list[str] | None = None, fixtures: list[str] | None = None,
     ) -> ToolResponse:
         request_id = new_id("req")
+        try:
+            selector_payload = self._test_selector_payload(test_filter, test_names, fixtures)
+        except ValueError as exc:
+            return fail(request_id, "TEST_SELECTORS_INVALID", str(exc))
         scene_state = await self.dispatcher.call(
             new_id("req"), "scene.list", {}, timeout_ms=30000
         )
@@ -176,17 +190,35 @@ class TestDomainService:
                 }
             )
 
-        payload: dict = {"testMode": test_mode}
+        payload: dict = {"testMode": test_mode, **selector_payload}
         if normalized_filter:
             payload["testFilter"] = normalized_filter
+        checkpoint("starting", startIntentSent=True)
         result = await self.dispatcher.call(
             request_id, "test.run", payload, timeout_ms=300000
         )
+        checkpoint("observing", runGuid=str((result.data or {}).get("runGuid") or ""))
         if result.data is not None:
             result.data.update(filter_diagnostics)
         elif result.error is not None:
             result.error.detail.update(filter_diagnostics)
         return result
+
+    @staticmethod
+    def _test_selector_payload(test_filter, test_names, fixtures) -> dict:
+        if test_names is None and fixtures is None:
+            return {}
+        if test_filter.strip():
+            raise ValueError("testFilter cannot be combined with testNames or fixtures.")
+        for values in (test_names, fixtures):
+            if values is not None and (
+                not isinstance(values, list)
+                or any(not isinstance(value, str) or not value.strip() for value in values)
+            ):
+                raise ValueError("Selectors must be arrays of non-empty exact names.")
+        if not 1 <= len(test_names or []) + len(fixtures or []) <= 256:
+            raise ValueError("Provide 1 to 256 selectors; empty arrays never mean all tests.")
+        return {key: value for key, value in (("testNames", test_names), ("fixtures", fixtures)) if value is not None}
 
     @staticmethod
     def _is_short_test_class_filter(test_filter: str) -> bool:
@@ -229,10 +261,17 @@ class TestDomainService:
             request_id, "test.force_cleanup", payload, timeout_ms=30000
         )
 
-    async def test_list(self, test_mode: str = "EditMode", test_filter: str = "") -> ToolResponse:
+    async def test_list(
+        self, test_mode: str = "EditMode", test_filter: str = "",
+        test_names: list[str] | None = None, fixtures: list[str] | None = None,
+    ) -> ToolResponse:
         request_id = new_id("req")
+        try:
+            selectors = self._test_selector_payload(test_filter, test_names, fixtures)
+        except ValueError as exc:
+            return fail(request_id, "TEST_SELECTORS_INVALID", str(exc))
         return await self.dispatcher.call(
-            request_id, "test.list", {"testMode": test_mode, "testFilter": test_filter}
+            request_id, "test.list", {"testMode": test_mode, "testFilter": test_filter, **selectors}
         )
 
     async def upilot_acceptance_run(
@@ -243,6 +282,8 @@ class TestDomainService:
         stop_active_captures: bool = True,
         require_tests: bool = True,
         write_artifact: bool = True,
+        test_names: list[str] | None = None,
+        fixtures: list[str] | None = None,
     ) -> ToolResponse:
         """Run canonical package acceptance without an active persistent Console capture."""
         request_id = new_id("req")
@@ -254,36 +295,31 @@ class TestDomainService:
             "startedAt": started_at,
             "testMode": test_mode,
             "testFilter": test_filter,
+            "testNames": test_names,
+            "fixtures": fixtures,
             "expectedProject": str(expected_project),
             "stoppedConsoleCaptures": [],
             "steps": {},
+            "requestId": request_id,
+            "writeArtifact": write_artifact,
+            "requireTests": require_tests,
+            "deadlineAt": started_at + int(max(10, timeout_sec) * 1000),
+            "sourceIdentity": source_identity(expected_project.parents[1]),
         }
+        context = TEST_JOB_CONTEXT.get()
+        if context:
+            report["deadlineAt"] = min(report["deadlineAt"], context[0]["deadlineAt"])
 
-        def response_summary(response: ToolResponse) -> dict:
-            return {
-                "ok": response.ok,
-                "data": response.data or {},
-                "error": ({"code": response.error.code, "message": response.error.message, "detail": response.error.detail} if response.error else None),
-            }
+        response_summary = _response_summary
 
         async def finish(passed: bool, code: str = "", message: str = "") -> ToolResponse:
-            report["acceptancePassed"] = passed
-            report["endedAt"] = now_ms()
-            report["elapsedMs"] = int(report["endedAt"]) - started_at
-            if code:
-                report["failureCode"] = code
-                report["failureMessage"] = message
-            if write_artifact:
-                artifact_dir = expected_project / "Log" / "UPilotAcceptance" / time.strftime("%Y%m%d-%H%M%S")
-                artifact_dir.mkdir(parents=True, exist_ok=True)
-                artifact_path = artifact_dir / "summary.json"
-                content = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-                artifact_path.write_bytes(content)
-                report["artifact"] = {
-                    "path": str(artifact_path), "bytes": len(content),
-                    "sha256": hashlib.sha256(content).hexdigest(),
-                }
-            return ok(request_id, report) if passed else fail(request_id, code or "UPILOT_ACCEPTANCE_FAILED", message or "UPilot acceptance failed.", report)
+            return self._finish_acceptance_report(report, passed, code, message)
+
+        checkpoint("preflight", acceptanceReport=report)
+        try:
+            self._test_selector_payload(test_filter, test_names, fixtures)
+        except ValueError as exc:
+            return await finish(False, "TEST_SELECTORS_INVALID", str(exc))
 
         status = await self.mcp_status(force_fresh=True, include_capabilities=False)
         report["steps"]["mcpStatus"] = response_summary(status)
@@ -306,22 +342,52 @@ class TestDomainService:
 
         captures = await self.console_capture_list(count=200, include_active=True)
         report["steps"]["consoleCaptureList"] = response_summary(captures)
+        if not captures.ok:
+            return await finish(False, "UPILOT_ACCEPTANCE_CAPTURE_STATE_UNKNOWN", "Could not verify active Console captures.")
         active_sessions = [item for item in ((captures.data or {}).get("sessions") or []) if item.get("active")]
         if active_sessions and not stop_active_captures:
             return await finish(False, "UPILOT_ACCEPTANCE_ACTIVE_CAPTURE", "Persistent Console capture is active; self-tests require capture-safe execution.")
         for session in active_sessions:
+            checkpoint("capture_cleanup")
             session_id = str(session.get("sessionId") or "")
             stopped = await self.console_capture_stop(session_id=session_id)
             report["stoppedConsoleCaptures"].append({"sessionId": session_id, **response_summary(stopped)})
             if not stopped.ok:
                 return await finish(False, "UPILOT_ACCEPTANCE_CAPTURE_STOP_FAILED", f"Could not stop Console capture {session_id}.")
 
-        compiled = await self.safe_compile_and_wait(timeout_s=min(timeout_sec, 600))
+        checkpoint("compile")
+        execution = (ready.data or {}).get("executionState") or {}
+        csharp_paths = [
+            path
+            for folder in (expected_project.parents[1] / "Editor", expected_project.parents[1] / "Runtime",
+                           expected_project.parents[1] / "Tests", expected_project / "Assets")
+            if folder.exists()
+            for path in folder.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".cs", ".asmdef", ".asmref", ".rsp"}
+        ]
+        latest_input_ms = max((int(path.stat().st_mtime * 1000) for path in csharp_paths), default=0)
+        if (
+            execution.get("authoritative") is True and execution.get("isStale") is False
+            and execution.get("terminal") is True and execution.get("errorsVerified") is True
+            and execution.get("compilePhase") == "completed" and execution.get("compileErrorCount") == 0
+            and int(execution.get("lastCompileVerifiedAt") or 0) >= latest_input_ms > 0
+        ):
+            compiled = ok(request_id, {**execution, "status": "success", "errorTotal": 0, "reusedVerifiedCompile": True})
+        else:
+            compiled = await self.safe_compile_and_wait(timeout_s=min(timeout_sec, 600))
         report["steps"]["compile"] = response_summary(compiled)
-        if not compiled.ok:
+        compile_data = compiled.data or {}
+        if (
+            not compiled.ok
+            or compile_data.get("errorsVerified") is not True
+            or str(compile_data.get("status") or "").lower() not in {"success", "completed"}
+            or compile_data.get("errorTotal") != 0
+        ):
             return await finish(False, "UPILOT_ACCEPTANCE_COMPILE_FAILED", "UPilot package compilation failed.")
 
-        listed = await self.test_list(test_mode=test_mode)
+        checkpoint("discovery", acceptanceReport=report)
+        selection_args = {"test_mode": test_mode, "test_names": test_names, "fixtures": fixtures}
+        listed = await self.test_list(**selection_args, test_filter="" if self._is_short_test_class_filter(test_filter) else test_filter)
         report["steps"]["testList"] = response_summary(listed)
         tests = (listed.data or {}).get("tests") or []
         report["discoveredTestCount"] = len(tests)
@@ -330,41 +396,112 @@ class TestDomainService:
         if require_tests and not tests:
             return await finish(False, "UPILOT_ACCEPTANCE_NO_TESTS", "No matching tests were discovered.")
 
-        run = await self.test_run(test_mode=test_mode, test_filter=test_filter)
+        checkpoint("test_preflight", acceptanceReport=report)
+        run = await self.test_run(**selection_args, test_filter=test_filter)
         report["steps"]["testRun"] = response_summary(run)
         if not run.ok:
             return await finish(False, "UPILOT_ACCEPTANCE_TEST_START_FAILED", "Unity Test Runner could not start.")
-        deadline = time.monotonic() + max(10, timeout_sec)
-        terminal = {"completed", "failed", "aborted", "no_tests"}
-        final_status = run
-        while time.monotonic() < deadline:
-            final_status = await self.test_status()
-            data = final_status.data or {}
-            if str(data.get("status") or "").lower() in terminal and not data.get("cleanupPending"):
-                break
-            await asyncio.sleep(1.0)
-        else:
-            cleanup = await self.test_force_cleanup(str((run.data or {}).get("runGuid") or ""))
-            report["steps"]["timeoutCleanup"] = response_summary(cleanup)
-            return await finish(False, "UPILOT_ACCEPTANCE_TEST_TIMEOUT", "Unity tests did not reach a cleaned terminal state before timeout.")
-        report["steps"]["testStatus"] = response_summary(final_status)
+        run_guid = str((run.data or {}).get("runGuid") or "")
+        report["runGuid"] = run_guid
+        if not run_guid:
+            return await finish(False, "UPILOT_ACCEPTANCE_RUN_ID_MISSING", "Test start did not return a runGuid; do not retry an uncertain start.")
+        checkpoint("observing", runGuid=run_guid, acceptanceReport=report)
+        return await self._complete_acceptance_report(report)
 
+    @staticmethod
+    def _finish_acceptance_report(report: dict, passed: bool, code: str = "", message: str = "") -> ToolResponse:
+        report["acceptancePassed"] = bool(passed)
+        report["endedAt"] = now_ms()
+        report["elapsedMs"] = report["endedAt"] - report["startedAt"]
+        if code:
+            report["failureCode"], report["failureMessage"] = code, message
+        if report.get("writeArtifact"):
+            artifact_dir = Path(report["expectedProject"]) / "Log" / "UPilotAcceptance" / (str(report["startedAt"]) + "_" + report["requestId"])
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = artifact_dir / "summary.json"
+            report.pop("artifact", None)
+            content = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+            temporary_path = artifact_path.with_suffix(".json.tmp")
+            temporary_path.write_bytes(content)
+            os.replace(temporary_path, artifact_path)
+            report["artifact"] = {"path": str(artifact_path), "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+        checkpoint("finalized", acceptanceReport=report)
+        return ok(report["requestId"], report) if passed else fail(report["requestId"], code or "UPILOT_ACCEPTANCE_FAILED", message or "UPilot acceptance failed.", report)
+
+    @staticmethod
+    def _test_cleanup_verified(data: dict) -> bool:
+        return (
+            data.get("cleanupPending") is False and data.get("cleanupSucceeded") is True
+            and data.get("cleanupStatus") == "completed" and data.get("cleanupErrors") == []
+            and data.get("unresolvedResources") == []
+        )
+
+    async def _wait_for_test_result(self, run_guid: str, deadline_at: int) -> ToolResponse:
+        context = TEST_JOB_CONTEXT.get()
+        state = context[0] if context else {}
+        cleanup_deadline = int(state.get("cleanupDeadlineAt") or 0)
+        while True:
+            if context and state.get("projectPath") != self.server.state._project_path:
+                return fail(new_id("req"), "TEST_RECOVERY_REQUIRED", "Connected project changed; no cross-project test observation or cancellation was attempted.")
+            final_status = await self.test_results(run_guid=run_guid)
+            data = final_status.data or {}
+            if final_status.ok and data.get("runGuid") != run_guid:
+                return fail(new_id("req"), "TEST_RECOVERY_REQUIRED", "Test result identity does not match the established runGuid.", data)
+            terminal = str(data.get("status") or "").lower() in {"completed", "failed", "aborted", "no_tests"}
+            if final_status.ok and terminal and data.get("cleanupPending") is not True:
+                return final_status
+            timed_out = now_ms() >= deadline_at
+            if (timed_out or state.get("cancelRequested")) and not cleanup_deadline:
+                cleanup_deadline = now_ms() + 60000
+                checkpoint("cancelling", cleanupDeadlineAt=cleanup_deadline, timedOut=timed_out)
+                cancelled = await self.test_cancel(run_guid=run_guid)
+                checkpoint("cleaning_up", cancelResponse=_response_summary(cancelled))
+            if cleanup_deadline and now_ms() >= cleanup_deadline:
+                return fail(new_id("req"), "TEST_RECOVERY_REQUIRED", "No authoritative cleaned terminal result before the cleanup deadline.", {
+                    "runGuid": run_guid, "lastObservation": _response_summary(final_status), "cleanupDeadlineAt": cleanup_deadline,
+                })
+            await asyncio.sleep(1.0)
+
+    async def _complete_acceptance_report(self, report: dict) -> ToolResponse:
+        run_guid = report["runGuid"]
+        final_status = await self._wait_for_test_result(run_guid, report["deadlineAt"])
+        report["steps"]["testStatus"] = _response_summary(final_status)
+        if not final_status.ok:
+            return self._finish_acceptance_report(report, False, "UPILOT_ACCEPTANCE_RECOVERY_REQUIRED", "Test outcome or cleanup could not be proven.")
+        checkpoint("finalizing", acceptanceReport=report)
         compile_errors = await self.compile_errors()
         console_errors = await self.console_search_logs(count=200, log_type="Error", include_stack_trace=True, exclude_upilot=False, max_message_length=4000)
-        report["steps"]["compileErrors"] = response_summary(compile_errors)
-        report["steps"]["consoleErrors"] = response_summary(console_errors)
+        report["steps"]["compileErrors"] = _response_summary(compile_errors)
+        report["steps"]["consoleErrors"] = _response_summary(console_errors)
         test_data = final_status.data or {}
+        cleanup_verified = self._test_cleanup_verified(test_data)
+        report["cleanupVerified"] = cleanup_verified
+        report["testIdentityVerified"] = (
+            test_data.get("runGuid") == run_guid
+            and test_data.get("resultAuthoritative") is True
+        )
+        report["sourceIdentityAfter"] = source_identity(Path(report["expectedProject"]).parents[1])
+        report["sourceUnchanged"] = report["sourceIdentityAfter"] == report["sourceIdentity"]
+        context = TEST_JOB_CONTEXT.get()
+        job = context[0] if context else {}
         passed = (
             final_status.ok
+            and report["testIdentityVerified"]
+            and cleanup_verified
             and str(test_data.get("status") or "").lower() == "completed"
-            and int(test_data.get("failed") or 0) == 0
+            and test_data.get("failed") == 0
+            and (not report["requireTests"] or int(test_data.get("total") or 0) > 0)
             and not bool(test_data.get("noTests"))
             and compile_errors.ok
-            and int((compile_errors.data or {}).get("total") or 0) == 0
+            and (compile_errors.data or {}).get("total") == 0
+            and console_errors.ok
+            and report["sourceUnchanged"]
+            and not job.get("cancelRequested")
+            and not job.get("timedOut")
         )
         if passed:
-            return await finish(True)
-        return await finish(False, "UPILOT_ACCEPTANCE_FAILED", "Compile, test, or cleanup acceptance criteria were not met.")
+            return self._finish_acceptance_report(report, True)
+        return self._finish_acceptance_report(report, False, "UPILOT_ACCEPTANCE_FAILED", "Compile, test, cleanup, cancellation or source identity acceptance criteria were not met.")
 
     async def editor_e2e_run(
         self,
@@ -540,6 +677,167 @@ class TestDomainService:
         )
 
     # Optional UPilot Flow test operations.
+    @staticmethod
+    def _flow_disabled() -> ToolResponse | None:
+        if not CONFIG.flow_enabled:
+            return fail(new_id("upilot_flow"), "FEATURE_DISABLED", "UPilot Flow is disabled by project configuration.")
+        return None
+
+    async def _wait_for_upilot_flow(self, execution_id: str, run_data: dict, timeout_s: float) -> ToolResponse:
+        deadline = time.monotonic() + timeout_s
+        last_data = run_data
+        last_status = ""
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            response = await self.upilot_flow_results(execution_id)
+            if not response.ok:
+                return response
+            last_data = response.data or {}
+            status = str(last_data.get("status") or "")
+            if status != last_status:
+                logger.info("[UPilot Flow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
+                last_status = status
+            if status in {"completed", "failed", "aborted"}:
+                return response
+        await self.upilot_flow_cancel(execution_id)
+        return fail(
+            new_id("upilot_flow"), "UIFLOW_WAIT_TIMEOUT",
+            f"Timed out waiting for upilot_flow execution: {execution_id}",
+            {"executionId": execution_id, "lastStatus": last_data.get("status")},
+        )
+
+    async def upilot_flow_run_file(
+        self, yaml_path: str, headed: bool = True, report_output_path: str = "",
+        screenshot_path: str = "", screenshot_on_failure: bool = True,
+        stop_on_first_failure: bool = True, continue_on_step_failure: bool = False,
+        default_timeout_ms: int = 10000, pre_step_delay_ms: int = 0,
+        enable_verbose_log: bool = True, debug_on_failure: bool = False,
+    ) -> ToolResponse:
+        disabled = self._flow_disabled()
+        if disabled is not None:
+            return disabled
+        resolved_yaml = str(Path(yaml_path).expanduser().resolve())
+        if not Path(resolved_yaml).is_file():
+            return fail(new_id("upilot_flow"), "UIFLOW_YAML_NOT_FOUND",
+                        f"YAML file not found: {resolved_yaml}", {"yamlPath": resolved_yaml})
+        report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+        run = await self.upilot_flow_run(
+            yaml_paths=[resolved_yaml], headed=headed, stop_on_first_failure=stop_on_first_failure,
+            continue_on_step_failure=continue_on_step_failure, screenshot_on_failure=screenshot_on_failure,
+            default_timeout_ms=default_timeout_ms, enable_verbose_log=enable_verbose_log,
+            report_path=report_root, debug_on_failure=debug_on_failure,
+        )
+        if not run.ok:
+            return run
+        execution_id = str((run.data or {}).get("executionId") or "")
+        if not execution_id:
+            return fail(new_id("upilot_flow"), "UIFLOW_EXECUTION_ID_MISSING",
+                        "upilot_flow.run did not return executionId", {"response": run.data or {}})
+        result = await self._wait_for_upilot_flow(
+            execution_id, run.data or {}, max(60.0, default_timeout_ms / 1000.0 + 180.0),
+        )
+        if not result.ok:
+            return result
+        data = result.data or {}
+        case = ((data.get("cases") or [None])[0]) or {}
+        return ok(new_id("upilot_flow"), {
+            "yamlPath": resolved_yaml,
+            "reportOutputPath": str(data.get("reportPath") or report_root),
+            "screenshotPath": screenshot_path.strip() or str((Path(report_root) / execution_id / "Screenshots").as_posix()),
+            "result": {
+                "executionId": execution_id, "status": str(data.get("status") or ""),
+                "caseName": case.get("caseName") or data.get("currentCaseName") or Path(resolved_yaml).stem,
+                "errorCode": case.get("errorCode") or data.get("errorCode") or "",
+                "errorMessage": case.get("errorMessage") or data.get("errorMessage") or "",
+                "reportPath": data.get("reportPath") or report_root, "raw": data,
+            },
+        })
+
+    async def upilot_flow_run_suite(
+        self, directory_path: str, headed: bool = True, report_output_path: str = "",
+        screenshot_path: str = "", screenshot_on_failure: bool = True,
+        stop_on_first_failure: bool = False, continue_on_step_failure: bool = False,
+        default_timeout_ms: int = 10000, pre_step_delay_ms: int = 0, enable_verbose_log: bool = True,
+    ) -> ToolResponse:
+        disabled = self._flow_disabled()
+        if disabled is not None:
+            return disabled
+        resolved_dir = str(Path(directory_path).expanduser().resolve())
+        if not Path(resolved_dir).is_dir():
+            return fail(new_id("upilot_flow"), "UIFLOW_SUITE_DIR_NOT_FOUND",
+                        f"Suite directory not found: {resolved_dir}", {"directoryPath": resolved_dir})
+        report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+        run = await self.upilot_flow_run(
+            yaml_directory=resolved_dir, headed=headed, stop_on_first_failure=stop_on_first_failure,
+            continue_on_step_failure=continue_on_step_failure, screenshot_on_failure=screenshot_on_failure,
+            default_timeout_ms=default_timeout_ms, enable_verbose_log=enable_verbose_log, report_path=report_root,
+        )
+        if not run.ok:
+            return run
+        execution_id = str((run.data or {}).get("executionId") or "")
+        if not execution_id:
+            return fail(new_id("upilot_flow"), "UIFLOW_EXECUTION_ID_MISSING",
+                        "upilot_flow.run did not return executionId", {"response": run.data or {}})
+        result = await self._wait_for_upilot_flow(
+            execution_id, run.data or {}, max(120.0, default_timeout_ms / 1000.0 + 360.0),
+        )
+        if not result.ok:
+            return result
+        data = result.data or {}
+        report_path = str(data.get("reportPath") or report_root)
+        status = str(data.get("status") or "")
+        failed, errors = int(data.get("failed") or 0), int(data.get("errors") or 0)
+        return ok(new_id("upilot_flow"), {
+            "directoryPath": resolved_dir, "reportOutputPath": report_path,
+            "screenshotPath": screenshot_path.strip() or str((Path(report_path) / "Screenshots").as_posix()),
+            "result": {
+                "executionId": execution_id, "status": status, "total": int(data.get("total") or 0),
+                "passed": int(data.get("passed") or 0), "failed": failed, "errors": errors,
+                "skipped": int(data.get("skipped") or 0),
+                "exitCode": 0 if status == "completed" and failed == 0 and errors == 0 else 1, "raw": data,
+            },
+        })
+
+    async def upilot_flow_run_async(
+        self, yaml_paths: list[str], batch_size: int = 10, batch_offset: int = 0,
+        headed: bool = True, report_output_path: str = "", screenshot_path: str = "",
+        screenshot_on_failure: bool = True, stop_on_first_failure: bool = False,
+        continue_on_step_failure: bool = False, default_timeout_ms: int = 10000,
+        pre_step_delay_ms: int = 0, enable_verbose_log: bool = True, debug_on_failure: bool = False,
+    ) -> ToolResponse:
+        disabled = self._flow_disabled()
+        if disabled is not None:
+            return disabled
+        resolved = []
+        for path in yaml_paths:
+            path = str(Path(path).expanduser().resolve())
+            if not Path(path).is_file():
+                return fail(new_id("upilot_flow"), "UIFLOW_YAML_NOT_FOUND",
+                            f"YAML file not found: {path}", {"yamlPath": path})
+            resolved.append(path)
+        report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+        run = await self.upilot_flow_run(
+            yaml_paths=resolved, headed=headed, stop_on_first_failure=stop_on_first_failure,
+            continue_on_step_failure=continue_on_step_failure, screenshot_on_failure=screenshot_on_failure,
+            default_timeout_ms=default_timeout_ms, enable_verbose_log=enable_verbose_log,
+            report_path=report_root, debug_on_failure=debug_on_failure,
+            batch_size=batch_size, batch_offset=batch_offset,
+        )
+        if not run.ok:
+            return run
+        data = run.data or {}
+        execution_id = str(data.get("executionId") or "")
+        if not execution_id:
+            return fail(new_id("upilot_flow"), "UIFLOW_EXECUTION_ID_MISSING",
+                        "upilot_flow.run did not return executionId", {"response": data})
+        return ok(run.request_id, {
+            "executionId": execution_id, "status": data.get("status", "queued"),
+            "total": int(data.get("total") or 0), "hasMore": bool(data.get("hasMore")),
+            "nextOffset": int(data.get("nextOffset") or 0), "totalAll": int(data.get("totalAll") or 0),
+            "reportOutputPath": report_root,
+            "screenshotPath": screenshot_path.strip() or str((Path(report_root) / "Screenshots").as_posix()),
+        })
+
     async def upilot_flow_run(
         self,
         yaml_paths: list[str] | None = None,

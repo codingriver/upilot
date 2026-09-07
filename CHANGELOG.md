@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Add Snapshot schema v1 with multi-Camera same-frame color capture, Built-in/URP raw and linear Float EXR depth, optional depth previews, strict SceneView/EditorWindow pixel evidence, and PlayMode Display 0 final-composite GameView capture.
+- Add a unified Snapshot evidence manifest, persisted/cancellable jobs, project-relative hashed artifacts, and managed PNG baselines with pixel-difference ratio, SSIM, diff/heatmap diagnostics, and mandatory dry-run/confirm-token updates.
+- Make every legacy `unity_screenshot_*` tool a Snapshot compatibility wrapper, remove the parallel Unity Bridge screenshot routes, and advance the public tool Registry to v6.
+- Define minimized-editor behavior explicitly: Camera and GameView capture remain offscreen-capable, while SceneView and EditorWindow capture fail fast instead of returning unverified pixels.
+- Make Console diagnostics reliable with persisted Stop-terminal recovery, shared summary/search classification, bounded summary samples, and precise UPilot-owned filtering that preserves business logs invoked through Reflection.
+- Simplify the Unity menu to `打开 UPilot`, `高级设置`, `Flow`, and `追踪器`; keep `Test Runner` in English and move imported example/sample launchers into the Flow Test Runner.
+- Add explicit `csharp_eval`, `reflection_emit_type`, and `execution_session` tools backed by a Unity-version-independent BCL execution core.
+- Upgrade `unity_reflection_call` with typed/named/ref/out arguments, deterministic overload selection, generics, handles, awaitables, and typed results while retaining legacy parameters.
+- Add bounded C# subset interpretation, emitted delegate caching, structured Reflection.Emit type generation, session/handle lifecycle diagnostics, Registry v5, and execution-tool Skill guidance.
+- Keep `reflection_eval` absent from the public MCP surface and avoid Unity Eval/Compilation APIs, Roslyn, CodeDom, mcs, raw IL input, and assembly persistence.
+- Complete execution P1 with structured source spans, cooperative cancellation, generic inference/calls, typed and jagged arrays, session-owned event subscriptions, guarded callback diagnostics, and custom emitted property accessors.
+- Isolate cached Reflection.Emit callback registrations by session and emitted instance, and preserve the original callback exception type and stack when `exceptionMode=propagate`.
+- Expand targeted execution acceptance across generic constraints/ambiguity, invalid arrays, every structured error stage, cancellation without replay, static/lambda/TTL/PlayMode event cleanup, callback concurrency/reentrancy/diagnostic capacity, mixed property accessors, and infrastructure leak cleanup.
+- Keep Agent Rules at 25 and bump Skill Install content to 23 with structured error recovery, event-session cleanup, callback-policy, and cache-hit session/instance isolation guidance; Registry remains v5 with 187 tools.
+- Improve execution-tool MCP descriptions and parameter schemas, remove the stale “future csharp_eval” wording, and expose additive structured-error, callback-policy/isolation, exception-mode, and event-cleanup capabilities.
+- Upgrade the private evaluator to `upilot-csharp-subset-v2`: bounded try/catch/finally/throw, lexical reference closures, typed/block/async lambdas without async void, practical deterministic generic inference, implicit and rank 1–4 arrays, async/session counters, and bounded finally cleanup diagnostics.
+- Allow synchronous V2 exception/generic/array nodes in Reflection.Emit bodies while keeping lambda/closure/await/async rejected; bump Agent Rules to 26 and Skill Install content to 24 without changing Registry v5 or the 187-tool surface.
+- Keep persistent async closures independent of disposed per-call cancellation sources, and avoid unsupported reflection over open `MethodBuilder` instances when reporting plain emitted methods on Unity Mono.
+
 ## 0.3.14
 
 - Keep the main-window runtime mode accurate across update, status refresh, and restart transitions.

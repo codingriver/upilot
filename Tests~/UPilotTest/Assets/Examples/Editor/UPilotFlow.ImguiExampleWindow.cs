@@ -21,7 +21,6 @@ namespace CodingRiver.UPilot.Flow.Examples
 
         private readonly string[] _qualityOptions = { "Low", "Medium", "High", "Ultra" };
 
-        [MenuItem("UPilot/Flow/Examples/IMGUI Example Window")]
         public static void ShowWindow()
         {
             var window = GetWindow<ImguiExampleWindow>();

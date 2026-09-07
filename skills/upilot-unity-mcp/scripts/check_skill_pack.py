@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import re
 import sys
 import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,9 +18,12 @@ REPO_ROOT = ROOT.parents[1]
 
 REQUIRED_FILES = [
     "SKILL.md",
+    "AGENTS.md.template",
     "agents/openai.yaml",
     "references/workflows.md",
     "references/tool-routing.md",
+    "references/tool-boundaries.md",
+    "references/execution-tools.md",
     "references/monohook-tracing.md",
     "references/client-configs.md",
     "references/installation.md",
@@ -30,6 +36,7 @@ REQUIRED_FILES = [
 REQUIRED_SKILL_REFERENCES = [
     "references/workflows.md",
     "references/tool-routing.md",
+    "references/execution-tools.md",
     "references/monohook-tracing.md",
     "references/client-configs.md",
     "references/installation.md",
@@ -65,7 +72,7 @@ def check_skill_frontmatter() -> None:
             fail(f"SKILL.md does not mention {reference}")
 
 
-def check_openai_yaml() -> None:
+def check_openai_yaml(installed: bool = False) -> None:
     text = require_file("agents/openai.yaml").read_text(encoding="utf-8")
     required_fragments = [
         'display_name: "UPilot Unity MCP"',
@@ -73,11 +80,24 @@ def check_openai_yaml() -> None:
         'brand_color: "#2563EB"',
         "Use $upilot-unity-mcp",
         'value: "upilot"',
-        'url: "http://127.0.0.1:8011/mcp"',
     ]
+    if not installed:
+        required_fragments.append('url: "http://127.0.0.1:8011/mcp"')
     for fragment in required_fragments:
         if fragment not in text:
             fail(f"agents/openai.yaml missing fragment: {fragment}")
+    if installed:
+        match = re.search(r"""^\s*url:\s*["']?([^"'\s]+)["']?\s*$""", text, re.MULTILINE)
+        try:
+            endpoint = urlsplit(match.group(1) if match else "")
+            if (
+                endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "localhost"}
+                or endpoint.path != "/mcp" or not endpoint.port
+                or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
+            ):
+                raise ValueError("expected a loopback HTTP /mcp endpoint with an explicit port")
+        except ValueError as exc:
+            fail(f"installed agents/openai.yaml endpoint invalid: {exc}")
 
 
 def check_unity_meta_files() -> None:
@@ -138,8 +158,8 @@ def check_repository_consistency() -> None:
     if len(set(resolved_versions.values())) != 1:
         fail(f"Agent rules version mismatch: {resolved_versions}")
     skill_version = re.search(r"SkillInstallTemplateVersion\s*=\s*(\d+)", agent_setup)
-    if skill_version is None or int(skill_version.group(1)) < 4:
-        fail("Skill install template version must be at least 4 for the HTTP-only skill update")
+    if skill_version is None or int(skill_version.group(1)) != 29:
+        fail("Skill install template version must be 29 for source/installed validation")
 
     required = {
         "package id": (package, '"name": "io.github.codingriver.upilot"'),
@@ -150,6 +170,15 @@ def check_repository_consistency() -> None:
         "parent rules cycle guard": (agent_template, "circular references are skipped"),
         "safe compile rule": (agent_template, "unity_safe_compile_and_wait"),
         "no-repeat compile rule": (agent_template, "Do not compile again when no code changed"),
+        "PlayMode deferred compile rule": (agent_template, "do not call `unity_sync_after_disk_write`"),
+        "compile/write timestamp correlation rule": (agent_template, "lastCompileVerifiedAt"),
+        "immediate compile boundary snapshots rule": (agent_template, "`compile_queued`"),
+        "immediate Domain Reload snapshots rule": (agent_template, "`domain_reload_starting`"),
+        "Skill write batch registration rule": (skill, "unity_write_batch_register(paths, compileWhenEditMode=true)"),
+        "Skill PlayMode deferred compile rule": (skill, "automatically performs one sync plus one safe compile"),
+        "Skill compile/write timestamp correlation rule": (skill, "lastCompileVerifiedAt >= writeBatchCreatedAt"),
+        "Skill immediate compiler-finished snapshot rule": (skill, "`compiler_finished`"),
+        "Skill immediate Domain Reload recovery snapshot rule": (skill, "`domain_reload_recovered/verifying`"),
         "HTTP-only Agent rule": (agent_template, "Third-party AI tools must connect through Streamable HTTP"),
         "internal WebSocket rule": (agent_template, "WebSocket transport is internal to MCP Server <-> Unity Bridge"),
         "HTTP-only Skill rule": (skill, "only third-party AI client transport"),
@@ -166,6 +195,10 @@ def check_repository_consistency() -> None:
         "repository skill entry": (repo_entry, "../../../skills/upilot-unity-mcp/SKILL.md"),
         "repository UPilot Tracer discovery": (repo_entry, "optional UPilot Tracer diagnostics"),
         "repository UPilot Tracer terminology": (repo_entry, "`追踪器` means UPilot Tracer (`UPilot 追踪器`)"),
+        "focused test selectors": (skill, "testNames"),
+        "persistent test job recovery": (skill, "RecoveryRequired"),
+        "bounded scene summary": (skill, "unity_scene_summary"),
+        "guarded prefab patch": (skill, "unity_prefab_patch"),
     }
     for label, (text, fragment) in required.items():
         if fragment not in text:
@@ -182,6 +215,8 @@ def check_repository_consistency() -> None:
         "unity_monohook_tracing_status",
         "unity_monohook_tracing_configure",
         "unity_monohook_tracing_events",
+        "unity_prefab_patch",
+        "unity_scene_summary",
     ):
         if f"def {tool}" not in tool_modules:
             fail(f"core tool is not registered: {tool}")
@@ -220,14 +255,71 @@ def check_repository_consistency() -> None:
         fail("installation documentation must not hardcode a semantic release tag")
 
 
-def main() -> int:
+def check_installed_integrity() -> None:
+    metadata_path = ROOT / ".upilot-install.json"
+    if not metadata_path.is_file():
+        fail("installed Skill is unmanaged/unverified: .upilot-install.json is missing")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise ValueError("expected a JSON object")
+        version = metadata.get("templateVersion")
+        recorded = metadata.get("contentSha256")
+        if type(version) is not int or version <= 0:
+            raise ValueError("templateVersion must be a positive integer")
+        if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", recorded):
+            raise ValueError("contentSha256 must be a SHA256 hex string")
+    except (OSError, ValueError) as exc:
+        fail(f"installed Skill metadata invalid: {exc}")
+
+    # Import the helper beside this checker, never code from an untrusted --root.
+    path = Path(__file__).with_name("install_upilot.py")
+    spec = importlib.util.spec_from_file_location("_upilot_skill_installer", path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+        actual = module._skill_content_hash(ROOT)
+    finally:
+        sys.dont_write_bytecode = previous
+    if recorded.lower() != actual:
+        fail(f"installed Skill content hash mismatch: recorded={recorded} actual={actual}; checker did not modify files")
+
+
+def main(argv: list[str] | None = None) -> int:
+    global ROOT, REPO_ROOT
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("auto", "source", "installed"), default="auto")
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    args = parser.parse_args(argv)
+    ROOT = args.root.expanduser().resolve()
+    REPO_ROOT = ROOT.parent.parent
+    is_source = ROOT == REPO_ROOT / "skills" / "upilot-unity-mcp" and all(
+        (REPO_ROOT / relative).is_file()
+        for relative in ("package.json", "upilotserver~/pyproject.toml", "Editor/Core/UPilotAgentSetup.cs")
+    )
+    mode = args.mode
+    if mode == "auto":
+        if (ROOT / ".upilot-install.json").exists():
+            mode = "installed"
+        elif is_source:
+            mode = "source"
+        else:
+            fail("cannot identify Skill layout; use --mode installed for an installation or --mode source for repository source")
+    if mode == "source" and not is_source:
+        fail("source mode requires the repository skills/upilot-unity-mcp directory")
+    print(f"Checking UPilot Skill: mode={mode} root={ROOT}")
     for relative in REQUIRED_FILES:
         require_file(relative)
     check_skill_frontmatter()
-    check_openai_yaml()
-    check_unity_meta_files()
-    check_repository_consistency()
-    print("UPilot skill pack ok")
+    check_openai_yaml(installed=mode == "installed")
+    if mode == "source":
+        check_unity_meta_files()
+        check_repository_consistency()
+    else:
+        check_installed_integrity()
+    print(f"UPilot skill pack ok (mode={mode})")
     return 0
 
 

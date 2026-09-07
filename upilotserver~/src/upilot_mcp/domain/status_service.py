@@ -260,12 +260,31 @@ class StatusDomainService:
             return status
         data = status.data or {}
         tools = self._registry_tools_snapshot(limit=200)
+        execution_capabilities: dict = {}
+        if self.server.session_manager.is_connected():
+            try:
+                execution_response = await self.execution_capabilities()
+                if execution_response.ok:
+                    execution_capabilities = dict(execution_response.data or {})
+                elif execution_response.error is not None:
+                    execution_capabilities = {
+                        "available": False,
+                        "unavailableReason": execution_response.error.code,
+                        "detail": execution_response.error.message,
+                    }
+            except Exception as ex:
+                execution_capabilities = {
+                    "available": False,
+                    "unavailableReason": "EXECUTION_CAPABILITY_QUERY_FAILED",
+                    "detail": str(ex),
+                }
         return ok(
             status.request_id,
             {
                 "registryVersion": REGISTRY_VERSION,
                 "tools": tools,
                 "capabilities": data.get("capabilities", {}),
+                "execution": execution_capabilities,
                 "session": data.get("session", {}),
                 "paths": data.get("paths", {}),
             },
@@ -1016,9 +1035,95 @@ class StatusDomainService:
 
     async def console_capture_stop(self, session_id: str = "") -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(
+        result = await self.dispatcher.call(
             request_id, "console.capture.stop", {"sessionId": session_id}
         )
+        if result.ok:
+            data = result.data or {}
+            result.data = data
+            session = data.get("session") if isinstance(data.get("session"), dict) else {}
+            if session:
+                active = bool(session.get("active", False))
+                data.setdefault("active", active)
+                data.setdefault("terminal", not active)
+                data.setdefault("completionSource", "unity")
+            return result
+
+        recovered = self._recover_completed_console_capture(session_id, result)
+        if recovered is None:
+            return result
+        return ok(
+            result.request_id,
+            recovered,
+            context=result.context,
+            timing=result.timing,
+        )
+
+    def _recover_completed_console_capture(
+        self, session_id: str, failed_stop: ToolResponse
+    ) -> dict | None:
+        """Return a persisted Stop terminal only for one exact, complete session."""
+        if not session_id:
+            return None
+
+        server = getattr(self, "server", None)
+        session_manager = getattr(server, "session_manager", None)
+        active_session = getattr(session_manager, "active", None)
+        project_path = str(getattr(active_session, "project_path", "") or "").strip()
+        if not project_path:
+            state = getattr(server, "state", None)
+            project_path = str(getattr(state, "_project_path", "") or "").strip()
+        if not project_path:
+            return None
+
+        capture_root = Path(project_path) / "Log" / "UPilotConsole"
+        if not capture_root.is_dir():
+            return None
+
+        for manifest_path in capture_root.glob("*/session.json"):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(manifest, dict) or manifest.get("sessionId") != session_id:
+                continue
+
+            try:
+                finished_at = int(manifest.get("finishedAtUtcMs") or 0)
+            except (TypeError, ValueError):
+                return None
+            summary_path = manifest_path.parent / "summary.json"
+            if (
+                bool(manifest.get("active", True))
+                or finished_at <= 0
+                or not str(manifest.get("sha256") or "").strip()
+                or not summary_path.is_file()
+            ):
+                return None
+            try:
+                summary_bytes = summary_path.stat().st_size
+            except OSError:
+                return None
+
+            diagnostic = {
+                "code": failed_stop.error.code if failed_stop.error else "",
+                "message": failed_stop.error.message if failed_stop.error else "",
+                "detail": failed_stop.error.detail if failed_stop.error else {},
+            }
+            return {
+                "ok": True,
+                "action": "StopCapture",
+                "error": "",
+                "session": manifest,
+                "active": False,
+                "terminal": True,
+                "completionSource": "persistedManifest",
+                "summaryPath": str(summary_path.resolve()),
+                "summaryBytes": summary_bytes,
+                "sha256": str(manifest.get("sha256") or ""),
+                "contextDiagnostic": diagnostic,
+            }
+        return None
 
     async def console_capture_list(
         self, count: int = 20, include_active: bool = True

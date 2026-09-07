@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="3" result="Passed" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.4473795">
+  <test-suite type="TestSuite" id="1251" name="ExecutionCompat2022" fullname="ExecutionCompat2022" runstate="Runnable" testcasecount="218" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.447380" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties />
+    <test-suite type="Assembly" id="1385" name="UPilot.Editor.Tests.dll" fullname="D:/upilot/Tests~/ExecutionCompat2022/Library/ScriptAssemblies/UPilot.Editor.Tests.dll" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.400885" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="38536" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+      </properties>
+      <test-suite type="TestSuite" id="1386" name="CodingRiver" fullname="CodingRiver" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.397169" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1387" name="UPilot" fullname="CodingRiver.UPilot" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.393436" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="1388" name="Tests" fullname="CodingRiver.UPilot.Tests" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.388315" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestFixture" id="1326" name="UPilotExecutionCoreTests" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" testcasecount="24" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.371036" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-case id="1340" name="EventSubscriptionsCoverStaticTtlPlayModeAndCleanupFailure" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.EventSubscriptionsCoverStaticTtlPlayModeAndCleanupFailure" methodname="EventSubscriptionsCoverStaticTtlPlayModeAndCleanupFailure" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1348552278" result="Passed" start-time="2026-09-04 09:36:18Z" end-time="2026-09-04 09:36:20Z" duration="1.240139" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1347" name="ReflectionEmitCacheHitUsesIndependentSessionCallbackGuardsAndLeases" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitCacheHitUsesIndependentSessionCallbackGuardsAndLeases" methodname="ReflectionEmitCacheHitUsesIndependentSessionCallbackGuardsAndLeases" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1165566253" result="Passed" start-time="2026-09-04 09:36:20Z" end-time="2026-09-04 09:36:20Z" duration="0.051436" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1346" name="ReflectionEmitCallbackGuardsCoverIsolationPropagationReentrancyConcurrencyAndCapacity" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitCallbackGuardsCoverIsolationPropagationReentrancyConcurrencyAndCapacity" methodname="ReflectionEmitCallbackGuardsCoverIsolationPropagationReentrancyConcurrencyAndCapacity" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="324164538" result="Passed" start-time="2026-09-04 09:36:20Z" end-time="2026-09-04 09:36:20Z" duration="0.037365" asserts="0">
+                <properties />
+              </test-case>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

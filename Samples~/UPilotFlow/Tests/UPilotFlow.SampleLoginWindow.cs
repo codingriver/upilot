@@ -55,7 +55,6 @@ namespace CodingRiver.UPilot.Flow
         private Button _saveButton;
         private double _toastHideAtTime;
 
-        [MenuItem("UPilot/Flow/Samples/Login Window")]
         public static void Open()
         {
             SampleLoginWindow window = GetWindow<SampleLoginWindow>();
@@ -173,7 +172,6 @@ namespace CodingRiver.UPilot.Flow
         private int _doubleClickCount;
         private bool _dragStarted;
 
-        [MenuItem("UPilot/Flow/Samples/Interaction Window")]
         public static void Open()
         {
             SampleInteractionWindow window = GetWindow<SampleInteractionWindow>();

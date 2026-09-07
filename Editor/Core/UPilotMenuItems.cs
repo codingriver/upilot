@@ -11,7 +11,6 @@ namespace CodingRiver.UPilot
 {
     public static class UPilotMenuItems
     {
-        [MenuItem("UPilot/Advanced/Force Restart Unity Bridge")]
         public static void RestartBridge()
         {
             try
@@ -31,7 +30,6 @@ namespace CodingRiver.UPilot
             }
         }
 
-        [MenuItem("UPilot/Advanced/Force Restart Unity Bridge", true)]
         public static bool ValidateRestartBridge()
         {
             return !Application.isPlaying;

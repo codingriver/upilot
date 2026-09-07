@@ -6,7 +6,7 @@ defaults:
   targetWindow: "upilot"
 setup:
   - action: menu
-    menuPath: "UPilot/UPilot"
+    menuPath: "UPilot/打开 UPilot"
   - action: wait
     ms: 500
 steps:

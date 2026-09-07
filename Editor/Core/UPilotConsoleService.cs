@@ -127,6 +127,7 @@ namespace CodingRiver.UPilot
         public int cursor;
         public int nextCursor;
         public int totalCount;
+        public int excludedUPilotCount;
         public bool truncated;
     }
 
@@ -137,6 +138,7 @@ namespace CodingRiver.UPilot
         public int totalCount;
         public int matchedCount;
         public int scannedCount;
+        public int excludedUPilotCount;
         public bool truncated;
         public string effectiveQuery;
         public string[] effectiveContains = Array.Empty<string>();
@@ -524,12 +526,14 @@ namespace CodingRiver.UPilot
                 if (payload.newestFirst)
                 {
                     for (int i = total - 1; i >= cursor && result.logs.Count < payload.count; i--)
-                        TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField);
+                        TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField,
+                            ref result.excludedUPilotCount);
                 }
                 else
                 {
                     for (int i = cursor; i < total && result.logs.Count < payload.count; i++)
-                        TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField);
+                        TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField,
+                            ref result.excludedUPilotCount);
                 }
             });
 
@@ -555,7 +559,8 @@ namespace CodingRiver.UPilot
                     for (int i = total - 1; i >= 0; i--)
                     {
                         result.scannedCount++;
-                        if (TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField))
+                        if (TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField,
+                                ref result.excludedUPilotCount))
                             result.matchedCount++;
                         if (result.logs.Count >= payload.count) break;
                     }
@@ -565,7 +570,8 @@ namespace CodingRiver.UPilot
                     for (int i = 0; i < total; i++)
                     {
                         result.scannedCount++;
-                        if (TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField))
+                        if (TryAddLogEntry(result.logs, i, payload, getEntryMethod, logEntryType, messageField, modeField,
+                                ref result.excludedUPilotCount))
                             result.matchedCount++;
                         if (result.logs.Count >= payload.count) break;
                     }
@@ -588,12 +594,13 @@ namespace CodingRiver.UPilot
             MethodInfo getEntryMethod,
             Type logEntryType,
             FieldInfo messageField,
-            FieldInfo modeField)
+            FieldInfo modeField,
+            ref int excludedUPilotCount)
         {
             return TryAddLogEntryCore(
                 logs, index, payload.logType, payload.includeStackTrace, payload.excludeUPilot,
                 payload.contains, payload.containsAll, payload.regex, payload.maxMessageLength,
-                getEntryMethod, logEntryType, messageField, modeField);
+                getEntryMethod, logEntryType, messageField, modeField, ref excludedUPilotCount);
         }
 
         private static bool TryAddLogEntry(
@@ -603,12 +610,13 @@ namespace CodingRiver.UPilot
             MethodInfo getEntryMethod,
             Type logEntryType,
             FieldInfo messageField,
-            FieldInfo modeField)
+            FieldInfo modeField,
+            ref int excludedUPilotCount)
         {
             return TryAddLogEntryCore(
                 logs, index, payload.logType, payload.includeStackTrace, payload.excludeUPilot,
                 payload.contains, payload.containsAll, payload.regex, payload.maxMessageLength,
-                getEntryMethod, logEntryType, messageField, modeField);
+                getEntryMethod, logEntryType, messageField, modeField, ref excludedUPilotCount);
         }
 
         private static bool TryAddLogEntryCore(
@@ -624,7 +632,8 @@ namespace CodingRiver.UPilot
             MethodInfo getEntryMethod,
             Type logEntryType,
             FieldInfo messageField,
-            FieldInfo modeField)
+            FieldInfo modeField,
+            ref int excludedUPilotCount)
         {
             var entry = Activator.CreateInstance(logEntryType);
             bool ok = (bool)getEntryMethod.Invoke(null, new object[] { index, entry });
@@ -645,8 +654,11 @@ namespace CodingRiver.UPilot
                 msg = msg.Substring(0, nlIndex);
             }
 
-            if (excludeUPilot && IsUPilotLog(msg, stackTrace))
+            if (excludeUPilot && IsUPilotOwnedLog(msg, stackTrace))
+            {
+                excludedUPilotCount++;
                 return false;
+            }
 
             if (!MatchesText(msg, stackTrace, contains, containsAll, regex))
                 return false;
@@ -700,18 +712,94 @@ namespace CodingRiver.UPilot
             return true;
         }
 
-        private static bool IsUPilotLog(string message, string stackTrace)
+        internal static bool IsUPilotOwnedLog(string message, string stackTrace)
         {
-            return ContainsUPilot(message) || ContainsUPilot(stackTrace);
+            string trimmedMessage = (message ?? string.Empty).TrimStart();
+            if (trimmedMessage.StartsWith("[UPilot]", StringComparison.OrdinalIgnoreCase)
+                || trimmedMessage.StartsWith("[UPilot Flow]", StringComparison.OrdinalIgnoreCase)
+                || HasInfrastructureCategoryPrefix(trimmedMessage, "COMMAND ")
+                || HasInfrastructureCategoryPrefix(trimmedMessage, "NETWORK "))
+                return true;
+
+            string stack = stackTrace ?? string.Empty;
+            return stack.IndexOf("CodingRiver.UPilot.Logger:WriteToUnityConsole", StringComparison.OrdinalIgnoreCase) >= 0
+                || stack.IndexOf("CodingRiver.UPilot.Logger.WriteToUnityConsole", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static bool ContainsUPilot(string value)
+        private static bool HasInfrastructureCategoryPrefix(string message, string category)
         {
-            if (string.IsNullOrEmpty(value)) return false;
-            return value.IndexOf("UPilot", StringComparison.OrdinalIgnoreCase) >= 0
-                || value.IndexOf("CodingRiver.UPilot", StringComparison.OrdinalIgnoreCase) >= 0
-                || value.IndexOf("[COMMAND ]", StringComparison.OrdinalIgnoreCase) >= 0
-                || value.IndexOf("upilot", StringComparison.OrdinalIgnoreCase) >= 0;
+            return message.StartsWith("[INFO ] [" + category + "]", StringComparison.OrdinalIgnoreCase)
+                || message.StartsWith("[WARN ] [" + category + "]", StringComparison.OrdinalIgnoreCase)
+                || message.StartsWith("[ERROR] [" + category + "]", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static ConsoleSummaryPayload CaptureSummary(int samplesPerType = 3)
+        {
+            samplesPerType = Math.Max(0, samplesPerType);
+            var result = new ConsoleSummaryPayload
+            {
+                source = "UnityEditor.LogEntries",
+                classification = "UPilotConsoleService.ModeToLogType/v1",
+                startCount = GetLogEntryCount(),
+            };
+
+            WithLogEntries((logEntriesType, getEntryMethod, logEntryType, messageField, modeField) =>
+            {
+                for (int i = 0; i < result.startCount; i++)
+                {
+                    var rawEntry = Activator.CreateInstance(logEntryType);
+                    if (!(bool)getEntryMethod.Invoke(null, new[] { (object)i, rawEntry }))
+                        continue;
+
+                    int mode = modeField != null ? (int)modeField.GetValue(rawEntry) : 0;
+                    string rawMessage = messageField?.GetValue(rawEntry)?.ToString() ?? string.Empty;
+                    string message = rawMessage;
+                    int newline = rawMessage.IndexOf('\n');
+                    if (newline >= 0)
+                        message = rawMessage.Substring(0, newline);
+
+                    AddToSummary(result, new ConsoleLogEntry
+                    {
+                        index = i,
+                        logType = ModeToLogType(mode),
+                        message = message.Length > 500 ? message.Substring(0, 500) : message,
+                        stackTrace = string.Empty,
+                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        count = 1,
+                    }, samplesPerType);
+                }
+            });
+
+            result.endCount = GetLogEntryCount();
+            result.stable = result.startCount == result.endCount;
+            return result;
+        }
+
+        internal static void AddToSummary(
+            ConsoleSummaryPayload summary,
+            ConsoleLogEntry entry,
+            int samplesPerType)
+        {
+            if (summary == null || entry == null) return;
+            summary.total++;
+            switch (entry.logType)
+            {
+                case "Warning": summary.warningCount++; break;
+                case "Error": summary.errorCount++; break;
+                case "Assert": summary.assertCount++; break;
+                case "Exception": summary.exceptionCount++; break;
+                default: summary.logCount++; break;
+            }
+
+            if (samplesPerType <= 0) return;
+            int existingSamples = 0;
+            foreach (var sample in summary.samples)
+            {
+                if (string.Equals(sample.logType, entry.logType, StringComparison.OrdinalIgnoreCase))
+                    existingSamples++;
+            }
+            if (existingSamples < samplesPerType)
+                summary.samples.Add(entry);
         }
 
         private static int GetLogEntryCount()
@@ -763,7 +851,7 @@ namespace CodingRiver.UPilot
                 ?? typeof(UnityEditor.Editor).Assembly.GetType("UnityEditorInternal.LogEntry");
         }
 
-        private static string ModeToLogType(int mode)
+        internal static string ModeToLogType(int mode)
         {
             if ((mode & (1 << 0)) != 0) return "Error";
             if ((mode & (1 << 1)) != 0) return "Assert";

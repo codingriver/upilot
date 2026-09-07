@@ -1,0 +1,17 @@
+{
+    "name": "UPilot.Execution.Core",
+    "rootNamespace": "CodingRiver.UPilot.Execution",
+    "references": [],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": true
+}
+

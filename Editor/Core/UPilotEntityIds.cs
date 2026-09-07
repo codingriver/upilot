@@ -14,6 +14,17 @@ namespace CodingRiver.UPilot
     public static class UPilotEntityIds
     {
 #if UNITY_6000_0_OR_NEWER
+        public static Object ObjectFromWireId(ulong wireId)
+        {
+            if (wireId == 0UL) return null;
+            var entityId = EntityId.FromULong(wireId);
+            var method = typeof(EditorUtility).GetMethod("EntityIdToObject", new[] { typeof(EntityId) });
+            if (method != null) return method.Invoke(null, new object[] { entityId }) as Object;
+            foreach (var candidate in Resources.FindObjectsOfTypeAll<Object>())
+                if (candidate != null && ToWireId(candidate) == wireId) return candidate;
+            return null;
+        }
+
         public static ulong ToWireId(Object o)
         {
             var id = o != null ? EntityId.ToULong(o.GetEntityId()) : 0UL;
@@ -48,6 +59,11 @@ namespace CodingRiver.UPilot
             return go;
         }
 #else
+        public static Object ObjectFromWireId(ulong wireId)
+        {
+            return wireId == 0UL ? null : EditorUtility.InstanceIDToObject(unchecked((int)(uint)wireId));
+        }
+
         public static ulong ToWireId(Object o)
         {
             var id = o != null ? (ulong)(uint)o.GetInstanceID() : 0UL;

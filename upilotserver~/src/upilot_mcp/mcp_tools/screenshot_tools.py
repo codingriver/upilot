@@ -24,7 +24,7 @@ _reject_compile_in_playmode = runtime._reject_compile_in_playmode
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
-@mcp.tool(description="截取 Unity Game 视图画面，返回 Base64 编码的图像数据。")
+@mcp.tool(description="Snapshot 薄包装：仅 PlayMode 截取 Display 0 的真正 GameView 最终合成，返回 data.snapshot、证据产物和兼容 Base64。")
 async def unity_screenshot_game_view(
     width: int = 1280,
     height: int = 720,
@@ -40,7 +40,7 @@ async def unity_screenshot_game_view(
     )
     return _log_tool_result("unity_screenshot_game_view", _payload(r))
 
-@mcp.tool(description="截取 Unity Scene 视图画面，返回 Base64 编码的图像数据。")
+@mcp.tool(description="Snapshot 薄包装：截取当前唯一/聚焦 SceneView，要求精确窗口像素、重绘、Handles 与 Scene GUI 证据。")
 async def unity_screenshot_scene_view(
     width: int = 1280,
     height: int = 720,
@@ -56,7 +56,7 @@ async def unity_screenshot_scene_view(
     )
     return _log_tool_result("unity_screenshot_scene_view", _payload(r))
 
-@mcp.tool(description="截取指定 Camera 的画面，返回 Base64 编码的图像数据。")
+@mcp.tool(description="Snapshot 薄包装：按精确 Camera 名称截图，返回 data.snapshot、证据产物和兼容 Base64。多 Camera 请直接使用 unity_snapshot_capture。")
 async def unity_screenshot_camera(
     cameraName: str,
     width: int = 1280,
@@ -84,7 +84,7 @@ async def unity_screenshot_camera(
     return _log_tool_result("unity_screenshot_camera", _payload(r))
 
 @mcp.tool(
-    description="截取 Unity 画面并保存为 .png，成功后返回完整路径、大小、分辨率和 sha256。path 可为空；为空时保存到当前 Unity 工程 Log/UPilotScreenshots。source: gameView|sceneView|camera|editorWindow。默认只允许写入当前 Unity 工程目录内。"
+    description="Snapshot 薄包装：采集严格证据后将 accepted color 产物复制到指定 .png，返回 data.snapshot、路径、大小和 sha256；不再静默回退来源。"
 )
 async def unity_screenshot_save(
     path: str = "",
@@ -148,11 +148,11 @@ async def unity_screenshot_compare(baselinePath: str, candidatePath: str, region
     return _log_tool_result("unity_screenshot_compare", _payload(r))
 
 @mcp.tool(
-    description="截取 Unity 编辑器窗口（EditorWindow）画面，返回 Base64 编码的 PNG。通过窗口标题匹配。screenshotDegrade: none|auto|scene|minimal — auto 在无法截取窗口时降级为 Scene 视图或占位图。"
+    description="Snapshot 薄包装：按窗口标题解析唯一/聚焦 EditorWindow 后，以精确 instanceId 截图；不再降级为 SceneView 或占位图。"
 )
 async def unity_screenshot_editor_window(
     windowTitle: str = "upilot",
-    screenshotDegrade: str = "auto",
+    screenshotDegrade: str = "none",
 ):
     _log_tool_call(
         "unity_screenshot_editor_window",
@@ -172,14 +172,20 @@ _DESTRUCTIVE_TOOLS = {
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue
     register_public_tool(
         _name,
         destructive=_name in _DESTRUCTIVE_TOOLS,
-        idempotent=_name not in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in _DESTRUCTIVE_TOOLS and _name not in {
+            "unity_screenshot_game_view",
+            "unity_screenshot_scene_view",
+            "unity_screenshot_camera",
+            "unity_screenshot_save",
+            "unity_screenshot_editor_window",
+        },
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
     )

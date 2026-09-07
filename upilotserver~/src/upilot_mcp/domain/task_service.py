@@ -22,6 +22,7 @@ from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
+from ..test_job_context import TEST_JOB_CONTEXT, TestJobCancelledBeforeStart
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -47,7 +48,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 22
+_UPILOT_RULES_VERSION = 29
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
@@ -1440,6 +1441,10 @@ class TaskDomainService:
         last_error = ""
         events: list[dict] = []
 
+        descriptor = REGISTRY.resolve(tool_name)
+        if retry_count > 0 and descriptor and (not descriptor.idempotent or descriptor.destructive):
+            return fail(request_id, "TASK_RETRY_UNSAFE", "Non-idempotent or destructive tools require retryCount=0.")
+
         for attempt in range(retry_count + 1):
             attempts += 1
             elapsed_total = time.monotonic() - start
@@ -1568,6 +1573,23 @@ class TaskDomainService:
         retry_count: int = 0,
     ) -> ToolResponse:
         request_id = new_id("req")
+        self._recover_test_jobs()
+        descriptor = REGISTRY.resolve(tool_name)
+        is_test_job = descriptor is not None and descriptor.facade_method in {"test_run", "upilot_acceptance_run"}
+        if is_test_job:
+            if retry_count != 0:
+                return fail(request_id, "TEST_TASK_RETRY_UNSAFE", "Tests and acceptance require retryCount=0; an uncertain start must never be replayed.")
+            if not 1 <= timeout_s <= 7200:
+                return fail(request_id, "TEST_TASK_TIMEOUT_INVALID", "Use timeoutS=1..7200.")
+            store = self.server.state
+            if store._db_path is None or not store._project_path:
+                return fail(request_id, "TEST_TASK_PROJECT_UNKNOWN", "Connect the intended Unity project before starting a persistent test task.")
+            if any(
+                value.get("durable") and value.get("projectPath") == store._project_path
+                and value.get("status") in {"queued", "running", "cancel_requested", "RecoveryRequired"}
+                for value in self._async_tasks.values()
+            ):
+                return fail(request_id, "TEST_TASK_ALREADY_ACTIVE", "Resolve the existing test/acceptance task before starting another.")
         task_id = new_id("task")
         state = {
             "taskId": task_id,
@@ -1580,7 +1602,21 @@ class TaskDomainService:
             "endedAt": 0,
             "result": None,
             "error": None,
+            "terminal": False,
         }
+        if is_test_job:
+            state.update({
+                "durable": True, "projectPath": store._project_path, "toolArgs": tool_args or {},
+                "deadlineAt": now_ms() + int(timeout_s * 1000), "runGuid": "",
+                "cancelRequested": False, "startIntentSent": False, "recovered": False,
+            })
+            try:
+                store.save_test_job(state)
+            except Exception as exc:
+                return fail(request_id, "TEST_TASK_PERSIST_FAILED", str(exc))
+            self._async_tasks[task_id] = state
+            self._async_task_handles[task_id] = asyncio.create_task(self._run_test_task(state), name=task_id)
+            return ok(request_id, state.copy())
         self._async_tasks[task_id] = state
 
         async def run() -> None:
@@ -1598,6 +1634,7 @@ class TaskDomainService:
             )
             state["updatedAt"] = now_ms()
             state["endedAt"] = now_ms()
+            state["terminal"] = True
             if result.ok:
                 state["status"] = "completed"
                 state["phase"] = "completed"
@@ -1614,23 +1651,154 @@ class TaskDomainService:
         self._async_task_handles[task_id] = asyncio.create_task(run(), name=task_id)
         return ok(request_id, state.copy())
 
-    async def task_status(self, task_id: str) -> ToolResponse:
+    async def task_status(self, task_id: str, detail_level: str = "summary") -> ToolResponse:
+        self._recover_test_jobs()
         state = self._async_tasks.get(task_id)
         if state is None:
             return fail(new_id("req"), "TASK_NOT_FOUND", f"Task not found: {task_id}", {"taskId": task_id})
-        result = state.copy()
+        if state.get("durable") and state.get("projectPath") != self.server.state._project_path:
+            return fail(new_id("req"), "TASK_PROJECT_MISMATCH", "Task belongs to another Unity project.", {"taskId": task_id})
+        self._resume_test_observer(state)
+        result = self._public_task_state(state, detail_level)
         result["elapsedMs"] = max(0, (result["endedAt"] or now_ms()) - result["startedAt"])
         return ok(new_id("req"), result)
 
     async def task_cancel(self, task_id: str) -> ToolResponse:
+        self._recover_test_jobs()
         state = self._async_tasks.get(task_id)
         if state is None:
             return fail(new_id("req"), "TASK_NOT_FOUND", f"Task not found: {task_id}", {"taskId": task_id})
-        handle = self._async_task_handles.get(task_id)
-        if handle and not handle.done():
-            handle.cancel()
-        state["status"] = "cancelled"
-        state["phase"] = "cancelled"
+        if state.get("terminal"):
+            return ok(new_id("req"), self._public_task_state(state))
+        if not state.get("durable"):
+            return fail(new_id("req"), "TASK_CANCELLATION_UNSUPPORTED", "This task has no business cancellation adapter; its work and observer were left running.", {"taskId": task_id})
+        if state.get("projectPath") != self.server.state._project_path:
+            return fail(new_id("req"), "TASK_PROJECT_MISMATCH", "Task belongs to another Unity project.", {"taskId": task_id})
+        state["cancelRequested"] = True
+        state["status"] = "cancel_requested"
+        state["phase"] = "cancel_requested"
         state["updatedAt"] = now_ms()
-        state["endedAt"] = now_ms()
-        return ok(new_id("req"), state.copy())
+        self.server.state.save_test_job(state)
+        self._resume_test_observer(state)
+        return ok(new_id("req"), self._public_task_state(state))
+
+    @staticmethod
+    def _public_task_state(state: dict, detail_level: str = "summary") -> dict:
+        if not state.get("durable") or detail_level == "full":
+            return state.copy()
+        result = {key: value for key, value in state.items() if key not in {"acceptanceReport", "toolArgs", "result", "error", "cancelResponse"}}
+        report = state.get("acceptanceReport") or {}
+        if report:
+            result["result"] = {"result": {key: report[key] for key in (
+                "acceptancePassed", "runGuid", "cleanupVerified", "testIdentityVerified", "sourceIdentity",
+                "sourceUnchanged", "failureCode", "failureMessage", "artifact",
+            ) if key in report}}
+            test_data = report.get("steps", {}).get("testStatus", {}).get("data", {})
+        else:
+            test_data = (state.get("result") or {}).get("result") or {}
+        result["tests"] = {key: test_data[key] for key in ("status", "total", "passed", "failed", "skipped", "cleanupSucceeded", "resultAuthoritative") if key in test_data}
+        error = state.get("error")
+        if error:
+            result["error"] = {"code": error.get("code"), "message": error.get("message", "")[:2000]}
+        return result
+
+    def _resume_test_observer(self, state: dict) -> None:
+        handle = self._async_task_handles.get(state["taskId"])
+        if state.get("durable") and state.get("runGuid") and not state.get("terminal") and (handle is None or handle.done()):
+            self._async_task_handles[state["taskId"]] = asyncio.create_task(self._run_test_task(state, recovering=True), name=state["taskId"])
+
+    def _recover_test_jobs(self) -> None:
+        store = getattr(getattr(self, "server", None), "state", None)
+        if store is None or not getattr(store, "_project_path", ""):
+            return
+        project_path = store._project_path
+        if getattr(self, "_test_jobs_loaded_project", "") == project_path:
+            return
+        self._test_jobs_loaded_project = project_path
+        for state in store.load_test_jobs():
+            task_id = state["taskId"]
+            if task_id in self._async_tasks:
+                continue
+            state["recovered"] = True
+            self._async_tasks[task_id] = state
+            if state.get("terminal"):
+                continue
+            if not state.get("runGuid"):
+                state.update(status="RecoveryRequired", phase="start_identity_unknown", terminal=False,
+                             error={"code": "TEST_RECOVERY_REQUIRED", "message": "Server restarted without an established runGuid. Start was not replayed."})
+                store.save_test_job(state)
+                continue
+            state["status"] = "running"
+            self._async_task_handles[task_id] = asyncio.create_task(self._run_test_task(state, recovering=True), name=task_id)
+
+    async def _run_test_task(self, state: dict, recovering: bool = False) -> None:
+        store = self.server.state
+        token = TEST_JOB_CONTEXT.set((state, store.save_test_job))
+        try:
+            state.update(status="running", phase="recovering" if recovering else "executing", updatedAt=now_ms())
+            store.save_test_job(state)
+            if recovering:
+                report = state.get("acceptanceReport")
+                if report:
+                    report["runGuid"] = state["runGuid"]
+                    result = await self._complete_acceptance_report(report)
+                else:
+                    result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
+            else:
+                result = await self._dispatch_tool(state["toolName"], state["toolArgs"])
+                if state.get("runGuid") and not state.get("acceptanceReport"):
+                    result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
+
+            report = state.get("acceptanceReport") or {}
+            test_result = (report.get("steps", {}).get("testStatus", {}).get("data")
+                           if report else result.data) or {}
+            no_tests = bool(test_result.get("noTests"))
+            cleaned = self._test_cleanup_verified(test_result)
+            identity_verified = test_result.get("runGuid") == state.get("runGuid") and test_result.get("resultAuthoritative") is True
+            state["result"] = {"result": result.data or (result.error.detail if result.error else {}), "runGuid": state.get("runGuid")}
+            if report.get("artifact"):
+                state["artifact"] = report["artifact"]
+            if no_tests and not state.get("runGuid") and not report:
+                state.update(status="no_tests", terminal=True)
+            elif state.get("runGuid") and not (cleaned and identity_verified):
+                state.update(status="RecoveryRequired", terminal=False)
+            elif state.get("cancelRequested"):
+                state.update(status="cancelled", terminal=True)
+            elif state.get("timedOut"):
+                state.update(status="timed_out", terminal=True)
+            elif report.get("failureCode") == "UPILOT_ACCEPTANCE_NO_TESTS":
+                state.update(status="no_tests", terminal=True)
+            elif report:
+                state.update(status="completed" if result.ok and report.get("acceptancePassed") else "failed", terminal=True)
+            else:
+                state.update(status="completed" if result.ok and test_result.get("status") == "completed" and test_result.get("failed") == 0 else "failed", terminal=True)
+            if state.get("startIntentSent") and not state.get("runGuid") and not no_tests:
+                state.update(status="RecoveryRequired", terminal=False)
+            if result.error:
+                state["error"] = {"code": result.error.code, "message": result.error.message, "detail": result.error.detail}
+            if state["status"] == "RecoveryRequired":
+                state["nextAction"] = "Inspect the original runGuid and persisted TestRuns evidence; do not replay start."
+        except TestJobCancelledBeforeStart:
+            state.update(status="cancelled", terminal=True)
+            if state.get("acceptanceReport"):
+                report = state["acceptanceReport"]
+                self._finish_acceptance_report(report, False, "UPILOT_ACCEPTANCE_CANCELLED", "Cancelled before test start.")
+                state["result"] = {"result": report}
+                if report.get("artifact"):
+                    state["artifact"] = report["artifact"]
+        except asyncio.CancelledError:
+            # Server shutdown only stops observation. A later server may reattach by runGuid.
+            state.update(status="RecoveryRequired", terminal=False, phase="observer_interrupted")
+            raise
+        except Exception as exc:
+            state.update(status="RecoveryRequired", terminal=False, error={"code": "TEST_TASK_EXCEPTION", "message": str(exc)})
+        finally:
+            TEST_JOB_CONTEXT.reset(token)
+            state["phase"] = state["status"]
+            state["updatedAt"] = now_ms()
+            state["endedAt"] = now_ms() if state.get("terminal") else 0
+            try:
+                store.save_test_job(state)
+            except Exception as exc:
+                state.update(status="RecoveryRequired", terminal=False, endedAt=0,
+                             error={"code": "TEST_TASK_PERSIST_FAILED", "message": str(exc)})

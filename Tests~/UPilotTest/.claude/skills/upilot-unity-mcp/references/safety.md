@@ -18,7 +18,7 @@
 ## Compile
 
 - Compile only after code or assembly changes.
-- Do not compile in PlayMode unless the workflow requires it.
+- Register assembly-related disk writes immediately. Do not invoke sync or compile in PlayMode; an authorized write batch resumes automatically only after Unity reports authoritative EditMode.
 - Read structured errors before editing.
 
 ## Configuration CSV
@@ -31,4 +31,6 @@
 
 - `unity_reflection_call` may invoke arbitrary state-changing methods, requires project write access, is non-idempotent, and must never be retried automatically.
 - Inspect the exact type, method, target instance, and arguments before calling it. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for read-only discovery.
-- After a real `unity_reflection_call` failure, use one bounded `reflection_eval` expression or add a stable compiled helper. Do not repeatedly probe unsupported syntax.
+- Choose the `unity_reflection_call` request shape before execution: structured `typeName` + `methodName`, or one bounded `expression`. Never fall back between the two engines after a real call because the first attempt may already have side effects. Add a stable compiled helper for repeated or multi-step logic.
+- `csharp_eval`, `reflection_emit_type`, and `execution_session` require write access and are non-idempotent. Budget failure and runtime exceptions do not roll back side effects. Never retry automatically.
+- Close every persistent execution session in success and failure paths. Treat handles from an earlier Domain Reload as expired; never substitute a similarly named object.

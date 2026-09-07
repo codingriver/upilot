@@ -184,7 +184,7 @@ namespace CodingRiver.UPilot
         private UPilotGameObjectService _gameObjectService;
         private UPilotSceneService      _sceneService;
         private UPilotComponentService  _componentService;
-        private UPilotScreenshotService _screenshotService;
+        private UPilotSnapshotService   _snapshotService;
         private UPilotAssetService      _assetService;
         private UPilotPrefabService     _prefabService;
         private UPilotMaterialService   _materialService;
@@ -193,6 +193,7 @@ namespace CodingRiver.UPilot
         private UPilotTestService       _testService;
         // P2 services
         private UPilotScriptService     _scriptService;
+        private UPilotExecutionService  _executionService;
         private UPilotReflectionService _reflectionService;
         private ReflectionEvalService       _reflectionEvalService;
         private UPilotBatchService      _batchService;
@@ -232,6 +233,11 @@ namespace CodingRiver.UPilot
         private long                 _pipelineCompileStartUtcMs;
         private string               _pipelineCompileStatusRequestId = string.Empty;
         private bool                 _pipelineCompileFromMcp;
+        private string               _producerEpoch = string.Empty;
+        private long                 _domainGeneration;
+        private long                 _stateSequence;
+        private string               _lastStateTransition = "startup";
+        private bool                 _preReloadPublishFailed;
         private string               _wsHost = DefaultWsHost;
         private int                  _wsPort = DefaultWsPort;
         private int                  _httpPort = DefaultHttpPort;
@@ -242,6 +248,7 @@ namespace CodingRiver.UPilot
         private UPilotBridge()
         {
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
+            RestoreExecutionStateIdentity();
             LoadDefaultEndpoints();
             _debugWireLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.DebugWireLogsKey, false);
             _verboseLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.VerboseLogsKey, false);
@@ -770,12 +777,19 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
+                    var heartbeatPayload = BuildExecutionStatePayload("heartbeat");
+                    if (!PersistExecutionState(heartbeatPayload))
+                    {
+                        consecutiveFailures++;
+                        await Task.Delay(HeartbeatIntervalMs, token).ConfigureAwait(false);
+                        continue;
+                    }
                     var hb = new HeartbeatMessage
                     {
                         id = $"hb-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                         type = "heartbeat",
                         name = "session.heartbeat",
-                        payload = BuildEditorContextPayload("bridge-heartbeat"),
+                        payload = heartbeatPayload,
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                         sessionId = _sessionId,
                     };
@@ -1004,8 +1018,8 @@ namespace CodingRiver.UPilot
             _componentService = new UPilotComponentService(this);
             _componentService.RegisterCommands();
 
-            _screenshotService = new UPilotScreenshotService(this);
-            _screenshotService.RegisterCommands();
+            _snapshotService = new UPilotSnapshotService(this);
+            _snapshotService.RegisterCommands();
 
             _assetService = new UPilotAssetService(this);
             _assetService.RegisterCommands();
@@ -1037,7 +1051,9 @@ namespace CodingRiver.UPilot
             // P2 services
             _scriptService = new UPilotScriptService(this);
             _scriptService.RegisterCommands();
-            _reflectionService = new UPilotReflectionService(this);
+            _executionService = new UPilotExecutionService(this);
+            _executionService.RegisterCommands();
+            _reflectionService = new UPilotReflectionService(this, _executionService);
             _reflectionService.RegisterCommands();
             _reflectionEvalService = new ReflectionEvalService(this);
             _reflectionEvalService.RegisterCommands();
@@ -1135,7 +1151,11 @@ namespace CodingRiver.UPilot
             var startTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             EnqueueTracked(id, () =>
             {
-                if (!_compileService.TryBeginCompile(requestId))
+                if (!_compileService.TryBeginCompile(
+                    requestId,
+                    command?.payload?.writeBatchId,
+                    command?.payload?.writeBatchCreatedAt ?? 0,
+                    () => PublishExecutionStateBounded("compile_queued")))
                 {
                     startTcs.TrySetResult(false);
                     return;
@@ -1146,7 +1166,16 @@ namespace CodingRiver.UPilot
             var compileStarted = await startTcs.Task;
             if (!compileStarted)
             {
-                await SendErrorAsync(id, "EDITOR_BUSY", "编译进行中，请稍后重试", token, "compile.request");
+                var persistenceFailed = string.Equals(
+                    _compileService.LastStartFailureCode,
+                    "StatePersistenceFailed",
+                    StringComparison.Ordinal);
+                await SendErrorAsync(
+                    id,
+                    persistenceFailed ? "STATE_PERSISTENCE_FAILED" : "EDITOR_BUSY",
+                    persistenceFailed ? "编译前状态持久化失败，未触发编译" : "编译进行中，请稍后重试",
+                    token,
+                    "compile.request");
                 return;
             }
             Logger.Log("COMPILE", $"编译已触发，等待完成: requestId={requestId} timeout=120s");
@@ -1168,14 +1197,26 @@ namespace CodingRiver.UPilot
 
             opCtx?.Step("编译完成，发送结果");
             Logger.Log("COMPILE", $"编译完成，发送结果: requestId={requestId} errors={_compileService.LastErrorCount}");
-            var accepted = new CompileAcceptedPayload { accepted = true, compileRequestId = requestId };
+            var accepted = new CompileAcceptedPayload
+            {
+                accepted = true,
+                compileRequestId = requestId,
+                compileOperationId = _compileService.CompileOperationId,
+                writeBatchId = _compileService.WriteBatchId,
+            };
             await SendResultAsync(id, "compile.request", accepted, token);
         }
 
         private async Task HandleCompileErrorsGetAsync(string id, string json, CancellationToken token)
         {
-            _compileService.CompleteVerification();
+            var transitioned = _compileService.CompleteVerification();
             var payload = _compileService.BuildLastCompileErrorsPayload();
+            if (transitioned)
+            {
+                await PublishExecutionStateAsync(
+                    _compileService.HasCompileErrors ? "compile_failed" : "compile_completed",
+                    token).ConfigureAwait(false);
+            }
             Logger.Log("COMPILE", $"compile.errors.get: errors={payload.total} requestId={payload.requestId}");
             await SendResultAsync(id, "compile.errors.get", payload, token);
         }
@@ -1209,6 +1250,8 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            var verificationCompleted = false;
+
             bool CompileWaitPending()
             {
                 if (CurrentIsCompiling())
@@ -1216,11 +1259,12 @@ namespace CodingRiver.UPilot
 
                 if (string.Equals(_compileService.Phase, "verifying", StringComparison.OrdinalIgnoreCase))
                 {
-                    _compileService.CompleteVerification();
+                    verificationCompleted = _compileService.CompleteVerification();
                     return false;
                 }
 
                 return string.Equals(_compileService.Phase, "queued", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(_compileService.Phase, "compiler_finished", StringComparison.OrdinalIgnoreCase) ||
                        string.Equals(_compileService.Phase, "domain_reload", StringComparison.OrdinalIgnoreCase);
             }
 
@@ -1259,6 +1303,13 @@ namespace CodingRiver.UPilot
                 Logger.LogWarning("COMPILE", $"compile.wait 超时 ({timeoutMs}ms) id={id}");
                 await SendErrorAsync(id, "COMMAND_TIMEOUT", $"等待编译结束超时（{timeoutMs}ms）", token, "compile.wait");
                 return;
+            }
+
+            if (verificationCompleted)
+            {
+                await PublishExecutionStateAsync(
+                    _compileService.HasCompileErrors ? "compile_failed" : "compile_completed",
+                    token).ConfigureAwait(false);
             }
 
             Logger.Log("COMPILE", $"compile.wait 完成，编译空闲 id={id}");
@@ -1336,6 +1387,7 @@ namespace CodingRiver.UPilot
 
         private async Task HandleEditorStateAsync(string id, string json, CancellationToken token)
         {
+            await PublishExecutionStateAsync("editor_state_requested", token).ConfigureAwait(false);
             var payload = BuildEditorStatePayload("editor.state");
             await SendResultAsync(id, "editor.state", payload, token);
         }
@@ -1486,13 +1538,24 @@ namespace CodingRiver.UPilot
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
             };
-            await SendJsonAsync(JsonUtility.ToJson(evt), token);
+            await SendJsonAsync(JsonUtility.ToJson(evt), token).ConfigureAwait(false);
         }
 
         public async Task SendErrorAsync(string id, string code, string message, CancellationToken token,
             string commandName = "")
         {
+            await SendErrorAsync(id, code, message, token, commandName, null);
+        }
+
+        public async Task SendErrorAsync(string id, string code, string message, CancellationToken token,
+            string commandName, ErrorDetailPayload errorDetail)
+        {
             Logger.LogWarning("NETWORK", $"TX error [{code}] {message}  cmd={commandName} id={id}");
+            if (errorDetail != null)
+            {
+                errorDetail.commandId = id;
+                errorDetail.commandName = commandName;
+            }
             var timing = UPilotOperationTracker.Instance.GetTimingSnapshot(id);
             var err = new ErrorMessage
             {
@@ -1502,7 +1565,7 @@ namespace CodingRiver.UPilot
                 {
                     code = code,
                     message = message,
-                    detail = new ErrorDetailPayload { commandId = id, commandName = commandName },
+                    detail = errorDetail ?? new ErrorDetailPayload { commandId = id, commandName = commandName },
                 },
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
@@ -1534,6 +1597,7 @@ namespace CodingRiver.UPilot
             var compilePhaseActive =
                 string.Equals(compilePhase, "queued", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(compilePhase, "compiling", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(compilePhase, "compiler_finished", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(compilePhase, "domain_reload", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(compilePhase, "verifying", StringComparison.OrdinalIgnoreCase);
             var isCompiling = editorIsCompiling || compilePhaseActive;
@@ -1560,8 +1624,22 @@ namespace CodingRiver.UPilot
                 blockedReason = "CompilationInProgress";
                 nextAction = "Continue with unity_compile_wait until compilation reaches a terminal state.";
             }
+            else if (string.Equals(compilePhase, "failed", StringComparison.OrdinalIgnoreCase) ||
+                     (_compileService.Terminal && _compileService.HasCompileErrors))
+            {
+                blockedReason = "CompileErrors";
+                nextAction = "Read unity_compile_errors and fix the reported compiler errors.";
+            }
             return new EditorContextPayload
             {
+                stateContractVersion = 2,
+                projectId = ProjectPathHashSuffix,
+                producerEpoch = _producerEpoch,
+                domainGeneration = _domainGeneration,
+                sequence = _stateSequence,
+                snapshotId = BuildSnapshotId(),
+                transition = _lastStateTransition,
+                observedAt = now,
                 connected = connected,
                 authoritative = authoritative,
                 isStale = !authoritative,
@@ -1580,6 +1658,21 @@ namespace CodingRiver.UPilot
                 compileStatus = _compileService.Status,
                 compilePhase = compilePhase,
                 compileRequestId = _compileService.LastRequestId,
+                compileOperationId = _compileService.CompileOperationId,
+                originatingCommandRequestId = _compileService.LastRequestId,
+                writeBatchId = _compileService.WriteBatchId,
+                writeBatchCreatedAt = _compileService.WriteBatchCreatedAt,
+                compileOrigin = _compileService.CompileOrigin,
+                terminal = _compileService.Terminal,
+                verificationPending = _compileService.VerificationPending,
+                errorsVerified = _compileService.ErrorsVerified,
+                lastCompileRequestedAt = _compileService.LastCompileRequestedAt,
+                lastCompileStartedAt = _compileService.LastCompileStartedAt,
+                lastCompilerFinishedAt = _compileService.LastCompilerFinishedAt,
+                lastCompileVerifiedAt = _compileService.LastCompileVerifiedAt,
+                lastTerminalCompileAt = _compileService.LastTerminalCompileAt,
+                reloadId = _compileService.ReloadId,
+                domainReloadObserved = _compileService.DomainReloadObserved,
                 compileStartedAt = _compileService.CompileStartedAt,
                 compileFinishedAt = _compileService.CompileFinishedAt,
                 lastProgressAt = _compileService.LastProgressAt,
@@ -1589,6 +1682,163 @@ namespace CodingRiver.UPilot
                 lastDequeuedCommandId = _lastDequeuedCommandId ?? string.Empty,
                 processId = Process.GetCurrentProcess().Id,
             };
+        }
+
+        private static string ExecutionStatePath => Path.Combine(
+            Directory.GetParent(Application.dataPath)?.FullName ?? ".",
+            "Logs", "UPilot", "EditorExecutionState.json");
+
+        private string BuildSnapshotId() =>
+            $"{_producerEpoch}:{_domainGeneration}:{_stateSequence}";
+
+        private void RestoreExecutionStateIdentity()
+        {
+            var processId = Process.GetCurrentProcess().Id;
+            try
+            {
+                if (File.Exists(ExecutionStatePath))
+                {
+                    var restored = JsonUtility.FromJson<EditorExecutionStatePayload>(
+                        File.ReadAllText(ExecutionStatePath));
+                    if (restored != null && restored.processId == processId &&
+                        !string.IsNullOrEmpty(restored.producerEpoch))
+                    {
+                        _producerEpoch = restored.producerEpoch;
+                        _domainGeneration = Math.Max(0, restored.domainGeneration);
+                        _stateSequence = Math.Max(0, restored.sequence);
+                        _lastStateTransition = string.IsNullOrEmpty(restored.transition)
+                            ? "restored"
+                            : restored.transition;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("SYSTEM", $"恢复 EditorExecutionState identity 失败: {ex.Message}");
+            }
+
+            if (string.IsNullOrEmpty(_producerEpoch))
+            {
+                _producerEpoch = Guid.NewGuid().ToString("N");
+                _domainGeneration = 0;
+                _stateSequence = 0;
+                _lastStateTransition = "process_started";
+            }
+        }
+
+        private EditorExecutionStatePayload BuildExecutionStatePayload(string transition)
+        {
+            _lastStateTransition = transition ?? "snapshot";
+            _stateSequence++;
+            var context = BuildEditorContextPayload("editor.execution_state");
+            return new EditorExecutionStatePayload
+            {
+                stateContractVersion = context.stateContractVersion,
+                projectId = context.projectId,
+                producerEpoch = context.producerEpoch,
+                domainGeneration = context.domainGeneration,
+                sequence = context.sequence,
+                snapshotId = context.snapshotId,
+                transition = context.transition,
+                observedAt = context.observedAt,
+                connected = context.connected,
+                authoritative = context.authoritative,
+                isStale = context.isStale,
+                ready = context.ready,
+                blocked = context.blocked,
+                blockedReason = context.blockedReason,
+                nextAction = context.nextAction,
+                source = context.source,
+                sessionId = context.sessionId,
+                updatedAt = context.updatedAt,
+                contextUpdatedAt = context.contextUpdatedAt,
+                playModeState = context.playModeState,
+                isPlaying = context.isPlaying,
+                isPaused = context.isPaused,
+                isCompiling = context.isCompiling,
+                compileStatus = context.compileStatus,
+                compilePhase = context.compilePhase,
+                compileRequestId = context.compileRequestId,
+                compileOperationId = context.compileOperationId,
+                originatingCommandRequestId = context.originatingCommandRequestId,
+                writeBatchId = context.writeBatchId,
+                writeBatchCreatedAt = context.writeBatchCreatedAt,
+                compileOrigin = context.compileOrigin,
+                terminal = context.terminal,
+                verificationPending = context.verificationPending,
+                errorsVerified = context.errorsVerified,
+                lastCompileRequestedAt = context.lastCompileRequestedAt,
+                lastCompileStartedAt = context.lastCompileStartedAt,
+                lastCompilerFinishedAt = context.lastCompilerFinishedAt,
+                lastCompileVerifiedAt = context.lastCompileVerifiedAt,
+                lastTerminalCompileAt = context.lastTerminalCompileAt,
+                reloadId = context.reloadId,
+                domainReloadObserved = context.domainReloadObserved,
+                pendingWriteBatchId = context.pendingWriteBatchId,
+                compileDeferredReason = context.compileDeferredReason,
+                compileStartedAt = context.compileStartedAt,
+                compileFinishedAt = context.compileFinishedAt,
+                lastProgressAt = context.lastProgressAt,
+                activeScene = context.activeScene,
+                lastMainThreadPumpAt = context.lastMainThreadPumpAt,
+                mainThreadQueueDepth = context.mainThreadQueueDepth,
+                lastDequeuedCommandId = context.lastDequeuedCommandId,
+                processId = context.processId,
+                errorCount = _compileService.LastErrorCount,
+                warningCount = _compileService.LastWarningCount,
+                preReloadPublishFailed = _preReloadPublishFailed,
+            };
+        }
+
+        private static bool PersistExecutionState(EditorExecutionStatePayload payload)
+        {
+            try
+            {
+                var directory = Path.GetDirectoryName(ExecutionStatePath);
+                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                var temporary = ExecutionStatePath + ".tmp";
+                File.WriteAllText(temporary, JsonUtility.ToJson(payload, true));
+                if (File.Exists(ExecutionStatePath)) File.Replace(temporary, ExecutionStatePath, null);
+                else File.Move(temporary, ExecutionStatePath);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("SYSTEM", $"持久化 EditorExecutionState 失败: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<bool> PublishExecutionStateAsync(string transition, CancellationToken token)
+        {
+            var payload = BuildExecutionStatePayload(transition);
+            if (!PersistExecutionState(payload)) return false;
+            if (_ws?.State != WebSocketState.Open || !_isAuthenticated) return true;
+            await SendEventAsync(
+                $"evt-editor-execution-state-{payload.snapshotId}",
+                "editor.execution_state", payload, token).ConfigureAwait(false);
+            return true;
+        }
+
+        private bool PublishExecutionStateBounded(string transition, int timeoutMs = 100)
+        {
+            var payload = BuildExecutionStatePayload(transition);
+            if (!PersistExecutionState(payload)) return false;
+            if (_ws?.State != WebSocketState.Open || !_isAuthenticated) return false;
+            try
+            {
+                using var timeout = new CancellationTokenSource(Math.Max(1, timeoutMs));
+                SendEventAsync(
+                    $"evt-editor-execution-state-{payload.snapshotId}",
+                    "editor.execution_state", payload, timeout.Token)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("NETWORK", $"Publish {transition} failed: {ex.Message}");
+                return false;
+            }
         }
 
         private EditorStatePayload BuildEditorStatePayload(string source)
@@ -1616,6 +1866,11 @@ namespace CodingRiver.UPilot
 
         private async Task SendEditorStateEventAsync(CancellationToken token)
         {
+            await PublishExecutionStateAsync(
+                string.Equals(_compileService.Phase, "verifying", StringComparison.OrdinalIgnoreCase)
+                    ? "domain_reload_recovered"
+                    : "connected_snapshot",
+                token).ConfigureAwait(false);
             var payload = BuildEditorStatePayload("editor.state.event");
             await SendEventAsync(
                 $"evt-editor-state-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
@@ -1630,7 +1885,12 @@ namespace CodingRiver.UPilot
                 await SendEventAsync(
                     $"evt-compile-errors-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                     "compile.errors", errorsPayload, token);
-                _compileService.CompleteVerification();
+                if (_compileService.CompleteVerification())
+                {
+                    await PublishExecutionStateAsync(
+                        _compileService.HasCompileErrors ? "compile_failed" : "compile_completed",
+                        token).ConfigureAwait(false);
+                }
             }
         }
 
@@ -1663,6 +1923,7 @@ namespace CodingRiver.UPilot
         private void OnPlayModeStateChanged(PlayModeStateChange change)
         {
             Logger.Log("SYSTEM", $"PlayMode 状态变更: {change}");
+            _executionService?.OnPlayModeStateChanged(change);
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _cachedIsPlaying = EditorApplication.isPlaying;
             _cachedIsPaused = EditorApplication.isPaused;
@@ -1682,6 +1943,7 @@ namespace CodingRiver.UPilot
             if (_cts == null || _cts.IsCancellationRequested) return;
             var payload = _playInputService.CurrentPlayModeChangedPayload();
             _cachedPlayModeState = payload.state;
+            _ = PublishExecutionStateAsync("play_mode_changed", _cts.Token);
             _ = SendPlayModeChangedEventAsync(payload, _cts.Token);
         }
 
@@ -1705,6 +1967,8 @@ namespace CodingRiver.UPilot
             var focus = GetFocusStateString();
             var isCompiling = CurrentIsCompiling();
             _compileService?.MarkDomainReload();
+            _domainGeneration++;
+            _preReloadPublishFailed = !PublishExecutionStateBounded("domain_reload_starting");
             UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.domain.reload.start", "Domain Reload开始",
                 $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 认证={(_isAuthenticated ? "是" : "否")} 编译={(isCompiling ? "是" : "否")}");
@@ -1733,7 +1997,8 @@ namespace CodingRiver.UPilot
                     Logger.LogNetwork("NETWORK",
                         $"sessionId={_sessionId} | name=domain_reload.starting | type=event | id={msg.id} | (sync)", isSend: true);
                     var bytes = Encoding.UTF8.GetBytes(json);
-                    _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
+                    using var timeout = new CancellationTokenSource(100);
+                    _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, timeout.Token)
                        .GetAwaiter().GetResult();
                 }
                 catch (Exception ex)
@@ -1778,6 +2043,7 @@ namespace CodingRiver.UPilot
                 "sys.compile.start", "Unity编译开始",
                 $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 焦点={focus}");
             var tok = _cts?.Token ?? CancellationToken.None;
+            _ = PublishExecutionStateAsync("compile_started", tok);
             _ = SendCompileStartedMcpPushAsync(tok);
         }
 
@@ -1845,6 +2111,7 @@ namespace CodingRiver.UPilot
                 "sys.compile.done", "Unity编译完成",
                 $"耗时={duration}ms errors={_compileService.LastErrorCount} ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 焦点={focus}");
             var tok = _cts?.Token ?? CancellationToken.None;
+            _ = PublishExecutionStateAsync("compiler_finished", tok);
             _ = SendCompilePipelineEventAsync(
                 "compile.pipeline.finished",
                 new CompilePipelinePayload
@@ -1935,6 +2202,11 @@ namespace CodingRiver.UPilot
                     $"evt-compile-errors-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
                     "compile.errors", errorsPayload, token);
                 Logger.Log("COMPILE", $"Compile errors sent: {errorsPayload.total}");
+                if (errorsPayload.total > 0)
+                {
+                    if (_compileService.CompleteVerification())
+                        await PublishExecutionStateAsync("compile_failed", token).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {

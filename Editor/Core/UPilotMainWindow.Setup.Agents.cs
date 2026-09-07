@@ -108,6 +108,13 @@ namespace CodingRiver.UPilot
                 else
                     UPilotProjectConfig.RevokeProjectWriteAccess();
 
+                var enabledAgentClients = new System.Collections.Generic.List<string>();
+                if (_setupWriteCodexConfig) enabledAgentClients.Add("Codex");
+                if (_setupWriteClaudeConfig) enabledAgentClients.Add("Claude Code");
+                if (_setupWriteCursorConfig) enabledAgentClients.Add("Cursor");
+                if (_setupWriteOpenCodeConfig) enabledAgentClients.Add("OpenCode");
+                UPilotAgentSetup.SetEnabledAgentClients(enabledAgentClients);
+
                 if (_setupWriteAgentRules)
                     Debug.Log("[UPilot] First setup agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
                 if (_setupWriteCodexConfig)

@@ -160,11 +160,17 @@ namespace CodingRiver.UPilot
     public class ConsoleSummaryPayload
     {
         public int total;
+        public int startCount;
+        public int endCount;
+        public bool stable;
+        public string source;
+        public string classification;
         public int logCount;
         public int warningCount;
         public int errorCount;
         public int assertCount;
         public int exceptionCount;
+        public List<ConsoleLogEntry> samples = new();
     }
 
     // ── Service ─────────────────────────────────────────────────────────────────
@@ -178,6 +184,7 @@ namespace CodingRiver.UPilot
         public void RegisterCommands()
         {
             _bridge.Router.Register("resource.sceneHierarchy",       HandleSceneHierarchyAsync);
+            _bridge.Router.Register("resource.sceneSummary",         HandleSceneSummaryAsync);
             _bridge.Router.Register("resource.consoleLogs",          HandleConsoleLogsAsync);
             _bridge.Router.Register("resource.editorState",          HandleEditorStateAsync);
             _bridge.Router.Register("resource.packages",             HandlePackagesAsync);
@@ -185,6 +192,25 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("resource.upilotLogsTab",        HandleUPilotLogsTabAsync);
             _bridge.Router.Register("resource.windowDiagnostics",    HandleWindowDiagnosticsAsync);
             _bridge.Router.Register("resource.consoleSummary",       HandleConsoleSummaryAsync);
+        }
+
+        private async Task HandleSceneSummaryAsync(string id, string json, CancellationToken token)
+        {
+            var request = JsonUtility.FromJson<SceneSummaryMessage>(json)?.payload ?? new SceneSummaryRequest();
+            var completion = new TaskCompletionSource<SceneSummaryResult>();
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    var scenes = new List<Scene>();
+                    for (int index = 0; index < SceneManager.sceneCount; index++)
+                        scenes.Add(SceneManager.GetSceneAt(index));
+                    completion.SetResult(UPilotSceneSummaryService.Summarize(scenes, request));
+                }
+                catch (Exception ex) { completion.SetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "resource.sceneSummary", await completion.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SCENE_SUMMARY_FAILED", ex.Message, token, "resource.sceneSummary"); }
         }
 
         // ── resource.sceneHierarchy ─────────────────────────────────────────────
@@ -502,7 +528,7 @@ namespace CodingRiver.UPilot
                         horizontalBarRisk                = hx || !layoutOk,
                         layoutVersion                  = "toolbar-2row-scroll-hnone-2026-04",
                         note =
-                            "打开菜单 UPilot/Advanced Settings，切换到「日志与诊断」页后，此处快照才有效；用于验收横向滚动风险（horizontalBarRisk=false 表示布局约束正常）。",
+                            "打开菜单 UPilot/高级设置，切换到「诊断」页后，此处快照才有效；用于验收横向滚动风险（horizontalBarRisk=false 表示布局约束正常）。",
                     };
                     tcs.SetResult(payload);
                 }
@@ -579,65 +605,7 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    var result = new ConsoleSummaryPayload();
-                    var logEntriesType = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntries")
-                                      ?? typeof(UnityEditor.Editor).Assembly.GetType("UnityEditorInternal.LogEntries");
-
-                    if (logEntriesType != null)
-                    {
-                        var getCount = logEntriesType.GetMethod("GetCount",
-                            BindingFlags.Static | BindingFlags.Public);
-                        var startGetting = logEntriesType.GetMethod("StartGettingEntries",
-                            BindingFlags.Static | BindingFlags.Public);
-                        var endGetting = logEntriesType.GetMethod("EndGettingEntries",
-                            BindingFlags.Static | BindingFlags.Public);
-                        var getEntry = logEntriesType.GetMethod("GetEntryInternal",
-                            BindingFlags.Static | BindingFlags.Public);
-
-                        if (getCount != null)
-                        {
-                            int total = (int)getCount.Invoke(null, null);
-                            result.total = total;
-
-                            if (startGetting != null && endGetting != null && getEntry != null)
-                            {
-                                startGetting.Invoke(null, null);
-                                try
-                                {
-                                    var logEntryType = typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.LogEntry")
-                                                    ?? typeof(UnityEditor.Editor).Assembly.GetType("UnityEditorInternal.LogEntry");
-
-                                    if (logEntryType != null)
-                                    {
-                                        var modeField = logEntryType.GetField("mode");
-                                        for (int i = 0; i < total; i++)
-                                        {
-                                            var entry = Activator.CreateInstance(logEntryType);
-                                            getEntry.Invoke(null, new object[] { i, entry });
-                                            int mode = modeField != null ? (int)modeField.GetValue(entry) : 0;
-
-                                            if ((mode & (1 << 0)) != 0 || (mode & (1 << 9)) != 0)
-                                                result.errorCount++;
-                                            else if ((mode & (1 << 1)) != 0 || (mode & (1 << 8)) != 0)
-                                                result.assertCount++;
-                                            else if ((mode & (1 << 5)) != 0)
-                                                result.warningCount++;
-                                            else
-                                                result.logCount++;
-                                        }
-                                    }
-                                }
-                                finally
-                                {
-                                    endGetting.Invoke(null, null);
-                                }
-                            }
-                        }
-
-                        result.exceptionCount = result.errorCount;
-                    }
-
-                    tcs.SetResult(result);
+                    tcs.SetResult(UPilotConsoleService.CaptureSummary());
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
             });

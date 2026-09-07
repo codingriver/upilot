@@ -6,10 +6,10 @@ alwaysApply: true
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 22
+rulesVersion: 29
 upilotPackageVersion: 0.3.28
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-09-01T11:51:17Z
+generatedAt: 2026-09-05T12:43:40Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -46,8 +46,10 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Distinguish server registration, client tool-list injection, and a successful real call; they are different states.
 - If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable. Treat `registered`, `available`, and `callableNow` as separate states and follow `unavailableReason` / `nextAction`.
 - After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.
-- Use the narrowest dedicated semantic tool. `unity_reflection_call` is a generic, write-authorized, non-idempotent execution entry point because the target method may mutate project or runtime state; inspect the exact target and arguments and never retry it automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery.
-- Only after `unity_reflection_call` actually fails may you fall back to one bounded `reflection_eval` expression.
+- Use the narrowest dedicated semantic tool. `unity_reflection_call` is the single public generic reflection entry point: pass `typeName` + `methodName` for one structured compiled-method call, or pass only `expression` for one bounded C#-like reflection expression. `kind=auto` selects the engine from the mutually exclusive request shape before execution and never retries through the other engine. The target may mutate project or runtime state, so inspect the exact target and arguments and never retry automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery.
+- Use `csharp_eval` for a bounded UPilot C# subset statement program, `reflection_emit_type` for a structured temporary CLR type, and `execution_session` whenever variables, handles, callbacks, event subscriptions, escaping closures/async delegates, or types must persist across calls. Event `+=` and any closure/async delegate that escapes its creating call require a persistent session.
+- Async lambdas may target only `Task`/`Task<T>` delegates; async void, `Action`, and ordinary event-handler conversion are unsupported. Cancellation does not roll back prior effects: inspect actual session state, never retry automatically, and close the session in every success, failure, timeout, or cancellation path. All four execution routes are write-gated and non-idempotent.
+- No separate public reflection-expression alias is exposed. Do not turn expression mode into a multi-step C# script.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
 
@@ -55,13 +57,18 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - Call `unity_ensure_ready` before Editor mutations and inspect the exact target before destructive changes.
 - Decide Editor readiness from `ready`, `blocked`, `blockedReason`, `authoritative`, `isStale`, and `nextAction`; follow `nextAction` while blocked or recovering.
-- Do not infer readiness from raw `isPlaying` or `isCompiling` values alone. Compilation phases `queued`, `compiling`, `domain_reload`, and `verifying` are non-ready even when `isCompiling=false`.
-- After one batch of disk writes, call `unity_sync_after_disk_write` once.
-- After C# or assembly-related changes, prefer one `unity_safe_compile_and_wait` call. It attaches to an existing compile and verifies persistent errors after Domain Reload.
+- Do not infer readiness from raw `isPlaying` or `isCompiling` values alone. Compilation phases `queued`, `compiling`, `compiler_finished`, `domain_reload`, and `verifying` are non-ready even when `isCompiling=false`.
+- Treat Unity as the sole producer of Editor/compile facts and the MCP Server as the ordered latest-snapshot store. A compile must publish and persist fresh snapshots immediately before the request (`compile_queued`), when the compiler starts (`compiling`), when the compiler callback ends (`compiler_finished`, still non-terminal while verification is pending), immediately before Domain Reload (`domain_reload_starting`), immediately after the new domain reconnects (`domain_reload_recovered/verifying`), and after persisted error verification (`completed|failed`). Missing snapshots must remain unknown/recovering, never be synthesized as success.
+- Before C# or assembly-related disk writes, retain the current compile identity and terminal timestamps as the pre-write baseline. A historical `completed` state or an unchanged completion timestamp does not prove that later edits were compiled.
+- Immediately after saving one batch of C#, asmdef, asmref, or rsp writes, call `unity_write_batch_register(paths, compileWhenEditMode=true)` once. Use the server-derived `writeBatchId` and `writeBatchCreatedAt`; never invent them or reuse a prior batch.
+- If the batch is registered while Unity is in PlayMode, paused, or changing modes, do not call `unity_sync_after_disk_write`, `unity_compile`, or `unity_safe_compile_and_wait`. Do not exit PlayMode without user authorization. The Server persists the authorized batch and automatically performs one sync and one safe compile after Unity publishes fresh authoritative EditMode.
+- For a registered batch with `compileWhenEditMode=true`, do not start a second manual sync or compile. Poll the returned batch/execution state until it reaches a correlated terminal result. Use `unity_sync_after_disk_write` followed by one `unity_safe_compile_and_wait` only for legacy or explicitly manual flows without automatic batch authorization.
 - If `unity_sync_after_disk_write(triggerCompile=true)` returns `ok=true/status=compiling`, do not retry sync; call `unity_safe_compile_and_wait` and follow its `stage`, `nextAction`, and structured error result.
 - Use `unity_compile_wait` plus `unity_compile_errors` only when observing a compile that must not be triggered or attached through the safe workflow; `unity_compile_errors_get` is a compatibility alias.
 - Compile only after C# or assembly-related changes. Do not compile again when no code changed.
-- After compilation, read structured compile errors and relevant Console errors before editing again.
+- Treat compilation as covering the current edit batch only when the terminal snapshot belongs to that batch/compile operation, `errorsVerified=true`, and `lastCompileVerifiedAt` is at or after `writeBatchCreatedAt`. A pre-existing `completed` snapshot, `lastCompilerFinishedAt` without verification, or a timestamp older than the write batch is not acceptance evidence. Until those correlation fields are available, require the result of the one `unity_safe_compile_and_wait` call started after returning to EditMode rather than relying on cached status.
+- Treat `ok` as protocol/tool success only. A successfully observed compile failure is `ok=true` with `status/phase=failed`; inspect `terminal`, `errorsVerified`, identities, and timestamps before deciding the business result.
+- After compilation, read structured compile errors and relevant Console errors before editing again. Do not claim Unity compiled the latest code when the terminal identity/timestamp evidence is missing, stale, or predates the edits.
 
 ## Optional UPilot Tracer
 
@@ -116,10 +123,12 @@ Project-specific business rules outside this controlled UPilot block take preced
 ## Artifacts And Screenshots
 
 - Prefer project-relative artifact paths returned by the project bridge.
-- Prefer `unity_screenshot_save` for screenshots.
-- When fallback is allowed, pass an explicit ordered `fallbackSources` list. Report screenshot `path`, `bytes`, `width`, `height`, `sha256`, the actual `source`, `degraded`, `degradeReason`, and `originalError`.
-- For EditorWindow capture, resolve the Unity window with `unity_editor_windows_list` and reuse its exact `typeName` or title. Validate returned match metadata against that Unity `instanceId`/type identity; never select an operating-system window by a matching title.
-- Treat EditorWindow/SceneView screenshots as trustworthy pixel evidence only when `pixelSourceVerified=true` and `occlusionSensitive=false`. Always report `captureApi`, Unity PID, `windowHandle`, `foreground`, `degraded`, and `degradeReason`; reject or explicitly downgrade screen-pixel/camera fallbacks.
+- Prefer `unity_snapshot_capture`; treat `unity_screenshot_*` as compatibility wrappers over the same Snapshot implementation.
+- For multi-Camera or depth evidence, use exact Camera IDs from `unity_camera_list`. Depth v1 is Built-in/URP Raw Depth and Linear Depth Float EXR with optional PNG previews; HDRP is unsupported.
+- GameView Snapshot is PlayMode-only, Display 0, Color-only final composition. Camera and GameView capture are offscreen-capable while Unity is minimized; SceneView and EditorWindow fail fast when minimized.
+- For EditorWindow/SceneView capture, resolve the exact Unity `instanceId` with `unity_editor_windows_list`; never select an operating-system window by title. SceneView evidence also requires exact `UnityEditor.SceneView`, a completed Repaint, `includesSceneGui=true`, and `includesHandles=true`.
+- Accept visual artifacts only when `acceptedAsEvidence=true`, `pixelSourceVerified=true`, and `occlusionSensitive=false`; report path, bytes, dimensions, SHA256, capture API, Unity PID/HWND, foreground/minimized state, degradation, and original error.
+- Snapshot baselines live under `.upilot/snapshots/baselines`. Baseline updates must use `unity_snapshot_baseline_update` as dry-run -> inspect -> explicit approval -> apply with the returned current-state `confirmToken`; never approve automatically.
 - UPilot records artifact metadata and hashes; business code decides whether the artifact proves success.
 
 ## Assets And Prefabs

@@ -73,7 +73,7 @@ namespace CodingRiver.UPilot
             return missing.Count == 0;
         }
 
-        [MenuItem("UPilot/Optional Flow/Enable", false, 400)]
+        [MenuItem("UPilot/Flow/Enable", false, 300)]
         private static void EnableFlow()
         {
             try
@@ -111,7 +111,13 @@ namespace CodingRiver.UPilot
             SetFlowEnabledState(true);
         }
 
-        [MenuItem("UPilot/Optional Flow/Disable", false, 401)]
+        [MenuItem("UPilot/Flow/Enable", true)]
+        private static bool ValidateEnableFlow()
+        {
+            return !IsFlowRequested && !IsFlowInstallInProgress;
+        }
+
+        [MenuItem("UPilot/Flow/Disable", false, 301)]
         private static void DisableFlow()
         {
             try
@@ -134,6 +140,15 @@ namespace CodingRiver.UPilot
                 return;
             SetFlowEnabledState(false);
         }
+
+        [MenuItem("UPilot/Flow/Disable", true)]
+        private static bool ValidateDisableFlow()
+        {
+            return IsFlowRequested && !IsFlowInstallInProgress;
+        }
+
+        private static bool IsFlowInstallInProgress =>
+            _pendingPackages != null || (_addRequest != null && !_addRequest.IsCompleted);
 
         private static void InstallNextFlowPackage()
         {

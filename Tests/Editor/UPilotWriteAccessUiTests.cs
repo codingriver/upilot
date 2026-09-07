@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -166,6 +167,185 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void AgentSelectionNormalizesAndPersistsStableClientIds()
+        {
+            var normalized = UPilotAgentSetup.NormalizeAgentClientIds(
+                new[] { "OpenCode", "codex", "Claude", "unknown", "codex" });
+            Assert.That(normalized, Is.EqualTo(new[] { "codex", "claude-code", "opencode" }));
+
+            var source = new UPilotProjectConfigData
+            {
+                agents = new UPilotAgentsConfig
+                {
+                    selectionInitialized = true,
+                    enabledClients = normalized,
+                },
+            };
+            var restored = JsonUtility.FromJson<UPilotProjectConfigData>(JsonUtility.ToJson(source));
+
+            Assert.That(restored.agents.selectionInitialized, Is.True);
+            Assert.That(restored.agents.enabledClients, Is.EqualTo(normalized));
+        }
+
+        [Test]
+        public void LegacyAgentSelectionInfersExistingEntriesAndCleanSetupDefaultsToCodex()
+        {
+            var rawStatuses = new[]
+            {
+                new AgentMcpConfigStatus("Codex", "codex.toml", true, true, true),
+                new AgentMcpConfigStatus("Claude Code", ".mcp.json", true, true, true),
+                new AgentMcpConfigStatus("Cursor", "mcp.json", true, true, true),
+                new AgentMcpConfigStatus("OpenCode", "opencode.json", false, false, false),
+            };
+
+            Assert.That(
+                UPilotAgentSetup.ResolveEnabledAgentClientIds(rawStatuses, new UPilotAgentsConfig()),
+                Is.EqualTo(new[] { "codex", "claude-code", "cursor" }));
+            Assert.That(
+                UPilotAgentSetup.ResolveEnabledAgentClientIds(
+                    Array.Empty<AgentMcpConfigStatus>(),
+                    new UPilotAgentsConfig()),
+                Is.EqualTo(new[] { "codex" }));
+            Assert.That(
+                UPilotAgentSetup.ResolveEnabledAgentClientIds(
+                    rawStatuses,
+                    new UPilotAgentsConfig
+                    {
+                        selectionInitialized = true,
+                        enabledClients = new[] { "opencode" },
+                    }),
+                Is.EqualTo(new[] { "opencode" }));
+        }
+
+        [Test]
+        public void BulkAgentMcpTargetsOnlyIncludeEnabledAgents()
+        {
+            var statuses = new[]
+            {
+                new AgentMcpConfigStatus("Codex", "codex.toml", true, true, true),
+                new AgentMcpConfigStatus("Claude Code", ".mcp.json", true, true, false),
+                new AgentMcpConfigStatus("Cursor", "mcp.json", false, false, false),
+                new AgentMcpConfigStatus(
+                    "OpenCode",
+                    "opencode.json",
+                    false,
+                    false,
+                    false,
+                    isEnabled: false),
+            };
+
+            Assert.That(
+                UPilotMainWindow.GetBulkAgentMcpTargetClients(statuses, includeMissingEnabled: false),
+                Is.EqualTo(new[] { "Codex", "Claude Code" }));
+            Assert.That(
+                UPilotMainWindow.GetBulkAgentMcpTargetClients(statuses, includeMissingEnabled: true),
+                Is.EqualTo(new[] { "Codex", "Claude Code", "Cursor" }));
+            Assert.That(
+                UPilotMainWindow.GetMissingEnabledAgentMcpTargets(statuses),
+                Is.EqualTo(new[] { "Cursor" }));
+        }
+
+        [Test]
+        public void BulkAgentMcpVerificationReportsMissingOrInvalidTargets()
+        {
+            var targetClients = new[] { "Codex", "Claude Code", "Cursor" };
+            var statuses = new[]
+            {
+                new AgentMcpConfigStatus("Codex", "codex.toml", true, true, true),
+                new AgentMcpConfigStatus("Claude Code", ".mcp.json", true, true, true),
+                new AgentMcpConfigStatus("Cursor", "mcp.json", true, true, false),
+            };
+
+            Assert.That(
+                UPilotMainWindow.GetUnconfiguredAgentMcpTargets(statuses, targetClients),
+                Is.EqualTo(new[] { "Cursor" }));
+        }
+
+        [Test]
+        public void ForceConfirmationNamesEnabledAgentsAndExcludesDisabledAgents()
+        {
+            var statuses = new[]
+            {
+                new AgentMcpConfigStatus("Codex", "codex.toml", true, true, true),
+                new AgentMcpConfigStatus("Claude Code", ".mcp.json", true, true, true),
+                new AgentMcpConfigStatus("Cursor", "mcp.json", true, true, true),
+                new AgentMcpConfigStatus(
+                    "OpenCode",
+                    "opencode.json",
+                    false,
+                    false,
+                    false,
+                    isEnabled: false),
+            };
+            var message = UPilotMainWindow.BuildForceAllAgentConfigurationMessage(statuses);
+
+            Assert.That(message, Does.Contain("Codex"));
+            Assert.That(message, Does.Contain("Claude Code"));
+            Assert.That(message, Does.Contain("Cursor"));
+            Assert.That(message, Does.Not.Contain("OpenCode"));
+            Assert.That(message, Does.Contain("创建或更新"));
+            Assert.That(message, Does.Contain("MCP 配置"));
+            Assert.That(message, Does.Contain("未启用的 Agent 会被跳过"));
+        }
+
+        [Test]
+        public void MissingEnabledAgentPromptOffersFillOrExistingOnlyScope()
+        {
+            var message = UPilotMainWindow.BuildMissingEnabledAgentMcpMessage(
+                new[] { "Cursor", "OpenCode" });
+
+            Assert.That(message, Does.Contain("Cursor、OpenCode"));
+            Assert.That(message, Does.Contain("补齐缺失配置"));
+            Assert.That(message, Does.Contain("只更新已有 MCP 配置"));
+            Assert.That(message, Does.Contain("未启用的 Agent 会保持不变"));
+        }
+
+        [Test]
+        public void DisabledAgentIsNeutralWhileEnabledMissingAgentIsActionable()
+        {
+            var disabled = new AgentMcpConfigStatus(
+                "OpenCode",
+                "opencode.json",
+                false,
+                false,
+                false,
+                isEnabled: false);
+            var enabledMissing = new AgentMcpConfigStatus(
+                "OpenCode",
+                "opencode.json",
+                false,
+                false,
+                false);
+            var failedRule = new AgentRuleConfigStatus(
+                "OpenCode",
+                "rules",
+                AgentRuleConfigState.Error,
+                "failed");
+            var failedSkill = new AgentSkillConfigStatus(
+                "OpenCode",
+                "skill",
+                AgentSkillConfigState.Conflict,
+                skillConflictSummary: "conflict");
+
+            Assert.That(disabled.StateText, Is.EqualTo("未启用"));
+            Assert.That(disabled.IsSatisfied, Is.True);
+            Assert.That(UPilotMainWindow.NeedsMcpUpdate(disabled), Is.False);
+            Assert.That(
+                UPilotMainWindow.GetAgentOverallStateText(disabled, failedRule, failedSkill),
+                Is.EqualTo("未启用"));
+            Assert.That(
+                UPilotMainWindow.CountAgentsNeedingUpdate(
+                    new[] { disabled },
+                    new[] { failedRule },
+                    new[] { failedSkill }),
+                Is.Zero);
+            Assert.That(enabledMissing.StateText, Is.EqualTo("未配置"));
+            Assert.That(enabledMissing.IsSatisfied, Is.False);
+            Assert.That(UPilotMainWindow.NeedsMcpUpdate(enabledMissing), Is.True);
+            Assert.That(UPilotMainWindow.BuildMcpTooltip(disabled), Does.Contain("启用状态：未启用"));
+        }
+
+        [Test]
         public void AgentSummaryPrioritizesFinalState()
         {
             var readyMcp = new AgentMcpConfigStatus("Codex", "config", true, true, true);
@@ -251,6 +431,53 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(openCodeKey, Is.EqualTo(codexKey));
             Assert.That(codexKey, Is.EqualTo(agentsPath));
+        }
+
+        [Test]
+        public void AgentUpdateCountTracksAffectedAgentsInsteadOfSharedPaths()
+        {
+            var sharedSkillPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "upilot", ".agents", "skills"));
+            var claudeSkillPath = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "upilot", ".claude", "skills"));
+            var clients = new[] { "Codex", "Claude Code", "Cursor", "OpenCode" };
+            var mcpStatuses = new AgentMcpConfigStatus[clients.Length];
+            var ruleStatuses = new AgentRuleConfigStatus[clients.Length];
+            var skillStatuses = new AgentSkillConfigStatus[clients.Length];
+            for (var i = 0; i < clients.Length; i++)
+            {
+                var clientName = clients[i];
+                mcpStatuses[i] = new AgentMcpConfigStatus(clientName, clientName + ".json", true, true, true);
+                ruleStatuses[i] = new AgentRuleConfigStatus(
+                    clientName,
+                    "AGENTS.md",
+                    AgentRuleConfigState.Current);
+                skillStatuses[i] = new AgentSkillConfigStatus(
+                    clientName,
+                    clientName == "Claude Code" ? claudeSkillPath : sharedSkillPath,
+                    AgentSkillConfigState.Customized);
+            }
+
+            var affectedAgentCount = UPilotMainWindow.CountAgentsNeedingUpdate(
+                mcpStatuses,
+                ruleStatuses,
+                skillStatuses);
+
+            Assert.That(affectedAgentCount, Is.EqualTo(4));
+            Assert.That(UPilotMainWindow.GetAgentUpdateButtonLabel(affectedAgentCount), Is.EqualTo("更新 4 项"));
+        }
+
+        [Test]
+        public void AgentWithMultipleIntegrationIssuesCountsOnce()
+        {
+            var mcp = new AgentMcpConfigStatus("Codex", "config.toml", true, true, false);
+            var rule = new AgentRuleConfigStatus("Codex", "AGENTS.md", AgentRuleConfigState.UpdateAvailable);
+            var skill = new AgentSkillConfigStatus("Codex", "skill", AgentSkillConfigState.Customized);
+
+            Assert.That(
+                UPilotMainWindow.CountAgentsNeedingUpdate(
+                    new[] { mcp },
+                    new[] { rule },
+                    new[] { skill }),
+                Is.EqualTo(1));
         }
 
         [Test]

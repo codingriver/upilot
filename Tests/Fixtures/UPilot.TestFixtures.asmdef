@@ -1,0 +1,11 @@
+{
+    "name": "UPilot.TestFixtures",
+    "rootNamespace": "CodingRiver.UPilot.Tests",
+    "references": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "autoReferenced": false,
+    "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+    "noEngineReferences": false
+}

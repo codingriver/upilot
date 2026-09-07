@@ -118,16 +118,19 @@ class CommandDispatcher:
             err = result.get("payload") or {}
             response_context = result.get("context") if isinstance(result.get("context"), dict) else None
             if response_context:
-                self.state.update_editor_state(response_context)
+                self.state.update_editor_context(response_context)
             self.state.mark_failed(command_id, err)
             elapsed_ms = round((time.monotonic() - started) * 1000)
             bridge_timing = result.get("timing") if isinstance(result, dict) else None
             timing = self._compose_timing(elapsed_ms, bridge_timing)
+            bridge_detail = err.get("detail", {}) if isinstance(err.get("detail"), dict) else {}
+            response_detail = {"command": name, "commandId": command_id, "detail": bridge_detail}
+            response_detail.update(bridge_detail)
             return fail(
                 request_id,
                 str(err.get("code", "INTERNAL_ERROR")),
                 str(err.get("message", "命令执行失败")),
-                {"command": name, "commandId": command_id, "detail": err.get("detail", {})},
+                response_detail,
                 context=response_context,
                 timing=timing,
             )
@@ -135,7 +138,7 @@ class CommandDispatcher:
         payload_data = result.get("payload") or {}
         response_context = result.get("context") if isinstance(result.get("context"), dict) else None
         if response_context:
-            self.state.update_editor_state(response_context)
+            self.state.update_editor_context(response_context)
         self.state.mark_success(command_id, payload_data)
         elapsed_ms = round((time.monotonic() - started) * 1000)
         bridge_timing = result.get("timing") if isinstance(result, dict) else None

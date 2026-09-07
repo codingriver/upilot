@@ -299,31 +299,31 @@ async def main_async() -> int:
             return (_ok(r), _err_msg(r) if not _ok(r) else "ok")
 
         async def t_p2_01() -> tuple[bool, str]:
-            r = await facade.reflection_eval("1 + 2")
+            r = await facade.reflection_call(expression="1 + 2")
             if not _ok(r):
                 return False, _err_msg(r)
             out = str((r.data or {}).get("result", ""))
             return (out == "3", f"result={out!r}")
 
         async def t_p2_02() -> tuple[bool, str]:
-            r = await facade.reflection_eval("new uint[]{1,2,3}[1]")
+            r = await facade.reflection_call(expression="new uint[]{1,2,3}[1]")
             if not _ok(r):
                 return False, _err_msg(r)
             return ("2" in str((r.data or {}).get("result", "")), str(r.data))
 
         async def t_p2_03() -> tuple[bool, str]:
-            r = await facade.reflection_eval("UnityEngine.Application.unityVersion")
+            r = await facade.reflection_call(expression="UnityEngine.Application.unityVersion")
             return (_ok(r) and len(str((r.data or {}).get("result", ""))) > 0, str(r.data))
 
         async def t_p2_04() -> tuple[bool, str]:
-            r = await facade.reflection_eval("UnityEditor.EditorApplication.isPlaying")
+            r = await facade.reflection_call(expression="UnityEditor.EditorApplication.isPlaying")
             if not _ok(r):
                 return False, _err_msg(r)
             out = str((r.data or {}).get("result", "")).lower()
             return ("false" in out, str(r.data))
 
         async def t_p2_05() -> tuple[bool, str]:
-            r = await facade.reflection_eval('System.Diagnostics.Process.Start("notepad")')
+            r = await facade.reflection_call(expression='System.Diagnostics.Process.Start("notepad")')
             if _ok(r):
                 return False, "expected failure for sandbox"
             code = (r.error.code if r.error else "") or ""
@@ -332,7 +332,7 @@ async def main_async() -> int:
             return (ok_sec, f"code={code} msg={msg[:120]}")
 
         async def t_p3_01() -> tuple[bool, str]:
-            await facade.reflection_eval('UnityEngine.Debug.Log("MCP_TEST_LOG_12345")')
+            await facade.reflection_call(expression='UnityEngine.Debug.Log("MCP_TEST_LOG_12345")')
             await asyncio.sleep(1.0)
             r = await facade.console_get_logs(count=20)
             if not _ok(r):
@@ -342,7 +342,7 @@ async def main_async() -> int:
             return ("MCP_TEST_LOG_12345" in text, f"logs_len={len(logs)}")
 
         async def t_p3_02() -> tuple[bool, str]:
-            await facade.reflection_eval('UnityEngine.Debug.LogWarning("MCP_WARN_TEST")')
+            await facade.reflection_call(expression='UnityEngine.Debug.LogWarning("MCP_WARN_TEST")')
             r = await facade.console_get_logs(log_type="Warning", count=30)
             if not _ok(r):
                 return False, _err_msg(r)
@@ -647,7 +647,7 @@ async def main_async() -> int:
             if not _ok(r):
                 return False, _err_msg(r)
             await facade.console_get_logs(count=5)
-            r3 = await facade.reflection_eval('"post_compile_ok"')
+            r3 = await facade.reflection_call(expression='"post_compile_ok"')
             if not _ok(r3):
                 return False, _err_msg(r3)
             return ("post_compile_ok" in str((r3.data or {}).get("result", "")), str(r3.data))
@@ -714,10 +714,10 @@ async def main_async() -> int:
             return ("total" in data, str(data.get("total")))
 
         async def t_m26_10() -> tuple[bool, str]:
-            r0 = await facade.reflection_eval('UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
+            r0 = await facade.reflection_call(expression='UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
             if not _ok(r0):
                 return False, _err_msg(r0)
-            m = await facade.menu_execute("UPilot/UPilot")
+            m = await facade.menu_execute("UPilot/打开 UPilot")
             if not _ok(m):
                 return False, _err_msg(m)
             await asyncio.sleep(0.7)
@@ -731,7 +731,7 @@ async def main_async() -> int:
             if not _ok(c2):
                 return False, _err_msg(c2)
             await asyncio.sleep(0.5)
-            m2 = await facade.menu_execute("UPilot/UPilot")
+            m2 = await facade.menu_execute("UPilot/打开 UPilot")
             if not _ok(m2):
                 return False, _err_msg(m2)
             await asyncio.sleep(0.7)
@@ -816,8 +816,8 @@ async def main_async() -> int:
             return (bool(err) or not (ss.get("imageData")), f"screenshot branch={ss}")
 
         async def t_m26_18() -> tuple[bool, str]:
-            await facade.reflection_eval('UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
-            await facade.menu_execute("UPilot/UPilot")
+            await facade.reflection_call(expression='UnityEditor.EditorPrefs.SetInt("upilot.ActiveTab", 1)')
+            await facade.menu_execute("UPilot/打开 UPilot")
             await asyncio.sleep(0.6)
             rw = await facade.resource_window_diagnostics()
             rl = await facade.resource_upilot_logs_tab()

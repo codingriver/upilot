@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from types import SimpleNamespace
 
 from upilot_mcp.domain.status_service import StatusDomainService
-from upilot_mcp.responses import ok
+from upilot_mcp.responses import fail, ok
 from upilot_mcp.tool_registry import REGISTRY
 
 
@@ -127,3 +129,94 @@ def test_console_capture_public_tools_are_registered_with_safety_metadata() -> N
     cleanup = REGISTRY.resolve("unity_console_capture_cleanup")
     assert start is not None and start.idempotent is False and start.destructive is False
     assert cleanup is not None and cleanup.idempotent is False and cleanup.destructive is True
+
+
+def test_console_capture_stop_recovers_completed_persisted_terminal(tmp_path) -> None:
+    session_id = "console-stop-recovered"
+    directory = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    directory.mkdir(parents=True)
+    summary_path = directory / "summary.json"
+    summary_path.write_text('{"ok":true}', encoding="utf-8")
+    (directory / "session.json").write_text(
+        json.dumps(
+            {
+                "sessionId": session_id,
+                "active": False,
+                "finishedAtUtcMs": 123,
+                "summaryPath": str(summary_path),
+                "sha256": "abc123",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _TimedOutDispatcher:
+        async def call(self, request_id: str, command: str, payload: dict):
+            assert command == "console.capture.stop"
+            assert payload == {"sessionId": session_id}
+            return fail(request_id, "COMMAND_TIMEOUT", "命令超时")
+
+    service = StatusDomainService()
+    service.dispatcher = _TimedOutDispatcher()
+    service.server = SimpleNamespace(
+        session_manager=SimpleNamespace(
+            active=SimpleNamespace(project_path=str(tmp_path))
+        )
+    )
+
+    result = asyncio.run(service.console_capture_stop(session_id=session_id))
+
+    assert result.ok
+    assert result.data["terminal"] is True
+    assert result.data["active"] is False
+    assert result.data["completionSource"] == "persistedManifest"
+    assert result.data["summaryPath"] == str(summary_path.resolve())
+    assert result.data["summaryBytes"] == summary_path.stat().st_size
+    assert result.data["sha256"] == "abc123"
+    assert result.data["contextDiagnostic"]["code"] == "COMMAND_TIMEOUT"
+
+
+def test_console_capture_stop_marks_normal_completed_response_terminal() -> None:
+    class _CompletedDispatcher:
+        async def call(self, request_id: str, command: str, payload: dict):
+            return ok(
+                request_id,
+                {"ok": True, "session": {"sessionId": "done", "active": False}},
+            )
+
+    service = StatusDomainService()
+    service.dispatcher = _CompletedDispatcher()
+
+    result = asyncio.run(service.console_capture_stop(session_id="done"))
+
+    assert result.ok
+    assert result.data["terminal"] is True
+    assert result.data["active"] is False
+    assert result.data["completionSource"] == "unity"
+
+
+def test_console_capture_stop_does_not_recover_incomplete_manifest(tmp_path) -> None:
+    session_id = "console-stop-incomplete"
+    directory = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    directory.mkdir(parents=True)
+    (directory / "session.json").write_text(
+        json.dumps({"sessionId": session_id, "active": False}),
+        encoding="utf-8",
+    )
+
+    class _TimedOutDispatcher:
+        async def call(self, request_id: str, command: str, payload: dict):
+            return fail(request_id, "COMMAND_TIMEOUT", "命令超时")
+
+    service = StatusDomainService()
+    service.dispatcher = _TimedOutDispatcher()
+    service.server = SimpleNamespace(
+        session_manager=SimpleNamespace(
+            active=SimpleNamespace(project_path=str(tmp_path))
+        )
+    )
+
+    result = asyncio.run(service.console_capture_stop(session_id=session_id))
+
+    assert not result.ok
+    assert result.error and result.error.code == "COMMAND_TIMEOUT"

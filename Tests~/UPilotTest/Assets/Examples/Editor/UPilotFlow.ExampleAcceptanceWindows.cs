@@ -61,7 +61,6 @@ namespace CodingRiver.UPilot.Flow.Examples
 
     public sealed class ExampleBasicLoginWindow : ExampleAcceptanceWindowBase
     {
-        [MenuItem("UPilot/Flow/Examples/Basic Login Window")]
         public static void Open()
         {
             ExampleBasicLoginWindow window = GetWindow<ExampleBasicLoginWindow>();
@@ -96,7 +95,6 @@ namespace CodingRiver.UPilot.Flow.Examples
 
     public sealed class ExampleSelectorsWindow : ExampleAcceptanceWindowBase
     {
-        [MenuItem("UPilot/Flow/Examples/Selectors Window")]
         public static void Open()
         {
             ExampleSelectorsWindow window = GetWindow<ExampleSelectorsWindow>();
@@ -128,7 +126,6 @@ namespace CodingRiver.UPilot.Flow.Examples
 
     public sealed class ExampleWaitForElementWindow : ExampleAcceptanceWindowBase
     {
-        [MenuItem("UPilot/Flow/Examples/Wait For Element Window")]
         public static void Open()
         {
             ExampleWaitForElementWindow window = GetWindow<ExampleWaitForElementWindow>();

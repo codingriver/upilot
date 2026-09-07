@@ -88,7 +88,7 @@ namespace CodingRiver.UPilot
         private static bool _commandLineErrorLogged;
         private static bool _listeningPortsErrorLogged;
 
-        [MenuItem("UPilot/Advanced Settings", false, 210)]
+        [MenuItem("UPilot/高级设置", false, 101)]
         public static void Open()
         {
             try
@@ -739,6 +739,7 @@ namespace CodingRiver.UPilot
             AgentMcpConfigStatus[] configStatuses)
         {
             var configuredCount = CountConfiguredAgents(configStatuses);
+            var enabledCount = CountEnabledAgents(configStatuses);
             var mcpHealthy = mcpStatus.IsRunning && mcpStatus.HttpPortListening && mcpStatus.WsPortListening;
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
@@ -746,7 +747,11 @@ namespace CodingRiver.UPilot
                 DrawSetupStep("1", "首次设置", UPilotSetupState.IsCompleted, UPilotSetupState.IsCompleted ? "已完成" : "需要设置端口和 Agent");
                 DrawSetupStep("2", "MCP 服务", mcpHealthy, mcpHealthy ? "运行中" : mcpStatus.IsRunning ? "监听异常" : "尚未启动");
                 DrawSetupStep("3", "Unity 桥接器", status.IsAuthenticated, status.IsAuthenticated ? "已连接并认证" : status.IsStarted ? "等待连接" : "尚未启动");
-                DrawSetupStep("4", "Agent 配置", configuredCount > 0, configuredCount > 0 ? $"{configuredCount}/3 已配置" : "尚未写入客户端配置");
+                DrawSetupStep(
+                    "4",
+                    "Agent 配置",
+                    enabledCount > 0 && configuredCount == enabledCount,
+                    enabledCount > 0 ? $"{configuredCount}/{enabledCount} 个已启用 Agent 已配置" : "尚未启用 Agent");
                 DrawSetupStep("5", "Agent 连接", mcpStatus.HttpClientCount > 0, mcpStatus.HttpClientCount > 0 ? $"已连接 {mcpStatus.HttpClientCount} 个" : "等待 Agent 客户端连接");
 
                 EditorGUILayout.Space(4);
@@ -783,13 +788,13 @@ namespace CodingRiver.UPilot
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    DrawAgentConfigButton("Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("Claude", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Codex", "Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Claude", "Claude Code", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    DrawAgentConfigButton("Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("OpenCode", () => UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Cursor", "Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("OpenCode", "OpenCode", () => UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -804,10 +809,10 @@ namespace CodingRiver.UPilot
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    DrawAgentConfigButton("Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("Claude", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
-                    DrawAgentConfigButton("OpenCode", () => UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Codex", "Codex", () => UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Claude", "Claude Code", () => UPilotAgentSetup.WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("Cursor", "Cursor", () => UPilotAgentSetup.WriteCursorMcpConfig(promptBeforeOverwrite: true));
+                    DrawAgentConfigButton("OpenCode", "OpenCode", () => UPilotAgentSetup.WriteOpenCodeMcpConfig(promptBeforeOverwrite: true));
                     if (GUILayout.Button("写入规则", GUILayout.Height(22)))
                     {
                         Debug.Log("[UPilot] Agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
@@ -817,11 +822,12 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void DrawAgentConfigButton(string label, Func<string> configure)
+        private void DrawAgentConfigButton(string label, string clientName, Func<string> configure)
         {
             if (!GUILayout.Button(label, GUILayout.Height(22)))
                 return;
 
+            UPilotAgentSetup.SetAgentEnabled(clientName, true);
             HandleAgentConfigResult(label, configure());
         }
 
@@ -831,9 +837,21 @@ namespace CodingRiver.UPilot
             if (statuses == null) return count;
             foreach (var status in statuses)
             {
-                if (status.IsConfigured)
+                if (status.IsEnabled && status.IsConfigured)
                     count++;
             }
+            return count;
+        }
+
+        private static int CountEnabledAgents(AgentMcpConfigStatus[] statuses)
+        {
+            var count = 0;
+            foreach (var status in statuses ?? Array.Empty<AgentMcpConfigStatus>())
+            {
+                if (status.IsEnabled)
+                    count++;
+            }
+
             return count;
         }
 
@@ -1495,8 +1513,13 @@ namespace CodingRiver.UPilot
             using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
             {
                 var prev = GUI.color;
-                GUI.color = status.IsConfigured ? Color.green : new Color(1f, 0.65f, 0.2f);
-                GUILayout.Label(status.IsConfigured ? "✓" : "!", EditorStyles.boldLabel, GUILayout.Width(18));
+                GUI.color = !status.IsEnabled
+                    ? Color.gray
+                    : status.IsConfigured ? Color.green : new Color(1f, 0.65f, 0.2f);
+                GUILayout.Label(
+                    !status.IsEnabled ? "—" : status.IsConfigured ? "✓" : "!",
+                    EditorStyles.boldLabel,
+                    GUILayout.Width(18));
                 GUI.color = prev;
 
                 using (new EditorGUILayout.VerticalScope())
@@ -1508,7 +1531,12 @@ namespace CodingRiver.UPilot
                         EditorStyles.miniLabel);
                 }
 
-                if (status.IsConfigured)
+                if (!status.IsEnabled)
+                {
+                    if (GUILayout.Button("启用", GUILayout.Width(54), GUILayout.Height(22)))
+                        RunStatusAction(status.ClientName + " MCP 配置处理失败", () => ConfigureAgentClient(status.ClientName));
+                }
+                else if (status.IsConfigured)
                 {
                     EditorGUILayout.LabelField("正常", EditorStyles.miniLabel, GUILayout.Width(42));
                 }
@@ -1524,6 +1552,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                UPilotAgentSetup.SetAgentEnabled(clientName, true);
                 if (clientName == "Codex")
                     HandleAgentConfigResult("Codex", UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
                 else if (clientName == "Claude Code")
@@ -1629,6 +1658,24 @@ namespace CodingRiver.UPilot
                     EditorGUILayout.HelpBox(
                         "这些操作用于故障排查。重置偏好不会修改 .upilot/config.json，也不会删除 Agent 配置文件。",
                         MessageType.Warning);
+
+                    using (new EditorGUI.DisabledScope(!UPilotMenuItems.ValidateRestartBridge()))
+                    {
+                        if (GUILayout.Button("强制重启 Unity Bridge", GUILayout.Height(24)))
+                        {
+                            RunStatusAction("强制重启 Unity Bridge 失败", () =>
+                            {
+                                UPilotMenuItems.RestartBridge();
+                                ShowToast("Unity Bridge 正在重启…", MessageType.Warning);
+                            });
+                        }
+                    }
+
+                    EditorGUILayout.Space(4);
+                    if (GUILayout.Button("重新运行首次设置", GUILayout.Height(24)))
+                        UPilotSetupState.ResetSetupState();
+
+                    EditorGUILayout.Space(4);
 
                     bool serviceRunning = status.IsStarted || mcpStatus.IsRunning;
                     using (new EditorGUI.DisabledScope(diagRunning || serviceRunning))

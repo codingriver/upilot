@@ -53,6 +53,20 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("prefab.open",         HandleOpenAsync);
             _bridge.Router.Register("prefab.close",        HandleCloseAsync);
             _bridge.Router.Register("prefab.save",         HandleSaveAsync);
+            _bridge.Router.Register("prefab.patch",        HandlePatchAsync);
+        }
+
+        private async Task HandlePatchAsync(string id, string json, CancellationToken token)
+        {
+            var request = JsonUtility.FromJson<PrefabPatchMessage>(json)?.payload ?? new PrefabPatchPayload();
+            var completion = new TaskCompletionSource<PrefabPatchResultPayload>();
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try { completion.SetResult(UPilotPrefabPatchService.Patch(request)); }
+                catch (Exception ex) { completion.SetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "prefab.patch", await completion.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "PREFAB_PATCH_FAILED", ex.Message, token, "prefab.patch"); }
         }
 
         // ── prefab.create ───────────────────────────────────────────────────────

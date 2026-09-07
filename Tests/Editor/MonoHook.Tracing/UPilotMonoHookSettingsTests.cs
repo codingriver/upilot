@@ -391,7 +391,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void TracingAssemblyDoesNotReferenceMainEditorAssembly()
+        public void TracingAssemblyReferencesRequiredEditorAssemblies()
         {
             var references = typeof(UPilotMonoHookController).Assembly
                 .GetReferencedAssemblies()
@@ -402,7 +402,7 @@ namespace CodingRiver.UPilot.Tests
                 Is.EqualTo("UPilot.MonoHook.Tracing.Editor"));
             Assert.That(references, Does.Contain("UPilot.MonoHook.Editor"));
             Assert.That(references, Does.Contain("UPilot.MonoHook.Tracing.Contracts.Editor"));
-            Assert.That(references, Does.Not.Contain("UPilot.Editor"));
+            Assert.That(references, Does.Contain("UPilot.Editor"));
         }
 
         [Test]

@@ -646,7 +646,7 @@ async def _reject_compile_in_playmode(tool_name: str):
     )
     compile_phase = str(execution.get("compilePhase") or "").lower()
     active_compile_recovery = compile_phase in {
-        "queued", "compiling", "domain_reload", "verifying"
+        "queued", "compiling", "compiler_finished", "domain_reload", "verifying"
     }
     completed_reload_recovery = bool(
         tool_name == "unity_safe_compile_and_wait"
@@ -748,8 +748,10 @@ from .mcp_tools import status_tools as _status_tools
 from .mcp_tools import compile_tools as _compile_tools
 from .mcp_tools import task_tools as _task_tools
 from .mcp_tools import screenshot_tools as _screenshot_tools
+from .mcp_tools import snapshot_tools as _snapshot_tools
 from .mcp_tools import resource_tools as _resource_tools
 from .mcp_tools import reflection_tools as _reflection_tools
+from .mcp_tools import execution_tools as _execution_tools
 from .mcp_tools import test_tools as _test_tools
 from .mcp_tools import build_tools as _build_tools
 from .mcp_tools import analysis_tools as _analysis_tools
@@ -1116,13 +1118,13 @@ _DESTRUCTIVE_TOOLS = {
     "unity_gameobject_duplicate", "unity_component_add",
     "unity_component_remove", "unity_component_modify",
     "unity_batch_execute", "unity_mouse_event", "unity_drag_drop",
-    "unity_keyboard_event", "reflection_eval",
+    "unity_keyboard_event",
 }
 
 for _tool_name, _value in list(globals().items()):
     if not callable(_value):
         continue
-    if not (_tool_name.startswith("unity_") or _tool_name == "reflection_eval"):
+    if not _tool_name.startswith("unity_"):
         continue
     if _tool_name in _HIDDEN_PUBLIC_TOOLS:
         continue

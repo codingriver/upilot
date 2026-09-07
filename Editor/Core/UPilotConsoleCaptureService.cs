@@ -137,6 +137,7 @@ namespace CodingRiver.UPilot
         public long errorCount;
         public long exceptionCount;
         public long assertCount;
+        public long excludedUPilotCount;
         public long droppedCount;
         public long fileBytes;
         public int segmentCount = 1;
@@ -402,8 +403,11 @@ namespace CodingRiver.UPilot
                 if (s_active == null || !s_active.Manifest.active)
                     return;
 
-                if (s_active.Manifest.excludeUPilot && IsUPilotLog(condition, stackTrace))
+                if (s_active.Manifest.excludeUPilot && UPilotConsoleService.IsUPilotOwnedLog(condition, stackTrace))
+                {
+                    s_active.Manifest.excludedUPilotCount++;
                     return;
+                }
 
                 var manifest = s_active.Manifest;
                 var record = new ConsoleCaptureRecord
@@ -1808,14 +1812,6 @@ namespace CodingRiver.UPilot
                 LogType.Exception => "Exception",
                 _ => "Log",
             };
-        }
-
-        private static bool IsUPilotLog(string message, string stackTrace)
-        {
-            string text = (message ?? string.Empty) + "\n" + (stackTrace ?? string.Empty);
-            return text.IndexOf("UPilot", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("CodingRiver.UPilot", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("[COMMAND ]", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static void ClearUnityConsole()

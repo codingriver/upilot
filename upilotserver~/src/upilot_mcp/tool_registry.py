@@ -12,7 +12,7 @@ from .config import CONFIG, refresh_config_if_changed
 
 
 ToolHandler = Callable[..., Awaitable[ToolResponse]]
-REGISTRY_VERSION = 4
+REGISTRY_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +137,6 @@ REGISTRY = ToolRegistry()
 
 
 def infer_facade_method(public_name: str) -> str:
-    if public_name == "reflection_eval":
-        return "reflection_eval"
     if public_name.startswith("unity_"):
         return public_name[len("unity_") :]
     return public_name

@@ -41,6 +41,8 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                if (UnityEngine.Application.isBatchMode)
+                    return;
                 if (!IsEnabled || UPilotSetupState.IsCompleted)
                     return;
 

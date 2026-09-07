@@ -84,6 +84,25 @@ def _require_mutation_success(response: ToolResponse, tool_name: str) -> ToolRes
     )
 
 class ResourceDomainService:
+    _CODE_WRITE_EXTENSIONS = {".cs", ".asmdef", ".asmref", ".rsp"}
+
+    def _current_execution_state(self) -> dict:
+        server = getattr(self, "server", None)
+        state = getattr(server, "state", None)
+        factory = getattr(state, "execution_state", None)
+        if callable(factory):
+            return factory(stale_after_ms=CONFIG.context_stale_ms)
+        compile_state = getattr(state, "compile", None)
+        editor_state = getattr(state, "editor", None)
+        return {
+            "compilePhase": str(getattr(compile_state, "phase", "idle") or "idle"),
+            "isCompiling": bool(getattr(editor_state, "is_compiling", False)),
+            "authoritative": False,
+            "isStale": True,
+            "playModeState": "unknown",
+            "snapshotId": "",
+        }
+
     def _active_project_root(self) -> Path | None:
         session = self.server.session_manager.active
         if session and session.project_path:
@@ -100,6 +119,150 @@ class ResourceDomainService:
             {"tool": tool_name, "configKey": "safety.writeAccessApproved"},
         )
 
+    def _code_write_roots(self, project_root: Path) -> list[Path]:
+        roots = [project_root]
+        manifest = project_root / "Packages" / "manifest.json"
+        try:
+            dependencies = json.loads(manifest.read_text(encoding="utf-8-sig")).get("dependencies", {})
+            for value in dependencies.values():
+                if isinstance(value, str) and value.startswith("file:"):
+                    roots.append((manifest.parent / value[5:]).resolve())
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        return list(dict.fromkeys(roots))
+
+    async def write_batch_register(
+        self,
+        paths: list[str],
+        compile_when_edit_mode: bool,
+        deleted_paths: list[str] | None = None,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+
+        rejected = self._reject_write_if_unapproved(request_id, "unity_write_batch_register")
+        if rejected is not None:
+            return rejected
+        project_root = self._active_project_root()
+        if project_root is None:
+            return fail(request_id, "UNITY_NOT_CONNECTED", "No active Unity project is connected.")
+        if (
+            not isinstance(paths, list)
+            or (deleted_paths is not None and not isinstance(deleted_paths, list))
+            or any(not isinstance(path, str) or not path.strip() for path in [*paths, *(deleted_paths or [])])
+            or not (paths or deleted_paths)
+        ):
+            return fail(request_id, "INVALID_WRITE_BATCH", "Provide paths and/or deletedPaths arrays of non-empty assembly-related paths.")
+
+        roots = self._code_write_roots(project_root)
+        changes: dict[str, dict] = {}
+        newest_mtime = 0
+        for kind, entries in (("write", paths), ("delete", deleted_paths or [])):
+            for raw in entries:
+                try:
+                    original = Path(raw).expanduser()
+                    if not original.is_absolute():
+                        original = project_root / original
+                    candidate = original.resolve()
+                    if candidate.suffix.lower() not in self._CODE_WRITE_EXTENSIONS:
+                        return fail(request_id, "UNSUPPORTED_WRITE_BATCH_FILE", f"Unsupported assembly-related file: {raw}")
+                    if not any(candidate == root or root in candidate.parents for root in roots):
+                        return fail(request_id, "WRITE_BATCH_PATH_OUTSIDE_PROJECT", f"Path is outside the Unity project and resolved local UPM roots: {raw}")
+                    normalized_path = str(candidate)
+                    key = os.path.normcase(normalized_path)
+                    if key in changes and changes[key]["kind"] != kind:
+                        return fail(request_id, "WRITE_BATCH_PATH_CONFLICT", f"Path is both written and deleted: {raw}")
+                    if kind == "delete":
+                        if os.path.lexists(original) or candidate.exists():
+                            return fail(request_id, "WRITE_BATCH_DELETED_PATH_EXISTS", f"Deleted path still exists: {raw}")
+                        content_hash = ""
+                    else:
+                        if not candidate.is_file():
+                            return fail(request_id, "WRITE_BATCH_FILE_NOT_FOUND", f"Write batch file does not exist: {candidate}")
+                        before = candidate.stat()
+                        content_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                        after = candidate.stat()
+                        if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+                            return fail(request_id, "WRITE_BATCH_FILE_CHANGED", f"File changed while registering: {raw}")
+                        newest_mtime = max(newest_mtime, int(after.st_mtime_ns // 1_000_000))
+                    changes[key] = {"path": normalized_path, "kind": kind, "contentSha256": content_hash}
+                except (OSError, ValueError, RuntimeError) as exc:
+                    return fail(request_id, "WRITE_BATCH_PATH_INVALID", f"Could not inspect {raw}: {exc}")
+
+        self.server.state.configure_project(str(project_root))
+        batch = self.server.state.register_write_batch(
+            [item["path"] for item in changes.values() if item["kind"] == "write"],
+            created_at=max(now_ms(), newest_mtime),
+            files_sha256="",
+            compile_when_edit_mode=compile_when_edit_mode,
+            changes=list(changes.values()),
+        )
+        execution = self._current_execution_state()
+        can_compile = bool(
+            execution.get("authoritative")
+            and not execution.get("isStale")
+            and execution.get("playModeState") == "edit"
+        )
+        if compile_when_edit_mode and can_compile:
+            self._schedule_write_batch_resume()
+            status = "queued"
+            next_action = "Poll unity_mcp_status until correlationVerified=true or the batch fails."
+        elif compile_when_edit_mode:
+            self.server.state.mark_write_batch(batch["writeBatchId"], "deferred")
+            status = "deferred"
+            next_action = "Leave PlayMode when ready; UPilot will resume this authorized batch after Unity publishes authoritative EditMode."
+        else:
+            status = "registered"
+            next_action = "Call unity_sync_after_disk_write with this writeBatchId after authoritative EditMode is available."
+        return ok(
+            request_id,
+            {**batch, "status": status, "terminal": False, "nextAction": next_action, "executionState": execution},
+            context=execution,
+        )
+
+    def _schedule_write_batch_resume(self) -> None:
+        task = getattr(self, "_write_batch_resume_task", None)
+        if task is not None and not task.done():
+            return
+        self._write_batch_resume_task = asyncio.create_task(self._resume_pending_write_batches())
+
+    async def _on_editor_execution_state(self, execution: dict) -> None:
+        if not execution.get("authoritative") or execution.get("playModeState") != "edit":
+            return
+        if self.server.state.pending_write_batches():
+            self._schedule_write_batch_resume()
+
+    async def _resume_pending_write_batches(self) -> None:
+        await asyncio.sleep(0.5)
+        execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+        if not execution.get("authoritative") or execution.get("playModeState") != "edit":
+            return
+        for batch in self.server.state.pending_write_batches():
+            if not batch["compileWhenEditMode"]:
+                continue
+            batch_id = str(batch["writeBatchId"])
+            self.server.state.mark_write_batch(batch_id, "syncing")
+            self.server.state.mark_write_batch(batch_id, "compiling")
+            result = await self.safe_compile_and_wait(
+                timeout_s=600,
+                poll_interval_s=1.0,
+                prefer_events=True,
+                post_compile_delay_s=1.0,
+                write_batch_id=batch_id,
+                write_batch_created_at=int(batch["writeBatchCreatedAt"]),
+            )
+            compile_operation_id = str(self.server.state.compile.compile_operation_id or "")
+            result_data = result.data or {}
+            phase = str(result_data.get("phase") or result_data.get("status") or "").lower()
+            if result.ok and bool(result_data.get("correlationVerified")) and phase == "completed":
+                self.server.state.mark_write_batch(batch_id, "verified", compile_operation_id=compile_operation_id)
+            else:
+                message = (
+                    result.error.message
+                    if result.error
+                    else "Compilation did not produce a correlated successful terminal state."
+                )
+                self.server.state.mark_write_batch(batch_id, "failed", compile_operation_id=compile_operation_id, error=message)
+
     async def asset_find(self, query: str, asset_type: str = "") -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {"query": query}
@@ -109,6 +272,37 @@ class ResourceDomainService:
 
     async def texture_importer_get(self, asset_path: str) -> ToolResponse:
         return await self.dispatcher.call(new_id("req"), "texture.importerGet", {"assetPath": asset_path})
+
+    async def prefab_patch(
+        self, asset_path: str, component_type: str, properties: list[dict],
+        hierarchy_path: str = ".", dry_run: bool = True, confirm_token: str = "",
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        if not dry_run:
+            rejected = self._reject_write_if_unapproved(request_id, "unity_prefab_patch")
+            if rejected is not None:
+                return rejected
+            if not confirm_token:
+                return fail(request_id, "PREFAB_CONFIRM_TOKEN_REQUIRED", "Preview and obtain explicit approval before applying.")
+            ready = await self.ensure_ready(timeout_s=30)
+            if not ready.ok or not (ready.data or {}).get("ready"):
+                return fail(request_id, "PREFAB_EDITOR_NOT_READY", "Wait for authoritative Editor readiness before applying.")
+        response = await self.dispatcher.call(request_id, "prefab.patch", {
+            "assetPath": asset_path, "componentType": component_type, "hierarchyPath": hierarchy_path,
+            "properties": properties, "dryRun": dry_run, "confirmToken": confirm_token,
+        }, timeout_ms=60000)
+        if response.ok and (response.data or {}).get("error"):
+            return fail(request_id, "PREFAB_PATCH_FAILED", response.data["error"], response.data)
+        if response.ok and not dry_run and (response.data or {}).get("persistenceVerified") is not True:
+            return fail(request_id, "PREFAB_PERSISTENCE_UNVERIFIED", "Prefab persistence was not verified; do not retry automatically.", response.data or {})
+        return response
+
+    async def scene_summary(self, max_nodes: int = 2000, max_milliseconds: int = 100, max_examples: int = 12) -> ToolResponse:
+        if not 1 <= max_nodes <= 10000 or not 1 <= max_milliseconds <= 1000 or not 0 <= max_examples <= 50:
+            return fail(new_id("req"), "SCENE_SUMMARY_BUDGET_INVALID", "Use maxNodes=1..10000, maxMilliseconds=1..1000 and maxExamples=0..50.")
+        return await self.dispatcher.call(new_id("req"), "resource.sceneSummary", {
+            "maxNodes": max_nodes, "maxMilliseconds": max_milliseconds, "maxExamples": max_examples,
+        })
 
     async def asset_dependencies(self, asset_path: str, recursive: bool = True) -> ToolResponse:
         return await self.dispatcher.call(
@@ -261,7 +455,12 @@ class ResourceDomainService:
         return await self.dispatcher.call(request_id, "asset.refresh", {})
 
     async def sync_after_disk_write(
-        self, delay_s: float = 2.0, trigger_compile: bool = False
+        self,
+        delay_s: float = 2.0,
+        trigger_compile: bool = False,
+        write_batch_id: str = "",
+        write_batch_created_at: int = 0,
+        compile_operation_id: str = "",
     ) -> ToolResponse:
         """Wait for OS/fs flush, then AssetDatabase.Refresh; optionally unity_compile.
 
@@ -272,6 +471,28 @@ class ResourceDomainService:
         """
         logger = logging.getLogger("upilot.facade")
         request_id = new_id("req")
+
+        if write_batch_id:
+            batch = self.server.state.get_write_batch(write_batch_id)
+            if batch is None:
+                return fail(request_id, "WRITE_BATCH_NOT_FOUND", f"Unknown writeBatchId: {write_batch_id}")
+            if write_batch_created_at and int(batch["writeBatchCreatedAt"]) != int(write_batch_created_at):
+                return fail(
+                    request_id,
+                    "WRITE_BATCH_TIMESTAMP_MISMATCH",
+                    "writeBatchCreatedAt does not match the registered batch.",
+                    {"writeBatchId": write_batch_id, "expected": batch["writeBatchCreatedAt"], "actual": write_batch_created_at},
+                )
+            execution = self._current_execution_state()
+            if execution.get("playModeState") != "edit" or not execution.get("authoritative"):
+                self.server.state.mark_write_batch(write_batch_id, "deferred")
+                return fail(
+                    request_id,
+                    "EDITOR_IN_PLAY_MODE" if execution.get("playModeState") in {"play", "pause"} else "EDITOR_CONTEXT_NOT_READY",
+                    "The registered code write batch can only be synchronized in authoritative EditMode.",
+                    {**execution, "writeBatchId": write_batch_id},
+                )
+            self.server.state.mark_write_batch(write_batch_id, "syncing")
 
         # External disk writes can make Unity start importing/compiling before
         # the client reaches this workflow.  In that state a refresh command
@@ -286,7 +507,7 @@ class ResourceDomainService:
         compile_active = bool(
             trigger_compile
             and (
-                compile_phase in {"queued", "compiling", "domain_reload", "verifying"}
+                compile_phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}
                 or bool(getattr(editor_state, "is_compiling", False))
             )
         )
@@ -318,6 +539,7 @@ class ResourceDomainService:
                         "lastProgressAt": getattr(compile_state, "last_progress_at", 0),
                         "compileRequestId": getattr(compile_state, "compile_request_id", ""),
                     },
+                    "executionState": self._current_execution_state(),
                 },
             )
         await asyncio.sleep(max(0.0, delay_s))
@@ -327,6 +549,11 @@ class ResourceDomainService:
             "triggerCompile": trigger_compile,
             "status": "refresh_failed" if not refresh_r.ok else "refreshed",
             "refreshed": refresh_r.ok,
+            "writeBatchId": write_batch_id,
+            "writeBatchCreatedAt": write_batch_created_at,
+            "compileOperationId": compile_operation_id,
+            "correlationVerified": False,
+            "executionState": self._current_execution_state(),
         }
         if refresh_r.data is not None:
             refresh_data = dict(refresh_r.data)
@@ -351,8 +578,16 @@ class ResourceDomainService:
                 payload,
             )
         if not trigger_compile:
+            payload["nextAction"] = "Call unity_safe_compile_and_wait with this writeBatchId to obtain a correlated terminal result." if write_batch_id else ""
             return ok(request_id, payload)
-        compile_r = await self.compile()
+        compile_r = await (
+            self.compile(
+                write_batch_id=write_batch_id,
+                write_batch_created_at=write_batch_created_at,
+            )
+            if write_batch_id
+            else self.compile()
+        )
         payload["compileStarted"] = compile_r.ok
         payload["compiled"] = False
         payload["compileCompleted"] = False
@@ -423,17 +658,19 @@ class ResourceDomainService:
                     payload,
                 )
 
-            terminal = (
+            uses_v2_state = bool(getattr(self.server.state, "producer_epoch", ""))
+            terminal = bool(compile_state.terminal and compile_state.errors_verified) if uses_v2_state else (
                 str(wait_data.get("status") or "").lower() == "ready"
                 and not bool(wait_data.get("isCompiling", False))
                 and not bool(self.server.state.editor.is_compiling)
             )
             if terminal:
-                compile_state.status = "finished"
-                compile_state.phase = "completed"
-                if not compile_state.finished_at:
-                    compile_state.finished_at = now_ms()
-                compile_state.last_progress_at = compile_state.finished_at
+                if not uses_v2_state:
+                    compile_state.status = "finished"
+                    compile_state.phase = "completed"
+                    if not compile_state.finished_at:
+                        compile_state.finished_at = now_ms()
+                    compile_state.last_progress_at = compile_state.finished_at
                 payload.update(
                     {
                         "status": "compiled",
@@ -461,6 +698,7 @@ class ResourceDomainService:
                 "lastProgressAt": compile_state.last_progress_at,
                 "compileRequestId": compile_state.compile_request_id,
             }
+            payload["executionState"] = self._current_execution_state()
         elif not compile_r.ok:
             msg = compile_r.error.message if compile_r.error else "compile failed"
             code = compile_r.error.code if compile_r.error else "COMPILE_FAILED"

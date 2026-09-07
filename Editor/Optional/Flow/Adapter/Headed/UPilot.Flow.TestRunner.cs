@@ -79,6 +79,31 @@ namespace CodingRiver.UPilot.Flow
 
     public sealed class TestRunnerWindow : EditorWindow
     {
+        private readonly struct ExampleWindowEntry
+        {
+            public ExampleWindowEntry(string menuPath, string typeName, string openMethodName)
+            {
+                MenuPath = menuPath;
+                TypeName = typeName;
+                OpenMethodName = openMethodName;
+            }
+
+            public string MenuPath { get; }
+            public string TypeName { get; }
+            public string OpenMethodName { get; }
+        }
+
+        private static readonly ExampleWindowEntry[] ExampleWindowEntries =
+        {
+            new ExampleWindowEntry("Examples/Basic Login Window", "CodingRiver.UPilot.Flow.Examples.ExampleBasicLoginWindow", "Open"),
+            new ExampleWindowEntry("Examples/Selectors Window", "CodingRiver.UPilot.Flow.Examples.ExampleSelectorsWindow", "Open"),
+            new ExampleWindowEntry("Examples/Wait For Element Window", "CodingRiver.UPilot.Flow.Examples.ExampleWaitForElementWindow", "Open"),
+            new ExampleWindowEntry("Examples/IMGUI Example Window", "CodingRiver.UPilot.Flow.Examples.ImguiExampleWindow", "ShowWindow"),
+            new ExampleWindowEntry("Examples/Coverage Input Window", "CodingRiver.UPilot.Flow.Examples.ExampleCoverageInputWindow", "Open"),
+            new ExampleWindowEntry("Samples/Login Window", "CodingRiver.UPilot.Flow.SampleLoginWindow", "Open"),
+            new ExampleWindowEntry("Samples/Interaction Window", "CodingRiver.UPilot.Flow.SampleInteractionWindow", "Open"),
+        };
+
         // ── External run sync (MCP-triggered runs) ────────────────────────────
         // All methods are safe to call from any context; they silently no-op when
         // the window is not open.  All UI mutations run on the main thread via
@@ -376,7 +401,7 @@ namespace CodingRiver.UPilot.Flow
         private Label _statusLabel;
         private Label _currentCaseLabel;
 
-        [MenuItem("UPilot/Flow/Test Runner", priority = 102)]
+        [MenuItem("UPilot/Flow/Test Runner", priority = 200)]
         public static void Open()
         {
             TestRunnerWindow window = GetWindow<TestRunnerWindow>();
@@ -486,6 +511,8 @@ namespace CodingRiver.UPilot.Flow
             _resumeButton.style.marginRight = 4;
             _refreshButton = CreateToolbarButton("Refresh", RefreshCaseList);
             var clearButton = CreateToolbarButton("Clear Results", ClearResults);
+            var examplesButton = CreateToolbarButton("Examples", ShowExamplesAndSamplesMenu);
+            examplesButton.tooltip = "Load imported YAML or open imported example and sample windows.";
             toolbar.Add(_runAllButton);
             toolbar.Add(_runSelectedButton);
             toolbar.Add(_runStepButton);
@@ -495,6 +522,7 @@ namespace CodingRiver.UPilot.Flow
             toolbar.Add(_resumeButton);
             toolbar.Add(_refreshButton);
             toolbar.Add(clearButton);
+            toolbar.Add(examplesButton);
 
             toolbar.Add(new VisualElement { style = { flexGrow = 1 } });
 
@@ -745,6 +773,121 @@ namespace CodingRiver.UPilot.Flow
             btn.style.height = 20;
             btn.style.fontSize = 10;
             return btn;
+        }
+
+        private void ShowExamplesAndSamplesMenu()
+        {
+            var menu = new GenericMenu();
+            const string importedYamlDirectory = "Assets/Examples/Yaml";
+            if (Directory.Exists(importedYamlDirectory))
+            {
+                menu.AddItem(
+                    new GUIContent("YAML/Use Imported Examples"),
+                    PathsEqual(_state.TargetDirectory, importedYamlDirectory),
+                    () => UseExampleYamlDirectory(importedYamlDirectory));
+                menu.AddItem(
+                    new GUIContent("YAML/Reveal Imported Examples"),
+                    false,
+                    () => EditorUtility.RevealInFinder(Path.GetFullPath(importedYamlDirectory)));
+            }
+            else
+            {
+                menu.AddDisabledItem(new GUIContent("YAML/Import UPilot Flow Samples first"));
+            }
+
+            menu.AddSeparator("");
+            foreach (ExampleWindowEntry entry in ExampleWindowEntries)
+            {
+                Type windowType = ResolveLoadedType(entry.TypeName);
+                if (windowType == null)
+                {
+                    menu.AddDisabledItem(new GUIContent(entry.MenuPath + " (not imported)"));
+                    continue;
+                }
+
+                ExampleWindowEntry capturedEntry = entry;
+                menu.AddItem(
+                    new GUIContent(entry.MenuPath),
+                    false,
+                    () => OpenExampleWindow(capturedEntry));
+            }
+
+            menu.ShowAsContext();
+        }
+
+        private void UseExampleYamlDirectory(string directory)
+        {
+            _state.TargetDirectory = directory;
+            TestRunnerPreferences.Save(_state);
+            RefreshCaseList();
+            ShowNotification(new GUIContent("Loaded imported UPilot Flow examples."));
+        }
+
+        private static void OpenExampleWindow(ExampleWindowEntry entry)
+        {
+            try
+            {
+                Type windowType = ResolveLoadedType(entry.TypeName);
+                if (windowType == null)
+                    throw new InvalidOperationException("Example window type is not loaded: " + entry.TypeName);
+
+                var openMethod = windowType.GetMethod(
+                    entry.OpenMethodName,
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Static,
+                    null,
+                    Type.EmptyTypes,
+                    null);
+                if (openMethod != null)
+                {
+                    openMethod.Invoke(null, null);
+                    return;
+                }
+
+                if (!typeof(EditorWindow).IsAssignableFrom(windowType))
+                    throw new InvalidOperationException("Example type is not an EditorWindow: " + entry.TypeName);
+
+                GetWindow(windowType).Show();
+            }
+            catch (Exception ex)
+            {
+                Exception actual = ex is System.Reflection.TargetInvocationException invocation && invocation.InnerException != null
+                    ? invocation.InnerException
+                    : ex;
+                Debug.LogError("[UPilot Flow] Failed to open example window: " + actual);
+                EditorUtility.DisplayDialog("UPilot Flow", "Failed to open the example window:\n" + actual.Message, "OK");
+            }
+        }
+
+        private static Type ResolveLoadedType(string fullName)
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type type = assembly.GetType(fullName, false);
+                if (type != null)
+                    return type;
+            }
+
+            return null;
+        }
+
+        private static bool PathsEqual(string left, string right)
+        {
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+                return false;
+
+            try
+            {
+                return string.Equals(
+                    Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         private VisualElement CreateDetailRow(string label, string value)

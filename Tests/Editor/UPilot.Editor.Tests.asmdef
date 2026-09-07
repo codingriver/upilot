@@ -2,7 +2,9 @@
     "name": "UPilot.Editor.Tests",
     "rootNamespace": "CodingRiver.UPilot.Tests",
     "references": [
-        "UPilot.Editor"
+        "UPilot.Editor",
+        "UPilot.Execution.Core",
+        "UPilot.TestFixtures"
     ],
     "includePlatforms": [
         "Editor"

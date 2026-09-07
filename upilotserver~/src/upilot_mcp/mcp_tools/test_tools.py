@@ -25,9 +25,12 @@ CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
 @mcp.tool(description="运行 Unity 测试（支持 EditMode 和 PlayMode）。")
-async def unity_test_run(testMode: str = "EditMode", testFilter: str = ""):
-    _log_tool_call("unity_test_run", {"testMode": testMode, "testFilter": testFilter})
-    r = await _get_facade().test_run(test_mode=testMode, test_filter=testFilter)
+async def unity_test_run(
+    testMode: str = "EditMode", testFilter: str = "",
+    testNames: list[str] | None = None, fixtures: list[str] | None = None,
+):
+    _log_tool_call("unity_test_run", {"testMode": testMode, "testFilter": testFilter, "testNames": testNames, "fixtures": fixtures})
+    r = await _get_facade().test_run(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures)
     return _log_tool_result("unity_test_run", _payload(r))
 
 @mcp.tool(description="获取最近一次或指定 runGuid 的 Unity 测试结果；PlayMode Domain Reload 或 MCP 重连后仍可读取持久化终态。")
@@ -61,22 +64,28 @@ async def unity_test_force_reset():
     return _log_tool_result("unity_test_force_reset", _payload(r))
 
 @mcp.tool(description="列出 Unity 项目中可用测试，并返回程序集边界、发现数量与过滤命中数量。")
-async def unity_test_list(testMode: str = "EditMode", testFilter: str = ""):
-    _log_tool_call("unity_test_list", {"testMode": testMode, "testFilter": testFilter})
-    r = await _get_facade().test_list(test_mode=testMode, test_filter=testFilter)
+async def unity_test_list(
+    testMode: str = "EditMode", testFilter: str = "",
+    testNames: list[str] | None = None, fixtures: list[str] | None = None,
+):
+    _log_tool_call("unity_test_list", {"testMode": testMode, "testFilter": testFilter, "testNames": testNames, "fixtures": fixtures})
+    r = await _get_facade().test_list(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures)
     return _log_tool_result("unity_test_list", _payload(r))
 
 @mcp.tool(description="一键执行 UPilot 包标准验收：校验规范项目、停止活动 Console capture、安全编译、测试发现与运行、错误检查并写入带 hash 的 JSON 报告。")
 async def unity_upilot_acceptance_run(
     testMode: str = "EditMode", testFilter: str = "", timeoutSec: float = 900,
     stopActiveCaptures: bool = True, requireTests: bool = True, writeArtifact: bool = True,
+    testNames: list[str] | None = None, fixtures: list[str] | None = None,
 ):
     args = {"testMode": testMode, "testFilter": testFilter, "timeoutSec": timeoutSec,
-            "stopActiveCaptures": stopActiveCaptures, "requireTests": requireTests, "writeArtifact": writeArtifact}
+            "stopActiveCaptures": stopActiveCaptures, "requireTests": requireTests, "writeArtifact": writeArtifact,
+            "testNames": testNames, "fixtures": fixtures}
     _log_tool_call("unity_upilot_acceptance_run", args)
     r = await _get_facade().upilot_acceptance_run(
         test_mode=testMode, test_filter=testFilter, timeout_sec=timeoutSec,
         stop_active_captures=stopActiveCaptures, require_tests=requireTests, write_artifact=writeArtifact,
+        test_names=testNames, fixtures=fixtures,
     )
     return _log_tool_result("unity_upilot_acceptance_run", _payload(r))
 
@@ -155,7 +164,7 @@ _NON_IDEMPOTENT_TOOLS = {"unity_upilot_acceptance_run", "unity_test_run", "unity
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue

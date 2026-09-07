@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="24" result="Passed" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.5726051">
+  <test-suite type="TestSuite" id="1251" name="ExecutionCompat2022" fullname="ExecutionCompat2022" runstate="Runnable" testcasecount="218" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.572605" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties />
+    <test-suite type="Assembly" id="1385" name="UPilot.Editor.Tests.dll" fullname="D:/upilot/Tests~/ExecutionCompat2022/Library/ScriptAssemblies/UPilot.Editor.Tests.dll" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.528987" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="119096" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+      </properties>
+      <test-suite type="TestSuite" id="1386" name="CodingRiver" fullname="CodingRiver" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.524855" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1387" name="UPilot" fullname="CodingRiver.UPilot" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.519474" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="1388" name="Tests" fullname="CodingRiver.UPilot.Tests" runstate="Runnable" testcasecount="124" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.515249" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestFixture" id="1326" name="UPilotExecutionCoreTests" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" testcasecount="24" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.506772" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-case id="1328" name="AwaitableAdapterSupportsTaskOfT" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.AwaitableAdapterSupportsTaskOfT" methodname="AwaitableAdapterSupportsTaskOfT" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1595470854" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.076690" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1337" name="AwaitableCancellationHasStableCode" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.AwaitableCancellationHasStableCode" methodname="AwaitableCancellationHasStableCode" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1092966894" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.029222" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1342" name="BudgetFailureHasStableCodeAndMetricDetails" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.BudgetFailureHasStableCodeAndMetricDetails" methodname="BudgetFailureHasStableCodeAndMetricDetails" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="439939880" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.003370" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1336" name="CancellationHasStableCodeAndPreservesActualState" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.CancellationHasStableCodeAndPreservesActualState" methodname="CancellationHasStableCodeAndPreservesActualState" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1699718029" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.036832" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1338" name="CancellationTimeoutAndEmitValidationNeverReplaySideEffects" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.CancellationTimeoutAndEmitValidationNeverReplaySideEffects" methodname="CancellationTimeoutAndEmitValidationNeverReplaySideEffects" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="586662059" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.023645" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1343" name="EmitBackendCachesValidatedProgram" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.EmitBackendCachesValidatedProgram" methodname="EmitBackendCachesValidatedProgram" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="31262050" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.008654" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1339" name="EventSubscriptionRequiresSessionAndClosesDeterministically" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.EventSubscriptionRequiresSessionAndClosesDeterministically" methodname="EventSubscriptionRequiresSessionAndClosesDeterministically" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1426890479" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:54Z" duration="0.014347" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1340" name="EventSubscriptionsCoverStaticTtlPlayModeAndCleanupFailure" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.EventSubscriptionsCoverStaticTtlPlayModeAndCleanupFailure" methodname="EventSubscriptionsCoverStaticTtlPlayModeAndCleanupFailure" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="882320348" result="Passed" start-time="2026-09-04 09:32:54Z" end-time="2026-09-04 09:32:56Z" duration="1.112111" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1331" name="GenericInferenceCoversArrayNullableConstraintsAndAmbiguity" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.GenericInferenceCoversArrayNullableConstraintsAndAmbiguity" methodname="GenericInferenceCoversArrayNullableConstraintsAndAmbiguity" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="799631288" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.013474" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1341" name="InterpreterRoutesReflectedCallsThroughInvocationScheduler" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.InterpreterRoutesReflectedCallsThroughInvocationScheduler" methodname="InterpreterRoutesReflectedCallsThroughInvocationScheduler" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="693162199" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.013651" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1330" name="InterpreterSupportsExplicitAndInferredGenericCallsAndClosedTypes" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.InterpreterSupportsExplicitAndInferredGenericCallsAndClosedTypes" methodname="InterpreterSupportsExplicitAndInferredGenericCallsAndClosedTypes" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1239010779" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.006608" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1329" name="InterpreterSupportsStatementsLoopsAndPersistentVariables" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.InterpreterSupportsStatementsLoopsAndPersistentVariables" methodname="InterpreterSupportsStatementsLoopsAndPersistentVariables" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="22123339" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.002833" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1332" name="InterpreterSupportsTypedAndJaggedArrays" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.InterpreterSupportsTypedAndJaggedArrays" methodname="InterpreterSupportsTypedAndJaggedArrays" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="39005007" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.002225" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1327" name="MethodBinderUsesDeclaredTypeNamedOptionalGenericAndRefOut" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.MethodBinderUsesDeclaredTypeNamedOptionalGenericAndRefOut" methodname="MethodBinderUsesDeclaredTypeNamedOptionalGenericAndRefOut" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1148050234" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.005911" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1335" name="ParseBindPolicyRuntimeBudgetAndEmitErrorsCarryStageAndSpan" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ParseBindPolicyRuntimeBudgetAndEmitErrorsCarryStageAndSpan" methodname="ParseBindPolicyRuntimeBudgetAndEmitErrorsCarryStageAndSpan" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="2128862047" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.009998" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1347" name="ReflectionEmitCacheHitUsesIndependentSessionCallbackGuardsAndLeases" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitCacheHitUsesIndependentSessionCallbackGuardsAndLeases" methodname="ReflectionEmitCacheHitUsesIndependentSessionCallbackGuardsAndLeases" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1802951724" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.036070" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1346" name="ReflectionEmitCallbackGuardsCoverIsolationPropagationReentrancyConcurrencyAndCapacity" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitCallbackGuardsCoverIsolationPropagationReentrancyConcurrencyAndCapacity" methodname="ReflectionEmitCallbackGuardsCoverIsolationPropagationReentrancyConcurrencyAndCapacity" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1269210661" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.025423" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1344" name="ReflectionEmitCreatesInterfaceImplementationAndProperty" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitCreatesInterfaceImplementationAndProperty" methodname="ReflectionEmitCreatesInterfaceImplementationAndProperty" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1295471405" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.012114" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1348" name="ReflectionEmitMixedPropertyAccessorsAndInvalidSpecsAreDeterministic" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitMixedPropertyAccessorsAndInvalidSpecsAreDeterministic" methodname="ReflectionEmitMixedPropertyAccessorsAndInvalidSpecsAreDeterministic" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1250620445" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.016352" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1345" name="ReflectionEmitSupportsCustomPropertyAndBoundedCallbackDiagnostics" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.ReflectionEmitSupportsCustomPropertyAndBoundedCallbackDiagnostics" methodname="ReflectionEmitSupportsCustomPropertyAndBoundedCallbackDiagnostics" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="436029836" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.005829" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1334" name="RuntimeErrorsCarryMultilineSourceSpan" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.RuntimeErrorsCarryMultilineSourceSpan" methodname="RuntimeErrorsCarryMultilineSourceSpan" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="176263191" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.001057" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1349" name="SessionCleanupReleasesInfrastructureWithoutDisposingUserObjects" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.SessionCleanupReleasesInfrastructureWithoutDisposingUserObjects" methodname="SessionCleanupReleasesInfrastructureWithoutDisposingUserObjects" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1388541428" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.002371" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1350" name="SessionCloseInvalidatesHandlesAndReportsDeferredTypeRelease" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.SessionCloseInvalidatesHandlesAndReportsDeferredTypeRelease" methodname="SessionCloseInvalidatesHandlesAndReportsDeferredTypeRelease" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1193326436" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.001699" asserts="0">
+                <properties />
+              </test-case>
+              <test-case id="1333" name="TypedArraysConvertElementsAndRejectInvalidShapesAndLengths" fullname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests.TypedArraysConvertElementsAndRejectInvalidShapesAndLengths" methodname="TypedArraysConvertElementsAndRejectInvalidShapesAndLengths" classname="CodingRiver.UPilot.Tests.UPilotExecutionCoreTests" runstate="Runnable" seed="1736375097" result="Passed" start-time="2026-09-04 09:32:56Z" end-time="2026-09-04 09:32:56Z" duration="0.003214" asserts="0">
+                <properties />
+              </test-case>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

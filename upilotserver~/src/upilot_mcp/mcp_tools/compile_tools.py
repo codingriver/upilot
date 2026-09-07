@@ -132,6 +132,9 @@ async def unity_safe_compile_and_wait(
     pollIntervalS: float = 1.0,
     preferEvents: bool = True,
     postCompileDelayS: float = 3.0,
+    writeBatchId: str = "",
+    writeBatchCreatedAt: int = 0,
+    compileOperationId: str = "",
 ):
     _log_tool_call(
         "unity_safe_compile_and_wait",
@@ -140,6 +143,9 @@ async def unity_safe_compile_and_wait(
             "pollIntervalS": pollIntervalS,
             "preferEvents": preferEvents,
             "postCompileDelayS": postCompileDelayS,
+            "writeBatchId": writeBatchId,
+            "writeBatchCreatedAt": writeBatchCreatedAt,
+            "compileOperationId": compileOperationId,
         },
     )
     facade = _get_facade()
@@ -152,7 +158,7 @@ async def unity_safe_compile_and_wait(
     )
     attach_compile_request_id = ""
     if invocation_compile_request_id and (
-        invocation_phase in {"queued", "compiling", "domain_reload", "verifying"}
+        invocation_phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}
         or (
             invocation_phase in {"completed", "failed"}
             and (
@@ -171,6 +177,9 @@ async def unity_safe_compile_and_wait(
         prefer_events=preferEvents,
         post_compile_delay_s=postCompileDelayS,
         attach_compile_request_id=attach_compile_request_id,
+        write_batch_id=writeBatchId,
+        write_batch_created_at=writeBatchCreatedAt,
+        compile_operation_id=compileOperationId,
     )
     return _log_tool_result("unity_safe_compile_and_wait", _payload(r))
 
@@ -183,12 +192,13 @@ _DESTRUCTIVE_TOOLS = {
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue
     register_public_tool(
         _name,
+        facade_method="compile_errors" if _name == "unity_compile_errors_get" else None,
         destructive=_name in _DESTRUCTIVE_TOOLS,
         idempotent=_name not in _DESTRUCTIVE_TOOLS,
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",

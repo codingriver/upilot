@@ -202,16 +202,11 @@ class ScreenshotDomainService:
         format: str = "png",
         quality: int = 75,
     ) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "screenshot.gameView",
-            {
-                "width": width,
-                "height": height,
-                "format": format,
-                "quality": quality,
-            },
+        if (format or "png").strip().lower() != "png":
+            return fail(new_id("req"), "INVALID_SCREENSHOT_FORMAT", "Snapshot-backed screenshots support PNG only.", {"format": format})
+        return await self._capture_snapshot_screenshot(
+            "gameView",
+            {"targetId": "game-view", "kind": "gameView", "targetDisplay": 0, "width": width, "height": height},
         )
 
     async def screenshot_scene_view(
@@ -221,16 +216,14 @@ class ScreenshotDomainService:
         format: str = "png",
         quality: int = 75,
     ) -> ToolResponse:
-        request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "screenshot.sceneView",
-            {
-                "width": width,
-                "height": height,
-                "format": format,
-                "quality": quality,
-            },
+        if (format or "png").strip().lower() != "png":
+            return fail(new_id("req"), "INVALID_SCREENSHOT_FORMAT", "Snapshot-backed screenshots support PNG only.", {"format": format})
+        resolved = await self._resolve_snapshot_window("sceneView", type_filter="UnityEditor.SceneView")
+        if isinstance(resolved, ToolResponse):
+            return resolved
+        return await self._capture_snapshot_screenshot(
+            "sceneView",
+            {"targetId": "scene-view", "kind": "sceneView", "instanceId": str(resolved["instanceId"]), "width": width, "height": height},
         )
 
     async def screenshot_camera(
@@ -242,17 +235,96 @@ class ScreenshotDomainService:
         quality: int = 75,
     ) -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(
-            request_id,
-            "screenshot.camera",
-            {
-                "cameraName": camera_name,
-                "width": width,
-                "height": height,
-                "format": format,
-                "quality": quality,
-            },
+        if (format or "png").strip().lower() != "png":
+            return fail(request_id, "INVALID_SCREENSHOT_FORMAT", "Snapshot-backed screenshots support PNG only.", {"format": format})
+        if not str(camera_name or "").strip():
+            return fail(request_id, "CAMERA_NAME_REQUIRED", "Snapshot-backed camera screenshots require an exact cameraName; use unity_camera_list for stable instanceId capture.", {})
+        return await self._capture_snapshot_screenshot(
+            "camera",
+            {"targetId": "camera", "kind": "camera", "exactName": camera_name, "width": width, "height": height},
         )
+
+    async def _resolve_snapshot_window(
+        self,
+        source: str,
+        *,
+        type_filter: str = "",
+        title_filter: str = "",
+    ) -> dict | ToolResponse:
+        request_id = new_id("req")
+        listed = await self.editor_windows_list(type_filter=type_filter, title_filter=title_filter)
+        if not listed.ok or not isinstance(listed.data, dict):
+            return listed
+        windows = [item for item in listed.data.get("windows", []) if isinstance(item, dict)]
+        if source == "sceneView":
+            windows = [item for item in windows if str(item.get("fullTypeName") or "") == "UnityEditor.SceneView"]
+        if not windows:
+            return fail(request_id, "WINDOW_NOT_FOUND", f"No {source} window matched the request.", {"typeFilter": type_filter, "titleFilter": title_filter})
+        focused = [item for item in windows if item.get("hasFocus") is True]
+        if len(focused) == 1:
+            return focused[0]
+        if len(windows) == 1:
+            return windows[0]
+        exact = [item for item in windows if str(item.get("title") or "").casefold() == str(title_filter or "").casefold()]
+        if len(exact) == 1:
+            return exact[0]
+        return fail(request_id, "AMBIGUOUS_EDITOR_WINDOW", "Multiple Unity EditorWindow instances matched; use unity_snapshot_capture with an exact instanceId.", {"matches": windows})
+
+    async def _capture_snapshot_screenshot(self, source: str, target: dict) -> ToolResponse:
+        request_id = new_id("req")
+        captured = await self.snapshot_capture(
+            [target],
+            channels=["color"],
+            sync_mode="sameFrame",
+            completion_policy="allOrNothing",
+            capture_policy={
+                "requireVerifiedPixels": True,
+                "allowFallback": False,
+                "allowOcclusionSensitive": False,
+                "allowStaleFrame": False,
+                "maxStaleFrameAgeMs": 0,
+            },
+            wait_ms=10000,
+        )
+        if not captured.ok or not isinstance(captured.data, dict):
+            return captured
+        snapshot = captured.data
+        artifacts = [
+            item for item in snapshot.get("artifacts", [])
+            if isinstance(item, dict) and item.get("role") == "color" and item.get("acceptedAsEvidence") is True
+        ]
+        if len(artifacts) != 1:
+            if snapshot.get("terminal") is not True:
+                return ok(request_id, {"source": source, "snapshot": snapshot})
+            return fail(request_id, "SNAPSHOT_SCREENSHOT_ARTIFACT_MISSING", "Snapshot completed without exactly one accepted color artifact.", {"snapshot": snapshot})
+        artifact = artifacts[0]
+        root = self._active_project_root()
+        if root is None:
+            return fail(request_id, "PROJECT_PATH_UNAVAILABLE", "Unity project path is unavailable.", {"snapshot": snapshot})
+        path = (root / str(artifact.get("path") or "")).resolve()
+        try:
+            path.relative_to(root)
+            raw = path.read_bytes()
+        except (OSError, ValueError) as ex:
+            return fail(request_id, "SNAPSHOT_SCREENSHOT_READ_FAILED", str(ex), {"snapshot": snapshot, "artifact": artifact})
+        actual_sha = hashlib.sha256(raw).hexdigest()
+        if actual_sha != str(artifact.get("sha256") or ""):
+            return fail(request_id, "SNAPSHOT_ARTIFACT_HASH_MISMATCH", "Snapshot color artifact hash changed before wrapper response.", {"snapshot": snapshot, "artifact": artifact, "actualSha256": actual_sha})
+        target_result = next((item for item in snapshot.get("targets", []) if isinstance(item, dict) and item.get("success") is True), {})
+        provenance = target_result.get("provenance") if isinstance(target_result, dict) else {}
+        provenance = provenance if isinstance(provenance, dict) else {}
+        return ok(request_id, {
+            "snapshot": snapshot,
+            "artifact": artifact,
+            "imageData": base64.b64encode(raw).decode("ascii"),
+            "width": artifact.get("width", 0),
+            "height": artifact.get("height", 0),
+            "format": "png",
+            "source": source,
+            "degraded": bool(provenance.get("degraded", False)),
+            "degradeReason": provenance.get("degradeReason", ""),
+            **provenance,
+        })
 
     async def screenshot_save(
         self,
@@ -310,51 +382,48 @@ class ScreenshotDomainService:
                 {"path": str(target_path)},
             )
 
-        bridge_save = await self.dispatcher.call(
-            new_id("req"),
-            "screenshot.save",
-            {
-                "path": str(target_path),
-                "source": normalized_source,
-                "overwrite": overwrite,
-                "width": width,
-                "height": height,
-                "format": image_format,
-                "quality": quality,
-                "cameraName": camera_name,
-                "windowTitle": window_title,
-                "allowOutsideProject": allow_outside_project,
-                "degrade": degrade,
-                "fallbackSources": fallback_sources or [],
-            },
-        )
-        if bridge_save.ok:
-            data = bridge_save.data or {}
-            result = {
-                    "path": data.get("path", str(target_path)),
-                    "source": data.get("source", normalized_source),
-                    "bytes": data.get("bytes", 0),
-                    "width": data.get("width", width),
-                    "height": data.get("height", height),
-                    "format": data.get("format", image_format),
-                    "sha256": data.get("sha256", ""),
-                    "overwritten": data.get("overwritten", overwrite),
-                    "degraded": bool(data.get("degraded", False)),
-                    "degradeReason": data.get("degradeReason", ""),
-                    "requestedSource": data.get("requestedSource", normalized_source),
-                    "savedBy": "unity_bridge",
-                }
-            for key in (
-                "captureApi", "windowHandle", "unityProcessId", "foreground",
-                "occlusionSensitive", "pixelSourceVerified", "repaintRequestedAtUtcMs",
-                "repaintObservedAtUtcMs", "repaintSequence", "includesSceneGui",
-                "includesHandles", "matchedFullTypeName", "matchedInstanceId",
-                "capturedAtUtcMs",
-            ):
-                if key in data:
-                    result[key] = data[key]
-            return ok(request_id, result)
-        return bridge_save
+        if fallback_sources:
+            return fail(
+                request_id,
+                "SNAPSHOT_FALLBACKS_UNSUPPORTED",
+                "Snapshot-backed screenshot wrappers do not silently fall back to another visual source.",
+                {"fallbackSources": fallback_sources},
+            )
+        if normalized_source == "gameView":
+            captured = await self.screenshot_game_view(width, height, image_format, quality)
+        elif normalized_source == "sceneView":
+            captured = await self.screenshot_scene_view(width, height, image_format, quality)
+        elif normalized_source == "camera":
+            captured = await self.screenshot_camera(camera_name, width, height, image_format, quality)
+        else:
+            captured = await self.screenshot_editor_window(window_title, degrade="none")
+        if not captured.ok or not isinstance(captured.data, dict):
+            return captured
+        data = captured.data
+        image_data = str(data.get("imageData") or "")
+        if not image_data:
+            return fail(request_id, "SNAPSHOT_SCREENSHOT_ARTIFACT_MISSING", "Snapshot wrapper did not return image bytes.", {"snapshot": data.get("snapshot")})
+        try:
+            raw = self._decode_screenshot_image_data(image_data)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target_path.with_name(f".{target_path.name}.{os.getpid()}.tmp")
+            try:
+                temporary.write_bytes(raw)
+                os.replace(temporary, target_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except (OSError, ValueError, binascii.Error) as ex:
+            return fail(request_id, "SCREENSHOT_WRITE_FAILED", str(ex), {"path": str(target_path), "snapshot": data.get("snapshot")})
+        return ok(request_id, {
+            **data,
+            "path": str(target_path),
+            "source": normalized_source,
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "overwritten": overwrite,
+            "requestedSource": normalized_source,
+            "savedBy": "snapshot_wrapper",
+        })
 
     @staticmethod
     def _normalize_screenshot_source(source_key: str) -> str:
@@ -470,80 +539,31 @@ class ScreenshotDomainService:
         window_title: str = "upilot",
         degrade: str | None = None,
     ) -> ToolResponse:
-        """Capture an editor window; optional degradation when capture is unavailable.
-
-        * degrade=none — only Bridge `screenshot.editorWindow` (strict).
-        * degrade=auto — editor → (unless WINDOW_NOT_FOUND) Scene view fallback → 1×1 placeholder.
-        * degrade=scene — editor then Scene view; no placeholder.
-        * degrade=minimal — editor then 1×1 placeholder (no Scene).
-
-        WINDOW_NOT_FOUND is never upgraded: unknown titles must still fail for T-M26-04.
-        """
+        """Thin compatibility wrapper over strict EditorWindow Snapshot capture."""
         request_id = new_id("req")
         mode = self._screenshot_degrade_mode(degrade)
-
-        primary = await self.dispatcher.call(
-            new_id("req"),
-            "screenshot.editorWindow",
-            {"windowTitle": window_title},
+        if mode != "none":
+            logger.info("Ignoring legacy screenshot degrade=%s; Snapshot wrappers require explicit source identity.", mode)
+        resolved = await self._resolve_snapshot_window(
+            "editorWindow",
+            title_filter=window_title,
         )
-
-        if mode == "none":
-            return primary
-
-        if self._response_has_screenshot_payload(primary):
-            data = dict(primary.data or {})
-            data.setdefault("source", "editorWindow")
-            data.setdefault("degraded", False)
-            data.setdefault("degradeLevel", "")
-            data.setdefault("degradeReason", "")
-            return ok(primary.request_id, data)
-
-        err_code, err_detail = self._screenshot_error_detail(primary)
-        if err_code == "WINDOW_NOT_FOUND":
-            return primary
-
-        if mode in ("auto", "scene"):
-            sv = await self.screenshot_scene_view(
-                width=320, height=180, format="png", quality=75
-            )
-            if self._response_has_screenshot_payload(sv):
-                d = sv.data or {}
-                return ok(
-                    request_id,
-                    {
-                        "imageData": d.get("imageData"),
-                        "width": d.get("width", 320),
-                        "height": d.get("height", 180),
-                        "format": d.get("format", "png"),
-                        "source": "sceneView",
-                        "degraded": True,
-                        "degradeLevel": "scene_view_fallback",
-                        "degradeReason": err_code or "EDITOR_WINDOW_CAPTURE_EMPTY",
-                        "requestedWindowTitle": window_title,
-                        "note": "Editor window capture missing; substituted Scene view.",
-                        "originalError": err_detail,
-                    },
-                )
-            if mode == "scene":
-                return sv
-
-        if mode in ("auto", "minimal"):
-            return ok(
+        if isinstance(resolved, ToolResponse):
+            return resolved
+        if str(resolved.get("fullTypeName") or "") == "UnityEditor.SceneView":
+            return fail(
                 request_id,
-                {
-                    "imageData": _MIN_PLACEHOLDER_PNG_B64,
-                    "width": 1,
-                    "height": 1,
-                    "format": "png",
-                    "source": "minimalPlaceholder",
-                    "degraded": True,
-                    "degradeLevel": "minimal_placeholder",
-                    "degradeReason": err_code or "EDITOR_WINDOW_CAPTURE_EMPTY",
-                    "requestedWindowTitle": window_title,
-                    "note": "Placeholder PNG; set UPILOT_SCREENSHOT_DEGRADE=none for strict errors only.",
-                    "originalError": err_detail,
-                },
+                "EDITORWINDOW_KIND_MISMATCH",
+                "Use unity_screenshot_scene_view for SceneView so repaint and Handles evidence is verified.",
+                {"window": resolved},
             )
-
-        return primary
+        return await self._capture_snapshot_screenshot(
+            "editorWindow",
+            {
+                "targetId": "editor-window",
+                "kind": "editorWindow",
+                "instanceId": str(resolved["instanceId"]),
+                "width": int(resolved.get("width") or 1),
+                "height": int(resolved.get("height") or 1),
+            },
+        )

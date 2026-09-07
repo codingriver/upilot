@@ -28,6 +28,9 @@ namespace CodingRiver.UPilot.Tests
         [SetUp]
         public void SetUp()
         {
+            // Physical patches are process-global. A preceding fixture can leave
+            // them installed even when this fixture starts with fresh settings.
+            UPilotMonoHookInstallationService.UninstallAll();
             var settings = UPilotMonoHookSettings.instance;
             settings.EnsureDefaults();
             _masterEnabled = settings.masterEnabled;
@@ -62,6 +65,7 @@ namespace CodingRiver.UPilot.Tests
         [TearDown]
         public void TearDown()
         {
+            UPilotMonoHookInstallationService.UninstallAll();
             var settings = UPilotMonoHookSettings.instance;
             settings.masterEnabled = _masterEnabled;
             settings.suppressUnchangedValues = _suppressUnchangedValues;
@@ -168,6 +172,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        [Explicit("Physical lifecycle and DestroyImmediate hooks mutate process-global native code; run explicitly in an isolated Editor process.")]
         public void LifecycleAndDestroyPointsCanBeInstalledAndCaptureEvents()
         {
             var settings = UPilotMonoHookSettings.instance;

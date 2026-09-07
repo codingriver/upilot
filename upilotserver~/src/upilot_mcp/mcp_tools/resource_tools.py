@@ -84,6 +84,29 @@ async def unity_asset_refresh():
 
 @mcp.tool(
     description=(
+        "Register one saved C#/asmdef/asmref/rsp change batch. paths must exist; optional deletedPaths must be absent. "
+        "Represent a move as its new path plus its deleted old path. Registration does not delete or move files. "
+        "When compileWhenEditMode=true, EditMode batches compile after a 500ms settle window; PlayMode batches remain durable and resume only after Unity publishes authoritative EditMode."
+    )
+)
+async def unity_write_batch_register(
+    paths: list[str],
+    compileWhenEditMode: bool = True,
+    deletedPaths: list[str] | None = None,
+):
+    _log_tool_call(
+        "unity_write_batch_register",
+        {"paths": paths, "compileWhenEditMode": compileWhenEditMode, "deletedPaths": deletedPaths},
+    )
+    r = await _get_facade().write_batch_register(
+        paths=paths,
+        compile_when_edit_mode=compileWhenEditMode,
+        deleted_paths=deletedPaths,
+    )
+    return _log_tool_result("unity_write_batch_register", _payload(r))
+
+@mcp.tool(
+    description=(
         "在 Cursor/IDE 中改完或新建完本轮所有脚本并全部保存后，再调用一次（不要每文件一调）："
         "先等待 delayS 秒（默认 2，缓解落盘延迟），再 AssetDatabase.Refresh；"
         "triggerCompile=true 时再触发 unity_compile（含 Refresh+脚本编译）。"
@@ -91,18 +114,32 @@ async def unity_asset_refresh():
     ),
 )
 async def unity_sync_after_disk_write(
-    delayS: float = 2.0, triggerCompile: bool = False
+    delayS: float = 2.0,
+    triggerCompile: bool = False,
+    writeBatchId: str = "",
+    writeBatchCreatedAt: int = 0,
+    compileOperationId: str = "",
 ):
     _log_tool_call(
         "unity_sync_after_disk_write",
-        {"delayS": delayS, "triggerCompile": triggerCompile},
+        {
+            "delayS": delayS,
+            "triggerCompile": triggerCompile,
+            "writeBatchId": writeBatchId,
+            "writeBatchCreatedAt": writeBatchCreatedAt,
+            "compileOperationId": compileOperationId,
+        },
     )
     if triggerCompile:
         rejected = await _reject_compile_in_playmode("unity_sync_after_disk_write")
         if rejected is not None:
             return rejected
     r = await _get_facade().sync_after_disk_write(
-        delay_s=delayS, trigger_compile=triggerCompile
+        delay_s=delayS,
+        trigger_compile=triggerCompile,
+        write_batch_id=writeBatchId,
+        write_batch_created_at=writeBatchCreatedAt,
+        compile_operation_id=compileOperationId,
     )
     return _log_tool_result("unity_sync_after_disk_write", _payload(r))
 
@@ -147,6 +184,24 @@ async def unity_texture_importer_get(assetPath: str):
     _log_tool_call("unity_texture_importer_get", {"assetPath": assetPath})
     r = await _get_facade().texture_importer_get(asset_path=assetPath)
     return _log_tool_result("unity_texture_importer_get", _payload(r))
+
+@mcp.tool(description="Patch one ordinary prefab component: preview, explicit approval, confirmToken apply, reload and verify. Exact paths, enum names only; no nested/variant/model or array structure edits.")
+async def unity_prefab_patch(
+    assetPath: str, componentType: str, properties: list[dict],
+    hierarchyPath: str = ".", dryRun: bool = True, confirmToken: str = "",
+):
+    r = await _get_facade().prefab_patch(
+        asset_path=assetPath, component_type=componentType, properties=properties,
+        hierarchy_path=hierarchyPath, dry_run=dryRun, confirm_token=confirmToken,
+    )
+    return _log_tool_result("unity_prefab_patch", _payload(r))
+
+
+@mcp.tool(description="Read a bounded summary of loaded scenes, nodes, components, missing scripts, cameras and lights. Partial coverage is explicit; no complete hierarchy download.")
+async def unity_scene_summary(maxNodes: int = 2000, maxMilliseconds: int = 100, maxExamples: int = 12):
+    r = await _get_facade().scene_summary(max_nodes=maxNodes, max_milliseconds=maxMilliseconds, max_examples=maxExamples)
+    return _log_tool_result("unity_scene_summary", _payload(r))
+
 
 @mcp.tool(description="两阶段修改 TextureImporter。先 dryRun=true 获取 confirmToken，再用相同 changes、当前资源/meta 哈希和 token 应用并重导入。")
 async def unity_texture_importer_patch(assetPath: str, changes: dict, dryRun: bool = True, confirmToken: str = "", reimport: bool = True):
@@ -864,11 +919,13 @@ _DESTRUCTIVE_TOOLS = {
     "unity_component_remove", "unity_component_modify",
     "unity_batch_execute",
     "unity_texture_importer_patch", "unity_asset_reimport",
+    "unity_write_batch_register",
+    "unity_prefab_patch",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
 for _name, _value in list(globals().items()):
-    if not callable(_value) or not (_name.startswith("unity_") or _name == "reflection_eval"):
+    if not callable(_value) or not _name.startswith("unity_"):
         continue
     if _name in _HIDDEN_PUBLIC_TOOLS:
         continue
