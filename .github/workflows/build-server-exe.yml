@@ -98,7 +98,7 @@ jobs:
           python -m pip install uv
           uv export --directory upilotserver~ --frozen --extra dev --no-emit-project --output-file requirements-locked.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --require-hashes -r requirements-locked.txt
+          python -m pip install --require-hashes -r upilotserver~/requirements-locked.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install pyinstaller
 

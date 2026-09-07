@@ -1020,3 +1020,11 @@ UPilot 通用开发：
 - 证据：capture `console_20260907_143351_302_23c646c4` 中 sequence 317/330/345/358/373/388，均为成功/失败0/错误0；`artifacts/integration-fixes/live-evidence.json` 保存了对应消息。
 - 建议改进：成功用例汇总使用 Info 或独立结果日志，只有异常/降级才用 Warning；保留失败报告，并以日志级别定向测试防止回归。
 - 当前状态：仅记录，不影响本次 6/6 业务结果；未改 Flow 引擎或日志策略。
+
+### [已完成][P1] Windows 发布构建未对齐 uv 导出文件与 pip 读取路径
+
+- 发现时间：2026-09-07；来源任务：发布 `v0.3.30` 后跟踪下游 `Build UPilot MCP Server EXE` run `34093609631`。
+- 问题/影响：工作流使用 `uv export --directory upilotserver~ --output-file requirements-locked.txt`；`--directory` 会先切换到 `upilotserver~`，但随后的 pip 仍在仓库根目录读取 `requirements-locked.txt`。构建在依赖安装阶段以 `No such file or directory` 终止，无法生成 EXE 或发布 GitHub Release 资产。
+- 证据：失败 job `101652214237` 的 `Install build dependencies` 日志；`uv export --help` 明确 `--directory` 会在运行前切换目录。`v0.3.29` 的旧 requirements 安装路径不受影响，错误由 commit `8426385` 引入的锁定依赖流程产生。
+- 改进：pip 显式读取 `upilotserver~/requirements-locked.txt`，使其与 uv 导出目标一致；发布 tag 更新后重新运行同一 tag 构建验证安装、打包、版本检查与 Release 资产。
+- 当前状态：已修复，待本次提交、强制更新 `v0.3.30` tag 并完成远端构建验收。
