@@ -123,15 +123,19 @@ namespace CodingRiver.UPilot
 
             Action<SceneView> onSceneGui = null;
             EditorApplication.CallbackFunction onUpdate = null;
+            AssemblyReloadEvents.AssemblyReloadCallback onReload = null;
+            Timer watchdog = null;
             Action cleanup = () =>
             {
                 SceneView.duringSceneGui -= onSceneGui;
                 EditorApplication.update -= onUpdate;
+                AssemblyReloadEvents.beforeAssemblyReload -= onReload;
+                watchdog?.Dispose();
             };
 
             onSceneGui = current =>
             {
-                if (captureScheduled || current == null
+                if (completion.Task.IsCompleted || captureScheduled || current == null || sceneView == null
                     || UPilotEntityIds.ToWireId(current) != UPilotEntityIds.ToWireId(sceneView))
                     return;
                 if (Event.current == null || Event.current.type != EventType.Repaint)
@@ -143,12 +147,18 @@ namespace CodingRiver.UPilot
 
             onUpdate = () =>
             {
-                if (captureScheduled)
+                if (completion.Task.IsCompleted) { cleanup(); return; }
+                if (sceneView == null)
                 {
                     cleanup();
+                    completion.TrySetException(new InvalidOperationException("SCENEVIEW_CLOSED"));
+                    return;
+                }
+                if (captureScheduled)
+                {
                     try
                     {
-                        var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(sceneView);
+                        var pixels = UPilotWindowDiagnostics.CaptureEditorWindowPixels(sceneView, allowCameraFallback);
                         ScreenshotBytesResult result = null;
                         if (pixels != null && !string.IsNullOrEmpty(pixels.imageData))
                         {
@@ -182,6 +192,7 @@ namespace CodingRiver.UPilot
                     {
                         completion.TrySetException(ex);
                     }
+                    finally { cleanup(); }
                     return;
                 }
 
@@ -192,6 +203,15 @@ namespace CodingRiver.UPilot
                     $"SceneView {UPilotEntityIds.ToWireId(sceneView)} did not complete a Repaint event within 5 seconds."));
             };
 
+            onReload = () =>
+            {
+                cleanup();
+                completion.TrySetException(new InvalidOperationException("SCENEVIEW_DOMAIN_RELOAD"));
+            };
+            // Deadline observation cannot depend on Editor.update pumping.
+            watchdog = new Timer(_ => completion.TrySetException(new TimeoutException("SCENEVIEW_REPAINT_TIMEOUT")),
+                null, 5000, Timeout.Infinite);
+            AssemblyReloadEvents.beforeAssemblyReload += onReload;
             SceneView.duringSceneGui += onSceneGui;
             EditorApplication.update += onUpdate;
             SceneView.RepaintAll();

@@ -42,7 +42,7 @@ namespace CodingRiver.UPilot
         /// </summary>
         public GenericOkPayload HandleMouseEvent(MouseEventPayload payload)
         {
-            var window = FindTargetWindow(payload.targetWindow);
+            var window = UPilotWindowInputRegistry.Resolve(payload.windowInstanceId, payload.targetWindow);
             if (window == null)
             {
                 return new GenericOkPayload
@@ -63,38 +63,68 @@ namespace CodingRiver.UPilot
 
             var pos = new Vector2(payload.x, payload.y);
             var uiRoot = window.rootVisualElement;
+            VisualElement matchedElement = null;
+            bool imguiMatched = false;
+            var evidence = new WindowInputEvidence
+            {
+                windowInstanceId = UPilotEntityIds.ToWireId(window).ToString(),
+                windowHandle = UPilotWindowInputRegistry.Handle(window), matchSource = "coordinates",
+            };
 
             // S4: auto-coordinate from elementName
             if (!string.IsNullOrEmpty(payload.elementName) || payload.elementIndex >= 0)
             {
+                var candidates = new System.Collections.Generic.List<VisualElement>();
                 if (uiRoot != null)
                 {
-                    VisualElement target = null;
-                    if (!string.IsNullOrEmpty(payload.elementName))
-                        target = uiRoot.Q(name: payload.elementName);
-                    if (target == null && payload.elementIndex >= 0)
-                    {
-                        var allElems = new System.Collections.Generic.List<VisualElement>();
-                        CollectAllElements(uiRoot, allElems);
-                        if (payload.elementIndex < allElems.Count)
-                            target = allElems[payload.elementIndex];
-                    }
-                    if (target != null)
-                    {
-                        var center = target.worldBound.center;
-                        pos = center;
-                    }
+                    CollectAllElements(uiRoot, candidates);
+                    candidates = candidates.Where(e => !(e is IMGUIContainer) &&
+                        (string.IsNullOrEmpty(payload.elementName) || e.name == payload.elementName ||
+                         (e is TextElement text && text.text == payload.elementName))).ToList();
+                }
+                if (candidates.Count > 0)
+                {
+                    if (payload.elementIndex < 0 && candidates.Count != 1)
+                        return new GenericOkPayload { ok = false, state = "ELEMENT_AMBIGUOUS", input = evidence };
+                    int index = payload.elementIndex < 0 ? 0 : payload.elementIndex;
+                    if (index >= candidates.Count)
+                        return new GenericOkPayload { ok = false, state = "ELEMENT_INDEX_OUT_OF_RANGE", input = evidence };
+                    matchedElement = candidates[index];
+                    if (!matchedElement.enabledInHierarchy || !matchedElement.visible || matchedElement.resolvedStyle.display == DisplayStyle.None
+                        || matchedElement.worldBound.width <= 0 || matchedElement.worldBound.height <= 0)
+                        return new GenericOkPayload { ok = false, state = "ELEMENT_NOT_INTERACTABLE", input = evidence };
+                    pos = matchedElement.worldBound.center;
+                    var picked = uiRoot.panel?.Pick(pos);
+                    if (picked == null || (picked != matchedElement && !matchedElement.Contains(picked)))
+                        return new GenericOkPayload { ok = false, state = "ELEMENT_CLIPPED_OR_OCCLUDED", input = evidence };
+                    evidence.text = (matchedElement as TextElement)?.text ?? matchedElement.name;
+                    evidence.controlType = matchedElement.GetType().Name;
+                    evidence.localRect = matchedElement.worldBound;
+                    evidence.clipRect = uiRoot.worldBound;
+                    evidence.matchSource = "uitoolkit";
+                    evidence.enabled = true;
+                }
+                else
+                {
+                    if (!UPilotWindowInputRegistry.TryFind(window, payload.elementName, payload.elementIndex, out var hit, out var error))
+                        return new GenericOkPayload { ok = false, state = error, input = hit ?? evidence };
+                    evidence = hit;
+                    pos = evidence.localRect.center;
+                    imguiMatched = true;
                 }
             }
 
             var mods = ParseModifiers(payload.modifiers);
 
             // Auto-route: if window has UIToolkit rootVisualElement, use synthetic UIToolkit events
-            if (uiRoot != null && uiRoot.childCount > 0)
+            if (!imguiMatched && uiRoot != null && uiRoot.childCount > 0)
             {
-                var sent = SendUIToolkitMouseEvent(uiRoot, payload.action, pos, button, mods, payload.scrollDeltaX, payload.scrollDeltaY);
+                var sent = SendUIToolkitMouseEvent(matchedElement ?? uiRoot, payload.action, pos, button, mods, payload.scrollDeltaX, payload.scrollDeltaY);
                 if (sent)
-                    return new GenericOkPayload { ok = true, state = $"{payload.action}:{payload.targetWindow}:uitoolkit" };
+                {
+                    evidence.dispatched = true;
+                    return new GenericOkPayload { ok = true, state = $"{payload.action}:{payload.targetWindow}:uitoolkit", input = evidence };
+                }
             }
 
             // Fallback: IMGUI SendEvent
@@ -128,7 +158,8 @@ namespace CodingRiver.UPilot
                     return new GenericOkPayload { ok = false, state = $"unknown_action:{payload.action}" };
             }
 
-            return new GenericOkPayload { ok = true, state = $"{payload.action}:{payload.targetWindow}" };
+            evidence.dispatched = true;
+            return new GenericOkPayload { ok = true, state = $"{payload.action}:{payload.targetWindow}", input = evidence };
         }
 
         private static bool SendUIToolkitMouseEvent(VisualElement root, string action, Vector2 pos, int button, EventModifiers mods, float scrollDx, float scrollDy)
@@ -139,29 +170,29 @@ namespace CodingRiver.UPilot
             {
                 case "down":
                     imguiBase.type = EventType.MouseDown;
-                    using (var evt = MouseDownEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(evt); }
+                    using (var evt = MouseDownEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
                     return true;
                 case "up":
                     imguiBase.type = EventType.MouseUp;
-                    using (var evt = MouseUpEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(evt); }
+                    using (var evt = MouseUpEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
                     return true;
                 case "drag":
                 case "move":
                     imguiBase.type = EventType.MouseMove;
-                    using (var evt = MouseMoveEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(evt); }
+                    using (var evt = MouseMoveEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
                     return true;
                 case "click":
                     imguiBase.type = EventType.MouseDown;
-                    using (var down = MouseDownEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(down); }
+                    using (var down = MouseDownEvent.GetPooled(imguiBase)) { root.SendEvent(down); }
                     imguiBase.type = EventType.MouseUp;
-                    using (var up = MouseUpEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(up); }
+                    using (var up = MouseUpEvent.GetPooled(imguiBase)) { root.SendEvent(up); }
                     return true;
                 case "doubleclick":
                     imguiBase.type = EventType.MouseDown;
                     imguiBase.clickCount = 2;
-                    using (var down = MouseDownEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(down); }
+                    using (var down = MouseDownEvent.GetPooled(imguiBase)) { root.SendEvent(down); }
                     imguiBase.type = EventType.MouseUp;
-                    using (var up = MouseUpEvent.GetPooled(imguiBase)) { root.panel.visualTree.SendEvent(up); }
+                    using (var up = MouseUpEvent.GetPooled(imguiBase)) { root.SendEvent(up); }
                     return true;
                 case "scroll":
                     imguiBase.type = EventType.ScrollWheel;

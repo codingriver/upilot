@@ -7,6 +7,10 @@ on:
         description: "Release version, for example 0.3.12 or v0.3.12"
         required: true
         type: string
+      acceptanceRunId:
+        description: "Successful UPilot Unity Release Evidence workflow run ID"
+        required: true
+        type: string
 
 concurrency:
   group: prepare-release-${{ github.event.inputs.version }}
@@ -21,13 +25,13 @@ jobs:
 
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
         with:
           ref: main
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0, node24
         with:
           python-version: "3.11"
 
@@ -56,11 +60,14 @@ jobs:
           uv sync --directory upilotserver~ --frozen --extra dev
 
       - name: Gate release source before version commit and tag
-        run: uv run --directory upilotserver~ --frozen --extra dev python scripts/check_release_quality.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPILOT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptanceRunId }}
+        run: uv run --directory upilotserver~ --frozen --extra dev python scripts/check_release_quality.py --require-unity-summary
 
       - name: Preserve source-bound quality evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
         with:
           name: upilot-pre-release-quality-${{ github.sha }}
           path: artifacts/reliability-quality/
@@ -84,9 +91,11 @@ jobs:
           fi
 
       - name: Push release commit and tag
+        env:
+          UPILOT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptanceRunId }}
         shell: bash
         run: |
-          git tag "${{ steps.release.outputs.tag }}"
+          git tag -a "${{ steps.release.outputs.tag }}" -m "UPilot-Acceptance-Run: $UPILOT_ACCEPTANCE_RUN_ID"
           git push origin HEAD:main
           git push origin "${{ steps.release.outputs.tag }}"
 

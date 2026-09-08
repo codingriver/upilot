@@ -58,6 +58,9 @@ namespace CodingRiver.UPilot.Tests
                 camera.clearFlags = CameraClearFlags.SolidColor;
                 camera.backgroundColor = Color.magenta;
                 camera.allowDynamicResolution = true;
+                // Unity/platform combinations may not retain an unsupported true value.
+                // The capture contract is to restore the actual prior camera state.
+                var originalDynamicResolution = camera.allowDynamicResolution;
 
                 for (var index = 0; index < 10; index++)
                 {
@@ -71,7 +74,7 @@ namespace CodingRiver.UPilot.Tests
                     Assert.That(capture.ColorHeight, Is.EqualTo(height));
                     Assert.That(capture.DepthWidth, Is.EqualTo(capture.ColorWidth));
                     Assert.That(capture.DepthHeight, Is.EqualTo(capture.ColorHeight));
-                    Assert.That(camera.allowDynamicResolution, Is.True);
+                    Assert.That(camera.allowDynamicResolution, Is.EqualTo(originalDynamicResolution));
                     Assert.That(camera.targetTexture, Is.Null);
                 }
 

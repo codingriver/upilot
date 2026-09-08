@@ -34,6 +34,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class HeartbeatPayload
     {
+        public PlayModeTransitionRecord playModeTransition;
         public int stateContractVersion;
         public string projectId;
         public string producerEpoch;
@@ -490,12 +491,16 @@ namespace CodingRiver.UPilot
     public class PlayModeSetPayload
     {
         public string action;
+        public string requestId;
+        public string operationId;
+        public string toolName;
     }
 
     [Serializable]
     public class PlayModeChangedPayload
     {
         public string state;
+        public PlayModeTransitionRecord transition;
     }
 
     [Serializable]
@@ -546,6 +551,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class MouseEventPayload
     {
+        public string windowInstanceId;
         public string targetWindow;
         public string action;
         public string button;
@@ -561,6 +567,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class GenericOkPayload
     {
+        public WindowInputEvidence input;
         public bool ok;
         public string state;
         public string status;
@@ -598,6 +605,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class KeyboardEventPayload
     {
+        public string windowInstanceId;
         public string targetWindow;
         public string action;    // keydown, keyup, keypress, type
         public string keyCode;   // Unity KeyCode name (e.g. "A", "Return", "Space")

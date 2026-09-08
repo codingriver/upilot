@@ -1,0 +1,37 @@
+name: UPilot Unity Release Evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upilot-unity-release-evidence
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, upilot-unity]
+    environment: upilot-unity-acceptance
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0, node24
+        with:
+          python-version: "3.11"
+      - name: Install locked dependencies
+        run: |
+          python -m pip install uv
+          uv sync --directory upilotserver~ --frozen --extra dev
+      - name: Run bounded canonical Unity acceptance
+        env:
+          UPILOT_MCP_URL: ${{ vars.UPILOT_MCP_URL }}
+        run: uv run --directory upilotserver~ --frozen --extra dev python scripts/collect_release_evidence.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
+        if: always()
+        with:
+          name: upilot-unity-release-evidence
+          path: artifacts/unity-release-evidence/
+          if-no-files-found: error

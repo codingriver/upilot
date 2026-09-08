@@ -16,6 +16,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class EditorWindowInfo
     {
+        public string windowHandle;
         public ulong instanceId;
         public string typeName;
         public string fullTypeName;
@@ -306,6 +307,7 @@ namespace CodingRiver.UPilot
             return new EditorWindowInfo
             {
                 instanceId = UPilotEntityIds.ToWireId(window),
+                windowHandle = UPilotWindowInputRegistry.Handle(window),
                 typeName = typeName,
                 fullTypeName = fullTypeName,
                 title = window.titleContent?.text ?? "",
@@ -313,7 +315,7 @@ namespace CodingRiver.UPilot
                 posY = rect.y,
                 width = rect.width,
                 height = rect.height,
-                hasFocus = window.hasFocus,
+                hasFocus = EditorWindow.focusedWindow == window,
                 docked = window.docked,
                 hasUIToolkit = window.rootVisualElement != null,
             };

@@ -33,7 +33,20 @@ namespace CodingRiver.UPilot
         public string ScenePath { get; }
         public string ComponentType { get; }
         public string TargetType { get; }
-        public string TargetGlobalObjectId { get; }
+        private string _targetGlobalObjectId;
+        private Func<string> _globalIdResolver;
+        public string TargetGlobalObjectId
+        {
+            get
+            {
+                if (_globalIdResolver != null)
+                {
+                    _targetGlobalObjectId = _globalIdResolver() ?? string.Empty;
+                    _globalIdResolver = null;
+                }
+                return _targetGlobalObjectId;
+            }
+        }
         public int TargetInstanceId { get; }
         public string EventSource { get; }
         public string MethodSignature { get; }
@@ -94,7 +107,8 @@ namespace CodingRiver.UPilot
             string targetType,
             string targetGlobalObjectId,
             string eventSource,
-            int targetInstanceId)
+            int targetInstanceId,
+            Func<string> globalIdResolver = null)
         {
             PointId = pointId ?? string.Empty;
             Target = target;
@@ -105,7 +119,8 @@ namespace CodingRiver.UPilot
             ScenePath = scenePath ?? string.Empty;
             ComponentType = componentType ?? string.Empty;
             TargetType = targetType ?? string.Empty;
-            TargetGlobalObjectId = targetGlobalObjectId ?? string.Empty;
+            _targetGlobalObjectId = targetGlobalObjectId ?? string.Empty;
+            _globalIdResolver = string.IsNullOrEmpty(targetGlobalObjectId) ? globalIdResolver : null;
             TargetInstanceId = targetInstanceId;
             EventSource = eventSource ?? string.Empty;
             MethodSignature = methodSignature ?? string.Empty;

@@ -6,6 +6,8 @@ import binascii
 import hashlib
 import json
 import logging
+import math
+from functools import wraps
 import os
 import shlex
 import subprocess
@@ -23,6 +25,7 @@ from ..protocol import new_id, now_ms
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
 from ..test_job_context import TEST_JOB_CONTEXT, TestJobCancelledBeforeStart
+from ..operation_context import OPERATION_ID, TASK_TOOL
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -55,6 +58,16 @@ _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.m
 _DEFAULT_OPERATION_SUCCESS = {"succeeded", "success", "complete", "completed", "passed", "ok"}
 _DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "aborted", "timeout", "timedout", "error"}
 _TERMINAL_STATUSES = _DEFAULT_OPERATION_SUCCESS | _DEFAULT_OPERATION_FAILURE
+
+
+def _serialized_operation(method):
+    """Serialize status/cancel so only one caller advances an operation's cleanup."""
+    @wraps(method)
+    async def guarded(self, operation_id, *args, **kwargs):
+        locks = self.__dict__.setdefault("_operation_locks", {})
+        async with locks.setdefault(operation_id, asyncio.Lock()):
+            return await method(self, operation_id, *args, **kwargs)
+    return guarded
 
 
 def _utc_iso() -> str:
@@ -182,6 +195,45 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _verify_capture_artifacts(root: Path, session: dict) -> None:
+    """Match ConsoleCaptureService's ordered, concatenated segment digest."""
+    paths = {}
+    for field in ("jsonlPath", "summaryPath"):
+        path = Path(str(session.get(field) or ""))
+        path = (path if path.is_absolute() else root / path).resolve()
+        path.relative_to(root)
+        if not path.is_file():
+            raise ValueError(f"Missing capture artifact: {field}")
+        paths[field] = path
+    summary = json.loads(paths["summaryPath"].read_text(encoding="utf-8-sig"))
+    for field in ("sessionId", "active", "finishedAtUtcMs", "sha256", "fileBytes", "segmentCount"):
+        if field not in session or not isinstance(summary, dict) or summary.get(field) != session[field]:
+            raise ValueError(f"Capture summary does not match stopped session: {field}")
+    directory = paths["jsonlPath"].parent
+    def segments():
+        return sorted(
+            (p for p in directory.iterdir()
+             if p.name.lower().startswith("console") and p.name.lower().endswith(".jsonl")),
+            key=lambda p: (p.name.lower() != "console.jsonl", p.name.lower()),
+        )
+    files = segments()
+    if len(files) != session["segmentCount"] or paths["jsonlPath"] not in [p.resolve() for p in files]:
+        raise ValueError("Console capture segment inventory mismatch.")
+    digest, size = hashlib.sha256(), 0
+    for path in files:
+        path.resolve().relative_to(root)
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+            after = os.fstat(stream.fileno())
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("Console capture segment changed during verification.")
+    if files != segments() or digest.hexdigest() != session["sha256"] or size != session["fileBytes"]:
+        raise ValueError("Console capture artifact hash/size mismatch.")
 
 
 def _normalize_agent_rules_block(block: str) -> str:
@@ -444,9 +496,24 @@ class TaskDomainService:
             })
 
         normalized = dict(job_spec)
+        if not isinstance(job_spec.get("failOnUnexpectedPlayModeExit", False), bool):
+            errors.append({"path": "failOnUnexpectedPlayModeExit", "code": "type", "message": "Expected a boolean."})
         normalized["displayName"] = str(job_spec.get("displayName") or "Unity operation")
         normalized["timeoutSec"] = float(job_spec.get("timeoutSec") or 300)
         normalized["pollIntervalSec"] = float(job_spec.get("pollIntervalSec") or 3)
+        cleanup = job_spec.get("cleanup", {})
+        if not isinstance(cleanup, dict):
+            errors.append({"path": "cleanup", "code": "type", "message": "Expected an object."})
+        else:
+            cleanup = dict(cleanup)
+            cleanup.setdefault("requireEditMode", False)
+            cleanup.setdefault("timeoutSec", 30)
+            if not isinstance(cleanup["requireEditMode"], bool):
+                errors.append({"path": "cleanup.requireEditMode", "code": "type", "message": "Expected a boolean."})
+            value = cleanup["timeoutSec"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                errors.append({"path": "cleanup.timeoutSec", "code": "range", "message": "Expected a finite positive number."})
+            normalized["cleanup"] = cleanup
         if normalized["timeoutSec"] <= 0:
             errors.append({"path": "timeoutSec", "code": "range", "message": "timeoutSec must be greater than zero."})
         if normalized["pollIntervalSec"] <= 0:
@@ -624,8 +691,14 @@ class TaskDomainService:
                     capture_result.data.get("nextSequence") or session_data.get("nextSequence") or -1
                 )
                 state["consoleCapture"]["session"] = session_data
+            if not capture_result.ok or not state["consoleCapture"].get("sessionId"):
+                state.update(status="Failed", phase="CaptureStartFailed",
+                             error="Required console capture did not establish a session; business was not started.",
+                             failureSignature="OperationCaptureStartFailed")
+                await self._operation_stop_console_capture(state)
+                return fail(request_id, "OPERATION_CAPTURE_START_FAILED", state["error"], self._public_operation_state(state))
 
-        start_result = await self._operation_invoke(start_call)
+        start_result = await self._operation_invoke(self._resolve_operation_call(start_call, state), operation_id)
         self._accumulate_timing(state, start_result)
         state["startResult"] = self._tool_response_summary(start_result)
         if not start_result.ok:
@@ -652,7 +725,8 @@ class TaskDomainService:
             state["startData"] = payload
             self._merge_operation_status(state, payload)
         mapping = job_spec.get("terminalStatusMapping")
-        if _is_terminal_status(str(state["status"]), mapping) and not _operation_cleanup_pending(payload):
+        if _is_terminal_status(str(state["status"]), mapping):
+            state["businessCleanupPending"] = _operation_cleanup_pending(payload)
             if _is_success_status(str(state["status"]), mapping):
                 state["status"] = "Succeeded"
             elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
@@ -672,6 +746,7 @@ class TaskDomainService:
         self._finalize_operation_timing(state)
         return ok(request_id, self._public_operation_state(state))
 
+    @_serialized_operation
     async def operation_status(
         self, operation_id: str, detail_level: str = "summary", max_tail_chars: int = 2000,
         include_raw_state: bool = False,
@@ -682,6 +757,10 @@ class TaskDomainService:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
         if state.get("endedAt"):
             self._finalize_operation_timing(state)
+            return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+
+        if state.get("businessTerminal"):
+            await self._operation_stop_console_capture(state)
             return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
         if now_ms() >= int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000):
@@ -697,7 +776,7 @@ class TaskDomainService:
             return fail(request_id, "OPERATION_TIMEOUT", state["error"], self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
         status_call = state["jobSpec"].get("statusCall")
-        result = await self._operation_invoke(self._resolve_operation_call(status_call, state))
+        result = await self._operation_invoke(self._resolve_operation_call(status_call, state), operation_id)
         self._accumulate_timing(state, result)
         state["lastStatusAt"] = now_ms()
         if not result.ok:
@@ -725,9 +804,23 @@ class TaskDomainService:
         if payload:
             self._merge_operation_status(state, payload)
         mapping = state["jobSpec"].get("terminalStatusMapping")
+        if state["jobSpec"].get("failOnUnexpectedPlayModeExit"):
+            observed = await self.mcp_status(force_fresh=True, include_capabilities=False)
+            transition = (observed.data or {}).get("playModeTransition") or {}
+            editor = (observed.data or {}).get("executionState") or {}
+            if (observed.ok and editor.get("authoritative") is True and editor.get("isStale") is False
+                    and transition and int(transition.get("at") or 0) >= state["startedAt"]):
+                state["playModeTransition"] = transition
+                if (transition.get("toState") in ("exitingPlay", "edit")
+                        and transition.get("fromState") in ("play", "exitingPlay")
+                        and transition.get("operationId") != operation_id
+                        and not _is_terminal_status(str(state["status"]), mapping)):
+                    state.update(status="Failed", phase="UnexpectedPlayModeExit", error="PlayMode exited without a correlated operation request.",
+                                 failureSignature="OperationUnexpectedPlayModeExit")
         cleanup_pending = _operation_cleanup_pending(payload)
         state["cleanupPending"] = cleanup_pending
-        if _is_terminal_status(str(state["status"]), mapping) and not cleanup_pending:
+        if _is_terminal_status(str(state["status"]), mapping):
+            state["businessCleanupPending"] = cleanup_pending
             if _is_success_status(str(state["status"]), mapping):
                 state["status"] = "Succeeded"
             elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
@@ -828,6 +921,7 @@ class TaskDomainService:
             state["_lastPollMono"] = time.monotonic()
             await asyncio.sleep(min(interval, max(0.1, deadline - time.monotonic())))
 
+    @_serialized_operation
     async def operation_cancel(self, operation_id: str) -> ToolResponse:
         request_id = new_id("req")
         state = self._operations.get(operation_id)
@@ -835,12 +929,15 @@ class TaskDomainService:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
         if state.get("endedAt"):
             return ok(request_id, self._public_operation_state(state))
+        if state.get("businessTerminal"):
+            await self._operation_stop_console_capture(state)
+            return ok(request_id, self._public_operation_state(state))
         if state.get("cancelAccepted"):
             return ok(request_id, self._public_operation_state(state))
         cancel_call = state["jobSpec"].get("cancelCall")
         if not isinstance(cancel_call, dict):
             return fail(request_id, "CANCEL_UNSUPPORTED", "This operation has no cancelCall.", self._public_operation_state(state))
-        result = await self._operation_invoke(self._resolve_operation_call(cancel_call, state))
+        result = await self._operation_invoke(self._resolve_operation_call(cancel_call, state), operation_id)
         self._accumulate_timing(state, result)
         state["cancelResult"] = self._tool_response_summary(result)
         state["cancelRequested"] = True
@@ -856,10 +953,10 @@ class TaskDomainService:
             bool(cancel_status)
             and _is_terminal_status(cancel_status, state["jobSpec"].get("terminalStatusMapping"))
             and cleanup_state_explicit
-            and not cleanup_pending
         )
         if result.ok and cancel_terminal:
             self._merge_operation_status(state, cancel_payload)
+            state["businessCleanupPending"] = cleanup_pending
             if cancel_status.lower() in {"canceled", "cancelled", "aborted"}:
                 state["status"] = "Canceled"
             elif _is_success_status(cancel_status, state["jobSpec"].get("terminalStatusMapping")):
@@ -867,10 +964,12 @@ class TaskDomainService:
             else:
                 state["status"] = "Failed"
             state["endedAt"] = now_ms()
+            await self._operation_stop_console_capture(state)
         else:
             state["status"] = "CancelRequested" if result.ok else "Running"
             state["phase"] = "Stopping" if result.ok else "CancelFailed"
-        state["error"] = "" if result.ok else (result.error.message if result.error else "cancelCall failed")
+        if not state.get("businessTerminal"):
+            state["error"] = "" if result.ok else (result.error.message if result.error else "cancelCall failed")
         if cancel_payload_error:
             state["cancelResultParseError"] = cancel_payload_error
         if not result.ok:
@@ -946,7 +1045,14 @@ class TaskDomainService:
             payload["operation"] = self._public_operation_state(state, detail_level, max_tail_chars, True)
         return ok(request_id, payload)
 
-    async def _operation_invoke(self, call: dict | None) -> ToolResponse:
+    async def _operation_invoke(self, call: dict | None, operation_id: str = "") -> ToolResponse:
+        token = OPERATION_ID.set(operation_id)
+        try:
+            return await self._operation_invoke_unscoped(call)
+        finally:
+            OPERATION_ID.reset(token)
+
+    async def _operation_invoke_unscoped(self, call: dict | None) -> ToolResponse:
         request_id = new_id("req")
         if not isinstance(call, dict):
             return fail(request_id, "INVALID_OPERATION_CALL", "Operation call must be an object.", {"call": call})
@@ -1218,6 +1324,76 @@ class TaskDomainService:
             capture["lastReadCount"] = len(result.data.get("entries") or result.data.get("logs") or [])
 
     async def _operation_stop_console_capture(self, state: dict) -> None:
+        # All terminal routes converge here; business completion is not final completion.
+        first_cleanup = not state.get("businessTerminal")
+        if not state.get("businessTerminal"):
+            state.update(
+                businessTerminal=True, businessEndedAt=state.get("endedAt") or now_ms(),
+                businessResult={key: state.get(key) for key in ("status", "phase", "error", "failureSignature")},
+                cleanupDeadlineAt=now_ms() + int(state["jobSpec"].get("cleanup", {}).get("timeoutSec", 30) * 1000),
+            )
+        state["endedAt"] = 0
+        state["status"], state["phase"] = "CleaningUp", "Cleanup"
+        if state.get("businessCleanupPending") and not first_cleanup:
+            try:
+                call = state["jobSpec"]["statusCall"]
+                result = await asyncio.wait_for(
+                    self._operation_invoke(self._resolve_operation_call(call, state), state["operationId"]), timeout=5)
+                payload, error = self._operation_adapt_payload(result, call, state["jobSpec"])
+                if result.ok and not error and _operation_cleanup_state_is_explicit(payload):
+                    state["businessCleanupPending"] = _operation_cleanup_pending(payload)
+                    state["cleanupBusinessEvidence"] = payload
+            except Exception as exc:
+                state["cleanupBusinessError"] = str(exc)
+        capture = state.get("consoleCapture") or {}
+        if not capture.get("stopped"):
+            try:
+                await asyncio.wait_for(self._stop_owned_operation_capture(state), timeout=5)
+            except Exception as exc:
+                capture["stopError"] = str(exc)
+        capture_done = not capture.get("sessionId") or capture.get("stopped") is True
+        resources_done = capture_done and not state.get("businessCleanupPending", False)
+        state["cleanupTerminal"] = resources_done
+        if resources_done:
+            state.setdefault("cleanupEndedAt", now_ms())
+        require_edit = state["jobSpec"].get("cleanup", {}).get("requireEditMode", False)
+        editor_done = not require_edit
+        if require_edit:
+            try:
+                observed = await asyncio.wait_for(self.mcp_status(force_fresh=True, include_capabilities=False), timeout=5)
+                editor = (observed.data or {}).get("executionState", {})
+                state["cleanupEditorEvidence"] = editor
+                transition = (observed.data or {}).get("playModeTransition") or {}
+                if (observed.ok and editor.get("authoritative") is True and editor.get("isStale") is False
+                        and transition.get("operationId") == state["operationId"]
+                        and int(transition.get("at") or 0) >= state["startedAt"]):
+                    state["playModeTransition"] = transition
+                editor_done = (
+                    observed.ok and editor.get("ready") is True and editor.get("authoritative") is True
+                    and editor.get("isStale") is False and editor.get("playModeState") == "edit"
+                    and int(editor.get("observedAt") or 0) > state["businessEndedAt"]
+                )
+            except Exception as exc:
+                state["cleanupEditorError"] = str(exc)
+        state["editorTerminal"] = bool(editor_done)
+        if editor_done:
+            state.setdefault("editorEndedAt", now_ms())
+        state["cleanupPending"] = not (resources_done and editor_done)
+        state["unresolvedResources"] = (
+            (["consoleCapture:" + str(capture.get("sessionId"))] if not capture_done else [])
+            + (["businessCleanup"] if state.get("businessCleanupPending") else [])
+            + (["authoritativeEditMode"] if not editor_done else [])
+        )
+        if not state["cleanupPending"]:
+            state.update(state["businessResult"])
+            state["endedAt"] = now_ms()
+        elif now_ms() >= state["cleanupDeadlineAt"]:
+            state.update(status="Failed", phase="CleanupTimeout", endedAt=now_ms(),
+                         failureSignature="OperationCleanupTimeout",
+                         error="Business ended but cleanup is unverified; inspect capture and Editor state before starting another operation.")
+        state["updatedAt"] = now_ms()
+
+    async def _stop_owned_operation_capture(self, state: dict) -> None:
         capture = state.get("consoleCapture") or {}
         session_id = capture.get("sessionId")
         if not session_id or capture.get("stopped"):
@@ -1230,7 +1406,26 @@ class TaskDomainService:
             for key in ("jsonlPath", "summaryPath", "manifestPath", "sha256", "recordCount", "droppedCount", "fileBytes"):
                 if key in session_data:
                     capture[key] = session_data[key]
-        capture["stopped"] = True
+        session_data = capture.get("session") or {}
+        capture["stopped"] = False
+        capture["artifactsVerified"] = False
+        stop_confirmed = bool(
+            result.ok and session_data.get("sessionId") == session_id
+            and session_data.get("active") is False
+            and session_data.get("finishedAtUtcMs")
+            and session_data.get("sha256") and session_data.get("summaryPath")
+            and session_data.get("fileBytes") is not None
+        )
+        if stop_confirmed:
+            try:
+                root = self._project_root().resolve()
+                await asyncio.to_thread(_verify_capture_artifacts, root, session_data)
+                capture["artifactsVerified"] = True
+                capture["stopped"] = True
+            except (OSError, ValueError) as exc:
+                capture["stopped"] = False
+                capture["artifactsVerified"] = False
+                capture["stopError"] = str(exc)
 
     @staticmethod
     def _finalize_operation_timing(state: dict) -> None:
@@ -1276,6 +1471,17 @@ class TaskDomainService:
             "cancelRequestedAt": state.get("cancelRequestedAt", 0),
             "cancelAttemptCount": state.get("cancelAttemptCount", 0),
             "cleanupPending": state.get("cleanupPending", False),
+            "businessTerminal": state.get("businessTerminal", False),
+            "unresolvedResources": state.get("unresolvedResources", []),
+            "cleanupTerminal": state.get("cleanupTerminal", False),
+            "editorTerminal": state.get("editorTerminal", False),
+            "businessEndedAt": state.get("businessEndedAt", 0),
+            "cleanupEndedAt": state.get("cleanupEndedAt", 0),
+            "editorEndedAt": state.get("editorEndedAt", 0),
+            "cleanupDeadlineAt": state.get("cleanupDeadlineAt", 0),
+            "businessResult": state.get("businessResult", {}),
+            "playModeTransition": state.get("playModeTransition", {}),
+            "cleanupEditorEvidence": state.get("cleanupEditorEvidence", {}),
             "startedAt": state.get("startedAt"),
             "updatedAt": state.get("updatedAt"),
             "endedAt": state.get("endedAt"),
@@ -1406,6 +1612,8 @@ class TaskDomainService:
         data = result.data
         if tool_name == "wait_condition" and isinstance(data, dict):
             return bool(data.get("met"))
+        if tool_name == "unity_snapshot_capture" and isinstance(data, dict):
+            return data.get("terminal") is True and data.get("success") is True
         return True
 
     @staticmethod
@@ -1413,6 +1621,12 @@ class TaskDomainService:
         data = result.data if isinstance(result.data, dict) else {}
         if tool_name == "wait_condition":
             return str(data.get("lastError") or "wait_condition not met (met=false)")
+        if tool_name == "unity_snapshot_capture":
+            failures = data.get("failures") or []
+            return "; ".join(
+                str(item.get("code") or "SNAPSHOT_CAPTURE_FAILED") + ": " + str(item.get("message") or "")
+                for item in failures[:4] if isinstance(item, dict)
+            ) or "Snapshot did not produce a successful terminal result."
         return "logical failure"
 
     async def task_execute(
@@ -1439,6 +1653,7 @@ class TaskDomainService:
         start = time.monotonic()
         attempts = 0
         last_error = ""
+        snapshot_evidence = None
         events: list[dict] = []
 
         descriptor = REGISTRY.resolve(tool_name)
@@ -1476,6 +1691,10 @@ class TaskDomainService:
                     )
                 if result.ok:
                     last_error = self._task_execute_logical_error(tool_name, result)
+                    if tool_name == "unity_snapshot_capture" and isinstance(result.data, dict):
+                        snapshot_evidence = {key: result.data.get(key) for key in
+                                             ("snapshotId", "status", "terminal", "success", "manifestPath")}
+                        snapshot_evidence["failures"] = (result.data.get("failures") or [])[:16]
                     events.append(
                         {
                             "event": "tool_logical_failure",
@@ -1531,6 +1750,7 @@ class TaskDomainService:
                 "attempts": attempts,
                 "elapsedS": round(time.monotonic() - start, 1),
                 "events": events,
+                **({"snapshot": snapshot_evidence} if snapshot_evidence is not None else {}),
             },
         )
 
@@ -1562,7 +1782,11 @@ class TaskDomainService:
 
     async def _dispatch_tool(self, tool_name: str, tool_args: dict) -> ToolResponse:
         """Route a public MCP tool name through the shared registry."""
-        return await dispatch_public_tool(self, tool_name, tool_args)
+        token = TASK_TOOL.set(tool_name)
+        try:
+            return await dispatch_public_tool(self, tool_name, tool_args)
+        finally:
+            TASK_TOOL.reset(token)
 
     async def task_start(
         self,

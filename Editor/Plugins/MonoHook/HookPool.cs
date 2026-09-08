@@ -15,49 +15,54 @@ namespace MonoHook
     /// </summary>
     public static class HookPool
     {
+        internal static readonly object SyncRoot = new object();
         private static Dictionary<MethodBase, MethodHook> _hooks = new Dictionary<MethodBase, MethodHook>();
 
         public static void AddHook(MethodBase method, MethodHook hook)
         {
+            lock (SyncRoot)
+            {
             MethodHook preHook;
             if (_hooks.TryGetValue(method, out preHook))
             {
-                preHook.Uninstall();
-                _hooks[method] = hook;
+                if (!ReferenceEquals(preHook, hook))
+                    throw new System.InvalidOperationException("Target already has a different Hook owner; explicit uninstall is required.");
             }
             else
                 _hooks.Add(method, hook);
+            }
         }
 
         public static MethodHook GetHook(MethodBase method)
         {
             if (method == null) return null;
 
-            MethodHook hook;
-            if (_hooks.TryGetValue(method, out hook))
-                return hook;
-            return null;
+            lock (SyncRoot)
+            {
+                MethodHook hook;
+                if (_hooks.TryGetValue(method, out hook)) return hook;
+                return null;
+            }
         }
 
         public static void RemoveHooker(MethodBase method)
         {
             if (method == null) return;
 
-            _hooks.Remove(method);
+            lock (SyncRoot) _hooks.Remove(method);
         }
 
         public static void UninstallAll()
         {
-            var list = _hooks.Values.ToList();
+            var list = GetAllHooks();
             foreach (var hook in list)
                 hook.Uninstall();
 
-            _hooks.Clear();
         }
 
         public static void UninstallByTag(string tag)
         {
-            var list = _hooks.Values.ToList();
+            var list = GetAllHooks();
             foreach (var hook in list)
             {
                 if(hook.tag == tag)
@@ -67,7 +72,7 @@ namespace MonoHook
 
         public static List<MethodHook> GetAllHooks()
         {
-            return _hooks.Values.ToList();
+            lock (SyncRoot) return _hooks.Values.ToList();
         }
     }
 

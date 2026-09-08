@@ -285,10 +285,15 @@ class TestDomainService:
         test_names: list[str] | None = None,
         fixtures: list[str] | None = None,
     ) -> ToolResponse:
-        """Run canonical package acceptance without an active persistent Console capture."""
+        """Run package acceptance only in explicitly supported repository test projects."""
         request_id = new_id("req")
         started_at = now_ms()
-        expected_project = (Path(__file__).resolve().parents[4] / "Tests~" / "UPilotTest").resolve()
+        repository_root = Path(__file__).resolve().parents[4]
+        expected_project = (repository_root / "Tests~" / "UPilotTest").resolve()
+        accepted_projects = {
+            os.path.normcase(str((repository_root / "Tests~" / name).resolve())): name
+            for name in ("UPilotTest", "UPilotTest2022")
+        }
         report: dict[str, object] = {
             "schemaVersion": 1,
             "workflow": "UPilotPackageAcceptance",
@@ -331,9 +336,14 @@ class TestDomainService:
             actual_project = Path(actual_project_text)
         if not status.ok or not status_data.get("connected") or not status_data.get("serverReady"):
             return await finish(False, "UPILOT_ACCEPTANCE_NOT_CONNECTED", "Unity MCP is not connected and ready.")
-        if os.path.normcase(str(actual_project)) != os.path.normcase(str(expected_project)):
+        project_key = os.path.normcase(str(actual_project))
+        if project_key not in accepted_projects:
             report["actualProject"] = str(actual_project)
-            return await finish(False, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project is not the canonical UPilot acceptance project.")
+            return await finish(False, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project is not a supported repository acceptance project.")
+        expected_project = actual_project
+        report["expectedProject"] = str(expected_project)
+        report["acceptanceProject"] = accepted_projects[project_key]
+        report["unityVersion"] = str((status_data.get("session") or {}).get("unityVersion") or "")
 
         ready = await self.ensure_ready(timeout_s=min(120, max(10, timeout_sec)))
         report["steps"]["ensureReady"] = response_summary(ready)

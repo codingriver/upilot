@@ -109,6 +109,28 @@ def test_acceptance_stops_capture_and_checks_correlated_clean_result() -> None:
     assert descriptor is not None and descriptor.idempotent is False
 
 
+def test_acceptance_supports_explicit_repository_unity_2022_project() -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest2022").resolve()
+    service = _AcceptanceService(expected)
+    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert result.ok and result.data["acceptancePassed"]
+    assert result.data["expectedProject"] == str(expected)
+    assert result.data["acceptanceProject"] == "UPilotTest2022"
+    assert result.data["sourceUnchanged"]
+
+
+@pytest.mark.parametrize("project", ("UPilotTest2022-other", "../Other/UPilotTest2022", "Customers/UPilotTest"))
+def test_acceptance_does_not_allow_name_only_or_sibling_project_matches(project) -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / project).resolve()
+    service = _AcceptanceService(expected)
+    async def forbidden(**_):
+        pytest.fail("Rejected project must not trigger Editor mutations or tests")
+    service.ensure_ready = forbidden
+    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_PROJECT_MISMATCH"
+
+
 @pytest.mark.parametrize("change", [
     {"cleanupSucceeded": False, "cleanupStatus": "failed", "cleanupErrors": ["callback-unregister"]},
     {"cleanupSucceeded": None},

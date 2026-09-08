@@ -20,7 +20,7 @@ namespace CodingRiver.UPilot
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
     [Serializable] public class TestRunMessage     { public TestRunPayload payload; }
-    [Serializable] public class TestRunPayload     { public string testMode = "EditMode"; public string testFilter = ""; public string[] testNames; public string[] fixtures; }
+    [Serializable] public class TestRunPayload     { public string testMode = "EditMode"; public string testFilter = ""; public string[] testNames; public string[] fixtures; public string requestId; public string operationId; }
 
     [Serializable] public class TestListMessage    { public TestListPayload payload; }
     [Serializable] public class TestListPayload    { public string testMode = "EditMode"; public string testFilter = ""; public string[] testNames; public string[] fixtures; }
@@ -51,10 +51,14 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class TestRunResultPayload
     {
+        public PlayModeTransitionRecord playModeTransition;
         public string status;  // started, running, cancel_requested, cleanup, completed, no_tests, failed, aborted
         public string phase;
         public string testMode;
         public string runGuid;
+        public string originatingRequestId;
+        public string originatingCommandId;
+        public string operationId;
         public string currentTest;
         public long   startedAt;
         public long   lastProgressAt;
@@ -390,9 +394,16 @@ namespace CodingRiver.UPilot
                     if (executeMethod == null)
                         throw new Exception("TestRunnerApi.Execute method not found.");
 
+                    _lastResults.originatingRequestId = p.requestId ?? id;
+                    _lastResults.originatingCommandId = id;
+                    _lastResults.operationId = p.operationId ?? "";
+                    if (string.Equals(_lastResults.testMode, "PlayMode", StringComparison.OrdinalIgnoreCase))
+                        UPilotPlayModeTransitions.RegisterIntent("testFramework", "play",
+                            _lastResults.originatingRequestId, id, _lastResults.operationId, "unity_test_run");
                     object executeResult = executeMethod.Invoke(api, new[] { execSettings });
                     _activeRunGuid = Convert.ToString(executeResult);
                     _lastResults.runGuid = _activeRunGuid;
+                    UPilotPlayModeTransitions.AttachRunIdentity(id, _activeRunGuid);
                     _lastResults.lastProgressAt = NowMs();
 
                     // Return immediately. The registered callback owns the real lifecycle and
@@ -875,6 +886,14 @@ namespace CodingRiver.UPilot
 
         private void OnRunFinished(object rootResult)
         {
+            if (!_isRunning || _lastResults == null || _cleanupScheduled) return;
+            // UTF's PlayMode RunFinished callback precedes its ExitPlayModeTask.
+            // Do not invent a new exit intent if an exit is already in progress.
+            if (ShouldRecordFrameworkExit(_lastResults,
+                    EditorApplication.isPlaying && EditorApplication.isPlayingOrWillChangePlaymode))
+                UPilotPlayModeTransitions.RegisterIntent("testFramework", "edit",
+                    _lastResults.originatingRequestId, _lastResults.originatingCommandId,
+                    _lastResults.operationId, "testFramework.RunFinished", _lastResults.runGuid);
             try
             {
                 var results = new List<TestResultItemPayload>();
@@ -910,6 +929,20 @@ namespace CodingRiver.UPilot
                 PersistSnapshot();
                 ScheduleCleanup();
             }
+        }
+
+        internal static bool ShouldRecordFrameworkExit(TestRunResultPayload result, bool stablePlayMode)
+        {
+            return stablePlayMode && result != null && !string.IsNullOrEmpty(result.runGuid)
+                && string.Equals(result.testMode, "PlayMode", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal void ObservePlayModeTransition(PlayModeTransitionRecord transition)
+        {
+            if (_lastResults == null || transition == null || string.IsNullOrEmpty(transition.runGuid)
+                || transition.runGuid != _lastResults.runGuid || transition.at < _lastResults.startedAt) return;
+            _lastResults.playModeTransition = transition;
+            PersistSnapshot(clearActivePointer: !_isRunning);
         }
 
         internal static string ApplyRunResults(TestRunResultPayload target, List<TestResultItemPayload> results, bool canceled)

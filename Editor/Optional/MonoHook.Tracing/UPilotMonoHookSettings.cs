@@ -64,6 +64,8 @@ namespace CodingRiver.UPilot
         public bool autoApplyOnPlayMode;
         public bool suppressUnchangedValues = true;
         public int maxEventsPerSecond = 1000;
+        public bool enableIngressBudget;
+        public int maxIngressEventsPerSecond = 1000;
         public bool enablePerObjectRateLimit;
         public int maxEventsPerObjectPerSecond = 100;
         public bool suppressDuplicateEvents;
@@ -431,6 +433,8 @@ namespace CodingRiver.UPilot
             autoApplyOnPlayMode = false;
             suppressUnchangedValues = true;
             maxEventsPerSecond = 1000;
+            enableIngressBudget = false;
+            maxIngressEventsPerSecond = 1000;
             enablePerObjectRateLimit = false;
             maxEventsPerObjectPerSecond = 100;
             suppressDuplicateEvents = false;

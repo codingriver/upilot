@@ -223,6 +223,13 @@ namespace CodingRiver.UPilot
             settings.maxEventsPerSecond = Mathf.Max(1, EditorGUILayout.IntField(
                 new GUIContent("每秒最大事件数", "超过上限的事件会被丢弃并计入丢弃数量。"),
                 settings.maxEventsPerSecond));
+            settings.enableIngressBudget = EditorGUILayout.ToggleLeft(
+                new GUIContent("启用入口预算", "默认关闭；在过滤和昂贵对象查询前丢弃，使用独立计数。"),
+                settings.enableIngressBudget);
+            if (settings.enableIngressBudget)
+                settings.maxIngressEventsPerSecond = Math.Max(1, EditorGUILayout.IntField(
+                    "每秒最大入口数", settings.maxIngressEventsPerSecond));
+            EditorGUILayout.LabelField("入口预算丢弃", UPilotMonoHookInstallationService.IngressDroppedCount.ToString());
             settings.enablePerObjectRateLimit = EditorGUILayout.ToggleLeft(
                 new GUIContent("启用单对象限流", "按点位和对象分别限制事件数量，默认关闭。"),
                 settings.enablePerObjectRateLimit);

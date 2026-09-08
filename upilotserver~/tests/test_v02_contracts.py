@@ -209,6 +209,23 @@ def test_dispatcher_preserves_authoritative_bridge_context() -> None:
     assert state.editor.process_id == 42
 
 
+def test_test_run_dispatch_preserves_request_and_operation_identity() -> None:
+    from upilot_mcp.operation_context import OPERATION_ID
+    async def run():
+        state = StateStore()
+        dispatcher = CommandDispatcher(_Transport({"type": "result", "payload": {"ok": True}}), state)
+        token = OPERATION_ID.set("op-runner")
+        try:
+            result = await dispatcher.call("req-runner", "test.run", {"testMode": "PlayMode"})
+        finally:
+            OPERATION_ID.reset(token)
+        assert result.ok
+        command = next(iter(state.commands.values()))
+        assert command.payload["requestId"] == "req-runner"
+        assert command.payload["operationId"] == "op-runner"
+    asyncio.run(run())
+
+
 def test_dispatcher_removes_timed_out_command_from_transport() -> None:
     class _NeverCompletes(_Transport):
         async def send_command(self, command_id: str, name: str, payload: dict) -> None:
@@ -1142,7 +1159,16 @@ def test_screenshot_save_preserves_scene_view_repaint_evidence(tmp_path: Path) -
     service._resolve_screenshot_save_path = lambda *_: tmp_path / "scene-view.png"
     service.screenshot_scene_view = _scene_view
 
-    result = asyncio.run(service.screenshot_save(source="sceneView"))
+    async def save_inside_task():
+        # This test covers artifact forwarding inside the task. The public short-wait
+        # entry point is covered separately by test_snapshot_short_tasks.
+        from upilot_mcp.operation_context import TASK_TOOL
+        token = TASK_TOOL.set(True)
+        try:
+            return await service.screenshot_save(source="sceneView")
+        finally:
+            TASK_TOOL.reset(token)
+    result = asyncio.run(save_inside_task())
     assert result.ok is True
     for key, value in evidence.items():
         assert result.data[key] == value

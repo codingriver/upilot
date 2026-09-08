@@ -14,6 +14,7 @@ from PIL import Image
 
 from ..protocol import new_id
 from ..responses import fail, ok
+from ..operation_context import TASK_TOOL
 
 
 _TERMINAL_SNAPSHOT_STATES = {"completed", "partial", "failed", "cancelled"}
@@ -21,6 +22,27 @@ _TERMINAL_SNAPSHOT_STATES = {"completed", "partial", "failed", "cancelled"}
 
 class SnapshotDomainService:
     """Facade methods for the versioned Unity Snapshot job contract."""
+
+    async def _bounded_snapshot_task(self, tool_name: str, arguments: dict, wait_ms: int = 4500):
+        deadline = time.monotonic() + min(max(wait_ms, 0), 4500) / 1000
+        started = await self.task_start("SceneView capture", tool_name, arguments, timeout_s=45, retry_count=0)
+        if not started.ok:
+            return started
+        task_id = started.data["taskId"]
+        task_deadline = int(started.data.get("startedAt") or time.time() * 1000) + 45000
+        while time.monotonic() < deadline:
+            status = await self.task_status(task_id, detail_level="full")
+            data = status.data or {}
+            if data.get("terminal"):
+                if data.get("status") == "completed":
+                    return ok(started.request_id, (data.get("result") or {}).get("result") or {})
+                return fail(started.request_id, "SNAPSHOT_TASK_FAILED", str(data.get("error") or ""),
+                            {"taskId": task_id, "terminal": True, "cause": data.get("error")})
+            await asyncio.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        return ok(started.request_id, {"taskId": task_id, "terminal": False, "repaintPending": True,
+                  "waitWindowElapsed": True, "deadline": task_deadline,
+                  "deadlineSource": "task-timeout", "repaintDeadline": None,
+                  "lastRepaintAt": None, "nextAction": "Poll unity_task_status with this taskId; do not start another capture."})
 
     async def camera_list(self):
         return await self.dispatcher.call(new_id("req"), "snapshot.cameraList", {})
@@ -52,6 +74,13 @@ class SnapshotDomainService:
                 "A Snapshot may contain at most 16 targets.",
                 {"targetCount": len(targets), "maxTargets": 16},
             )
+
+        if any(str(t.get("kind", "")).lower() == "sceneview" for t in targets) and not TASK_TOOL.get():
+            return await self._bounded_snapshot_task("unity_snapshot_capture", {
+                "targets": targets, "channels": channels, "syncMode": sync_mode, "completionPolicy": completion_policy,
+                "capturePolicy": capture_policy, "outputDirectory": output_directory, "waitMs": 30000,
+                "requestKey": request_key,
+            }, wait_ms)
 
         started = await self.dispatcher.call(
             new_id("req"),

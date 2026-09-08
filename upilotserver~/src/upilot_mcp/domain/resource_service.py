@@ -446,9 +446,10 @@ class ResourceDomainService:
         rejected = self._reject_write_if_unapproved(request_id, "unity_asset_delete")
         if rejected is not None:
             return rejected
-        return await self.dispatcher.call(
+        response = await self.dispatcher.call(
             request_id, "asset.delete", {"assetPath": asset_path}
         )
+        return _require_mutation_success(response, "unity_asset_delete")
 
     async def asset_refresh(self) -> ToolResponse:
         request_id = new_id("req")

@@ -1,0 +1,8 @@
+{
+  "name": "UPilot.PlayMode.Tests",
+  "rootNamespace": "CodingRiver.UPilot.Tests",
+  "references": [],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"]
+}

@@ -1,0 +1,40 @@
+{
+    "schemaVersion": 2,
+    "mcp": {
+        "httpHost": "127.0.0.1",
+        "httpPort": 8017,
+        "wsHost": "127.0.0.1",
+        "wsPort": 8770
+    },
+    "cache": {
+        "contextStaleMs": 2000
+    },
+    "features": {
+        "flow": {
+            "enabled": false
+        }
+    },
+    "runtime": {
+        "mode": "python",
+        "pythonPath": "C:\\Python311\\python.exe",
+        "serverExePath": "",
+        "serverVersion": ""
+    },
+    "safety": {
+        "writeAccessApproved": true,
+        "writeAccessApprovedAtUtc": "2026-09-08T03:15:08.7888655+00:00"
+    },
+    "updates": {
+        "manifestUrl": "",
+        "channel": "auto"
+    },
+    "agents": {
+        "selectionInitialized": true,
+        "enabledClients": [
+            "codex",
+            "claude-code",
+            "cursor",
+            "opencode"
+        ]
+    }
+}

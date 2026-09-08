@@ -57,6 +57,10 @@ namespace CodingRiver.UPilot
         private static int _perObjectDroppedCount;
         private static int _duplicateDroppedCount;
         private static int _traceFailureCount;
+        private static double _ingressWindowStart;
+        private static int _ingressWindowCount;
+        private static int _ingressDroppedCount;
+        public static int IngressDroppedCount => _ingressDroppedCount;
         private static readonly Dictionary<string, double> PerObjectRateWindowStarts =
             new Dictionary<string, double>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> PerObjectRateWindowCounts =
@@ -123,6 +127,7 @@ namespace CodingRiver.UPilot
                 hookEvent.pointId = hookEvent.kind ?? string.Empty;
             if (!hookEvent.filterEvaluated)
             {
+                if (!TryAcquireIngressSlot(settings)) return 0;
                 if (!UPilotTraceFilterEngine.Evaluate(hookEvent, true, out var filterDecision))
                     return 0;
                 hookEvent.filterProfileId = filterDecision.ProfileId;
@@ -185,6 +190,9 @@ namespace CodingRiver.UPilot
             _perObjectDroppedCount = 0;
             _duplicateDroppedCount = 0;
             _traceFailureCount = 0;
+            _ingressWindowStart = 0;
+            _ingressWindowCount = 0;
+            _ingressDroppedCount = 0;
             PerObjectRateWindowStarts.Clear();
             PerObjectRateWindowCounts.Clear();
             LastEventTimes.Clear();
@@ -1474,6 +1482,7 @@ namespace CodingRiver.UPilot
             string phase,
             string methodSignature)
         {
+                if (!TryAcquireIngressSlot(UPilotMonoHookSettings.instance)) return;
                 if (!UPilotTraceFilterEngine.Evaluate(
                         kind,
                         target,
@@ -1489,7 +1498,7 @@ namespace CodingRiver.UPilot
                         true,
                         out var filterDecision,
                         target.GetType().FullName,
-                        TryGetGlobalObjectId(target),
+                        null,
                         EditorApplication.isPlaying ? "PlayMode" : "EditMode",
                         GetObjectId(target)))
                 {
@@ -1528,6 +1537,24 @@ namespace CodingRiver.UPilot
             if (target == null) return string.Empty;
             try { return GlobalObjectId.GetGlobalObjectIdSlow(target).ToString(); }
             catch { return string.Empty; }
+        }
+
+        internal static bool TryAcquireIngressSlot(UPilotMonoHookSettings settings)
+        {
+            if (!settings.enableIngressBudget) return true;
+            double now = EditorApplication.timeSinceStartup;
+            if (_ingressWindowStart <= 0 || now - _ingressWindowStart >= 1)
+            {
+                _ingressWindowStart = now;
+                _ingressWindowCount = 0;
+            }
+            if (_ingressWindowCount < Math.Max(1, settings.maxIngressEventsPerSecond))
+            {
+                _ingressWindowCount++;
+                return true;
+            }
+            _ingressDroppedCount++;
+            return false;
         }
 
         private static bool TryAcquireEventSlot(int maxEventsPerSecond)

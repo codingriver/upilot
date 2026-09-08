@@ -78,7 +78,7 @@ namespace CodingRiver.UPilot
 
         private static GenericOkPayload HandleKeyboardEvent(KeyboardEventPayload payload, string action, KeyCode parsedKeyCode)
         {
-            var window = UPilotPlayInputService.FindTargetWindow(payload.targetWindow);
+            var window = UPilotWindowInputRegistry.Resolve(payload.windowInstanceId, payload.targetWindow);
             if (window == null)
             {
                 return new GenericOkPayload
@@ -91,14 +91,23 @@ namespace CodingRiver.UPilot
             window.Focus();
 
             var mods = UPilotPlayInputService.ParseModifiers(payload.modifiers);
+            var evidence = new WindowInputEvidence
+            {
+                windowInstanceId = UPilotEntityIds.ToWireId(window).ToString(),
+                windowHandle = UPilotWindowInputRegistry.Handle(window), enabled = true,
+                controlType = "keyboard", dispatched = true, businessEffectVerified = false,
+            };
 
             // Auto-route: if the window has UIToolkit content, prefer UIToolkit synthetic events
             var root = window.rootVisualElement;
-            if (root != null && root.childCount > 0)
+            if (root != null && root.childCount > 0 && !(root.focusController?.focusedElement is IMGUIContainer))
             {
                 var sent = SendUIToolkitKeyboardEvent(root, action, parsedKeyCode, payload.character, payload.text, mods);
                 if (sent)
-                    return new GenericOkPayload { ok = true, state = $"{action}:{payload.targetWindow}:uitoolkit" };
+                {
+                    evidence.matchSource = "uitk-focused-element";
+                    return new GenericOkPayload { ok = true, state = $"{action}:{payload.targetWindow}:uitoolkit", input = evidence };
+                }
             }
 
             // Fallback: IMGUI SendEvent
@@ -136,7 +145,8 @@ namespace CodingRiver.UPilot
                     break;
             }
 
-            return new GenericOkPayload { ok = true, state = $"{action}:{payload.targetWindow}" };
+            evidence.matchSource = "imgui-window";
+            return new GenericOkPayload { ok = true, state = $"{action}:{payload.targetWindow}", input = evidence };
         }
 
         private static bool SendUIToolkitKeyboardEvent(VisualElement root, string action, KeyCode keyCode, char character, string text, EventModifiers mods)

@@ -213,7 +213,46 @@ namespace CodingRiver.UPilot.Tests
 
     public sealed class UPilotAssetMutationContractTests
     {
+        [Test]
+        public void DeleteFailureAndUnverifiedEffectsNeverReportSuccessOrRetry()
+        {
+            AssetDatabase.CreateFolder("Assets", "UPilotAssetMutationTests");
+            string path = TempFolder + "/DeleteFailure.mat";
+            var asset = new Material(Shader.Find("Hidden/InternalErrorShader"));
+            AssetDatabase.CreateAsset(asset, path);
+            foreach (bool reportedSuccess in new[] { false, true })
+            {
+                int calls = 0;
+                var error = Assert.Throws<System.InvalidOperationException>(() =>
+                    UPilotAssetService.DeleteAsset(path, _ => { calls++; return reportedSuccess; }));
+                Assert.That(calls, Is.EqualTo(1));
+                Assert.That(error.Message, Does.Contain("unverified").And.Contain("do not retry"));
+                Assert.That(System.IO.File.Exists(path), Is.True);
+                Assert.That(System.IO.File.Exists(path + ".meta"), Is.True);
+            }
+        }
         private const string TempFolder = "Assets/UPilotAssetMutationTests";
+
+        [Test]
+        public void DeleteReturnsVerifiedConsistentResultsAcrossTenIterations()
+        {
+            AssetDatabase.CreateFolder("Assets", "UPilotAssetMutationTests");
+            for (var index = 0; index < 10; index++)
+            {
+                var path = $"{TempFolder}/Delete_{index}.mat";
+                AssetDatabase.CreateAsset(new Material(Shader.Find("Hidden/InternalErrorShader")), path);
+                var guid = AssetDatabase.AssetPathToGUID(path);
+                var result = UPilotAssetService.DeleteAsset(path);
+                Assert.That(result.ok && result.verified && result.deleted, Is.True);
+                Assert.That(result.status, Is.EqualTo("ok"));
+                Assert.That(result.sourceGuid, Is.EqualTo(guid));
+                Assert.That(System.IO.File.Exists(path), Is.False);
+                Assert.That(System.IO.File.Exists(path + ".meta"), Is.False);
+                Assert.That(AssetDatabase.LoadMainAssetAtPath(path), Is.Null);
+                Assert.Throws<System.InvalidOperationException>(() => UPilotAssetService.DeleteAsset(path));
+            }
+            Assert.Throws<System.ArgumentException>(() => UPilotAssetService.DeleteAsset("Assets/../package.json"));
+        }
 
         [TearDown]
         public void TearDown()

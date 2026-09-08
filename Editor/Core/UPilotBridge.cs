@@ -1353,6 +1353,9 @@ namespace CodingRiver.UPilot
             var resultTcs = new TaskCompletionSource<GenericOkPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             EnqueueTracked(id, () =>
             {
+                if ((action == "play") != EditorApplication.isPlaying)
+                    UPilotPlayModeTransitions.RegisterIntent("upilot", action == "play" ? "play" : "edit",
+                        command?.payload?.requestId, id, command?.payload?.operationId, command?.payload?.toolName);
                 var payload = _playInputService.SetPlayMode(action);
                 resultTcs.TrySetResult(payload);
             });
@@ -1632,6 +1635,7 @@ namespace CodingRiver.UPilot
             }
             return new EditorContextPayload
             {
+                playModeTransition = UPilotPlayModeTransitions.Latest,
                 stateContractVersion = 2,
                 projectId = ProjectPathHashSuffix,
                 producerEpoch = _producerEpoch,
@@ -1753,6 +1757,7 @@ namespace CodingRiver.UPilot
                 updatedAt = context.updatedAt,
                 contextUpdatedAt = context.contextUpdatedAt,
                 playModeState = context.playModeState,
+                playModeTransition = context.playModeTransition,
                 isPlaying = context.isPlaying,
                 isPaused = context.isPaused,
                 isCompiling = context.isCompiling,
@@ -1922,6 +1927,7 @@ namespace CodingRiver.UPilot
 
         private void OnPlayModeStateChanged(PlayModeStateChange change)
         {
+            UPilotPlayModeTransitions.Observe(change, _sessionId);
             Logger.Log("SYSTEM", $"PlayMode 状态变更: {change}");
             _executionService?.OnPlayModeStateChanged(change);
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -1942,6 +1948,7 @@ namespace CodingRiver.UPilot
                 $"state={change}");
             if (_cts == null || _cts.IsCancellationRequested) return;
             var payload = _playInputService.CurrentPlayModeChangedPayload();
+            payload.transition = UPilotPlayModeTransitions.Latest;
             _cachedPlayModeState = payload.state;
             _ = PublishExecutionStateAsync("play_mode_changed", _cts.Token);
             _ = SendPlayModeChangedEventAsync(payload, _cts.Token);

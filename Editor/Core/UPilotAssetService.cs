@@ -58,6 +58,7 @@ namespace CodingRiver.UPilot
         public string sha256;
         public bool saved;
         public bool verified;
+        public bool deleted;
     }
 
     [Serializable] public class AssetGetDataMessage { public AssetGetDataPayload payload; }
@@ -607,28 +608,20 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<AssetMutationResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    bool ok = AssetDatabase.DeleteAsset(p.assetPath);
-                    if (!ok)
-                    {
-                        tcs.SetException(new Exception($"DeleteAsset failed: {p.assetPath}"));
-                        return;
-                    }
-
-                    AssetDatabase.SaveAssets();
-                    tcs.SetResult(true);
+                    tcs.SetResult(DeleteAsset(p.assetPath));
                 }
                 catch (Exception ex) { tcs.SetException(ex); }
             });
 
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "asset.delete", new GenericOkPayload { status = "ok" }, token);
+                var result = await tcs.Task;
+                await _bridge.SendResultAsync(id, "asset.delete", result, token);
             }
             catch (Exception ex)
             {
@@ -1430,6 +1423,34 @@ namespace CodingRiver.UPilot
                 saved = true,
                 verified = AssetExists(destinationPath) && !string.IsNullOrEmpty(destinationGuid),
             };
+        }
+
+        internal static AssetMutationResultPayload DeleteAsset(string assetPath, Func<string, bool> delete = null)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.Ordinal)
+                || assetPath.Contains("..") || assetPath.Contains("\\"))
+                throw new ArgumentException("Delete requires an exact project-relative Assets/ path.", nameof(assetPath));
+            EnsureAssetExists(assetPath, "Asset");
+            var sourceGuid = AssetDatabase.AssetPathToGUID(assetPath);
+            try
+            {
+                if (!(delete ?? AssetDatabase.DeleteAsset)(assetPath))
+                    throw new InvalidOperationException("AssetDatabase.DeleteAsset returned false.");
+                if (File.Exists(assetPath) || Directory.Exists(assetPath) || File.Exists(assetPath + ".meta")
+                    || AssetDatabase.LoadMainAssetAtPath(assetPath) != null)
+                    throw new InvalidOperationException("Deletion postconditions could not be verified.");
+                return new AssetMutationResultPayload
+                {
+                    operation = "asset.delete", sourcePath = assetPath, sourceGuid = sourceGuid,
+                    ok = true, verified = true, deleted = true, saved = true,
+                };
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Delete was attempted for {assetPath} (GUID {sourceGuid}); its effects are unverified. "
+                    + "Inspect actual asset and meta state; do not retry automatically. " + ex.Message, ex);
+            }
         }
 
         private static bool AssetExists(string assetPath)

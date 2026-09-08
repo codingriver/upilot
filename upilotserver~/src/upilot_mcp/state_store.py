@@ -86,6 +86,7 @@ class StateStore:
         self.sequence = 0
         self.snapshot_id = ""
         self.transition = ""
+        self.playmode_transition: dict[str, Any] = {}
         self.observed_at = 0
         self.received_at = 0
         self.pending_write_batch_id = ""
@@ -111,6 +112,7 @@ class StateStore:
             self.sequence = 0
             self.snapshot_id = ""
             self.transition = ""
+            self.playmode_transition = {}
             self.observed_at = 0
             self.received_at = 0
             self.pending_write_batch_id = ""
@@ -348,6 +350,8 @@ class StateStore:
                 return False
 
         self.project_id = str(payload.get("projectId") or self.project_id)
+        transition = payload.get("playModeTransition")
+        self.playmode_transition = dict(transition) if isinstance(transition, dict) else {}
         self.producer_epoch = incoming_epoch
         self.domain_generation = incoming_domain
         self.sequence = incoming_sequence

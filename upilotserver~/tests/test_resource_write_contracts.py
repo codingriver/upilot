@@ -130,6 +130,18 @@ def test_mutation_success_requires_matching_inner_ok_and_verification() -> None:
     assert rejected.error.detail["bridgeData"]["ok"] is False
 
 
+def test_asset_delete_rejects_contradictory_success_without_retry(monkeypatch) -> None:
+    monkeypatch.setattr(CONFIG, "write_access_approved", True)
+    dispatcher = _RecordingDispatcher()
+    service = ResourceDomainService()
+    service.dispatcher = dispatcher
+    result = asyncio.run(service.asset_delete("Assets/Deleted.asset"))
+    assert not result.ok
+    assert result.error.code == "RESULT_CONTRACT_VIOLATION"
+    assert len(dispatcher.calls) == 1
+    assert dispatcher.calls[0][1] == "asset.delete"
+
+
 def test_prefab_physics_audit_dispatches_one_bounded_read_only_batch() -> None:
     dispatcher = _RecordingDispatcher()
     service = ResourceDomainService()

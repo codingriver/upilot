@@ -19,6 +19,8 @@ MonoBehaviour:
   autoApplyOnPlayMode: 0
   suppressUnchangedValues: 1
   maxEventsPerSecond: 10000
+  enableIngressBudget: 0
+  maxIngressEventsPerSecond: 1000
   enablePerObjectRateLimit: 0
   maxEventsPerObjectPerSecond: 100
   suppressDuplicateEvents: 0

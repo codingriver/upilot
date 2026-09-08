@@ -293,7 +293,9 @@ namespace CodingRiver.UPilot
                     bool isStatic = p.isStatic;
                     if (!string.IsNullOrWhiteSpace(p.targetHandle))
                     {
-                        target = _execution.Sessions.Resolve(p.sessionId, p.targetHandle);
+                        target = p.targetHandle.StartsWith("window:", StringComparison.Ordinal)
+                            ? UPilotWindowInputRegistry.ResolveHandle(p.targetHandle)
+                            : _execution.Sessions.Resolve(p.sessionId, p.targetHandle);
                         if (target == null)
                             throw new ExecutionContractException("HANDLE_TARGET_INVALID", "targetHandle resolved to null.");
                         isStatic = false;

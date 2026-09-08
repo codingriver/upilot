@@ -209,6 +209,7 @@ async def unity_mouse_event(
     scrollDeltaY: float = 0.0,
     elementName: str = "",
     elementIndex: int = -1,
+    windowInstanceId: str = "",
 ):
     _log_tool_call(
         "unity_mouse_event",
@@ -239,6 +240,7 @@ async def unity_mouse_event(
         scroll_delta_y=scrollDeltaY,
         element_name=elementName,
         element_index=elementIndex,
+        window_instance_id=windowInstanceId,
     )
     return _log_tool_result("unity_mouse_event", _payload(r))
 
@@ -302,6 +304,7 @@ async def unity_keyboard_event(
     character: str = "",
     text: str = "",
     modifiers: list[str] | None = None,
+    windowInstanceId: str = "",
 ):
     _log_tool_call(
         "unity_keyboard_event",
@@ -321,6 +324,7 @@ async def unity_keyboard_event(
         action=action,
         target_window=targetWindow,
         key_code=keyCode,
+        window_instance_id=windowInstanceId,
         character=character,
         text=text,
         modifiers=modifiers,

@@ -14,6 +14,8 @@ namespace MonoHook
         protected void*     _pTarget, _pReplace, _pProxy;
         protected int       _jmpCodeSize;
         protected byte[]    _targetHeaderBackup;
+        private byte[] _installedHeader;
+        private bool _unknownState;
 
         public CodePatcher(IntPtr target, IntPtr replace, IntPtr proxy, int jmpCodeSize)
         {
@@ -25,21 +27,49 @@ namespace MonoHook
 
         public void ApplyPatch()
         {
+            if (_unknownState) throw new InvalidOperationException("Unknown patch state; reinstall refused.");
             BackupHeader();
-            EnableAddrModifiable();
-            PatchTargetMethod();
-            PatchProxyMethod();
-            FlushICache();
+            RequireHeader(_targetHeaderBackup);
+            try
+            {
+                EnableAddrModifiable();
+                // Prepare the original-call proxy before exposing the replacement.
+                PatchProxyMethod();
+                if (_pProxy != null) HookUtils.FlushICache(_pProxy, _targetHeaderBackup.Length + _jmpCodeSize);
+                PatchTargetMethod();
+                _installedHeader = ReadHeader();
+                FlushICache();
+            }
+            catch { _unknownState = true; throw; }
         }
 
         public void RemovePatch()
         {
             if (_targetHeaderBackup == null)
                 return;
+            if (_unknownState) throw new InvalidOperationException("Unknown patch state; restore refused.");
+            RequireHeader(_installedHeader);
+            try
+            {
+                EnableAddrModifiable();
+                RestoreHeader();
+                FlushICache();
+            }
+            catch { _unknownState = true; throw; }
+        }
 
-            EnableAddrModifiable();
-            RestoreHeader();
-            FlushICache();
+        private byte[] ReadHeader()
+        {
+            var bytes = new byte[_targetHeaderBackup.Length];
+            fixed (void* destination = bytes) HookUtils.MemCpy(destination, _pTarget, bytes.Length);
+            return bytes;
+        }
+
+        private void RequireHeader(byte[] expected)
+        {
+            if (expected != null && ReadHeader().SequenceEqual(expected)) return;
+            _unknownState = true;
+            throw new InvalidOperationException("Target patch bytes do not match this owner; no overwrite was performed.");
         }
 
         protected void BackupHeader()
@@ -86,7 +116,7 @@ namespace MonoHook
         protected void FlushICache()
         {
             HookUtils.FlushICache(_pTarget, _targetHeaderBackup.Length);
-            HookUtils.FlushICache(_pProxy, _targetHeaderBackup.Length * 2);
+            if (_pProxy != null) HookUtils.FlushICache(_pProxy, _targetHeaderBackup.Length + _jmpCodeSize);
         }
         protected abstract byte[] GenJmpCode(void* jmpFrom, void* jmpTo);
 
@@ -103,7 +133,7 @@ namespace MonoHook
         private void EnableAddrModifiable()
         {
             HookUtils.SetAddrFlagsToRWX(new IntPtr(_pTarget), _targetHeaderBackup.Length);
-            HookUtils.SetAddrFlagsToRWX(new IntPtr(_pProxy), _targetHeaderBackup.Length + _jmpCodeSize);
+            if (_pProxy != null) HookUtils.SetAddrFlagsToRWX(new IntPtr(_pProxy), _targetHeaderBackup.Length + _jmpCodeSize);
         }
     }
 

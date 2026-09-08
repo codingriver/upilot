@@ -130,6 +130,12 @@ namespace CodingRiver.UPilot
     {
         private static readonly Dictionary<string, Type> TypeCacheByName =
             new Dictionary<string, Type>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, Regex> PatternCache = new Dictionary<string, Regex>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string[]> ListCache = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        [Flags]
+        private enum ContextNeeds { None = 0, Name = 1, Hierarchy = 2, Scene = 4, Type = 8, InstanceId = 16, All = 31 }
+        internal static int ContextBuildCount { get; private set; }
+        internal static int GlobalIdReadCount { get; private set; }
         private static readonly Dictionary<string, UPilotTraceFilterStatistics> Statistics =
             new Dictionary<string, UPilotTraceFilterStatistics>(StringComparer.Ordinal);
         private static readonly Regex NumberRegex = new Regex(
@@ -258,6 +264,24 @@ namespace CodingRiver.UPilot
                 return true;
             }
 
+            var rules = profile.Rules;
+            int activeCount = 0;
+            int includeCount = 0;
+            var needs = ContextNeeds.None;
+            if (rules != null)
+                foreach (var rule in rules)
+                {
+                    if (rule == null || !rule.Enabled) continue;
+                    activeCount++;
+                    if (rule.Effect == UPilotTraceFilterRuleEffect.Include) includeCount++;
+                    needs |= GetContextNeeds(rule);
+                }
+            if (activeCount == 0)
+            {
+                decision.Reason = "过滤器没有启用的规则";
+                if (track) Track(pointId, decision);
+                return true;
+            }
             var context = BuildContext(
                 pointId,
                 target,
@@ -273,15 +297,11 @@ namespace CodingRiver.UPilot
                 targetType,
                 targetGlobalObjectId,
                 eventSource,
-                targetInstanceId);
-            var rules = (profile.Rules ?? new List<UPilotTraceFilterRule>())
-                .Where(rule => rule != null && rule.Enabled)
-                .ToArray();
-            var includes = rules.Where(rule => rule.Effect == UPilotTraceFilterRuleEffect.Include).ToArray();
-            var excludes = rules.Where(rule => rule.Effect == UPilotTraceFilterRuleEffect.Exclude).ToArray();
+                targetInstanceId, needs);
 
-            foreach (var rule in excludes)
+            foreach (var rule in rules)
             {
+                if (rule == null || !rule.Enabled || rule.Effect != UPilotTraceFilterRuleEffect.Exclude) continue;
                 if (!RuleMatches(rule, context, out _)) continue;
                 decision.Accepted = false;
                 decision.Reason = "命中排除规则：" + rule.Name;
@@ -289,10 +309,11 @@ namespace CodingRiver.UPilot
                 return false;
             }
 
-            if (includes.Length > 0)
+            if (includeCount > 0)
             {
-                foreach (var rule in includes)
+                foreach (var rule in rules)
                 {
+                    if (rule == null || !rule.Enabled || rule.Effect != UPilotTraceFilterRuleEffect.Include) continue;
                     if (!RuleMatches(rule, context, out _)) continue;
                     decision.Accepted = true;
                     decision.Reason = "命中包含规则：" + rule.Name;
@@ -306,7 +327,7 @@ namespace CodingRiver.UPilot
             }
 
             decision.Accepted = true;
-            decision.Reason = rules.Length == 0 ? "过滤器没有启用的规则" : "未命中排除规则";
+            decision.Reason = "未命中排除规则";
             if (track) Track(pointId, decision);
             return true;
         }
@@ -376,7 +397,24 @@ namespace CodingRiver.UPilot
             return result;
         }
 
-        internal static void ClearStatistics() => Statistics.Clear();
+        internal static void ClearStatistics()
+        {
+            Statistics.Clear();
+            ContextBuildCount = 0;
+            GlobalIdReadCount = 0;
+        }
+
+        private static ContextNeeds GetContextNeeds(UPilotTraceFilterRule rule)
+        {
+            if (!string.IsNullOrWhiteSpace(rule.CustomFilterId)) return ContextNeeds.All;
+            var needs = ContextNeeds.None;
+            if (rule.NameMatchMode != UPilotTraceStringMatchMode.Any) needs |= ContextNeeds.Name;
+            if (rule.HierarchyMatchMode != UPilotTraceHierarchyMatchMode.Any) needs |= ContextNeeds.Hierarchy;
+            if (rule.SceneMatchMode != UPilotTraceStringMatchMode.Any) needs |= ContextNeeds.Scene;
+            if (HasAnyTypeCriteria(rule)) needs |= ContextNeeds.Type;
+            if (rule.TargetInstanceId != 0) needs |= ContextNeeds.InstanceId;
+            return needs;
+        }
 
         private static void Track(string pointId, UPilotTraceFilterDecision decision)
         {
@@ -415,28 +453,25 @@ namespace CodingRiver.UPilot
             string targetType = null,
             string targetGlobalObjectId = null,
             string eventSource = null,
-            int targetInstanceId = 0)
+            int targetInstanceId = 0,
+            ContextNeeds needs = ContextNeeds.All)
         {
+            ContextBuildCount++;
             var gameObject = target as GameObject;
             var component = target as Component;
             if (gameObject == null && component != null) gameObject = component.gameObject;
-            if (string.IsNullOrEmpty(objectName))
+            if ((needs & ContextNeeds.Name) != 0 && string.IsNullOrEmpty(objectName))
                 objectName = gameObject != null ? gameObject.name : component != null ? component.name : target != null ? target.name : string.Empty;
-            if (string.IsNullOrEmpty(hierarchyPath) && gameObject != null)
+            if ((needs & ContextNeeds.Hierarchy) != 0 && string.IsNullOrEmpty(hierarchyPath) && gameObject != null)
                 hierarchyPath = BuildHierarchyPath(gameObject.transform);
-            if (string.IsNullOrEmpty(scenePath) && gameObject != null && gameObject.scene.IsValid())
+            if ((needs & ContextNeeds.Scene) != 0 && string.IsNullOrEmpty(scenePath) && gameObject != null && gameObject.scene.IsValid())
                 scenePath = string.IsNullOrEmpty(gameObject.scene.path) ? gameObject.scene.name : gameObject.scene.path;
-            if (string.IsNullOrEmpty(componentType) && target != null)
+            if ((needs & ContextNeeds.Type) != 0 && string.IsNullOrEmpty(componentType) && target != null)
                 componentType = target.GetType().FullName;
-            if (string.IsNullOrEmpty(targetType) && target != null)
+            if ((needs & ContextNeeds.Type) != 0 && string.IsNullOrEmpty(targetType) && target != null)
                 targetType = target.GetType().FullName;
-            if (targetInstanceId == 0 && target != null)
+            if ((needs & ContextNeeds.InstanceId) != 0 && targetInstanceId == 0 && target != null)
                 targetInstanceId = UPilotMonoHookInstallationService.GetObjectId(target);
-            if (string.IsNullOrEmpty(targetGlobalObjectId) && target != null)
-            {
-                try { targetGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(target).ToString(); }
-                catch { targetGlobalObjectId = string.Empty; }
-            }
             return new UPilotTraceFilterContext(
                 pointId,
                 target,
@@ -454,7 +489,14 @@ namespace CodingRiver.UPilot
                 targetType,
                 targetGlobalObjectId,
                 eventSource,
-                targetInstanceId);
+                targetInstanceId,
+                () =>
+                {
+                    if (target == null) return string.Empty;
+                    GlobalIdReadCount++;
+                    try { return GlobalObjectId.GetGlobalObjectIdSlow(target).ToString(); }
+                    catch { return string.Empty; }
+                });
         }
 
         private static bool RuleMatches(
@@ -478,14 +520,13 @@ namespace CodingRiver.UPilot
             if (!MatchesRequiredComponent(rule, context.GameObject)) { reason = "必需组件不匹配"; return false; }
             if (rule.TargetInstanceId != 0 && context.TargetInstanceId != rule.TargetInstanceId)
             { reason = "对象 InstanceID 不匹配"; return false; }
-            if (!string.IsNullOrWhiteSpace(rule.TargetGlobalObjectId) &&
-                !string.Equals(context.TargetGlobalObjectId, rule.TargetGlobalObjectId.Trim(), StringComparison.Ordinal))
-            { reason = "对象 GlobalObjectId 不匹配"; return false; }
             if (!MatchesString(context.ObjectName, rule.NamePattern, rule.NameMatchMode, rule.IgnoreCase)) { reason = "名称不匹配"; return false; }
             if (!MatchesHierarchy(context.HierarchyPath, rule.HierarchyPattern, rule.HierarchyMatchMode, rule.IgnoreCase)) { reason = "Hierarchy 不匹配"; return false; }
             if (!MatchesHierarchyRelation(context.GameObject, rule)) { reason = "父级或层级不匹配"; return false; }
             if (!MatchesString(context.ScenePath, rule.ScenePattern, rule.SceneMatchMode, rule.IgnoreCase)) { reason = "场景不匹配"; return false; }
-            string assetPath = context.Target == null ? string.Empty : AssetDatabase.GetAssetPath(context.Target);
+            string assetPath = rule.AssetPathMatchMode == UPilotTraceStringMatchMode.Any ||
+                               string.IsNullOrEmpty(rule.AssetPathPattern) || context.Target == null
+                ? string.Empty : AssetDatabase.GetAssetPath(context.Target);
             if (!MatchesString(assetPath, rule.AssetPathPattern, rule.AssetPathMatchMode, rule.IgnoreCase)) { reason = "资源路径不匹配"; return false; }
             if (!MatchesPrefabAssetPath(rule, context)) { reason = "Prefab 来源不匹配"; return false; }
             if (rule.LayerMask != -1 && (context.GameObject == null || (rule.LayerMask & (1 << context.GameObject.layer)) == 0)) { reason = "Layer 不匹配"; return false; }
@@ -495,6 +536,9 @@ namespace CodingRiver.UPilot
             if (!MatchesPrefab(rule.PrefabState, context)) { reason = "Prefab 状态不匹配"; return false; }
             if (!MatchesSelection(rule.SelectionScope, context.GameObject)) { reason = "选中范围不匹配"; return false; }
             if (!MatchesValue(rule, context)) { reason = "值条件不匹配"; return false; }
+            if (!string.IsNullOrWhiteSpace(rule.TargetGlobalObjectId) &&
+                !string.Equals(context.TargetGlobalObjectId, rule.TargetGlobalObjectId.Trim(), StringComparison.Ordinal))
+            { reason = "对象 GlobalObjectId 不匹配"; return false; }
             if (!MatchesCustom(rule, context, out reason)) return false;
             reason = "匹配";
             return true;
@@ -733,8 +777,7 @@ namespace CodingRiver.UPilot
                 case UPilotTraceStringMatchMode.StartsWith: return value.StartsWith(pattern, comparison);
                 case UPilotTraceStringMatchMode.Wildcard: return WildcardMatches(value, pattern, ignoreCase);
                 case UPilotTraceStringMatchMode.Regex:
-                    try { return Regex.IsMatch(value, pattern, ignoreCase ? RegexOptions.IgnoreCase | RegexOptions.CultureInvariant : RegexOptions.CultureInvariant); }
-                    catch { return false; }
+                    return MatchCached(value, pattern, ignoreCase, false);
                 default: return true;
             }
         }
@@ -747,15 +790,36 @@ namespace CodingRiver.UPilot
 
         private static bool WildcardMatches(string value, string pattern, bool ignoreCase)
         {
-            string expression = "^" + Regex.Escape(pattern ?? string.Empty).Replace("\\*", ".*").Replace("\\?", ".") + "$";
-            return Regex.IsMatch(value ?? string.Empty, expression,
-                ignoreCase ? RegexOptions.IgnoreCase | RegexOptions.CultureInvariant : RegexOptions.CultureInvariant);
+            return MatchCached(value, pattern, ignoreCase, true);
+        }
+
+        private static bool MatchCached(string value, string pattern, bool ignoreCase, bool wildcard)
+        {
+            string key = (ignoreCase ? "i" : "c") + (wildcard ? "w" : "r") + pattern;
+            try
+            {
+                if (!PatternCache.TryGetValue(key, out var regex))
+                {
+                    if (PatternCache.Count >= 512) PatternCache.Clear();
+                    string expression = wildcard
+                        ? "^" + Regex.Escape(pattern ?? string.Empty).Replace("\\*", ".*").Replace("\\?", ".") + "$"
+                        : pattern;
+                    regex = new Regex(expression, ignoreCase ? RegexOptions.IgnoreCase | RegexOptions.CultureInvariant : RegexOptions.CultureInvariant,
+                        TimeSpan.FromMilliseconds(20));
+                    PatternCache[key] = regex;
+                }
+                return regex.IsMatch(value ?? string.Empty);
+            }
+            catch (ArgumentException) { return false; }
+            catch (RegexMatchTimeoutException) { return false; }
         }
 
         private static string[] ParseList(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return Array.Empty<string>();
-            return value.Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            if (ListCache.TryGetValue(value, out var cached)) return cached;
+            if (ListCache.Count >= 512) ListCache.Clear();
+            return ListCache[value] = value.Split(new[] { ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(item => item.Trim()).Where(item => item.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 

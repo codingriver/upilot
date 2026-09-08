@@ -89,6 +89,11 @@ class CommandDispatcher:
                 return fail(request_id, "UNITY_NOT_CONNECTED", "Unity 未连接", {"command": name}, timing={"totalMs": round((time.monotonic() - started) * 1000), "queueMs": 0, "bridgeMs": 0, "unityExecutionMs": 0})
 
         command_id = new_id("cmd")
+        if name in ("playmode.set", "test.run"):
+            from .operation_context import OPERATION_ID
+            payload = {**payload, "requestId": request_id, "operationId": OPERATION_ID.get()}
+            if name == "playmode.set":
+                payload["toolName"] = "unity_playmode_start" if payload.get("action") == "play" else "unity_playmode_stop"
         self.state.create_command(command_id=command_id, request_id=request_id, name=name, payload=payload)
 
         future = self.transport.register_pending(command_id)

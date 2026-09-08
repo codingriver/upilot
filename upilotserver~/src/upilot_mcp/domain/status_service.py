@@ -193,6 +193,7 @@ class StatusDomainService:
         execution = self.server.state.execution_state()
         data = {
                 "connected": self.server.session_manager.is_connected(),
+                "playModeTransition": getattr(self.server.state, "playmode_transition", {}),
                 "serverReady": self.server.is_ready(),
                 "session": {
                     "sessionId": session.session_id if session else "",
@@ -656,6 +657,7 @@ class StatusDomainService:
         scroll_delta_y: float = 0.0,
         element_name: str = "",
         element_index: int = -1,
+        window_instance_id: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {
@@ -664,6 +666,7 @@ class StatusDomainService:
             "x": x,
             "y": y,
             "targetWindow": target_window,
+            "windowInstanceId": window_instance_id,
             "modifiers": modifiers or [],
             "scrollDeltaX": scroll_delta_x,
             "scrollDeltaY": scroll_delta_y,
@@ -822,12 +825,14 @@ class StatusDomainService:
         character: str = "",
         text: str = "",
         modifiers: list[str] | None = None,
+        window_instance_id: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
         payload = {
             "action": action,
             "targetWindow": target_window,
             "keyCode": key_code,
+            "windowInstanceId": window_instance_id,
             "character": character,
             "text": text,
             "modifiers": modifiers or [],

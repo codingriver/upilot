@@ -112,6 +112,52 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void DisabledAndEmptyFiltersSkipContextAndRejectedNamesSkipGlobalIds()
+        {
+            Assert.That(Evaluate(_child, "tests.filter"), Is.True);
+            Assert.That(UPilotTraceFilterEngine.ContextBuildCount, Is.Zero);
+            var profile = NewProfile("lazy");
+            UseProfile(profile);
+            Assert.That(Evaluate(_child, "tests.filter"), Is.True);
+            Assert.That(UPilotTraceFilterEngine.ContextBuildCount, Is.Zero);
+            profile.Rules.Add(new UPilotTraceFilterRule
+            {
+                NameMatchMode = UPilotTraceStringMatchMode.Equals,
+                NamePattern = "not-this-object",
+                TargetGlobalObjectId = "must-not-be-read",
+            });
+            for (int i = 0; i < 1000; i++)
+                Assert.That(Evaluate(_child, "tests.filter"), Is.False);
+            Assert.That(UPilotTraceFilterEngine.GlobalIdReadCount, Is.Zero);
+        }
+
+        [Test]
+        public void IngressBudgetIsOptInAndHasIndependentDropCount()
+        {
+            bool enabled = _settings.enableIngressBudget;
+            int limit = _settings.maxIngressEventsPerSecond;
+            try
+            {
+                UPilotMonoHookInstallationService.ClearEvents();
+                _settings.enableIngressBudget = false;
+                _settings.maxIngressEventsPerSecond = 1;
+                for (int i = 0; i < 20; i++)
+                    Assert.That(UPilotMonoHookInstallationService.TryAcquireIngressSlot(_settings), Is.True);
+                _settings.enableIngressBudget = true;
+                Assert.That(UPilotMonoHookInstallationService.TryAcquireIngressSlot(_settings), Is.True);
+                Assert.That(UPilotMonoHookInstallationService.TryAcquireIngressSlot(_settings), Is.False);
+                Assert.That(UPilotMonoHookInstallationService.IngressDroppedCount, Is.EqualTo(1));
+                Assert.That(UPilotMonoHookInstallationService.PerObjectDroppedCount, Is.Zero);
+            }
+            finally
+            {
+                _settings.enableIngressBudget = enabled;
+                _settings.maxIngressEventsPerSecond = limit;
+                UPilotMonoHookInstallationService.ClearEvents();
+            }
+        }
+
+        [Test]
         public void NameAndHierarchyRulesUseAndSemantics()
         {
             var profile = NewProfile("name-hierarchy");

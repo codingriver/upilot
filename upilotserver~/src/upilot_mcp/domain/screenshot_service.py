@@ -23,6 +23,7 @@ from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
+from ..operation_context import TASK_TOOL
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -218,6 +219,10 @@ class ScreenshotDomainService:
     ) -> ToolResponse:
         if (format or "png").strip().lower() != "png":
             return fail(new_id("req"), "INVALID_SCREENSHOT_FORMAT", "Snapshot-backed screenshots support PNG only.", {"format": format})
+        if not TASK_TOOL.get():
+            return await self._bounded_snapshot_task("unity_screenshot_scene_view", {
+                "width": width, "height": height, "format": format, "quality": quality,
+            })
         resolved = await self._resolve_snapshot_window("sceneView", type_filter="UnityEditor.SceneView")
         if isinstance(resolved, ToolResponse):
             return resolved
@@ -341,6 +346,12 @@ class ScreenshotDomainService:
         degrade: str = "none",
         fallback_sources: list[str] | None = None,
     ) -> ToolResponse:
+        if (source or "").lower() == "sceneview" and not TASK_TOOL.get():
+            return await self._bounded_snapshot_task("unity_screenshot_save", {
+                "path": path, "source": source, "overwrite": overwrite, "width": width, "height": height,
+                "format": format, "quality": quality, "cameraName": camera_name, "windowTitle": window_title,
+                "allowOutsideProject": allow_outside_project, "degrade": degrade, "fallbackSources": fallback_sources,
+            })
         request_id = new_id("req")
         image_format = (format or "png").strip().lower()
         if image_format != "png":
@@ -402,6 +413,8 @@ class ScreenshotDomainService:
         data = captured.data
         image_data = str(data.get("imageData") or "")
         if not image_data:
+            if data.get("taskId") and data.get("terminal") is False:
+                return captured
             return fail(request_id, "SNAPSHOT_SCREENSHOT_ARTIFACT_MISSING", "Snapshot wrapper did not return image bytes.", {"snapshot": data.get("snapshot")})
         try:
             raw = self._decode_screenshot_image_data(image_data)

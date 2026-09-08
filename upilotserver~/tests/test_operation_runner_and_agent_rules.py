@@ -372,7 +372,8 @@ def test_operation_cancel_waits_for_status_and_cleanup_before_terminal(tmp_path:
 
     cleaning = asyncio.run(service.operation_status(operation_id))
     assert cleaning.ok
-    assert cleaning.data["status"] == "Stopping"
+    assert cleaning.data["status"] == "CleaningUp"
+    assert cleaning.data["businessTerminal"] is True
     assert cleaning.data["phase"] == "Cleanup"
     assert cleaning.data["cleanupPending"] is True
     assert cleaning.data["terminal"] is False

@@ -120,6 +120,8 @@ namespace MonoHook
 
         public void Install()
         {
+            lock (HookPool.SyncRoot)
+            {
             if (LDasm.IsiOS()) // iOS 不支持修改 code 所在区域 page
                 return;
 
@@ -135,17 +137,23 @@ namespace MonoHook
             DoInstall();
 #endif
             isPlayModeHook = Application.isPlaying;
+            }
         }
 
         public void Uninstall()
         {
+            lock (HookPool.SyncRoot)
+            {
             if (!isHooked)
                 return;
 
+            if (!ReferenceEquals(HookPool.GetHook(targetMethod), this))
+                throw new InvalidOperationException("Hook ownership changed; refusing to restore unknown code.");
             _codePatcher.RemovePatch();
 
             isHooked = false;
             HookPool.RemoveHooker(targetMethod);
+            }
         }
 
         #region private
@@ -156,6 +164,8 @@ namespace MonoHook
 
             HookPool.AddHook(targetMethod, this);
 
+            try
+            {
             if (_codePatcher == null)
             {
                 if (GetFunctionAddr())
@@ -168,7 +178,6 @@ namespace MonoHook
 #endif
 
                     CreateCodePatcher();
-                    _codePatcher.ApplyPatch();
 
 #if ENABLE_HOOK_DEBUG
                     Codingriver.Logger.Log($"New [{targetMethod.DeclaringType.Name}.{targetMethod.Name}]: {HookUtils.HexToString(_targetPtr.ToPointer(), 64, -16)}");
@@ -178,8 +187,18 @@ namespace MonoHook
 #endif
                 }
             }
-
+            if (_codePatcher == null)
+                throw new InvalidOperationException("Could not resolve managed Hook function addresses.");
+            // A cached patcher must reapply after uninstall, too.
+            _codePatcher.ApplyPatch();
             isHooked = true;
+            }
+            catch
+            {
+                // Keep ownership if native bytes may already have changed.
+                if (_codePatcher == null) HookPool.RemoveHooker(targetMethod);
+                throw;
+            }
         }
 
         private void CheckMethod()

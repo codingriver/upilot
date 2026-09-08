@@ -214,6 +214,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class SnapshotFailurePayload
     {
+        public EditorWindowPixelCapture captureDiagnostics;
         public string targetId;
         public string code;
         public string message;
@@ -484,9 +485,14 @@ namespace CodingRiver.UPilot
 
                 UpdateJob(job, "running", "rendering", false, false);
                 var hasGameView = resolved.targets.Any(value => value.kind == "gameview");
-                var frame = hasGameView ? -1 : Time.frameCount;
+                // A single SceneView must wait for a new Repaint. Its capture frame,
+                // not its request frame, is the sameFrame baseline. Multi-target
+                // requests retain the strict existing cross-target frame check.
+                var singleSceneView = resolved.targets.Count == 1 && resolved.targets[0].kind == "sceneview";
+                var deferredFrame = hasGameView || singleSceneView;
+                var frame = deferredFrame ? -1 : Time.frameCount;
                 job.frame.frameCount = frame;
-                job.frame.fixedTime = hasGameView ? 0f : Time.fixedTime;
+                job.frame.fixedTime = deferredFrame ? 0f : Time.fixedTime;
                 job.frame.playModeState = EditorApplication.isPlaying ? "play" : "edit";
 
                 var captureTargets = resolved.targets
@@ -501,8 +507,12 @@ namespace CodingRiver.UPilot
                     }
                     try
                     {
-                        await CaptureTargetAsync(job, item, request.channels, request.capturePolicy);
-                        if (frame < 0 && item.kind == "gameview")
+                        var captureTask = CaptureTargetAsync(job, item, request.channels, request.capturePolicy);
+                        if (item.kind == "sceneview")
+                            await new SceneViewEditorCompletion(captureTask);
+                        else
+                            await captureTask;
+                        if (frame < 0 && (item.kind == "gameview" || singleSceneView))
                         {
                             frame = Time.frameCount;
                             job.frame.frameCount = frame;
@@ -515,6 +525,8 @@ namespace CodingRiver.UPilot
                             ? sre.Code
                             : "SNAPSHOT_TARGET_CAPTURE_FAILED";
                         RecordTargetFailure(job, item.request, code, ex.Message, "rendering");
+                        if (ex is EditorWindowCaptureException captureError)
+                            job.failures[job.failures.Count - 1].captureDiagnostics = captureError.Diagnostics;
                         if (allOrNothing)
                         {
                             RejectArtifacts(job);
@@ -567,7 +579,7 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task CaptureTargetAsync(
+        private Task CaptureTargetAsync(
             SnapshotJobPayload job,
             ResolvedSnapshotTarget target,
             string[] defaultChannels,
@@ -577,16 +589,14 @@ namespace CodingRiver.UPilot
             {
                 case "camera":
                     CaptureCameraTarget(job, target.request, target.camera, defaultChannels, capturePolicy);
-                    return;
+                    return Task.CompletedTask;
                 case "sceneview":
-                    await CaptureSceneViewTargetAsync(job, target.request, target.sceneView, defaultChannels, capturePolicy);
-                    return;
+                    return CaptureSceneViewTargetAsync(job, target.request, target.sceneView, defaultChannels, capturePolicy);
                 case "gameview":
-                    await CaptureGameViewTargetAsync(job, target.request, defaultChannels, capturePolicy);
-                    return;
+                    return CaptureGameViewTargetAsync(job, target.request, defaultChannels, capturePolicy);
                 case "editorwindow":
                     CaptureEditorWindowTarget(job, target.request, target.editorWindow, defaultChannels, capturePolicy);
-                    return;
+                    return Task.CompletedTask;
                 default:
                     throw new SnapshotRequestException("SNAPSHOT_TARGET_KIND_NOT_IMPLEMENTED", $"Target kind is not implemented: {target.kind}");
             }
@@ -669,6 +679,44 @@ namespace CodingRiver.UPilot
             UpdateJob(job, "running", "writing", false, false);
         }
 
+        // SceneView work must resume on the Editor thread even when Unity's current
+        // SynchronizationContext is not pumping (for example after a Runner Reload).
+        // A watchdog may complete the source Task on a worker; never run Unity APIs there.
+        private sealed class SceneViewEditorCompletion : System.Runtime.CompilerServices.INotifyCompletion
+        {
+            private readonly Task task;
+            private bool interrupted;
+
+            public SceneViewEditorCompletion(Task task) { this.task = task; }
+            public SceneViewEditorCompletion GetAwaiter() => this;
+            public bool IsCompleted => task.IsCompleted;
+            public void GetResult()
+            {
+                if (interrupted && !task.IsCompleted)
+                    throw new InvalidOperationException("SCENEVIEW_DOMAIN_RELOAD");
+                task.GetAwaiter().GetResult();
+            }
+
+            public void OnCompleted(Action continuation)
+            {
+                EditorApplication.CallbackFunction update = null;
+                AssemblyReloadEvents.AssemblyReloadCallback reload = null;
+                var resumed = false;
+                Action resume = () =>
+                {
+                    if (resumed) return;
+                    resumed = true;
+                    EditorApplication.update -= update;
+                    AssemblyReloadEvents.beforeAssemblyReload -= reload;
+                    continuation();
+                };
+                update = () => { if (task.IsCompleted) resume(); };
+                reload = () => { interrupted = true; resume(); };
+                EditorApplication.update += update;
+                AssemblyReloadEvents.beforeAssemblyReload += reload;
+            }
+        }
+
         private async Task CaptureSceneViewTargetAsync(
             SnapshotJobPayload job,
             SnapshotTargetRequestPayload requested,
@@ -690,7 +738,7 @@ namespace CodingRiver.UPilot
 
             var width = ClampDimension(requested.width, 1280);
             var height = ClampDimension(requested.height, 720);
-            var completion = new TaskCompletionSource<UPilotScreenshotService.ScreenshotBytesResult>();
+            var completion = new TaskCompletionSource<UPilotScreenshotService.ScreenshotBytesResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             UPilotScreenshotService.CaptureSceneViewAfterRepaint(
                 sceneView,
                 width,
@@ -699,7 +747,8 @@ namespace CodingRiver.UPilot
                 75,
                 completion,
                 allowCameraFallback: false);
-            var capture = await completion.Task;
+            await new SceneViewEditorCompletion(completion.Task);
+            var capture = completion.Task.GetAwaiter().GetResult();
             if (capture == null || capture.Bytes == null || capture.Bytes.Length == 0)
                 throw new SnapshotRequestException("SNAPSHOT_SCENEVIEW_CAPTURE_UNAVAILABLE", "The exact SceneView did not produce verified EditorWindow pixels.");
 
@@ -853,13 +902,14 @@ namespace CodingRiver.UPilot
             if (UPilotWindowDiagnostics.TryGetEditorWindowMinimized(window, out var windowMinimized, out var windowHandle) && windowMinimized)
                 throw new SnapshotRequestException("SNAPSHOT_EDITOR_MINIMIZED", "The requested EditorWindow is minimized.");
 
-            var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(window);
+            var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(window, capturePolicy.allowFallback);
             if (capture == null || string.IsNullOrWhiteSpace(capture.imageData))
                 throw new SnapshotRequestException("SNAPSHOT_EDITORWINDOW_CAPTURE_UNAVAILABLE", "The exact EditorWindow did not produce pixels.");
             var bytes = Convert.FromBase64String(capture.imageData);
             var provenance = new SnapshotProvenancePayload
             {
                 captureApi = capture.captureApi,
+                originalError = capture.originalError,
                 pixelSourceVerified = capture.pixelSourceVerified,
                 occlusionSensitive = capture.occlusionSensitive,
                 degraded = capture.degraded,

@@ -61,6 +61,8 @@ namespace CodingRiver.UPilot.Tests
             {
                 var first = ConfigureCamera(firstObject, Color.red);
                 var second = ConfigureCamera(secondObject, Color.blue);
+                var firstDynamicResolution = first.allowDynamicResolution;
+                var secondDynamicResolution = second.allowDynamicResolution;
                 var service = new UPilotSnapshotService(UPilotBridge.Instance);
                 job = Start(service, new SnapshotCapturePayload
                 {
@@ -87,8 +89,8 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(job.frame.capturedAtUtcMs, Is.GreaterThan(0));
                 Assert.That(first.targetTexture, Is.Null);
                 Assert.That(second.targetTexture, Is.Null);
-                Assert.That(first.allowDynamicResolution, Is.True);
-                Assert.That(second.allowDynamicResolution, Is.True);
+                Assert.That(first.allowDynamicResolution, Is.EqualTo(firstDynamicResolution));
+                Assert.That(second.allowDynamicResolution, Is.EqualTo(secondDynamicResolution));
 
                 foreach (var artifact in job.artifacts)
                 {
