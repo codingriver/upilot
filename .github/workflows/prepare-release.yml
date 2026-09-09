@@ -8,8 +8,9 @@ on:
         required: true
         type: string
       acceptanceRunId:
-        description: "Successful UPilot Unity Release Evidence workflow run ID"
-        required: true
+        description: "Optional successful UPilot Unity Release Evidence workflow run ID"
+        required: false
+        default: ""
         type: string
 
 concurrency:
@@ -59,11 +60,17 @@ jobs:
           python -m pip install uv
           uv sync --directory upilotserver~ --frozen --extra dev
 
-      - name: Gate release source before version commit and tag
+      - name: Validate release source and optional Unity evidence
         env:
           GH_TOKEN: ${{ github.token }}
           UPILOT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptanceRunId }}
-        run: uv run --directory upilotserver~ --frozen --extra dev python scripts/check_release_quality.py --require-unity-summary
+        shell: bash
+        run: |
+          args=()
+          if [[ -n "$UPILOT_ACCEPTANCE_RUN_ID" ]]; then
+            args+=(--require-unity-summary)
+          fi
+          uv run --directory upilotserver~ --frozen --extra dev python scripts/check_release_quality.py "${args[@]}"
 
       - name: Preserve source-bound quality evidence
         if: always()
@@ -95,7 +102,11 @@ jobs:
           UPILOT_ACCEPTANCE_RUN_ID: ${{ inputs.acceptanceRunId }}
         shell: bash
         run: |
-          git tag -a "${{ steps.release.outputs.tag }}" -m "UPilot-Acceptance-Run: $UPILOT_ACCEPTANCE_RUN_ID"
+          tag_message="Release ${{ steps.release.outputs.tag }}"
+          if [[ -n "$UPILOT_ACCEPTANCE_RUN_ID" ]]; then
+            tag_message+=$'\nUPilot-Acceptance-Run: '"$UPILOT_ACCEPTANCE_RUN_ID"
+          fi
+          git tag -a "${{ steps.release.outputs.tag }}" -m "$tag_message"
           git push origin HEAD:main
           git push origin "${{ steps.release.outputs.tag }}"
 

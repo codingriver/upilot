@@ -545,7 +545,7 @@ UPilot 通用开发：
 
 ### [已完成][P1][Bug] SceneView 截图等待真实 Repaint 并验证 Handles 像素来源
 
-- 唯一 ID：UP-008；出现次数：0（历史根/项目现场 ≥1、2026-09-07 与 2026-09-09 新增两组及本轮失败证据保留）。
+- 唯一 ID：UP-008；出现次数：0（已关闭原范围；历史根/项目现场 ≥1、2026-09-07 与 2026-09-09 六组业务回归现场及失败证据保留）。
 - 2026-09-08 最终收口：新增捕获中真实 Domain Reload 验收；修复 Snapshot 的 SceneView 异步续体依赖延迟同步上下文，明确在 Editor.update 主线程收尾，Reload/结束解绑，后台 watchdog 不调用 Unity API。测试按持久精确 ID 清理自建窗口，避免 Reload 重置标题造成漏清理；Camera 直接回归验证实际可设置的原值恢复。最终 runGuid `e27d5d98-c2b3-49ee-be2c-2655d18d72d9` 为 10/10、无跳过、cleanupVerified/testIdentityVerified/sourceUnchanged=true；低层/Snapshot 各 10 次可信 SceneGUI 像素、无 Repaint、关闭、真实 Reload 和 Camera/GameView 直接回归均通过。Snapshot 连续 10 次完成耗时 123～214ms。Reload 订阅 0→2→0→0，原 snapshotId 保持失败终态、无图片，不重放请求。完整失败历史、编译批次与摘要 bytes/SHA256 见 `Documentation~/UP001-UP009-Delivery.md`。
 - 2026-09-08 实施/验收：修复窗口销毁后的 MissingReference，以及单 SceneView 等新 Repaint 被 sameFrame 请求帧误判；Task 失败保留原始 code、snapshotId 和 manifest。Unity 2022.3 SceneView 4/4（含低层和 Snapshot 各 10 次真实 Handles/SceneGUI 像素、无 Repaint 超时、窗口销毁）；HTTP 精确 SceneView 10/10，7～24ms 返回同一 taskId，234～468ms 完成可信图片。原始失败 manifest 与后续通过证据均保留；捕获中 Reload、多目标同帧组合尚未专项验收，保持部分完成。
 - 2026-09-07 实施：SceneView 同步入口复用 Task，最多观察 4.5 秒后返回同一 taskId；Unity 后台 5 秒 watchdog、不复用旧 Repaint、迟到回调不覆盖终态、结束/窗口关闭/Reload 清理订阅。Python 短等待测试通过；2022.3 PlayMode Handles/Gizmos 10 次、无 Repaint 和销毁专项仍待完成。
@@ -563,6 +563,7 @@ UPilot 通用开发：
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 的 Unity 2022.3 fixture 中，进入 PlayMode 后打开含 `OnDrawGizmos`/`SceneView.duringSceneGui` Handles 的测试场景，连续 10 次调用保存型 SceneView 截图；每次在 5 秒内成功，或在 5 秒内返回可轮询任务句柄并最终成功，且元数据包含精确 SceneView identity、Repaint sequence/timestamps、`includesSceneGui=true`、`includesHandles=true`、`pixelSourceVerified=true`、`occlusionSensitive=false`。短观察窗口结束前必须至少保留一帧可信产物。
 - 2026-09-07 新现场（UP-008，P1、回归待处理）：本地逻辑时钟暂停，但 PlayMode 帧号继续更新时，单 SceneView `sameFrame` 捕获得到 `FRAME_ADVANCED_DURING_CAPTURE`；`independent` 明确未支持。2026-09-09 在 `F:\xclient2` 的多目标追踪预览再次复现，失败快照=`snapshot-f13815e65df84cd8b0b9caf682ecf49a`；临时全局 Editor 暂停后快照=`snapshot-014b3f79e0ab4e07a18b3bd7485d446d`成功，`includesSceneGui/includesHandles/pixelSourceVerified=true`、`occlusionSensitive=false`，PNG SHA256=`8f57648d578450295b1177b86dcaea24dbea3da1c8b135b7cfd66421a4816de3`。建议为单目标提供以目标 Repaint 为边界的严格策略，并在 schema 公开支持的 syncMode enum；保留多目标 sameFrame 的原契约。规范项目用独立时钟冻结、全局不暂停的 SceneView fixture 连续采图，验证 provenance、Repaint、帧边界和失败原因，预计每轮减少 2～4 次捕获/模式切换。双向来源：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260813-01`；现场次数更新为2组，不要求 UPilot 理解弹道业务时钟。
 - 2026-09-09 追加：公开 schema 接受任意 `syncMode` 字符串，但 `sequential` 在运行时被拒绝，仅 `sameFrame` 可用；轴向自转、自由旋转和 24 发加特林三组本地逻辑暂停仍需临时全局暂停才能通过严格帧门禁。加特林 `snapshot-9126dd0d853d429c831f3ac96eea578c` 的 SceneView/Handles/像素来源均可信，PNG SHA256=`bccf9ed516afe48ac4bdf08d7b475b146e4d8f58db8dc218beea0af3ef02adaa`。建议 schema 公开实际枚举并实现单目标 Repaint 边界模式；项目双向条目已更新，累计现场为 5 组。
+- 2026-09-09 LineRenderer 业务复验补充（第 6 组，P1 回归待处理）：`F:\xclient2` 的 `Weapon_CannonRowsThreeByFive` 本地预览已暂停，但 Unity 全局帧仍推进，`unity_screenshot_scene_view` 连续产生 `snapshot-95bf174500734f0a8151e1e231447114` 与 `snapshot-b78b8f0884b046c097aa26b6a7ddd636`，均以 `FRAME_ADVANCED_DURING_CAPTURE` 拒绝。后者产物实际含 SceneView/Handles/LineRenderer，且 `pixelSourceVerified=true/occlusionSensitive=false/includesSceneGui=true/includesHandles=true`、SHA256=`247eb9fe1bd8f2b3c051bb9f2d18bd76973c3450e9355cf06969a89cbecb2f26`，但 `acceptedAsEvidence=false`，业务侧未冒充签收。期望能力、通用归属、效率收益和验收标准沿用本条：增加以单目标 SceneView Repaint 为边界的严格模式，在 `D:\upilot\Tests~\UPilotTest` 独立逻辑时钟冻结且全局不暂停的 PlayMode fixture 连续 10 次通过；项目双向条目为 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260813-01`。
 
 ### [已完成] Flow 原生菜单/模态弹窗动作增加可取消超时与自动关闭
 
@@ -578,7 +579,7 @@ UPilot 通用开发：
 - 2026-09-09 直接输入补充（P1）：xclient2 弹道编辑器调用 `unity_mouse_event` 打开 IMGUI `GenericMenu` 后，Unity 主线程进入菜单模态循环并使调用超时，既有 Flow watchdog 未覆盖直接鼠标入口。建议让 `unity_mouse_event`/`unity_keyboard_event` 复用同一 owner/deadline/精确 Escape 恢复器并返回 `waitingForModalUi/modalOwner/recoverySource`；未知或破坏性菜单不自动选择。规范项目创建 IMGUI GenericMenu，直接鼠标打开后 5 秒内可取消恢复、主线程继续泵送且只派发一次。项目双向条目：`F:\xclient2\TODO_UPilot.mcd` / “EditorWindow IMGUI 控件点击按名称误报成功”。
 - 2026-09-09 最终保存复验再次复现（该直接输入缺口累计 2 次）：请求 `cmd-16cf9fea-846b-435d-96a9-21e9c297a4d7` 点击弹道编辑器“当前选择”后等待 30 秒，以 `COMMAND_TIMEOUT/EditorContextStale` 返回，桌面像素确认 GenericMenu 仍打开；绑定 Unity PID/HWND 的单次 Windows 点击后 Bridge 立即恢复并正确加载 `NativeCompleteCopy.prefab`。通用状态/挂起诊断还应返回活动模态 HWND、标题/类型、owner 和安全 `nextAction`，不能只让调用方重复 `forceFresh`。
 
-### [已完成] UPilot Test Runner 保存 run GUID 并提供 status/cancel/force-reset 能力
+### [回归待修复，P1] UPilot Test Runner 保存 run GUID 并提供 status/cancel/force-reset 能力
 
 - 发现时间：2026-08-14
 - 来源任务/测试：UPilot Flow EditMode 全量验收中，测试进入 headed failure pause 后无法结束，脚本编译长期停在 queued，最终只能重启 Unity 清理 Test Runner 作业。
@@ -587,6 +588,8 @@ UPilot 通用开发：
 - 建议改进：保存 `Execute` 返回的 run GUID，并将测试运行接入统一 operation 体系；新增 `unity_test_status`（runGuid、currentTest、stage、progress、lastProgressAt、cancelRequested）、`unity_test_cancel`（调用官方 CancelTestRun）和仅用于残留状态修复的 `unity_test_force_reset`。取消后必须等待 `RunFinished` 或明确的清理终态，不能仅把内存标记改成 aborted。
 - 证据/复现：本次 `HeadedFailurePolicyPause_ActuallyPausesController` 与非交互测试误用 `Headed=true/DebugOnFailure=true` 后均进入无限等待；`unity_safe_compile_and_wait` 只能看到 compile queued，现有 MCP 没有测试取消入口。
 - 备注：已实现 `unity_test_status/cancel/force_cleanup/force_reset`、官方 `CancelTestRun(runGuid)` 与分级清理；2026-08-17 进一步加入 `Library/UPilot/TestRuns` 持久化、Domain Reload 回调重挂接和 `unity_test_results(runGuid=...)` 重连查询。
+- 2026-09-09 回归复现：在 `F:\xclient2` 取消仍在推进的 EditMode runGuid=`a8b71a59-37fc-4516-adb1-7e6a7b2ce8e4` 时，`unity_test_cancel` 返回 `TestRunnerApi.CancelTestRun(string) was not found`；`sideEffectsMayHaveOccurred=false`。`unity_test_force_cleanup` 随后能在约 12 秒内收口为 `aborted/cleanupSucceeded=true/unresolvedResources=[]`，说明分级清理可用，但普通取消的签名绑定再次失效。项目证据与双向条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260823-02`。
+- 期望修复与验收：注册工具时按当前 Unity Test Framework 版本解析并缓存可调用取消入口，`unity_test_cancel` 与 `unity_test_force_cleanup` 共用该适配层；在 `D:\upilot\Tests~\UPilotTest` 启动持续 30 秒且持续报告进度的 EditMode fixture，调用一次 cancel 后不得出现缺失方法异常，须在 15 秒内得到权威 aborted/cancelled、`cleanupSucceeded=true`、`unresolvedResources=[]`，重复取消保持幂等。预计每次主动缩小回归范围节省一次失败调用和 10～30 秒恢复等待。
 
 ### [已完成] 建立 Flow 全入口共享的活动执行注册表与可停止业务句柄
 

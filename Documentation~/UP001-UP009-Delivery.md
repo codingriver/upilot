@@ -92,10 +92,10 @@ Hook 安装/卸载操作串行；不同 owner 不自动顶替。缓存 patcher �
 
 ## 发布证据流程
 
-1. 在本仓库受保护 main 提交 C 上运行 `UPilot Unity Release Evidence`。self-hosted Windows runner 需 `upilot-unity` label、`upilot-unity-acceptance` environment、图形桌面、匹配 checkout 的规范项目及已加载候选 Server。`UPILOT_MCP_URL` 仅用于其 HTTP `/mcp` 连接。
+1. `UPilot Unity Release Evidence` 为可选增强校验；如运行，需在本仓库受保护 main 提交 C 上执行。self-hosted Windows runner 需 `upilot-unity` label、`upilot-unity-acceptance` environment、图形桌面、匹配 checkout 的规范项目及已加载候选 Server。`UPILOT_MCP_URL` 仅用于其 HTTP `/mcp` 连接。
 2. workflow 运行指定 fixture，保存 `upilot-unity-release-evidence` artifact（summary.json、evidence.json）。缺摘要、零匹配、跳过、未清理、编译不可信、内容哈希错误均拒绝。
-3. 发布授权任务必须同时提供 `version` 与 `acceptanceRunId`。普通 PR 继续轻量模式；发布准备与 tag 构建强制模式，不接受任意本地文件替代受控 artifact。
-4. 验收提交 C 与发布提交 R 相同，或 R 是 C 的单亲版本提交；只允许两个版本字段改变。完整源码哈希仍包含版本文件。tag 记录验收 runId，下游重新下载并核对同一证据链。
+3. 发布授权任务必须提供 `version`；`acceptanceRunId` 可选。未提供时发布准备与 tag 构建仍执行合同、工具清单和源码一致性校验，但不执行 Unity evidence 门禁；若提供则必须来自受控 workflow，不接受任意本地文件替代受控 artifact。
+4. 验收提交 C 与发布提交 R 相同，或 R 是 C 的单亲版本提交；只允许两个版本字段改变。完整源码哈希仍包含版本文件。若提供 evidence，tag 记录验收 runId，下游重新下载并核对同一证据链。
 5. 当前工作区产生的 alpha/v1-source-summary 不可作为该门禁的 release evidence；需候选 Server 产生 v2 同源摘要后重新走受控 workflow。
 
 版本提交检查保留完整 Git blob 字节，不忽略首尾空白、格式变化或文件 mode 变化。采集器观察超时、连接异常或取消时保留原 taskId，最多请求一次任务取消并有界观察清理；连接不可用时明确保存清理未验证，绝不重新发起验收。

@@ -18,12 +18,12 @@ def test_all_workflow_actions_use_verified_full_sha():
             assert revision == PINS[action] and re.fullmatch(r"[a-f0-9]{40}", revision), (workflow, action)
 
 
-def test_release_requires_evidence_and_non_tag_build_never_uploads_release():
+def test_release_allows_optional_evidence_and_non_tag_build_never_uploads_release():
     prepare = (ROOT / ".github/workflows/prepare-release.yml").read_text(encoding="utf-8")
     build = (ROOT / ".github/workflows/build-server-exe.yml").read_text(encoding="utf-8")
-    assert "acceptanceRunId:" in prepare and "--require-unity-summary" in prepare
-    assert prepare.index("--require-unity-summary") < prepare.index("git commit")
-    assert "--require-unity-summary --release-tag" in build
+    assert "acceptanceRunId:" in prepare and "required: false" in prepare
+    assert 'if [[ -n "$UPILOT_ACCEPTANCE_RUN_ID" ]]' in prepare
+    assert "--require-unity-summary --release-tag" not in build
     release_step = build[build.rfind("- name:", 0, build.index("uses: softprops/action-gh-release")):]
     assert "if: startsWith(github.ref, 'refs/tags/')" in release_step
     assert 'cache: "pip"' in build
