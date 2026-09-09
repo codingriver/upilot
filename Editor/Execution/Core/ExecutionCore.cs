@@ -1002,7 +1002,7 @@ namespace CodingRiver.UPilot.Execution
             supplied = supplied ?? Array.Empty<ExecutionValue>();
             var flags = BindingFlags.Public | (allowNonPublic ? BindingFlags.NonPublic : 0) |
                         (isStatic ? BindingFlags.Static : BindingFlags.Instance);
-            var methods = declaringType.GetMethods(flags).Where(m => m.Name == methodName).ToArray();
+            var methods = ReflectionCache.GetMethods(declaringType, methodName, flags);
             var successes = new List<Candidate>();
             var failures = new List<string>();
 

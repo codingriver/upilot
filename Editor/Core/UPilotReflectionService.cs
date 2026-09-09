@@ -140,7 +140,7 @@ namespace CodingRiver.UPilot
                 try
                 {
                     token.ThrowIfCancellationRequested();
-                    var candidates = FindTypes(payload.typeName);
+                    var candidates = ReflectionCache.FindTypes(payload.typeName);
                     var result = new TypeExistsResultPayload
                     {
                         requestedTypeName = payload.typeName,
@@ -191,7 +191,7 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    var type = FindType(p.typeName);
+                    var type = ReflectionCache.FindType(p.typeName);
                     if (type == null)
                     {
                         tcs.SetException(new Exception($"Type not found: {p.typeName}"));
@@ -301,7 +301,7 @@ namespace CodingRiver.UPilot
                         isStatic = false;
                     }
 
-                    var type = target?.GetType() ?? FindType(p.typeName);
+                    var type = target?.GetType() ?? ReflectionCache.FindType(p.typeName);
                     if (type == null)
                     {
                         invokeTcs.SetException(new ExecutionContractException("TYPE_NOT_FOUND", $"Type not found: {p.typeName}"));
@@ -394,55 +394,6 @@ namespace CodingRiver.UPilot
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────
-
-        private static Type FindType(string fullName)
-        {
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    var t = asm.GetType(fullName);
-                    if (t != null) return t;
-                }
-                catch { /* skip */ }
-            }
-            // Fallback: search by name without namespace
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    foreach (var t in asm.GetTypes())
-                    {
-                        if (t.Name == fullName) return t;
-                    }
-                }
-                catch { /* skip */ }
-            }
-            return null;
-        }
-
-        private static List<Type> FindTypes(string typeName)
-        {
-            var exact = new List<Type>();
-            var shortMatches = new List<Type>();
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type[] types;
-                try { types = assembly.GetTypes(); }
-                catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(type => type != null).ToArray(); }
-                catch { continue; }
-                foreach (var type in types)
-                {
-                    if (type == null) continue;
-                    if (string.Equals(type.FullName, typeName, StringComparison.Ordinal) ||
-                        string.Equals(type.AssemblyQualifiedName, typeName, StringComparison.Ordinal))
-                        exact.Add(type);
-                    else if (string.Equals(type.Name, typeName, StringComparison.Ordinal))
-                        shortMatches.Add(type);
-                }
-            }
-            return exact.Count > 0 ? exact : shortMatches;
-        }
 
         private static bool TryBindMethod(
             Type type,
@@ -643,7 +594,7 @@ namespace CodingRiver.UPilot
             {
                 var staticType = string.IsNullOrEmpty(payload.targetStaticTypeName)
                     ? componentType
-                    : FindType(payload.targetStaticTypeName);
+                    : ReflectionCache.FindType(payload.targetStaticTypeName);
                 if (staticType != null)
                 {
                     var memberTarget = ResolveMemberPath(staticType, payload.targetStaticMemberPath, true);
@@ -782,7 +733,7 @@ namespace CodingRiver.UPilot
                 if (expression[i] != '.') continue;
 
                 string typeName = expression.Substring(0, i);
-                var type = FindType(typeName);
+                var type = ReflectionCache.FindType(typeName);
                 if (type == null) continue;
 
                 string memberPath = expression.Substring(i + 1);
