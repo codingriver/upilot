@@ -224,6 +224,45 @@ namespace CodingRiver.UPilot
             }
         }
 
+        internal static string GetPythonEnvironmentPath(out string sharingScope)
+        {
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
+            return ResolvePythonEnvironmentPath(
+                package?.source ?? PackageSource.Unknown,
+                !IsSourceUpdateChannel(),
+                UpmVersion,
+                GetPackageRoot(),
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                Path.Combine(PythonEnvironmentCacheRoot, SafePathSegment(GetProjectKey()), "venv"),
+                out sharingScope);
+        }
+
+        internal static string ResolvePythonEnvironmentPath(
+            PackageSource source, bool releaseChannel, string version, string packageRoot,
+            string userProfile, string legacyPath, out string sharingScope)
+        {
+            if (source == PackageSource.Local || source == PackageSource.Embedded)
+            {
+                if (string.IsNullOrWhiteSpace(packageRoot))
+                    throw new InvalidOperationException("无法确定本地 UPilot 包目录。");
+                sharingScope = "同一源码工作区共享";
+                return Path.Combine(packageRoot, "upilotserver~", ".venv");
+            }
+
+            if (releaseChannel)
+            {
+                if (string.IsNullOrWhiteSpace(userProfile))
+                    throw new InvalidOperationException("无法确定当前系统用户目录，不能配置 Python 环境。");
+                if (!IsStrictSemver(version) || !IsSafePathSegment(version))
+                    throw new InvalidOperationException("无法确定当前正式包版本，不能配置 Python 环境。");
+                sharingScope = "同一正式版本共享，不同版本隔离";
+                return Path.Combine(userProfile, ".upilot", "python-envs", version, "venv");
+            }
+
+            sharingScope = "当前工程独立（保留原目录）";
+            return legacyPath;
+        }
+
         internal static bool TryGetRuntimeCacheRoot(out string path, out string error)
         {
             path = "";
@@ -1936,38 +1975,49 @@ namespace CodingRiver.UPilot
 
         private async Task ConfigurePythonEnvironmentAsync(CancellationToken token)
         {
+            var venvPath = "";
             try
             {
-                var probe = ProbePython();
-                var python = probe.PythonPath;
-                if (!probe.InterpreterUsable || string.IsNullOrWhiteSpace(python) || !File.Exists(python))
-                    throw new InvalidOperationException("未找到可用的 Python 解释器。");
-
-                var venvRoot = Path.Combine(PythonEnvironmentCacheRoot, SafePathSegment(GetProjectKey()));
-                var venvPath = Path.Combine(venvRoot, "venv");
-                var interpreterPath = GetVenvPythonPath(venvPath);
-                Directory.CreateDirectory(venvRoot);
-
+                venvPath = GetPythonEnvironmentPath(out _);
                 UpdatePythonEnvState(state =>
                 {
-                    state.PythonPath = python;
                     state.VenvPath = venvPath;
-                    state.InterpreterPath = interpreterPath;
-                    state.Phase = "创建虚拟环境";
+                    state.InterpreterPath = GetVenvPythonPath(venvPath);
+                    state.Phase = "等待安装锁并检查已有环境";
                 });
 
-                await Task.Run(() => RunProcessChecked(python, $"-m venv \"{venvPath}\"", 120000, token), token);
-                token.ThrowIfCancellationRequested();
-
-                UpdatePythonEnvState(state => state.Phase = "升级 pip 与构建工具");
-                await Task.Run(() => RunProcessChecked(interpreterPath, "-m pip install --upgrade pip setuptools wheel", 180000, token), token);
-                token.ThrowIfCancellationRequested();
-
-                UpdatePythonEnvState(state => state.Phase = "安装 MCP server 依赖");
                 var requirements = GetRequirementsPath();
-                if (File.Exists(requirements))
-                    await Task.Run(() => RunProcessChecked(interpreterPath, $"-m pip install -r \"{requirements}\"", 300000, token), token);
-
+                var interpreterPath = await PreparePythonEnvironmentAsync(
+                    venvPath,
+                    async interpreter =>
+                    {
+                        if (!File.Exists(requirements))
+                            throw new FileNotFoundException("缺少 MCP server 依赖清单。", requirements);
+                        var probe = await Task.Run(ProbePython, token);
+                        var python = probe.PythonPath;
+                        if (!probe.InterpreterUsable || string.IsNullOrWhiteSpace(python) || !File.Exists(python))
+                            throw new InvalidOperationException("未找到可用的 Python 解释器。");
+                        UpdatePythonEnvState(state =>
+                        {
+                            state.PythonPath = python;
+                            state.Phase = "创建虚拟环境";
+                        });
+                        await Task.Run(() => RunProcessChecked(python, $"-m venv \"{venvPath}\"", 120000, token), token);
+                        UpdatePythonEnvState(state => state.Phase = "升级 pip 与构建工具");
+                        await Task.Run(() => RunProcessChecked(interpreter, "-m pip install --upgrade pip setuptools wheel", 180000, token), token);
+                        UpdatePythonEnvState(state => state.Phase = "安装 MCP server 依赖");
+                        await Task.Run(() => RunProcessChecked(interpreter, $"-m pip install -r \"{requirements}\"", 300000, token), token);
+                    },
+                    interpreter =>
+                    {
+                        var probe = ProbePythonCandidate(interpreter);
+                        if (!probe.InterpreterUsable)
+                            throw new InvalidOperationException(probe.Message);
+                        RunProcessChecked(interpreter, "-B -c \"import mcp, websockets, yaml, PIL\"", 30000, token);
+                        RunProcessChecked(interpreter, "-B -m pip check", 30000, token);
+                    },
+                    token);
+                token.ThrowIfCancellationRequested();
                 SetPythonRuntime(interpreterPath);
                 UpdatePythonEnvState(state =>
                 {
@@ -1989,7 +2039,8 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UPilot] Python environment setup failed: {ex.Message}");
+                var phase = PythonEnvironmentState.Phase;
+                Debug.LogError($"[UPilot] Python environment setup failed.\nOperation={phase}\nVenv={venvPath}\nException={ex}");
                 UpdatePythonEnvState(state =>
                 {
                     state.IsRunning = false;
@@ -1997,7 +2048,38 @@ namespace CodingRiver.UPilot
                     state.Phase = "配置失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
+                EditorApplication.delayCall += () => EditorUtility.DisplayDialog(
+                    "UPilot Python 环境配置失败",
+                    ex.Message + "\n\nPython 环境目录：" + venvPath +
+                    "\n\n已有环境不会自动覆盖或删除。请检查权限、文件占用和依赖，人工修复后重试。",
+                    "确定");
             }
+        }
+
+        internal static async Task<string> PreparePythonEnvironmentAsync(
+            string venvPath, Func<string, Task> install, Action<string> validate, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            Directory.CreateDirectory(Path.GetDirectoryName(venvPath));
+            using var installLock = await AcquireInstallLockAsync(venvPath + ".install.lock.tmp", token);
+            // Recheck under the shared lock: another project may have completed installation.
+            var exists = Directory.Exists(venvPath) || File.Exists(venvPath);
+            var interpreter = GetVenvPythonPath(venvPath);
+            if (!exists)
+                await install(interpreter);
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                if (!File.Exists(interpreter))
+                    throw new FileNotFoundException("Python 环境解释器不存在。", interpreter);
+                await Task.Run(() => validate(interpreter), token);
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException) && exists)
+            {
+                throw new InvalidOperationException("已有 Python 环境验证失败，请人工修复后重试；未修改该环境。\n" + ex.Message, ex);
+            }
+            token.ThrowIfCancellationRequested();
+            return interpreter;
         }
 
         private static string GetVenvPythonPath(string venvPath)

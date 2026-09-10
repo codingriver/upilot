@@ -222,6 +222,18 @@ namespace CodingRiver.UPilot
             {
                 var messageType = _setupPythonProbe.InterpreterUsable ? MessageType.Info : MessageType.Warning;
                 EditorGUILayout.HelpBox(_setupPythonProbe.Message, messageType);
+                try
+                {
+                    var environmentPath = UPilotServerRuntimeService.GetPythonEnvironmentPath(out var sharingScope);
+                    EditorGUILayout.LabelField(
+                        new GUIContent("Python 环境目录", "自动配置的目标目录；已有 Python 解释器配置保持不变。"),
+                        new GUIContent(environmentPath), EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField("共享范围", sharingScope, EditorStyles.miniLabel);
+                }
+                catch (Exception ex)
+                {
+                    EditorGUILayout.HelpBox("无法确定 Python 自动配置目录：" + ex.Message, MessageType.Warning);
+                }
                 if (!string.IsNullOrWhiteSpace(_setupPythonProbe.PythonPath))
                     EditorGUILayout.SelectableLabel(
                         _setupPythonProbe.PythonPath,

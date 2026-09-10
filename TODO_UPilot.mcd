@@ -157,6 +157,7 @@
 
 ### [待处理][P2] UP-025 执行参数递归 DTO 序列化深度诊断
 
+- 2026-09-10 固定工作场景验收补充（通用/P2/待处理）：xclient2 Capture `console_20260910_185938_832_b7477bb8` sequence128～132、202～206共10条TypedValue深度Warning，expression和structured arguments均出现；业务11个目标用例和真实PlayMode/EditMode已验证，0 Error/Exception/Assert。证据 `F:\xclient2\Log\UPilotConsole\2026-09-10_18-59-38-832_Projectile Fixed Workspace Focused 20260910\console.jsonl`，SHA256=`96111fe0f2b69f6215086cfca8231042bb2f11334ec6d252b309171c1269116c`；双向项目条目 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260907-VisualTypedValue`。沿用本项验收，预期减少每轮10条工具噪声的手工分类，不新增重复输入DTO条目。
 - 发现时间：2026-09-07
 - 来源任务/测试：xclient2 弹道模型与材质视觉验收；通用 UPilot/MCP 执行协议问题，不涉及业务算法。
 - 来源项目清单/条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260907-VisualTypedValue`。
@@ -957,6 +958,7 @@ UPilot 通用开发：
 
 ### [已完成][P0/P1] 反射调用、表达式执行与动态类型生成能力分层升级
 
+- 2026-09-10 子项 `PrimitiveArrayResult`（P2，待处理，通用UPilot/MCP）：xclient2固定工作场景设置核对中，`unity_reflection_call(expression=...)` 的8项String数组执行Succeeded，却返回 `serializationStatus=unsupported/valueJson=null/result=System.String[]` 且无handle，requestId=`req-b4511006-476a-436f-9c4d-91798e915f7b`；只能显式改写string.Join再次查询。建议预算内基本类型数组直接内联，超限明确返回诊断/下一步，禁止自动重放。规范项目 `D:\upilot\Tests~\UPilotTest` 覆盖string/int/bool数组、null/空串/换行/上限，验证准确值和类型及无额外执行；预计每次多字段快照省一次失败查询与字符串解析。双向现场 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260910-PrimitiveArrayResult`；原已完成父项不回滚，输入DTO警告继续归UP-025。
 - 发现时间：2026-09-02。
 - 来源任务/调研：用户要求保留并升级 `unity_reflection_call`，彻底移除 `reflection_eval` 外部接口且不保留兼容，并新增不依赖 Unity 官方 Eval、Unity 编译 API或 Roslyn 的 `csharp_eval` 与 Reflection.Emit 动态类型能力。
 - 现象/问题：`unity_reflection_call` 当前以字符串数组绑定参数，只返回 `ToString()`，不完整支持精确重载、泛型、`ref/out`、对象参数、对象句柄及 `Task/ValueTask` 等待；现有表达式引擎不支持局部变量、代码块、控制流、lambda、async/await、任意已加载类型构造和跨调用会话；UPilot 没有公开的 Reflection.Emit 动态类能力。Unity 官方 Eval/Pipeline 与 `UnityEditor.Compilation.AssemblyBuilder` 在 Unity 2022.3、Unity 6 间能力和生命周期不同，直接使用会形成新的版本耦合。
@@ -1279,6 +1281,18 @@ UPilot 通用开发：
 - 证据：请求 ID `cmd-316433ff-8890-4a88-8a9a-7e5c5ca0c30c`；`F:\xclient2\Log\UPilotConsole\ProjectileEditor_ED-06.3_RealStartup\summary.json`（捕获中两条 `TypedValueSpec.items` 深度 Warning 亦来自该反射参数解码链）。
 - 相关工具/路径：`unity_reflection_call`；`D:\upilot\Tests~\UPilotTest`；`F:\xclient2\Assets\Editor\KingShotBattle\ProjectileGameplaySystem\Acceptance\ProjectileEditorPlaySession.cs`
 - 建议归属：通用 UPilot/MCP；项目侧双向引用：`F:\xclient2\TODO_UPilot.mcd` 同名条目。
+- 当前状态：待处理；出现次数 1。
+
+### [待处理][P2] 直接注入的 MCP 工具参数名应与公开 Schema 一致
+
+- 发现时间：2026-09-10；来源任务为 `F:\xclient2` 弹道编辑器环境下拉菜单窗口验收。
+- 现象/问题：当前客户端的 `unity_menu_execute` 类型化工具声明显示 `menu_path`，服务端 Pydantic DTO 却只接受 `menuPath`。按声明的首次调用返回字段缺失，改用未在声明中出现的 camelCase 才成功执行菜单。该问题发生在直接注入工具，不是已完成的 `unity_tool_call` 代理参数映射事项。
+- 建议改进：以单一 DTO/schema 源同时生成 MCP tool schema、客户端类型化声明和服务端绑定；若需兼容 snake_case/camelCase，应在目标调用前无副作用地归一化，并在校验错误中返回支持的字段和候选。
+- 预期效率收益：消除直接语义工具的参数猜测与首调失败，预计每个菜单/资源/场景验收节省 10～30 秒，且降低非幂等入口被无意义重试的风险。
+- 优先级：P2。
+- 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 给带 camelCase 参数的直接注入工具生成客户端声明；按声明字段连续 10 次调用成功。保留的别名同样可用并回显归一化结果，未知参数必须在业务目标前拒绝且给出候选。
+- 证据：`unity_menu_execute` 请求 `req-783fd75f-e95e-48cf-a8e4-2954fd503f90` 最终成功；前一次按客户端声明的 `menu_path` 调用被 Pydantic 拒绝，错误要求 `menuPath`。项目侧双向条目：`F:\xclient2\TODO_UPilot.mcd` / “直接注入的 MCP 工具参数名应与公开 Schema 一致”。
+- 建议归属：通用 UPilot/MCP。
 - 当前状态：待处理；出现次数 1。
 
 ### [待处理][P1] 安全编译等待不得因 `terminal_execution` 未定义丢失终态

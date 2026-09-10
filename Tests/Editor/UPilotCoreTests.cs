@@ -1687,6 +1687,140 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void PythonEnvironmentPathsShareByReleaseOrLocalSource()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "upilot-python-path-tests");
+            string Resolve(PackageSource source, bool release, string version, string package, string legacy)
+                => UPilotServerRuntimeService.ResolvePythonEnvironmentPath(
+                    source, release, version, package, root, legacy, out _);
+
+            var releaseA = Resolve(PackageSource.Git, true, "0.3.31", "package-a", "legacy-a");
+            var releaseB = Resolve(PackageSource.Git, true, "0.3.31", "package-b", "legacy-b");
+            Assert.That(releaseA, Is.EqualTo(Path.Combine(root, ".upilot", "python-envs", "0.3.31", "venv")));
+            Assert.That(releaseB, Is.EqualTo(releaseA));
+            Assert.That(Resolve(PackageSource.Git, true, "0.3.32", "package-a", "legacy-a"), Is.Not.EqualTo(releaseA));
+            var local = Path.Combine(root, "source");
+            Assert.That(Resolve(PackageSource.Local, false, "main", local, "legacy-a"),
+                Is.EqualTo(Path.Combine(local, "upilotserver~", ".venv")));
+            Assert.That(Resolve(PackageSource.Embedded, false, "main", local, "legacy-b"),
+                Is.EqualTo(Resolve(PackageSource.Local, false, "main", local, "legacy-a")));
+            Assert.That(Resolve(PackageSource.Local, false, "main", local + "-other", "legacy-a"),
+                Is.Not.EqualTo(Resolve(PackageSource.Local, false, "main", local, "legacy-a")));
+            Assert.That(Resolve(PackageSource.Git, false, "main", local, "legacy-a"), Is.EqualTo("legacy-a"));
+            Assert.Throws<InvalidOperationException>(() =>
+                UPilotServerRuntimeService.ResolvePythonEnvironmentPath(
+                    PackageSource.Git, true, "0.3.31", local, "", "legacy", out _));
+            Assert.Throws<InvalidOperationException>(() => Resolve(PackageSource.Git, true, "../bad", local, "legacy"));
+        }
+
+        [UnityTest]
+        public IEnumerator PythonEnvironmentConcurrentPreparationInstallsOnceAndReuses()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "upilot-python-test-" + Guid.NewGuid().ToString("N"));
+            var venv = Path.Combine(root, "venv");
+            var installs = 0;
+            var releaseInstall = new TaskCompletionSource<bool>();
+            Task Install(string interpreter)
+            {
+                installs++;
+                return FinishInstall(interpreter);
+            }
+            async Task FinishInstall(string interpreter)
+            {
+                await releaseInstall.Task;
+                Directory.CreateDirectory(Path.GetDirectoryName(interpreter));
+                File.WriteAllText(interpreter, "test interpreter");
+            }
+            void Validate(string interpreter) => Assert.That(File.ReadAllText(interpreter), Is.EqualTo("test interpreter"));
+            Task<string> first = null;
+            Task<string> second = null;
+            try
+            {
+                first = UPilotServerRuntimeService.PreparePythonEnvironmentAsync(venv, Install, Validate, CancellationToken.None);
+                second = UPilotServerRuntimeService.PreparePythonEnvironmentAsync(venv, Install, Validate, CancellationToken.None);
+                Assert.That(installs, Is.EqualTo(1));
+                Assert.That(second.IsCompleted, Is.False);
+                releaseInstall.SetResult(true);
+                while (!first.IsCompleted || !second.IsCompleted)
+                    yield return null;
+                Assert.That(second.GetAwaiter().GetResult(), Is.EqualTo(first.GetAwaiter().GetResult()));
+                Assert.That(installs, Is.EqualTo(1));
+                var reused = UPilotServerRuntimeService.PreparePythonEnvironmentAsync(venv, Install, Validate, CancellationToken.None);
+                while (!reused.IsCompleted)
+                    yield return null;
+                Assert.That(reused.GetAwaiter().GetResult(), Is.EqualTo(first.Result));
+                Assert.That(installs, Is.EqualTo(1));
+            }
+            finally
+            {
+                releaseInstall.TrySetResult(true);
+                if (first?.IsCompleted != false && second?.IsCompleted != false && Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator PythonEnvironmentInvalidExistingFilesArePreserved()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "upilot-python-test-" + Guid.NewGuid().ToString("N"));
+            var venv = Path.Combine(root, "venv");
+            var python = Path.Combine(venv, "Scripts", "python.exe");
+            var configBefore = JsonUtility.ToJson(UPilotProjectConfig.Current);
+            Directory.CreateDirectory(Path.GetDirectoryName(python));
+            File.WriteAllText(python, "keep existing");
+            try
+            {
+                var task = UPilotServerRuntimeService.PreparePythonEnvironmentAsync(
+                    venv, _ => throw new AssertionException("Must not install into an existing environment"),
+                    _ => throw new InvalidOperationException("missing dependency"), CancellationToken.None);
+                while (!task.IsCompleted)
+                    yield return null;
+                var error = Assert.Throws<InvalidOperationException>(() => task.GetAwaiter().GetResult());
+                Assert.That(error.Message, Does.Contain("人工修复"));
+                Assert.That(File.ReadAllText(python), Is.EqualTo("keep existing"));
+                Assert.That(JsonUtility.ToJson(UPilotProjectConfig.Current), Is.EqualTo(configBefore));
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator PythonEnvironmentFailedInstallAndCancellationDoNotChangeConfiguration()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "upilot-python-test-" + Guid.NewGuid().ToString("N"));
+            var venv = Path.Combine(root, "venv");
+            var configBefore = JsonUtility.ToJson(UPilotProjectConfig.Current);
+            try
+            {
+                var failed = UPilotServerRuntimeService.PreparePythonEnvironmentAsync(
+                    venv, _ => throw new IOException("installation failed"), _ => Assert.Fail("Must not validate"),
+                    CancellationToken.None);
+                while (!failed.IsCompleted)
+                    yield return null;
+                Assert.Throws<IOException>(() => failed.GetAwaiter().GetResult());
+                using var cts = new CancellationTokenSource();
+                using (var held = new FileStream(venv + ".install.lock.tmp", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+                {
+                    var cancelled = UPilotServerRuntimeService.PreparePythonEnvironmentAsync(
+                        venv, _ => throw new AssertionException("Must wait for lock"), _ => { }, cts.Token);
+                    Assert.That(cancelled.IsCompleted, Is.False);
+                    cts.Cancel();
+                    while (!cancelled.IsCompleted)
+                        yield return null;
+                    Assert.Throws<TaskCanceledException>(() => cancelled.GetAwaiter().GetResult());
+                }
+                Assert.That(JsonUtility.ToJson(UPilotProjectConfig.Current), Is.EqualTo(configBefore));
+                Assert.That(Directory.Exists(venv), Is.False);
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        [Test]
         public void ManagedServerCacheUsesUserProfileVersionPathAndRequiresSha256()
         {
             var expectedRoot = Path.Combine(
