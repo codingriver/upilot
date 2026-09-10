@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import re
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SERVER_ROOT = SCRIPT_DIR.parent
@@ -168,6 +169,32 @@ def write_manifest(
     return manifest_path
 
 
+def verify_release_manifest(manifest_path: Path) -> None:
+    """Fail packaging before publishing if a managed-server checksum is absent or wrong."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    downloads = manifest.get("downloads")
+    if not isinstance(downloads, list) or not downloads:
+        raise ValueError("Release manifest must contain at least one download")
+
+    for item in downloads:
+        if not isinstance(item, dict):
+            raise ValueError("Release manifest download entry must be an object")
+        file_name = str(item.get("fileName") or "")
+        digest = str(item.get("sha256") or "")
+        if Path(file_name).name != file_name or not file_name:
+            raise ValueError(f"Release manifest download has invalid fileName: {file_name!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest, flags=re.IGNORECASE):
+            raise ValueError(f"Release manifest download has invalid SHA256: {file_name!r}")
+        artifact = manifest_path.parent / file_name
+        if not artifact.is_file():
+            raise FileNotFoundError(artifact)
+        actual = sha256(artifact)
+        if actual.lower() != digest.lower():
+            raise ValueError(
+                f"Release manifest SHA256 mismatch for {file_name}: expected {digest}, actual {actual}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", default=read_pyproject_version())
@@ -188,6 +215,7 @@ def main() -> int:
         protocol_version=args.protocol_version,
         base_url=args.base_url,
     )
+    verify_release_manifest(manifest)
     print(f"exe={exe}")
     print(f"sha256={exe}.sha256")
     print(f"manifest={manifest}")

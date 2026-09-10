@@ -1669,6 +1669,64 @@ namespace CodingRiver.UPilot.Tests
                 Is.True);
         }
 
+        [Test]
+        public void ManagedServerCacheUsesUserProfileVersionPathAndRequiresSha256()
+        {
+            var expectedRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".upilot",
+                "servers");
+            Assert.That(UPilotServerRuntimeService.Instance.RuntimeCacheRoot, Is.EqualTo(expectedRoot));
+
+            var resolvePath = typeof(UPilotServerRuntimeService).GetMethod(
+                "TryGetManagedServerPath",
+                BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            Assert.That(resolvePath, Is.Not.Null);
+            var arguments = new object[] { "9.8.7", "upilot-mcp-server-9.8.7-win-x64.exe", null, null };
+            Assert.That((bool)resolvePath.Invoke(null, arguments), Is.True);
+            Assert.That((string)arguments[2], Is.EqualTo(Path.Combine(
+                expectedRoot,
+                "9.8.7",
+                "upilot-mcp-server-9.8.7-win-x64.exe")));
+
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-managed-server-hash-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var file = Path.Combine(directory, "server.exe");
+            File.WriteAllText(file, "verified");
+            try
+            {
+                var isVerified = typeof(UPilotServerRuntimeService).GetMethod(
+                    "IsVerifiedServerFileReady",
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                Assert.That(isVerified, Is.Not.Null);
+                var digest = UPilotServerRuntimeService.ComputeSha256(file);
+                Assert.That((bool)isVerified.Invoke(null, new object[] { file, digest }), Is.True);
+                Assert.That((bool)isVerified.Invoke(null, new object[] { file, "" }), Is.False);
+
+                var validate = typeof(UPilotServerRuntimeService).GetMethod(
+                    "TryValidateManagedServerDownload",
+                    BindingFlags.Static | BindingFlags.NonPublic);
+                Assert.That(validate, Is.Not.Null);
+                var manifest = new UPilotReleaseManifest { ServerVersion = "9.8.7" };
+                var download = new UPilotServerDownloadInfo
+                {
+                    Url = "https://example.test/upilot-mcp-server-9.8.7-win-x64.exe",
+                    FileName = "upilot-mcp-server-9.8.7-win-x64.exe",
+                    SizeBytes = 1,
+                };
+                var validationArgs = new object[] { manifest, download, null };
+                Assert.That((bool)validate.Invoke(null, validationArgs), Is.False);
+                Assert.That((string)validationArgs[2], Does.Contain("SHA256"));
+                download.Sha256 = digest;
+                validationArgs = new object[] { manifest, download, null };
+                Assert.That((bool)validate.Invoke(null, validationArgs), Is.True);
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
         [UnityTest]
         public IEnumerator VerifiedDownloadMoveRetriesTransientFileLocks()
         {

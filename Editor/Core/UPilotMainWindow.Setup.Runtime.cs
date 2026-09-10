@@ -114,6 +114,7 @@ namespace CodingRiver.UPilot
                 {
                     if (_setupManifest != null)
                         EditorGUILayout.LabelField("推荐版本", _setupManifest.ServerVersion, EditorStyles.miniLabel);
+                    DrawManagedServerLocation(runtime);
                     EditorGUILayout.HelpBox(statusMessage, ready ? MessageType.Info : MessageType.Warning);
                 }
 
@@ -168,6 +169,32 @@ namespace CodingRiver.UPilot
                     }
                 }
             }
+        }
+
+        private static void DrawManagedServerLocation(UPilotServerRuntimeService runtime)
+        {
+            runtime.GetConfiguredStandaloneRuntime(out var exePath, out var serverVersion);
+            var download = runtime.DownloadState;
+            if (string.IsNullOrWhiteSpace(exePath))
+            {
+                var cacheRoot = runtime.RuntimeCacheRoot;
+                EditorGUILayout.LabelField(
+                    "自动下载目录",
+                    string.IsNullOrWhiteSpace(cacheRoot) ? "当前系统用户目录不可用" : cacheRoot,
+                    EditorStyles.miniLabel);
+                if (!string.IsNullOrWhiteSpace(download.ErrorMessage))
+                    EditorGUILayout.LabelField("最近安装失败", download.ErrorMessage, EditorStyles.miniLabel);
+                return;
+            }
+
+            var version = string.IsNullOrWhiteSpace(serverVersion) ? "未知" : serverVersion;
+            var directory = Path.GetDirectoryName(exePath);
+            EditorGUILayout.LabelField("当前 EXE 版本", version, EditorStyles.miniLabel);
+            EditorGUILayout.LabelField("EXE 下载目录", string.IsNullOrWhiteSpace(directory) ? exePath : directory, EditorStyles.miniLabel);
+            if (!string.IsNullOrWhiteSpace(download.Sha256))
+                EditorGUILayout.LabelField("SHA256 状态", download.IsComplete ? "已验证" : "等待验证", EditorStyles.miniLabel);
+            if (!string.IsNullOrWhiteSpace(download.ErrorMessage))
+                EditorGUILayout.LabelField("最近安装失败", download.ErrorMessage, EditorStyles.miniLabel);
         }
 
         private void DrawPythonRuntimeSetup()

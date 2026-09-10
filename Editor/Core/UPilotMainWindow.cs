@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -824,6 +825,7 @@ namespace CodingRiver.UPilot
 
             var serverVersion = string.IsNullOrEmpty(_mcpStatus.ServerVersion) ? "未启动/旧版" : _mcpStatus.ServerVersion;
             var upmVersion = UPilotServerRuntimeService.UpmVersion;
+            var runtime = UPilotServerRuntimeService.Instance;
             var bridge = UPilotBridge.Instance;
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
@@ -853,6 +855,7 @@ namespace CodingRiver.UPilot
 
                 DrawRuntimeDetailRow("运行方式", GetRuntimeModeLabel(snapshot.State));
                 DrawRuntimeDetailRow("发布通道", UPilotServerRuntimeService.ResolveUpdateChannel());
+                DrawManagedServerRuntimeDetails(runtime);
 
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -865,6 +868,28 @@ namespace CodingRiver.UPilot
                     }
                 }
             }
+        }
+
+        private static void DrawManagedServerRuntimeDetails(UPilotServerRuntimeService runtime)
+        {
+            runtime.GetConfiguredStandaloneRuntime(out var exePath, out var configuredVersion);
+            var download = runtime.DownloadState;
+            if (string.IsNullOrWhiteSpace(exePath))
+            {
+                var cacheRoot = runtime.RuntimeCacheRoot;
+                DrawRuntimeDetailRow("自动下载目录", string.IsNullOrWhiteSpace(cacheRoot) ? "当前系统用户目录不可用" : cacheRoot);
+                if (!string.IsNullOrWhiteSpace(download.ErrorMessage))
+                    DrawRuntimeDetailRow("最近安装失败", download.ErrorMessage);
+                return;
+            }
+
+            DrawRuntimeDetailRow("已配置 EXE 版本", string.IsNullOrWhiteSpace(configuredVersion) ? "未知" : configuredVersion);
+            var directory = Path.GetDirectoryName(exePath);
+            DrawRuntimeDetailRow("EXE 下载目录", string.IsNullOrWhiteSpace(directory) ? exePath : directory);
+            if (!string.IsNullOrWhiteSpace(download.Sha256))
+                DrawRuntimeDetailRow("SHA256 状态", download.IsComplete ? "已验证" : "等待验证");
+            if (!string.IsNullOrWhiteSpace(download.ErrorMessage))
+                DrawRuntimeDetailRow("最近安装失败", download.ErrorMessage);
         }
 
         private static void DrawRuntimeDetailRow(string label, string value)

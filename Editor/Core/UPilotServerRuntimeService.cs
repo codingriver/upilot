@@ -144,6 +144,8 @@ namespace CodingRiver.UPilot
         private const int SegmentRetryCount = 2;
         private const int FileOperationRetryCount = 3;
         private const int FileOperationRetryDelayMs = 2000;
+        private const int InstallLockRetryDelayMs = 250;
+        private const int InstallLockTimeoutMs = 300000;
         private const long DiskSpaceSafetyMarginBytes = 64L * 1024 * 1024;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
         private static bool _verifiedServerHashErrorLogged;
@@ -197,11 +199,61 @@ namespace CodingRiver.UPilot
         {
             get
             {
+                return TryGetRuntimeCacheRoot(out var path, out _) ? path : "";
+            }
+        }
+
+        private static string PythonEnvironmentCacheRoot
+        {
+            get
+            {
                 var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 if (string.IsNullOrWhiteSpace(local))
                     local = Path.GetTempPath();
-                return Path.Combine(local, "CodingRiver", "UPilot", "servers");
+                return Path.Combine(local, "CodingRiver", "UPilot", "servers", "python-envs");
             }
+        }
+
+        internal static bool TryGetRuntimeCacheRoot(out string path, out string error)
+        {
+            path = "";
+            error = "";
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrWhiteSpace(profile))
+            {
+                error = "无法确定当前系统用户目录，不能安装自动管理 MCP 服务。";
+                return false;
+            }
+
+            path = Path.Combine(profile, ".upilot", "servers");
+            return true;
+        }
+
+        internal static bool TryGetManagedServerPath(
+            string version,
+            string fileName,
+            out string path,
+            out string error)
+        {
+            path = "";
+            error = "";
+            if (!TryGetRuntimeCacheRoot(out var root, out error))
+                return false;
+            if (!IsSafePathSegment(version))
+            {
+                error = "发布清单中的 Server 版本不可用。";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(fileName) ||
+                !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal) ||
+                fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                error = "发布清单中的 Server 文件名不可用。";
+                return false;
+            }
+
+            path = Path.Combine(root, version, fileName);
+            return true;
         }
 
         public string RuntimeModeLabel
@@ -514,12 +566,28 @@ namespace CodingRiver.UPilot
             if (string.IsNullOrWhiteSpace(exePath))
             {
                 error = "未找到已准备好的服务文件。";
+                ReportManagedServerInstallFailure(
+                    "启用已准备的 MCP 服务",
+                    serverVersion,
+                    "",
+                    exePath,
+                    "",
+                    "",
+                    new UPilotDownloadUserActionException(error));
                 return false;
             }
 
             if (!File.Exists(exePath))
             {
                 error = "已准备好的服务文件不存在：" + exePath;
+                ReportManagedServerInstallFailure(
+                    "启用已准备的 MCP 服务",
+                    serverVersion,
+                    "",
+                    exePath,
+                    "",
+                    "",
+                    new FileNotFoundException(error, exePath));
                 return false;
             }
 
@@ -532,7 +600,14 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 error = "启用服务文件失败：" + ex.Message;
-                Debug.LogError("[UPilot] " + error + "\n" + ex);
+                ReportManagedServerInstallFailure(
+                    "启用已准备的 MCP 服务",
+                    serverVersion,
+                    "",
+                    exePath,
+                    "",
+                    TryComputeSha256(exePath),
+                    ex);
                 return false;
             }
         }
@@ -649,6 +724,9 @@ namespace CodingRiver.UPilot
             CancellationToken token)
         {
             string activeTmpPath = null;
+            string finalPath = null;
+            string expectedSha256 = "";
+            string manifestVersion = "";
             var preserveVerifiedDownload = false;
             try
             {
@@ -656,6 +734,16 @@ namespace CodingRiver.UPilot
                 var download = PickCurrentPlatformDownload(manifest);
                 if (download == null)
                     throw new InvalidOperationException($"没有找到适用于 {CurrentPlatformDisplayName} 的服务。");
+                if (!TryValidateManagedServerDownload(manifest, download, out var validationError))
+                    throw new UPilotDownloadUserActionException(validationError);
+
+                manifestVersion = manifest.ServerVersion;
+                expectedSha256 = download.Sha256;
+                var fileName = download.FileName;
+                if (!TryGetManagedServerPath(manifestVersion, fileName, out finalPath, out var pathError))
+                    throw new UPilotDownloadUserActionException(pathError);
+                var versionDir = Path.GetDirectoryName(finalPath);
+                Directory.CreateDirectory(versionDir);
 
                 UpdateState(state =>
                 {
@@ -667,20 +755,24 @@ namespace CodingRiver.UPilot
                     state.Phase = "正在下载安装";
                 });
 
-                var versionDir = Path.Combine(
-                    RuntimeCacheRoot,
-                    "managed-servers",
-                    SafePathSegment(GetProjectKey()),
-                    SafePathSegment(manifest.ServerVersion));
-                Directory.CreateDirectory(versionDir);
-                var fileName = string.IsNullOrWhiteSpace(download.FileName)
-                    ? BuildDefaultServerFileName(manifest.ServerVersion)
-                    : download.FileName;
-                var finalPath = Path.Combine(versionDir, fileName);
                 var tmpPath = finalPath + ".download";
                 activeTmpPath = tmpPath;
-                var alreadyReady = IsVerifiedServerFileReady(finalPath, download.Sha256);
-                var reusableDownload = !alreadyReady && IsVerifiedServerFileReady(tmpPath, download.Sha256);
+                using var installLock = await AcquireInstallLockAsync(finalPath + ".install.lock", token);
+                var alreadyReady = IsVerifiedServerFileReady(finalPath, expectedSha256);
+                if (!alreadyReady && File.Exists(finalPath))
+                {
+                    var actualSha256 = TryComputeSha256(finalPath);
+                    var warning = "已下载的 MCP 服务文件 SHA256 不匹配，正在删除或隔离后重新下载。" +
+                                  $"\nPath={finalPath}\nExpected={expectedSha256}\nActual={actualSha256}";
+                    Debug.LogWarning("[UPilot] " + warning);
+                    UpdateState(state => state.WarningMessage = warning);
+                    if (!CleanupOrQuarantineFailedTarget(finalPath, token, out var quarantinePath))
+                        throw new UPilotDownloadUserActionException(
+                            "无法删除或隔离 SHA256 不匹配的 MCP 服务文件。" +
+                            $"\nPath={finalPath}\nQuarantine={quarantinePath}");
+                }
+
+                var reusableDownload = !alreadyReady && IsVerifiedServerFileReady(tmpPath, expectedSha256);
                 if (!alreadyReady)
                 {
                     if (!reusableDownload)
@@ -703,8 +795,7 @@ namespace CodingRiver.UPilot
                         token.ThrowIfCancellationRequested();
                         UpdateState(state => state.Phase = "正在验证文件");
                         var actualSha = ComputeSha256(tmpPath);
-                        if (!string.IsNullOrWhiteSpace(download.Sha256) &&
-                            !string.Equals(actualSha, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(actualSha, expectedSha256, StringComparison.OrdinalIgnoreCase))
                         {
                             await RetryFileOperationAsync(
                                 () => File.Delete(tmpPath),
@@ -713,7 +804,7 @@ namespace CodingRiver.UPilot
                                 throwOnFailure: false,
                                 updateProgress: false);
                             throw new UPilotDownloadUserActionException(
-                                $"下载的 MCP 服务文件未通过完整性校验，请重新执行更新。期望 {download.Sha256}，实际 {actualSha}");
+                                $"下载的 MCP 服务文件未通过完整性校验，请重新执行更新。期望 {expectedSha256}，实际 {actualSha}");
                         }
                         preserveVerifiedDownload = true;
                     }
@@ -728,7 +819,7 @@ namespace CodingRiver.UPilot
                         });
                     }
 
-                    await ReplaceVerifiedDownloadAsync(tmpPath, finalPath, download.Sha256, token);
+                    await ReplaceVerifiedDownloadAsync(tmpPath, finalPath, expectedSha256, token);
                     preserveVerifiedDownload = false;
                 }
                 else
@@ -760,7 +851,7 @@ namespace CodingRiver.UPilot
                 {
                     Version = manifest.ServerVersion,
                     TargetPath = finalPath,
-                    Sha256 = download.Sha256,
+                    Sha256 = expectedSha256,
                     PlatformDisplayName = CurrentPlatformDisplayName,
                 };
             }
@@ -796,8 +887,14 @@ namespace CodingRiver.UPilot
                         "MCP 服务目标路径不可用。请检查路径和磁盘状态后重新更新。",
                         ex);
                 }
-                Debug.LogError("[UPilot] MCP server exe download failed: " + reportedException.Message +
-                               "\n" + reportedException);
+                ReportManagedServerInstallFailure(
+                    "安装自动管理 MCP 服务",
+                    manifestVersion,
+                    activeTmpPath,
+                    finalPath,
+                    expectedSha256,
+                    TryComputeSha256(finalPath),
+                    reportedException);
                 UpdateState(state =>
                 {
                     state.IsRunning = false;
@@ -805,8 +902,6 @@ namespace CodingRiver.UPilot
                     state.Phase = "下载失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
-                if (reportedException is UPilotDownloadUserActionException)
-                    ScheduleDownloadErrorDialog(reportedException.Message);
                 throw reportedException;
             }
             finally
@@ -817,32 +912,137 @@ namespace CodingRiver.UPilot
                     {
                         Debug.LogWarning("[UPilot] 已保留通过 SHA256 校验的下载文件，后续更新可直接复用。" +
                                          "\nPath=" + activeTmpPath);
-                        await RetryFileOperationAsync(
+                        var cleanupSucceeded = await RetryFileOperationAsync(
                             () => CleanupSegmentFiles(activeTmpPath, ParallelDownloadSegments),
                             "清理服务下载分片文件",
                             CancellationToken.None,
                             throwOnFailure: false,
                             updateProgress: false);
+                        if (!cleanupSucceeded)
+                            ReportManagedServerInstallFailure("清理服务下载分片文件", manifestVersion, activeTmpPath, finalPath, expectedSha256, "", null);
                     }
                     else
                     {
-                        await RetryFileOperationAsync(
+                        var cleanupSucceeded = await RetryFileOperationAsync(
                             () => CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments),
                             "清理服务下载临时文件",
                             CancellationToken.None,
                             throwOnFailure: false,
                             updateProgress: false);
+                        if (!cleanupSucceeded)
+                            ReportManagedServerInstallFailure("清理服务下载临时文件", manifestVersion, activeTmpPath, finalPath, expectedSha256, "", null);
                     }
                 }
             }
+        }
+
+        private static bool TryValidateManagedServerDownload(
+            UPilotReleaseManifest manifest,
+            UPilotServerDownloadInfo download,
+            out string error)
+        {
+            error = "";
+            if (manifest == null || string.IsNullOrWhiteSpace(manifest.ServerVersion))
+                error = "发布清单缺少 Server 版本。";
+            else if (download == null)
+                error = "发布清单缺少当前平台的 Server 下载项。";
+            else if (!Uri.TryCreate(download.Url, UriKind.Absolute, out var url) ||
+                     !string.Equals(url.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                error = "发布清单中的 Server 下载地址必须是 HTTPS 绝对地址。";
+            else if (download.SizeBytes <= 0)
+                error = "发布清单中的 Server 文件大小必须大于零。";
+            else if (!Regex.IsMatch(download.Sha256 ?? "", "\\A[0-9a-fA-F]{64}\\z"))
+                error = "发布清单缺少或包含无效的 Server SHA256，已拒绝自动安装。";
+            else if (!TryGetManagedServerPath(manifest.ServerVersion, download.FileName, out _, out error))
+                return false;
+
+            return string.IsNullOrEmpty(error);
+        }
+
+        private sealed class ManagedServerInstallLock : IDisposable
+        {
+            private readonly FileStream _stream;
+
+            public ManagedServerInstallLock(FileStream stream)
+            {
+                _stream = stream;
+            }
+
+            public void Dispose()
+            {
+                _stream?.Dispose();
+            }
+        }
+
+        private static async Task<ManagedServerInstallLock> AcquireInstallLockAsync(string lockPath, CancellationToken token)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            Exception lastError = null;
+            while (stopwatch.ElapsedMilliseconds < InstallLockTimeoutMs)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    return new ManagedServerInstallLock(stream);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    lastError = ex;
+                    await Task.Delay(InstallLockRetryDelayMs, token);
+                }
+            }
+
+            throw new UPilotDownloadUserActionException(
+                "等待共享 MCP 服务安装锁超时，请关闭可能正在更新同版本服务的 Unity 工程后重试。" +
+                "\nLock=" + lockPath,
+                lastError);
+        }
+
+        private static string TryComputeSha256(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return "";
+            try
+            {
+                return ComputeSha256(path);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[UPilot] 无法读取 MCP 服务文件 SHA256。\nPath=" + path + "\nException=" + ex);
+                return "";
+            }
+        }
+
+        private static void ReportManagedServerInstallFailure(
+            string operation,
+            string version,
+            string sourcePath,
+            string targetPath,
+            string expectedSha256,
+            string actualSha256,
+            Exception exception)
+        {
+            var message = "[UPilot] 自动管理 MCP 服务失败" +
+                          $"\nOperation={operation}" +
+                          $"\nVersion={version}" +
+                          $"\nSource={sourcePath}" +
+                          $"\nTarget={targetPath}" +
+                          $"\nExpectedSha256={expectedSha256}" +
+                          $"\nActualSha256={actualSha256}" +
+                          $"\nException={exception}";
+            Debug.LogError(message);
+            Instance.UpdateState(state => state.ErrorMessage = exception?.Message ?? operation + "失败");
+            ScheduleDownloadErrorDialog((exception?.Message ?? operation + "失败") +
+                                        (string.IsNullOrWhiteSpace(targetPath) ? "" : "\n\n目标文件：" + targetPath));
         }
 
         private static bool IsVerifiedServerFileReady(string path, string expectedSha256)
         {
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
                 return false;
-            if (string.IsNullOrWhiteSpace(expectedSha256))
-                return true;
+            if (!Regex.IsMatch(expectedSha256 ?? "", "\\A[0-9a-fA-F]{64}\\z"))
+                return false;
             try
             {
                 var actual = ComputeSha256(path);
@@ -1032,8 +1232,10 @@ namespace CodingRiver.UPilot
 
         private static bool CleanupOrQuarantineFailedTarget(
             string targetPath,
-            CancellationToken token)
+            CancellationToken token,
+            out string quarantinePath)
         {
+            quarantinePath = "";
             if (!File.Exists(targetPath))
                 return true;
 
@@ -1049,7 +1251,7 @@ namespace CodingRiver.UPilot
             }
 
             token.ThrowIfCancellationRequested();
-            var quarantinePath = targetPath + ".failed-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+            quarantinePath = targetPath + ".failed-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
             try
             {
                 File.Move(targetPath, quarantinePath);
@@ -1224,7 +1426,7 @@ namespace CodingRiver.UPilot
                 try
                 {
                     if (File.Exists(finalPath) &&
-                        !CleanupOrQuarantineFailedTarget(finalPath, token))
+                        !CleanupOrQuarantineFailedTarget(finalPath, token, out _))
                     {
                         throw new UPilotDownloadUserActionException(
                             "无法删除或隔离不完整的 MCP 服务文件。请关闭占用该文件的程序后重新更新。");
@@ -1260,7 +1462,7 @@ namespace CodingRiver.UPilot
                     var hardError = IsDiskFullException(ex);
                     LogFileOperationFailure("Copy", attempt, ex, verifiedPath, finalPath, hardError);
                     if (File.Exists(finalPath) &&
-                        !CleanupOrQuarantineFailedTarget(finalPath, token))
+                        !CleanupOrQuarantineFailedTarget(finalPath, token, out _))
                     {
                         throw new UPilotDownloadUserActionException(
                             "复制失败后无法删除或隔离不完整的 MCP 服务文件。请关闭占用该文件的程序后重新更新。",
@@ -1729,7 +1931,7 @@ namespace CodingRiver.UPilot
                 if (!probe.InterpreterUsable || string.IsNullOrWhiteSpace(python) || !File.Exists(python))
                     throw new InvalidOperationException("未找到可用的 Python 解释器。");
 
-                var venvRoot = Path.Combine(RuntimeCacheRoot, "python-envs", SafePathSegment(GetProjectKey()));
+                var venvRoot = Path.Combine(PythonEnvironmentCacheRoot, SafePathSegment(GetProjectKey()));
                 var venvPath = Path.Combine(venvRoot, "venv");
                 var interpreterPath = GetVenvPythonPath(venvPath);
                 Directory.CreateDirectory(venvRoot);
@@ -1831,6 +2033,16 @@ namespace CodingRiver.UPilot
             foreach (var c in Path.GetInvalidFileNameChars())
                 value = value.Replace(c, '_');
             return value;
+        }
+
+        private static bool IsSafePathSegment(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   value != "." &&
+                   value != ".." &&
+                   value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 &&
+                   value.IndexOf(Path.DirectorySeparatorChar) < 0 &&
+                   value.IndexOf(Path.AltDirectorySeparatorChar) < 0;
         }
 
         private static bool IsMainChannel(string value)
