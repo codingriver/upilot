@@ -48,13 +48,9 @@ namespace CodingRiver.UPilot
                 {
                     window.ShowActiveUpdate();
                 }
-                else if (UPilotUpdateService.Instance.GetOperationStatus().Phase ==
-                         UPilotUpdateOperationPhase.Completed)
-                {
-                    window.ShowCompletedUpdate();
-                }
                 else
                 {
+                    ClearCompletedOperationStatusForFreshCheck();
                     window.CheckForUpdates();
                 }
             }
@@ -119,14 +115,6 @@ namespace CodingRiver.UPilot
             _isChecking = false;
             _error = "";
             _operationRunning = true;
-            Repaint();
-        }
-
-        private void ShowCompletedUpdate()
-        {
-            _isChecking = false;
-            _error = "";
-            _operationRunning = false;
             Repaint();
         }
 
@@ -601,14 +589,20 @@ namespace CodingRiver.UPilot
 
         private void RecheckForUpdates()
         {
-            if (UPilotUpdateService.Instance.GetOperationStatus().Phase ==
-                UPilotUpdateOperationPhase.Completed)
-            {
-                UPilotUpdateService.ClearOperationStatus();
+            if (ClearCompletedOperationStatusForFreshCheck())
                 _lastObservedOperationPhase = UPilotUpdateOperationPhase.None;
-            }
 
             CheckForUpdates();
+        }
+
+        internal static bool ClearCompletedOperationStatusForFreshCheck()
+        {
+            if (UPilotUpdateService.Instance.GetOperationStatus().Phase !=
+                UPilotUpdateOperationPhase.Completed)
+                return false;
+
+            UPilotUpdateService.ClearOperationStatus();
+            return true;
         }
 
         internal static bool ShouldRefreshForOperationStatus(

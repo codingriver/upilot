@@ -405,6 +405,9 @@ namespace CodingRiver.UPilot
 
             UPilotProjectConfig.Reload();
             UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
+            var agentConfigurationRefresh = UPilotAgentSetup.RefreshManagedConfigurationAfterPackageUpdate();
+            if (!string.Equals(agentConfigurationRefresh, "No changes needed.", StringComparison.Ordinal))
+                Debug.Log("[UPilot] 已自动刷新更新后的 Agent 配置：\n" + agentConfigurationRefresh);
             if (installManagedServer && UPilotServerRuntimeService.Instance.GetConfiguredMode() ==
                 UPilotServerRuntimeMode.StandaloneExe)
             {

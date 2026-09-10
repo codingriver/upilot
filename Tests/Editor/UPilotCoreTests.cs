@@ -1282,6 +1282,24 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void ReopeningUpdateCenterClearsCompletedStatusBeforeFreshCheck()
+        {
+            UPilotUpdateService.SetOperationCompleted("更新成功");
+
+            try
+            {
+                Assert.That(UPilotUpdateWindow.ClearCompletedOperationStatusForFreshCheck(), Is.True);
+                Assert.That(
+                    UPilotUpdateService.Instance.GetOperationStatus().Phase,
+                    Is.EqualTo(UPilotUpdateOperationPhase.None));
+            }
+            finally
+            {
+                UPilotUpdateService.ClearOperationStatus();
+            }
+        }
+
+        [Test]
         public void UpdateOperationStatusUsesWaitingCopyDuringPackageReload()
         {
             UPilotUpdateService.SetOperationPhase(
@@ -1864,6 +1882,65 @@ namespace CodingRiver.UPilot.Tests
             {
                 if (Directory.Exists(directory))
                 Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ManagedSkillRefreshDetectsSourceChangeWithoutTemplateVersionBump()
+        {
+            var currentVersion = GetSkillInstallTemplateVersion();
+
+            Assert.That(
+                UPilotAgentSetup.IsManagedSkillInstallUpdateAvailable(
+                    currentVersion,
+                    "installed-hash",
+                    "new-source-hash"),
+                Is.True);
+            Assert.That(
+                UPilotAgentSetup.IsManagedSkillInstallUpdateAvailable(
+                    currentVersion,
+                    "matching-hash",
+                    "matching-hash"),
+                Is.False);
+        }
+
+        [Test]
+        public void ManagedSkillSourceHashUsesTheInstalledEndpoint()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-skill-source-" + Guid.NewGuid().ToString("N"));
+            var source = Path.Combine(directory, "source");
+            var installed = Path.Combine(directory, "installed");
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(installed);
+
+            try
+            {
+                const string sourceText = "endpoint=http://127.0.0.1:9999/mcp\nhealth=http://127.0.0.1:9999/health\n";
+                File.WriteAllText(Path.Combine(source, "SKILL.md"), sourceText);
+                var rewrite = typeof(UPilotAgentSetup).GetMethod(
+                    "RewriteSkillEndpoints",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                File.WriteAllText(
+                    Path.Combine(installed, "SKILL.md"),
+                    (string)rewrite.Invoke(null, new object[] { sourceText }));
+
+                var sourceHash = typeof(UPilotAgentSetup).GetMethod(
+                    "ComputeManagedSkillSourceHash",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                var installedHash = typeof(UPilotAgentSetup).GetMethod(
+                    "ComputeSkillInstallHash",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string) },
+                    null);
+
+                Assert.That(sourceHash.Invoke(null, new object[] { source }),
+                    Is.EqualTo(installedHash.Invoke(null, new object[] { installed })));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
             }
         }
 

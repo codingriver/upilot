@@ -613,9 +613,58 @@ namespace CodingRiver.UPilot
             return result.Length == 0 ? "No changes needed." : result.ToString().TrimEnd();
         }
 
+        internal static string RefreshManagedConfigurationAfterPackageUpdate()
+        {
+            var result = new StringBuilder();
+            try
+            {
+                AppendRefreshResult(result, WriteAgentRules(overwriteExisting: false));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[UPilot] 自动刷新 Agent 规则和 Skill 失败：" + ex.Message);
+                result.Append("刷新 Agent 规则和 Skill 失败：").Append(ex.Message);
+            }
+
+            foreach (var status in GetMcpConfigStatuses())
+            {
+                // Do not add UPilot to an agent configuration the project has not opted into.
+                if (!status.FileExists || !status.HasUPilotEntry)
+                    continue;
+
+                try
+                {
+                    AppendRefreshResult(
+                        result,
+                        WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false));
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning(
+                        "[UPilot] 自动刷新 " + status.ClientName + " MCP 配置失败：" + ex.Message);
+                    if (result.Length > 0)
+                        result.AppendLine();
+                    result.Append("刷新 ").Append(status.ClientName).Append(" MCP 配置失败：").Append(ex.Message);
+                }
+            }
+
+            MarkAgentRulesHandledForCurrentProject();
+            return result.Length == 0 ? "No changes needed." : result.ToString();
+        }
+
         public static void MarkAgentRulesHandledForCurrentProject()
         {
             EditorPrefs.SetBool(GetAgentRulesSetupKey(), true);
+        }
+
+        private static void AppendRefreshResult(StringBuilder target, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) ||
+                string.Equals(value, "No changes needed.", StringComparison.Ordinal))
+                return;
+            if (target.Length > 0)
+                target.AppendLine();
+            target.Append(value.Trim());
         }
 
         private static void WriteSharedAgentsRule(string projectRoot, StringBuilder result)
@@ -1635,9 +1684,14 @@ namespace CodingRiver.UPilot
                     source,
                     $"managed={isUnmodifiedManagedInstall}; installedTemplateVersion={installedTemplateVersion}; expectedTemplateVersion={SkillInstallTemplateVersion}; installedHash={installedContentHash}");
 
+                var sourceContentHash = Directory.Exists(source)
+                    ? ComputeManagedSkillSourceHash(source)
+                    : "";
                 if (isUnmodifiedManagedInstall &&
-                    installedTemplateVersion < SkillInstallTemplateVersion &&
-                    Directory.Exists(source))
+                    IsManagedSkillInstallUpdateAvailable(
+                        installedTemplateVersion,
+                        installedContentHash,
+                        sourceContentHash))
                 {
                     LogAgentRulesFileProcessing("Deleting old managed Skill install", target, source);
                     Directory.Delete(target, recursive: true);
@@ -1693,6 +1747,18 @@ namespace CodingRiver.UPilot
             result.AppendLine("Wrote " + NormalizePathForLog(target));
         }
 
+        internal static bool IsManagedSkillInstallUpdateAvailable(
+            int installedTemplateVersion,
+            string installedContentHash,
+            string sourceContentHash)
+        {
+            if (string.IsNullOrWhiteSpace(sourceContentHash))
+                return false;
+
+            return installedTemplateVersion < SkillInstallTemplateVersion ||
+                   !string.Equals(installedContentHash, sourceContentHash, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool TryReadSkillInstallMetadata(
             string target,
             out int templateVersion,
@@ -1740,6 +1806,16 @@ namespace CodingRiver.UPilot
 
         private static string ComputeSkillInstallHash(string target)
         {
+            return ComputeSkillInstallHashCore(target, normalizeSkillEndpoints: false);
+        }
+
+        private static string ComputeManagedSkillSourceHash(string source)
+        {
+            return ComputeSkillInstallHashCore(source, normalizeSkillEndpoints: true);
+        }
+
+        private static string ComputeSkillInstallHashCore(string target, bool normalizeSkillEndpoints)
+        {
             using var sha256 = SHA256.Create();
             var files = Directory.GetFiles(target, "*", SearchOption.AllDirectories);
             Array.Sort(files, StringComparer.OrdinalIgnoreCase);
@@ -1758,6 +1834,12 @@ namespace CodingRiver.UPilot
                 sha256.TransformBlock(separator, 0, separator.Length, separator, 0);
 
                 var contentBytes = File.ReadAllBytes(file);
+                if (normalizeSkillEndpoints &&
+                    string.Equals(Path.GetFileName(file), "SKILL.md", StringComparison.OrdinalIgnoreCase))
+                {
+                    contentBytes = new UTF8Encoding(false).GetBytes(
+                        RewriteSkillEndpoints(File.ReadAllText(file, Encoding.UTF8)));
+                }
                 sha256.TransformBlock(contentBytes, 0, contentBytes.Length, contentBytes, 0);
                 sha256.TransformBlock(separator, 0, separator.Length, separator, 0);
             }
@@ -1776,14 +1858,18 @@ namespace CodingRiver.UPilot
                 return;
 
             var text = File.ReadAllText(skillPath, Encoding.UTF8);
-            text = Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/mcp", McpUrl);
-            text = Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/health", HealthUrl);
-            File.WriteAllText(skillPath, text, new UTF8Encoding(false));
+            File.WriteAllText(skillPath, RewriteSkillEndpoints(text), new UTF8Encoding(false));
             LogAgentRulesFileProcessing(
                 "Rewrote Skill endpoint",
                 skillPath,
                 sourcePath: "",
                 $"mcpUrl={McpUrl}; healthUrl={HealthUrl}");
+        }
+
+        private static string RewriteSkillEndpoints(string text)
+        {
+            text = Regex.Replace(text ?? "", "http://127\\.0\\.0\\.1:\\d+/mcp", McpUrl);
+            return Regex.Replace(text, "http://127\\.0\\.0\\.1:\\d+/health", HealthUrl);
         }
 
         private static void CopyDirectoryWithoutMeta(string source, string target)
