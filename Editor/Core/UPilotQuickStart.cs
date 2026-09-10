@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
@@ -211,7 +212,8 @@ namespace CodingRiver.UPilot
             if (openCode) enabledAgentClients.Add("OpenCode");
             UPilotAgentSetup.SetEnabledAgentClients(enabledAgentClients);
 
-            EnsureAvailablePortsWhenStopped();
+            if (!EnsureAvailablePortsWhenStopped())
+                return "端口配置未完成，未启动服务。";
 
             var result = new StringBuilder();
             result.AppendLine(UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
@@ -308,8 +310,9 @@ namespace CodingRiver.UPilot
             if (repairAction == UPilotRepairAction.SwitchPorts)
             {
                 BeginOperation(UPilotServiceOperation.Restarting);
-                SwitchToAvailablePortsAndRestart(agentConfigs);
-                return "已切换到空闲端口并重新启动。";
+                return SwitchToAvailablePortsAndRestart(agentConfigs)
+                    ? "已切换到空闲端口并重新启动。"
+                    : "未修改工程端口。";
             }
 
             if (repairAction == UPilotRepairAction.RestartServer)
@@ -465,34 +468,51 @@ namespace CodingRiver.UPilot
             _operationStartedAt = 0d;
         }
 
-        private static void EnsureAvailablePortsWhenStopped()
+        private static bool EnsureAvailablePortsWhenStopped()
         {
-            var bridge = UPilotBridge.Instance;
-            var manager = UPilotMcpServerManager.Instance;
-            var status = manager.GetStatus();
-            if (bridge.IsStarted || status.IsRunning)
-                return;
+            try
+            {
+                var bridge = UPilotBridge.Instance;
+                var status = UPilotMcpServerManager.Instance.GetStatus();
+                if (status.ProcessOwnership == McpProcessOwnership.CurrentUPilot)
+                    return UPilotPortRegistration.TrySyncCurrent();
+                if (UPilotPortAllocator.IsPortAvailable(bridge.WsPort) &&
+                    UPilotPortAllocator.IsPortAvailable(bridge.HttpPort) &&
+                    bridge.WsPort != bridge.HttpPort &&
+                    string.IsNullOrEmpty(UPilotPortRegistry.ForUser().Check(
+                        UPilotProjectConfig.ProjectRoot, bridge.WsPort, bridge.HttpPort)))
+                    return UPilotPortRegistration.TrySyncCurrent();
 
-            if (UPilotPortAllocator.IsPortAvailable(bridge.WsPort) &&
-                UPilotPortAllocator.IsPortAvailable(bridge.HttpPort) &&
-                bridge.WsPort != bridge.HttpPort)
-                return;
-
-            var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
-            bridge.SetWsEndpoint(UPilotBridge.DefaultWsHost, pair.wsPort);
-            bridge.HttpPort = pair.httpPort;
-            manager.InvalidateStatusCache();
+                var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
+                if (!EditorUtility.DisplayDialog("修改当前工程端口？",
+                        $"当前端口存在占用或预留冲突。将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort}。",
+                        "修改端口", "取消"))
+                    return false;
+                bridge.SetProjectEndpoints(UPilotBridge.DefaultWsHost, pair.wsPort, pair.httpPort);
+                return true;
+            }
+            catch (Exception ex) { UPilotPortRegistration.Report("配置启动端口", ex); return false; }
         }
 
-        private static void SwitchToAvailablePortsAndRestart(AgentMcpConfigStatus[] agentConfigs)
+        private static bool SwitchToAvailablePortsAndRestart(AgentMcpConfigStatus[] agentConfigs)
+        {
+            try { return SwitchToAvailablePortsAndRestartCore(agentConfigs); }
+            catch (Exception ex) { UPilotPortRegistration.Report("修复端口", ex); return false; }
+        }
+
+        private static bool SwitchToAvailablePortsAndRestartCore(AgentMcpConfigStatus[] agentConfigs)
         {
             var bridge = UPilotBridge.Instance;
             var manager = UPilotMcpServerManager.Instance;
-            bridge.Stop();
-
             var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
-            bridge.SetWsEndpoint(UPilotBridge.DefaultWsHost, pair.wsPort);
-            bridge.HttpPort = pair.httpPort;
+            if (!EditorUtility.DisplayDialog("修改当前工程端口？",
+                    $"当前 WS {bridge.WsPort} / HTTP {bridge.HttpPort} 存在冲突。\n" +
+                    $"将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort}，并更新已配置客户端。",
+                    "修改并重启", "取消"))
+                return false;
+            manager.StopServer();
+            bridge.Stop();
+            bridge.SetProjectEndpoints(UPilotBridge.DefaultWsHost, pair.wsPort, pair.httpPort);
             manager.InvalidateStatusCache();
 
             RewriteExistingAgentConfigs(agentConfigs);
@@ -501,9 +521,10 @@ namespace CodingRiver.UPilot
                 manager.StartServer();
                 bridge.EnsureStarted();
             };
+            return true;
         }
 
-        private static void RewriteExistingAgentConfigs(AgentMcpConfigStatus[] statuses)
+        internal static void RewriteExistingAgentConfigs(AgentMcpConfigStatus[] statuses)
         {
             if (statuses == null) return;
             foreach (var status in statuses)

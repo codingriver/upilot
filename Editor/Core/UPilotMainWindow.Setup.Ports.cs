@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
+using System;
 using UnityEditor;
 using UnityEngine;
 
@@ -33,6 +34,8 @@ namespace CodingRiver.UPilot
                 {
                     if (GUILayout.Button("重新检测", GUILayout.Height(26)))
                         EvaluateSetupPorts();
+                    if (GUILayout.Button("端口登记管理", GUILayout.Height(26)))
+                        UPilotPortRegistryWindow.Open();
 
                     using (new EditorGUI.DisabledScope(_setupPortsReady || _recommendedWsPort <= 0 || _recommendedHttpPort <= 0))
                     {
@@ -70,6 +73,18 @@ namespace CodingRiver.UPilot
 
         private void EvaluateSetupPorts()
         {
+            try { EvaluateSetupPortsCore(); }
+            catch (Exception ex)
+            {
+                _setupPortsReady = false;
+                _setupPortMessage = ex.Message;
+                _setupPortMessageType = MessageType.Error;
+                UPilotPortRegistration.Report("检查设置端口", ex);
+            }
+        }
+
+        private void EvaluateSetupPortsCore()
+        {
             _setupPortsReady = false;
             _recommendedWsPort = 0;
             _recommendedHttpPort = 0;
@@ -92,10 +107,22 @@ namespace CodingRiver.UPilot
 
             var manager = UPilotMcpServerManager.Instance;
             var serviceStatus = manager.GetStatus();
+            var conflict = UPilotPortRegistry.ForUser().Check(
+                UPilotProjectConfig.ProjectRoot, _setupWsPort, _setupHttpPort);
+            if (!string.IsNullOrEmpty(conflict))
+            {
+                _setupPortMessage = conflict;
+                _setupPortMessageType = MessageType.Error;
+                FindRecommendedSetupPorts();
+                if (_recommendedWsPort > 0)
+                    _setupPortMessage += $"\n推荐 WS {_recommendedWsPort}，HTTP {_recommendedHttpPort}。";
+                return;
+            }
+            var owned = serviceStatus.ProcessOwnership == McpProcessOwnership.CurrentUPilot;
             var wsAvailable = UPilotPortAllocator.IsPortAvailable(_setupWsPort) ||
-                              (_setupWsPort == manager.WsPort && serviceStatus.WsPortListening);
+                              (owned && _setupWsPort == manager.WsPort && serviceStatus.WsPortListening);
             var httpAvailable = UPilotPortAllocator.IsPortAvailable(_setupHttpPort) ||
-                                (_setupHttpPort == manager.HttpPort && serviceStatus.HttpPortListening);
+                                (owned && _setupHttpPort == manager.HttpPort && serviceStatus.HttpPortListening);
             _setupPortsReady = wsAvailable && httpAvailable;
             if (_setupPortsReady)
             {
@@ -121,15 +148,27 @@ namespace CodingRiver.UPilot
             var startHttp = _setupHttpPort > 0 && _setupHttpPort <= 65535
                 ? _setupHttpPort
                 : UPilotBridge.DefaultHttpPort;
-            var pair = UPilotPortAllocator.FindAvailablePair(startWs, startHttp);
-            _recommendedWsPort = pair.wsPort;
-            _recommendedHttpPort = pair.httpPort;
+            try
+            {
+                var pair = UPilotPortAllocator.FindAvailablePair(startWs, startHttp);
+                _recommendedWsPort = pair.wsPort;
+                _recommendedHttpPort = pair.httpPort;
+            }
+            catch (Exception ex)
+            {
+                _recommendedWsPort = _recommendedHttpPort = 0;
+                _setupPortMessage = ex.Message;
+                _setupPortMessageType = MessageType.Error;
+                UPilotPortRegistration.Report("推荐端口", ex);
+            }
         }
 
         private void ApplyRecommendedSetupPorts()
         {
             if (_recommendedWsPort <= 0 || _recommendedHttpPort <= 0)
                 FindRecommendedSetupPorts();
+            if (_recommendedWsPort <= 0 || _recommendedHttpPort <= 0)
+                return;
             _setupWsPort = _recommendedWsPort;
             _setupHttpPort = _recommendedHttpPort;
             EvaluateSetupPorts();
@@ -137,8 +176,10 @@ namespace CodingRiver.UPilot
 
         private void ContinueFromPortStep()
         {
+            EvaluateSetupPorts();
             if (!_setupPortsReady)
             {
+                if (_recommendedWsPort <= 0 || _recommendedHttpPort <= 0) return;
                 if (!EditorUtility.DisplayDialog(
                         "自动分配可用端口？",
                         $"当前端口存在冲突。UPilot 将重新检测并使用推荐端口 WS {_recommendedWsPort}、HTTP {_recommendedHttpPort}。",

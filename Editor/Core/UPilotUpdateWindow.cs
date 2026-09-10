@@ -207,6 +207,13 @@ namespace CodingRiver.UPilot
             EditorGUILayout.Space(4);
             using (new EditorGUILayout.VerticalScope(new GUIStyle { padding = new RectOffset(12, 12, 0, 8) }))
             {
+                if (UPilotUpdateService.Instance.HasOccupancyRecovery)
+                {
+                    DrawOccupancyRecoveryContent();
+                    DrawFooter();
+                    return;
+                }
+
                 if (UPilotServerRuntimeService.IsSourceUpdateChannel())
                 {
                     _isChecking = false;
@@ -304,6 +311,68 @@ namespace CodingRiver.UPilot
             }
 
             DrawReloadGuardNotice(operationStatus);
+
+            if (!string.IsNullOrWhiteSpace(_notice))
+                EditorGUILayout.HelpBox(_notice, _noticeType);
+        }
+
+        private void DrawOccupancyRecoveryContent()
+        {
+            var updateService = UPilotUpdateService.Instance;
+            var scan = updateService.GetOccupancyRecoveryScan();
+            EditorGUILayout.HelpBox(
+                updateService.GetOccupancyRecoveryMessage() +
+                "\n\n检测到占用更新资源或仍在运行旧代码的进程。结束操作会终止全部可结束进程，并自动重试一次更新。",
+                MessageType.Error);
+
+            EditorGUILayout.Space(6);
+            DrawSectionTitle("检测到的占用进程");
+            if (scan == null || scan.Processes.Count == 0)
+            {
+                EditorGUILayout.LabelField("正在重新检测占用进程…", EditorStyles.miniLabel);
+            }
+            else
+            {
+                foreach (var process in scan.Processes)
+                {
+                    var status = process.CanTerminate ? "可结束" : "无法结束：" + process.CannotTerminateReason;
+                    EditorGUILayout.LabelField(
+                        $"{process.DisplayName}  PID {process.ProcessId}（{status}）",
+                        EditorStyles.miniLabel);
+                    if (!string.IsNullOrWhiteSpace(process.CommandLine))
+                        EditorGUILayout.LabelField(process.CommandLine, EditorStyles.wordWrappedMiniLabel);
+                }
+            }
+
+            EditorGUILayout.Space(12);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                var previous = GUI.backgroundColor;
+                try
+                {
+                    GUI.backgroundColor = new Color(0.86f, 0.42f, 0.22f);
+                    if (GUILayout.Button("结束全部占用进程并重试", GUILayout.Width(196), GUILayout.Height(34)))
+                    {
+                        _operationRunning = updateService.ConfirmTerminateOccupiersAndRetry(out var message);
+                        _notice = message;
+                        _noticeType = _operationRunning ? MessageType.Info : MessageType.Warning;
+                    }
+                }
+                finally
+                {
+                    GUI.backgroundColor = previous;
+                }
+
+                if (GUILayout.Button("取消更新", GUILayout.Width(92), GUILayout.Height(34)))
+                {
+                    updateService.CancelOccupancyRecovery();
+                    _operationRunning = false;
+                    _notice = "已取消更新。";
+                    _noticeType = MessageType.Info;
+                }
+                GUILayout.FlexibleSpace();
+            }
 
             if (!string.IsNullOrWhiteSpace(_notice))
                 EditorGUILayout.HelpBox(_notice, _noticeType);

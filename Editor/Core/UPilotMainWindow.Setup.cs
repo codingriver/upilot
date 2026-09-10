@@ -203,8 +203,7 @@ namespace CodingRiver.UPilot
                 _setupHost = UPilotBridge.DefaultWsHost;
 
             var bridge = UPilotBridge.Instance;
-            bridge.SetWsEndpoint(_setupHost, _setupWsPort);
-            bridge.HttpPort = _setupHttpPort;
+            bridge.SetProjectEndpoints(_setupHost, _setupWsPort, _setupHttpPort);
         }
 
         private static string FormatSetupBytes(long bytes)

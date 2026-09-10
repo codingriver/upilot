@@ -153,8 +153,7 @@ namespace CodingRiver.UPilot
             if (host == bridge.WsHost && wsPort == bridge.WsPort && httpPort == bridge.HttpPort)
                 return;
 
-            bridge.SetWsEndpoint(host, wsPort);
-            bridge.HttpPort = httpPort;
+            bridge.SetProjectEndpoints(host, wsPort, httpPort);
         }
 
         private void OnEditorUpdate()
@@ -1006,6 +1005,16 @@ namespace CodingRiver.UPilot
 
         private void RepairPortsAndRestart(UPilotBridge bridge, McpServerStatus mcpStatus)
         {
+            try { RepairPortsAndRestartCore(bridge, mcpStatus); }
+            catch (Exception ex)
+            {
+                UPilotPortRegistration.Report("高级设置修复端口", ex);
+                ShowExceptionToast("端口修复失败", ex);
+            }
+        }
+
+        private void RepairPortsAndRestartCore(UPilotBridge bridge, McpServerStatus mcpStatus)
+        {
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 ShowToast(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
@@ -1013,16 +1022,19 @@ namespace CodingRiver.UPilot
             }
 
             var manager = UPilotMcpServerManager.Instance;
+            var pair = UPilotPortAllocator.FindAvailablePair(_wsPortInput, _httpPortInput);
+            if (!EditorUtility.DisplayDialog("修改当前工程端口？",
+                    $"将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort} 并重启服务。", "修改并重启", "取消"))
+                return;
             if (mcpStatus.ProcessId.HasValue)
                 manager.StopServer();
             bridge.Stop();
+            bridge.SetProjectEndpoints(UPilotBridge.DefaultWsHost, pair.wsPort, pair.httpPort);
 
-            var pair = UPilotPortAllocator.FindAvailablePair(_wsPortInput, _httpPortInput);
             _wsHostInput = UPilotBridge.DefaultWsHost;
             _wsPortInput = pair.wsPort;
             _httpPortInput = pair.httpPort;
-            bridge.SetWsEndpoint(_wsHostInput, _wsPortInput);
-            bridge.HttpPort = _httpPortInput;
+            UPilotQuickStart.RewriteExistingAgentConfigs(UPilotAgentSetup.GetMcpConfigStatuses());
 
             manager.InvalidateStatusCache();
             EditorApplication.delayCall += () =>
@@ -1424,8 +1436,7 @@ namespace CodingRiver.UPilot
                             if (_wsPortInput <= 0) _wsPortInput = UPilotBridge.DefaultWsPort;
                             if (_httpPortInput <= 0) _httpPortInput = UPilotBridge.DefaultHttpPort;
                             if (string.IsNullOrWhiteSpace(_wsHostInput)) _wsHostInput = UPilotBridge.DefaultWsHost;
-                            bridge.SetWsEndpoint(_wsHostInput, _wsPortInput);
-                            bridge.HttpPort = _httpPortInput;
+                            bridge.SetProjectEndpoints(_wsHostInput, _wsPortInput, _httpPortInput);
                             ShowToast($"已应用 ws://{_wsHostInput}:{_wsPortInput}  http://{_wsHostInput}:{_httpPortInput}/mcp");
                         }
                     }
@@ -1433,6 +1444,10 @@ namespace CodingRiver.UPilot
 
                 if (status.IsStarted)
                     EditorGUILayout.LabelField("桥接器运行中，连接地址暂不可修改。", EditorStyles.miniLabel);
+                if (!string.IsNullOrEmpty(UPilotPortRegistration.LastError))
+                    EditorGUILayout.HelpBox(UPilotPortRegistration.LastError, MessageType.Error);
+                if (GUILayout.Button("端口登记管理", GUILayout.Height(22)))
+                    UPilotPortRegistryWindow.Open();
             }
         }
 

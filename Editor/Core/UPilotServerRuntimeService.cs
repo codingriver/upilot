@@ -167,6 +167,7 @@ namespace CodingRiver.UPilot
         private readonly object _pythonEnvLock = new();
         private UPilotDownloadState _downloadState = new();
         private UPilotPythonEnvironmentState _pythonEnvState = new();
+        private string _lastManagedInstallFailurePath = "";
 
         public UPilotDownloadState DownloadState
         {
@@ -174,6 +175,15 @@ namespace CodingRiver.UPilot
             {
                 lock (_stateLock)
                     return CopyState(_downloadState);
+            }
+        }
+
+        internal string LastManagedInstallFailurePath
+        {
+            get
+            {
+                lock (_stateLock)
+                    return _lastManagedInstallFailurePath;
             }
         }
 
@@ -1023,6 +1033,8 @@ namespace CodingRiver.UPilot
             string actualSha256,
             Exception exception)
         {
+            lock (Instance._stateLock)
+                Instance._lastManagedInstallFailurePath = targetPath ?? "";
             var message = "[UPilot] 自动管理 MCP 服务失败" +
                           $"\nOperation={operation}" +
                           $"\nVersion={version}" +

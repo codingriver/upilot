@@ -58,6 +58,25 @@ namespace CodingRiver.UPilot
             string targetServerVersion = "",
             string preparedServerPath = "")
         {
+            return PrepareForPackageUpdate(
+                targetVersion,
+                notice,
+                installManagedServerAfterUpdate,
+                targetServerVersion,
+                preparedServerPath,
+                UPilotOccupancyRetryKind.Package,
+                "");
+        }
+
+        internal static bool PrepareForPackageUpdate(
+            string targetVersion,
+            Action<string, MessageType> notice,
+            bool installManagedServerAfterUpdate,
+            string targetServerVersion,
+            string preparedServerPath,
+            UPilotOccupancyRetryKind occupancyRetryKind,
+            string occupancyRetryIdentifier)
+        {
             if (GetSessionBool(UpdateInProgressKey, false))
             {
                 if (installManagedServerAfterUpdate)
@@ -103,10 +122,20 @@ namespace CodingRiver.UPilot
                 return true;
 
             ClearUpdateState();
-            manager.StartServer();
-            UPilotBridge.Instance.EnsureStarted();
-            UPilotUpdateService.SetOperationFailed("无法停止 MCP 服务，已取消包更新以避免文件占用");
-            notice?.Invoke("无法停止 MCP 服务，已取消包更新以避免文件占用", MessageType.Error);
+            var message = "无法停止 MCP 服务，已取消包更新以避免文件占用";
+            var recoveryStarted = UPilotUpdateService.Instance.BeginOccupancyRecovery(
+                occupancyRetryKind,
+                occupancyRetryIdentifier,
+                message);
+            if (!recoveryStarted)
+            {
+                manager.StartServer();
+                UPilotBridge.Instance.EnsureStarted();
+            }
+            UPilotUpdateService.SetOperationFailed(message);
+            notice?.Invoke(
+                recoveryStarted ? message + "。请在更新中心结束全部占用进程并重试。" : message,
+                MessageType.Error);
             return false;
         }
 
@@ -273,8 +302,12 @@ namespace CodingRiver.UPilot
                 var installManagedServer = ShouldInstallManagedServerAfterPackageUpdate();
                 if (!PrepareForPackageUpdate(
                         targetVersion,
-                        installManagedServerAfterUpdate: installManagedServer,
-                        targetServerVersion: ""))
+                        null,
+                        installManagedServer,
+                        "",
+                        "",
+                        UPilotOccupancyRetryKind.ExternalPackageManager,
+                        targetPackage.packageId ?? ""))
                 {
                     var message =
                         "Package Manager 正在更新 UPilot，但 MCP 服务无法在包注册前停止。请等待 Package Manager 完成后打开 UPilot 更新中心修复状态。";
@@ -304,6 +337,7 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
+                UPilotUpdateService.ClearOccupancyRecovery();
                 MarkPackageUpdateCompleted();
             }
             catch (Exception ex)

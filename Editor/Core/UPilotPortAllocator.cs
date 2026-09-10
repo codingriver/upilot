@@ -37,18 +37,8 @@ namespace CodingRiver.UPilot
             int startHttpPort = UPilotBridge.DefaultHttpPort,
             int maxAttempts = 100)
         {
-            var ws = startWsPort;
-            var http = startHttpPort;
-            for (var i = 0; i < maxAttempts; i++)
-            {
-                if (ws != http && IsPortAvailable(ws) && IsPortAvailable(http))
-                    return (ws, http);
-
-                ws++;
-                http++;
-            }
-
-            return (startWsPort, startHttpPort);
+            return UPilotPortRegistry.ForUser().Recommend(
+                UPilotProjectConfig.ProjectRoot, startWsPort, startHttpPort, maxAttempts);
         }
     }
 }

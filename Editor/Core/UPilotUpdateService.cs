@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
@@ -22,6 +23,15 @@ namespace CodingRiver.UPilot
         RestartingService,
         Completed,
         Failed,
+    }
+
+    internal enum UPilotOccupancyRetryKind
+    {
+        None,
+        Package,
+        ManagedServer,
+        PackageAndManagedServer,
+        ExternalPackageManager,
     }
 
     internal readonly struct UPilotUpdateOperationStatus
@@ -113,6 +123,10 @@ namespace CodingRiver.UPilot
         private const string ReloadGuardAutoRefreshBlockedKey = "CodingRiver.UPilot.UpdateService.ReloadGuardAutoRefreshBlocked";
         private const string ReloadGuardAssemblyReloadLockedKey = "CodingRiver.UPilot.UpdateService.ReloadGuardAssemblyReloadLocked";
         private const string ExternalPackageManagerAbortKey = "CodingRiver.UPilot.UpdateService.ExternalPackageManagerAbort";
+        private const string OccupancyRecoveryPendingKey = "CodingRiver.UPilot.UpdateService.OccupancyRecoveryPending";
+        private const string OccupancyRecoveryKindKey = "CodingRiver.UPilot.UpdateService.OccupancyRecoveryKind";
+        private const string OccupancyRecoveryIdentifierKey = "CodingRiver.UPilot.UpdateService.OccupancyRecoveryIdentifier";
+        private const string OccupancyRecoveryMessageKey = "CodingRiver.UPilot.UpdateService.OccupancyRecoveryMessage";
         private const string SkipReleaseReminderVersionKey = "CodingRiver.UPilot.UpdateService.SkipReleaseReminderVersion";
         private static readonly string RuntimeId = Guid.NewGuid().ToString("N");
         private static bool _reloadGuardActive;
@@ -124,6 +138,7 @@ namespace CodingRiver.UPilot
         private bool _releaseCheckRunning;
         private bool _releaseCheckCompleted;
         private UPilotReleaseUpdateCheckStatus _releaseCheckStatus = new();
+        private static UPilotOccupancyScanResult _occupancyRecoveryScan;
 
         static UPilotUpdateService()
         {
@@ -224,6 +239,187 @@ namespace CodingRiver.UPilot
         internal static void ClearExternalPackageManagerAbort()
         {
             SessionState.EraseBool(ProjectKey(ExternalPackageManagerAbortKey));
+        }
+
+        internal bool HasOccupancyRecovery =>
+            SessionState.GetBool(ProjectKey(OccupancyRecoveryPendingKey), false);
+
+        internal UPilotOccupancyScanResult GetOccupancyRecoveryScan(bool refresh = false)
+        {
+            if (!HasOccupancyRecovery)
+                return null;
+            if (refresh || _occupancyRecoveryScan == null)
+            {
+                _occupancyRecoveryScan = UPilotProcessOccupancyService.Scan(
+                    UPilotMcpServerManager.Instance.GetUpdateOccupancyResourcePaths());
+            }
+            return _occupancyRecoveryScan;
+        }
+
+        internal bool BeginOccupancyRecovery(
+            UPilotOccupancyRetryKind retryKind,
+            string retryIdentifier,
+            string failureMessage)
+        {
+            var scan = UPilotProcessOccupancyService.Scan(
+                UPilotMcpServerManager.Instance.GetUpdateOccupancyResourcePaths());
+            if (scan.Processes.Count == 0)
+                return false;
+
+            _occupancyRecoveryScan = scan;
+            SessionState.SetBool(ProjectKey(OccupancyRecoveryPendingKey), true);
+            SessionState.SetString(ProjectKey(OccupancyRecoveryKindKey), retryKind.ToString());
+            SessionState.SetString(ProjectKey(OccupancyRecoveryIdentifierKey), retryIdentifier ?? "");
+            SessionState.SetString(ProjectKey(OccupancyRecoveryMessageKey), failureMessage ?? "");
+            Debug.LogError(
+                "[UPilot] 更新被占用进程阻止，等待用户二次确认后统一结束并重试。" +
+                $"\nReason={failureMessage}\nRetry={retryKind}" +
+                "\nProcesses=" + string.Join(", ", scan.Processes.Select(process =>
+                    $"{process.DisplayName}(PID {process.ProcessId})")));
+            return true;
+        }
+
+        internal string GetOccupancyRecoveryMessage()
+        {
+            return SessionState.GetString(ProjectKey(OccupancyRecoveryMessageKey), "更新被占用进程阻止。");
+        }
+
+        internal void CancelOccupancyRecovery()
+        {
+            var reason = GetOccupancyRecoveryMessage();
+            ClearOccupancyRecovery();
+            SetOperationFailed("已取消更新：" + reason);
+            TryRestoreServiceAfterOccupancyCancellation();
+            Debug.LogWarning("[UPilot] 用户取消占用进程恢复。\nReason=" + reason);
+        }
+
+        internal bool ConfirmTerminateOccupiersAndRetry(out string message)
+        {
+            message = "";
+            var scan = GetOccupancyRecoveryScan(refresh: true);
+            if (scan == null || scan.Processes.Count == 0)
+            {
+                message = "未再检测到占用进程；请重新执行更新。";
+                ClearOccupancyRecovery();
+                SetOperationFailed(message);
+                return false;
+            }
+            if (!scan.HasTerminableProcesses)
+            {
+                message = "检测到占用进程，但当前用户没有权限结束它们。请关闭相关程序后重新更新。";
+                SetOperationFailed(message);
+                Debug.LogError("[UPilot] " + message + "\n" + UPilotProcessOccupancyService.BuildConfirmationMessage(scan));
+                return false;
+            }
+
+            if (!EditorUtility.DisplayDialog(
+                    "结束全部占用进程并重试？",
+                    UPilotProcessOccupancyService.BuildConfirmationMessage(scan),
+                    "结束全部并重试",
+                    "取消"))
+            {
+                message = "已取消结束占用进程。";
+                return false;
+            }
+
+            var termination = UPilotProcessOccupancyService.TerminateAll(scan);
+            _occupancyRecoveryScan = UPilotProcessOccupancyService.Scan(
+                UPilotMcpServerManager.Instance.GetUpdateOccupancyResourcePaths());
+            if (termination.Failed.Count > 0 || _occupancyRecoveryScan.Processes.Count > 0)
+            {
+                var stillRunning = _occupancyRecoveryScan.Processes
+                    .Select(process => process.DisplayName + " (PID " + process.ProcessId + ") 仍在运行");
+                message = "结束占用进程后仍无法继续更新：" +
+                          string.Join("；", termination.Failed.Concat(stillRunning));
+                SetOperationFailed(message);
+                Debug.LogError("[UPilot] " + message);
+                return false;
+            }
+
+            var retryKind = ReadOccupancyRetryKind();
+            var identifier = SessionState.GetString(ProjectKey(OccupancyRecoveryIdentifierKey), "");
+            ClearOccupancyRecovery();
+            Debug.LogWarning("[UPilot] 已结束全部占用进程，自动重试一次更新。\nRetry=" + retryKind);
+            StartOccupancyRecoveryRetry(retryKind, identifier);
+            message = "已结束全部占用进程，正在自动重试更新…";
+            return true;
+        }
+
+        private void StartOccupancyRecoveryRetry(UPilotOccupancyRetryKind retryKind, string identifier)
+        {
+            switch (retryKind)
+            {
+                case UPilotOccupancyRetryKind.Package:
+                    UpdateUpmFromManifest(null);
+                    break;
+                case UPilotOccupancyRetryKind.ManagedServer:
+                    UpdateManagedServerAndRestart(null);
+                    break;
+                case UPilotOccupancyRetryKind.PackageAndManagedServer:
+                    UpdateFromManifest(true, true, null);
+                    break;
+                case UPilotOccupancyRetryKind.ExternalPackageManager:
+                    RetryExternalPackageManagerUpdate(identifier);
+                    break;
+                default:
+                    SetOperationFailed("无法确定占用恢复后的更新目标，请重新执行更新。");
+                    break;
+            }
+        }
+
+        private void RetryExternalPackageManagerUpdate(string identifier)
+        {
+            if (string.IsNullOrWhiteSpace(identifier))
+            {
+                SetOperationFailed("无法读取 Unity Package Manager 的原始更新目标，请在 Package Manager 中重新更新。");
+                return;
+            }
+            if (!UPilotPackageUpdateLifecycle.PrepareForPackageUpdate(
+                    "", null, false, "", "",
+                    UPilotOccupancyRetryKind.ExternalPackageManager, identifier))
+                return;
+            try
+            {
+                _upmRequest = Client.Add(identifier);
+                EditorApplication.update += PollUpmUpdate;
+                SetOperationPhase(UPilotUpdateOperationPhase.UpdatingPackage, "正在重试 Unity Package Manager 更新…");
+            }
+            catch (Exception ex)
+            {
+                SetOperationFailed("重试 Unity Package Manager 更新失败：" + ex.Message);
+                Debug.LogError("[UPilot] Retry external Package Manager update failed.\n" + ex);
+            }
+        }
+
+        private static void TryRestoreServiceAfterOccupancyCancellation()
+        {
+            try
+            {
+                if (UPilotSetupState.IsCompleted)
+                {
+                    UPilotMcpServerManager.Instance.StartServer();
+                    UPilotBridge.Instance.EnsureStarted();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[UPilot] 取消占用恢复后恢复服务失败。\n" + ex);
+            }
+        }
+
+        private static UPilotOccupancyRetryKind ReadOccupancyRetryKind()
+        {
+            var raw = SessionState.GetString(ProjectKey(OccupancyRecoveryKindKey), "");
+            return Enum.TryParse(raw, out UPilotOccupancyRetryKind kind) ? kind : UPilotOccupancyRetryKind.None;
+        }
+
+        internal static void ClearOccupancyRecovery()
+        {
+            _occupancyRecoveryScan = null;
+            SessionState.EraseBool(ProjectKey(OccupancyRecoveryPendingKey));
+            SessionState.EraseString(ProjectKey(OccupancyRecoveryKindKey));
+            SessionState.EraseString(ProjectKey(OccupancyRecoveryIdentifierKey));
+            SessionState.EraseString(ProjectKey(OccupancyRecoveryMessageKey));
         }
 
         internal void EnsureLatestReleaseCheck(bool force = false)
@@ -755,6 +951,10 @@ namespace CodingRiver.UPilot
             {
                 var message = "MCP 服务更新失败：" + ex.Message;
                 SetOperationFailed(message);
+                BeginOccupancyRecovery(
+                    UPilotOccupancyRetryKind.PackageAndManagedServer,
+                    "",
+                    message);
                 LogUpdateError(message, ex);
                 notice?.Invoke(message, MessageType.Error);
                 return null;
@@ -965,9 +1165,18 @@ namespace CodingRiver.UPilot
                 {
                     var message = "无法停止 MCP 服务，已取消更新以避免文件占用";
                     SetOperationFailed(message);
-                    manager.StartServer();
-                    UPilotBridge.Instance.EnsureStarted();
-                    notice?.Invoke(message, MessageType.Error);
+                    var recoveryStarted = BeginOccupancyRecovery(
+                        UPilotOccupancyRetryKind.ManagedServer,
+                        "",
+                        message);
+                    if (!recoveryStarted)
+                    {
+                        manager.StartServer();
+                        UPilotBridge.Instance.EnsureStarted();
+                    }
+                    notice?.Invoke(
+                        recoveryStarted ? message + "。请在更新中心结束全部占用进程并重试。" : message,
+                        MessageType.Error);
                     return false;
                 }
             }
@@ -984,6 +1193,7 @@ namespace CodingRiver.UPilot
             {
                 var message = string.IsNullOrEmpty(state.ErrorMessage) ? "MCP 服务更新未完成" : state.ErrorMessage;
                 SetOperationFailed(message);
+                BeginOccupancyRecovery(UPilotOccupancyRetryKind.ManagedServer, "", message);
                 if (shouldRestart)
                     manager.StartServer();
                 notice?.Invoke(message, MessageType.Error);
@@ -1119,7 +1329,11 @@ namespace CodingRiver.UPilot
                     notice,
                     installManagedServerAfterUpdate,
                     manifest.ServerVersion,
-                    preparedServerPath))
+                    preparedServerPath,
+                    installManagedServerAfterUpdate
+                        ? UPilotOccupancyRetryKind.PackageAndManagedServer
+                        : UPilotOccupancyRetryKind.Package,
+                    identifier))
             {
                 if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingNotice))
                 {

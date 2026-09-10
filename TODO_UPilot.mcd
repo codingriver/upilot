@@ -2,6 +2,16 @@
 
 本文件是 UPilot 仓库根目录的统一改进清单。测试或开发过程中，如果发现某个问题、手工步骤、诊断缺口、工具能力缺失、集成摩擦或 agent 规则缺口可以通过优化 UPilot 通用功能、MCP 工具、agent 规则或通用项目接入协议来简化，应记录在这里。
 
+### [部分完成][P1] 跨工程持久端口预留与进程身份保护
+
+- 发现时间：2026-09-10；来源：本次多工程端口治理开发；出现次数：1。
+- 问题/证据：`UPilotPortAllocator.FindAvailablePair` 只检测当前监听，且穷尽后返回原端口；未启动工程的端口可能被分配。`IsCurrentProjectMcpCommandLine` 只判断进程名和端口，重复端口可能导致误认其他工程。
+- 改进：用户目录 `.upilot/ports.json` 持久索引、跨进程锁、工程配置权威、双文件待提交预留、人工确认改端口/释放、结构化日志及主线程弹窗；进程归属增加精确工程日志路径。
+- 验证：功能实现已完成。规范项目 `Tests~/UPilotTest` 定向测试 runGuid `a3600169-469b-422c-a95a-b467df672940` 为 17/17、无跳过，cleanupVerified/testIdentityVerified=true；批次 `wb-ed39f0dc-3dc5-43ff-91ef-5bc308a7a658` 已验证编译无错误。但并行占用诊断/更新流程代码在验收期间变化，sourceUnchanged=false，因此不宣称最终包验收通过，不重复盲跑；待并行源码稳定后补验一致性。
+- 报告：`Tests~/UPilotTest/Log/UPilotAcceptance/1789034359747_req-050ab36e-0f49-46b8-9666-95145ab5914c/summary.json`，90142 bytes，SHA256 `745f7e94f61e446dc70198377a1b5c6311c2de8bc4f3a4a7f065c19707368562`。配置、故障恢复策略及界面证据见 `Documentation~/Server-Port-Reservations.md`。
+- 调度证据：首轮弹窗测试 runGuid `01dd9b98-db66-4125-8a19-d5d7e1335a7f` 为 15/16，通过日志检查但 `delayCall` 在 5 秒内未执行；本模块改用一次性 `EditorApplication.update` 主线程回调。启动登记也使用现有 update 初始化入口，已生成用户目录登记文件且工程端口不变。
+- 范围：同系统用户、已登记且采用新机制的工程；不扫描外部项目、不自动回收离线预留、不引入共享 Server。
+
 ## 关联项目清单与整体关系
 
 本文件是 UPilot 通用产品、MCP、Agent 规则和集成改进事项的总索引及权威状态源。以下项目清单是现场问题、项目侧事项和通用问题原始证据的来源，与本文件共同组成完整的 UPilot 改进清单体系：
@@ -140,7 +150,10 @@
 - 优先级/归属：P2；通用 UPilot/MCP。
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 的通用 fixture 中，主材质引用纹理并附有未被引用的 Editor ScriptableObject 子资源；文件级保留完整结果，对象级仅给可达对象，真实 Editor 纹理能追溯到字段；原资源哈希不变，预算超限不得宣称完整。
 - 相关工具：`unity_asset_get_info`、`unity_asset_dependencies`、`unity_tools_find`。
-- 出现次数：1；状态：待处理。
+- 2026-09-10 同类补充（xclient2 弹道公式引擎删除）：缺少资源 GUID 反向引用、序列化字段批量查询与完整覆盖证明。`unity_asset_dependencies` 仅正向，单个 `unity_prefab_query_components` 不能低成本覆盖千级资源；有界 `csharp_eval` 每 10 秒约处理 30～60 Prefab，预算/重载超时缺少续查游标，本次 3375 项只检查前 143 项，后续定向文本发现额外非标准资源。项目侧记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260908-AssetDependencyGraph`。
+- 同日收尾：单次原生 `AssetDatabase.GetDependencies(allOtherImportedPaths, true)` 约25秒完成后，解释器因10秒预算拒绝返回，结果未持久化，旧公式 Asset 仍不能安全删除；请求 `req-d892c370-ad42-4dcd-8872-6e15bc1c441f`。本条持久异步查询应避免原生工作结束后丢失全部证据，并明确不可抢占阶段与恢复结果入口；同一现场不重复计数。
+- 补充能力/验收：分页反查 GUID/对象字段/字符串配置键，明确三者证据类别，返回稳定游标、已查/总数、coverageComplete 和未查清单；取消或预算结束仍可恢复。在 `D:\upilot\Tests~\UPilotTest` 用普通 Prefab、嵌套 Prefab、ScriptableObject 及无对象引用的字符串键验证正确性、哈希不变和预算续查，千级资源另做性能基线。预计减少多轮临时诊断与分钟级超时重查，避免漏资源后静默迁移；仍归属通用 UPilot/MCP、P2。
+- 出现次数：2；状态：待处理。
 
 ### [待处理][P2] UP-025 执行参数递归 DTO 序列化深度诊断
 
@@ -357,6 +370,9 @@ UPilot 通用开发：
 
 ### [已完成][P1] 统一编译、PlayMode、磁盘同步与 Editor Context 状态契约
 
+- 2026-09-10 自动编译身份残留补充（P1，Open，通用 UPilot/MCP，出现 1 次，不撤销历史核心验收）：xclient2 EditMode 弹道预览注册批次 `wb-9d872f7a-0157-4417-81fa-d124c351bd5a` 已于 `1789032213715` 关联验证成功；随后并行源码改造触发独立自动编译 `1cb7b44a50b0400e8fccf9ef4d743997`，于 `1789032573699` 验证为 29 Error。`unity_compile_errors` 的实时 context 正确返回空 request/writeBatch，但 `unity_mcp_status`、`unity_compile_wait`、`unity_ensure_ready` 投影新 operation 时仍保留旧 request、writeBatch、createdAt 和 reloadId，虽 `correlationVerified=false`，仍易把新失败归给旧批次。
+- 本补充期望与效率收益：完整权威快照切换 compile operation 时原子替换身份组，明确的空值必须清除旧关联，不得按非空字段拼接历史状态；批次历史结果单独保存。预计每次减少 2～4 次交叉查询，避免并行开发下错误归责或误接受历史编译。可验收标准：在 `D:\upilot\Tests~\UPilotTest` 先完成注册批次编译，再触发无批次自动编译失败，三个状态入口与实时错误入口必须一致指向新 operation、空批次/请求，原批次历史成功仍可追溯。相关工具如上；双向项目引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`；本补充优先级和状态以根清单为准，尚未实施或进行 UPilot 包验收。
+
 - 2026-09-08 写入批次等待原因补充（P2，待处理，出现 1 次，不撤销历史核心 Done）：xclient2 弹道编辑器 Config 来源迁移中，`unity_write_batch_register` 在 `playModeState=unknown/compilePhase=domain_reload/compileOrigin=unity_auto` 且 Bridge 断连时返回 `status=deferred`，nextAction 却要求 “Leave PlayMode”。批次 `wb-89cfe261-3c3e-4e90-a8e1-59b0cf74a6c4`（created=1788858650053，verified=1788858684593）随后自动恢复并完成相关联编译，无需手动退出或再编译。
 - 期望能力：区分 `waiting_for_reload`、断连与已确认 PlayMode，只对权威 PlayMode 给出退出提示，其余提示等待/重连；附着自动编译时仍须验证文件哈希与批次/编译身份。归属：通用 UPilot/MCP；预期减少误退出、额外状态查询及重复 Reload。
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 自动 Domain Reload 窗口注册批次，返回非终态等待重载且无退出未知 PlayMode 指令，恢复后自动取得同批次 `errorsVerified=true` 的相关联终态。相关工具：`unity_write_batch_register`、`unity_mcp_status`；双向现场引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。本补充尚未实施或在规范项目验收，优先级和状态以本根清单为准。
@@ -447,6 +463,8 @@ UPilot 通用开发：
 - 备注：已修复 `upilotserver~/src/upilot_mcp/domain/test_service.py`；无需重跑已通过的 331 个 Unity 用例，Python 契约回归覆盖报告分支。
 
 ### [回归待修复][P0] PlayMode Test Runner 结果跨 Domain Reload 与 MCP 重连持久化
+
+- 2026-09-10 第四次客户增量回归（P0，通用 UPilot/MCP，待修复）：`F:\xclient2` 伤害简化联合 Runner9/Service8/Preview30 的 runGuid=`402155fb-5a7f-4053-86ad-f878399deade` 退出 Reload 后为 `aborted/total=0/outcomeStatus=unknown/resultAuthoritative=false`，本次叶子结果也未恢复。`unity_test_force_cleanup`、`unity_test_force_reset` 各一次后仍残留 `test-callback`，`cleanupStatus=not_started/cleanupSucceeded=false` 且 nextAction 为空，后续战场 Smoke 因无法确认清理而暂停。期望持久叶子/SuiteFinished与清理证据独立，失效 callback 可单次释放或提供明确恢复条件，禁止将零 Console 错误当作通过。规范验收在 `D:\upilot\Tests~\UPilotTest` 的 Unity 2022 多 fixture 联合 PlayMode 中覆盖末项完成后的退出 Reload、原 runGuid 查询及安全串行下一任务；预期每轮减少 1～3 分钟重跑和 3～5 次恢复查询。证据与双向条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260818-01`，Capture=`F:\xclient2\Log\UPilotConsole\2026-09-10_17-57-43-316_ProjectileDamageSimplification-FinalRegression\summary.json`，JSONL SHA256=`d00f6742466f3fd9f98c3f437a4ab10c727b41bbf54d83d089b175d8ce6368cb`。
 
 - 发现时间：2026-08-15
 - 来源任务/测试：`F:\xclient2\TODO_UPilot.mcd` / PlayMode 测试结束后 `unity_test_results` 返回 `none`。
@@ -592,6 +610,9 @@ UPilot 通用开发：
 - 备注：Skill 与 Agent 规则要求手写 jobSpec 在 start 前先 validate；不引入 KingShotBattle 专用服务端分支。
 
 ### [已完成][P1][Bug] SceneView 截图等待真实 Repaint 并验证 Handles 像素来源
+
+- 2026-09-10 嵌套目标 schema 补充（P2，Open，通用 UPilot/MCP，出现 1 次，保留 UP-008 原范围 Done）：xclient2 EditMode 弹道预览截图调用 `unity_snapshot_capture` 时，`targets` 暴露为无结构字典，误用兼容接口的 `source=sceneView` 而非 `kind=sceneView`，字段被静默忽略并默认走 Camera，返回误导性的 `CAMERA_NOT_FOUND`。改用真实 schema 的 `kind` 与精确 SceneView instanceId 后成功，证据 `F:\xclient2\Log\ProjectileEditor\EditModeFocused_20260910\ClusterFramed`、snapshot `snapshot-c6824c2042eb44e59b26b668b2de9ca0`。
+- 本补充期望与效率收益：公开 `targets[].kind` 实际枚举及各类型必填字段，对未知嵌套键和缺失 kind 在执行前返回字段路径与纠正建议，禁止静默选择其他捕获源。预计每轮减少一次失败截图及 1～2 次 schema 查询。可验收标准：在 `D:\upilot\Tests~\UPilotTest` 输入 `source`、错误 `kind` 或错误 instanceId 字段时均在捕获前明确拒绝，不创建误目标任务；合法 SceneView 请求仍返回精确窗口和可信像素来源。双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260813-01`；本补充优先级和状态以根清单为准，尚未实施。
 
 - 唯一 ID：UP-008；出现次数：0（已关闭原范围；历史根/项目现场 ≥1、2026-09-07 与 2026-09-09 六组业务回归现场及失败证据保留）。
 - 2026-09-08 最终收口：新增捕获中真实 Domain Reload 验收；修复 Snapshot 的 SceneView 异步续体依赖延迟同步上下文，明确在 Editor.update 主线程收尾，Reload/结束解绑，后台 watchdog 不调用 Unity API。测试按持久精确 ID 清理自建窗口，避免 Reload 重置标题造成漏清理；Camera 直接回归验证实际可设置的原值恢复。最终 runGuid `e27d5d98-c2b3-49ee-be2c-2655d18d72d9` 为 10/10、无跳过、cleanupVerified/testIdentityVerified/sourceUnchanged=true；低层/Snapshot 各 10 次可信 SceneGUI 像素、无 Repaint、关闭、真实 Reload 和 Camera/GameView 直接回归均通过。Snapshot 连续 10 次完成耗时 123～214ms。Reload 订阅 0→2→0→0，原 snapshotId 保持失败终态、无图片，不重放请求。完整失败历史、编译批次与摘要 bytes/SHA256 见 `Documentation~/UP001-UP009-Delivery.md`。

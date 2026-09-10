@@ -124,12 +124,19 @@ namespace CodingRiver.UPilot
             _cached = Load();
         }
 
-        public static void Save(UPilotProjectConfigData config)
+        public static void Save(UPilotProjectConfigData config, bool updateEndpoints = false)
         {
-            var directory = Path.GetDirectoryName(ConfigPath);
-            if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-            File.WriteAllText(ConfigPath, JsonUtility.ToJson(config, true));
-            _cached = config;
+            try
+            {
+                UPilotPortRegistry.ForUser().Commit(ProjectRoot, config, preserveExistingPorts: !updateEndpoints);
+                _cached = config;
+            }
+            catch (Exception ex)
+            {
+                _cached = null;
+                UPilotPortRegistration.Report("保存工程配置及端口预留", ex);
+                throw;
+            }
         }
 
         public static void ApproveProjectWriteAccess()

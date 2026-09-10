@@ -284,8 +284,7 @@ namespace CodingRiver.UPilot
             set
             {
                 if (_httpPort == value) return;
-                _httpPort = value > 0 ? value : DefaultHttpPort;
-                SaveProjectEndpoints();
+                SetProjectEndpoints(_wsHost, _wsPort, value);
                 Logger.Log("NETWORK", $"设置HTTP端口: {_httpPort}");
             }
         }
@@ -333,10 +332,7 @@ namespace CodingRiver.UPilot
         /// </summary>
         public void SetWsEndpoint(string host, int port)
         {
-            Logger.Log("NETWORK", $"设置WS端点: host={host} port={port}");
-            _wsHost = string.IsNullOrWhiteSpace(host) ? DefaultWsHost : host.Trim();
-            _wsPort = port > 0 ? port : DefaultWsPort;
-            SaveProjectEndpoints();
+            SetProjectEndpoints(host, port, _httpPort);
         }
 
         public void ApplyProjectEndpoints(string wsHost, int wsPort, int httpPort)
@@ -347,14 +343,26 @@ namespace CodingRiver.UPilot
             Logger.Log("NETWORK", $"应用项目配置端点: ws={_wsHost}:{_wsPort} http={_httpPort}");
         }
 
-        private void SaveProjectEndpoints()
+        public void SetProjectEndpoints(string host, int wsPort, int httpPort)
         {
-            UPilotProjectConfigData config = UPilotProjectConfig.Current;
+            UPilotProjectConfigData config;
+            try
+            {
+                config = System.IO.File.Exists(UPilotProjectConfig.ConfigPath)
+                    ? UPilotPortRegistry.ReadConfig(UPilotProjectConfig.ProjectRoot)
+                    : JsonUtility.FromJson<UPilotProjectConfigData>(JsonUtility.ToJson(UPilotProjectConfig.Current));
+            }
+            catch (Exception ex)
+            {
+                UPilotPortRegistration.Report("读取工程端口配置", ex);
+                throw;
+            }
             config.mcp ??= new UPilotMcpConfig();
-            config.mcp.wsHost = _wsHost;
-            config.mcp.wsPort = _wsPort;
-            config.mcp.httpPort = _httpPort;
-            UPilotProjectConfig.Save(config);
+            config.mcp.wsHost = string.IsNullOrWhiteSpace(host) ? DefaultWsHost : host.Trim();
+            config.mcp.wsPort = wsPort;
+            config.mcp.httpPort = httpPort;
+            UPilotProjectConfig.Save(config, updateEndpoints: true);
+            ApplyProjectEndpoints(config.mcp.wsHost, wsPort, httpPort);
         }
 
         public string GetServerUrl() => $"ws://{_wsHost}:{_wsPort}";

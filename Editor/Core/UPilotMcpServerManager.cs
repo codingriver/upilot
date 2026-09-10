@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -64,6 +65,8 @@ namespace CodingRiver.UPilot
         private static string DefaultPythonEntry => ResolveDefaultPythonEntry();
         private const string DefaultLogLevel = "INFO";
         private const string PackageName = "io.github.codingriver.upilot";
+        private static readonly string CurrentProjectLogPath =
+            Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
         private string _pythonEntryPath = DefaultPythonEntry;
         private string _logLevel = DefaultLogLevel;
         private bool _autoStart = true;
@@ -858,13 +861,8 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            if (!UPilotPortAllocator.IsPortAvailable(HttpPort) ||
-                !UPilotPortAllocator.IsPortAvailable(WsPort))
-            {
-                Debug.LogError(
-                    $"[UPilotMcpServerManager] Cannot start MCP server because HTTP={HttpPort} or WS={WsPort} is already in use by another process.");
+            if (!UPilotPortRegistration.TrySyncCurrent(requireAvailable: true))
                 return;
-            }
 
             _startInProgress = true;
 
@@ -1058,6 +1056,34 @@ namespace CodingRiver.UPilot
                    UPilotPortAllocator.IsPortAvailable(WsPort);
         }
 
+        internal string[] GetUpdateOccupancyResourcePaths()
+        {
+            var paths = new List<string>();
+            try
+            {
+                string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
+                var pythonEntry = Path.IsPathRooted(_pythonEntryPath)
+                    ? _pythonEntryPath
+                    : Path.GetFullPath(Path.Combine(projectRoot, _pythonEntryPath));
+                if (!string.IsNullOrWhiteSpace(pythonEntry))
+                    paths.Add(pythonEntry);
+            }
+            catch { }
+
+            try
+            {
+                if (UPilotServerRuntimeService.Instance.IsStandaloneExeConfigured(out var exePath) &&
+                    !string.IsNullOrWhiteSpace(exePath))
+                    paths.Add(exePath);
+            }
+            catch { }
+
+            var failedPath = UPilotServerRuntimeService.Instance.LastManagedInstallFailurePath;
+            if (!string.IsNullOrWhiteSpace(failedPath))
+                paths.Add(failedPath);
+            return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
         public void RestartServer(Action afterStart = null)
         {
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
@@ -1196,7 +1222,7 @@ namespace CodingRiver.UPilot
                 return new McpProcessProbe(
                     McpProcessOwnership.CurrentUPilot,
                     trackedPid,
-                    SafeGetCommandLine(trackedPid),
+                    GetProcessCommandLineForDiagnostics(trackedPid),
                     "已跟踪的 UPilot 进程");
             }
 
@@ -1241,7 +1267,7 @@ namespace CodingRiver.UPilot
             var allCommandLinesReadable = true;
             foreach (var pid in candidatePids)
             {
-                var commandLine = SafeGetCommandLine(pid);
+                var commandLine = GetProcessCommandLineForDiagnostics(pid);
                 if (!firstPid.HasValue)
                 {
                     firstPid = pid;
@@ -1325,7 +1351,7 @@ namespace CodingRiver.UPilot
 
             foreach (var pid in candidatePids)
             {
-                string cmdLine = SafeGetCommandLine(pid);
+                string cmdLine = GetProcessCommandLineForDiagnostics(pid);
                 if (IsCurrentProjectMcpCommandLine(cmdLine, HttpPort, WsPort))
                     result.Add((pid, cmdLine));
             }
@@ -1371,7 +1397,28 @@ namespace CodingRiver.UPilot
         {
             return IsUPilotMcpLike(cmdLine) &&
                    HasCommandLinePort(cmdLine, "--http-port", httpPort) &&
-                   HasCommandLinePort(cmdLine, "--port", wsPort);
+                   HasCommandLinePort(cmdLine, "--port", wsPort) &&
+                   HasCurrentProjectLogPath(cmdLine);
+        }
+
+        private static bool HasCurrentProjectLogPath(string cmdLine)
+        {
+            var match = Regex.Match(cmdLine,
+                "(?:^|\\s)--log-file(?:\\s+|=)(?:\"([^\"]+)\"|(\\S+))",
+                RegexOptions.IgnoreCase);
+            if (!match.Success) return false;
+            var path = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+            if (!Path.IsPathRooted(path)) return false;
+            try
+            {
+                return string.Equals(Path.GetFullPath(path), Path.GetFullPath(CurrentProjectLogPath),
+                    Path.DirectorySeparatorChar == '\\'
+                        ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         private static bool HasCommandLinePort(string cmdLine, string argument, int port)
@@ -1483,7 +1530,7 @@ namespace CodingRiver.UPilot
             return int.TryParse(portText, out var port) ? port : -1;
         }
 
-        private static string SafeGetCommandLine(int pid)
+        internal static string GetProcessCommandLineForDiagnostics(int pid)
         {
 #if UNITY_EDITOR_WIN
             try

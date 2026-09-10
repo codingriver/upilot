@@ -1461,6 +1461,8 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void McpProcessMatchingRequiresBothCurrentProjectPorts()
         {
+            var logArgument = " --log-file \"" +
+                              Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log") + "\"";
             var method = typeof(UPilotMcpServerManager).GetMethod(
                 "IsCurrentProjectMcpCommandLine",
                 BindingFlags.NonPublic | BindingFlags.Static);
@@ -1469,7 +1471,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 method.Invoke(null, new object[]
                 {
-                    "upilot-mcp-server.exe --transport http --http-port 8012 --port 8766",
+                    "upilot-mcp-server.exe --transport http --http-port 8012 --port 8766" + logArgument,
                     8012,
                     8766,
                 }),
@@ -1485,11 +1487,26 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 method.Invoke(null, new object[]
                 {
-                    "upilot-mcp-server.exe --transport http --http-port=8012 --port=8766",
+                    "upilot-mcp-server.exe --transport http --http-port=8012 --port=8766" + logArgument,
                     8012,
                     8766,
                 }),
                 Is.True);
+            Assert.That(method.Invoke(null, new object[]
+            {
+                "upilot-mcp-server.exe --http-port 8012 --port 8766 --log-file \"" +
+                Path.Combine(Path.GetTempPath(), "another-project", "log", "mcp-server.log") + "\"", 8012, 8766
+            }), Is.False, "Another project's server must not be stopped or reused just because ports match.");
+            Assert.That(method.Invoke(null, new object[]
+            {
+                "upilot-mcp-server.exe --http-port 8012 --port 8766", 8012, 8766
+            }), Is.False, "Unknown project identity is not ownership.");
+            var backgroundProbe = Task.Run(() => method.Invoke(null, new object[]
+            {
+                "upilot-mcp-server.exe --http-port 8012 --port 8766" + logArgument, 8012, 8766
+            }));
+            Assert.That(backgroundProbe.Wait(2000), Is.True);
+            Assert.That(backgroundProbe.Result, Is.True, "Status ownership probes also run on worker threads.");
         }
 
         [Test]
@@ -2232,6 +2249,49 @@ namespace CodingRiver.UPilot.Tests
                 "AgentRulesTemplateVersion",
                 BindingFlags.NonPublic | BindingFlags.Static);
             return (int)field.GetRawConstantValue();
+        }
+
+        [Test]
+        public void OccupancyDiagnosticsRecognizeUPilotPythonCommandLinesOnly()
+        {
+            Assert.That(
+                UPilotProcessOccupancyService.IsUPilotServerCommandLine(
+                    "python.exe D:/upilot/upilotserver~/run_upilot_mcp.py --http-port 8011"),
+                Is.True);
+            Assert.That(
+                UPilotProcessOccupancyService.IsUPilotServerCommandLine(
+                    "python -m upilot_mcp.mcp_main"),
+                Is.True);
+            Assert.That(
+                UPilotProcessOccupancyService.IsUPilotServerCommandLine("python tools/build.py"),
+                Is.False);
+        }
+
+        [Test]
+        public void OccupancyConfirmationListsEveryProcessWithoutIndividualActions()
+        {
+            var scan = new UPilotOccupancyScanResult();
+            scan.Processes.Add(new UPilotOccupyingProcess
+            {
+                ProcessId = 101,
+                ProcessName = "python",
+                CommandLine = "python run_upilot_mcp.py",
+                CanTerminate = true,
+            });
+            scan.Processes.Add(new UPilotOccupyingProcess
+            {
+                ProcessId = 202,
+                ProcessName = "UPilotMcpServer",
+                CanTerminate = false,
+                CannotTerminateReason = "当前 Unity Editor 进程不能结束",
+            });
+
+            var text = UPilotProcessOccupancyService.BuildConfirmationMessage(scan);
+
+            Assert.That(text, Does.Contain("PID 101"));
+            Assert.That(text, Does.Contain("PID 202"));
+            Assert.That(text, Does.Contain("其他 Unity 工程"));
+            Assert.That(text, Does.Contain("无法结束"));
         }
 
         private static int GetSkillInstallTemplateVersion()

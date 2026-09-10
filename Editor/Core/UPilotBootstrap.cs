@@ -87,6 +87,9 @@ namespace CodingRiver.UPilot
                     return;
 
                 EditorApplication.update -= TryStartMcpServer;
+                if (System.IO.File.Exists(UPilotProjectConfig.ConfigPath) &&
+                    !UPilotPortRegistration.TrySyncCurrent())
+                    return;
                 if (!UPilotSetupState.IsCompleted)
                     return;
 
