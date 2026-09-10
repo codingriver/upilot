@@ -61,8 +61,22 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class UPilotSafetyConfig
     {
+        public const string UnsavedScenePolicyBlock = "block";
+        public const string UnsavedScenePolicyAutoSave = "autoSave";
+        public const string UnsavedScenePolicyIgnore = "ignore";
+
         public bool writeAccessApproved;
         public string writeAccessApprovedAtUtc = "";
+        public string unsavedScenePolicy = UnsavedScenePolicyBlock;
+
+        public static string NormalizeUnsavedScenePolicy(string value)
+        {
+            return string.Equals(value, UnsavedScenePolicyAutoSave, StringComparison.OrdinalIgnoreCase)
+                ? UnsavedScenePolicyAutoSave
+                : string.Equals(value, UnsavedScenePolicyIgnore, StringComparison.OrdinalIgnoreCase)
+                    ? UnsavedScenePolicyIgnore
+                    : UnsavedScenePolicyBlock;
+        }
     }
 
     [Serializable]

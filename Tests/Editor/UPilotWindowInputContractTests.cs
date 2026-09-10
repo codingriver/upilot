@@ -1,5 +1,8 @@
 using System;
 using System.Collections;
+using System.IO;
+using System.Reflection;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -42,6 +45,54 @@ namespace CodingRiver.UPilot.Tests
                 new object[] { "test_transition_contract" });
             Assert.That(snapshot.playModeTransition, Is.SameAs(UPilotPlayModeTransitions.Latest),
                 "The ordered authoritative snapshot must retain the producer's ledger record.");
+        }
+
+        [Test]
+        public void ExecutionStatePersistenceSerializesConcurrentWritesAndCleansTemporaryFiles()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "UPilotExecutionStateTests");
+            var path = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".json");
+            var method = typeof(UPilotBridge).GetMethod("PersistExecutionState",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[] { typeof(EditorExecutionStatePayload), typeof(string) },
+                null);
+            Assert.That(method, Is.Not.Null);
+
+            try
+            {
+                var succeeded = new bool[32];
+                Parallel.For(0, succeeded.Length, index =>
+                {
+                    succeeded[index] = (bool)method.Invoke(null, new object[]
+                    {
+                        new EditorExecutionStatePayload
+                        {
+                            processId = 1,
+                            sequence = index + 1,
+                            transition = "concurrent_test",
+                        },
+                        path,
+                    });
+                });
+
+                foreach (var result in succeeded)
+                    Assert.That(result, Is.True);
+
+                var persisted = JsonUtility.FromJson<EditorExecutionStatePayload>(File.ReadAllText(path));
+                Assert.That(persisted, Is.Not.Null);
+                Assert.That(persisted.sequence, Is.InRange(1, succeeded.Length));
+                Assert.That(Directory.GetFiles(directory, Path.GetFileName(path) + ".*.tmp"), Is.Empty);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                {
+                    foreach (var temporary in Directory.GetFiles(directory, Path.GetFileName(path) + ".*.tmp"))
+                        File.Delete(temporary);
+                    if (File.Exists(path)) File.Delete(path);
+                }
+            }
         }
 
         public sealed class ScrollProbe : EditorWindow

@@ -22,6 +22,7 @@ class UPilotConfig:
     context_stale_ms: int = 5000
     flow_enabled: bool = False
     write_access_approved: bool = False
+    unsaved_scene_policy: str = "block"
 
 
 def _project_config_path() -> Path:
@@ -47,6 +48,12 @@ def load_config() -> UPilotConfig:
     features = raw.get("features") if isinstance(raw.get("features"), dict) else {}
     flow = features.get("flow") if isinstance(features.get("flow"), dict) else {}
     safety = raw.get("safety") if isinstance(raw.get("safety"), dict) else {}
+    requested_unsaved_scene_policy = str(safety.get("unsavedScenePolicy") or "block").strip().lower()
+    unsaved_scene_policy = (
+        "autoSave" if requested_unsaved_scene_policy == "autosave"
+        else "ignore" if requested_unsaved_scene_policy == "ignore"
+        else "block"
+    )
 
     def env_int(name: str, fallback: int) -> int:
         value = os.getenv(name, "").strip()
@@ -66,6 +73,7 @@ def load_config() -> UPilotConfig:
         context_stale_ms=max(250, int(cache.get("contextStaleMs") or 5000)),
         flow_enabled=bool(flow.get("enabled", False)),
         write_access_approved=bool(safety.get("writeAccessApproved", False)),
+        unsaved_scene_policy=unsaved_scene_policy,
     )
 
 
@@ -104,7 +112,12 @@ def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
         if force or disk_hash != _CONFIG_LAST_DISK_HASH:
             try:
                 disk_config = load_config()
-                for field in ("context_stale_ms", "flow_enabled", "write_access_approved"):
+                for field in (
+                    "context_stale_ms",
+                    "flow_enabled",
+                    "write_access_approved",
+                    "unsaved_scene_policy",
+                ):
                     setattr(CONFIG, field, getattr(disk_config, field))
                 _CONFIG_LAST_DISK_HASH = disk_hash
                 _CONFIG_LAST_LOADED_AT = int(time.time() * 1000)
@@ -135,6 +148,7 @@ def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
             "configLoadError": _CONFIG_LOAD_ERROR,
             "writeAccessApproved": CONFIG.write_access_approved,
             "flowEnabled": CONFIG.flow_enabled,
+            "unsavedScenePolicy": CONFIG.unsaved_scene_policy,
         }
 
 

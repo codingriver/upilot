@@ -585,15 +585,18 @@ def test_project_config_hot_reloads_write_access_and_reports_restart_fields(tmp_
     try:
         first = config_module.refresh_config_if_changed(force=True)
         assert config_module.CONFIG.write_access_approved is False
+        assert config_module.CONFIG.unsaved_scene_policy == "block"
         assert first["restartRequired"] is False
 
         config_path.write_text(
-            '{"mcp":{"httpPort":8011,"wsPort":8765},"safety":{"writeAccessApproved":true}}',
+            '{"mcp":{"httpPort":8011,"wsPort":8765},"safety":{"writeAccessApproved":true,"unsavedScenePolicy":"autoSave"}}',
             encoding="utf-8",
         )
         second = config_module.refresh_config_if_changed()
         assert config_module.CONFIG.write_access_approved is True
+        assert config_module.CONFIG.unsaved_scene_policy == "autoSave"
         assert second["writeAccessApproved"] is True
+        assert second["unsavedScenePolicy"] == "autoSave"
         assert second["diskConfigChanged"] is False
         assert second["diskConfigHash"] != first["diskConfigHash"]
 

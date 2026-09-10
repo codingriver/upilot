@@ -314,6 +314,8 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.Space(6);
                 DrawLogOptionsSection(bridge);
                 EditorGUILayout.Space(6);
+                DrawUnsavedScenePolicySection();
+                EditorGUILayout.Space(6);
                 DrawSharedEndpointSection(bridge, status);
                 EditorGUILayout.Space(6);
                 DrawProcessSettingsSection(mcpStatus);
@@ -1253,6 +1255,55 @@ namespace CodingRiver.UPilot
                 {
                     Logger.SetLogToUnityConsole(newLogToConsole);
                     ShowToast(newLogToConsole ? "已开启 Unity Console 日志输出" : "已关闭 Unity Console 日志输出");
+                }
+            }
+        }
+
+        private void DrawUnsavedScenePolicySection()
+        {
+            var config = UPilotProjectConfig.Current;
+            config.safety ??= new UPilotSafetyConfig();
+            var current = UPilotSafetyConfig.NormalizeUnsavedScenePolicy(config.safety.unsavedScenePolicy);
+            var values = new[]
+            {
+                UPilotSafetyConfig.UnsavedScenePolicyBlock,
+                UPilotSafetyConfig.UnsavedScenePolicyAutoSave,
+                UPilotSafetyConfig.UnsavedScenePolicyIgnore,
+            };
+            var labels = new[] { "阻止（推荐）", "自动保存后继续", "忽略并继续" };
+            var index = Array.IndexOf(values, current);
+            if (index < 0)
+                index = 0;
+
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("未保存场景", EditorStyles.boldLabel);
+                var selected = EditorGUILayout.Popup("测试/验收前策略", index, labels);
+                if (selected != index)
+                {
+                    config.safety.unsavedScenePolicy = values[selected];
+                    UPilotProjectConfig.Save(config);
+                    current = values[selected];
+                    ShowToast("未保存场景策略已更新：" + labels[selected]);
+                }
+
+                if (current == UPilotSafetyConfig.UnsavedScenePolicyAutoSave)
+                {
+                    EditorGUILayout.HelpBox(
+                        "运行测试或验收前，UPilot 会保存所有已有路径的脏场景。新建但尚无路径的场景仍会阻止操作，以避免弹出另存为窗口。",
+                        MessageType.Warning);
+                }
+                else if (current == UPilotSafetyConfig.UnsavedScenePolicyIgnore)
+                {
+                    EditorGUILayout.HelpBox(
+                        "UPilot 不保存场景并继续运行测试或验收。仅建议在你确认当前场景可被测试影响时短暂使用。",
+                        MessageType.Warning);
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox(
+                        "发现未保存场景时阻止测试或验收，并返回场景列表供确认。这是默认且推荐的保护策略。",
+                        MessageType.Info);
                 }
             }
         }

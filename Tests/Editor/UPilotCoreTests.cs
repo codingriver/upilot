@@ -1945,6 +1945,23 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UnsavedScenePolicyDefaultsToBlockAndRejectsUnknownValues()
+        {
+            var safety = new UPilotSafetyConfig();
+
+            Assert.That(safety.unsavedScenePolicy, Is.EqualTo(UPilotSafetyConfig.UnsavedScenePolicyBlock));
+            Assert.That(
+                UPilotSafetyConfig.NormalizeUnsavedScenePolicy("autoSave"),
+                Is.EqualTo(UPilotSafetyConfig.UnsavedScenePolicyAutoSave));
+            Assert.That(
+                UPilotSafetyConfig.NormalizeUnsavedScenePolicy("ignore"),
+                Is.EqualTo(UPilotSafetyConfig.UnsavedScenePolicyIgnore));
+            Assert.That(
+                UPilotSafetyConfig.NormalizeUnsavedScenePolicy("unexpected"),
+                Is.EqualTo(UPilotSafetyConfig.UnsavedScenePolicyBlock));
+        }
+
+        [Test]
         public void SkillSourceIncludesAgentsTemplateForManagedUpdates()
         {
             var resolveMethod = typeof(UPilotAgentSetup).GetMethod(

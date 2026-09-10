@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from upilot_mcp.config import CONFIG
 from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.responses import fail, ok
@@ -187,13 +190,46 @@ def test_test_run_blocks_dirty_scenes_without_starting_tests() -> None:
         )
     )
 
-    result = asyncio.run(service.test_run(test_filter="UPilotCoreTests"))
+    result = asyncio.run(service.test_run(test_filter="CodingRiver.UPilot.Tests.UPilotCoreTests"))
 
     assert result.ok is False
     assert result.error.code == "UNSAVED_SCENES"
     assert result.error.detail["blockedReason"] == "UnsavedScenes"
     assert result.error.detail["dirtyScenes"][0]["scenePath"] == "Assets/Main.unity"
     assert [call[0] for call in dispatcher.calls] == ["scene.list"]
+
+
+def test_test_run_autosaves_dirty_scenes_before_starting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(CONFIG, "unsaved_scene_policy", "autoSave")
+    service, dispatcher = _test_service(
+        ok("scene-list", {"scenes": [{"scenePath": "Assets/Main.unity", "sceneName": "Main", "isDirty": True}]}),
+        ok("scene-save", {"scenePath": "Assets/Main.unity", "isDirty": False}),
+        ok("scene-list-verified", {"scenes": [{"scenePath": "Assets/Main.unity", "sceneName": "Main", "isDirty": False}]}),
+        ok("test-run", {"status": "running", "runGuid": "run-auto-save"}),
+    )
+
+    result = asyncio.run(service.test_run(test_filter="CodingRiver.UPilot.Tests.UPilotCoreTests"))
+
+    assert result.ok is True
+    assert result.data["dirtyScenePolicy"] == "autoSave"
+    assert result.data["dirtySceneAction"] == "autoSaved"
+    assert [call[0] for call in dispatcher.calls] == ["scene.list", "scene.save", "scene.list", "test.run"]
+    assert dispatcher.calls[1][1] == {"scenePath": "Assets/Main.unity"}
+
+
+def test_test_run_can_ignore_dirty_scenes_when_explicitly_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(CONFIG, "unsaved_scene_policy", "ignore")
+    service, dispatcher = _test_service(
+        ok("scene-list", {"scenes": [{"scenePath": "Assets/Main.unity", "sceneName": "Main", "isDirty": True}]}),
+        ok("test-run", {"status": "running", "runGuid": "run-ignore"}),
+    )
+
+    result = asyncio.run(service.test_run(test_filter="CodingRiver.UPilot.Tests.UPilotCoreTests"))
+
+    assert result.ok is True
+    assert result.data["dirtyScenePolicy"] == "ignore"
+    assert result.data["dirtySceneAction"] == "ignored"
+    assert [call[0] for call in dispatcher.calls] == ["scene.list", "test.run"]
 
 
 def test_test_run_resolves_unique_short_class_name() -> None:

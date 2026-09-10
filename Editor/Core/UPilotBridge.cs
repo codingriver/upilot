@@ -163,6 +163,8 @@ namespace CodingRiver.UPilot
         private static string HttpPortPrefsKey => $"upilot.HttpPort.{ProjectPathHashSuffix}";
         private const int    HeartbeatIntervalMs = 2000;
         private const int    MaxLogEntries    = 1000;
+        private const int    ExecutionStatePersistenceAttempts = 3;
+        private const int    ExecutionStatePersistenceRetryDelayMs = 5;
 
         private static readonly Lazy<UPilotBridge> Lazy = new(() => new UPilotBridge());
         public static UPilotBridge Instance => Lazy.Value;
@@ -174,6 +176,8 @@ namespace CodingRiver.UPilot
         public UPilotCompileService CompileService => _compileService;
         private readonly ConcurrentQueue<Action>   _mainThreadQueue   = new();
         private readonly SemaphoreSlim             _sendLock          = new(1, 1);
+        private readonly object                    _executionStatePublicationLock = new();
+        private static readonly object             ExecutionStatePersistenceLock = new();
         private readonly object                    _logLock           = new();
         private readonly List<BridgeLogEntry>      _logBuffer         = new(MaxLogEntries);
         private readonly int                       _mainThreadId;
@@ -777,8 +781,7 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    var heartbeatPayload = BuildExecutionStatePayload("heartbeat");
-                    if (!PersistExecutionState(heartbeatPayload))
+                    if (!TryBuildAndPersistExecutionState("heartbeat", out var heartbeatPayload))
                     {
                         consecutiveFailures++;
                         await Task.Delay(HeartbeatIntervalMs, token).ConfigureAwait(false);
@@ -1795,29 +1798,85 @@ namespace CodingRiver.UPilot
             };
         }
 
-        private static bool PersistExecutionState(EditorExecutionStatePayload payload)
+        /// <summary>
+        /// Creates and persists one snapshot as a single ordered operation.  Snapshot
+        /// identity and file replacement must share a lock: otherwise two async
+        /// publishers can write the shared state file in sequence order A/B but leave
+        /// its contents at A.
+        /// </summary>
+        private bool TryBuildAndPersistExecutionState(
+            string transition,
+            out EditorExecutionStatePayload payload)
         {
-            try
+            lock (_executionStatePublicationLock)
             {
-                var directory = Path.GetDirectoryName(ExecutionStatePath);
-                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-                var temporary = ExecutionStatePath + ".tmp";
-                File.WriteAllText(temporary, JsonUtility.ToJson(payload, true));
-                if (File.Exists(ExecutionStatePath)) File.Replace(temporary, ExecutionStatePath, null);
-                else File.Move(temporary, ExecutionStatePath);
-                return true;
+                payload = BuildExecutionStatePayload(transition);
+                return PersistExecutionState(payload);
             }
-            catch (Exception ex)
+        }
+
+        private static bool PersistExecutionState(EditorExecutionStatePayload payload) =>
+            PersistExecutionState(payload, ExecutionStatePath);
+
+        private static bool PersistExecutionState(EditorExecutionStatePayload payload, string executionStatePath)
+        {
+            lock (ExecutionStatePersistenceLock)
             {
-                Logger.LogWarning("SYSTEM", $"持久化 EditorExecutionState 失败: {ex.Message}");
+                var temporary = string.Empty;
+                try
+                {
+                    var directory = Path.GetDirectoryName(executionStatePath);
+                    if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
+                    temporary = $"{executionStatePath}.{payload.processId}.{payload.sequence}.{Guid.NewGuid():N}.tmp";
+                    File.WriteAllText(temporary, JsonUtility.ToJson(payload, true));
+                    for (var attempt = 1; attempt <= ExecutionStatePersistenceAttempts; attempt++)
+                    {
+                        try
+                        {
+                            if (File.Exists(executionStatePath))
+                                File.Replace(temporary, executionStatePath, null);
+                            else
+                                File.Move(temporary, executionStatePath);
+                            return true;
+                        }
+                        catch (IOException) when (attempt < ExecutionStatePersistenceAttempts)
+                        {
+                            Thread.Sleep(ExecutionStatePersistenceRetryDelayMs * attempt);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning("SYSTEM",
+                        $"持久化 EditorExecutionState 失败: path={executionStatePath}; " +
+                        $"sequence={payload.sequence}; transition={payload.transition}; " +
+                        $"attempts={ExecutionStatePersistenceAttempts}; {ex.Message}");
+                    return false;
+                }
+                finally
+                {
+                    if (!string.IsNullOrEmpty(temporary))
+                    {
+                        try
+                        {
+                            if (File.Exists(temporary)) File.Delete(temporary);
+                        }
+                        catch { }
+                    }
+                }
+
+                Logger.LogWarning("SYSTEM",
+                    $"持久化 EditorExecutionState 失败: path={executionStatePath}; " +
+                    $"sequence={payload.sequence}; transition={payload.transition}; " +
+                    $"attempts={ExecutionStatePersistenceAttempts}");
                 return false;
             }
         }
 
         private async Task<bool> PublishExecutionStateAsync(string transition, CancellationToken token)
         {
-            var payload = BuildExecutionStatePayload(transition);
-            if (!PersistExecutionState(payload)) return false;
+            if (!TryBuildAndPersistExecutionState(transition, out var payload)) return false;
             if (_ws?.State != WebSocketState.Open || !_isAuthenticated) return true;
             await SendEventAsync(
                 $"evt-editor-execution-state-{payload.snapshotId}",
@@ -1827,8 +1886,7 @@ namespace CodingRiver.UPilot
 
         private bool PublishExecutionStateBounded(string transition, int timeoutMs = 100)
         {
-            var payload = BuildExecutionStatePayload(transition);
-            if (!PersistExecutionState(payload)) return false;
+            if (!TryBuildAndPersistExecutionState(transition, out var payload)) return false;
             if (_ws?.State != WebSocketState.Open || !_isAuthenticated) return false;
             try
             {

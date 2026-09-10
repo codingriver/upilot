@@ -102,26 +102,119 @@ class TestDomainService:
             for scene in ((scene_state.data or {}).get("scenes") or [])
             if bool(scene.get("isDirty", False))
         ]
+        dirty_scene_policy = CONFIG.unsaved_scene_policy
+        dirty_scene_action = "none"
         if dirty_scenes:
-            return fail(
-                request_id,
-                "UNSAVED_SCENES",
-                "Unity tests were not started because one or more open scenes have unsaved changes.",
-                {
-                    "blockedReason": "UnsavedScenes",
-                    "dirtySceneCount": len(dirty_scenes),
-                    "dirtyScenes": dirty_scenes,
-                    "requestedTestMode": test_mode,
-                    "requestedTestFilter": test_filter,
-                    "nextAction": "Ask the user whether to save, discard, or cancel. Do not change scene state automatically.",
-                },
-            )
+            if dirty_scene_policy == "autoSave":
+                untitled_scenes = [scene for scene in dirty_scenes if not scene["scenePath"]]
+                if untitled_scenes:
+                    return fail(
+                        request_id,
+                        "UNSAVED_SCENES",
+                        "Unity tests were not started because an untitled scene cannot be saved automatically.",
+                        {
+                            "blockedReason": "UntitledUnsavedScenes",
+                            "dirtyScenePolicy": dirty_scene_policy,
+                            "dirtySceneCount": len(dirty_scenes),
+                            "dirtyScenes": dirty_scenes,
+                            "untitledScenes": untitled_scenes,
+                            "requestedTestMode": test_mode,
+                            "requestedTestFilter": test_filter,
+                            "nextAction": "Save each untitled scene to an explicit Assets/*.unity path, then retry.",
+                        },
+                    )
+
+                for scene in dirty_scenes:
+                    saved = await self.dispatcher.call(
+                        new_id("req"),
+                        "scene.save",
+                        {"scenePath": scene["scenePath"]},
+                        timeout_ms=30000,
+                    )
+                    if not saved.ok:
+                        return fail(
+                            request_id,
+                            "UNSAVED_SCENES",
+                            "Unity tests were not started because UPilot could not save every dirty scene.",
+                            {
+                                "blockedReason": "AutoSaveFailed",
+                                "dirtyScenePolicy": dirty_scene_policy,
+                                "dirtySceneCount": len(dirty_scenes),
+                                "dirtyScenes": dirty_scenes,
+                                "failedScene": scene,
+                                "saveError": _response_summary(saved)["error"],
+                                "requestedTestMode": test_mode,
+                                "requestedTestFilter": test_filter,
+                                "nextAction": "Resolve the reported scene save error, then retry.",
+                            },
+                        )
+
+                verified_scene_state = await self.dispatcher.call(
+                    new_id("req"), "scene.list", {}, timeout_ms=30000
+                )
+                if not verified_scene_state.ok:
+                    return fail(
+                        request_id,
+                        "TEST_PREFLIGHT_FAILED",
+                        "UPilot saved dirty scenes but could not verify their final state.",
+                        {
+                            "blockedReason": "SceneStateUnavailableAfterAutoSave",
+                            "dirtyScenePolicy": dirty_scene_policy,
+                            "sourceError": _response_summary(verified_scene_state)["error"],
+                            "nextAction": "Restore the Unity Bridge connection and verify scene state before retrying.",
+                        },
+                    )
+                remaining_dirty_scenes = [
+                    {
+                        "scenePath": str(scene.get("scenePath") or ""),
+                        "sceneName": str(scene.get("sceneName") or ""),
+                        "isActive": bool(scene.get("isActive", False)),
+                    }
+                    for scene in ((verified_scene_state.data or {}).get("scenes") or [])
+                    if bool(scene.get("isDirty", False))
+                ]
+                if remaining_dirty_scenes:
+                    return fail(
+                        request_id,
+                        "UNSAVED_SCENES",
+                        "Unity tests were not started because some scenes remained unsaved after auto-save.",
+                        {
+                            "blockedReason": "AutoSaveIncomplete",
+                            "dirtyScenePolicy": dirty_scene_policy,
+                            "dirtySceneCount": len(remaining_dirty_scenes),
+                            "dirtyScenes": remaining_dirty_scenes,
+                            "requestedTestMode": test_mode,
+                            "requestedTestFilter": test_filter,
+                            "nextAction": "Save the remaining scenes manually and retry.",
+                        },
+                    )
+                dirty_scene_action = "autoSaved"
+            elif dirty_scene_policy == "ignore":
+                dirty_scene_action = "ignored"
+            else:
+                return fail(
+                    request_id,
+                    "UNSAVED_SCENES",
+                    "Unity tests were not started because one or more open scenes have unsaved changes.",
+                    {
+                        "blockedReason": "UnsavedScenes",
+                        "dirtyScenePolicy": dirty_scene_policy,
+                        "dirtySceneCount": len(dirty_scenes),
+                        "dirtyScenes": dirty_scenes,
+                        "requestedTestMode": test_mode,
+                        "requestedTestFilter": test_filter,
+                        "nextAction": "Set the unsaved-scene policy to autoSave or ignore in UPilot advanced settings, or save/discard scenes manually.",
+                    },
+                )
 
         normalized_filter = test_filter
         filter_diagnostics: dict[str, object] = {
             "requestedTestFilter": test_filter,
             "normalizedTestFilter": test_filter,
             "filterResolution": "unchanged",
+            "dirtyScenePolicy": dirty_scene_policy,
+            "dirtySceneAction": dirty_scene_action,
+            "initialDirtySceneCount": len(dirty_scenes),
         }
         if self._is_short_test_class_filter(test_filter):
             listed = await self.test_list(test_mode=test_mode)
