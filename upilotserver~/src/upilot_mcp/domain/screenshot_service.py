@@ -549,18 +549,43 @@ class ScreenshotDomainService:
 
     async def screenshot_editor_window(
         self,
-        window_title: str = "upilot",
+        window_title: str = "",
         degrade: str | None = None,
+        *,
+        instance_id: str = "",
+        domain_generation: str = "",
+        full_type_name: str = "",
     ) -> ToolResponse:
         """Thin compatibility wrapper over strict EditorWindow Snapshot capture."""
         request_id = new_id("req")
         mode = self._screenshot_degrade_mode(degrade)
         if mode != "none":
             logger.info("Ignoring legacy screenshot degrade=%s; Snapshot wrappers require explicit source identity.", mode)
-        resolved = await self._resolve_snapshot_window(
-            "editorWindow",
-            title_filter=window_title,
-        )
+        if instance_id:
+            listed = await self.editor_windows_list()
+            if not listed.ok or not isinstance(listed.data, dict):
+                return listed
+            matches = [
+                item for item in listed.data.get("windows", [])
+                if isinstance(item, dict) and str(item.get("instanceId") or "") == str(instance_id)
+            ]
+            if not matches:
+                return fail(request_id, "WINDOW_NOT_FOUND", "No EditorWindow matched the exact instanceId.", {"instanceId": str(instance_id)})
+            if len(matches) != 1:
+                return fail(request_id, "WINDOW_AMBIGUOUS", "Multiple EditorWindow instances used the requested instanceId.", {"instanceId": str(instance_id), "matches": matches})
+            resolved = matches[0]
+            if domain_generation and str(resolved.get("domainGeneration") or "") != domain_generation:
+                return fail(request_id, "WINDOW_DOMAIN_MISMATCH", "The exact EditorWindow belongs to a different domainGeneration.", {"instanceId": str(instance_id), "expectedDomainGeneration": domain_generation, "actualDomainGeneration": resolved.get("domainGeneration", "")})
+            if full_type_name and str(resolved.get("fullTypeName") or "") != full_type_name:
+                return fail(request_id, "EDITORWINDOW_TYPE_MISMATCH", "The exact EditorWindow has a different fullTypeName.", {"instanceId": str(instance_id), "expectedFullTypeName": full_type_name, "actualFullTypeName": resolved.get("fullTypeName", "")})
+            if window_title and str(resolved.get("title") or "") != window_title:
+                return fail(request_id, "EDITORWINDOW_TITLE_MISMATCH", "The exact EditorWindow has a different title.", {"instanceId": str(instance_id), "expectedTitle": window_title, "actualTitle": resolved.get("title", "")})
+        else:
+            resolved = await self._resolve_snapshot_window(
+                "editorWindow",
+                type_filter=full_type_name,
+                title_filter=window_title or ("" if full_type_name else "upilot"),
+            )
         if isinstance(resolved, ToolResponse):
             return resolved
         if str(resolved.get("fullTypeName") or "") == "UnityEditor.SceneView":
@@ -576,6 +601,10 @@ class ScreenshotDomainService:
                 "targetId": "editor-window",
                 "kind": "editorWindow",
                 "instanceId": str(resolved["instanceId"]),
+                "domainGeneration": str(resolved.get("domainGeneration") or domain_generation),
+                "fullTypeName": str(resolved.get("fullTypeName") or full_type_name),
+                "title": str(resolved.get("title") or window_title),
+                "requireContentRect": True,
                 "width": int(resolved.get("width") or 1),
                 "height": int(resolved.get("height") or 1),
             },

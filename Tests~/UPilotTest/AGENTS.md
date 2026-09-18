@@ -1,14 +1,14 @@
 ## Change Scope
 
-- For every requirement, bug fix, refactor, diagnostic, test, or documentation task, prioritize the smallest correct change. Touch only the files and direct-regression tests required by the request; expand the scope only when verified evidence shows a narrower change cannot solve the problem safely and correctly, and explain the reason and impact before doing so.
+- For every requirement, bug fix, refactor, diagnostic, test, or documentation task, prioritize the smallest correct change and the simplest solution that fully satisfies the verified requirements. Touch only the files and direct-regression tests required by the request; do not add speculative abstractions, generalized frameworks, extra configuration, or unrelated refactors for hypothetical future needs. Expand the scope only when verified evidence shows a narrower change cannot solve the problem safely and correctly, and explain the reason and impact before doing so.
 
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 29
-upilotPackageVersion: 0.3.31
+rulesVersion: 30
+upilotPackageVersion: 0.3.32
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-09-10T08:07:58Z
+generatedAt: 2026-09-15T11:53:14Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -101,12 +101,12 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 ## Persistent Console Capture
 
-- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, keep its `sessionId`, and always call `unity_console_capture_stop` on success or failure.
+- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation and retain its exact `sessionId` and one-time `ownerToken` outside ordinary logs. Call `unity_console_capture_stop` only with that matching token for the task's own session; unknown or another task's capture is not an automatic cleanup target. `forceStop=true` requires an exact session and explicit authorized human disposition.
 - Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`.
-- Before concluding cleanup, call `unity_console_capture_list`, inspect recovered or historical sessions still marked active, and stop the relevant session explicitly.
+- Before concluding cleanup, call `unity_console_capture_list` and inspect recovered or historical active sessions. Do not infer ownership from list data or stop them automatically; package acceptance must block and report the exact session instead.
 - Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
 - Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
-- For canonical UPilot package acceptance, prefer `unity_upilot_acceptance_run`. It stops active captures before ConsoleCaptureService self-tests and does not start a persistent capture around that test run.
+- For canonical UPilot package acceptance, prefer `unity_upilot_acceptance_run`. It blocks on another or unknown active capture before ConsoleCaptureService self-tests and does not start a persistent capture around that test run. Use `unity_console_capture_attach`/`unity_console_capture_detach` for read-only fixed ranges; detach never stops the source.
 
 ## Configuration CSV Safety
 
@@ -117,7 +117,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 ## Hang Diagnostics
 
 - When Unity stops pumping commands or appears stuck, call `unity_hang_status` before retrying or restarting it.
-- On Windows, collect `unity_hang_capture` before restart when diagnostic evidence is needed. Confirm the output path and report dump metadata; the capture must not terminate Unity.
+- On Windows, collect `unity_hang_capture` before restart when diagnostic evidence is needed. Choose `dumpType=mini|heap|full`; the tool verifies the exact main Editor identity and enforces an effective `reserveBytes` of at least 2 GiB. An insufficient-space result must have `dumpAttempted=false`; a completed capture must report path, bytes, SHA256, `reserveMaintained=true`, and `processTerminated=false`.
 
 ## Artifacts And Screenshots
 

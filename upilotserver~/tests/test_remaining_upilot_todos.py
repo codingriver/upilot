@@ -173,21 +173,12 @@ def test_compile_error_snapshot_updates_current_warning_count() -> None:
     assert state.compile.warning_count == 34
 
 
-def test_test_run_blocks_dirty_scenes_without_starting_tests() -> None:
+def test_test_run_blocks_dirty_scenes_without_starting_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(CONFIG, "unsaved_scene_policy", "block")
     service, dispatcher = _test_service(
-        ok(
-            "scene-list",
-            {
-                "scenes": [
-                    {
-                        "scenePath": "Assets/Main.unity",
-                        "sceneName": "Main",
-                        "isDirty": True,
-                        "isActive": True,
-                    }
-                ]
-            },
-        )
+        ok("scene-prepare", {"prepared": False, "action": "blocked", "remainingDirtyScenes": [{"scenePath": "Assets/Main.unity", "isDirty": True}]}),
     )
 
     result = asyncio.run(service.test_run(test_filter="CodingRiver.UPilot.Tests.UPilotCoreTests"))
@@ -195,16 +186,14 @@ def test_test_run_blocks_dirty_scenes_without_starting_tests() -> None:
     assert result.ok is False
     assert result.error.code == "UNSAVED_SCENES"
     assert result.error.detail["blockedReason"] == "UnsavedScenes"
-    assert result.error.detail["dirtyScenes"][0]["scenePath"] == "Assets/Main.unity"
-    assert [call[0] for call in dispatcher.calls] == ["scene.list"]
+    assert result.error.detail["scenePreparation"]["remainingDirtyScenes"][0]["scenePath"] == "Assets/Main.unity"
+    assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation"]
 
 
-def test_test_run_autosaves_dirty_scenes_before_starting(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_test_run_autosaves_each_named_dirty_scene_once_before_starting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(CONFIG, "unsaved_scene_policy", "autoSave")
     service, dispatcher = _test_service(
-        ok("scene-list", {"scenes": [{"scenePath": "Assets/Main.unity", "sceneName": "Main", "isDirty": True}]}),
-        ok("scene-save", {"scenePath": "Assets/Main.unity", "isDirty": False}),
-        ok("scene-list-verified", {"scenes": [{"scenePath": "Assets/Main.unity", "sceneName": "Main", "isDirty": False}]}),
+        ok("scene-prepare", {"prepared": True, "action": "autoSaved", "items": [{"scenePath": "Assets/Main.unity"}, {"scenePath": "Assets/Additive.unity"}]}),
         ok("test-run", {"status": "running", "runGuid": "run-auto-save"}),
     )
 
@@ -213,28 +202,45 @@ def test_test_run_autosaves_dirty_scenes_before_starting(monkeypatch: pytest.Mon
     assert result.ok is True
     assert result.data["dirtyScenePolicy"] == "autoSave"
     assert result.data["dirtySceneAction"] == "autoSaved"
-    assert [call[0] for call in dispatcher.calls] == ["scene.list", "scene.save", "scene.list", "test.run"]
-    assert dispatcher.calls[1][1] == {"scenePath": "Assets/Main.unity"}
+    assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation", "test.run"]
+    assert dispatcher.calls[-1][1]["dirtyScenePolicy"] == "autoSave"
 
 
-def test_test_run_can_ignore_dirty_scenes_when_explicitly_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_test_run_autosaves_untitled_scene_without_starting_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(CONFIG, "unsaved_scene_policy", "autoSave")
+    service, dispatcher = _test_service(
+        ok("scene-prepare", {"prepared": True, "action": "autoSaved", "items": [{"savedPath": "Assets/UPilotAutoSave_1.unity"}]}),
+        ok("test-run", {"status": "running", "runGuid": "run-untitled"}),
+    )
+
+    result = asyncio.run(service.test_run(test_filter="CodingRiver.UPilot.Tests.UPilotCoreTests"))
+
+    assert result.ok is True
+    assert result.data["dirtySceneAction"] == "autoSaved"
+    assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation", "test.run"]
+
+
+def test_test_run_ignore_discards_changes_before_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(CONFIG, "unsaved_scene_policy", "ignore")
     service, dispatcher = _test_service(
-        ok("scene-list", {"scenes": [{"scenePath": "Assets/Main.unity", "sceneName": "Main", "isDirty": True}]}),
+        ok("scene-prepare", {"prepared": True, "action": "ignored", "items": [{"action": "reloadedFromDisk"}, {"action": "closedWithoutSave"}]}),
         ok("test-run", {"status": "running", "runGuid": "run-ignore"}),
     )
 
     result = asyncio.run(service.test_run(test_filter="CodingRiver.UPilot.Tests.UPilotCoreTests"))
 
     assert result.ok is True
-    assert result.data["dirtyScenePolicy"] == "ignore"
     assert result.data["dirtySceneAction"] == "ignored"
-    assert [call[0] for call in dispatcher.calls] == ["scene.list", "test.run"]
+    assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation", "test.run"]
 
 
 def test_test_run_resolves_unique_short_class_name() -> None:
     service, dispatcher = _test_service(
-        ok("scene-list", {"scenes": []}),
+        ok("scene-prepare", {"prepared": True, "action": "none", "items": []}),
         ok(
             "test-list",
             {
@@ -259,7 +265,7 @@ def test_test_run_resolves_unique_short_class_name() -> None:
 
 def test_test_run_reports_ambiguous_short_class_name() -> None:
     service, dispatcher = _test_service(
-        ok("scene-list", {"scenes": []}),
+        ok("scene-prepare", {"prepared": True, "action": "none", "items": []}),
         ok(
             "test-list",
             {
@@ -279,12 +285,12 @@ def test_test_run_reports_ambiguous_short_class_name() -> None:
         "NamespaceA.SharedTests",
         "NamespaceB.SharedTests",
     ]
-    assert [call[0] for call in dispatcher.calls] == ["scene.list", "test.list"]
+    assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation", "test.list"]
 
 
 def test_test_run_reports_short_class_no_match() -> None:
     service, _ = _test_service(
-        ok("scene-list", {"scenes": []}),
+        ok("scene-prepare", {"prepared": True, "action": "none", "items": []}),
         ok("test-list", {"discoveredCount": 1, "tests": ["Namespace.RealTests.First"]}),
     )
 
@@ -298,25 +304,25 @@ def test_test_run_reports_short_class_no_match() -> None:
 def test_test_run_preserves_fully_qualified_and_regex_filters() -> None:
     for test_filter in ("Namespace.RealTests", "regex:^Namespace\\."):
         service, dispatcher = _test_service(
-            ok("scene-list", {"scenes": []}),
+            ok("scene-prepare", {"prepared": True, "action": "none", "items": []}),
             ok("test-run", {"status": "running"}),
         )
 
         result = asyncio.run(service.test_run(test_filter=test_filter))
 
         assert result.ok is True
-        assert [call[0] for call in dispatcher.calls] == ["scene.list", "test.run"]
+        assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation", "test.run"]
         assert dispatcher.calls[-1][1]["testFilter"] == test_filter
 
 
 def test_test_run_fails_closed_when_scene_preflight_is_unavailable() -> None:
     service, dispatcher = _test_service(
-        fail("scene-list", "UNITY_NOT_CONNECTED", "not connected")
+        fail("scene-prepare", "UNITY_NOT_CONNECTED", "not connected")
     )
 
     result = asyncio.run(service.test_run())
 
     assert result.ok is False
     assert result.error.code == "TEST_PREFLIGHT_FAILED"
-    assert result.error.detail["blockedReason"] == "SceneStateUnavailable"
-    assert [call[0] for call in dispatcher.calls] == ["scene.list"]
+    assert result.error.detail["blockedReason"] == "ScenePreparationFailed"
+    assert [call[0] for call in dispatcher.calls] == ["scene.prepareForAutomation"]

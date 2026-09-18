@@ -215,7 +215,7 @@ namespace CodingRiver.UPilot
         public UPilotFlowService(UPilotBridge bridge)
         {
             _bridge = bridge;
-            Logger.Log("[UPilot Flow] UPilot Flow service 初始化");
+            Logger.Log("UPilot.Flow", "UPilot Flow service 初始化");
             // Register the supplier that feeds a freshly-opened TestRunnerWindow
             // with the current execution snapshot.
             CodingRiver.UPilot.Flow.TestRunnerWindow.OnWindowOpened = SyncWindowOnOpen;

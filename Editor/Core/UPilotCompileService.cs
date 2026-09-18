@@ -22,6 +22,12 @@ namespace CodingRiver.UPilot
         private static readonly string CompileErrorsPath = Path.Combine(CompileLogDir, "CompileErrors.json");
 
         private readonly List<CompileErrorItemPayload> _lastErrors = new();
+        private const int MaxPersistedWarnings = 1000;
+        private readonly List<CompileErrorItemPayload> _lastWarnings = new();
+        // Old persisted records have no warning detail list.  Keep that state
+        // distinct from a newly observed compilation with zero warnings.
+        private bool _warningDetailsAvailable = false;
+        private bool _warningsTruncated;
         private int _lastWarningCount;
         private string _lastRequestId = string.Empty;
         private string _compileOperationId = string.Empty;
@@ -99,6 +105,8 @@ namespace CodingRiver.UPilot
                     errorsVerified = ErrorsVerified,
                     total = _lastErrors.Count,
                     warningCount = _lastWarningCount,
+                    warningDetailsAvailable = _warningDetailsAvailable,
+                    warningsTruncated = _warningsTruncated,
                     startedAt = CompileStartedAt,
                     finishedAt = CompileFinishedAt,
                     lastProgressAt = LastProgressAt,
@@ -110,6 +118,9 @@ namespace CodingRiver.UPilot
                     reloadId = _reloadId,
                     domainReloadObserved = DomainReloadObserved,
                     errors = new List<CompileErrorItemPayload>(_lastErrors),
+                    warnings = _warningDetailsAvailable
+                        ? new List<CompileErrorItemPayload>(_lastWarnings)
+                        : null,
                 };
                 var json = JsonUtility.ToJson(payload, true);
                 File.WriteAllText(CompileErrorsPath, json);
@@ -155,6 +166,10 @@ namespace CodingRiver.UPilot
                 ErrorsVerified = payload.errorsVerified;
                 DomainReloadObserved = payload.domainReloadObserved;
                 _lastWarningCount = payload.warningCount;
+                // JsonUtility uses false for a field absent from legacy payloads.
+                // Do not infer availability from an empty/missing list: it may mean
+                // that the historical compile only persisted its aggregate count.
+                _warningDetailsAvailable = payload.warningDetailsAvailable;
                 CompileStartedAt = payload.startedAt;
                 CompileFinishedAt = payload.finishedAt;
                 LastProgressAt = payload.lastProgressAt > 0
@@ -168,6 +183,20 @@ namespace CodingRiver.UPilot
                 _lastErrors.Clear();
                 if (payload.errors != null)
                     _lastErrors.AddRange(payload.errors);
+                _lastWarnings.Clear();
+                if (_warningDetailsAvailable && payload.warnings != null)
+                {
+                    var retained = Math.Min(payload.warnings.Count, MaxPersistedWarnings);
+                    for (var index = 0; index < retained; index++)
+                        _lastWarnings.Add(payload.warnings[index]);
+                    _warningsTruncated = payload.warningsTruncated ||
+                        payload.warnings.Count > retained || _lastWarningCount > retained;
+                }
+                else
+                {
+                    // An unavailable legacy detail list is unknown, not truncated.
+                    _warningsTruncated = false;
+                }
                 HasCompileErrors = _lastErrors.Count > 0;
                 Logger.Log("COMPILE", $"编译错误已从磁盘恢复: errors={_lastErrors.Count} requestId={_lastRequestId}");
             }
@@ -256,8 +285,7 @@ namespace CodingRiver.UPilot
             DomainReloadObserved = false;
             LastCompileRequestedAt = now;
             LastProgressAt = now;
-            CompileStartedAt = 0;
-            CompileFinishedAt = 0;
+            ResetCompileCompletionEvidence();
             _compileTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             // Clear previous persistent errors when starting a new compile
@@ -292,6 +320,22 @@ namespace CodingRiver.UPilot
         public Task WaitForCompileAsync() =>
             _compileTcs?.Task ?? Task.CompletedTask;
 
+        private void ResetCompileCompletionEvidence()
+        {
+            CompileStartedAt = 0;
+            CompileFinishedAt = 0;
+            LastCompileStartedAt = 0;
+            LastCompilerFinishedAt = 0;
+            LastCompileVerifiedAt = 0;
+            LastTerminalCompileAt = 0;
+            _lastErrors.Clear();
+            _lastWarnings.Clear();
+            _lastWarningCount = 0;
+            _warningDetailsAvailable = true;
+            _warningsTruncated = false;
+            HasCompileErrors = false;
+        }
+
         // Called when compilation starts (both auto and request-scoped)
         private void OnCompilationStarted(object _)
         {
@@ -312,13 +356,10 @@ namespace CodingRiver.UPilot
             Terminal = false;
             VerificationPending = true;
             ErrorsVerified = false;
-            _lastErrors.Clear();
-            _lastWarningCount = 0;
-            HasCompileErrors = false;
+            ResetCompileCompletionEvidence();
             CompileStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             LastCompileStartedAt = CompileStartedAt;
             LastProgressAt = CompileStartedAt;
-            CompileFinishedAt = 0;
             Logger.Log("COMPILE", "编译流水线开始");
         }
 
@@ -350,6 +391,19 @@ namespace CodingRiver.UPilot
                 if (msg.type == CompilerMessageType.Warning)
                 {
                     _lastWarningCount++;
+                    if (_lastWarnings.Count < MaxPersistedWarnings)
+                    {
+                        _lastWarnings.Add(new CompileErrorItemPayload
+                        {
+                            assemblyName = assembly,
+                            file = msg.file,
+                            line = msg.line,
+                            column = msg.column,
+                            message = msg.message,
+                            severity = "warning",
+                        });
+                    }
+                    else _warningsTruncated = true;
                     continue;
                 }
                 if (msg.type != CompilerMessageType.Error) continue;
@@ -357,6 +411,7 @@ namespace CodingRiver.UPilot
                 hadError = true;
                 _lastErrors.Add(new CompileErrorItemPayload
                 {
+                    assemblyName = assembly,
                     file = msg.file,
                     line = msg.line,
                     column = msg.column,
@@ -472,7 +527,7 @@ namespace CodingRiver.UPilot
                 finishedAt = CompileFinishedAt,
             };
 
-        public CompileErrorsPayload BuildCompileErrorsPayload(string requestId) =>
+        public CompileErrorsPayload BuildCompileErrorsPayload(string requestId, bool includeWarnings = false) =>
             new CompileErrorsPayload
             {
                 requestId = requestId,
@@ -487,6 +542,8 @@ namespace CodingRiver.UPilot
                 errorsVerified = ErrorsVerified,
                 total = _lastErrors.Count,
                 warningCount = _lastWarningCount,
+                warningDetailsAvailable = _warningDetailsAvailable,
+                warningsTruncated = _warningsTruncated,
                 startedAt = CompileStartedAt,
                 finishedAt = CompileFinishedAt,
                 lastProgressAt = LastProgressAt,
@@ -498,9 +555,12 @@ namespace CodingRiver.UPilot
                 reloadId = _reloadId,
                 domainReloadObserved = DomainReloadObserved,
                 errors = new List<CompileErrorItemPayload>(_lastErrors),
+                warnings = includeWarnings && _warningDetailsAvailable
+                    ? new List<CompileErrorItemPayload>(_lastWarnings)
+                    : null,
             };
 
-        public CompileErrorsPayload BuildLastCompileErrorsPayload() =>
-            BuildCompileErrorsPayload(_lastRequestId);
+        public CompileErrorsPayload BuildLastCompileErrorsPayload(bool includeWarnings = false) =>
+            BuildCompileErrorsPayload(_lastRequestId, includeWarnings);
     }
 }

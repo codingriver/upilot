@@ -256,6 +256,7 @@ namespace CodingRiver.UPilot
             LoadDefaultEndpoints();
             _debugWireLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.DebugWireLogsKey, false);
             _verboseLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.VerboseLogsKey, false);
+            Logger.SetRuntimeLogOptions(_debugWireLogsEnabled, _verboseLogsEnabled);
             _autoRestartOnCriticalStuck = EditorPrefs.GetBool(UPilotPreferences.AutoRestartOnStuckKey, false);
             RegisterLegacyCommands();
             RegisterModuleServices();
@@ -299,6 +300,7 @@ namespace CodingRiver.UPilot
                 if (_debugWireLogsEnabled == value) return;
                 _debugWireLogsEnabled = value;
                 EditorPrefs.SetBool(UPilotPreferences.DebugWireLogsKey, value);
+                Logger.SetRuntimeLogOptions(_debugWireLogsEnabled, _verboseLogsEnabled);
                 Logger.Log("SYSTEM", value ? "调试日志已开启（通信命令收发可见）" : "调试日志已关闭");
             }
         }
@@ -311,6 +313,7 @@ namespace CodingRiver.UPilot
                 if (_verboseLogsEnabled == value) return;
                 _verboseLogsEnabled = value;
                 EditorPrefs.SetBool(UPilotPreferences.VerboseLogsKey, value);
+                Logger.SetRuntimeLogOptions(_debugWireLogsEnabled, _verboseLogsEnabled);
                 Logger.Log("SYSTEM", value ? "详细日志已开启（心跳、连接、请求状态）" : "详细日志已关闭");
             }
         }
@@ -570,6 +573,13 @@ namespace CodingRiver.UPilot
                 try { action(); }
                 catch (Exception ex) { Debug.LogError($"[UPilotBridge] main thread error: {ex}"); }
             }
+
+            var startupContext = BuildEditorContextPayload("startup-diagnostics");
+            UPilotStartupDiagnostics.ObserveEditorState(
+                startupContext.ready,
+                startupContext.authoritative,
+                startupContext.isStale,
+                _sessionId);
 
             if (EditorApplication.timeSinceStartup - _lastWatchdogCheck > 2.0)
             {
@@ -927,6 +937,7 @@ namespace CodingRiver.UPilot
                 }
 
                 _isAuthenticated = true;
+                UPilotStartupDiagnostics.ObserveBridgeAuthenticated(_sessionId);
                 UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.auth.success", "认证成功",
                     $"sessionId={_sessionId} {FormatMcpServerHintForLog()}");
@@ -1047,7 +1058,7 @@ namespace CodingRiver.UPilot
             _packageService = new UPilotPackageService(this);
             _packageService.RegisterCommands();
 
-            _testService = new UPilotTestService(this);
+            _testService = UPilotTestService.AttachBridge(this);
             _testService.RegisterCommands();
 
             _dragDropService = new UPilotDragDropService(this);
@@ -1220,8 +1231,9 @@ namespace CodingRiver.UPilot
 
         private async Task HandleCompileErrorsGetAsync(string id, string json, CancellationToken token)
         {
+            var includeWarnings = JsonUtility.FromJson<CompileErrorsGetMessage>(json)?.payload?.includeWarnings ?? false;
             var transitioned = _compileService.CompleteVerification();
-            var payload = _compileService.BuildLastCompileErrorsPayload();
+            var payload = _compileService.BuildLastCompileErrorsPayload(includeWarnings);
             if (transitioned)
             {
                 await PublishExecutionStateAsync(
@@ -1355,25 +1367,109 @@ namespace CodingRiver.UPilot
             var command = JsonUtility.FromJson<PlayModeSetMessage>(json);
             var action = command?.payload?.action ?? "stop";
 
-            if (action != "play" && action != "stop")
+            if (action != "play" && action != "stop" && action != "pause" && action != "resume")
             {
-                await SendErrorAsync(id, "INVALID_PAYLOAD", $"非法 PlayMode 动作：{action}", token, "playmode.set");
+                await SendErrorAsync(id, "INVALID_PAYLOAD", $"非法 PlayMode 动作：{action}", token, "playmode.set",
+                    new ErrorDetailPayload
+                    {
+                        commandId = id,
+                        commandName = "playmode.set",
+                        commandSubmitted = false,
+                        stateObserved = false,
+                        changed = false,
+                        writeCount = 0,
+                        stage = "preflight",
+                        blockedReason = "INVALID_PAYLOAD",
+                        nextAction = "Use play, stop, pause, or resume.",
+                        sideEffectsMayHaveOccurred = false,
+                    });
+                return;
+            }
+
+            if (token.IsCancellationRequested)
+            {
+                await SendErrorAsync(id, "EXECUTION_CANCELLED", "PlayMode request was cancelled before it reached the main thread.",
+                    CancellationToken.None, "playmode.set", new ErrorDetailPayload
+                    {
+                        commandId = id,
+                        commandName = "playmode.set",
+                        commandSubmitted = false,
+                        stateObserved = false,
+                        changed = false,
+                        writeCount = 0,
+                        stage = "cancelled",
+                        nextAction = "Inspect the current PlayMode state; do not submit the cancelled request again.",
+                        sideEffectsMayHaveOccurred = false,
+                    });
                 return;
             }
 
             var resultTcs = new TaskCompletionSource<GenericOkPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             EnqueueTracked(id, () =>
             {
-                if ((action == "play") != EditorApplication.isPlaying)
+                if (token.IsCancellationRequested)
+                {
+                    resultTcs.TrySetCanceled(token);
+                    return;
+                }
+                if (action == "play" && !EditorApplication.isPlaying)
                     UPilotPlayModeTransitions.RegisterIntent("upilot", action == "play" ? "play" : "edit",
+                        command?.payload?.requestId, id, command?.payload?.operationId, command?.payload?.toolName);
+                else if (action == "stop" && EditorApplication.isPlaying)
+                    UPilotPlayModeTransitions.RegisterIntent("upilot", "edit",
                         command?.payload?.requestId, id, command?.payload?.operationId, command?.payload?.toolName);
                 var payload = _playInputService.SetPlayMode(action);
                 resultTcs.TrySetResult(payload);
             });
 
-            var result = await resultTcs.Task;
-            await SendResultAsync(id, "playmode.set", result, token);
-            await SendPlayModeChangedEventAsync(new PlayModeChangedPayload { state = result.state }, token);
+            GenericOkPayload result;
+            try { result = await resultTcs.Task; }
+            catch (OperationCanceledException)
+            {
+                await SendErrorAsync(id, "EXECUTION_CANCELLED", "PlayMode request was cancelled before the state setter ran.",
+                    CancellationToken.None, "playmode.set", new ErrorDetailPayload
+                    {
+                        commandId = id,
+                        commandName = "playmode.set",
+                        commandSubmitted = false,
+                        stateObserved = false,
+                        changed = false,
+                        writeCount = 0,
+                        stage = "cancelled",
+                        nextAction = "Inspect the current PlayMode state; do not submit the cancelled request again.",
+                        sideEffectsMayHaveOccurred = false,
+                    });
+                return;
+            }
+            if (!result.ok)
+            {
+                await SendErrorAsync(id, result.blockedReason ?? "PLAYMODE_SET_REJECTED",
+                    result.nextAction ?? "PlayMode request was rejected.", token, "playmode.set",
+                    new ErrorDetailPayload
+                    {
+                        commandId = id,
+                        commandName = "playmode.set",
+                        commandSubmitted = false,
+                        stateObserved = false,
+                        changed = false,
+                        writeCount = 0,
+                        stage = "preflight",
+                        blockedReason = result.blockedReason ?? "PLAYMODE_SET_REJECTED",
+                        nextAction = result.nextAction ?? "PlayMode request was rejected.",
+                        sideEffectsMayHaveOccurred = false,
+                    });
+                return;
+            }
+            result.commandId = id;
+            result.stateObserved = true;
+            result.commandSubmitted = true;
+            var context = BuildEditorContextPayload("playmode.set");
+            result.authoritative = context.authoritative;
+            result.isStale = context.isStale;
+            result.confirmed = result.authoritative && !result.isStale;
+            var responseToken = token.IsCancellationRequested ? CancellationToken.None : token;
+            await SendResultAsync(id, "playmode.set", result, responseToken);
+            await SendPlayModeChangedEventAsync(new PlayModeChangedPayload { state = result.state }, responseToken);
         }
 
         private async Task HandleMouseEventAsync(string id, string json, CancellationToken token)
@@ -1388,14 +1484,10 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var resultTcs = new TaskCompletionSource<GenericOkPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
-            EnqueueTracked(id, () =>
-            {
-                var result = _playInputService.HandleMouseEvent(mousePayload);
-                resultTcs.TrySetResult(result);
-            });
-
-            var mouseResult = await resultTcs.Task;
+            var mouseResult = await UPilotModalObserver.RunAsync(this, id,
+                () => _playInputService.HandleMouseEvent(mousePayload),
+                escapeGenericMenu: mousePayload.escapeGenericMenu,
+                target: () => UPilotWindowInputRegistry.Resolve(mousePayload.windowInstanceId, mousePayload.targetWindow));
             await SendResultAsync(id, "mouse.event", mouseResult, token);
         }
 
@@ -2309,7 +2401,7 @@ namespace CodingRiver.UPilot
 
         private void LogInboundCommand(BridgeEnvelope envelope, string json)
         {
-            if (envelope == null) return;
+            if (!_debugWireLogsEnabled || envelope == null) return;
             var type = string.IsNullOrEmpty(envelope.type) ? "(unknown)" : envelope.type;
             if (type == "heartbeat" ||
                 string.Equals(envelope.name, "session.heartbeat", StringComparison.OrdinalIgnoreCase)) return;
@@ -2323,7 +2415,7 @@ namespace CodingRiver.UPilot
 
         private void LogOutboundCommand(string json)
         {
-            if (string.IsNullOrEmpty(json)) return;
+            if (!_debugWireLogsEnabled || string.IsNullOrEmpty(json)) return;
             var envelope = JsonUtility.FromJson<BridgeEnvelope>(json);
             if (envelope == null) return;
             var type = string.IsNullOrEmpty(envelope.type) ? "(unknown)" : envelope.type;

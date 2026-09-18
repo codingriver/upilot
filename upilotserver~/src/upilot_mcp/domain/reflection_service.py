@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import json
 import logging
+import math
 import os
 import shlex
 import subprocess
@@ -22,12 +23,19 @@ from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
-from .execution_service import normalize_arguments, normalize_variables
+from .execution_service import (
+    TypedValueValidationError,
+    normalize_arguments,
+    normalize_execution_error,
+    normalize_variables,
+    validate_finite_values,
+    validate_typed_arguments,
+    validate_typed_json_size,
+    validate_typed_variables,
+)
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-
-
 def _normalize_reflection_parameters(parameters: list | None) -> list:
     if not parameters:
         return []
@@ -46,6 +54,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     if value is None:
         return ""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
 
 class ReflectionDomainService:
     async def reflection_find(
@@ -88,8 +97,79 @@ class ReflectionDomainService:
         await_timeout_ms: int = 3000,
         result_mode: str = "auto",
     ) -> ToolResponse:
+        request_id = new_id("req")
+        def reject(code: str, message: str, path: str = "") -> ToolResponse:
+            detail = {
+                "stage": "policy", "sideEffectsMayHaveOccurred": False,
+                "nextAction": "Correct the request before calling once; no target was dispatched.",
+            }
+            if path:
+                detail["path"] = path
+            return fail(request_id, code, message, detail)
+        try:
+            for name, value in (("typeName", type_name), ("methodName", method_name), ("expression", expression),
+                                ("kind", kind), ("sessionId", session_id), ("targetHandle", target_handle),
+                                ("targetInstancePath", target_instance_path), ("targetStaticTypeName", target_static_type_name),
+                                ("targetStaticMemberPath", target_static_member_path)):
+                if not isinstance(value, str):
+                    raise ValueError(f"{name} must be a string.")
+            for name, value in (("parameterTypeNames", parameter_type_names), ("genericTypeArguments", generic_type_arguments)):
+                if value is not None and (not isinstance(value, list)
+                        or any(not isinstance(item, str) or not item.strip() for item in value)):
+                    raise ValueError(f"{name} must be an array of nonempty type names.")
+            if not isinstance(is_static, bool) or not isinstance(force_async, bool):
+                raise ValueError("isStatic and forceAsync must be booleans.")
+            await_mode = (await_mode or "auto").strip().lower()
+            result_mode = (result_mode or "auto").strip().lower()
+            if await_mode not in {"auto", "always", "never"}:
+                return reject("INVALID_AWAIT_MODE", "awaitMode must be auto, always or never.")
+            if result_mode not in {"auto", "inline", "handle", "legacystring"}:
+                return reject("INVALID_RESULT_MODE", "resultMode must be auto, inline, handle or legacyString.")
+            if result_mode == "handle" and not session_id.strip():
+                return reject("SESSION_REQUIRED", "resultMode=handle requires a persistent session.")
+            for name, value in (("asyncAfterSec", async_after_sec), ("operationTimeoutSec", operation_timeout_sec)):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError(f"{name} must be a finite number.")
+            if operation_timeout_sec <= 0:
+                raise ValueError("operationTimeoutSec must be positive.")
+            if isinstance(await_timeout_ms, bool) or not isinstance(await_timeout_ms, int):
+                raise ValueError("awaitTimeoutMs must be an integer.")
+            if arguments is not None and not isinstance(arguments, list):
+                raise ValueError("arguments must be an array.")
+            if parameters is not None and not isinstance(parameters, list):
+                raise ValueError("parameters must be an array.")
+            if variables is not None and not isinstance(variables, dict):
+                raise ValueError("variables must be an object.")
+            if options is not None and not isinstance(options, dict):
+                raise ValueError("options must be an object.")
+            for name, value in (options or {}).items():
+                if name == "resultMode":
+                    if not isinstance(value, str) or value.strip().lower() not in {"string", "json", "type"}:
+                        raise ValueError("options.resultMode must be string, json or type.")
+                    continue
+                if name not in {"timeoutMs", "maxStatements", "maxLoopIterations", "maxCalls",
+                                "maxAllocations", "maxRecursion", "maxResultBytes", "maxAwaits", "maxArrayElements"}:
+                    raise ValueError(f"options.{name} is not supported by the expression execution profile.")
+                if name != "resultMode" and (isinstance(value, bool) or not isinstance(value, int)):
+                    raise ValueError(f"options.{name} must be an integer budget.")
+            validate_finite_values(parameters, "parameters")
+            has_input_handle = validate_typed_arguments(arguments)
+            has_input_handle |= validate_typed_variables(variables)
+            arguments_json = normalize_arguments(arguments) if arguments is not None else ""
+            variables_json = normalize_variables(variables)
+            if arguments_json:
+                validate_typed_json_size(arguments_json, "arguments")
+            validate_typed_json_size(variables_json, "variables")
+            if target_handle and (target_instance_path or target_static_type_name or target_static_member_path):
+                return reject("REFLECTION_TARGET_CONFLICT", "targetHandle cannot be combined with instance/static member paths.")
+            if (target_handle or has_input_handle) and not session_id.strip():
+                return reject("SESSION_REQUIRED", "targetHandle and typed handle values require a persistent session.")
+        except TypedValueValidationError as ex:
+            return reject("INVALID_PARAMS", str(ex), ex.path)
+        except (ValueError, TypeError, AttributeError) as ex:
+            return reject("INVALID_PARAMS", str(ex))
         if arguments is not None and parameters:
-            return fail(new_id("req"), "REFLECTION_ARGUMENTS_CONFLICT", "arguments and legacy parameters are mutually exclusive.")
+            return reject("REFLECTION_ARGUMENTS_CONFLICT", "arguments and legacy parameters are mutually exclusive.")
         execution_kind, kind_error = self._resolve_reflection_execution_kind(
             kind=kind,
             type_name=type_name,
@@ -99,10 +179,12 @@ class ReflectionDomainService:
         )
         if kind_error:
             return fail(
-                new_id("req"),
+                request_id,
                 kind_error[0],
                 kind_error[1],
                 {
+                    "stage": "policy",
+                    "sideEffectsMayHaveOccurred": False,
                     "kind": kind or "auto",
                     "hasTypeName": bool(type_name.strip()),
                     "hasMethodName": bool(method_name.strip()),
@@ -115,10 +197,16 @@ class ReflectionDomainService:
             )
 
         if execution_kind == "expression":
+            if (arguments is not None or parameters or parameter_type_names or generic_type_arguments
+                    or target_instance_path or target_static_type_name or target_static_member_path):
+                return reject("AMBIGUOUS_REFLECTION_REQUEST", "Method arguments and targets cannot accompany an expression.")
             result = await self._reflection_expression_eval(
                 code=expression,
                 variables=variables,
+                variables_json=variables_json,
                 options=options,
+                session_id=session_id,
+                result_mode=result_mode,
             )
             return self._decorate_reflection_response(
                 result,
@@ -126,7 +214,8 @@ class ReflectionDomainService:
                 engine_used="reflection-expression",
             )
 
-        request_id = new_id("req")
+        if options or variables:
+            return reject("INVALID_PARAMS", "options and variables are expression-only parameters.")
         payload: dict = {
             "typeName": type_name,
             "methodName": method_name,
@@ -134,7 +223,7 @@ class ReflectionDomainService:
             "isStatic": is_static,
         }
         if arguments is not None:
-            payload["argumentsJson"] = normalize_arguments(arguments)
+            payload["argumentsJson"] = arguments_json
         if parameter_type_names:
             payload["parameterTypeNames"] = parameter_type_names
         if generic_type_arguments:
@@ -287,7 +376,10 @@ class ReflectionDomainService:
         self,
         code: str,
         variables: dict | None = None,
+        variables_json: str | None = None,
         options: dict | None = None,
+        session_id: str = "",
+        result_mode: str = "auto",
     ) -> ToolResponse:
         # The public expression shape now uses the shared parser/interpreter with
         # the expression-only profile. reflection.eval remains a private bridge
@@ -295,11 +387,12 @@ class ReflectionDomainService:
         return await self.dispatcher.call(new_id("req"), "csharp.eval", {
             "code": code,
             "mode": "expression",
-            "variablesJson": normalize_variables(variables),
+            "sessionId": session_id,
+            "variablesJson": variables_json if variables_json is not None else normalize_variables(variables),
             "imports": [],
             "executionBackend": "interpret",
             "limitsJson": _json_dumps_or_empty(options or {}),
-            "resultMode": "legacyString",
+            "resultMode": result_mode,
             "languageProfileMode": "reflection-expression",
         })
 
@@ -371,6 +464,7 @@ class ReflectionDomainService:
         execution_kind: str,
         engine_used: str,
     ) -> ToolResponse:
+        result = normalize_execution_error(result)
         if result.ok:
             data = dict(result.data or {})
             data.setdefault("executionKind", execution_kind)

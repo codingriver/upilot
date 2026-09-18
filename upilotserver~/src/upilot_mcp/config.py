@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from .automation_authorization import authorization_status, normalize_scopes
 
 
 @dataclass(slots=True)
@@ -23,6 +24,10 @@ class UPilotConfig:
     flow_enabled: bool = False
     write_access_approved: bool = False
     unsaved_scene_policy: str = "block"
+    automation_authorization_scopes: tuple[str, ...] = ()
+    automation_authorization_catalog_hash: str = ""
+    automation_authorization_scope_version: int = 0
+    automation_authorization_approved_at_utc: str = ""
 
 
 def _project_config_path() -> Path:
@@ -74,6 +79,10 @@ def load_config() -> UPilotConfig:
         flow_enabled=bool(flow.get("enabled", False)),
         write_access_approved=bool(safety.get("writeAccessApproved", False)),
         unsaved_scene_policy=unsaved_scene_policy,
+        automation_authorization_scopes=normalize_scopes(safety.get("automationAuthorizationScopes")),
+        automation_authorization_catalog_hash=str(safety.get("automationAuthorizationCatalogHash") or ""),
+        automation_authorization_scope_version=int(safety.get("automationAuthorizationScopeVersion") or 0),
+        automation_authorization_approved_at_utc=str(safety.get("automationAuthorizationApprovedAtUtc") or ""),
     )
 
 
@@ -117,6 +126,10 @@ def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
                     "flow_enabled",
                     "write_access_approved",
                     "unsaved_scene_policy",
+                    "automation_authorization_scopes",
+                    "automation_authorization_catalog_hash",
+                    "automation_authorization_scope_version",
+                    "automation_authorization_approved_at_utc",
                 ):
                     setattr(CONFIG, field, getattr(disk_config, field))
                 _CONFIG_LAST_DISK_HASH = disk_hash
@@ -149,6 +162,7 @@ def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
             "writeAccessApproved": CONFIG.write_access_approved,
             "flowEnabled": CONFIG.flow_enabled,
             "unsavedScenePolicy": CONFIG.unsaved_scene_policy,
+            "automationAuthorization": {**authorization_status(CONFIG.automation_authorization_scopes, CONFIG.automation_authorization_catalog_hash, CONFIG.automation_authorization_scope_version), "approvedAtUtc": CONFIG.automation_authorization_approved_at_utc},
         }
 
 

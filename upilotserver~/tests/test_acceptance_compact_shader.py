@@ -49,7 +49,10 @@ def _operation_state(tmp_path: Path) -> dict:
         "updatedAt": 2, "endedAt": 0, "timeoutSec": 30, "pollIntervalSec": 1,
         "lastStatusData": {"metrics": {"fps": 60}, "domain": {"huge": "x" * 10000}, "raw": "y" * 10000},
         "artifacts": {"report": {"path": str(tmp_path / "report.txt"), "tail": "z" * 5000}},
-        "artifactErrors": [], "consoleCapture": {"sessionId": "cap", "stopped": False, "read": {"logs": "q" * 10000}},
+        "artifactErrors": [], "consoleCapture": {
+            "sessionId": "cap", "ownerToken": "secret-owner-token", "stopped": False,
+            "start": {"data": {"ownerToken": "nested-secret"}}, "read": {"logs": "q" * 10000},
+        },
         "timing": {}, "jobSpec": {},
     }
 
@@ -66,19 +69,24 @@ def test_operation_summary_is_compact_and_full_is_available(tmp_path: Path) -> N
     assert summary["artifacts"]["report"]["tail"].endswith("chars]")
     assert full["lastStatusData"]["domain"]["huge"] == "x" * 10000
     assert full["responseBytes"] > summary["responseBytes"] * 2
+    assert "secret-owner-token" not in json.dumps(full, ensure_ascii=False)
+    assert "nested-secret" not in json.dumps(full, ensure_ascii=False)
 
 
 class _AcceptanceService(TestDomainService):
-    def __init__(self, expected_project: Path) -> None:
+    def __init__(self, expected_project: Path, *, active_capture: bool = False) -> None:
         self.expected_project = expected_project
         self.status_calls = 0
+        self.active_capture = active_capture
 
     async def mcp_status(self, **_kwargs):
         return ok("status", {"connected": True, "serverReady": True, "paths": {"unityProjectAbsolute": str(self.expected_project)}})
 
     async def ensure_ready(self, **_kwargs): return ok("ready", {"ready": True})
-    async def console_capture_list(self, **_kwargs): return ok("captures", {"sessions": [{"sessionId": "old", "active": True}]})
-    async def console_capture_stop(self, **_kwargs): return ok("stop", {"stopped": True})
+    async def console_capture_list(self, **_kwargs):
+        return ok("captures", {"sessions": [{"sessionId": "old", "active": True}] if self.active_capture else []})
+    async def console_capture_stop(self, **_kwargs):
+        pytest.fail("Package acceptance must not stop another task's capture")
     async def safe_compile_and_wait(self, **_kwargs): return ok("compile", {"status": "success", "errorsVerified": True, "errorTotal": 0})
     async def test_list(self, **_kwargs): return ok("list", {"tests": ["UPilot.Test"]})
     async def test_run(self, **_kwargs): return ok("run", {"status": "started", "runGuid": "run-1"})
@@ -95,7 +103,7 @@ class _AcceptanceService(TestDomainService):
     async def console_search_logs(self, **_kwargs): return ok("console", {"logs": []})
 
 
-def test_acceptance_stops_capture_and_checks_correlated_clean_result() -> None:
+def test_acceptance_checks_correlated_clean_result_without_cross_capture_cleanup() -> None:
     expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
     service = _AcceptanceService(expected)
     result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
@@ -103,10 +111,18 @@ def test_acceptance_stops_capture_and_checks_correlated_clean_result() -> None:
     assert result.ok and result.data["acceptancePassed"] is True
     assert "failureCode" not in result.data
     assert "failureMessage" not in result.data
-    assert result.data["stoppedConsoleCaptures"][0]["sessionId"] == "old"
+    assert result.data["stoppedConsoleCaptures"] == []
     assert result.data["discoveredTestCount"] == 1
     descriptor = REGISTRY.resolve("unity_upilot_acceptance_run")
     assert descriptor is not None and descriptor.idempotent is False
+
+
+def test_acceptance_blocks_unknown_active_capture_without_stopping_it() -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected, active_capture=True)
+    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok and result.error.code == "UPILOT_ACCEPTANCE_CAPTURE_OWNERSHIP_REQUIRED"
+    assert result.error.detail["activeConsoleCaptures"] == [{"sessionId": "old", "ownerId": ""}]
 
 
 def test_acceptance_supports_explicit_repository_unity_2022_project() -> None:

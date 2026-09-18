@@ -5,6 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -53,6 +55,93 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void LoggerInfoConsolePolicyKeepsRoutineTransportQuietByDefault()
+        {
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("COMMAND", false, false), Is.False);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("COMPILE", false, false), Is.False);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("NETWORK", false, false), Is.False);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("UPilot.Flow", false, false), Is.False);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("SYSTEM", false, false), Is.True);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("COMMAND", true, false), Is.True);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("UPilot.Flow", true, false), Is.True);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("NETWORK", true, true), Is.False);
+        }
+
+        [Test]
+        public void FlowLoggerCompatibilityFacadeUsesCoreLoggerSettingsAndPath()
+        {
+            var flowLogger = Type.GetType("Codingriver.Logger, UPilot.Flow");
+            if (flowLogger == null)
+                Assert.Ignore("UPilot Flow is not enabled in this project.");
+
+            Assert.That(flowLogger.GetProperty("LogFilePath")?.GetValue(null), Is.EqualTo(Logger.LogFilePath));
+            Assert.That(flowLogger.GetProperty("LogToUnityConsole"), Is.Not.Null);
+
+            var previous = Logger.LogToUnityConsole;
+            try
+            {
+                flowLogger.GetProperty("LogToUnityConsole")?.SetValue(null, !previous);
+                Assert.That(Logger.LogToUnityConsole, Is.EqualTo(!previous));
+            }
+            finally
+            {
+                Logger.SetLogToUnityConsole(previous);
+            }
+        }
+
+        [Test]
+        public void LoggerRotationAccountsForIncomingEntryAndRetainsTwoBackups()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-logger-" + Guid.NewGuid().ToString("N"));
+            var logPath = Path.Combine(directory, "upilot.log");
+            Directory.CreateDirectory(directory);
+            try
+            {
+                File.WriteAllBytes(logPath, new byte[8]);
+                File.WriteAllText(logPath + ".1", "previous");
+                File.WriteAllText(logPath + ".2", "oldest");
+
+                Logger.RotateLogIfNeeded(logPath, incomingByteCount: 3, maxLogSizeBytes: 10, maxBackupFiles: 2);
+
+                Assert.That(File.Exists(logPath), Is.False);
+                Assert.That(new FileInfo(logPath + ".1").Length, Is.EqualTo(8));
+                Assert.That(File.ReadAllText(logPath + ".2"), Is.EqualTo("previous"));
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void LoggerNewSessionRotatesCurrentLogInsteadOfOverwritingIt()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-logger-session-" + Guid.NewGuid().ToString("N"));
+            var logPath = Path.Combine(directory, "upilot.log");
+            Directory.CreateDirectory(directory);
+            try
+            {
+                File.WriteAllText(logPath, "previous session");
+
+                Logger.RotateLogForNewSession(logPath, maxBackupFiles: 2);
+
+                Assert.That(File.Exists(logPath), Is.False);
+                Assert.That(File.ReadAllText(logPath + ".1"), Is.EqualTo("previous session"));
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void LoggerTruncatesOversizedEntriesWithOriginalLength()
+        {
+            var value = new string('x', 20);
+            Assert.That(Logger.TruncateLogEntry(value, 10), Is.EqualTo("xxxxxxxxxx ... [truncated, total=20]"));
+        }
+
+        [Test]
         public void ReflectionBinderConvertsPrimitiveParameter()
         {
             var method = typeof(UPilotReflectionService).GetMethod("TryConvertParameter", BindingFlags.NonPublic | BindingFlags.Static);
@@ -66,12 +155,8 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void ReflectionTypeQueryResolvesExactTypeWithoutMemberEnumeration()
         {
-            var method = typeof(UPilotReflectionService).GetMethod(
-                "FindTypes",
-                BindingFlags.NonPublic | BindingFlags.Static);
-
-            var exact = (List<Type>)method.Invoke(null, new object[] { typeof(GameObject).FullName });
-            var shortName = (List<Type>)method.Invoke(null, new object[] { nameof(GameObject) });
+            var exact = Execution.ReflectionCache.FindTypes(typeof(GameObject).FullName);
+            var shortName = Execution.ReflectionCache.FindTypes(nameof(GameObject));
 
             Assert.That(exact, Has.Count.EqualTo(1));
             Assert.That(exact[0], Is.EqualTo(typeof(GameObject)));
@@ -106,13 +191,13 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void ScreenshotPathRejectsOutsideProjectByDefault()
         {
-            var method = typeof(UPilotScreenshotService).GetMethod("ResolveSavePath", BindingFlags.NonPublic | BindingFlags.Static);
+            var method = typeof(UPilotSnapshotService).GetMethod(
+                "ResolveOutputDirectory", BindingFlags.NonPublic | BindingFlags.Static);
             var outside = Path.Combine(Path.GetPathRoot(Application.dataPath), "upilot-outside.png");
-            var args = new object[] { outside, false, null };
-            var resolved = (string)method.Invoke(null, args);
+            var error = Assert.Throws<TargetInvocationException>(() =>
+                method.Invoke(null, new object[] { outside, "outside-project" }));
 
-            Assert.That(resolved, Is.Empty);
-            Assert.That(args[2], Does.Contain("current Unity project"));
+            Assert.That(error.InnerException?.Message, Does.Contain("current Unity project"));
         }
 
         [Test]
@@ -161,6 +246,272 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void GenericOkPayloadPreservesPlayModeIdempotencyEvidence()
+        {
+            var payload = new GenericOkPayload
+            {
+                ok = true,
+                state = "pause",
+                changed = false,
+                writeCount = 0,
+                commandId = "cmd-pause-1",
+                stateObserved = true,
+                requestedState = "pause",
+                observedState = "pause",
+                commandSubmitted = true,
+                confirmed = true,
+                authoritative = true,
+                isStale = false,
+            };
+
+            var restored = JsonUtility.FromJson<GenericOkPayload>(JsonUtility.ToJson(payload));
+
+            Assert.That(restored.changed, Is.False);
+            Assert.That(restored.writeCount, Is.EqualTo(0));
+            Assert.That(restored.commandId, Is.EqualTo("cmd-pause-1"));
+            Assert.That(restored.stateObserved, Is.True);
+            Assert.That(restored.requestedState, Is.EqualTo("pause"));
+            Assert.That(restored.observedState, Is.EqualTo("pause"));
+            Assert.That(restored.commandSubmitted, Is.True);
+            Assert.That(restored.confirmed, Is.True);
+            Assert.That(restored.authoritative, Is.True);
+            Assert.That(restored.isStale, Is.False);
+        }
+
+        [Test]
+        public void SceneViewMaximizePayloadPreservesIdentityEvidenceAndZeroWriteRejection()
+        {
+            var payload = new EditorWindowCloseResultPayload
+            {
+                commandId = "cmd-sceneview-1",
+                instanceId = "42",
+                domainGeneration = "domain-3",
+                ok = false,
+                deniedReason = "SCENEVIEW_STATE_CHANGED",
+                changed = false,
+                writeCount = 0,
+                commandSubmitted = false,
+                stateObserved = true,
+                sideEffectsMayHaveOccurred = false,
+                originalRect = new WindowRectPayload { x = 1, y = 2, width = 300, height = 200 },
+                observedRect = new WindowRectPayload { x = 3, y = 4, width = 500, height = 400 },
+            };
+
+            var restored = JsonUtility.FromJson<EditorWindowCloseResultPayload>(JsonUtility.ToJson(payload));
+
+            Assert.That(restored.instanceId, Is.EqualTo("42"));
+            Assert.That(restored.domainGeneration, Is.EqualTo("domain-3"));
+            Assert.That(restored.deniedReason, Is.EqualTo("SCENEVIEW_STATE_CHANGED"));
+            Assert.That(restored.changed, Is.False);
+            Assert.That(restored.writeCount, Is.EqualTo(0));
+            Assert.That(restored.commandSubmitted, Is.False);
+            Assert.That(restored.stateObserved, Is.True);
+            Assert.That(restored.sideEffectsMayHaveOccurred, Is.False);
+            Assert.That(restored.originalRect.width, Is.EqualTo(300));
+            Assert.That(restored.observedRect.height, Is.EqualTo(400));
+        }
+
+        [Test]
+        public void SceneViewMaximizeAcceptsOnlyCanonicalNonNegativeIntegerIdentity()
+        {
+            Assert.That(UPilotWindowService.TryNormalizeSceneViewInstanceId("00042", out var canonical), Is.True);
+            Assert.That(canonical, Is.EqualTo("42"));
+            Assert.That(UPilotWindowService.TryNormalizeSceneViewInstanceId("-1", out _), Is.False);
+            Assert.That(UPilotWindowService.TryNormalizeSceneViewInstanceId("42.0", out _), Is.False);
+            Assert.That(UPilotWindowService.TryNormalizeSceneViewInstanceId("Scene", out _), Is.False);
+        }
+
+        [Test]
+        public void SceneViewCommandObservationRetainsTimeoutAndPostSetterStatesWithoutReplay()
+        {
+            const string commandId = "sceneview-observation-contract";
+            UPilotWindowService.ResetSceneViewCommandObservationsForTests();
+            try
+            {
+                // This is the write-ahead state retained before the setter. A
+                // timed-out caller can safely query it rather than submit a
+                // second mutation.
+                UPilotWindowService.RecordSceneViewCommandObservationForTests(new EditorWindowCloseResultPayload
+                {
+                    commandId = commandId,
+                    observationStatus = "submitted",
+                    terminal = false,
+                    commandSubmitted = true,
+                    stateObserved = false,
+                    changed = false,
+                    writeCount = 0,
+                    sideEffectsMayHaveOccurred = true,
+                });
+                Assert.That(UPilotWindowService.TryGetSceneViewCommandObservationForTests(commandId, out var submitted), Is.True);
+                Assert.That(submitted.observationStatus, Is.EqualTo("submitted"));
+                Assert.That(submitted.terminal, Is.False);
+                Assert.That(submitted.writeCount, Is.EqualTo(0));
+
+                // Simulate a completed setter whose original response was
+                // lost. Reading the saved result must not re-run that setter.
+                UPilotWindowService.RecordSceneViewCommandObservationForTests(new EditorWindowCloseResultPayload
+                {
+                    commandId = commandId,
+                    observationStatus = "observed",
+                    terminal = false,
+                    commandSubmitted = true,
+                    stateObserved = true,
+                    changed = true,
+                    writeCount = 1,
+                    maximized = true,
+                    sideEffectsMayHaveOccurred = true,
+                });
+                Assert.That(UPilotWindowService.TryGetSceneViewCommandObservationForTests(commandId, out var observed), Is.True);
+                observed.writeCount = 99;
+                Assert.That(UPilotWindowService.TryGetSceneViewCommandObservationForTests(commandId, out var reread), Is.True);
+                Assert.That(reread.observationStatus, Is.EqualTo("observed"));
+                Assert.That(reread.writeCount, Is.EqualTo(1));
+
+                // Domain reload clears this in-process store. The command is
+                // deliberately not recreated or inferred from a reused ID.
+                UPilotWindowService.ResetSceneViewCommandObservationsForTests();
+                Assert.That(UPilotWindowService.TryGetSceneViewCommandObservationForTests(commandId, out _), Is.False);
+                var unknown = UPilotWindowService.CreateUnknownSceneViewCommandObservation(commandId);
+                Assert.That(unknown.observationStatus, Is.EqualTo("unknown"));
+                Assert.That(unknown.recoveryRequired, Is.True);
+                Assert.That(unknown.terminal, Is.False);
+                Assert.That(unknown.commandSubmitted, Is.True);
+                Assert.That(unknown.sideEffectsMayHaveOccurred, Is.True);
+                Assert.That(unknown.writeCount, Is.Zero);
+            }
+            finally
+            {
+                UPilotWindowService.ResetSceneViewCommandObservationsForTests();
+            }
+        }
+
+        [Test]
+        public void SceneViewPreSetterWriteGatePayloadStatesZeroSideEffects()
+        {
+            // P2-WP-13-T02/T06 contract: a pre-setter readiness rejection is
+            // not an unknown mutation and must never make a later retry infer
+            // that a native SceneView write may have occurred.
+            var rejected = new EditorWindowCloseResultPayload
+            {
+                commandId = "sceneview-preflight-blocked",
+                instanceId = "42",
+                state = "denied",
+                deniedReason = "CompilationInProgress",
+                commandSubmitted = false,
+                stateObserved = false,
+                changed = false,
+                writeCount = 0,
+                sideEffectsMayHaveOccurred = false,
+            };
+
+            var restored = JsonUtility.FromJson<EditorWindowCloseResultPayload>(JsonUtility.ToJson(rejected));
+            Assert.That(restored.state, Is.EqualTo("denied"));
+            Assert.That(restored.deniedReason, Is.EqualTo("CompilationInProgress"));
+            Assert.That(restored.commandSubmitted, Is.False);
+            Assert.That(restored.stateObserved, Is.False);
+            Assert.That(restored.changed, Is.False);
+            Assert.That(restored.writeCount, Is.Zero);
+            Assert.That(restored.sideEffectsMayHaveOccurred, Is.False);
+        }
+
+        [Test]
+        public void SceneViewRuntimeFailureOnlyClaimsUnknownSideEffectsAfterSetterBoundary()
+        {
+            var beforeSetter = UPilotWindowService.CreateSceneViewRuntimeFailureObservation(
+                "sceneview-before-setter", "42", "domain-7", setterMayHaveRun: false);
+            var afterSetter = UPilotWindowService.CreateSceneViewRuntimeFailureObservation(
+                "sceneview-after-setter", "42", "domain-7", setterMayHaveRun: true);
+
+            Assert.That(beforeSetter.observationStatus, Is.EqualTo("not_submitted"));
+            Assert.That(beforeSetter.terminal, Is.True);
+            Assert.That(beforeSetter.commandSubmitted, Is.False);
+            Assert.That(beforeSetter.sideEffectsMayHaveOccurred, Is.False);
+            Assert.That(beforeSetter.recoveryRequired, Is.False);
+
+            Assert.That(afterSetter.observationStatus, Is.EqualTo("submitted"));
+            Assert.That(afterSetter.terminal, Is.False);
+            Assert.That(afterSetter.commandSubmitted, Is.True);
+            Assert.That(afterSetter.sideEffectsMayHaveOccurred, Is.True);
+            Assert.That(afterSetter.recoveryRequired, Is.True);
+        }
+
+        [Test]
+        public void EditorWindowSetRectPayloadPreservesFullTypeNameAndTypeMismatchZeroWriteEvidence()
+        {
+            var request = new EditorWindowSetRectPayload
+            {
+                instanceId = "42",
+                domainGeneration = "domain-3",
+                fullTypeName = "UnityEditor.SceneView",
+                windowTitle = "Scene",
+                matchMode = "exact",
+            };
+            var denied = new EditorWindowCloseResultPayload
+            {
+                commandId = "cmd-window-type-mismatch",
+                instanceId = "42",
+                domainGeneration = "domain-3",
+                ok = false,
+                state = "denied",
+                deniedReason = "WINDOW_TYPE_MISMATCH",
+                matchedFullTypeName = "UnityEditor.InspectorWindow",
+                changed = false,
+                writeCount = 0,
+                commandSubmitted = false,
+                stateObserved = true,
+                sideEffectsMayHaveOccurred = false,
+            };
+
+            var restoredRequest = JsonUtility.FromJson<EditorWindowSetRectPayload>(JsonUtility.ToJson(request));
+            var restoredDenied = JsonUtility.FromJson<EditorWindowCloseResultPayload>(JsonUtility.ToJson(denied));
+
+            Assert.That(restoredRequest.fullTypeName, Is.EqualTo("UnityEditor.SceneView"));
+            Assert.That(restoredDenied.deniedReason, Is.EqualTo("WINDOW_TYPE_MISMATCH"));
+            Assert.That(restoredDenied.changed, Is.False);
+            Assert.That(restoredDenied.writeCount, Is.EqualTo(0));
+            Assert.That(restoredDenied.commandSubmitted, Is.False);
+            Assert.That(restoredDenied.stateObserved, Is.True);
+            Assert.That(restoredDenied.sideEffectsMayHaveOccurred, Is.False);
+        }
+
+        [Test]
+        public void EditorWindowSetRectExplicitTitleRemainsAnIdentityConstraint()
+        {
+            // P2-WP-04-T02 direct regression: with an exact instanceId the
+            // title remains an explicit consistency check, rather than a
+            // fallback selector that could be silently ignored before a write.
+            Assert.That(UPilotWindowService.WindowTitleMatches("Probe 42", "Probe 42", "exact"), Is.True);
+            Assert.That(UPilotWindowService.WindowTitleMatches("Probe 42", "Probe", "contains"), Is.True);
+            Assert.That(UPilotWindowService.WindowTitleMatches("Probe 42", "Other", "exact"), Is.False);
+        }
+
+        [Test]
+        public void PlayModeCancellationErrorPreservesZeroSetterEvidence()
+        {
+            var detail = new ErrorDetailPayload
+            {
+                commandId = "cmd-pause-cancelled",
+                commandName = "playmode.set",
+                commandSubmitted = false,
+                stateObserved = false,
+                changed = false,
+                writeCount = 0,
+                stage = "cancelled",
+                sideEffectsMayHaveOccurred = false,
+            };
+
+            var restored = JsonUtility.FromJson<ErrorDetailPayload>(JsonUtility.ToJson(detail));
+
+            Assert.That(restored.commandId, Is.EqualTo("cmd-pause-cancelled"));
+            Assert.That(restored.commandName, Is.EqualTo("playmode.set"));
+            Assert.That(restored.commandSubmitted, Is.False);
+            Assert.That(restored.stateObserved, Is.False);
+            Assert.That(restored.changed, Is.False);
+            Assert.That(restored.writeCount, Is.EqualTo(0));
+            Assert.That(restored.sideEffectsMayHaveOccurred, Is.False);
+        }
+
+        [Test]
         public void CompileLifecyclePayloadRoundTripPreservesReloadVerificationState()
         {
             var payload = new CompileErrorsPayload
@@ -177,6 +528,8 @@ namespace CodingRiver.UPilot.Tests
                 errorsVerified = false,
                 total = 0,
                 warningCount = 2,
+                warningDetailsAvailable = true,
+                warningsTruncated = false,
                 startedAt = 100,
                 finishedAt = 200,
                 lastProgressAt = 250,
@@ -186,6 +539,10 @@ namespace CodingRiver.UPilot.Tests
                 reloadId = "reload-1",
                 domainReloadObserved = true,
                 errors = new List<CompileErrorItemPayload>(),
+                warnings = new List<CompileErrorItemPayload>
+                {
+                    new CompileErrorItemPayload { assemblyName = "Assembly-CSharp", severity = "warning", message = "example" },
+                },
             };
 
             var restored = JsonUtility.FromJson<CompileErrorsPayload>(
@@ -199,6 +556,9 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(restored.status, Is.EqualTo("verifying"));
             Assert.That(restored.phase, Is.EqualTo("verifying"));
             Assert.That(restored.warningCount, Is.EqualTo(2));
+            Assert.That(restored.warningDetailsAvailable, Is.True);
+            Assert.That(restored.warnings, Has.Count.EqualTo(1));
+            Assert.That(restored.warnings[0].assemblyName, Is.EqualTo("Assembly-CSharp"));
             Assert.That(restored.startedAt, Is.EqualTo(100));
             Assert.That(restored.finishedAt, Is.EqualTo(200));
             Assert.That(restored.lastProgressAt, Is.EqualTo(250));
@@ -284,6 +644,287 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        [Test]
+        public void EditorWindowResolutionByInstanceIdDoesNotFallBackToTitle()
+        {
+            var resolved = UPilotWindowService.ResolveWindowByInstanceId("not-a-window-id");
+            Assert.That(resolved.window, Is.Null);
+            Assert.That(resolved.info, Is.Null);
+            Assert.That(resolved.multipleMatches, Is.False);
+        }
+
+        [UnityTest]
+        public IEnumerator EditorWindowHistoryRecordsNormalCloseWithoutInventingFailureAttribution()
+        {
+            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
+            var window = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
+            var instanceId = UPilotEntityIds.ToWireId(window).ToString();
+            try
+            {
+                window.titleContent = new GUIContent(UPilotSafeWindowProbe.Title);
+                window.ShowUtility();
+                yield return null;
+                UPilotWindowHistory.SampleForTests();
+
+                var opened = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
+                Assert.That(opened.events.Any(item => item.kind == "observed-open"), Is.True);
+
+                var closeCursor = opened.latestSequence;
+                window.Close();
+                window = null;
+                yield return null;
+                UPilotWindowHistory.SampleForTests();
+
+                var closed = UPilotWindowHistory.Query(instanceId, closeCursor, 512);
+                var closeEvent = closed.events.Single(item => item.kind == "closed-or-lost");
+                Assert.That(closeEvent.failureReason, Is.EqualTo("not_observed_on_next_sample"));
+                Assert.That(closeEvent.failureReasonAuthoritative, Is.False);
+            }
+            finally
+            {
+                if (window != null)
+                    window.Close();
+            }
+        }
+
+        [Test]
+        public void EditorWindowHistoryMarksRestoredDomainBoundaryAsGap()
+        {
+            var historyType = typeof(UPilotWindowHistory);
+            var restoredField = historyType.GetField(
+                "_restoredPreviousDomain",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var boundaryField = historyType.GetField(
+                "_restoredDomainBoundarySequence",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(restoredField, Is.Not.Null);
+            Assert.That(boundaryField, Is.Not.Null);
+
+            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
+            var previousRestored = (bool)restoredField.GetValue(null);
+            var previousBoundary = (long)boundaryField.GetValue(null);
+            try
+            {
+                restoredField.SetValue(null, true);
+                boundaryField.SetValue(null, before.latestSequence);
+
+                var restored = UPilotWindowHistory.Query(string.Empty, 0, 512);
+                Assert.That(restored.restoredPreviousDomain, Is.True);
+                Assert.That(restored.gap, Is.True);
+                Assert.That(restored.gapReason, Does.Contain("domain_reload_boundary"));
+                Assert.That(restored.gapAfterSequence, Is.EqualTo(before.latestSequence));
+            }
+            finally
+            {
+                restoredField.SetValue(null, previousRestored);
+                boundaryField.SetValue(null, previousBoundary);
+            }
+        }
+
+        [Test]
+        public void SafeWindowProbeOnEnableFailureReportsObservedGapWithoutInventingWindowAttribution()
+        {
+            var historyType = typeof(UPilotWindowHistory);
+            var samplingGapField = historyType.GetField("_samplingGap", BindingFlags.NonPublic | BindingFlags.Static);
+            var samplingGapAfterSequenceField = historyType.GetField("_samplingGapAfterSequence", BindingFlags.NonPublic | BindingFlags.Static);
+            var samplingGapReasonField = historyType.GetField("_samplingGapReason", BindingFlags.NonPublic | BindingFlags.Static);
+            var samplingErrorField = historyType.GetField("_samplingError", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(samplingGapField, Is.Not.Null);
+            Assert.That(samplingGapAfterSequenceField, Is.Not.Null);
+            Assert.That(samplingGapReasonField, Is.Not.Null);
+            Assert.That(samplingErrorField, Is.Not.Null);
+
+            var previousGap = (bool)samplingGapField.GetValue(null);
+            var previousGapAfterSequence = (long)samplingGapAfterSequenceField.GetValue(null);
+            var previousGapReason = (string)samplingGapReasonField.GetValue(null);
+            var previousSamplingError = (string)samplingErrorField.GetValue(null);
+            UPilotSafeWindowProbe window = null;
+            try
+            {
+                var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
+                UPilotSafeWindowProbe.FailOnEnableForTests = true;
+                window = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
+                var instanceId = UPilotEntityIds.ToWireId(window).ToString();
+
+                var result = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
+                Assert.That(result.gap, Is.True);
+                Assert.That(result.gapReason, Does.Contain("window_lifecycle_enable_failed"));
+                Assert.That(result.samplingError, Is.EqualTo(nameof(InvalidOperationException)));
+                Assert.That(result.events.Any(item =>
+                    item.failureReasonAuthoritative || !string.IsNullOrEmpty(item.failureReason)), Is.False);
+            }
+            finally
+            {
+                UPilotSafeWindowProbe.FailOnEnableForTests = false;
+                if (window != null) UnityEngine.Object.DestroyImmediate(window);
+                samplingGapField.SetValue(null, previousGap);
+                samplingGapAfterSequenceField.SetValue(null, previousGapAfterSequence);
+                samplingGapReasonField.SetValue(null, previousGapReason);
+                samplingErrorField.SetValue(null, previousSamplingError);
+            }
+        }
+
+        [Test]
+        public void SafeWindowProbeReloadFixtureStatePreservesStableLifecycleKeyForFieldAcceptance()
+        {
+            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
+            var original = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
+            var rebuilt = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
+            try
+            {
+                original.ArmReloadFixtureForTests();
+                var lifecycleKey = original.LifecycleKey;
+                var enableOrdinal = original.EnableOrdinal;
+                var instanceId = UPilotEntityIds.ToWireId(original).ToString();
+                var enabled = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
+                var serialized = EditorJsonUtility.ToJson(original);
+                EditorJsonUtility.FromJsonOverwrite(serialized, rebuilt);
+
+                Assert.That(lifecycleKey, Is.Not.Empty);
+                Assert.That(enabled.events.Any(item =>
+                    item.kind == "probe-enabled" && item.lifecycleKey == lifecycleKey), Is.True);
+                Assert.That(rebuilt.LifecycleKey, Is.EqualTo(lifecycleKey));
+                Assert.That(rebuilt.EnableOrdinal, Is.EqualTo(enableOrdinal));
+                Assert.That(rebuilt.ReloadFixtureArmed, Is.True);
+                // A real Domain Reload must then invoke OnEnable and append probe-rebuilt
+                // with this same key. The test intentionally does not trigger Reload.
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(original);
+                UnityEngine.Object.DestroyImmediate(rebuilt);
+            }
+        }
+
+        [Test]
+        public void EditorWindowHistoryReportsTruncationAfterMoreThanCapacityEvents()
+        {
+            var historyType = typeof(UPilotWindowHistory);
+            var eventsField = historyType.GetField("Events", BindingFlags.NonPublic | BindingFlags.Static);
+            var knownField = historyType.GetField("Known", BindingFlags.NonPublic | BindingFlags.Static);
+            var sequenceField = historyType.GetField("_lastSequence", BindingFlags.NonPublic | BindingFlags.Static);
+            var persistenceErrorField = historyType.GetField("_persistenceError", BindingFlags.NonPublic | BindingFlags.Static);
+            var append = historyType.GetMethod("Append", BindingFlags.NonPublic | BindingFlags.Static);
+            var persist = historyType.GetMethod("Persist", BindingFlags.NonPublic | BindingFlags.Static);
+            var stateType = historyType.GetNestedType("WindowState", BindingFlags.NonPublic);
+            Assert.That(eventsField, Is.Not.Null);
+            Assert.That(knownField, Is.Not.Null);
+            Assert.That(sequenceField, Is.Not.Null);
+            Assert.That(persistenceErrorField, Is.Not.Null);
+            Assert.That(append, Is.Not.Null);
+            Assert.That(persist, Is.Not.Null);
+            Assert.That(stateType, Is.Not.Null);
+
+            var events = (IList)eventsField.GetValue(null);
+            var known = (IDictionary)knownField.GetValue(null);
+            var savedEvents = events.Cast<object>().ToArray();
+            var savedKnown = new DictionaryEntry[known.Count];
+            known.CopyTo(savedKnown, 0);
+            var savedSequence = (long)sequenceField.GetValue(null);
+            var savedPersistenceError = (string)persistenceErrorField.GetValue(null);
+            try
+            {
+                events.Clear();
+                known.Clear();
+                sequenceField.SetValue(null, 0L);
+                var state = Activator.CreateInstance(stateType, nonPublic: true);
+                foreach (var field in new[] { "instanceId", "domainGeneration", "fullTypeName", "title" })
+                    stateType.GetField(field, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                        .SetValue(state, "capacity-probe");
+
+                for (var index = 0; index <= 513; index++)
+                    append.Invoke(null, new object[] { "capacity-probe", state, string.Empty, false, string.Empty });
+
+                // Cursor 1 precedes the retained ring segment once event 514 displaced it.
+                var result = UPilotWindowHistory.Query(string.Empty, afterSequence: 1, count: 512);
+                Assert.That(result.observationLimit, Is.EqualTo(512));
+                Assert.That(result.truncated, Is.True);
+                Assert.That(result.gap, Is.True);
+                Assert.That(result.gapReason, Does.Contain("history_truncated"));
+                Assert.That(result.earliestSequence, Is.GreaterThan(1));
+                Assert.That(result.events, Has.Count.EqualTo(512));
+                Assert.That(result.events[0].sequence, Is.EqualTo(result.earliestSequence));
+            }
+            finally
+            {
+                events.Clear();
+                foreach (var item in savedEvents) events.Add(item);
+                known.Clear();
+                foreach (var item in savedKnown) known.Add(item.Key, item.Value);
+                sequenceField.SetValue(null, savedSequence);
+                persist.Invoke(null, null);
+                persistenceErrorField.SetValue(null, savedPersistenceError);
+            }
+        }
+
+        [Test]
+        public void EditorWindowHistoryReportsPersistenceFailureAndRecovers()
+        {
+            // Persist is an explicit controlled boundary, not a side effect of Query.
+            // Lock only that task-local backing file, then release it and require the next
+            // explicit persistence attempt to recover without losing read availability.
+            var root = Directory.GetParent(Application.dataPath)?.FullName;
+            Assert.That(root, Is.Not.Null.And.Not.Empty);
+            var path = Path.Combine(root, "Library", "UPilot", "window-history.json");
+            UPilotWindowHistory.PersistForTests();
+            Assert.That(File.Exists(path), Is.True);
+
+            EditorWindowHistoryResultPayload failed;
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                UPilotWindowHistory.PersistForTests();
+                failed = UPilotWindowHistory.Query(string.Empty, 0, 1);
+            }
+
+            Assert.That(failed.persistenceError, Is.Not.Empty);
+            UPilotWindowHistory.PersistForTests();
+            var recovered = UPilotWindowHistory.Query(string.Empty, 0, 1);
+            Assert.That(recovered.persistenceError, Is.Empty);
+            Assert.That(recovered.observationLimit, Is.EqualTo(512));
+        }
+
+        [Test]
+        public void EditorWindowHistoryQueryDoesNotSampleOrPersist()
+        {
+            var historyType = typeof(UPilotWindowHistory);
+            var eventsField = historyType.GetField("Events", BindingFlags.NonPublic | BindingFlags.Static);
+            var knownField = historyType.GetField("Known", BindingFlags.NonPublic | BindingFlags.Static);
+            var sequenceField = historyType.GetField("_lastSequence", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(eventsField, Is.Not.Null);
+            Assert.That(knownField, Is.Not.Null);
+            Assert.That(sequenceField, Is.Not.Null);
+
+            UPilotWindowHistory.SampleForTests();
+            UPilotWindowHistory.PersistForTests();
+            var root = Directory.GetParent(Application.dataPath)?.FullName;
+            Assert.That(root, Is.Not.Null.And.Not.Empty);
+            var path = Path.Combine(root, "Library", "UPilot", "window-history.json");
+            Assert.That(File.Exists(path), Is.True);
+
+            var events = (IList)eventsField.GetValue(null);
+            var known = (IDictionary)knownField.GetValue(null);
+            var expectedEvents = events.Cast<object>().ToArray();
+            var expectedKnown = new DictionaryEntry[known.Count];
+            known.CopyTo(expectedKnown, 0);
+            var expectedSequence = (long)sequenceField.GetValue(null);
+            var expectedBytes = File.ReadAllBytes(path);
+            var expectedLastWriteTime = File.GetLastWriteTimeUtc(path);
+
+            var result = UPilotWindowHistory.Query(string.Empty, 0, 512);
+
+            Assert.That(result.latestSequence, Is.EqualTo(expectedSequence));
+            Assert.That(events.Cast<object>(), Is.EqualTo(expectedEvents));
+            Assert.That(known.Count, Is.EqualTo(expectedKnown.Length));
+            foreach (var expected in expectedKnown)
+            {
+                Assert.That(known.Contains(expected.Key), Is.True);
+                Assert.That(known[expected.Key], Is.SameAs(expected.Value));
+            }
+            Assert.That((long)sequenceField.GetValue(null), Is.EqualTo(expectedSequence));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(expectedBytes));
+            Assert.That(File.GetLastWriteTimeUtc(path), Is.EqualTo(expectedLastWriteTime));
+        }
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateWindowEx(
             int extendedStyle,
@@ -316,11 +957,17 @@ namespace CodingRiver.UPilot.Tests
             var manifestPath = Path.Combine(directory, "session.json");
             var summaryPath = Path.Combine(directory, "summary.json");
             var jsonlPath = Path.Combine(directory, "console.jsonl");
+            const string ownerToken = "historical-owner-token";
+            string ownerTokenSha256;
+            using (var sha256 = SHA256.Create())
+                ownerTokenSha256 = BitConverter.ToString(sha256.ComputeHash(Encoding.UTF8.GetBytes(ownerToken)))
+                    .Replace("-", string.Empty).ToLowerInvariant();
             File.WriteAllText(jsonlPath, "{\"sequence\":0}\n");
             var manifest = new ConsoleCaptureManifest
             {
                 sessionId = sessionId,
                 title = "historical-stop",
+                ownerTokenSha256 = ownerTokenSha256,
                 directory = directory,
                 jsonlPath = jsonlPath,
                 manifestPath = manifestPath,
@@ -352,11 +999,13 @@ namespace CodingRiver.UPilot.Tests
                     "StopCapture",
                     BindingFlags.NonPublic | BindingFlags.Static);
 
-                var result = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId });
-                var repeated = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId });
+                var rejected = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId, string.Empty, false });
+                var result = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId, ownerToken, false });
+                var repeated = (ConsoleCaptureResult)stop.Invoke(null, new object[] { sessionId, ownerToken, false });
                 var persisted = JsonUtility.FromJson<ConsoleCaptureManifest>(
                     File.ReadAllText(manifestPath));
 
+                Assert.That(rejected.ok, Is.False);
                 Assert.That(result.ok, Is.True);
                 Assert.That(result.session.active, Is.False);
                 Assert.That(persisted.active, Is.False);
@@ -649,16 +1298,16 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("project-provided bridge entry points"));
             Assert.That(text, Does.Contain("waitWindowElapsed=true/terminal=false"));
             Assert.That(text, Does.Contain("unity_console_capture_start"));
-            Assert.That(text, Does.Contain("always call `unity_console_capture_stop`"));
+            Assert.That(text, Does.Contain("Call `unity_console_capture_stop` only with that matching token"));
             Assert.That(text, Does.Contain("`nextSequence` as the next call's `afterSequence`"));
-            Assert.That(text, Does.Contain("recovered or historical sessions still marked active"));
+            Assert.That(text, Does.Contain("recovered or historical active sessions"));
             Assert.That(text, Does.Contain("separate from domain-specific reports"));
             Assert.That(text, Does.Contain("unity_config_csv_get"));
             Assert.That(text, Does.Contain("unity_config_csv_patch"));
             Assert.That(text, Does.Contain("explicit write approval"));
             Assert.That(text, Does.Contain("unity_hang_status"));
             Assert.That(text, Does.Contain("unity_hang_capture"));
-            Assert.That(text, Does.Contain("fallbackSources"));
+            Assert.That(text, Does.Contain("`acceptedAsEvidence=true`, `pixelSourceVerified=true`, and `occlusionSensitive=false`"));
             Assert.That(text, Does.Contain("unity_editor_windows_list"));
             Assert.That(text, Does.Contain("incremental status, log, and report APIs"));
             Assert.That(text, Does.Contain("project-relative artifact paths"));
@@ -2312,7 +2961,7 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(terminal.elapsedFrozen, Is.True);
             Assert.That(queried.elapsedSec, Is.EqualTo(elapsed).Within(0.000001d));
-            Assert.That(queried.elapsedSource, Is.EqualTo("EditorApplication.timeSinceStartup"));
+            Assert.That(queried.elapsedSource, Is.EqualTo("Stopwatch.GetTimestamp"));
         }
 
         [Test]
@@ -2343,11 +2992,36 @@ namespace CodingRiver.UPilot.Tests
                 windowHandle = 42,
                 pixelSourceVerified = true,
                 occlusionSensitive = false,
+                contentRectVerified = true,
+                cropComplete = true,
+                includesDecorations = false,
+                geometrySource = "Win32.GetWindowRect+GetClientRect+ClientToScreen",
+                pixelsPerPoint = 1.25f,
+                windowLeft = 100,
+                windowTop = 200,
+                windowRight = 1100,
+                windowBottom = 900,
+                contentLeft = 110,
+                contentTop = 230,
+                contentRight = 1090,
+                contentBottom = 890,
+                cropLeft = 110,
+                cropTop = 230,
+                cropRight = 1090,
+                cropBottom = 890,
             };
             Assert.That(capture.captureApi, Does.Contain("PrintWindow"));
             Assert.That(capture.windowHandle, Is.EqualTo(42));
             Assert.That(capture.pixelSourceVerified, Is.True);
             Assert.That(capture.occlusionSensitive, Is.False);
+            Assert.That(capture.contentRectVerified, Is.True);
+            Assert.That(capture.cropComplete, Is.True);
+            Assert.That(capture.includesDecorations, Is.False);
+            Assert.That(capture.geometrySource, Does.Contain("GetClientRect"));
+            Assert.That(capture.pixelsPerPoint, Is.EqualTo(1.25f));
+            Assert.That(capture.windowRight - capture.windowLeft, Is.EqualTo(1000));
+            Assert.That(capture.contentBottom - capture.contentTop, Is.EqualTo(660));
+            Assert.That(capture.cropLeft, Is.EqualTo(capture.contentLeft));
         }
 
         private static string BuildAgentRulesText()

@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Linq.Expressions;
@@ -115,7 +116,79 @@ namespace CodingRiver.UPilot.Execution
     {
         public bool SideEffects;
         public ExecutionSourceSpan CurrentSpan;
+        public ExecutionSourceSpan LastCompletedSpan;
         public Exception CurrentCaughtException;
+    }
+
+    /// <summary>Request-local, value-free execution telemetry for bounded expression diagnostics.</summary>
+    public sealed class CSharpExecutionDiagnostics
+    {
+        private const int MaxCompletedBoundaries = 64;
+        private long _resolveTicks;
+        private long _bindTicks;
+        private long _invokeTicks;
+        private long _encodeTicks;
+        private int _getterCallCount;
+        private int _methodCallCount;
+        private readonly string[] _completedBoundaries = new string[MaxCompletedBoundaries];
+        private int _completedBoundaryCount;
+        private int _droppedDiagnosticCount;
+
+        public long ResolveMs => ToMilliseconds(Interlocked.Read(ref _resolveTicks));
+        public long BindMs => ToMilliseconds(Interlocked.Read(ref _bindTicks));
+        public long InvokeMs => ToMilliseconds(Interlocked.Read(ref _invokeTicks));
+        public long EncodeMs => ToMilliseconds(Interlocked.Read(ref _encodeTicks));
+        public int GetterCallCount => Volatile.Read(ref _getterCallCount);
+        public int MethodCallCount => Volatile.Read(ref _methodCallCount);
+        public int DroppedDiagnosticCount => Volatile.Read(ref _droppedDiagnosticCount);
+        public string[] CompletedBoundaries
+        {
+            get
+            {
+                lock (_completedBoundaries)
+                {
+                    var count = Math.Min(_completedBoundaryCount, MaxCompletedBoundaries);
+                    var result = new string[count];
+                    Array.Copy(_completedBoundaries, result, count);
+                    return result;
+                }
+            }
+        }
+
+        internal T MeasureResolve<T>(Func<T> action) { return Measure(action, ref _resolveTicks, "resolve.completed"); }
+        internal T MeasureBind<T>(Func<T> action) { return Measure(action, ref _bindTicks, "bind.completed"); }
+        internal T MeasureInvoke<T>(Func<T> action) { return Measure(action, ref _invokeTicks, "invoke.completed"); }
+        public T MeasureEncode<T>(Func<T> action) { return Measure(action, ref _encodeTicks, "encode.completed"); }
+        internal void CountGetter() { Interlocked.Increment(ref _getterCallCount); }
+        internal void CountMethod() { Interlocked.Increment(ref _methodCallCount); }
+
+        private T Measure<T>(Func<T> action, ref long ticks, string completedBoundary)
+        {
+            long started = Stopwatch.GetTimestamp();
+            try
+            {
+                T result = action();
+                RecordCompletedBoundary(completedBoundary);
+                return result;
+            }
+            finally { Interlocked.Add(ref ticks, Stopwatch.GetTimestamp() - started); }
+        }
+
+        private void RecordCompletedBoundary(string boundary)
+        {
+            lock (_completedBoundaries)
+            {
+                if (_completedBoundaryCount < MaxCompletedBoundaries)
+                    _completedBoundaries[_completedBoundaryCount++] = boundary;
+                else
+                    _droppedDiagnosticCount++;
+            }
+        }
+
+        private static long ToMilliseconds(long ticks)
+        {
+            return Math.Max(0L, ticks * 1000L / Stopwatch.Frequency);
+        }
     }
 
     public sealed class CSharpEvaluationContext
@@ -126,12 +199,14 @@ namespace CodingRiver.UPilot.Execution
         private readonly EvaluationState _state;
 
         public ExecutionBudget Budget { get; }
+        public CSharpExecutionDiagnostics Diagnostics { get; }
         public IExecutionPolicy Policy { get; }
         public IReadOnlyList<string> Imports { get; }
         public bool SideEffectsMayHaveOccurred { get => _state.SideEffects; internal set => _state.SideEffects = value; }
         public IExecutionSessionLifetime SessionLifetime { get; }
         public CancellationToken CancellationToken => _cancellationToken;
         public ExecutionSourceSpan CurrentSpan => _state.CurrentSpan;
+        public ExecutionSourceSpan LastCompletedSpan => _state.LastCompletedSpan;
         internal Exception CurrentCaughtException { get => _state.CurrentCaughtException; set => _state.CurrentCaughtException = value; }
         internal ExecutionScope Scope => _scope;
 
@@ -153,6 +228,7 @@ namespace CodingRiver.UPilot.Execution
             }
             Imports = (imports ?? new[] { "System" }).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToArray();
             Budget = budget ?? new ExecutionBudget();
+            Diagnostics = new CSharpExecutionDiagnostics();
             Policy = policy ?? new RestrictedEvalExecutionPolicy();
             _invocationScheduler = invocationScheduler;
             _cancellationToken = cancellationToken.CanBeCanceled ? cancellationToken : (sessionLifetime?.CancellationToken ?? cancellationToken);
@@ -166,6 +242,7 @@ namespace CodingRiver.UPilot.Execution
             _scope = scope;
             Imports = parent.Imports;
             Budget = parent.Budget;
+            Diagnostics = parent.Diagnostics;
             Policy = parent.Policy;
             _invocationScheduler = parent._invocationScheduler;
             _cancellationToken = parent._cancellationToken;
@@ -207,9 +284,11 @@ namespace CodingRiver.UPilot.Execution
         }
         public object Invoke(Func<object> action)
         {
-            CheckCancellation();
+            Budget.CheckTime();
+            SideEffectsMayHaveOccurred = true;
             object result = _invocationScheduler == null ? action() : _invocationScheduler(action);
-            CheckCancellation();
+            _state.LastCompletedSpan = CurrentSpan?.Clone();
+            Budget.CheckTime();
             return result;
         }
         public CSharpEvaluationContext Fork(IDictionary<string, object> additions)
@@ -245,6 +324,7 @@ namespace CodingRiver.UPilot.Execution
         public IDictionary<string, object> Variables { get; internal set; }
         public bool SideEffectsMayHaveOccurred { get; internal set; }
         public ExecutionBudget Budget { get; internal set; }
+        public CSharpExecutionDiagnostics Diagnostics { get; internal set; }
         public string ModeUsed { get; internal set; }
     }
 
@@ -413,12 +493,20 @@ namespace CodingRiver.UPilot.Execution
             }
             return new CSharpEvaluationResult
             {
-                Value = value,
-                Variables = context.SnapshotVariables(),
+                Value = RequireResolvedResult(value),
+                Variables = context.SnapshotVariables().ToDictionary(pair => pair.Key, pair => RequireResolvedResult(pair.Value), StringComparer.Ordinal),
                 SideEffectsMayHaveOccurred = context.SideEffectsMayHaveOccurred,
                 Budget = context.Budget,
+                Diagnostics = context.Diagnostics,
                 ModeUsed = IsExpressionOnly ? "expression" : "statements",
             };
+        }
+
+        internal static object RequireResolvedResult(object value)
+        {
+            if (value is UnresolvedName unresolved)
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Type or variable was not found: " + unresolved.Path);
+            return StaticTypeTarget.Unwrap(value);
         }
 
         public Task<CSharpEvaluationResult> ExecuteAsync(CSharpEvaluationContext context)
@@ -484,6 +572,8 @@ namespace CodingRiver.UPilot.Execution
                 ex.Detail["stage"] = InferFailureStage(ex.Code);
             if (!ex.Detail.ContainsKey("sourceSpan") && context?.CurrentSpan != null)
                 ex.Detail["sourceSpan"] = sourceMap.Resolve(context.CurrentSpan.start, context.CurrentSpan.length);
+            if (!ex.Detail.ContainsKey("lastCompletedSpan") && context?.LastCompletedSpan != null)
+                ex.Detail["lastCompletedSpan"] = sourceMap.Resolve(context.LastCompletedSpan.start, context.LastCompletedSpan.length);
             if (!ex.Detail.ContainsKey("sideEffectsMayHaveOccurred"))
                 ex.Detail["sideEffectsMayHaveOccurred"] = context?.SideEffectsMayHaveOccurred ?? false;
         }
@@ -612,6 +702,7 @@ namespace CodingRiver.UPilot.Execution
         {
             Enter(context);
             object value = _initializer == null ? null : _initializer.Evaluate(context);
+            value = CSharpProgram.RequireResolvedResult(value);
             if (_typeName != "var")
             {
                 Type target = ExecutionTypeResolver.Resolve(_typeName, context.Imports);
@@ -848,11 +939,32 @@ namespace CodingRiver.UPilot.Execution
         {
             Enter(context);
             if (context.TryGetVariable(Name, out var value)) return value;
-            var type = ExecutionTypeResolver.ResolveExpressionRoot(Name, context.Imports);
-            if (type != null) { context.Policy.EnsureTypeAllowed(type); return type; }
+            var type = context.Diagnostics.MeasureResolve(() => ExecutionTypeResolver.ResolveExpressionRoot(Name, context.Imports));
+            if (type != null) { context.Policy.EnsureTypeAllowed(type); return new StaticTypeTarget(type); }
             return new UnresolvedName(Name);
         }
         public override void Assign(CSharpEvaluationContext context, object value) { context.SetVariable(Name, value); }
+    }
+
+    // A generic type path is syntactic only until a following member/call requires
+    // resolution.  It must not turn a closed CLR Type into a static target early.
+    internal sealed class GenericTypePathExpr : Expr
+    {
+        private readonly Expr _target;
+        private readonly IReadOnlyList<string> _arguments;
+        public GenericTypePathExpr(Expr target, IReadOnlyList<string> arguments)
+        {
+            _target = target;
+            _arguments = arguments ?? Array.Empty<string>();
+        }
+        public override object Evaluate(CSharpEvaluationContext context)
+        {
+            Enter(context);
+            object target = _target.Evaluate(context);
+            if (!(target is UnresolvedName unresolved))
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Generic type arguments require an unresolved type path.");
+            return new UnresolvedName(unresolved.Path + "<" + string.Join(",", _arguments) + ">");
+        }
     }
 
     internal sealed class MemberExpr : Expr
@@ -868,25 +980,48 @@ namespace CodingRiver.UPilot.Execution
             if (target is UnresolvedName unresolved)
             {
                 string path = unresolved.Path + "." + Name;
-                var type = ExecutionTypeResolver.Resolve(path, context.Imports);
-                if (type != null) { context.Policy.EnsureTypeAllowed(type); return type; }
-                return new UnresolvedName(path);
+                var type = context.Diagnostics.MeasureResolve(() => ExecutionTypeResolver.Resolve(path, context.Imports));
+                if (type != null) { context.Policy.EnsureTypeAllowed(type); return new StaticTypeTarget(type); }
+                // Closed generic paths cannot have their following static member
+                // resolved as part of a CLR type name. Resolve the closed path at
+                // this member boundary, then use the ordinary static member flow.
+                if (unresolved.Path.IndexOf("<", StringComparison.Ordinal) >= 0)
+                {
+                    type = context.Diagnostics.MeasureResolve(() => ExecutionTypeResolver.Resolve(unresolved.Path, context.Imports));
+                    if (type != null)
+                    {
+                        context.Policy.EnsureTypeAllowed(type);
+                        target = new StaticTypeTarget(type);
+                    }
+                    else return new UnresolvedName(path);
+                }
+                else return new UnresolvedName(path);
             }
-            bool isStatic = target is Type;
-            Type typeTarget = isStatic ? (Type)target : target?.GetType();
+            bool isStatic = target is StaticTypeTarget;
+            Type typeTarget = isStatic ? ((StaticTypeTarget)target).Type : target?.GetType();
             if (typeTarget == null) throw new NullReferenceException("Cannot read member " + Name + " from null.");
-            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static | BindingFlags.FlattenHierarchy : BindingFlags.Instance);
             var property = typeTarget.GetProperty(Name, flags);
             if (property != null)
             {
                 context.Policy.EnsureMemberAllowed(property);
-                return context.Invoke(() => property.GetValue(isStatic ? null : target, null));
+                context.Diagnostics.CountGetter();
+                return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => property.GetValue(isStatic ? null : target, null)));
             }
             var field = typeTarget.GetField(Name, flags);
             if (field != null)
             {
                 context.Policy.EnsureMemberAllowed(field);
-                return context.Invoke(() => field.GetValue(isStatic ? null : target));
+                return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => field.GetValue(isStatic ? null : target)));
+            }
+            if (isStatic)
+            {
+                var nestedType = typeTarget.GetNestedType(Name, BindingFlags.Public | BindingFlags.NonPublic);
+                if (nestedType != null)
+                {
+                    context.Policy.EnsureTypeAllowed(nestedType);
+                    return new StaticTypeTarget(nestedType);
+                }
             }
             throw new ExecutionContractException("CSHARP_BIND_ERROR", "Member was not found: " + typeTarget.FullName + "." + Name);
         }
@@ -895,10 +1030,10 @@ namespace CodingRiver.UPilot.Execution
             Enter(context);
             object target = Target.Evaluate(context);
             Enter(context);
-            bool isStatic = target is Type;
-            Type typeTarget = isStatic ? (Type)target : target?.GetType();
+            bool isStatic = target is StaticTypeTarget;
+            Type typeTarget = isStatic ? ((StaticTypeTarget)target).Type : target?.GetType();
             if (typeTarget == null) throw new NullReferenceException("Cannot assign member " + Name + " on null.");
-            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static | BindingFlags.FlattenHierarchy : BindingFlags.Instance);
             var property = typeTarget.GetProperty(Name, flags);
             if (property != null)
             {
@@ -923,10 +1058,10 @@ namespace CodingRiver.UPilot.Execution
             target = Target.Evaluate(context);
             Enter(context);
             if (target is UnresolvedName unresolved)
-                target = ExecutionTypeResolver.Resolve(unresolved.Path, context.Imports);
-            bool isStatic = target is Type;
-            Type type = isStatic ? (Type)target : target?.GetType();
-            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+                target = new StaticTypeTarget(ExecutionTypeResolver.Resolve(unresolved.Path, context.Imports));
+            bool isStatic = target is StaticTypeTarget;
+            Type type = isStatic ? ((StaticTypeTarget)target).Type : target?.GetType();
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static | BindingFlags.FlattenHierarchy : BindingFlags.Instance);
             eventInfo = type?.GetEvent(Name, flags);
             return eventInfo != null;
         }
@@ -997,7 +1132,7 @@ namespace CodingRiver.UPilot.Execution
                 context.SideEffectsMayHaveOccurred = true;
                 return handler;
             }
-            if (_operator != "=") value = BinaryExpr.Apply(_operator.Substring(0, 1), _target.Evaluate(context), value);
+            if (_operator != "=") value = BinaryExpr.Apply(_operator.Substring(0, 1), _target.Evaluate(context), value, context);
             _target.Assign(context, value);
             return value;
         }
@@ -1013,7 +1148,7 @@ namespace CodingRiver.UPilot.Execution
         {
             Enter(context);
             object previous = _target.Evaluate(context);
-            object next = BinaryExpr.Apply("+", previous, _delta);
+            object next = BinaryExpr.Apply("+", previous, _delta, context);
             _target.Assign(context, next);
             return _postfix ? previous : next;
         }
@@ -1030,7 +1165,7 @@ namespace CodingRiver.UPilot.Execution
             object value = _value.Evaluate(context);
             if (_operator == "!") return !RuntimeConvert.ToBool(value);
             if (_operator == "+") return value;
-            if (_operator == "-") return -RuntimeConvert.ToDouble(value);
+            if (_operator == "-") return BinaryExpr.ApplyUnaryMinus(value, context);
             if (_operator == "~") return ~Convert.ToInt64(value, CultureInfo.InvariantCulture);
             throw new ExecutionContractException("CSHARP_RUNTIME_ERROR", "Unsupported unary operator: " + _operator);
         }
@@ -1048,10 +1183,15 @@ namespace CodingRiver.UPilot.Execution
             object left = _left.Evaluate(context);
             if (_operator == "&&" && !RuntimeConvert.ToBool(left)) return false;
             if (_operator == "||" && RuntimeConvert.ToBool(left)) return true;
-            return Apply(_operator, left, _right.Evaluate(context));
+            return Apply(_operator, left, _right.Evaluate(context), context);
         }
 
         public static object Apply(string op, object left, object right)
+        {
+            return Apply(op, left, right, null);
+        }
+
+        public static object Apply(string op, object left, object right, CSharpEvaluationContext context)
         {
             if (op == "+" && (left is string || right is string)) return Convert.ToString(left, CultureInfo.InvariantCulture) + Convert.ToString(right, CultureInfo.InvariantCulture);
             if (op == "==") return EqualsNormalized(left, right);
@@ -1064,6 +1204,9 @@ namespace CodingRiver.UPilot.Execution
             if (op == "<=") return Compare(left, right) <= 0;
             if (op == ">") return Compare(left, right) > 0;
             if (op == ">=") return Compare(left, right) >= 0;
+
+            if (TryApplyUnityVectorOperator(op, left, right, context, out var vectorResult))
+                return vectorResult;
 
             bool floating = RuntimeConvert.IsFloating(left) || RuntimeConvert.IsFloating(right);
             if (floating)
@@ -1087,6 +1230,86 @@ namespace CodingRiver.UPilot.Execution
             if (op == "|") return x | y;
             if (op == "^") return x ^ y;
             throw new ExecutionContractException("CSHARP_RUNTIME_ERROR", "Unsupported binary operator: " + op);
+        }
+
+        internal static object ApplyUnaryMinus(object value, CSharpEvaluationContext context)
+        {
+            if (!IsUnityVector(value)) return -RuntimeConvert.ToDouble(value);
+            var method = value.GetType().GetMethod(
+                "op_UnaryNegation",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { value.GetType() },
+                null);
+            if (method == null)
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Unity vector does not expose op_UnaryNegation.");
+            return InvokeOperator(method, new[] { value }, context);
+        }
+
+        private static bool TryApplyUnityVectorOperator(
+            string op,
+            object left,
+            object right,
+            CSharpEvaluationContext context,
+            out object result)
+        {
+            result = null;
+            bool leftVector = IsUnityVector(left);
+            bool rightVector = IsUnityVector(right);
+            if (!leftVector && !rightVector) return false;
+
+            Type vectorType = leftVector ? left.GetType() : right.GetType();
+            Type[] parameterTypes;
+            string methodName;
+            if ((op == "+" || op == "-") && leftVector && rightVector && left.GetType() == right.GetType())
+            {
+                parameterTypes = new[] { vectorType, vectorType };
+                methodName = op == "+" ? "op_Addition" : "op_Subtraction";
+            }
+            else if (op == "*" && leftVector && right is float)
+            {
+                parameterTypes = new[] { vectorType, typeof(float) };
+                methodName = "op_Multiply";
+            }
+            else if (op == "*" && rightVector && left is float)
+            {
+                parameterTypes = new[] { typeof(float), vectorType };
+                methodName = "op_Multiply";
+            }
+            else if (op == "/" && leftVector && right is float)
+            {
+                parameterTypes = new[] { vectorType, typeof(float) };
+                methodName = "op_Division";
+            }
+            else
+            {
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Unity vector operator requires matching vectors or an exact float scalar.");
+            }
+
+            var method = vectorType.GetMethod(methodName, BindingFlags.Public | BindingFlags.Static, null, parameterTypes, null);
+            if (method == null)
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Unity vector operator was not found: " + methodName);
+            result = InvokeOperator(method, new[] { left, right }, context);
+            return true;
+        }
+
+        private static object InvokeOperator(MethodInfo method, object[] arguments, CSharpEvaluationContext context)
+        {
+            if (context == null)
+            {
+                try { return method.Invoke(null, arguments); }
+                catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+            }
+            context.Policy.EnsureMemberAllowed(method);
+            context.Diagnostics.CountMethod();
+            try { return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => method.Invoke(null, arguments))); }
+            catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+        }
+
+        private static bool IsUnityVector(object value)
+        {
+            string name = value?.GetType().FullName;
+            return name == "UnityEngine.Vector2" || name == "UnityEngine.Vector3" || name == "UnityEngine.Vector4";
         }
 
         private static object PreserveInteger(object left, object right, long value)
@@ -1134,21 +1357,27 @@ namespace CodingRiver.UPilot.Execution
                 Enter(context);
                 if (target is UnresolvedName unresolved)
                 {
-                    var resolvedType = ExecutionTypeResolver.Resolve(unresolved.Path, context.Imports);
+                    var resolvedType = context.Diagnostics.MeasureResolve(() => ExecutionTypeResolver.Resolve(unresolved.Path, context.Imports));
                     if (resolvedType == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Type was not found: " + unresolved.Path);
-                    target = resolvedType;
+                    target = new StaticTypeTarget(resolvedType);
                 }
-                bool isStatic = target is Type;
-                Type type = isStatic ? (Type)target : target?.GetType();
-                var genericTypes = _genericTypeNames.Select(name => ExecutionTypeResolver.Resolve(name, context.Imports)).ToArray();
+                bool isStatic = target is StaticTypeTarget;
+                Type type = isStatic ? ((StaticTypeTarget)target).Type : target?.GetType();
+                var genericTypes = _genericTypeNames.Select(name => context.Diagnostics.MeasureResolve(() => ExecutionTypeResolver.Resolve(name, context.Imports))).ToArray();
                 if (genericTypes.Any(typeArgument => typeArgument == null))
                     throw new ExecutionContractException("CSHARP_BIND_ERROR", "One or more explicit generic type arguments could not be resolved.");
-                var bound = MethodBinder.Bind(type, member.Name, isStatic, values,
+                var bound = context.Diagnostics.MeasureBind(() => MethodBinder.Bind(type, member.Name, isStatic, values,
                     genericTypeArguments: genericTypes.Length == 0 ? null : genericTypes,
-                    inferGenericTypeArguments: genericTypes.Length == 0);
+                    inferGenericTypeArguments: genericTypes.Length == 0,
+                    userConversionInvoker: action =>
+                    {
+                        context.Diagnostics.CountMethod();
+                        return context.Diagnostics.MeasureInvoke(() => context.Invoke(action));
+                    }));
                 context.Policy.EnsureMemberAllowed(bound.Method);
                 context.SideEffectsMayHaveOccurred = true;
-                try { return context.Invoke(() => bound.Method.Invoke(isStatic ? null : target, bound.Arguments)); }
+                context.Diagnostics.CountMethod();
+                try { return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => bound.Method.Invoke(isStatic ? null : target, bound.Arguments))); }
                 catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
             }
             object callable = _callee.Evaluate(context);
@@ -1175,7 +1404,7 @@ namespace CodingRiver.UPilot.Execution
         {
             Enter(context);
             context.Budget.CountAllocation();
-            Type type = ExecutionTypeResolver.Resolve(_typeName, context.Imports);
+            Type type = context.Diagnostics.MeasureResolve(() => ExecutionTypeResolver.Resolve(_typeName, context.Imports));
             if (type == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Constructor type was not found: " + _typeName);
             context.Policy.EnsureConstructionAllowed(type);
             object[] values = _arguments.Select(argument => argument.Evaluate(context)).ToArray();
@@ -1415,6 +1644,19 @@ namespace CodingRiver.UPilot.Execution
         public string Path { get; }
         public UnresolvedName(string path) { Path = path; }
         public override string ToString() { return Path; }
+    }
+
+    // This marker represents a syntactic static type path only while binding members.
+    // Values stored in scopes and returned to callers are always real System.Type instances.
+    internal sealed class StaticTypeTarget
+    {
+        public Type Type { get; }
+        public StaticTypeTarget(Type type)
+        {
+            if (type == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Static target type was not found.");
+            Type = type;
+        }
+        public static object Unwrap(object value) => value is StaticTypeTarget target ? target.Type : value;
     }
 
     internal sealed class ReturnSignal : Exception { public object Value { get; } public ReturnSignal(object value) { Value = value; } }
@@ -1794,7 +2036,11 @@ namespace CodingRiver.UPilot.Execution
             {
                 if (Match(".") || Match("?.")) { expression = WithSpan(new MemberExpr(expression, ExpectIdentifier()), start); continue; }
                 if (TryParseGenericTypeArguments(out var genericArguments))
-                { Expect("("); expression = WithSpan(new CallExpr(expression, ParseArgumentList(")"), genericArguments), start); continue; }
+                {
+                    if (Match("(")) expression = WithSpan(new CallExpr(expression, ParseArgumentList(")"), genericArguments), start);
+                    else expression = WithSpan(new GenericTypePathExpr(expression, genericArguments), start);
+                    continue;
+                }
                 if (Match("(")) { expression = WithSpan(new CallExpr(expression, ParseArgumentList(")")), start); continue; }
                 if (Match("["))
                 {
@@ -1988,7 +2234,11 @@ namespace CodingRiver.UPilot.Execution
                 var values = new List<string>();
                 do { values.Add(ParseTypeName()); } while (Match(","));
                 ExpectTypeClose();
-                if (Peek().Text != "(") { _position = save; return false; }
+                // A parsed generic suffix is expression syntax only when it is
+                // immediately followed by a member or invocation.  Keeping the
+                // rollback for all other followers preserves '<'/'>' comparison
+                // parsing, while allowing ClosedType<T>.StaticMember.
+                if (Peek().Text != "(" && Peek().Text != ".") { _position = save; return false; }
                 arguments = values;
                 return true;
             }

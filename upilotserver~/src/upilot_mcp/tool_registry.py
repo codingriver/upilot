@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, get_type_hints
 import inspect
 import re
+
+from pydantic import TypeAdapter, ValidationError
 
 from .models import ToolResponse
 from .protocol import new_id
@@ -12,7 +14,9 @@ from .config import CONFIG, refresh_config_if_changed
 
 
 ToolHandler = Callable[..., Awaitable[ToolResponse]]
-REGISTRY_VERSION = 6
+WriteAccessPredicate = Callable[[dict[str, Any]], bool]
+REGISTRY_VERSION = 7
+_PUBLIC_TOOL_HANDLERS: dict[str, Any] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +28,10 @@ class ToolDescriptor:
     destructive: bool = False
     requires_unity_connection: bool = True
     requires_write_access: bool = False
+    write_access_predicate: WriteAccessPredicate | None = None
+    write_access_condition: str = ""
     play_mode_policy: str = "allowed"
+    required_editor_mode: str = "any"
     feature: str = "core"
     timeout_ms: int = 30000
     capability_requirements: tuple[str, ...] = ()
@@ -35,8 +42,13 @@ class ToolDescriptor:
         data["registered"] = True
         data["requiresUnityConnection"] = data.pop("requires_unity_connection")
         data["requiresWriteAccess"] = data.pop("requires_write_access")
+        data.pop("write_access_predicate")
+        write_access_condition = data.pop("write_access_condition")
+        if write_access_condition:
+            data["writeAccessCondition"] = write_access_condition
         data["capabilityRequirements"] = list(data.pop("capability_requirements"))
         data["aliases"] = list(data["aliases"])
+        data["requiredEditorMode"] = data.pop("required_editor_mode")
         return data
 
 
@@ -197,18 +209,33 @@ def _match_score(item: ToolDescriptor, query_tokens: list[str]) -> int:
 def register_public_tool(
     name: str,
     *,
+    public_handler: Any | None = None,
     facade_method: str | None = None,
     category: str | None = None,
     idempotent: bool = True,
     destructive: bool = False,
     requires_unity_connection: bool | None = None,
     requires_write_access: bool | None = None,
+    write_access_predicate: WriteAccessPredicate | None = None,
+    write_access_condition: str = "",
     play_mode_policy: str = "allowed",
+    required_editor_mode: str = "any",
     feature: str = "core",
     timeout_ms: int = 30000,
     capability_requirements: tuple[str, ...] = (),
     aliases: tuple[str, ...] = (),
 ) -> None:
+    if required_editor_mode == "any":
+        # Metadata is advisory to clients; the execution coordinator remains the
+        # authoritative enforcement point. Tests own their temporary runtime.
+        if name in {"unity_test_run", "unity_upilot_acceptance_run", "unity_operation_start"}:
+            required_editor_mode = "managed"
+        elif name in {"unity_compile", "unity_safe_compile_and_wait", "unity_write_batch_register"}:
+            required_editor_mode = "edit"
+        elif name in {"unity_keyboard_input", "unity_gameview_snapshot"}:
+            required_editor_mode = "play"
+    if public_handler is not None:
+        _PUBLIC_TOOL_HANDLERS[name] = public_handler
     REGISTRY.register(
         ToolDescriptor(
             name=name,
@@ -222,7 +249,10 @@ def register_public_tool(
                 else requires_unity_connection
             ),
             requires_write_access=destructive if requires_write_access is None else requires_write_access,
+            write_access_predicate=write_access_predicate,
+            write_access_condition=write_access_condition,
             play_mode_policy=play_mode_policy,
+            required_editor_mode=required_editor_mode,
             feature=feature,
             timeout_ms=timeout_ms,
             capability_requirements=capability_requirements,
@@ -258,7 +288,7 @@ async def dispatch_public_tool(facade: Any, public_name: str, args: dict[str, An
             f"MCP tool has no facade handler: {public_name}",
             {"tool": public_name, "facadeMethod": descriptor.facade_method},
         )
-    normalized_args, argument_error = _normalize_proxy_arguments(method, args)
+    normalized_args, argument_error = _normalize_proxy_arguments(method, args, public_name)
     if argument_error:
         return fail(
             new_id("req"),
@@ -270,11 +300,29 @@ async def dispatch_public_tool(facade: Any, public_name: str, args: dict[str, An
                 **argument_error,
             },
         )
+    if (
+        descriptor.write_access_predicate is not None
+        and descriptor.write_access_predicate(normalized_args)
+        and not CONFIG.write_access_approved
+    ):
+        return fail(
+            new_id("req"),
+            "WRITE_ACCESS_NOT_APPROVED",
+            "UPilot is in safe mode. Enable project write access in the Unity UPilot first setup or .upilot/config.json before using this tool.",
+            {
+                "tool": public_name,
+                "configKey": "safety.writeAccessApproved",
+                "writeAccessCondition": descriptor.write_access_condition,
+            },
+        )
     return await method(**normalized_args)
 
 
-def proxy_argument_schema(method: Any) -> list[dict[str, Any]]:
+def proxy_argument_schema(method: Any, public_name: str = "") -> list[dict[str, Any]]:
     """Describe the arguments accepted by unity_tool_call for one bound facade method."""
+    public_handler = _PUBLIC_TOOL_HANDLERS.get(public_name)
+    if public_handler is not None:
+        return _public_proxy_argument_schema(method, public_handler)
     try:
         signature = inspect.signature(method)
     except (TypeError, ValueError):
@@ -298,7 +346,7 @@ def proxy_argument_schema(method: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_proxy_arguments(
-    method: Any, args: dict[str, Any]
+    method: Any, args: dict[str, Any], public_name: str = ""
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     try:
         signature = inspect.signature(method)
@@ -323,6 +371,21 @@ def _normalize_proxy_arguments(
             continue
         folded_names.setdefault(_fold_argument_name(name), []).append(name)
 
+    public_entries = proxy_argument_schema(method, public_name)
+    public_names: dict[str, str] = {}
+    public_types: dict[str, Any] = {}
+    public_handler = _PUBLIC_TOOL_HANDLERS.get(public_name)
+    if public_handler is not None:
+        try:
+            public_types = get_type_hints(public_handler, include_extras=True)
+        except (NameError, TypeError):
+            public_types = {}
+    for entry in public_entries:
+        facade_name = str(entry.get("facadeName") or entry.get("name") or "")
+        for candidate in [entry.get("name"), entry.get("camelCase"), *(entry.get("aliases") or [])]:
+            if candidate:
+                public_names.setdefault(_fold_argument_name(str(candidate)), facade_name)
+
     normalized: dict[str, Any] = {}
     unknown: list[str] = []
     duplicates: list[str] = []
@@ -332,6 +395,8 @@ def _normalize_proxy_arguments(
             matches = folded_names.get(_fold_argument_name(supplied_name), [])
             if len(matches) == 1:
                 target_name = matches[0]
+        if not target_name:
+            target_name = public_names.get(_fold_argument_name(supplied_name), "")
         if not target_name and accepts_kwargs:
             target_name = supplied_name
         if not target_name:
@@ -340,13 +405,32 @@ def _normalize_proxy_arguments(
         if target_name in normalized:
             duplicates.append(supplied_name)
             continue
+        public_entry = next(
+            (entry for entry in public_entries if str(entry.get("facadeName") or entry.get("name")) == target_name),
+            None,
+        )
+        public_parameter_name = str(public_entry.get("name") or "") if public_entry else ""
+        annotation = public_types.get(public_parameter_name, inspect.Parameter.empty)
+        if annotation is not inspect.Parameter.empty:
+            try:
+                value = TypeAdapter(annotation).validate_python(value)
+            except ValidationError as exc:
+                schema = public_entry.get("schema") if public_entry else {}
+                return normalized, {
+                    "invalidArgument": supplied_name,
+                    "validationError": str(exc),
+                    "candidates": list(schema.get("enum") or []) if isinstance(schema, dict) else [],
+                    "sideEffectsMayHaveOccurred": False,
+                    "expectedArguments": public_entries,
+                    "nextAction": "Use the target tool argument names and types returned by unity_tools_find.",
+                }
         normalized[target_name] = value
 
     if unknown or duplicates:
         return normalized, {
             "unknownArguments": unknown,
             "duplicateArguments": duplicates,
-            "expectedArguments": proxy_argument_schema(method),
+            "expectedArguments": public_entries,
             "nextAction": "Use the target tool argument names returned by unity_tools_find.",
         }
     try:
@@ -354,7 +438,7 @@ def _normalize_proxy_arguments(
     except TypeError as exc:
         return normalized, {
             "bindingError": str(exc),
-            "expectedArguments": proxy_argument_schema(method),
+            "expectedArguments": public_entries,
             "nextAction": "Supply all required target tool arguments using the returned schema.",
         }
     return normalized, None
@@ -367,3 +451,102 @@ def _fold_argument_name(value: str) -> str:
 def _snake_to_camel(value: str) -> str:
     head, *tail = value.split("_")
     return head + "".join(part[:1].upper() + part[1:] for part in tail)
+
+
+def _public_proxy_argument_schema(method: Any, public_handler: Any) -> list[dict[str, Any]]:
+    try:
+        facade_signature = inspect.signature(method)
+        public_signature = inspect.signature(public_handler)
+    except (TypeError, ValueError):
+        return []
+    facade_names = {
+        _fold_argument_name(parameter.name): parameter.name
+        for parameter in facade_signature.parameters.values()
+        if parameter.name != "self"
+        and parameter.kind not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+    }
+    try:
+        type_hints = get_type_hints(public_handler, include_extras=True)
+    except (NameError, TypeError):
+        type_hints = {}
+
+    result: list[dict[str, Any]] = []
+    for parameter in public_signature.parameters.values():
+        if parameter.name == "self" or parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
+        facade_name = facade_names.get(_fold_argument_name(parameter.name), "")
+        if not facade_name:
+            continue
+        aliases = []
+        for alias in (facade_name, _snake_to_camel(facade_name)):
+            if alias != parameter.name and alias not in aliases:
+                aliases.append(alias)
+        entry: dict[str, Any] = {
+            "name": parameter.name,
+            "camelCase": parameter.name,
+            "facadeName": facade_name,
+            "aliases": aliases,
+            "required": parameter.default is inspect.Parameter.empty,
+        }
+        if parameter.default is not inspect.Parameter.empty:
+            entry["default"] = parameter.default
+        annotation = type_hints.get(parameter.name, parameter.annotation)
+        if annotation is not inspect.Parameter.empty:
+            try:
+                entry["schema"] = TypeAdapter(annotation).json_schema()
+            except (TypeError, ValueError):
+                pass
+        result.append(entry)
+    return result
+
+
+def normalize_public_mcp_arguments(
+    tool_name: str, args: dict[str, Any], input_schema: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Normalize documented aliases before FastMCP validation and reject unknown fields."""
+    properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+    if not isinstance(properties, dict):
+        return dict(args), None
+    folded: dict[str, list[str]] = {}
+    for name in properties:
+        folded.setdefault(_fold_argument_name(name), []).append(name)
+
+    normalized: dict[str, Any] = {}
+    unknown: list[str] = []
+    duplicates: list[str] = []
+    for supplied_name, value in args.items():
+        canonical = supplied_name if supplied_name in properties else ""
+        if not canonical:
+            matches = folded.get(_fold_argument_name(supplied_name), [])
+            if len(matches) == 1:
+                canonical = matches[0]
+        if not canonical:
+            unknown.append(supplied_name)
+            continue
+        if canonical in normalized:
+            duplicates.append(supplied_name)
+            continue
+        normalized[canonical] = value
+    invalid_values = []
+    candidates: dict[str, list[Any]] = {}
+    for name, value in normalized.items():
+        property_schema = properties.get(name)
+        allowed = property_schema.get("enum") if isinstance(property_schema, dict) else None
+        if isinstance(allowed, list) and value not in allowed:
+            invalid_values.append({"name": name, "value": value})
+            candidates[name] = list(allowed)
+    if unknown or duplicates or invalid_values:
+        return normalized, {
+            "tool": tool_name,
+            "unknownArguments": unknown,
+            "duplicateArguments": duplicates,
+            "invalidArguments": invalid_values,
+            "candidates": candidates,
+            "sideEffectsMayHaveOccurred": False,
+            "expectedArguments": list(properties),
+            "nextAction": "Use an exact public Schema field or one unambiguous snake_case/case variant.",
+        }
+    return normalized, None

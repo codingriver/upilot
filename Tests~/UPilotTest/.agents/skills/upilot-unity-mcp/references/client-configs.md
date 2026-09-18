@@ -21,6 +21,25 @@ For multiple concurrent Unity projects, assign each project a unique internal HT
 
 After server tool registration changes, restart or refresh the MCP client so its injected tool list is current.
 
+## Restricted Client Handshake
+
+The stable entry points are `unity_tools_find` and `unity_tool_call`. A client may
+expose only these two functions to its agent. Discover the exact tool, then proxy
+its documented arguments; the existing Registry and safety gates remain authoritative.
+
+After installing the Python server package, run the read-only handshake against
+the existing server (this command does not start or restart Unity or the server):
+
+```powershell
+python -m upilot_mcp.client_probe --url http://127.0.0.1:8011/mcp --project D:\upilot\Tests~\UPilotTest
+```
+
+The report separates HTTP initialization, `tools/list` visibility, discovery,
+real proxy execution, and exact project identity. `clientToolListInjected` stays
+`unknown`: the probe cannot observe another AI client's injected tools. If
+registration changed, refresh that client's MCP connection/tool list, perform a
+real read-only proxy call there, and verify the returned project before writes.
+
 ## Project Skill discovery
 
 - Codex: `.agents/skills/upilot-unity-mcp`

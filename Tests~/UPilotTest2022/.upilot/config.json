@@ -22,7 +22,25 @@
     },
     "safety": {
         "writeAccessApproved": true,
-        "writeAccessApprovedAtUtc": "2026-09-08T03:15:08.7888655+00:00"
+        "writeAccessApprovedAtUtc": "2026-09-08T03:15:08.7888655+00:00",
+        "unsavedScenePolicy": "ignore",
+        "automationAuthorizationScopes": [
+            "assetMoveDelete",
+            "captureArtifactCleanup",
+            "captureForceStop",
+            "configCsvApply",
+            "destructiveProjectWrite",
+            "editorModeTransition",
+            "editorWindowForceDiscard",
+            "hangRestart",
+            "prefabPatchApply",
+            "scenePolicyExecution",
+            "snapshotBaselineUpdate",
+            "textureImporterApply"
+        ],
+        "automationAuthorizationCatalogHash": "",
+        "automationAuthorizationScopeVersion": 0,
+        "automationAuthorizationApprovedAtUtc": "2026-09-16T09:42:20.9744315+00:00"
     },
     "updates": {
         "manifestUrl": "",

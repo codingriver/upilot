@@ -36,7 +36,15 @@ namespace CodingRiver.UPilot
 
             if (Array.IndexOf(SupportedActions, action) < 0)
             {
-                await _bridge.SendErrorAsync(id, "INVALID_PAYLOAD", $"非法键盘动作：{action}", token, "keyboard.event");
+                await _bridge.SendErrorAsync(id, "INVALID_PAYLOAD", $"非法键盘动作：{action}", token,
+                    "keyboard.event", new ErrorDetailPayload
+                    {
+                        stage = "preflight",
+                        sideEffectsMayHaveOccurred = false,
+                        candidates = SupportedActions,
+                        candidatesJson = "[\"keydown\",\"keyup\",\"keypress\",\"type\"]",
+                        nextAction = "Use one exact lowercase keyboard action from candidates.",
+                    });
                 return;
             }
 
@@ -51,23 +59,12 @@ namespace CodingRiver.UPilot
                 }
             }
 
-            var resultTcs = new TaskCompletionSource<GenericOkPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _bridge.EnqueueTracked(id, () =>
-            {
-                try
-                {
-                    var result = HandleKeyboardEvent(keyboardPayload, action, parsedKeyCode);
-                    resultTcs.TrySetResult(result);
-                }
-                catch (Exception ex)
-                {
-                    resultTcs.TrySetException(ex);
-                }
-            });
-
             try
             {
-                var keyboardResult = await resultTcs.Task;
+                var keyboardResult = await UPilotModalObserver.RunAsync(_bridge, id,
+                    () => HandleKeyboardEvent(keyboardPayload, action, parsedKeyCode),
+                    escapeGenericMenu: keyboardPayload.escapeGenericMenu,
+                    target: () => UPilotWindowInputRegistry.Resolve(keyboardPayload.windowInstanceId, keyboardPayload.targetWindow));
                 await _bridge.SendResultAsync(id, "keyboard.event", keyboardResult, token);
             }
             catch (Exception ex)

@@ -4,11 +4,15 @@ import asyncio
 import hashlib
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
+from mcp.server.fastmcp.exceptions import ToolError
 
+from upilot_mcp import mcp_stdio_server as runtime
 from upilot_mcp.domain.snapshot_service import SnapshotDomainService
+from upilot_mcp.mcp_tools import snapshot_tools
 from upilot_mcp.responses import ok
-from upilot_mcp.tool_registry import REGISTRY
+from upilot_mcp.tool_registry import REGISTRY, dispatch_public_tool
 
 
 class _Dispatcher:
@@ -48,6 +52,33 @@ def _service_with_project(project_root, *responses):
         )
     )
     return service
+
+
+def _persisted_snapshot(
+    *,
+    snapshot_id: str = "snapshot-persisted",
+    status: str = "completed",
+    terminal: bool = True,
+    persistence_status: str = "verified",
+    schema: object = 2,
+    sequence: object = 7,
+    manifest_bytes: object = 1200,
+    manifest_sha256: str = "a" * 64,
+    persistence_error: str = "",
+    recovered: bool = False,
+) -> dict:
+    return {
+        "snapshotId": snapshot_id,
+        "status": status,
+        "terminal": terminal,
+        "persistenceSchemaVersion": schema,
+        "snapshotSequence": sequence,
+        "persistenceStatus": persistence_status,
+        "persistenceError": persistence_error,
+        "persistenceRecovered": recovered,
+        "manifestBytes": manifest_bytes,
+        "manifestSha256": manifest_sha256,
+    }
 
 
 def test_snapshot_capture_rejects_missing_and_excessive_targets_without_dispatch() -> None:
@@ -98,6 +129,117 @@ def test_snapshot_capture_applies_strict_defaults_and_polls_to_terminal() -> Non
     }
 
 
+def test_snapshot_capture_nested_schema_rejects_before_native_or_proxy_dispatch(monkeypatch) -> None:
+    """P2-WP-04-T03: public nested schema is strict before snapshot.start."""
+
+    schema = {
+        tool.name: tool for tool in asyncio.run(runtime._original_mcp_list_tools())
+    }["unity_snapshot_capture"].inputSchema
+    target = schema["properties"]["targets"]["items"]
+    policy = schema["properties"]["capturePolicy"]["anyOf"][0]
+    assert target["additionalProperties"] is False
+    assert target["properties"]["kind"]["default"] == "camera"
+    assert target["properties"]["width"]["default"] == 1280
+    assert target["properties"]["height"]["default"] == 720
+    assert target["properties"]["domainGeneration"]["default"] == ""
+    assert target["properties"]["channels"]["type"] == "array"
+    assert policy["additionalProperties"] is False
+    assert policy["properties"]["requireVerifiedPixels"]["default"] is True
+    assert policy["properties"]["allowStaleFrame"]["default"] is False
+
+    calls: list[dict] = []
+
+    class Facade:
+        async def snapshot_capture(
+            self,
+            targets,
+            *,
+            channels=None,
+            sync_mode="sameFrame",
+            completion_policy="allOrNothing",
+            capture_policy=None,
+            output_directory="",
+            wait_ms=5000,
+            request_key="",
+        ):
+            calls.append({
+                "targets": targets,
+                "channels": channels,
+                "capturePolicy": capture_policy,
+            })
+            return ok("snapshot", {"targetCount": len(targets)})
+
+    facade = Facade()
+    monkeypatch.setattr(snapshot_tools, "_get_facade", lambda: facade)
+
+    native = asyncio.run(runtime.mcp._tool_manager.call_tool(
+        "unity_snapshot_capture", {"targets": [{"exactName": "Main Camera"}]}
+    ))
+    assert native.structuredContent["data"]["targetCount"] == 1
+    assert calls[0]["targets"] == [{
+        "targetId": "", "instanceId": "", "hierarchyPath": "",
+        "exactName": "Main Camera", "cameraName": "", "fullTypeName": "",
+        "title": "", "kind": "camera", "targetDisplay": 0, "channels": [],
+        "depthPreview": False, "width": 1280, "height": 720,
+        "domainGeneration": "", "requireContentRect": False,
+    }]
+    assert calls[0]["capturePolicy"] == {
+        "requireVerifiedPixels": True, "allowFallback": False,
+        "allowOcclusionSensitive": False, "allowStaleFrame": False,
+        "maxStaleFrameAgeMs": 0,
+    }
+
+    with pytest.raises(ToolError):
+        asyncio.run(runtime.mcp._tool_manager.call_tool(
+            "unity_snapshot_capture", {"targets": [{"exactName": "Never", "unknown": True}]}
+        ))
+    with pytest.raises(ToolError):
+        asyncio.run(runtime.mcp._tool_manager.call_tool(
+            "unity_snapshot_capture", {"targets": [{"width": "1280"}]}
+        ))
+    with pytest.raises(ToolError):
+        asyncio.run(runtime.mcp._tool_manager.call_tool(
+            "unity_snapshot_capture", {
+                "targets": [{"exactName": "Never"}],
+                "capturePolicy": {"unknown": True},
+            }
+        ))
+    assert len(calls) == 1
+
+    proxy = asyncio.run(dispatch_public_tool(
+        facade,
+        "unity_snapshot_capture",
+        {"targets": [{"exactName": "Proxy"}], "capturePolicy": {"allowFallback": True}},
+    ))
+    assert proxy.ok is True
+    assert calls[1]["targets"][0]["width"] == 1280
+    assert calls[1]["capturePolicy"] == {
+        "requireVerifiedPixels": True, "allowFallback": True,
+        "allowOcclusionSensitive": False, "allowStaleFrame": False,
+        "maxStaleFrameAgeMs": 0,
+    }
+
+    rejected_proxy = asyncio.run(dispatch_public_tool(
+        facade,
+        "unity_snapshot_capture",
+        {"targets": [{"exactName": "Never", "unknown": True}]},
+    ))
+    assert rejected_proxy.ok is False
+    assert rejected_proxy.error.code == "INVALID_TOOL_ARGUMENTS"
+    assert rejected_proxy.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert len(calls) == 2
+
+    rejected_policy_proxy = asyncio.run(dispatch_public_tool(
+        facade,
+        "unity_snapshot_capture",
+        {"targets": [{"exactName": "Never"}], "capturePolicy": {"allowFallback": "true"}},
+    ))
+    assert rejected_policy_proxy.ok is False
+    assert rejected_policy_proxy.error.code == "INVALID_TOOL_ARGUMENTS"
+    assert rejected_policy_proxy.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert len(calls) == 2
+
+
 def test_snapshot_capture_wait_window_is_not_a_terminal_timeout() -> None:
     service = SnapshotDomainService()
     service.dispatcher = _RunningDispatcher()
@@ -131,6 +273,127 @@ def test_snapshot_status_cancel_and_collect_use_exact_job_identity() -> None:
         ("snapshot.cancel", {"snapshotId": "snapshot-3"}),
         ("snapshot.collect", {"snapshotId": "snapshot-3"}),
     ]
+
+
+@pytest.mark.parametrize(
+    ("case", "payload", "expected_verified"),
+    [
+        # T01: a terminal v2 state may be accepted only with real manifest metadata.
+        ("P2-WP-06-T01", _persisted_snapshot(), True),
+        # T02: a leftover tmp is never authority; interrupted persistence remains unverified.
+        ("P2-WP-06-T02", _persisted_snapshot(persistence_status="unverified", persistence_error="MANIFEST_REPLACE_FAILED"), False),
+        # T03: Unity recovered a newer terminal manifest and rebuilt its state sidecar.
+        ("P2-WP-06-T03", _persisted_snapshot(recovered=True), True),
+        # T04: missing state/manifest or unequal same-sequence projection cannot be signed.
+        ("P2-WP-06-T04", _persisted_snapshot(persistence_status="unverified", persistence_error="MANIFEST_STATE_MISMATCH"), False),
+        # T05: a delayed stale sequence remains a persistence diagnostic, not a new capture.
+        ("P2-WP-06-T05", _persisted_snapshot(persistence_status="unverified", persistence_error="MANIFEST_SEQUENCE_STALE"), False),
+        # T06: legacy schema and path/requestKey rejection are not silently upgraded.
+        ("P2-WP-06-T06", _persisted_snapshot(persistence_status="unknown", schema=1, sequence=0, manifest_bytes=0, manifest_sha256="", persistence_error="LEGACY_PERSISTENCE_SCHEMA"), False),
+        # T07: cancellation preserves its business outcome while persistence stays separate.
+        ("P2-WP-06-T07", _persisted_snapshot(status="cancelled", persistence_status="unverified", persistence_error="STATE_REPLACE_FAILED"), False),
+        # T08: unknown schema/rebuild failure must never be inferred from a terminal status.
+        ("P2-WP-06-T08", _persisted_snapshot(persistence_status="unverified", persistence_error="STATE_REBUILD_FAILED", manifest_sha256="not-a-hash"), False),
+        # A Bridge must not be trusted when it claims both a verified state and
+        # a persistence failure; this is a persistence contradiction, not a
+        # reason for the Server to rewrite the underlying business outcome.
+        ("verified-status-with-persistence-error", _persisted_snapshot(persistence_error="STATE_REPLACE_FAILED"), False),
+        ("nonterminal-cannot-be-persistence-verified", _persisted_snapshot(status="running", terminal=False), False),
+    ],
+)
+def test_snapshot_status_exposes_conservative_persistence_verdict(case, payload, expected_verified) -> None:
+    service = _service(ok(case, payload))
+
+    result = asyncio.run(service.snapshot_status("snapshot-persisted"))
+
+    assert result.ok is True, case
+    assert result.data["persistenceVerified"] is expected_verified, case
+    assert result.data["persistenceStatus"] == payload["persistenceStatus"], case
+    assert result.data["persistenceError"] == payload["persistenceError"], case
+    assert [name for name, _ in service.dispatcher.calls] == ["snapshot.status"], case
+
+
+@pytest.mark.parametrize("field,value", [
+    ("persistenceSchemaVersion", "2"),
+    ("snapshotSequence", "7"),
+    ("manifestBytes", "1200"),
+    ("snapshotSequence", True),
+])
+def test_snapshot_persistence_metadata_requires_exact_integer_types(field, value) -> None:
+    payload = _persisted_snapshot()
+    payload[field] = value
+    service = _service(ok("status", payload))
+
+    result = asyncio.run(service.snapshot_status("snapshot-persisted"))
+
+    assert result.ok is True
+    assert result.data["persistenceVerified"] is False
+
+
+def test_snapshot_persistence_requires_exact_job_and_request_key_without_retrying() -> None:
+    wrong_status = _service(ok("status", _persisted_snapshot(snapshot_id="snapshot-other")))
+    status = asyncio.run(wrong_status.snapshot_status("snapshot-expected"))
+    assert status.ok is False
+    assert status.error.code == "SNAPSHOT_IDENTITY_MISMATCH"
+    assert status.error.detail["expectedSnapshotId"] == "snapshot-expected"
+    assert status.error.detail["actualSnapshotId"] == "snapshot-other"
+    assert [name for name, _ in wrong_status.dispatcher.calls] == ["snapshot.status"]
+
+    wrong_request_key = _service(ok("start", {
+        "snapshotId": "snapshot-start",
+        "status": "queued",
+        "terminal": False,
+        "requestKey": "other-request",
+    }))
+    started = asyncio.run(wrong_request_key.snapshot_capture(
+        [{"targetId": "main", "kind": "camera", "exactName": "Main Camera"}],
+        wait_ms=0,
+        request_key="expected-request",
+    ))
+    assert started.ok is False
+    assert started.error.code == "SNAPSHOT_REQUEST_KEY_MISMATCH"
+    assert [name for name, _ in wrong_request_key.dispatcher.calls] == ["snapshot.start"]
+
+
+def test_snapshot_identity_missing_is_rejected_without_retry_or_new_capture() -> None:
+    service = _service(
+        ok("status", {"status": "completed", "terminal": True}),
+        ok("cancel", {"cancelRequested": True}),
+        ok("collect", {"artifacts": []}),
+    )
+
+    status = asyncio.run(service.snapshot_status("snapshot-original"))
+    cancel = asyncio.run(service.snapshot_cancel("snapshot-original"))
+    collected = asyncio.run(service.snapshot_collect_artifacts("snapshot-original"))
+
+    for result in (status, cancel, collected):
+        assert result.ok is False
+        assert result.error.code == "SNAPSHOT_IDENTITY_MISSING"
+        assert result.error.detail["expectedSnapshotId"] == "snapshot-original"
+    assert [name for name, _ in service.dispatcher.calls] == [
+        "snapshot.status", "snapshot.cancel", "snapshot.collect",
+    ]
+
+    empty_payload = _service(ok("status", None))
+    empty_result = asyncio.run(empty_payload.snapshot_status("snapshot-original"))
+    assert empty_result.ok is False
+    assert empty_result.error.code == "SNAPSHOT_IDENTITY_MISSING"
+    assert [name for name, _ in empty_payload.dispatcher.calls] == ["snapshot.status"]
+
+
+def test_snapshot_server_preserves_unverified_pixel_evidence_without_fabricating_pass() -> None:
+    payload = _persisted_snapshot(persistence_status="unverified", persistence_error="STATE_REPLACE_FAILED")
+    payload.update({"acceptedAsEvidence": False, "pixelSourceVerified": False, "occlusionSensitive": True})
+    service = _service(ok("collect", payload))
+
+    result = asyncio.run(service.snapshot_collect_artifacts("snapshot-persisted"))
+
+    assert result.ok is True
+    assert result.data["persistenceVerified"] is False
+    assert result.data["acceptedAsEvidence"] is False
+    assert result.data["pixelSourceVerified"] is False
+    assert result.data["occlusionSensitive"] is True
+    assert [name for name, _ in service.dispatcher.calls] == ["snapshot.collect"]
 
 
 def test_snapshot_public_tools_are_registered_with_correct_idempotency() -> None:

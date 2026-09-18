@@ -21,22 +21,30 @@ _payload = runtime._payload
 _log_tool_call = runtime._log_tool_call
 _log_tool_result = runtime._log_tool_result
 _reject_compile_in_playmode = runtime._reject_compile_in_playmode
+_reject_write_if_unapproved = runtime._reject_write_if_unapproved
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
 @mcp.tool(description="运行 Unity 测试（支持 EditMode 和 PlayMode）。")
 async def unity_test_run(
-    testMode: str = "EditMode", testFilter: str = "",
+    testMode: str = "EditMode", testFilter: str | None = None,
     testNames: list[str] | None = None, fixtures: list[str] | None = None,
+    assemblies: list[str] | None = None, categories: list[str] | None = None, matchMode: str = "union",
+    requireAllSelectorsMatch: bool = True, expectedSelectionDomain: str = "",
+    expectedSelectionSnapshotId: str = "",
 ):
-    _log_tool_call("unity_test_run", {"testMode": testMode, "testFilter": testFilter, "testNames": testNames, "fixtures": fixtures})
-    r = await _get_facade().test_run(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures)
+    _log_tool_call("unity_test_run", {"testMode": testMode, "testFilter": testFilter, "testNames": testNames, "fixtures": fixtures, "assemblies": assemblies, "categories": categories, "matchMode": matchMode, "requireAllSelectorsMatch": requireAllSelectorsMatch, "expectedSelectionDomain": expectedSelectionDomain, "expectedSelectionSnapshotId": expectedSelectionSnapshotId})
+    r = await _get_facade().test_run(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures, assemblies=assemblies, categories=categories, match_mode=matchMode, require_all_selectors_match=requireAllSelectorsMatch, expected_selection_domain=expectedSelectionDomain, expected_selection_snapshot_id=expectedSelectionSnapshotId)
     return _log_tool_result("unity_test_run", _payload(r))
 
-@mcp.tool(description="获取最近一次或指定 runGuid 的 Unity 测试结果；PlayMode Domain Reload 或 MCP 重连后仍可读取持久化终态。")
-async def unity_test_results(runGuid: str = ""):
-    _log_tool_call("unity_test_results", {"runGuid": runGuid})
-    r = await _get_facade().test_results(run_guid=runGuid)
+@mcp.tool(description="获取最近一次或指定 runGuid 的 Unity 测试结果；cursor='begin' 开始只读增量叶子事件，后续使用 nextCursor。省略 cursor 保留完整结果兼容行为。")
+async def unity_test_results(
+    runGuid: str = "",
+    cursor: str = "",
+    count: Annotated[int, Field(strict=True, ge=1, le=1000)] = 100,
+):
+    _log_tool_call("unity_test_results", {"runGuid": runGuid, "cursor": cursor, "count": count})
+    r = await _get_facade().test_results(run_guid=runGuid, cursor=cursor, count=count)
     return _log_tool_result("unity_test_results", _payload(r))
 
 @mcp.tool(description="获取当前 Unity Test Runner 运行 GUID、当前测试、进度时间与取消/清理状态。")
@@ -65,27 +73,36 @@ async def unity_test_force_reset():
 
 @mcp.tool(description="列出 Unity 项目中可用测试，并返回程序集边界、发现数量与过滤命中数量。")
 async def unity_test_list(
-    testMode: str = "EditMode", testFilter: str = "",
+    testMode: str = "EditMode", testFilter: str | None = None,
     testNames: list[str] | None = None, fixtures: list[str] | None = None,
+    assemblies: list[str] | None = None, categories: list[str] | None = None, matchMode: str = "union",
+    requireAllSelectorsMatch: bool = True,
 ):
-    _log_tool_call("unity_test_list", {"testMode": testMode, "testFilter": testFilter, "testNames": testNames, "fixtures": fixtures})
-    r = await _get_facade().test_list(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures)
+    _log_tool_call("unity_test_list", {"testMode": testMode, "testFilter": testFilter, "testNames": testNames, "fixtures": fixtures, "assemblies": assemblies, "categories": categories, "matchMode": matchMode, "requireAllSelectorsMatch": requireAllSelectorsMatch})
+    r = await _get_facade().test_list(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures, assemblies=assemblies, categories=categories, match_mode=matchMode, require_all_selectors_match=requireAllSelectorsMatch)
     return _log_tool_result("unity_test_list", _payload(r))
 
 @mcp.tool(description="一键执行 UPilot 包标准验收：校验规范项目、停止活动 Console capture、安全编译、测试发现与运行、错误检查并写入带 hash 的 JSON 报告。")
 async def unity_upilot_acceptance_run(
-    testMode: str = "EditMode", testFilter: str = "", timeoutSec: float = 900,
+    testMode: str = "EditMode", testFilter: str | None = None, timeoutSec: float = 900,
     stopActiveCaptures: bool = True, requireTests: bool = True, writeArtifact: bool = True,
     testNames: list[str] | None = None, fixtures: list[str] | None = None,
+    assemblies: list[str] | None = None, categories: list[str] | None = None, matchMode: str = "union",
+    requireAllSelectorsMatch: bool = True, expectedSelectionDomain: str = "",
+    expectedSelectionSnapshotId: str = "", preflightOnly: bool = False,
 ):
     args = {"testMode": testMode, "testFilter": testFilter, "timeoutSec": timeoutSec,
             "stopActiveCaptures": stopActiveCaptures, "requireTests": requireTests, "writeArtifact": writeArtifact,
-            "testNames": testNames, "fixtures": fixtures}
+            "testNames": testNames, "fixtures": fixtures, "assemblies": assemblies, "categories": categories, "matchMode": matchMode, "requireAllSelectorsMatch": requireAllSelectorsMatch, "expectedSelectionDomain": expectedSelectionDomain, "expectedSelectionSnapshotId": expectedSelectionSnapshotId, "preflightOnly": preflightOnly}
     _log_tool_call("unity_upilot_acceptance_run", args)
+    if not preflightOnly:
+        rejected = _reject_write_if_unapproved("unity_upilot_acceptance_run")
+        if rejected is not None:
+            return rejected
     r = await _get_facade().upilot_acceptance_run(
         test_mode=testMode, test_filter=testFilter, timeout_sec=timeoutSec,
         stop_active_captures=stopActiveCaptures, require_tests=requireTests, write_artifact=writeArtifact,
-        test_names=testNames, fixtures=fixtures,
+        test_names=testNames, fixtures=fixtures, assemblies=assemblies, categories=categories, match_mode=matchMode, require_all_selectors_match=requireAllSelectorsMatch, expected_selection_domain=expectedSelectionDomain, expected_selection_snapshot_id=expectedSelectionSnapshotId, preflight_only=preflightOnly,
     )
     return _log_tool_result("unity_upilot_acceptance_run", _payload(r))
 
@@ -101,9 +118,12 @@ async def unity_batch_diagnostics():
     description="全自动窗口验收：等编译完成 → 截图（可选） + 窗口布局诊断 + 控制台摘要，一次调用完成所有验收步骤。screenshotDegrade 同 unity_screenshot_editor_window。"
 )
 async def unity_verify_window(
-    windowTitle: str = "upilot",
+    windowTitle: str = "",
     includeScreenshot: bool = True,
     screenshotDegrade: str = "auto",
+    instanceId: str = "",
+    domainGeneration: str = "",
+    fullTypeName: str = "",
 ):
     _log_tool_call(
         "unity_verify_window",
@@ -111,12 +131,18 @@ async def unity_verify_window(
             "windowTitle": windowTitle,
             "includeScreenshot": includeScreenshot,
             "screenshotDegrade": screenshotDegrade,
+            "instanceId": instanceId,
+            "domainGeneration": domainGeneration,
+            "fullTypeName": fullTypeName,
         },
     )
     r = await _get_facade().verify_window(
         window_title=windowTitle,
         include_screenshot=includeScreenshot,
         screenshot_degrade=screenshotDegrade,
+        instance_id=instanceId,
+        domain_generation=domainGeneration,
+        full_type_name=fullTypeName,
     )
     return _log_tool_result("unity_verify_window", _payload(r))
 
@@ -170,7 +196,18 @@ for _name, _value in list(globals().items()):
         continue
     register_public_tool(
         _name,
+        public_handler=_value,
         destructive=_name in _DESTRUCTIVE_TOOLS,
+        write_access_predicate=(
+            (lambda arguments: not bool(arguments.get("preflight_only")))
+            if _name == "unity_upilot_acceptance_run"
+            else None
+        ),
+        write_access_condition=(
+            "preflightOnly=false"
+            if _name == "unity_upilot_acceptance_run"
+            else ""
+        ),
         idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from upilot_mcp.config import CONFIG
+from upilot_mcp.domain.compile_service import CompileDomainService
 from upilot_mcp.domain.resource_service import ResourceDomainService
 from upilot_mcp.responses import ok
 from upilot_mcp.state_store import StateStore
@@ -156,6 +157,9 @@ def test_legacy_database_migration_keeps_old_records_separate(tmp_path, monkeypa
     legacy = state.get_write_batch("legacy")
     assert legacy["filesSha256"] == "legacy-digest"
     assert legacy["changes"] is None and legacy["deletedPaths"] == []
+    assert legacy["warningDetailsAvailable"] is False
+    assert legacy["warningsTruncated"] is False
+    assert "warnings" not in legacy
     new = state.register_write_batch([], created_at=0, files_sha256="", compile_when_edit_mode=True,
                                      changes=[{"path": str(tmp_path / "Gone.cs"), "kind": "delete", "contentSha256": ""}])
     assert new["writeBatchId"] != "legacy" and not new["coalesced"]
@@ -170,7 +174,7 @@ def test_new_batches_do_not_mix_compile_authorization(service):
     assert service.server.state.get_write_batch(first["writeBatchId"])["compileWhenEditMode"] is False
 
 
-def test_delete_batch_resumes_once_after_editmode(service, monkeypatch):
+def test_delete_batch_without_persisted_terminal_requires_recovery_after_editmode(service, monkeypatch):
     result = register(service, deleted=["Gone.cs"])
     calls = []
 
@@ -189,7 +193,10 @@ def test_delete_batch_resumes_once_after_editmode(service, monkeypatch):
     asyncio.run(service._resume_pending_write_batches())
     asyncio.run(service._resume_pending_write_batches())
     assert len(calls) == 1 and calls[0]["write_batch_id"] == result.data["writeBatchId"]
-    assert service.server.state.get_write_batch(result.data["writeBatchId"])["status"] == "verified"
+    stored = service.server.state.get_write_batch(result.data["writeBatchId"])
+    assert stored["status"] == "recovery_required"
+    assert stored["outcome"] == "unknown"
+    assert stored["terminal"] is False
 
 
 def test_new_input_time_is_not_older_than_future_file_mtime(service, tmp_path):
@@ -198,3 +205,219 @@ def test_new_input_time_is_not_older_than_future_file_mtime(service, tmp_path):
     os.utime(path, (2_000_000_000, 2_000_000_000))
     result = register(service, [str(path)])
     assert result.ok and result.data["writeBatchCreatedAt"] >= 2_000_000_000_000
+
+
+def _compile_service(state, dispatch):
+    result = CompileDomainService()
+    result.server = SimpleNamespace(state=state)
+    result.dispatcher = SimpleNamespace(call=dispatch)
+    return result
+
+
+@pytest.mark.parametrize("invalid_value", [{}, [], "true", 1, None])
+def test_compile_warning_option_requires_literal_boolean_and_does_not_dispatch(tmp_path, invalid_value):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    calls = []
+
+    async def dispatch(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("invalid includeWarnings must not reach Unity")
+
+    result = asyncio.run(_compile_service(state, dispatch).compile_errors(
+        compile_request_id="compile-a", include_warnings=invalid_value,
+    ))
+
+    assert not result.ok and result.error.code == "INVALID_PAYLOAD"
+    assert result.error.detail["dispatchAttempted"] is False
+    assert calls == []
+
+
+def test_compile_warning_details_are_opt_in_and_bounded_without_changing_count(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    warnings = [
+        {"file": "Probe.cs", "line": index + 1, "column": 1,
+         "message": f"warning-{index}", "severity": "warning", "assemblyName": "Probe"}
+        for index in range(1001)
+    ]
+    calls = []
+
+    async def dispatch(request_id, command, payload, **kwargs):
+        calls.append((command, payload))
+        return ok(request_id, {
+            "requestId": "compile-a", "total": 0, "errors": [],
+            "warningCount": 1001, "warningDetailsAvailable": True,
+            "warningsTruncated": False, "warnings": warnings,
+        })
+
+    service = _compile_service(state, dispatch)
+    omitted = asyncio.run(service.compile_errors("compile-a", include_warnings=False))
+    assert omitted.ok
+    assert omitted.data["includeWarnings"] is False
+    assert "warnings" not in omitted.data
+    assert omitted.data["warningDetailsAvailable"] is True
+    assert omitted.data["warningCount"] == 1001
+
+    included = asyncio.run(service.compile_errors("compile-a", include_warnings=True))
+    assert included.ok
+    assert included.data["includeWarnings"] is True
+    assert len(included.data["warnings"]) == 1000
+    assert included.data["warningCount"] == 1001
+    assert included.data["warningsTruncated"] is True
+    assert included.data["warningDetailsAvailable"] is True
+    assert state.compile.warning_count == 1001
+    assert calls == [
+        ("compile.errors.get", {"includeWarnings": False}),
+        ("compile.errors.get", {"includeWarnings": True}),
+    ]
+
+
+def test_compile_warning_details_keep_old_missing_records_unknown(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+
+    async def dispatch(request_id, _command, _payload, **_kwargs):
+        return ok(request_id, {
+            "requestId": "compile-old", "total": 0, "errors": [],
+            "warningCount": 4, "warningDetailsAvailable": False,
+            "warnings": [{"message": "must not escape unavailable details"}],
+        })
+
+    result = asyncio.run(_compile_service(state, dispatch).compile_errors(
+        "compile-old", include_warnings=True,
+    ))
+
+    assert result.ok
+    assert result.data["warningCount"] == 4
+    assert result.data["warningDetailsAvailable"] is False
+    assert "warnings" not in result.data
+
+
+def test_correlated_warning_details_are_persisted_bounded_and_restart_safe(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(
+        [str(tmp_path / "Probe.cs")], created_at=1000, files_sha256="digest", compile_when_edit_mode=True,
+    )
+    state.mark_write_batch(batch["writeBatchId"], "compiling", compile_operation_id="compile-a")
+    with sqlite3.connect(state._db_path) as db:
+        db.execute(
+            "UPDATE write_batches SET compile_request_id=? WHERE project_path=? AND write_batch_id=?",
+            ("request-a", state.project_path, batch["writeBatchId"]),
+        )
+    state.producer_epoch = "epoch-a"
+    state.editor.authoritative = True
+    state.compile.compile_request_id = "request-a"
+    state.compile.compile_operation_id = "compile-a"
+    state.compile.write_batch_id = batch["writeBatchId"]
+    state.compile.write_batch_created_at = batch["writeBatchCreatedAt"]
+    state.compile.compile_origin = "mcp"
+    warnings = [{"message": str(index)} for index in range(1001)]
+
+    async def dispatch(request_id, _command, _payload, **_kwargs):
+        return ok(request_id, {
+            "compileRequestId": "request-a", "compileOperationId": "compile-a",
+            "writeBatchId": batch["writeBatchId"],
+            "writeBatchCreatedAt": batch["writeBatchCreatedAt"],
+            "total": 0, "errors": [], "warningCount": 1001,
+            "warningDetailsAvailable": True, "warnings": warnings,
+        })
+
+    response = asyncio.run(_compile_service(state, dispatch).compile_errors("request-a", include_warnings=True))
+    assert response.ok and response.data["warningDetailsPersisted"] is True
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored["warningDetailsAvailable"] is True
+    assert stored["warningsTruncated"] is True
+    assert len(stored["warnings"]) == 1000
+
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    recovered = restored.get_write_batch(batch["writeBatchId"])
+    assert recovered["warningDetailsAvailable"] is True
+    assert recovered["warningsTruncated"] is True
+    assert len(recovered["warnings"]) == 1000
+
+
+def test_warning_persistence_failure_keeps_previous_correlated_details(tmp_path, monkeypatch):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(["Probe.cs"], created_at=1000, files_sha256="digest", compile_when_edit_mode=True)
+    state.mark_write_batch(batch["writeBatchId"], "compiling", compile_operation_id="compile-a")
+    with sqlite3.connect(state._db_path) as db:
+        db.execute(
+            "UPDATE write_batches SET compile_request_id=? WHERE project_path=? AND write_batch_id=?",
+            ("request-a", state.project_path, batch["writeBatchId"]),
+        )
+    assert state.persist_write_batch_warnings(
+        write_batch_id=batch["writeBatchId"], compile_operation_id="compile-a", compile_request_id="request-a",
+        details_available=True, warnings_truncated=False, warnings=[{"message": "old"}],
+    )
+    real_connect = sqlite3.connect
+
+    def broken_connect(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr("upilot_mcp.state_store.sqlite3.connect", broken_connect)
+    assert not state.persist_write_batch_warnings(
+        write_batch_id=batch["writeBatchId"], compile_operation_id="compile-a", compile_request_id="request-a",
+        details_available=True, warnings_truncated=False, warnings=[{"message": "new"}],
+    )
+    monkeypatch.setattr("upilot_mcp.state_store.sqlite3.connect", real_connect)
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored["warnings"] == [{"message": "old"}]
+
+
+def test_unattributed_automatic_compile_never_persists_late_batch_warning_details(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(["Late.cs"], created_at=1000, files_sha256="digest", compile_when_edit_mode=True)
+    state.mark_write_batch(batch["writeBatchId"], "compiling", compile_operation_id="auto-a")
+    with sqlite3.connect(state._db_path) as db:
+        db.execute(
+            "UPDATE write_batches SET compile_request_id=? WHERE project_path=? AND write_batch_id=?",
+            ("request-a", state.project_path, batch["writeBatchId"]),
+        )
+    state.producer_epoch = "epoch-a"
+    state.editor.authoritative = True
+    state.compile.compile_request_id = "request-a"
+    state.compile.compile_operation_id = "auto-a"
+    state.compile.write_batch_id = batch["writeBatchId"]
+    state.compile.write_batch_created_at = batch["writeBatchCreatedAt"]
+    state.compile.compile_origin = "unity_auto"
+
+    async def dispatch(request_id, _command, _payload, **_kwargs):
+        return ok(request_id, {
+            "compileRequestId": "request-a", "compileOperationId": "auto-a",
+            "writeBatchId": batch["writeBatchId"], "total": 0, "errors": [],
+            "warningCount": 1, "warningDetailsAvailable": True, "warnings": [{"message": "late"}],
+        })
+
+    response = asyncio.run(_compile_service(state, dispatch).compile_errors("request-a", include_warnings=True))
+    assert response.ok and response.data["warningDetailsPersisted"] is False
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored["warningDetailsAvailable"] is False
+    assert "warnings" not in stored
+
+
+def test_compile_error_identity_mismatch_does_not_overwrite_other_compile_state(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.compile.warning_count = 7
+
+    async def dispatch(request_id, _command, _payload, **_kwargs):
+        return ok(request_id, {
+            "requestId": "compile-b", "total": 0, "errors": [], "warningCount": 99,
+        })
+
+    result = asyncio.run(_compile_service(state, dispatch).compile_errors(
+        "compile-a", include_warnings=True,
+    ))
+
+    assert not result.ok and result.error.code == "COMPILE_IDENTITY_MISMATCH"
+    assert result.error.detail == {
+        "expectedCompileRequestId": "compile-a",
+        "actualCompileRequestId": "compile-b",
+        "stateUpdated": False,
+    }
+    assert state.compile.warning_count == 7

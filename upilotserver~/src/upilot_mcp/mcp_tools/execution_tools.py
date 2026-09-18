@@ -80,6 +80,7 @@ async def reflection_emit_type(
 for _name in ("execution_session", "csharp_eval", "reflection_emit_type"):
     register_public_tool(
         _name,
+        public_handler=globals()[_name],
         facade_method=_name,
         category="execution",
         destructive=True,

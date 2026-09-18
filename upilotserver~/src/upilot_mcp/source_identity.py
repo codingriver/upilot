@@ -10,9 +10,15 @@ import subprocess
 SOURCE_DIRS = ("Editor", "Runtime", "Tests", "upilotserver~/src", "upilotserver~/tests",
                "upilotserver~/scripts", "upilotserver~/deploy", "skills", ".github/workflows")
 SOURCE_FILES = ("package.json", "upilotserver~/pyproject.toml", "upilotserver~/uv.lock")
+IMPORT_INPUT_SUFFIXES = {".asmdef", ".asmref", ".cs", ".meta", ".rsp"}
 
 
 def source_identity(root: Path, revision: str | None = None) -> dict:
+    identity, _ = source_identity_with_files(root, revision)
+    return identity
+
+
+def source_identity_with_files(root: Path, revision: str | None = None) -> tuple[dict, dict[str, str]]:
     root = root.resolve()
     files = set()
     for directory in SOURCE_DIRS:
@@ -45,4 +51,41 @@ def source_identity(root: Path, revision: str | None = None) -> dict:
         "fileCount": len(entries),
         "scope": "package-code-tests-skills-workflows-v2",
         "textNormalization": "CRLF-to-LF",
+    }, dict(entries)
+
+
+def acceptance_import_inputs(source_root: Path, project: Path) -> dict:
+    """Hash importer-sensitive project inputs without treating equal hashes as import proof."""
+    source_root = source_root.resolve()
+    project = project.resolve()
+    _, package_files = source_identity_with_files(source_root)
+    inputs = {"package:" + path: digest for path, digest in package_files.items()}
+    for folder in (project / "Assets", project / "Packages"):
+        if not folder.is_dir():
+            continue
+        for path in folder.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in IMPORT_INPUT_SUFFIXES:
+                continue
+            relative = path.relative_to(project).as_posix()
+            content = path.read_bytes()
+            if path.suffix.lower() in {".asmdef", ".asmref", ".cs", ".meta", ".rsp"}:
+                content = content.replace(b"\r\n", b"\n")
+            inputs["project:" + relative] = hashlib.sha256(content).hexdigest()
+    return {
+        "schemaVersion": 1,
+        "projectPath": str(project),
+        "inputCount": len(inputs),
+        "inputs": inputs,
     }
+
+
+def diff_acceptance_import_inputs(before: dict, after: dict, limit: int = 200) -> dict:
+    before_inputs = before.get("inputs") if isinstance(before.get("inputs"), dict) else {}
+    after_inputs = after.get("inputs") if isinstance(after.get("inputs"), dict) else {}
+    changes = []
+    for path in sorted(set(before_inputs) | set(after_inputs)):
+        before_hash, after_hash = before_inputs.get(path, ""), after_inputs.get(path, "")
+        if before_hash == after_hash:
+            continue
+        changes.append({"path": path, "beforeSha256": before_hash, "afterSha256": after_hash})
+    return {"changed": changes[:limit], "changeCount": len(changes), "changesTruncated": len(changes) > limit}

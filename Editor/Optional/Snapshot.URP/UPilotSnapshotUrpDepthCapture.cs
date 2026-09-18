@@ -54,7 +54,6 @@ namespace CodingRiver.UPilot
         private sealed class SnapshotDepthPass : ScriptableRenderPass, IDisposable
         {
             private static readonly int InputDepthId = Shader.PropertyToID("_UPilotDepthTexture");
-            private static readonly int CameraDepthId = Shader.PropertyToID("_CameraDepthTexture");
             private readonly RenderTexture _rawDepth;
             private readonly RenderTexture _linearDepth;
             private readonly Material _material;
@@ -84,10 +83,15 @@ namespace CodingRiver.UPilot
 #if !UNITY_6000_0_OR_NEWER
             public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
             {
+                var depth = renderingData.cameraData.renderer.cameraDepthTargetHandle;
+                if (depth == null || depth.rt == null || depth.rt.depth == 0)
+                    return;
                 var command = CommandBufferPool.Get("UPilot Snapshot Depth");
                 try
                 {
-                    command.SetGlobalTexture(InputDepthId, CameraDepthId);
+                    // A one-shot Camera.Render can leave the copied global at a
+                    // placeholder. Sample this camera's live depth attachment.
+                    command.SetGlobalTexture(InputDepthId, depth.nameID, RenderTextureSubElement.Depth);
                     command.Blit(Texture2D.blackTexture, _rawDepth, _material, 0);
                     command.Blit(Texture2D.blackTexture, _linearDepth, _material, 1);
                     context.ExecuteCommandBuffer(command);

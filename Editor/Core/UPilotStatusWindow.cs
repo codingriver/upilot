@@ -315,6 +315,8 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.Space(6);
                 DrawUnsavedScenePolicySection();
                 EditorGUILayout.Space(6);
+                DrawAutomationAuthorizationSection();
+                EditorGUILayout.Space(6);
                 DrawSharedEndpointSection(bridge, status);
                 EditorGUILayout.Space(6);
                 DrawProcessSettingsSection(mcpStatus);
@@ -1154,16 +1156,16 @@ namespace CodingRiver.UPilot
                     var bootstrapEnabled = UPilotBootstrap.IsEnabled;
                     var managerAutoStart = manager.AutoStartEnabled;
                     var autoStart = bootstrapEnabled && managerAutoStart;
-                    var newAutoStart = EditorGUILayout.Toggle("自动启动", autoStart);
+                    var serviceSummary = GetServiceSummary(status, mcpStatus);
+                    var newAutoStart = EditorGUILayout.ToggleLeft(
+                        new GUIContent("自动启动", $"Unity 完成初始化后自动启动 UPilot。当前状态：{serviceSummary}"),
+                        autoStart);
                     if (newAutoStart != autoStart)
                     {
                         UPilotBootstrap.IsEnabled = newAutoStart;
                         manager.AutoStartEnabled = newAutoStart;
                         ShowToast(newAutoStart ? "已开启自动启动" : "已关闭自动启动");
                     }
-
-                    GUILayout.FlexibleSpace();
-                    EditorGUILayout.LabelField(GetServiceSummary(status, mcpStatus), EditorStyles.miniLabel, GUILayout.MaxWidth(260));
                 }
 
                 EditorGUILayout.Space(4);
@@ -1186,40 +1188,43 @@ namespace CodingRiver.UPilot
                 }
                 else
                 {
-                    using (new EditorGUILayout.HorizontalScope())
+                    var buttonRow = EditorGUILayout.GetControlRect(false, 28f);
+                    const float buttonGap = 4f;
+                    var primaryWidth = (buttonRow.width - buttonGap) * (2f / 3f);
+                    var primaryRect = new Rect(buttonRow.x, buttonRow.y, primaryWidth, buttonRow.height);
+                    var stopRect = new Rect(primaryRect.xMax + buttonGap, buttonRow.y, buttonRow.xMax - primaryRect.xMax - buttonGap, buttonRow.height);
+                    var primaryLabel = ready ? "重启 UPilot" : "重新连接";
+
+                    using (new EditorGUI.DisabledScope(serviceStartBlocked))
                     {
-                        var primaryLabel = ready ? "重启 UPilot" : "重新连接";
-                        using (new EditorGUI.DisabledScope(serviceStartBlocked))
+                        if (GUI.Button(primaryRect, primaryLabel))
                         {
-                            if (GUILayout.Button(primaryLabel, GUILayout.Height(28)))
+                            RunStatusAction("重启 UPilot 失败", () =>
                             {
-                                RunStatusAction("重启 UPilot 失败", () =>
-                                {
-                                    UPilotQuickStart.Restart();
-                                    ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
-                                });
-                            }
+                                UPilotQuickStart.Restart();
+                                ShowToast(ready ? "UPilot 正在重启…" : "正在重新连接…");
+                            });
                         }
+                    }
 
-                        using (new EditorGUI.DisabledScope(status.IsCompiling && mcpStatus.IsRunning))
+                    using (new EditorGUI.DisabledScope(status.IsCompiling && mcpStatus.IsRunning))
+                    {
+                        var previousBackground = GUI.backgroundColor;
+                        GUI.backgroundColor = new Color(0.9f, 0.28f, 0.24f);
+                        var stopClicked = GUI.Button(stopRect, "停止");
+                        GUI.backgroundColor = previousBackground;
+
+                        if (stopClicked && EditorUtility.DisplayDialog(
+                                "停止 UPilot？",
+                                "停止后 Agent 将暂时无法操作 Unity。",
+                                "停止 UPilot",
+                                "取消"))
                         {
-                            var previousBackground = GUI.backgroundColor;
-                            GUI.backgroundColor = new Color(0.9f, 0.28f, 0.24f);
-                            var stopClicked = GUILayout.Button("停止", GUILayout.Width(72), GUILayout.Height(28));
-                            GUI.backgroundColor = previousBackground;
-
-                            if (stopClicked && EditorUtility.DisplayDialog(
-                                    "停止 UPilot？",
-                                    "停止后 Agent 将暂时无法操作 Unity。",
-                                    "停止 UPilot",
-                                    "取消"))
+                            RunStatusAction("停止 UPilot 失败", () =>
                             {
-                                RunStatusAction("停止 UPilot 失败", () =>
-                                {
-                                    UPilotQuickStart.Stop();
-                                    ShowToast("UPilot 正在停止…", MessageType.Warning);
-                                });
-                            }
+                                UPilotQuickStart.Stop();
+                                ShowToast("UPilot 正在停止…", MessageType.Warning);
+                            });
                         }
                     }
 
@@ -1250,12 +1255,16 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.LabelField("日志", EditorStyles.boldLabel);
 
                 var debugWire = bridge.DebugWireLogsEnabled;
-                var newDebugWire = EditorGUILayout.ToggleLeft("调试通信日志", debugWire);
+                var newDebugWire = EditorGUILayout.ToggleLeft(
+                    new GUIContent("调试通信日志", "记录 WebSocket SEND/RECV 及截断后的 payload；默认关闭。"),
+                    debugWire);
                 if (newDebugWire != debugWire)
                     bridge.DebugWireLogsEnabled = newDebugWire;
 
                 var verboseLogs = bridge.VerboseLogsEnabled;
-                var newVerboseLogs = EditorGUILayout.ToggleLeft("详细运行日志", verboseLogs);
+                var newVerboseLogs = EditorGUILayout.ToggleLeft(
+                    new GUIContent("详细运行日志", "将命令、编译和普通网络 INFO 过程同步到 Unity Console，并记录额外心跳与连接状态。"),
+                    verboseLogs);
                 if (newVerboseLogs != verboseLogs)
                     bridge.VerboseLogsEnabled = newVerboseLogs;
 
@@ -1268,6 +1277,12 @@ namespace CodingRiver.UPilot
                     Logger.SetLogToUnityConsole(newLogToConsole);
                     ShowToast(newLogToConsole ? "已开启 Unity Console 日志输出" : "已关闭 Unity Console 日志输出");
                 }
+
+                EditorGUILayout.LabelField(
+                    $"文件日志始终写入；单文件 {Logger.MaxLogSizeBytes / (1024 * 1024)} MiB，保留 {Logger.MaxBackupFiles} 个备份（约 {(Logger.MaxBackupFiles + 1) * Logger.MaxLogSizeBytes / (1024 * 1024)} MiB）",
+                    EditorStyles.miniLabel);
+                if (!string.IsNullOrEmpty(Logger.LastFileError))
+                    EditorGUILayout.HelpBox("最近一次日志文件异常：" + Logger.LastFileError, MessageType.Warning);
             }
         }
 
@@ -1282,7 +1297,7 @@ namespace CodingRiver.UPilot
                 UPilotSafetyConfig.UnsavedScenePolicyAutoSave,
                 UPilotSafetyConfig.UnsavedScenePolicyIgnore,
             };
-            var labels = new[] { "阻止（推荐）", "自动保存后继续", "忽略并继续" };
+            var labels = new[] { "阻止", "自动保存后继续", "忽略修改后继续" };
             var index = Array.IndexOf(values, current);
             if (index < 0)
                 index = 0;
@@ -1302,13 +1317,13 @@ namespace CodingRiver.UPilot
                 if (current == UPilotSafetyConfig.UnsavedScenePolicyAutoSave)
                 {
                     EditorGUILayout.HelpBox(
-                        "运行测试或验收前，UPilot 会保存所有已有路径的脏场景。新建但尚无路径的场景仍会阻止操作，以避免弹出另存为窗口。",
-                        MessageType.Warning);
+                        "保存已有路径的脏场景；未命名场景保存为 Assets/UPilotAutoSave_<编号>.unity，绝不覆盖现有文件。",
+                        MessageType.Info);
                 }
                 else if (current == UPilotSafetyConfig.UnsavedScenePolicyIgnore)
                 {
                     EditorGUILayout.HelpBox(
-                        "UPilot 不保存场景并继续运行测试或验收。仅建议在你确认当前场景可被测试影响时短暂使用。",
+                        "运行前会丢弃修改：已有路径场景从磁盘重载，未命名场景关闭而不保存。此操作不可恢复。",
                         MessageType.Warning);
                 }
                 else
@@ -1316,6 +1331,40 @@ namespace CodingRiver.UPilot
                     EditorGUILayout.HelpBox(
                         "发现未保存场景时阻止测试或验收，并返回场景列表供确认。这是默认且推荐的保护策略。",
                         MessageType.Info);
+                }
+            }
+        }
+
+        private void DrawAutomationAuthorizationSection()
+        {
+            var config = UPilotProjectConfig.Current;
+            config.safety ??= new UPilotSafetyConfig();
+            var safety = config.safety;
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("高级设置 > 自动处置授权", EditorStyles.boldLabel);
+                bool full = UPilotAutomationAuthorizationCatalog.IsFull(safety);
+                bool any = (safety.automationAuthorizationScopes ?? Array.Empty<string>()).Length > 0;
+                EditorGUI.showMixedValue = any && !full;
+                bool selected = EditorGUILayout.ToggleLeft("完全授权所有已列项目", full);
+                EditorGUI.showMixedValue = false;
+                if (selected != full)
+                {
+                    UPilotAutomationAuthorizationCatalog.SetAll(safety, selected);
+                    UPilotProjectConfig.Save(config);
+                    ShowToast(selected ? "已原子启用全部当前授权项" : "已清空全部自动处置授权");
+                }
+                EditorGUILayout.HelpBox("仅覆盖下列已建模、精确目标的当前项目操作；未知原生弹窗、其他项目/进程、外部发布和语义不确定的窗口不会自动处理。", MessageType.Info);
+                foreach (var scope in UPilotAutomationAuthorizationCatalog.All)
+                {
+                    bool enabled = UPilotAutomationAuthorizationCatalog.Has(safety, scope.key);
+                    bool updated = EditorGUILayout.ToggleLeft(scope.label, enabled);
+                    if (updated != enabled)
+                    {
+                        UPilotAutomationAuthorizationCatalog.SetScope(safety, scope.key, updated);
+                        UPilotProjectConfig.Save(config);
+                    }
+                    EditorGUILayout.LabelField($"  风险：{scope.risk}  目标：{scope.targetRequirement}", EditorStyles.miniLabel);
                 }
             }
         }

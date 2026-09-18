@@ -27,6 +27,10 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# 根目录临时目录
+.tmp/
+.tmp-release-check/
+
 # Unity test project generated folders
 Tests~/*/.idea/
 Tests~/*/[Ll]ibrary/
@@ -58,6 +62,20 @@ Tests~/*/*.opendb
 Tests~/*/*.VC.db
 Tests~/*/*.stacktrace
 Tests~/*/sysinfo.txt
+
+# Unity test project IDE / 代理配置（测试工程不应提交本地 IDE 和代理配置）
+Tests~/*/.vscode/
+Tests~/*/.opencode/
+Tests~/*/.pytest_cache/
+Tests~/*/.cursor/
+Tests~/*/.codex/
+
+# Documentation~ 临时证据、实现状态、开发计划和一次性分析文件
+Documentation~/P0*
+Documentation~/P1*
+Documentation~/P2*
+Documentation~/Snapshot-Bridge-V1.md
+Documentation~/Unity-Startup-Focus-Analysis-*.md
 
 # Keep (do not ignore)
 !.github/

@@ -1,6 +1,6 @@
 # UPilot Unity MCP Agent Rules Template
 
-rulesVersion: 29
+rulesVersion: 30
 upilotPackageVersion: 0.3.27
 
 This template is the generic UPilot rule source for Unity projects that install
@@ -94,12 +94,12 @@ controlled UPilot block take precedence over these generic rules.
 
 ## Persistent Console Capture
 
-- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation, keep its `sessionId`, and always call `unity_console_capture_stop` on success or failure.
+- For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation and retain its exact `sessionId` and one-time `ownerToken` outside ordinary logs. Call `unity_console_capture_stop` only with that matching token for the task's own session; unknown or another task's capture is not an automatic cleanup target. `forceStop=true` requires an exact session and explicit authorized human disposition.
 - Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`.
-- Before concluding cleanup, call `unity_console_capture_list`, inspect recovered or historical sessions still marked active, and stop the relevant session explicitly.
+- Before concluding cleanup, call `unity_console_capture_list` and inspect recovered or historical active sessions. Do not infer ownership from list data or stop them automatically; package acceptance must block and report the exact session instead.
 - Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
 - Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
-- For canonical UPilot package acceptance, prefer `unity_upilot_acceptance_run`. It stops active captures before ConsoleCaptureService self-tests and does not start a persistent capture around that test run.
+- For canonical UPilot package acceptance, prefer `unity_upilot_acceptance_run`. It blocks on another or unknown active capture before ConsoleCaptureService self-tests and does not start a persistent capture around that test run. Use `unity_console_capture_attach`/`unity_console_capture_detach` for read-only fixed ranges; detach never stops the source.
 
 ## Configuration CSV Safety
 
@@ -146,3 +146,9 @@ controlled UPilot block take precedence over these generic rules.
 - Each item should include the observed problem, affected workflow/tool, proposed UPilot or integration improvement, reproduction or evidence when available, and current status.
 - Do not bury UPilot improvement ideas only in external client project TODO files; the UPilot repository-root `TODO_UPilot.mcd` is the source of truth for UPilot product/backlog follow-up.
 - Do not block the main task just to write feedback unless the missing MCP capability prevents safe completion; summarize any recorded UPilot improvement in the final handoff.
+
+## Advanced Automation Authorization
+
+- Advanced Settings contains a persistent, human-controlled catalog of finite automation scopes. A current catalog select-all is explicit human disposition only for modeled, current-project actions with exact targets; it does not authorize unknown native dialogs, other Unity projects/processes, external release actions, or ambiguous business windows.
+- A `block` unsaved-scene policy remains a deliberate data decision. `autoSave` saves unnamed scenes as `Assets/UPilotAutoSave_<number>.unity`; `ignore` discards modifications before the Runner. Mode transitions and scene policy execution may proceed when their respective scopes are enabled.
+- An ownerless Console Capture can be force-stopped only when both the workflow and persistent `captureForceStop` authorization identify the exact current-project `sessionId`. Acceptance additionally requires `captureAcceptanceClearance`, processes sessions one by one, and verifies manifest/summary evidence without deletion.

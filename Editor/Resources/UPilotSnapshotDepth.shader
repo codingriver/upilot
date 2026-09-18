@@ -1,9 +1,7 @@
 Shader "Hidden/UPilot/SnapshotDepth"
 {
-    Properties
-    {
-        _UPilotDepthTexture ("Depth", 2D) = "black" {}
-    }
+    // This input is also bound by a command-buffer global in the URP 14 pass.
+    // A material Properties default would shadow that binding with black.
     SubShader
     {
         Cull Off ZWrite Off ZTest Always

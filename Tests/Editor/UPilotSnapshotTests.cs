@@ -7,6 +7,7 @@ using System.Collections;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -26,6 +27,353 @@ namespace CodingRiver.UPilot.Tests
         private static readonly MethodInfo CreateAndSchedule = typeof(UPilotSnapshotService).GetMethod(
             "CreateAndSchedule",
             BindingFlags.NonPublic | BindingFlags.Instance);
+
+        [Test]
+        public void NewerTerminalManifestWinsOverOlderNonterminalState()
+        {
+            var state = PersistenceJob("snapshot-state", 4, false, "running");
+            var manifest = PersistenceJob("snapshot-state", 5, true, "completed");
+            var manifestBytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest));
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, manifestBytes, out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.True);
+            Assert.That(resolved, Is.Not.SameAs(state));
+            Assert.That(resolved.terminal, Is.True);
+            Assert.That(resolved.status, Is.EqualTo("completed"));
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("verified"));
+            Assert.That(resolved.persistenceRecovered, Is.True);
+            Assert.That(resolved.manifestBytes, Is.EqualTo(manifestBytes.LongLength));
+            Assert.That(resolved.manifestSha256, Has.Length.EqualTo(64));
+        }
+
+        [Test]
+        public void RecoveredCancellationKeepsBusinessOutcomeSeparateFromPersistence()
+        {
+            var state = PersistenceJob("snapshot-cancelled", 4, false, "running");
+            var manifest = PersistenceJob("snapshot-cancelled", 5, true, "cancelled");
+            manifest.success = false;
+            var manifestBytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest));
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, manifestBytes, out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.True);
+            Assert.That(resolved.terminal, Is.True);
+            Assert.That(resolved.status, Is.EqualTo("cancelled"));
+            Assert.That(resolved.success, Is.False);
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("verified"));
+            Assert.That(resolved.persistenceRecovered, Is.True);
+        }
+
+        [Test]
+        public void NewerNonterminalManifestCannotRollbackTerminalState()
+        {
+            var state = PersistenceJob("snapshot-terminal", 7, true, "completed");
+            var manifest = PersistenceJob("snapshot-terminal", 8, false, "running");
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest)), out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved, Is.SameAs(state));
+            Assert.That(resolved.terminal, Is.True);
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("TERMINAL_STATE_ROLLBACK_REJECTED"));
+        }
+
+        [Test]
+        public void EqualSequenceRequiresSameManifestProjection()
+        {
+            var state = PersistenceJob("snapshot-mismatch", 3, true, "completed");
+            var manifest = PersistenceJob("snapshot-mismatch", 3, true, "failed");
+            var manifestBytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest));
+            state.manifestBytes = manifestBytes.LongLength;
+            state.manifestSha256 = Hash(manifestBytes);
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, manifestBytes, out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("MANIFEST_STATE_MISMATCH"));
+        }
+
+        [Test]
+        public void OlderManifestCannotReplaceANewerStateRecord()
+        {
+            // P2-WP-06-T05: a delayed writer must not roll a job back merely
+            // because it eventually reaches disk after a newer state revision.
+            var state = PersistenceJob("snapshot-late-manifest", 8, false, "running");
+            var manifest = PersistenceJob("snapshot-late-manifest", 7, false, "queued");
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest)), out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved, Is.SameAs(state));
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("MANIFEST_SEQUENCE_STALE"));
+        }
+
+        [Test]
+        public void RequestKeyMismatchIsNotAcceptedAsTheSamePersistedSnapshot()
+        {
+            // P2-WP-06-T06: a matching file name/snapshotId cannot substitute
+            // for request identity; no recovery write is authorized.
+            var state = PersistenceJob("snapshot-request-key", 3, true, "completed");
+            var manifest = PersistenceJob("snapshot-request-key", 3, true, "completed");
+            manifest.requestKey = "other-request";
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest)), out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved, Is.SameAs(state));
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("MANIFEST_STATE_MISMATCH"));
+        }
+
+        [Test]
+        public void GeometryChangeCaptureExceptionIsReportedWithoutDowngradingItsFailureCode()
+        {
+            // P2-WP-04-T04: native capture supplies this diagnostic only after
+            // its before/after identity-and-geometry check has rejected pixels.
+            var exception = new EditorWindowCaptureException(
+                "fixture geometry changed",
+                new EditorWindowPixelCapture { originalError = "WINDOW_CHANGED_DURING_CAPTURE" });
+
+            Assert.That(UPilotSnapshotService.CaptureFailureCode(exception),
+                Is.EqualTo("WINDOW_CHANGED_DURING_CAPTURE"));
+        }
+
+        [Test]
+        public void PersistedManifestPathMustRemainUnderTheDeclaredOutputDirectory()
+        {
+            var job = PersistenceJob("snapshot-path", 1, false, "queued");
+            job.manifestPath = "../outside/manifest.json";
+
+            Assert.That(UPilotSnapshotService.TryResolvePersistedManifestPathForTests(job, out var path), Is.False);
+            Assert.That(path, Is.Null);
+
+            job.manifestPath = job.outputDirectory + "/other.json";
+            Assert.That(UPilotSnapshotService.TryResolvePersistedManifestPathForTests(job, out path), Is.False);
+            Assert.That(path, Is.Null);
+        }
+
+        [Test]
+        public void ManifestOnlyTerminalSnapshotRebuildsOnlyTheStateMetadata()
+        {
+            var manifest = PersistenceJob("snapshot-manifest-only", 9, true, "completed");
+            var bytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest));
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                null, manifest, bytes, out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.True);
+            Assert.That(resolved.terminal, Is.True);
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("verified"));
+            Assert.That(resolved.persistenceRecovered, Is.True);
+            Assert.That(resolved.manifestSha256, Is.EqualTo(Hash(bytes)));
+        }
+
+        [Test]
+        public void ManifestOnlyNonterminalSnapshotRemainsUnverifiedAndIsNotMistakenForACompletedCapture()
+        {
+            // P2-WP-06-T08: a complete manifest file does not prove that its
+            // paired state transaction or the capture itself completed.
+            var manifest = PersistenceJob("snapshot-manifest-running", 9, false, "running");
+            var bytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest));
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                null, manifest, bytes, out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved.terminal, Is.False);
+            Assert.That(resolved.status, Is.EqualTo("running"));
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("NONTERMINAL_MANIFEST_STATE_MISSING"));
+        }
+
+        [Test]
+        public void StateOnlySnapshotStaysUnverifiedAndDoesNotRequestManifestRebuild()
+        {
+            var state = PersistenceJob("snapshot-state-only", 9, true, "completed");
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, null, null, out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved, Is.SameAs(state));
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("MANIFEST_MISSING"));
+        }
+
+        [Test]
+        public void UnknownPersistenceSchemaIsNeverInterpretedAsV2()
+        {
+            var state = PersistenceJob("snapshot-schema", 2, true, "completed");
+            var manifest = PersistenceJob("snapshot-schema", 2, true, "completed");
+            state.persistenceSchemaVersion = 3;
+            manifest.persistenceSchemaVersion = 3;
+
+            var resolved = UPilotSnapshotService.ResolvePersistedSnapshotForTests(
+                state, manifest, Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest)), out var stateNeedsRebuild);
+
+            Assert.That(stateNeedsRebuild, Is.False);
+            Assert.That(resolved.persistenceStatus, Is.EqualTo("unverified"));
+            Assert.That(resolved.persistenceError, Is.EqualTo("PERSISTENCE_SCHEMA_UNSUPPORTED"));
+        }
+
+        [Test]
+        public void StateReplacementFailureDoesNotChangeBusinessResultOrPublishVerifiedHash()
+        {
+            var snapshotId = "snapshot-persist-fault-" + Guid.NewGuid().ToString("N");
+            var job = PersistenceJob(snapshotId, 0, true, "completed");
+            job.success = true;
+            var manifest = ProjectAbsolute(job.manifestPath);
+            var state = ProjectAbsolute("Library/UPilot/SnapshotJobs/" + snapshotId + ".json");
+            try
+            {
+                UPilotSnapshotService.PersistenceWriteFaultForTests = stage =>
+                    stage == "state" ? new IOException("expected state replacement failure") : null;
+                new UPilotSnapshotService(null).PersistJobForTests(job);
+
+                Assert.That(job.terminal, Is.True);
+                Assert.That(job.success, Is.True);
+                Assert.That(job.persistenceStatus, Is.EqualTo("unverified"));
+                Assert.That(job.persistenceError, Is.EqualTo("STATE_REPLACE_FAILED"));
+                Assert.That(job.manifestSha256, Is.Empty);
+                Assert.That(File.Exists(manifest), Is.True);
+                Assert.That(File.Exists(state), Is.False);
+            }
+            finally
+            {
+                UPilotSnapshotService.PersistenceWriteFaultForTests = null;
+                if (File.Exists(manifest)) File.Delete(manifest);
+                var output = ProjectAbsolute(job.outputDirectory);
+                if (Directory.Exists(output)) Directory.Delete(output, true);
+                if (File.Exists(state)) File.Delete(state);
+            }
+        }
+
+        [Test]
+        public void ManifestReplacementBoundaryKeepsOldPairAndReloadDoesNotRecapture()
+        {
+            var snapshotId = "snapshot-manifest-boundary-" + Guid.NewGuid().ToString("N");
+            var job = PersistenceJob(snapshotId, 0, true, "completed");
+            var manifestPath = ProjectAbsolute(job.manifestPath);
+            var statePath = StatePath(snapshotId);
+            try
+            {
+                var writer = new UPilotSnapshotService(null);
+                writer.PersistJobForTests(job);
+                var oldManifest = File.ReadAllBytes(manifestPath);
+                var oldState = File.ReadAllBytes(statePath);
+
+                job.updatedAtUtcMs++;
+                UPilotSnapshotService.PersistenceWriteFaultForTests = stage =>
+                    stage == "manifest-replace" ? new IOException("expected manifest replacement interruption") : null;
+                writer.PersistJobForTests(job);
+                var staged = Directory.GetFiles(
+                    Path.GetDirectoryName(manifestPath),
+                    Path.GetFileName(manifestPath) + ".*.tmp");
+
+                Assert.That(File.ReadAllBytes(manifestPath), Is.EqualTo(oldManifest));
+                Assert.That(File.ReadAllBytes(statePath), Is.EqualTo(oldState));
+                Assert.That(staged, Has.Length.EqualTo(1),
+                    "The interrupted manifest replacement must retain its own non-authoritative staging evidence.");
+                Assert.That(job.persistenceStatus, Is.EqualTo("unverified"));
+                Assert.That(job.persistenceError, Is.EqualTo("MANIFEST_REPLACE_FAILED"));
+
+                UPilotSnapshotService.PersistenceWriteFaultForTests = null;
+                var schedules = 0;
+                var reloaded = new UPilotSnapshotService(null, _ => schedules++);
+                var recovered = reloaded.ReadFromApi(snapshotId);
+
+                Assert.That(recovered, Is.Not.Null);
+                Assert.That(recovered.snapshotId, Is.EqualTo(snapshotId));
+                Assert.That(recovered.terminal, Is.True);
+                Assert.That(recovered.status, Is.EqualTo("completed"));
+                Assert.That(recovered.persistenceStatus, Is.EqualTo("verified"));
+                Assert.That(recovered.manifestSha256, Is.EqualTo(Hash(oldManifest)));
+                Assert.That(schedules, Is.Zero, "Reload must observe the original snapshot instead of scheduling a recapture.");
+            }
+            finally
+            {
+                UPilotSnapshotService.PersistenceWriteFaultForTests = null;
+                var directory = Path.GetDirectoryName(manifestPath);
+                if (Directory.Exists(directory))
+                    foreach (var temporary in Directory.GetFiles(directory, Path.GetFileName(manifestPath) + ".*.tmp"))
+                        File.Delete(temporary);
+                Cleanup(job);
+            }
+        }
+
+        [Test]
+        public void StateReplacementBoundaryRecoversCancelledSnapshotWithOriginalIdWithoutRecapture()
+        {
+            var snapshotId = "snapshot-state-boundary-" + Guid.NewGuid().ToString("N");
+            var job = PersistenceJob(snapshotId, 0, false, "running");
+            var manifestPath = ProjectAbsolute(job.manifestPath);
+            var statePath = StatePath(snapshotId);
+            try
+            {
+                var writer = new UPilotSnapshotService(null);
+                writer.PersistJobForTests(job);
+                var oldManifest = File.ReadAllBytes(manifestPath);
+                var oldState = File.ReadAllBytes(statePath);
+
+                // Model cancellation after the original observation is persisted.
+                // The state fault is raised after the new manifest replacement.
+                job.cancelRequested = true;
+                job.terminal = true;
+                job.success = false;
+                job.status = "cancelled";
+                job.phase = "cancelled";
+                job.updatedAtUtcMs++;
+                job.endedAtUtcMs = job.updatedAtUtcMs;
+                UPilotSnapshotService.PersistenceWriteFaultForTests = stage =>
+                    stage == "state-replace" ? new IOException("expected state replacement interruption") : null;
+                writer.PersistJobForTests(job);
+                var newManifest = File.ReadAllBytes(manifestPath);
+
+                Assert.That(Hash(newManifest), Is.Not.EqualTo(Hash(oldManifest)));
+                Assert.That(File.ReadAllBytes(statePath), Is.EqualTo(oldState));
+                Assert.That(job.snapshotId, Is.EqualTo(snapshotId));
+                Assert.That(job.terminal, Is.True);
+                Assert.That(job.status, Is.EqualTo("cancelled"));
+                Assert.That(job.success, Is.False);
+                Assert.That(job.persistenceStatus, Is.EqualTo("unverified"));
+                Assert.That(job.persistenceError, Is.EqualTo("STATE_REPLACE_FAILED"));
+                Assert.That(job.manifestSha256, Is.Empty);
+
+                UPilotSnapshotService.PersistenceWriteFaultForTests = null;
+                var schedules = 0;
+                var reloaded = new UPilotSnapshotService(null, _ => schedules++);
+                var recovered = reloaded.ReadFromApi(snapshotId);
+                var rebuiltState = JsonUtility.FromJson<SnapshotJobPayload>(File.ReadAllText(statePath));
+
+                Assert.That(recovered, Is.Not.Null);
+                Assert.That(recovered.snapshotId, Is.EqualTo(snapshotId));
+                Assert.That(recovered.terminal, Is.True);
+                Assert.That(recovered.status, Is.EqualTo("cancelled"));
+                Assert.That(recovered.success, Is.False);
+                Assert.That(recovered.persistenceStatus, Is.EqualTo("verified"));
+                Assert.That(recovered.persistenceRecovered, Is.True);
+                Assert.That(recovered.manifestSha256, Is.EqualTo(Hash(newManifest)));
+                Assert.That(rebuiltState.snapshotId, Is.EqualTo(snapshotId));
+                Assert.That(rebuiltState.persistenceStatus, Is.EqualTo("verified"));
+                Assert.That(rebuiltState.manifestSha256, Is.EqualTo(Hash(newManifest)));
+                Assert.That(schedules, Is.Zero, "Reload must not hide cancellation by scheduling another capture.");
+            }
+            finally
+            {
+                UPilotSnapshotService.PersistenceWriteFaultForTests = null;
+                Cleanup(job);
+            }
+        }
 
         [Test]
         public void CameraDiscoveryIncludesInactiveSceneCameras()
@@ -100,6 +448,13 @@ namespace CodingRiver.UPilot.Tests
                 }
                 Assert.That(File.Exists(ProjectAbsolute(job.manifestPath)), Is.True);
                 Assert.That(job.manifestSha256, Has.Length.EqualTo(64));
+                Assert.That(job.persistenceSchemaVersion, Is.EqualTo(2));
+                Assert.That(job.snapshotSequence, Is.GreaterThan(0));
+                Assert.That(job.persistenceStatus, Is.EqualTo("verified"));
+                Assert.That(job.manifestBytes, Is.GreaterThan(0));
+                var manifest = JsonUtility.FromJson<SnapshotJobPayload>(File.ReadAllText(ProjectAbsolute(job.manifestPath)));
+                Assert.That(manifest.manifestSha256, Is.Empty);
+                Assert.That(manifest.manifestBytes, Is.Zero);
             }
             finally
             {
@@ -118,7 +473,8 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 var camera = ConfigureCamera(cameraObject, Color.green);
-                var service = new UPilotSnapshotService(UPilotBridge.Instance);
+                var schedules = 0;
+                var service = new UPilotSnapshotService(UPilotBridge.Instance, _ => schedules++);
                 var request = new SnapshotCapturePayload
                 {
                     requestKey = "deduplicated-" + suffix,
@@ -139,6 +495,7 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(job.status, Is.EqualTo("completed"));
                 Assert.That(job.artifacts.Count, Is.EqualTo(1));
                 Assert.That(job.targets.Count, Is.EqualTo(1));
+                Assert.That(schedules, Is.EqualTo(1));
             }
             finally
             {
@@ -370,6 +727,16 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void WindowContentRectRequirementIsExplicitAndDefaultsToCompatibilityMode()
+        {
+            var target = new SnapshotTargetRequestPayload();
+
+            Assert.That(target.requireContentRect, Is.False);
+            target.requireContentRect = true;
+            Assert.That(target.requireContentRect, Is.True);
+        }
+
+        [Test]
         public void SceneViewSelectorResolvesExactInstanceId()
         {
             var sceneView = EditorWindow.GetWindow<SceneView>();
@@ -387,6 +754,33 @@ namespace CodingRiver.UPilot.Tests
             });
 
             Assert.That(resolved, Is.SameAs(sceneView));
+        }
+
+        [Test]
+        public void SceneViewSelectorRejectsStaleDomainAndExplicitIdentityConflicts()
+        {
+            var sceneView = EditorWindow.GetWindow<SceneView>();
+            var resolve = typeof(UPilotSnapshotService).GetMethod(
+                "ResolveSceneView",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var target = new SnapshotTargetRequestPayload
+            {
+                kind = "sceneView",
+                instanceId = UPilotEntityIds.ToWireId(sceneView).ToString(),
+                domainGeneration = "stale-domain",
+            };
+
+            var domain = Assert.Throws<TargetInvocationException>(() =>
+                resolve.Invoke(null, new object[] { target }));
+            Assert.That(((UPilotSnapshotService.SnapshotRequestException)domain.InnerException).Code,
+                Is.EqualTo("WINDOW_DOMAIN_MISMATCH"));
+
+            target.domainGeneration = UPilotWindowDiagnostics.DomainReloadEpoch.ToString();
+            target.fullTypeName = "Fixture.WrongWindow";
+            var type = Assert.Throws<TargetInvocationException>(() =>
+                resolve.Invoke(null, new object[] { target }));
+            Assert.That(((UPilotSnapshotService.SnapshotRequestException)type.InnerException).Code,
+                Is.EqualTo("EDITORWINDOW_TYPE_MISMATCH"));
         }
 
         [UnityTest]
@@ -572,8 +966,33 @@ namespace CodingRiver.UPilot.Tests
             return job;
         }
 
+        private static SnapshotJobPayload PersistenceJob(string snapshotId, long sequence, bool terminal, string status) =>
+            new SnapshotJobPayload
+            {
+                persistenceSchemaVersion = 2,
+                snapshotId = snapshotId,
+                requestKey = "request-" + snapshotId,
+                requestHash = "hash-" + snapshotId,
+                snapshotSequence = sequence,
+                terminal = terminal,
+                success = terminal,
+                status = status,
+                phase = status,
+                outputDirectory = "Temp/UPilotSnapshotTests/" + snapshotId,
+                manifestPath = "Temp/UPilotSnapshotTests/" + snapshotId + "/manifest.json",
+            };
+
+        private static string Hash(byte[] bytes)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", string.Empty).ToLowerInvariant();
+        }
+
         private static string ProjectAbsolute(string relative) =>
             Path.GetFullPath(Path.Combine(Application.dataPath, "..", relative.Replace('/', Path.DirectorySeparatorChar)));
+
+        private static string StatePath(string snapshotId) =>
+            ProjectAbsolute("Library/UPilot/SnapshotJobs/" + snapshotId + ".json");
 
         private static void Cleanup(SnapshotJobPayload job)
         {

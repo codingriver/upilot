@@ -2,7 +2,7 @@
 
 本文档用于跟踪 UPilot MCP 工具的开发、验收和可用状态。状态矩阵是维护用清单，不替代 `tools/list` 和 `unity_capabilities_get` 返回的实时 schema。
 
-最近同步：2026-09-07，`tools/list` 以当前 MCP 实时返回为准；本表已同步 Snapshot schema v1、Registry v6 及三项集成修复的定向证据。
+最近同步：2026-09-16，`tools/list` 以当前 MCP 实时返回为准；本表已同步 Snapshot schema v1、Registry v7 及三项集成修复的定向证据。
 
 ## 状态口径
 
@@ -28,7 +28,7 @@
 
 本轮最终证据：Unity 6000.6.0a2 定向 12/12、Python 73 项及 Skill 校验通过；源码绑定门禁已实际校验同源 Unity summary。运行中刷新 MCP Server 后原 taskId/runGuid 恢复成功，底层取消与清理屏障实测通过。详情、报告路径与 SHA256 见交付记录，不代表全工具或跨 Unity 版本验收。
 
-上述为前一阶段证据。三项集成修复的当前自动清单位于 `artifacts/integration-fixes/quality/tools.json`：Registry/实时暴露均为 198，本次没有新增工具，四项 `proxyHandlerGaps` 已归零，非空即使质量门禁失败。
+上述为前一阶段证据，不能视为当前源码的工具清单。2026-09-16 以 FastMCP 注册与 Registry 动态核对：FastMCP 为 209、Registry 为 208、已绑定 `public_handler` 为 173，仍有 35 个已注册的 proxy handler gaps；唯一 FastMCP-only 项为刻意隐藏的 `unity_upilot_flow_run_batch`，没有 Registry-only 项。剩余 gap 均非 P2：`unity_build_cancel/start/status/targets`、`unity_monohook_tracing_configure/events/status`、`unity_reflection_call/find/operation_cancel/operation_status/operation_wait`、`unity_type_exists`、`unity_screenshot_camera/compare/editor_window/game_view/pixel_stats/save/scene_view`，以及 `unity_upilot_flow_cancel/executions/force_cleanup/force_reset/list/migrate/pause/results/resume/run_async/run_file/run_suite/status/stop/validate`。这些项的 proxy discovery 仍回退到 Facade snake_case 签名，故不得再声明 gap 为零；本次未修改其非 P2 wrapper。
 
 ### 2026-09-07 三项集成修复
 
@@ -64,13 +64,15 @@
 | `unity_editor_focus_state` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Windows 下成功查询 Unity Editor 焦点状态。 |
 | `unity_playmode_start` | 是 | 是 | 是 | 2026-08-06 联机复验：仅在权威 Context 确认 `playModeState=play/isPlaying=true` 后返回 `confirmed=true`。 |
 | `unity_playmode_stop` | 是 | 是 | 是 | 2026-08-06 联机复验：等待权威 Context 确认 EditMode 后返回；随后 readiness 约 0.09 秒内恢复。 |
+| `unity_playmode_pause` | 是 | 待补充 | 条件可用 | 幂等设置 PlayMode 暂停目标；EditMode 拒绝，写权限关闭时零派发。双版本取消/Reload 现场矩阵待验收。 |
+| `unity_playmode_resume` | 是 | 待补充 | 条件可用 | 幂等恢复已暂停 PlayMode，不等于 stop；写权限关闭时零派发。双版本取消/Reload 现场矩阵待验收。 |
 | `unity_editor_delay` | 是 | 是 | 是 | 2026-06-30 自动验收通过：Unity 主线程 50ms 延迟调用成功。 |
 
 ### 编译、错误与同步
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `unity_compile` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功触发 Unity 编译请求。 |
+| `unity_compile` | 是 | 是 | 是 | 强制请求一次增量脚本编译（Refresh + RequestScriptCompilation），不是 Clean Build；不会绕过断连、PlayMode、活动编译或过期状态保护。 |
 | `unity_compile_status` | 是 | 是 | 是 | 2026-08-06 三项目联机复验：终态 `phase=completed`，queued/accepted/started/finished 时间完整有序；快速无变更编译也会补齐 `finishedAt`。 |
 | `unity_compile_errors` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功读取结构化编译错误，当前错误数为 0。 |
 | `unity_compile_wait` | 是 | 是 | 是 | 2026-06-30 自动验收通过：在编译空闲状态下等待成功返回。 |
@@ -113,6 +115,9 @@
 | `unity_editor_windows_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出打开的 EditorWindow。 |
 | `unity_editor_window_close` | 是 | 是 | 是 | 2026-06-30 自动验收通过：补注册 Bridge 路由后成功关闭浮动 `upilot` 窗口，并通过菜单恢复窗口。 |
 | `unity_editor_window_set_rect` | 是 | 是 | 是 | 2026-06-30 自动验收通过：补注册 Bridge 路由后成功设置浮动 `upilot` 窗口位置和大小。 |
+| `unity_editor_window_history` | 是 | 待补充 | 条件可用 | 返回有界窗口生命周期元数据与 Reload/gap 诊断，不读取窗口内容；真实跨 Reload 重建链待验收。 |
+| `unity_editor_window_open` | 是 | 待补充 | 条件可用 | Safe Mode 仅允许经审计的自有探针类型；未知类型在创建前拒绝。生产白名单保持 fail-closed。 |
+| `unity_editor_window_focus` | 是 | 待补充 | 条件可用 | 只聚焦精确 instanceId/domainGeneration 的已审计探针，不按标题创建或猜测目标。 |
 | `unity_editor_execute_command` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功执行 `Window/General/Console` 编辑器命令。 |
 | `unity_menu_execute` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功执行 `GameObject/Camera` 菜单项。 |
 | `unity_menu_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出可用菜单项。 |
@@ -122,6 +127,8 @@
 | `unity_keyboard_event` | 是 | 是 | 是 | 2026-06-30 自动验收通过：向 Console 窗口注入 `F5` keypress 成功。 |
 | `unity_drag_drop` | 是 | 是 | 是 | 2026-06-30 自动验收通过：对编辑器内部拖拽事件异常降级为 `event_warning` 后，自定义拖放注入路径返回 ok。 |
 | `unity_sceneview_navigate` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功设置 SceneView pivot、size、rotation 与透视模式。 |
+| `unity_sceneview_set_maximized` | 是 | 待补充 | 条件可用 | 精确整数 instanceId 的幂等最大化/恢复；要求写权限，保留原 commandId 与有界 restore token，不保存布局。双 SceneView/Reload/取消矩阵待验收。 |
+| `unity_sceneview_command_status` | 是 | 待补充 | 是 | 只读查询原始 SceneView 命令观察，不重放 setter；未知或 Reload/Server 重启返回 RecoveryRequired。 |
 
 ### 截图与视觉
 

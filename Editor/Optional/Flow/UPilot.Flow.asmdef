@@ -2,6 +2,7 @@
     "name": "UPilot.Flow",
     "rootNamespace": "CodingRiver.UPilot.Flow",
     "references": [
+        "UPilot.Editor",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner",
         "Unity.InputSystem",

@@ -35,6 +35,9 @@ namespace CodingRiver.UPilot
         public int flushIntervalMs = 1000;
         public long maxFileBytes = 50L * 1024L * 1024L;
         public bool allowOutsideProject;
+        public string ownerId;
+        public string ownerToken;
+        public string requestKey;
     }
 
     [Serializable]
@@ -47,6 +50,8 @@ namespace CodingRiver.UPilot
     public sealed class ConsoleCaptureSessionPayload
     {
         public string sessionId;
+        public string ownerToken;
+        public bool forceStop;
     }
 
     [Serializable]
@@ -118,6 +123,9 @@ namespace CodingRiver.UPilot
         public bool ok = true;
         public string sessionId;
         public string title;
+        public string ownerId;
+        public string ownerTokenSha256;
+        public string requestKey;
         public string directory;
         public string jsonlPath;
         public string manifestPath;
@@ -362,6 +370,25 @@ namespace CodingRiver.UPilot
 
         private readonly UPilotBridge _bridge;
 
+        // This is a point-in-time cursor, not proof that every prior record was flushed.
+        // Consumers use it only to bound a related Console query.
+        internal static bool TryGetActiveSequenceBoundary(out string sessionId, out long nextSequence)
+        {
+            lock (CaptureLock)
+            {
+                if (s_active == null || s_active.Manifest == null || !s_active.Manifest.active)
+                {
+                    sessionId = string.Empty;
+                    nextSequence = -1;
+                    return false;
+                }
+
+                sessionId = s_active.Manifest.sessionId ?? string.Empty;
+                nextSequence = s_active.Manifest.nextSequence;
+                return !string.IsNullOrEmpty(sessionId) && nextSequence >= 0;
+            }
+        }
+
         public UPilotConsoleCaptureService(UPilotBridge bridge)
         {
             _bridge = bridge;
@@ -533,7 +560,7 @@ namespace CodingRiver.UPilot
             var tcs = new TaskCompletionSource<ConsoleCaptureResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
-                try { tcs.TrySetResult(StopCapture(payload.sessionId)); }
+                try { tcs.TrySetResult(StopCapture(payload.sessionId, payload.ownerToken, payload.forceStop)); }
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             await SendResultOrError(id, "console.capture.stop", tcs.Task, token);
@@ -577,7 +604,16 @@ namespace CodingRiver.UPilot
             lock (CaptureLock)
             {
                 if (s_active != null && s_active.Manifest.active)
+                {
+                    if (!string.IsNullOrEmpty(payload.requestKey)
+                        && string.Equals(s_active.Manifest.requestKey, payload.requestKey, StringComparison.Ordinal))
+                    {
+                        return CaptureStartRequestMatches(s_active.Manifest, payload)
+                            ? Result(true, "StartCapture", string.Empty, CloneManifest(s_active.Manifest))
+                            : Result(false, "StartCapture", "requestKey 已绑定到不同的采集请求", CloneManifest(s_active.Manifest));
+                    }
                     return Result(false, "StartCapture", "已有日志采集会话正在运行", CloneManifest(s_active.Manifest));
+                }
             }
 
             string projectRoot = GetProjectRoot();
@@ -595,6 +631,9 @@ namespace CodingRiver.UPilot
             {
                 sessionId = sessionId,
                 title = title,
+                ownerId = payload.ownerId ?? string.Empty,
+                ownerTokenSha256 = string.IsNullOrEmpty(payload.ownerToken) ? string.Empty : ComputeTextSha256(payload.ownerToken),
+                requestKey = payload.requestKey ?? string.Empty,
                 directory = directory,
                 jsonlPath = Path.Combine(directory, "console.jsonl"),
                 manifestPath = Path.Combine(directory, "session.json"),
@@ -607,12 +646,12 @@ namespace CodingRiver.UPilot
                 startedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             };
 
+            WriteManifest(manifest);
             lock (CaptureLock)
             {
                 s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
             }
             SessionState.SetString(ProjectSessionKey(ActiveDirectorySessionKey), directory);
-            WriteManifest(manifest);
             RegisterCustomSession(manifest);
             if (payload.clearUnityConsole)
                 ClearUnityConsole();
@@ -927,15 +966,19 @@ namespace CodingRiver.UPilot
             return fields.ToArray();
         }
 
-        private static ConsoleCaptureResult StopCapture(string sessionId)
+        private static ConsoleCaptureResult StopCapture(string sessionId, string ownerToken, bool forceStop)
         {
             TryRecoverActiveSession();
+            if (forceStop && string.IsNullOrEmpty(sessionId))
+                return Result(false, "StopCapture", "forceStop 必须指定精确 sessionId", null);
             ActiveCapture active;
             lock (CaptureLock)
             {
                 active = s_active;
                 if (active != null && !string.IsNullOrEmpty(sessionId) && active.Manifest.sessionId != sessionId)
                     return Result(false, "StopCapture", "活跃会话与 sessionId 不匹配", CloneManifest(active.Manifest));
+                if (active != null && !forceStop && !OwnerTokenMatches(active.Manifest, ownerToken))
+                    return Result(false, "StopCapture", "采集会话所有权凭据不匹配", CloneManifest(active.Manifest));
                 if (active != null)
                     active.Manifest.active = false;
             }
@@ -944,6 +987,8 @@ namespace CodingRiver.UPilot
                 var existing = LoadManifestBySessionId(sessionId);
                 if (existing == null)
                     return Result(false, "StopCapture", "当前没有活跃日志采集会话", null);
+                if (!forceStop && !OwnerTokenMatches(existing, ownerToken))
+                    return Result(false, "StopCapture", "采集会话所有权凭据不匹配", CloneManifest(existing));
 
                 // A service restart or domain reload can lose the SessionState
                 // pointer while the persisted manifest still says active.  A
@@ -1707,6 +1752,40 @@ namespace CodingRiver.UPilot
         private static ConsoleCaptureManifest CloneManifest(ConsoleCaptureManifest manifest)
         {
             return manifest == null ? null : JsonUtility.FromJson<ConsoleCaptureManifest>(JsonUtility.ToJson(manifest));
+        }
+
+        private static bool OwnerTokenMatches(ConsoleCaptureManifest manifest, string ownerToken)
+        {
+            return manifest != null && !string.IsNullOrEmpty(manifest.ownerTokenSha256)
+                && !string.IsNullOrEmpty(ownerToken)
+                && TextHashesMatch(manifest.ownerTokenSha256, ComputeTextSha256(ownerToken));
+        }
+
+        // Ownership credentials authorize a destructive stop.  Compare their
+        // SHA-256 text encodings in fixed time so an untrusted token cannot
+        // learn a matching hash prefix from the comparison itself.
+        private static bool TextHashesMatch(string expectedHash, string actualHash)
+        {
+            if (string.IsNullOrEmpty(expectedHash) || string.IsNullOrEmpty(actualHash))
+            {
+                return false;
+            }
+
+            byte[] expected = Encoding.UTF8.GetBytes(expectedHash);
+            byte[] actual = Encoding.UTF8.GetBytes(actualHash);
+            return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
+        }
+
+        private static bool CaptureStartRequestMatches(ConsoleCaptureManifest manifest, ConsoleCaptureStartPayload payload)
+        {
+            return manifest != null
+                && string.Equals(manifest.ownerId, payload.ownerId ?? string.Empty, StringComparison.Ordinal)
+                && TextHashesMatch(manifest.ownerTokenSha256,
+                    string.IsNullOrEmpty(payload.ownerToken) ? string.Empty : ComputeTextSha256(payload.ownerToken))
+                && manifest.includeStackTrace == payload.includeStackTrace
+                && manifest.excludeUPilot == payload.excludeUPilot
+                && manifest.flushIntervalMs == Math.Max(100, Math.Min(payload.flushIntervalMs, 60000))
+                && manifest.maxFileBytes == Math.Max(1024L * 1024L, payload.maxFileBytes);
         }
 
         private static string GetCurrentSegmentPath(ConsoleCaptureManifest manifest)

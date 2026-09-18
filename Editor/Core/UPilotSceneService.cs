@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -145,6 +146,19 @@ namespace CodingRiver.UPilot
         public List<SceneInfoPayload> scenes = new();
     }
 
+    [Serializable] public class ScenePrepareMessage { public string id; public string type; public string name; public ScenePreparePayload payload; public long timestamp; public string sessionId; public string protocolVersion; }
+    [Serializable] public class ScenePreparePayload { public string policy = "block"; }
+    [Serializable] public class ScenePreparationItemPayload { public string scenePath = ""; public string sceneName = ""; public bool isActive; public string action = ""; public string savedPath = ""; }
+    [Serializable] public class ScenePreparationResultPayload
+    {
+        public string policy = "block";
+        public string action = "none";
+        public bool prepared;
+        public bool sideEffectsMayHaveOccurred;
+        public ScenePreparationItemPayload[] items = Array.Empty<ScenePreparationItemPayload>();
+        public SceneInfoPayload[] remainingDirtyScenes = Array.Empty<SceneInfoPayload>();
+    }
+
     [Serializable]
     public class SceneEnsureTestMessage
     {
@@ -193,8 +207,99 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("scene.load",      HandleSceneLoadAsync);
             _bridge.Router.Register("scene.setActive", HandleSceneSetActiveAsync);
             _bridge.Router.Register("scene.list",      HandleSceneListAsync);
+            _bridge.Router.Register("scene.prepareForAutomation", HandleScenePrepareForAutomationAsync);
             _bridge.Router.Register("scene.unload",    HandleSceneUnloadAsync);
             _bridge.Router.Register("scene.ensureTest", HandleSceneEnsureTestAsync);
+        }
+
+        private async Task HandleScenePrepareForAutomationAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<ScenePrepareMessage>(json)?.payload ?? new ScenePreparePayload();
+            var tcs = new TaskCompletionSource<ScenePreparationResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try { tcs.TrySetResult(PrepareForAutomation(payload.policy)); }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            try { await _bridge.SendResultAsync(id, "scene.prepareForAutomation", await tcs.Task, token); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SCENE_PREPARATION_FAILED", ex.Message, token, "scene.prepareForAutomation"); }
+        }
+
+        /// <summary>Must run on Unity's main thread. It is shared by Server preflight and TestRunner's final preflight.</summary>
+        internal static ScenePreparationResultPayload PrepareForAutomation(string requestedPolicy)
+        {
+            string policy = UPilotSafetyConfig.NormalizeUnsavedScenePolicy(requestedPolicy);
+            var scenes = CaptureLoadedScenes();
+            var dirty = scenes.Where(x => x.isDirty).ToArray();
+            var result = new ScenePreparationResultPayload { policy = policy, prepared = dirty.Length == 0, action = dirty.Length == 0 ? "none" : "blocked" };
+            if (dirty.Length == 0) return result;
+            result.items = dirty.Select(x => new ScenePreparationItemPayload { scenePath = x.scenePath ?? "", sceneName = x.sceneName ?? "", isActive = x.isActive }).ToArray();
+            if (policy == UPilotSafetyConfig.UnsavedScenePolicyBlock)
+            {
+                result.remainingDirtyScenes = dirty;
+                return result;
+            }
+
+            bool sideEffects = false;
+            try
+            {
+                if (policy == UPilotSafetyConfig.UnsavedScenePolicyAutoSave)
+                {
+                    int next = NextAutoSaveNumber();
+                    foreach (var item in result.items)
+                    {
+                        var scene = string.IsNullOrEmpty(item.scenePath) ? FindLoadedUntitled(item.sceneName) : SceneManager.GetSceneByPath(item.scenePath);
+                        if (!scene.IsValid()) throw new InvalidOperationException("Dirty scene was no longer loaded: " + item.sceneName);
+                        string path = scene.path;
+                        if (string.IsNullOrEmpty(path)) path = "Assets/UPilotAutoSave_" + next++ + ".unity";
+                        if (!EditorSceneManager.SaveScene(scene, path)) throw new InvalidOperationException("Could not save scene: " + path);
+                        sideEffects = true; item.action = "saved"; item.savedPath = path; item.scenePath = path;
+                    }
+                    AssetDatabase.Refresh(); result.action = "autoSaved";
+                }
+                else
+                {
+                    // Closing without save is the only way to make the Test Runner unable to show a save modal.
+                    var activePath = SceneManager.GetActiveScene().path;
+                    foreach (var item in result.items)
+                    {
+                        var scene = string.IsNullOrEmpty(item.scenePath) ? FindLoadedUntitled(item.sceneName) : SceneManager.GetSceneByPath(item.scenePath);
+                        if (!scene.IsValid()) throw new InvalidOperationException("Dirty scene was no longer loaded: " + item.sceneName);
+                        string path = scene.path;
+                        if (!EditorSceneManager.CloseScene(scene, true)) throw new InvalidOperationException("Could not close dirty scene: " + item.sceneName);
+                        sideEffects = true;
+                        if (!string.IsNullOrEmpty(path)) EditorSceneManager.OpenScene(path, OpenSceneMode.Additive);
+                        item.action = string.IsNullOrEmpty(path) ? "closedWithoutSave" : "reloadedFromDisk";
+                    }
+                    if (SceneManager.sceneCount == 0) EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+                    if (!string.IsNullOrEmpty(activePath)) { var active = SceneManager.GetSceneByPath(activePath); if (active.IsValid()) SceneManager.SetActiveScene(active); }
+                    result.action = "ignored";
+                }
+                result.remainingDirtyScenes = CaptureLoadedScenes().Where(x => x.isDirty).ToArray();
+                result.prepared = result.remainingDirtyScenes.Length == 0;
+                result.sideEffectsMayHaveOccurred = sideEffects;
+                if (!result.prepared) throw new InvalidOperationException("Scene preparation left dirty scenes.");
+                return result;
+            }
+            catch
+            {
+                result.sideEffectsMayHaveOccurred = sideEffects;
+                result.remainingDirtyScenes = CaptureLoadedScenes().Where(x => x.isDirty).ToArray();
+                throw;
+            }
+        }
+
+        private static SceneInfoPayload[] CaptureLoadedScenes() => Enumerable.Range(0, SceneManager.sceneCount).Select(i => BuildSceneInfo(SceneManager.GetSceneAt(i))).ToArray();
+        private static Scene FindLoadedUntitled(string name) => Enumerable.Range(0, SceneManager.sceneCount).Select(i => SceneManager.GetSceneAt(i)).FirstOrDefault(x => string.IsNullOrEmpty(x.path) && x.name == name);
+        private static int NextAutoSaveNumber()
+        {
+            string directory = Application.dataPath; int max = 0;
+            foreach (var file in System.IO.Directory.GetFiles(directory, "UPilotAutoSave_*.unity"))
+            {
+                var stem = System.IO.Path.GetFileNameWithoutExtension(file).Replace("UPilotAutoSave_", "");
+                if (int.TryParse(stem, out int value)) max = Math.Max(max, value);
+            }
+            return max + 1;
         }
 
         // ── scene.ensureTest — empty test scene: open if asset exists, else create + save ──

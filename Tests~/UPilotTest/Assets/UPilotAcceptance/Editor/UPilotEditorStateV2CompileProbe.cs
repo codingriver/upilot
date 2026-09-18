@@ -6,6 +6,6 @@ namespace CodingRiver.UPilot.Acceptance
     /// </summary>
     internal static class UPilotEditorStateV2CompileProbe
     {
-        internal const int Round = 12;
+        internal const int Round = 17;
     }
 }

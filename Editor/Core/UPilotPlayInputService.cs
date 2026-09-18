@@ -16,16 +16,70 @@ namespace CodingRiver.UPilot
         /// <summary>Must be called from the main thread.</summary>
         public GenericOkPayload SetPlayMode(string action)
         {
-            if (action == "play")
+            if (action == "pause" || action == "resume")
             {
                 if (!EditorApplication.isPlaying)
-                    EditorApplication.isPlaying = true;
-                return new GenericOkPayload { ok = true, state = "play" };
+                {
+                    return new GenericOkPayload
+                    {
+                        ok = false,
+                        state = "edit",
+                        status = "rejected",
+                        blocked = true,
+                        blockedReason = "PLAYMODE_REQUIRED",
+                        nextAction = "Enter PlayMode explicitly before pausing or resuming.",
+                    };
+                }
+
+                var shouldPause = action == "pause";
+                var changed = EditorApplication.isPaused != shouldPause;
+                if (EditorApplication.isPaused != shouldPause)
+                    EditorApplication.isPaused = shouldPause;
+                var observedState = CurrentPlayModeChangedPayload().state;
+                return new GenericOkPayload
+                {
+                    ok = true,
+                    state = observedState,
+                    status = "completed",
+                    changed = changed,
+                    writeCount = changed ? 1 : 0,
+                    requestedState = shouldPause ? "pause" : "play",
+                    observedState = observedState,
+                };
             }
 
+            if (action == "play")
+            {
+                var changed = !EditorApplication.isPlaying;
+                if (!EditorApplication.isPlaying)
+                    EditorApplication.isPlaying = true;
+                var observedState = CurrentPlayModeChangedPayload().state;
+                return new GenericOkPayload
+                {
+                    ok = true,
+                    state = observedState,
+                    status = "completed",
+                    changed = changed,
+                    writeCount = changed ? 1 : 0,
+                    requestedState = "play",
+                    observedState = observedState,
+                };
+            }
+
+            var stopped = EditorApplication.isPlaying;
             if (EditorApplication.isPlaying)
                 EditorApplication.isPlaying = false;
-            return new GenericOkPayload { ok = true, state = "edit" };
+            var state = CurrentPlayModeChangedPayload().state;
+            return new GenericOkPayload
+            {
+                ok = true,
+                state = state,
+                status = "completed",
+                changed = stopped,
+                writeCount = stopped ? 1 : 0,
+                requestedState = "edit",
+                observedState = state,
+            };
         }
 
         public PlayModeChangedPayload CurrentPlayModeChangedPayload()

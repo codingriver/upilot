@@ -138,15 +138,44 @@ namespace CodingRiver.UPilot
                         ? property.enumNames[property.enumValueIndex]
                         : property.enumValueIndex.ToString(CultureInfo.InvariantCulture);
                 case SerializedPropertyType.Color:
-                    return JsonUtility.ToJson(property.colorValue);
+                    var color = property.colorValue;
+                    RequireFinite(color.r, property.propertyPath, "r");
+                    RequireFinite(color.g, property.propertyPath, "g");
+                    RequireFinite(color.b, property.propertyPath, "b");
+                    RequireFinite(color.a, property.propertyPath, "a");
+                    return JsonUtility.ToJson(color);
                 case SerializedPropertyType.Vector2:
-                    return JsonUtility.ToJson(property.vector2Value);
+                    var vector2 = property.vector2Value;
+                    RequireFinite(vector2.x, property.propertyPath, "x");
+                    RequireFinite(vector2.y, property.propertyPath, "y");
+                    return JsonUtility.ToJson(vector2);
                 case SerializedPropertyType.Vector3:
-                    return JsonUtility.ToJson(property.vector3Value);
+                    var vector3 = property.vector3Value;
+                    RequireFinite(vector3.x, property.propertyPath, "x");
+                    RequireFinite(vector3.y, property.propertyPath, "y");
+                    RequireFinite(vector3.z, property.propertyPath, "z");
+                    return JsonUtility.ToJson(vector3);
                 case SerializedPropertyType.Vector4:
-                    return JsonUtility.ToJson(property.vector4Value);
+                    var vector4 = property.vector4Value;
+                    RequireFinite(vector4.x, property.propertyPath, "x");
+                    RequireFinite(vector4.y, property.propertyPath, "y");
+                    RequireFinite(vector4.z, property.propertyPath, "z");
+                    RequireFinite(vector4.w, property.propertyPath, "w");
+                    return JsonUtility.ToJson(vector4);
                 case SerializedPropertyType.Quaternion:
-                    return JsonUtility.ToJson(property.quaternionValue);
+                    var quaternion = property.quaternionValue;
+                    RequireFinite(quaternion.x, property.propertyPath, "x");
+                    RequireFinite(quaternion.y, property.propertyPath, "y");
+                    RequireFinite(quaternion.z, property.propertyPath, "z");
+                    RequireFinite(quaternion.w, property.propertyPath, "w");
+                    return JsonUtility.ToJson(quaternion);
+                case SerializedPropertyType.Rect:
+                    var rect = property.rectValue;
+                    RequireFinite(rect.x, property.propertyPath, "x");
+                    RequireFinite(rect.y, property.propertyPath, "y");
+                    RequireFinite(rect.width, property.propertyPath, "width");
+                    RequireFinite(rect.height, property.propertyPath, "height");
+                    return JsonUtility.ToJson(rect);
                 case SerializedPropertyType.ObjectReference:
                     if (property.objectReferenceValue == null)
                         return string.Empty;
@@ -304,13 +333,25 @@ namespace CodingRiver.UPilot
             for (var index = 0; index < fields.Length; index++)
             {
                 if (!parsed.TryGetValue(fields[index], out var text)
-                    || !float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out result[index]))
+                    || !float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out result[index])
+                    || float.IsNaN(result[index])
+                    || float.IsInfinity(result[index]))
                 {
                     throw new InvalidOperationException(
-                        $"{propertyPath}: expected JSON object containing numeric {string.Join(", ", fields)} fields.");
+                        $"{propertyPath}.{fields[index]}: expected a finite JSON number; " +
+                        $"all required fields are {string.Join(", ", fields)}.");
                 }
             }
             return result;
+        }
+
+        private static void RequireFinite(float value, string propertyPath, string component)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value))
+            {
+                throw new InvalidOperationException(
+                    $"{propertyPath}.{component}: cannot serialize non-finite floating-point value.");
+            }
         }
     }
 }

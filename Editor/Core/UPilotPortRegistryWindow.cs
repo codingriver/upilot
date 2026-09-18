@@ -15,7 +15,6 @@ namespace CodingRiver.UPilot
         private string _error = "";
         private string _path = "";
 
-        [MenuItem("UPilot/端口登记管理", false, 102)]
         internal static void Open()
         {
             var window = GetWindow<UPilotPortRegistryWindow>("UPilot 端口登记");

@@ -25,7 +25,12 @@ CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
 @mcp.tool(
-    description="触发 Unity 脚本编译请求。会刷新/编译项目代码；PlayMode 下会被拒绝。修改代码后优先用 unity_safe_compile_and_wait 或 compile + compile_wait。"
+    description=(
+        "强制请求一次 Unity 增量脚本编译：先 AssetDatabase.Refresh，再调用 RequestScriptCompilation。"
+        "这不是 Clean Build，不会绕过断连、PlayMode、活动编译或状态过期保护。"
+        "修改代码后优先登记 unity_write_batch_register(compileWhenEditMode=true)，"
+        "手动诊断优先使用 unity_safe_compile_and_wait。"
+    )
 )
 async def unity_compile():
     _log_tool_call("unity_compile", {})
@@ -42,15 +47,15 @@ async def unity_compile_status(compileRequestId: str = ""):
     return _log_tool_result("unity_compile_status", _payload(r))
 
 @mcp.tool(description="获取最近一次结构化编译错误（仅 live，不回退缓存）。")
-async def unity_compile_errors(compileRequestId: str = ""):
-    _log_tool_call("unity_compile_errors", {"compileRequestId": compileRequestId})
-    r = await _get_facade().compile_errors(compile_request_id=compileRequestId)
+async def unity_compile_errors(compileRequestId: str = "", includeWarnings: bool = False):
+    _log_tool_call("unity_compile_errors", {"compileRequestId": compileRequestId, "includeWarnings": includeWarnings})
+    r = await _get_facade().compile_errors(compile_request_id=compileRequestId, include_warnings=includeWarnings)
     return _log_tool_result("unity_compile_errors", _payload(r))
 
 @mcp.tool(description="兼容别名：获取最近一次结构化编译错误。请优先使用 unity_compile_errors。")
-async def unity_compile_errors_get(compileRequestId: str = ""):
-    _log_tool_call("unity_compile_errors_get", {"compileRequestId": compileRequestId})
-    r = await _get_facade().compile_errors(compile_request_id=compileRequestId)
+async def unity_compile_errors_get(compileRequestId: str = "", includeWarnings: bool = False):
+    _log_tool_call("unity_compile_errors_get", {"compileRequestId": compileRequestId, "includeWarnings": includeWarnings})
+    r = await _get_facade().compile_errors(compile_request_id=compileRequestId, include_warnings=includeWarnings)
     return _log_tool_result("unity_compile_errors_get", _payload(r))
 
 @mcp.tool(
@@ -198,6 +203,7 @@ for _name, _value in list(globals().items()):
         continue
     register_public_tool(
         _name,
+        public_handler=_value,
         facade_method="compile_errors" if _name == "unity_compile_errors_get" else None,
         destructive=_name in _DESTRUCTIVE_TOOLS,
         idempotent=_name not in _DESTRUCTIVE_TOOLS,

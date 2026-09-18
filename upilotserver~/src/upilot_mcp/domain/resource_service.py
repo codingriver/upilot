@@ -83,8 +83,87 @@ def _require_mutation_success(response: ToolResponse, tool_name: str) -> ToolRes
         timing=response.timing,
     )
 
+
+def _with_read_only_observation_evidence(response: ToolResponse) -> ToolResponse:
+    """Keep Unity's state evidence verbatim and make an absent observation explicit.
+
+    Dependency/reference queries are read-only *requests*, but an isolated Prefab
+    load can still expose a Unity-side state change.  Older Bridge payloads did
+    not carry the observation fields for every dependency mode, so never turn a
+    missing field into ``false`` merely because this tool did not request a write.
+    """
+    if not response.ok or not isinstance(response.data, dict):
+        return response
+    data = dict(response.data)
+    has_read_only = isinstance(data.get("readOnly"), bool)
+    has_changed_state = isinstance(data.get("changedEditorState"), bool)
+    if has_read_only and has_changed_state:
+        data.setdefault("changeStateEvidence", "unityPayload")
+    else:
+        # ``null`` means the Bridge did not make an observation.  It is distinct
+        # from a verified ``false`` and keeps old Unity packages wire-compatible.
+        data.setdefault("readOnly", None)
+        data.setdefault("changedEditorState", None)
+        data.setdefault("changeStateEvidence", "unknown")
+    return ToolResponse(
+        ok=response.ok,
+        data=data,
+        error=response.error,
+        request_id=response.request_id,
+        timestamp=response.timestamp,
+        context=response.context,
+        timing=response.timing,
+    )
+
+
 class ResourceDomainService:
     _CODE_WRITE_EXTENSIONS = {".cs", ".asmdef", ".asmref", ".rsp"}
+
+    def _write_batch_waiting_diagnostics(self, batch: dict, execution: dict | None = None) -> dict:
+        """Derive a non-mutating wait diagnosis from the current authoritative state."""
+        execution = execution or self._current_execution_state()
+        terminal = bool(batch.get("terminal"))
+        now = now_ms()
+        created_at = int(batch.get("writeBatchCreatedAt") or 0)
+        last_progress_at = int(execution.get("lastProgressAt") or created_at)
+        pending_age_ms = max(0, now - created_at) if created_at and not terminal else 0
+        progress_age_ms = max(0, now - last_progress_at) if last_progress_at and not terminal else 0
+        phase = str(execution.get("compilePhase") or "").lower()
+
+        if terminal:
+            reason = "none"
+        elif str(batch.get("status") or "") == "recovery_required":
+            reason = "recovery_required"
+        elif execution.get("unityConnected") is False:
+            reason = "disconnected"
+        elif phase in {"domain_reload", "verifying"}:
+            reason = "reload"
+        # A raw play flag from a stale/recovering snapshot is not authorization
+        # to tell a caller to leave PlayMode.
+        elif execution.get("authoritative") and str(execution.get("playModeState") or "") in {"play", "pause"}:
+            reason = "playmode"
+        elif not execution.get("authoritative") or execution.get("isStale"):
+            reason = "stale"
+        elif phase in {"queued", "compiling", "compiler_finished"} or bool(execution.get("isCompiling")):
+            reason = "compile_in_progress"
+        else:
+            reason = "none"
+
+        actions = {
+            "playmode": "Leave PlayMode only after user confirmation; UPilot will resume the same authorized batch after authoritative EditMode.",
+            "reload": "Wait for the same batch to recover; do not switch PlayMode.",
+            "disconnected": "Reconnect the intended Unity project and observe the same batch; do not recompile.",
+            "stale": "Wait for the same authorized batch to receive a fresh authoritative Editor snapshot.",
+            "recovery_required": "Observe the original compile identity; do not trigger a replacement compile for this batch.",
+            "compile_in_progress": "Continue observing the current compile; do not submit a second compile.",
+        }
+        return {
+            "waitingReason": reason,
+            "pendingAgeMs": pending_age_ms,
+            "lastProgressAt": int(execution.get("lastProgressAt") or 0),
+            "attentionRequired": bool(not terminal and progress_age_ms > 30000),
+            "waitingNextAction": actions.get(reason, "No compile wait is currently required."),
+        }
 
     def _current_execution_state(self) -> dict:
         server = getattr(self, "server", None)
@@ -130,6 +209,20 @@ class ResourceDomainService:
         except (OSError, ValueError, json.JSONDecodeError):
             pass
         return list(dict.fromkeys(roots))
+
+    async def write_batch_status(self, write_batch_id: str) -> ToolResponse:
+        request_id = new_id("req")
+        batch = self.server.state.get_write_batch(write_batch_id)
+        if batch is None:
+            return fail(request_id, "WRITE_BATCH_NOT_FOUND", "No batch exists in this project.", {"writeBatchId": write_batch_id})
+        execution = self._current_execution_state()
+        waiting = self._write_batch_waiting_diagnostics(batch, execution)
+        return ok(request_id, {
+            **batch,
+            **waiting,
+            "nextAction": waiting["waitingNextAction"],
+            "executionState": execution,
+        }, context=execution)
 
     async def write_batch_register(
         self,
@@ -209,13 +302,24 @@ class ResourceDomainService:
         elif compile_when_edit_mode:
             self.server.state.mark_write_batch(batch["writeBatchId"], "deferred")
             status = "deferred"
-            next_action = "Leave PlayMode when ready; UPilot will resume this authorized batch after Unity publishes authoritative EditMode."
+            wait_reason = self._write_batch_waiting_diagnostics({**batch, "status": status}, execution)["waitingReason"]
+            next_action = (
+                "Leave PlayMode when ready; UPilot will resume this authorized batch after Unity publishes authoritative EditMode."
+                if wait_reason == "playmode"
+                else "Wait for the same authorized batch to recover; do not change PlayMode or submit another compile."
+            )
         else:
             status = "registered"
             next_action = "Call unity_sync_after_disk_write with this writeBatchId after authoritative EditMode is available."
+        response_batch = {**batch, "status": status, "terminal": False}
         return ok(
             request_id,
-            {**batch, "status": status, "terminal": False, "nextAction": next_action, "executionState": execution},
+            {
+                **response_batch,
+                **self._write_batch_waiting_diagnostics(response_batch, execution),
+                "nextAction": next_action,
+                "executionState": execution,
+            },
             context=execution,
         )
 
@@ -239,6 +343,23 @@ class ResourceDomainService:
         for batch in self.server.state.pending_write_batches():
             if not batch["compileWhenEditMode"]:
                 continue
+            if batch["status"] == "recovery_required":
+                continue
+            # A write registered after Unity had already begun an automatic
+            # compile cannot borrow that compile's result.  Leave this batch
+            # pending; the next fresh EditMode execution snapshot schedules
+            # the one already-authorized, request-scoped compile.  This branch
+            # neither marks recovery-required nor starts a second compile.
+            if (
+                str(execution.get("compileOrigin") or "") == "unity_auto"
+                and (
+                    bool(execution.get("isCompiling"))
+                    or str(execution.get("compilePhase") or "") in {
+                        "queued", "compiling", "compiler_finished", "domain_reload", "verifying"
+                    }
+                )
+            ):
+                continue
             batch_id = str(batch["writeBatchId"])
             self.server.state.mark_write_batch(batch_id, "syncing")
             self.server.state.mark_write_batch(batch_id, "compiling")
@@ -253,15 +374,26 @@ class ResourceDomainService:
             compile_operation_id = str(self.server.state.compile.compile_operation_id or "")
             result_data = result.data or {}
             phase = str(result_data.get("phase") or result_data.get("status") or "").lower()
-            if result.ok and bool(result_data.get("correlationVerified")) and phase == "completed":
-                self.server.state.mark_write_batch(batch_id, "verified", compile_operation_id=compile_operation_id)
-            else:
+            correlation_verified = bool(result_data.get("correlationVerified"))
+            stored = self.server.state.get_write_batch(batch_id)
+            persisted_terminal = bool(
+                stored
+                and stored.get("terminal")
+                and stored.get("correlationVerified")
+                and stored.get("outcome") in {"passed", "failed"}
+            )
+            if not (result.ok and correlation_verified and phase in {"completed", "failed"} and persisted_terminal):
                 message = (
                     result.error.message
                     if result.error
-                    else "Compilation did not produce a correlated successful terminal state."
+                    else "Compilation returned without a persisted correlated terminal snapshot."
                 )
-                self.server.state.mark_write_batch(batch_id, "failed", compile_operation_id=compile_operation_id, error=message)
+                self.server.state.mark_write_batch(
+                    batch_id,
+                    "recovery_required",
+                    compile_operation_id=compile_operation_id,
+                    error=message,
+                )
 
     async def asset_find(self, query: str, asset_type: str = "") -> ToolResponse:
         request_id = new_id("req")
@@ -304,12 +436,153 @@ class ResourceDomainService:
             "maxNodes": max_nodes, "maxMilliseconds": max_milliseconds, "maxExamples": max_examples,
         })
 
-    async def asset_dependencies(self, asset_path: str, recursive: bool = True) -> ToolResponse:
-        return await self.dispatcher.call(
-            new_id("req"),
-            "asset.dependencies",
-            {"assetPath": asset_path, "recursive": recursive},
+    async def asset_dependencies(
+        self,
+        asset_path: str = "",
+        recursive: bool = True,
+        evidence_mode: str = "file",
+        runtime_boundary: str = "none",
+        direction: str = "forward",
+        reference_query: dict | None = None,
+        scope: list[str] | None = None,
+        max_nodes: int = 500,
+        time_budget_ms: int = 5000,
+        continuation_token: str = "",
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        if not isinstance(recursive, bool):
+            return fail(request_id, "DEPENDENCY_RECURSIVE_INVALID", "recursive must be a boolean.",
+                        {"field": "recursive", "sideEffectsMayHaveOccurred": False})
+        if not isinstance(continuation_token, str):
+            return fail(request_id, "REFERENCE_QUERY_INVALID", "continuationToken must be a string.",
+                        {"field": "continuationToken", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(evidence_mode, str):
+            return fail(request_id, "DEPENDENCY_EVIDENCE_MODE_INVALID", "evidenceMode must be a string.",
+                        {"field": "evidenceMode", "value": evidence_mode, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(runtime_boundary, str):
+            return fail(request_id, "DEPENDENCY_RUNTIME_BOUNDARY_INVALID", "runtimeBoundary must be a string.",
+                        {"field": "runtimeBoundary", "value": runtime_boundary, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(direction, str):
+            return fail(request_id, "DEPENDENCY_DIRECTION_INVALID", "direction must be a string.",
+                        {"field": "direction", "value": direction, "sideEffectsMayHaveOccurred": False})
+        evidence_key = str(evidence_mode or "").strip().lower()
+        boundary_key = str(runtime_boundary or "").strip()
+        direction_key = str(direction or "").strip().lower()
+        if scope is not None and not isinstance(scope, list):
+            return fail(request_id, "REFERENCE_SCOPE_INVALID", "scope must be an array of project-relative Assets/ folders.",
+                        {"field": "scope", "sideEffectsMayHaveOccurred": False})
+        normalized_scope = list(scope or [])
+        if evidence_key not in {"file", "object"}:
+            return fail(request_id, "DEPENDENCY_EVIDENCE_MODE_INVALID", "evidenceMode must be file or object.",
+                        {"field": "evidenceMode", "value": evidence_mode, "sideEffectsMayHaveOccurred": False})
+        if boundary_key not in {"none", "ExcludeAssetsEditor"}:
+            return fail(request_id, "DEPENDENCY_RUNTIME_BOUNDARY_INVALID", "runtimeBoundary must be none or ExcludeAssetsEditor.",
+                        {"field": "runtimeBoundary", "value": runtime_boundary, "sideEffectsMayHaveOccurred": False})
+        if direction_key not in {"forward", "reverse"}:
+            return fail(request_id, "DEPENDENCY_DIRECTION_INVALID", "direction must be forward or reverse.",
+                        {"field": "direction", "value": direction, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(max_nodes, int) or isinstance(max_nodes, bool) or not 1 <= max_nodes <= 5000:
+            return fail(request_id, "DEPENDENCY_NODE_BUDGET_INVALID", "maxNodes must be an integer from 1 through 5000.",
+                        {"field": "maxNodes", "sideEffectsMayHaveOccurred": False})
+        if not isinstance(time_budget_ms, int) or isinstance(time_budget_ms, bool) or not 1 <= time_budget_ms <= 30000:
+            return fail(request_id, "DEPENDENCY_TIME_BUDGET_INVALID", "timeBudgetMs must be an integer from 1 through 30000.",
+                        {"field": "timeBudgetMs", "sideEffectsMayHaveOccurred": False})
+        if any(not self._is_project_asset_folder(path) for path in normalized_scope):
+            return fail(request_id, "REFERENCE_SCOPE_INVALID", "scope must contain project-relative Assets/ folders only.",
+                        {"field": "scope", "sideEffectsMayHaveOccurred": False})
+        # Scope and literal property paths identify a query, not a traversal order.
+        # Canonicalize them before Unity derives the cursor signature so a caller can
+        # safely resume a page with the same semantic query.
+        normalized_scope = sorted({path.rstrip("/") if path != "Assets/" else path for path in normalized_scope})
+
+        normalized_query, query_error = self._normalize_dependency_reference_query(reference_query)
+        if query_error is not None:
+            return fail(request_id, "REFERENCE_QUERY_INVALID", query_error,
+                        {"field": "referenceQuery", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if direction_key == "forward":
+            if not isinstance(asset_path, str) or not asset_path.strip():
+                return fail(request_id, "ASSET_PATH_REQUIRED", "assetPath is required for forward dependency queries.",
+                            {"field": "assetPath", "sideEffectsMayHaveOccurred": False})
+            if normalized_query is not None or normalized_scope:
+                return fail(request_id, "REFERENCE_QUERY_INVALID", "referenceQuery and scope are only valid for reverse queries.",
+                            {"field": "referenceQuery", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+            if continuation_token:
+                return fail(request_id, "REFERENCE_QUERY_INVALID", "continuationToken is only valid for reverse queries.",
+                            {"field": "continuationToken", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        else:
+            if not isinstance(asset_path, str) or asset_path:
+                return fail(request_id, "REFERENCE_QUERY_INVALID", "assetPath must be empty for reverse queries.",
+                            {"field": "assetPath", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+            if evidence_key != "object":
+                return fail(request_id, "DEPENDENCY_EVIDENCE_MODE_INVALID", "Reverse queries require evidenceMode=object.",
+                            {"field": "evidenceMode", "sideEffectsMayHaveOccurred": False})
+            if normalized_query is None or not normalized_scope:
+                return fail(request_id, "REFERENCE_QUERY_INVALID", "Reverse queries require one referenceQuery and a non-empty scope.",
+                            {"field": "referenceQuery", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if boundary_key != "none" and evidence_key != "object":
+            return fail(request_id, "DEPENDENCY_RUNTIME_BOUNDARY_INVALID", "runtimeBoundary is only available for object evidence.",
+                        {"field": "runtimeBoundary", "sideEffectsMayHaveOccurred": False})
+
+        payload = {"assetPath": asset_path, "recursive": recursive}
+        if evidence_key != "file" or boundary_key != "none" or direction_key != "forward" or normalized_query is not None or normalized_scope or max_nodes != 500 or time_budget_ms != 5000 or continuation_token:
+            payload.update({
+                "evidenceMode": evidence_key,
+                "runtimeBoundary": boundary_key,
+                "direction": direction_key,
+                "referenceQuery": normalized_query,
+                "scope": normalized_scope,
+                "maxNodes": max_nodes,
+                "timeBudgetMs": time_budget_ms,
+                "continuationToken": continuation_token,
+            })
+        return _with_read_only_observation_evidence(
+            await self.dispatcher.call(request_id, "asset.dependencies", payload)
         )
+
+    @staticmethod
+    def _normalize_dependency_reference_query(reference_query: object) -> tuple[dict | None, str | None]:
+        if reference_query is None:
+            return None, None
+        if not isinstance(reference_query, dict):
+            return None, "referenceQuery must be an object."
+        kind = reference_query.get("kind")
+        if not isinstance(kind, str) or kind not in {"guid", "object", "stringLiteral"}:
+            return None, "referenceQuery.kind must be guid, object, or stringLiteral."
+        allowed = {
+            "guid": {"kind", "value"},
+            "object": {"kind", "guid", "localFileId"},
+            "stringLiteral": {"kind", "value", "propertyPaths"},
+        }[kind]
+        if set(reference_query) != allowed:
+            return None, "referenceQuery has fields incompatible with its kind."
+        if kind == "guid":
+            value = reference_query.get("value")
+            if not isinstance(value, str) or not value.strip():
+                return None, "referenceQuery.value must be a non-empty GUID string."
+            return {"kind": kind, "value": value}, None
+        if kind == "object":
+            guid = reference_query.get("guid")
+            local_file_id = reference_query.get("localFileId")
+            if not isinstance(guid, str) or not guid.strip() or not isinstance(local_file_id, str) or not local_file_id.strip():
+                return None, "referenceQuery.guid and localFileId must be non-empty strings."
+            return {"kind": kind, "guid": guid, "localFileId": local_file_id}, None
+        value = reference_query.get("value")
+        property_paths = reference_query.get("propertyPaths")
+        if not isinstance(value, str) or not value or not isinstance(property_paths, list) or not property_paths or any(not isinstance(path, str) or not path for path in property_paths):
+            return None, "stringLiteral queries require value and non-empty string propertyPaths."
+        return {"kind": kind, "value": value, "propertyPaths": sorted(set(property_paths))}, None
+
+    @staticmethod
+    def _is_project_asset_folder(path: object) -> bool:
+        """Accept only a canonical Assets folder scope, never an asset/path traversal."""
+        if not isinstance(path, str) or not path.startswith("Assets/"):
+            return False
+        if path == "Assets/":
+            return True
+        if path != path.strip() or "\\" in path:
+            return False
+        parts = path.rstrip("/").split("/")
+        return all(part and part not in {".", ".."} for part in parts)
 
     async def texture_importer_patch(
         self,
@@ -347,6 +620,7 @@ class ResourceDomainService:
             "assetPath": asset_path,
             "dryRun": dry_run,
             "applied": False,
+            "writeAttempted": False,
             "changes": normalized,
             "sourceSha256": before_hash,
             "metaSha256": meta_hash,
@@ -453,7 +727,11 @@ class ResourceDomainService:
 
     async def asset_refresh(self) -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(request_id, "asset.refresh", {})
+        response = await self.dispatcher.call(request_id, "asset.refresh", {})
+        if response.ok and (response.data or {}).get("ok") is not True:
+            return fail(request_id, "RESULT_CONTRACT_VIOLATION", "asset.refresh did not report data.ok=true.",
+                        {"bridgeData": response.data}, context=response.context, timing=response.timing)
+        return response
 
     async def sync_after_disk_write(
         self,
@@ -859,8 +1137,30 @@ class ResourceDomainService:
         include_serialized_fields: bool = True,
         max_depth: int = 6,
         max_results: int = 50,
+        follow_object_references: bool = False,
+        include_nested_prefab_contents: bool = False,
+        reference_depth: int = 1,
     ) -> ToolResponse:
         request_id = new_id("req")
+        if (not isinstance(prefab_path, str) or prefab_path != prefab_path.strip()
+                or not prefab_path or not prefab_path.endswith(".prefab")):
+            return fail(request_id, "INVALID_PREFAB_PATH", "prefabPath must be a non-empty .prefab asset path.",
+                        {"field": "prefabPath", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(component_type, str) or not component_type.strip():
+            return fail(request_id, "INVALID_COMPONENT_TYPE", "componentType is required.",
+                        {"field": "componentType", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(follow_object_references, bool) or not isinstance(include_nested_prefab_contents, bool):
+            return fail(request_id, "REFERENCE_QUERY_INVALID", "followObjectReferences and includeNestedPrefabContents must be booleans.",
+                        {"field": "followObjectReferences", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if not isinstance(reference_depth, int) or isinstance(reference_depth, bool) or not 1 <= reference_depth <= 4:
+            return fail(request_id, "REFERENCE_DEPTH_INVALID", "referenceDepth must be an integer from 1 through 4.",
+                        {"field": "referenceDepth", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if include_nested_prefab_contents and not follow_object_references:
+            return fail(request_id, "REFERENCE_QUERY_INVALID", "includeNestedPrefabContents requires followObjectReferences=true.",
+                        {"field": "includeNestedPrefabContents", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
+        if reference_depth != 1 and not follow_object_references:
+            return fail(request_id, "REFERENCE_QUERY_INVALID", "referenceDepth requires followObjectReferences=true.",
+                        {"field": "referenceDepth", "loadAttempted": False, "sideEffectsMayHaveOccurred": False})
         payload: dict = {
             "prefabPath": prefab_path,
             "componentType": component_type,
@@ -868,10 +1168,18 @@ class ResourceDomainService:
             "maxDepth": max_depth,
             "maxResults": max_results,
         }
-        return await self.dispatcher.call(
-            request_id,
-            "prefab.queryComponents",
-            payload,
+        if follow_object_references or include_nested_prefab_contents or reference_depth != 1:
+            payload.update({
+                "followObjectReferences": follow_object_references,
+                "includeNestedPrefabContents": include_nested_prefab_contents,
+                "referenceDepth": reference_depth,
+            })
+        return _with_read_only_observation_evidence(
+            await self.dispatcher.call(
+                request_id,
+                "prefab.queryComponents",
+                payload,
+            )
         )
 
     async def prefab_physics_audit(
@@ -1015,13 +1323,13 @@ class ResourceDomainService:
             request_id, "shader.checkErrors", {"assetPath": asset_path, "includeWarnings": include_warnings}
         )
 
-    async def menu_execute(self, menu_path: str) -> ToolResponse:
+    async def menu_execute(self, menu_path: str, expected_modal: dict | None = None) -> ToolResponse:
         request_id = new_id("req")
         rejected = self._reject_write_if_unapproved(request_id, "unity_menu_execute")
         if rejected is not None:
             return rejected
         return await self.dispatcher.call(
-            request_id, "menu.execute", {"menuPath": menu_path}
+            request_id, "menu.execute", {"menuPath": menu_path, **({"expectedModal": expected_modal} if expected_modal is not None else {})}
         )
 
     async def menu_list(self) -> ToolResponse:

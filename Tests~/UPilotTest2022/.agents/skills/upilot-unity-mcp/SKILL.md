@@ -49,6 +49,7 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 
 - Inspect the exact target before persistent or destructive work.
 - Treat Unity as the sole producer of Editor/compile facts and the MCP Server as the ordered latest-snapshot store. Expect fresh persisted snapshots immediately before a compile request (`compile_queued`), at compiler start (`compiling`), at compiler callback completion (`compiler_finished`, non-terminal until verification), immediately before Domain Reload (`domain_reload_starting`), immediately after reconnect (`domain_reload_recovered/verifying`), and after persisted error verification (`completed|failed`). Missing lifecycle evidence means unknown/recovering, not success.
+- `isCompiling=true` alone does not establish a new compile phase or identity. If the lifecycle snapshot still describes an earlier terminal, wait for matching lifecycle evidence; do not reuse its successful result. A Unity heartbeat's empty pending field cannot clear a Server-owned unresolved write batch.
 - Retain the current compile identity and terminal timestamps before C# or assembly-related disk writes; an old `completed` snapshot does not cover later edits.
 - Immediately after saving one batch of C#, asmdef, asmref, or rsp writes, call `unity_write_batch_register(paths, compileWhenEditMode=true)` once and retain its server-derived batch identity and creation time.
 - For deletions, include the absent paths in `deletedPaths`; represent a move as the existing destination in `paths` and the absent source in `deletedPaths`. Pure deletion uses `paths=[]`. Registration does not delete/move files; existing writes must still exist and all paths remain restricted to the project/local UPM roots. Use the returned merged change manifest/hash, not a last-call-only digest.
@@ -58,6 +59,7 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 - Treat envelope `ok` as protocol/tool success only; an observed compiler failure may be `ok=true/status=failed`. Decide the business result from phase, terminal verification, identities, timestamps, and structured errors.
 - Never claim the latest code was compiled from a historical `completed` state, an unchanged completion timestamp, or the absence of immediate Console errors.
 - Compile only after C# or assembly-related changes. Do not repeat compilation when no code changed.
+- `unity_compile` already forces one incremental script-compilation request (`AssetDatabase.Refresh` + `RequestScriptCompilation`); it is not a Clean Build and cannot bypass a disconnected Bridge, PlayMode, an active compile, or stale Editor state. Prefer the correlated write-batch workflow after code changes.
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - For PlayMode tests, keep the returned `runGuid` and query `unity_test_results(runGuid=...)`; UPilot persists the run across Domain Reload and MCP reconnects.
 - Before starting a hand-authored generic operation, call `unity_operation_validate(jobSpec)` to check calls, placeholders, mappings, timeouts, and artifact rules without starting business work.
@@ -75,16 +77,17 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 
 Use persistent capture when logs must survive long waits, Console clears, or Agent polling gaps:
 
-1. Call `unity_console_capture_start` before the operation. Keep its `sessionId` and output directory.
+1. Call `unity_console_capture_start` before the operation. Keep its exact `sessionId`, returned one-time `ownerToken`, and output directory; never write the token to normal logs or reports.
 2. Run the task normally. Unity writes JSONL independently of MCP polling.
 3. Call `unity_console_capture_status` for counters and write failures. For simple live tails, use the previous `nextSequence` as the next `afterSequence`. For filtered or large captures, prefer `fromSequence/toSequence`, regex or keyword filters, and continue with the returned `continuationToken`; keep the first page's stable snapshot and report `totalMatchCount`, scan range/count, elapsed time, and index status.
-4. Always call `unity_console_capture_stop` when the task ends, including failure paths. Report the JSONL path, summary path, counts, dropped logs, and SHA256.
-5. Use `unity_console_capture_list` to find recent default-directory sessions. Before concluding cleanup, inspect and stop relevant recovered or historical sessions still marked active.
-6. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
+4. Call `unity_console_capture_stop(sessionId, ownerToken)` only for the capture owned by this task when it ends, including failure paths. An unknown or another task's capture is not an automatic cleanup target; `forceStop=true` requires an exact session and explicit authorized human disposition.
+5. Use `unity_console_capture_list` to inspect recent sessions. Do not infer ownership from a list entry or stop recovered/unknown sessions; package acceptance blocks on them instead of stopping them.
+6. Use `unity_console_capture_attach` and `unity_console_capture_detach` for a fixed, read-only range of another capture. Detach never stops or adopts the source; paginate an export with the same attachment request key and continuation token.
+7. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
 
 Default captures belong under `Log/UPilotConsole/<timestamp>_<title>/`. Keep raw Console capture separate from domain-specific reports such as battle smoke-test reports. Prefer a project-relative custom path; do not set `allowOutsideProject=true` unless the user explicitly needs an external directory.
 
-Exception: canonical UPilot package acceptance should use `unity_upilot_acceptance_run`. It detects and stops active captures before running ConsoleCaptureService self-tests and writes a structured hashed report; do not wrap it in another persistent capture.
+Exception: canonical UPilot package acceptance should use `unity_upilot_acceptance_run`. It blocks on an active Capture with another or unknown owner before ConsoleCaptureService self-tests and writes a structured hashed report; do not wrap it in another persistent capture.
 
 ## Configuration CSV
 
@@ -95,7 +98,7 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 ## Hang Diagnostics
 
 - If Unity stops pumping commands, call `unity_hang_status` before retrying or restarting it.
-- On Windows, use `unity_hang_capture` before restart when a dump is needed. Confirm the path and verify `processTerminated=false` in the result.
+- On Windows, use `unity_hang_capture` before restart when a dump is needed. It accepts `dumpType=mini|heap|full`, verifies the exact main Editor identity, estimates dump size, and preserves at least the effective `reserveBytes` (minimum 2 GiB). An insufficient-space preflight must report `dumpAttempted=false`; after capture, confirm the path, bytes, SHA256, `reserveMaintained=true`, and `processTerminated=false`.
 
 ## Runtime Diagnostics
 
@@ -117,8 +120,8 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 
 ## Focused Reliability
 
-- Use `unity_test_list` and `unity_test_run` with exact `testNames` and/or fully qualified `fixtures` arrays for a union in one runGuid. Inspect per-selector match counts. Do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
-- Start long package acceptance through `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})`. Keep taskId and runGuid. Only tests/package acceptance use the project-isolated SQLite job records; other tasks and generic operations are not durable.
+- Use `unity_test_list`, `unity_test_run` and `unity_upilot_acceptance_run` with exact `testNames`, fully qualified `fixtures`, `assemblies` and/or `categories`. `matchMode=union` preserves the default; `intersection` intersects nonempty field groups while values inside each group remain a union. List and execute use the same assembly-isolated selection. Inspect selector counts; do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
+- Start long package acceptance through `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})`. Keep taskId and runGuid. Tests/package acceptance and generic `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Generic operations persist start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
 - `unity_task_cancel` requests underlying test cancellation. It is not terminal until authoritative cleanup succeeds. Unsupported generic-task cancellation leaves both work and observation running.
 - A recovered test task observes its established runGuid and never replays start. `RecoveryRequired` means the outcome or cleanup is unproven, not success or cancellation. Inspect original evidence before any new run.
 - Acceptance requires a matching authoritative run, successful cleanup, verified compile evidence and unchanged checked source. Already verified compilation covering the current C# input timestamps is reused without a second compile.
@@ -137,3 +140,7 @@ For execution-tool selection and typed values, read `references/execution-tools.
 - Recovery and destructive work: read `references/safety.md`.
 - UPilot Tracer: read `references/monohook-tracing.md`.
 - Only when the user explicitly requests UPilot Flow or YAML EditorWindow automation: read `references/flow.md`.
+
+## Advanced Automation Authorization
+
+The Advanced Settings authorization catalog is persistent human authorization for finite, exact-target current-project actions. Full authorization selects every current catalog item but never covers unknown dialogs, cross-project/process actions, external publishing, or ambiguous business UI. It preserves `block` scene policy; `autoSave` creates `Assets/UPilotAutoSave_<number>.unity` for unnamed scenes and `ignore` deliberately discards changes. For ownerless Capture recovery, require the relevant enabled scopes plus exact `sessionId`, force-stop one session at a time, and verify manifest/summary/hash evidence without deleting it.

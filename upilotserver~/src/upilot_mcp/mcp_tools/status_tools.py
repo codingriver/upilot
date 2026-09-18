@@ -6,9 +6,9 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 from ..models import ToolResponse
 from ..protocol import new_id
 from ..responses import fail, ok
@@ -42,6 +42,8 @@ async def unity_open_editor(command: str = "", waitForConnectMs: int = 60000):
     description=(
         "诊断 MCP 连接/会话/超时/编译状态。"
         "返回 paths.unityProjectAbsolute（当前 Unity 工程绝对路径）与 paths.mcpProcessWorkingDirectory（MCP Python 进程当前工作目录，多为 Cursor 工作区根目录）。"
+        "runtimeIdentity 分开报告 Unity PID、MCP Server PID、Bridge sessionId 与 managed domainGeneration；"
+        "同一 Unity PID 下 domainGeneration 变化表示 Domain Reload，不是 Unity 进程重启。"
     ),
 )
 async def unity_mcp_status(forceFresh: bool = False, includeCapabilities: bool = True):
@@ -99,6 +101,30 @@ async def unity_playmode_stop():
     r = await _get_facade().playmode_stop()
     return _log_tool_result("unity_playmode_stop", _payload(r))
 
+@mcp.tool(description="暂停当前 PlayMode；EditMode 会明确拒绝，重复 pause 不应产生额外状态写入。")
+async def unity_playmode_pause(
+    wait: StrictBool = True,
+    timeoutMs: Annotated[int, Field(strict=True, ge=1, le=30000)] = 5000,
+):
+    _log_tool_call("unity_playmode_pause", {"wait": wait, "timeoutMs": timeoutMs})
+    rejected = _reject_write_if_unapproved("unity_playmode_pause")
+    if rejected is not None:
+        return rejected
+    r = await _get_facade().playmode_pause(wait=wait, timeout_ms=timeoutMs)
+    return _log_tool_result("unity_playmode_pause", _payload(r))
+
+@mcp.tool(description="恢复当前已暂停的 PlayMode；不会退出 PlayMode。")
+async def unity_playmode_resume(
+    wait: StrictBool = True,
+    timeoutMs: Annotated[int, Field(strict=True, ge=1, le=30000)] = 5000,
+):
+    _log_tool_call("unity_playmode_resume", {"wait": wait, "timeoutMs": timeoutMs})
+    rejected = _reject_write_if_unapproved("unity_playmode_resume")
+    if rejected is not None:
+        return rejected
+    r = await _get_facade().playmode_resume(wait=wait, timeout_ms=timeoutMs)
+    return _log_tool_result("unity_playmode_resume", _payload(r))
+
 @mcp.tool(
     description=(
         "列出 Unity 编辑器中打开的窗口（可按类型/标题过滤）。"
@@ -121,13 +147,17 @@ async def unity_editor_windows_list(typeFilter: str = "", titleFilter: str = "")
         "matchMode：exact | contains。"
     ),
 )
-async def unity_editor_window_close(windowTitle: str, matchMode: str = "exact"):
+async def unity_editor_window_close(
+    windowTitle: str = "", matchMode: str = "exact", instanceId: str = "", domainGeneration: str = "",
+    closeMode: str = "requestUserClose",
+):
     _log_tool_call(
         "unity_editor_window_close",
-        {"windowTitle": windowTitle, "matchMode": matchMode},
+        {"windowTitle": windowTitle, "matchMode": matchMode, "instanceId": instanceId, "domainGeneration": domainGeneration, "closeMode": closeMode},
     )
     r = await _get_facade().editor_window_close(
-        window_title=windowTitle, match_mode=matchMode
+        window_title=windowTitle, match_mode=matchMode, instance_id=instanceId,
+        domain_generation=domainGeneration, close_mode=closeMode,
     )
     return _log_tool_result("unity_editor_window_close", _payload(r))
 
@@ -138,12 +168,15 @@ async def unity_editor_window_close(windowTitle: str, matchMode: str = "exact"):
     ),
 )
 async def unity_editor_window_set_rect(
-    windowTitle: str,
-    x: float,
-    y: float,
-    width: float,
-    height: float,
+    windowTitle: str = "",
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
     matchMode: str = "exact",
+    instanceId: str = "",
+    domainGeneration: str = "",
+    fullTypeName: str = "",
 ):
     _log_tool_call(
         "unity_editor_window_set_rect",
@@ -154,6 +187,9 @@ async def unity_editor_window_set_rect(
             "width": width,
             "height": height,
             "matchMode": matchMode,
+            "instanceId": instanceId,
+            "domainGeneration": domainGeneration,
+            "fullTypeName": fullTypeName,
         },
     )
     r = await _get_facade().editor_window_set_rect(
@@ -163,8 +199,58 @@ async def unity_editor_window_set_rect(
         width=width,
         height=height,
         match_mode=matchMode,
+        instance_id=instanceId,
+        domain_generation=domainGeneration,
+        full_type_name=fullTypeName,
     )
     return _log_tool_result("unity_editor_window_set_rect", _payload(r))
+
+@mcp.tool(description="查询已观测的 EditorWindow 生命周期事件；仅返回有界元数据，不打开、聚焦或关闭窗口。")
+async def unity_editor_window_history(
+    instanceId: str = "",
+    afterSequence: Annotated[int, Field(strict=True, ge=0)] = 0,
+    count: Annotated[int, Field(strict=True, ge=1, le=512)] = 100,
+):
+    _log_tool_call("unity_editor_window_history", {"instanceId": instanceId, "afterSequence": afterSequence, "count": count})
+    r = await _get_facade().editor_window_history(
+        instance_id=instanceId, after_sequence=afterSequence, count=count,
+    )
+    return _log_tool_result("unity_editor_window_history", _payload(r))
+
+@mcp.tool(description="仅打开已审计的 UPilot Safe Mode 探针窗口；未知或第三方窗口类型会在创建前拒绝。")
+async def unity_editor_window_open(typeName: str):
+    _log_tool_call("unity_editor_window_open", {"typeName": typeName})
+    r = await _get_facade().editor_window_open(type_name=typeName)
+    return _log_tool_result("unity_editor_window_open", _payload(r))
+
+@mcp.tool(description="仅聚焦已审计的 UPilot Safe Mode 探针窗口；要求精确 instanceId，可选 domainGeneration 用于跨 Reload 防护。")
+async def unity_editor_window_focus(instanceId: str, domainGeneration: str = ""):
+    _log_tool_call("unity_editor_window_focus", {"instanceId": instanceId, "domainGeneration": domainGeneration})
+    r = await _get_facade().editor_window_focus(instance_id=instanceId, domain_generation=domainGeneration)
+    return _log_tool_result("unity_editor_window_focus", _payload(r))
+
+@mcp.tool(description="按精确非负 instanceId 设置现有 SceneView 的最大化状态；不会创建窗口或保存布局。wait=true 仅在 Unity 返回 fresh authoritative、non-stale 状态时确认；restoreToken 仅在同一 Server 生命周期内可幂等重放。")
+async def unity_sceneview_set_maximized(
+    instanceId: Annotated[int, Field(strict=True, ge=0)], maximized: StrictBool,
+    expectedCurrentMaximized: StrictBool | None = None, domainGeneration: str = "",
+    wait: StrictBool = True, timeoutMs: Annotated[int, Field(strict=True, ge=1, le=30000)] = 5000,
+    restoreToken: str = "",
+):
+    _log_tool_call("unity_sceneview_set_maximized", {"instanceId": instanceId, "maximized": maximized, "expectedCurrentMaximized": expectedCurrentMaximized, "domainGeneration": domainGeneration, "wait": wait, "timeoutMs": timeoutMs, "restoreToken": restoreToken})
+    rejected = _reject_write_if_unapproved("unity_sceneview_set_maximized")
+    if rejected is not None:
+        return rejected
+    r = await _get_facade().sceneview_set_maximized(
+        instance_id=instanceId, maximized=maximized, expected_current_maximized=expectedCurrentMaximized,
+        domain_generation=domainGeneration, wait=wait, timeout_ms=timeoutMs, restore_token=restoreToken,
+    )
+    return _log_tool_result("unity_sceneview_set_maximized", _payload(r))
+
+@mcp.tool(description="按原始 commandId 只读查询 SceneView maximize/restore 的已记录观察状态；不会再次设置窗口或创建窗口。未知身份、Domain Reload 或 Server 重启明确返回 RecoveryRequired/unknown。")
+async def unity_sceneview_command_status(commandId: str):
+    _log_tool_call("unity_sceneview_command_status", {"commandId": commandId})
+    r = await _get_facade().sceneview_command_status(command_id=commandId)
+    return _log_tool_result("unity_sceneview_command_status", _payload(r))
 
 @mcp.tool(description="获取 Unity 编辑器状态快照。")
 async def unity_editor_state():
@@ -210,6 +296,7 @@ async def unity_mouse_event(
     elementName: str = "",
     elementIndex: int = -1,
     windowInstanceId: str = "",
+    escapeGenericMenu: bool = False,
 ):
     _log_tool_call(
         "unity_mouse_event",
@@ -224,6 +311,7 @@ async def unity_mouse_event(
             "scrollDeltaY": scrollDeltaY,
             "elementName": elementName,
             "elementIndex": elementIndex,
+            "escapeGenericMenu": escapeGenericMenu,
         },
     )
     rejected = _reject_write_if_unapproved("unity_mouse_event")
@@ -241,6 +329,7 @@ async def unity_mouse_event(
         element_name=elementName,
         element_index=elementIndex,
         window_instance_id=windowInstanceId,
+        escape_generic_menu=escapeGenericMenu,
     )
     return _log_tool_result("unity_mouse_event", _payload(r))
 
@@ -298,13 +387,17 @@ async def unity_drag_drop(
     description="执行 Unity 编辑器键盘动作。用于真实 UI 输入；targetWindow 必须明确，text 会输入到当前焦点控件。优先使用专用设置/脚本/组件工具，避免焦点不确定时盲打。"
 )
 async def unity_keyboard_event(
-    action: str,
-    targetWindow: str,
-    keyCode: str = "",
-    character: str = "",
-    text: str = "",
-    modifiers: list[str] | None = None,
+    action: Annotated[
+        Literal["keydown", "keyup", "keypress", "type"],
+        Field(description="键盘动作：keydown、keyup、keypress 或 type；严格使用小写。"),
+    ],
+    targetWindow: Annotated[str, Field(description="目标 EditorWindow 的精确标题或类型名。")],
+    keyCode: Annotated[str, Field(description="keydown、keyup、keypress 使用的 Unity KeyCode；type 动作忽略。")]= "",
+    character: Annotated[str, Field(description="可选单字符，随 keydown、keyup、keypress 事件发送。")]= "",
+    text: Annotated[str, Field(description="type 动作逐字符输入的文本；其他动作忽略。")]= "",
+    modifiers: Annotated[list[str] | None, Field(description="可选修饰键列表，例如 Control、Shift、Alt、Command。")]= None,
     windowInstanceId: str = "",
+    escapeGenericMenu: bool = False,
 ):
     _log_tool_call(
         "unity_keyboard_event",
@@ -315,6 +408,7 @@ async def unity_keyboard_event(
             "character": character,
             "text": text,
             "modifiers": modifiers,
+            "escapeGenericMenu": escapeGenericMenu,
         },
     )
     rejected = _reject_write_if_unapproved("unity_keyboard_event")
@@ -328,6 +422,7 @@ async def unity_keyboard_event(
         character=character,
         text=text,
         modifiers=modifiers,
+        escape_generic_menu=escapeGenericMenu,
     )
     return _log_tool_result("unity_keyboard_event", _payload(r))
 
@@ -349,7 +444,7 @@ async def unity_console_tail_logs(
     logType: str = "",
     includeStackTrace: bool = False,
     excludeUPilot: bool = True,
-    contains: list[str] | None = None,
+    contains: str | list[str] | None = None,
     containsAll: bool = False,
     regex: str = "",
     newestFirst: bool = False,
@@ -370,13 +465,14 @@ async def unity_console_tail_logs(
             "maxMessageLength": maxMessageLength,
         },
     )
+    normalized_contains = [contains] if isinstance(contains, str) else contains
     r = await _get_facade().console_tail_logs(
         cursor=cursor,
         count=count,
         log_type=logType,
         include_stack_trace=includeStackTrace,
         exclude_upilot=excludeUPilot,
-        contains=contains,
+        contains=normalized_contains,
         contains_all=containsAll,
         regex=regex,
         newest_first=newestFirst,
@@ -397,7 +493,7 @@ async def unity_console_search_logs(
     logType: str = "",
     includeStackTrace: bool = False,
     excludeUPilot: bool = True,
-    contains: list[str] | None = None,
+    contains: str | list[str] | None = None,
     containsAll: bool = False,
     regex: str = "",
     newestFirst: bool = True,
@@ -418,13 +514,14 @@ async def unity_console_search_logs(
             "maxMessageLength": maxMessageLength,
         },
     )
+    normalized_contains = [contains] if isinstance(contains, str) else contains
     r = await _get_facade().console_search_logs(
         count=maxCount if maxCount > 0 else count,
         query=query,
         log_type=logType,
         include_stack_trace=includeStackTrace,
         exclude_upilot=excludeUPilot,
-        contains=contains,
+        contains=normalized_contains,
         contains_all=containsAll,
         regex=regex,
         newest_first=newestFirst,
@@ -447,6 +544,8 @@ async def unity_console_capture_start(
     flushIntervalMs: int = 1000,
     maxFileBytes: int = 50 * 1024 * 1024,
     allowOutsideProject: bool = False,
+    ownerId: str = "",
+    requestKey: str = "",
 ):
     _log_tool_call(
         "unity_console_capture_start",
@@ -459,6 +558,8 @@ async def unity_console_capture_start(
             "flushIntervalMs": flushIntervalMs,
             "maxFileBytes": maxFileBytes,
             "allowOutsideProject": allowOutsideProject,
+            "ownerId": ownerId,
+            "requestKey": requestKey,
         },
     )
     r = await _get_facade().console_capture_start(
@@ -470,6 +571,8 @@ async def unity_console_capture_start(
         flush_interval_ms=flushIntervalMs,
         max_file_bytes=maxFileBytes,
         allow_outside_project=allowOutsideProject,
+        owner_id=ownerId,
+        request_key=requestKey,
     )
     return _log_tool_result("unity_console_capture_start", _payload(r))
 
@@ -533,11 +636,43 @@ async def unity_console_capture_read(
     )
     return _log_tool_result("unity_console_capture_read", _payload(r))
 
-@mcp.tool(description="停止当前 Unity Console 持久化采集，刷新缓冲区并生成 summary.json 与 SHA256；返回真实 terminal 状态，超时后可从完整持久化 manifest 恢复终态。")
-async def unity_console_capture_stop(sessionId: str = ""):
-    _log_tool_call("unity_console_capture_stop", {"sessionId": sessionId})
-    r = await _get_facade().console_capture_stop(session_id=sessionId)
+@mcp.tool(description="停止精确且已归属的 Unity Console 持久化采集。ownerToken 必须匹配；forceStop 仅限已授权的明确人工处置，不能用于自动清理。")
+async def unity_console_capture_stop(sessionId: str = "", ownerToken: str = "", forceStop: bool = False):
+    _log_tool_call("unity_console_capture_stop", {"sessionId": sessionId, "ownerToken": ownerToken, "forceStop": forceStop})
+    r = await _get_facade().console_capture_stop(
+        session_id=sessionId, owner_token=ownerToken, force_stop=forceStop,
+    )
     return _log_tool_result("unity_console_capture_stop", _payload(r))
+
+@mcp.tool(description="只读附着到精确 Console Capture 会话；不会启动、停止或接管采集。")
+async def unity_console_capture_attach(sessionId: str, requestKey: str):
+    _log_tool_call("unity_console_capture_attach", {"sessionId": sessionId, "requestKey": requestKey})
+    r = await _get_facade().console_capture_attach(session_id=sessionId, request_key=requestKey)
+    return _log_tool_result("unity_console_capture_attach", _payload(r))
+
+@mcp.tool(description="关闭只读 Console Capture 附着的固定范围；可分页导出该范围，但绝不停止或接管源采集。")
+async def unity_console_capture_detach(
+    attachmentId: str,
+    export: bool = False,
+    requestKey: str = "",
+    continuationToken: str = "",
+):
+    _log_tool_call(
+        "unity_console_capture_detach",
+        {
+            "attachmentId": attachmentId,
+            "export": export,
+            "requestKey": requestKey,
+            "continuationToken": continuationToken,
+        },
+    )
+    r = await _get_facade().console_capture_detach(
+        attachment_id=attachmentId,
+        export=export,
+        request_key=requestKey,
+        continuation_token=continuationToken,
+    )
+    return _log_tool_result("unity_console_capture_detach", _payload(r))
 
 @mcp.tool(description="列出工程默认 Log/UPilotConsole 目录中的近期持久化采集会话。")
 async def unity_console_capture_list(count: int = 20, includeActive: bool = True):
@@ -603,9 +738,9 @@ async def unity_editor_redo(steps: int = 1):
     return _log_tool_result("unity_editor_redo", _payload(r))
 
 @mcp.tool(description="执行 Unity 编辑器命令（通过菜单路径，如 'Edit/Play'）。")
-async def unity_editor_execute_command(commandName: str):
-    _log_tool_call("unity_editor_execute_command", {"commandName": commandName})
-    r = await _get_facade().editor_execute_command(command_name=commandName)
+async def unity_editor_execute_command(commandName: str, expectedModal: dict | None = None):
+    _log_tool_call("unity_editor_execute_command", {"commandName": commandName, "expectedModal": expectedModal})
+    r = await _get_facade().editor_execute_command(command_name=commandName, expected_modal=expectedModal)
     return _log_tool_result("unity_editor_execute_command", _payload(r))
 
 @mcp.tool(
@@ -656,7 +791,10 @@ _DESTRUCTIVE_TOOLS = {
     "unity_component_remove", "unity_component_modify",
     "unity_batch_execute", "unity_mouse_event", "unity_drag_drop",
     "unity_keyboard_event",
+    "unity_console_capture_stop",
     "unity_console_capture_cleanup",
+    "unity_playmode_pause", "unity_playmode_resume",
+    "unity_sceneview_set_maximized",
 }
 _NON_IDEMPOTENT_TOOLS = {
     "unity_console_capture_start",
@@ -672,6 +810,7 @@ for _name, _value in list(globals().items()):
         continue
     register_public_tool(
         _name,
+        public_handler=_value,
         destructive=_name in _DESTRUCTIVE_TOOLS,
         idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",

@@ -48,3 +48,29 @@ def test_scene_summary_preserves_budgets_and_is_read_only():
     descriptor = REGISTRY.resolve("unity_scene_summary")
     assert descriptor.idempotent and not descriptor.destructive and not descriptor.requires_write_access
     assert REGISTRY.resolve("unity_prefab_patch").idempotent is False
+
+
+def test_prefab_reference_tracking_is_read_only_and_has_an_explicit_scope():
+    target = Service()
+
+    result = asyncio.run(target.prefab_query_components(
+        "Assets/Test.prefab",
+        "Probe",
+        follow_object_references=True,
+        include_nested_prefab_contents=True,
+        reference_depth=2,
+    ))
+
+    assert result.ok
+    assert target.calls == [("prefab.queryComponents", {
+        "prefabPath": "Assets/Test.prefab",
+        "componentType": "Probe",
+        "includeSerializedFields": True,
+        "maxDepth": 6,
+        "maxResults": 50,
+        "followObjectReferences": True,
+        "includeNestedPrefabContents": True,
+        "referenceDepth": 2,
+    })]
+    descriptor = REGISTRY.resolve("unity_prefab_query_components")
+    assert descriptor.idempotent and not descriptor.destructive and not descriptor.requires_write_access

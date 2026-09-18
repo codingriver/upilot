@@ -6,6 +6,10 @@
 using System;
 using System.IO;
 using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace CodingRiver.UPilot
 {
@@ -68,6 +72,10 @@ namespace CodingRiver.UPilot
         public bool writeAccessApproved;
         public string writeAccessApprovedAtUtc = "";
         public string unsavedScenePolicy = UnsavedScenePolicyBlock;
+        public string[] automationAuthorizationScopes = Array.Empty<string>();
+        public string automationAuthorizationCatalogHash = "";
+        public int automationAuthorizationScopeVersion;
+        public string automationAuthorizationApprovedAtUtc = "";
 
         public static string NormalizeUnsavedScenePolicy(string value)
         {
@@ -77,6 +85,46 @@ namespace CodingRiver.UPilot
                     ? UnsavedScenePolicyIgnore
                     : UnsavedScenePolicyBlock;
         }
+    }
+
+    public sealed class UPilotAutomationAuthorizationScope
+    {
+        public string key, label, risk, tools, targetRequirement;
+        public UPilotAutomationAuthorizationScope(string k, string l, string r, string t, string target)
+        { key = k; label = l; risk = r; tools = t; targetRequirement = target; }
+    }
+
+    /// <summary>Finite UI mirror of the service catalog. New catalog versions cannot inherit select-all.</summary>
+    public static class UPilotAutomationAuthorizationCatalog
+    {
+        public const int ScopeVersion = 1;
+        private static readonly UPilotAutomationAuthorizationScope[] Entries =
+        {
+            new("editorModeTransition", "自动切换 EditMode / PlayMode", "改变编辑器运行状态；不会恢复旧模式。", "ensure_ready, playmode", "当前已验证项目和目标模式"),
+            new("scenePolicyExecution", "执行已选未保存场景策略", "autoSave 写入，ignore 丢弃修改；block 永不覆盖。", "test, acceptance, scene.prepareForAutomation", "当前项目已加载场景"),
+            new("captureForceStop", "强制停止无 ownerToken 的 Capture", "仅精确 sessionId，停止后保留证据。", "console_capture_stop", "当前项目 active sessionId"),
+            new("captureAcceptanceClearance", "自动停止验收前阻塞的 Capture", "逐个处理，失败即停止验收。", "upilot_acceptance_run", "精确 active sessionId"),
+            new("captureArtifactCleanup", "清理过期 Capture 产物", "仍需 dry-run 和 confirmToken。", "console_capture_cleanup", "预览列出的项目内目录"),
+            new("destructiveProjectWrite", "项目写入授权", "仅已建模、当前项目写入。", "write-gated tools", "精确项目内路径"),
+            new("configCsvApply", "确认配置 CSV 写入", "仍需 preview/confirmToken。", "config_csv_patch", "预览哈希与目标记录"),
+            new("prefabPatchApply", "确认 Prefab patch", "仍需 preview/confirmToken。", "prefab_patch", "精确 Prefab/组件"),
+            new("textureImporterApply", "确认 Texture Importer patch", "仍需 preview/confirmToken。", "texture_importer_patch", "精确资产"),
+            new("snapshotBaselineUpdate", "确认 Snapshot baseline 更新", "仍需 preview/confirmToken。", "snapshot_baseline_update", "精确基线和哈希"),
+            new("assetMoveDelete", "精确资产移动/删除", "仅当前项目已检查路径。", "asset tools", "精确源/目标路径"),
+            new("editorWindowForceDiscard", "强制关闭窗口/丢弃草稿", "仅已识别 Unity 窗口。", "editor window", "精确 instanceId"),
+            new("hangRestart", "声明的 Unity 挂起恢复或重启", "仍须精确 Editor 身份和诊断。", "hang/restart", "当前项目 Editor PID/身份"),
+        };
+        public static IReadOnlyList<UPilotAutomationAuthorizationScope> All => Entries;
+        public static string Hash
+        {
+            get { var canonical = string.Join("|", Entries.Select(x => x.key)); using var sha = SHA256.Create(); return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(canonical))).Replace("-", "").ToLowerInvariant(); }
+        }
+        public static bool Has(UPilotSafetyConfig safety, string scope) => (safety?.automationAuthorizationScopes ?? Array.Empty<string>()).Contains(scope, StringComparer.Ordinal);
+        public static bool IsFull(UPilotSafetyConfig safety) => safety != null && safety.automationAuthorizationCatalogHash == Hash && safety.automationAuthorizationScopeVersion == ScopeVersion && Entries.All(x => Has(safety, x.key));
+        public static void SetAll(UPilotSafetyConfig safety, bool enabled)
+        { safety.automationAuthorizationScopes = enabled ? Entries.Select(x => x.key).ToArray() : Array.Empty<string>(); safety.automationAuthorizationCatalogHash = enabled ? Hash : ""; safety.automationAuthorizationScopeVersion = enabled ? ScopeVersion : 0; safety.automationAuthorizationApprovedAtUtc = enabled ? DateTimeOffset.UtcNow.ToString("O") : ""; }
+        public static void SetScope(UPilotSafetyConfig safety, string scope, bool enabled)
+        { var values = new HashSet<string>(safety.automationAuthorizationScopes ?? Array.Empty<string>(), StringComparer.Ordinal); if (enabled) values.Add(scope); else values.Remove(scope); safety.automationAuthorizationScopes = values.OrderBy(x => x, StringComparer.Ordinal).ToArray(); safety.automationAuthorizationCatalogHash = ""; safety.automationAuthorizationScopeVersion = 0; safety.automationAuthorizationApprovedAtUtc = DateTimeOffset.UtcNow.ToString("O"); }
     }
 
     [Serializable]

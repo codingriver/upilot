@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import ast
 import base64
+import hashlib
+import json
+import subprocess
+import sys
 import types
 from pathlib import Path
+
+import pytest
 
 from upilot_mcp.config import diagnose_client_configs
 from upilot_mcp.dispatcher import CommandDispatcher
@@ -13,7 +20,7 @@ from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.domain.status_service import StatusDomainService
 from upilot_mcp.responses import fail, ok
 from upilot_mcp.state_store import StateStore
-from upilot_mcp.tool_registry import ToolDescriptor, ToolRegistry, dispatch_public_tool, register_public_tool
+from upilot_mcp.tool_registry import REGISTRY, ToolDescriptor, ToolRegistry, dispatch_public_tool, register_public_tool
 from upilot_mcp.config import CONFIG
 
 
@@ -22,6 +29,26 @@ class _Facade:
         from upilot_mcp.responses import ok
 
         return ok("req-test", {"value": value})
+
+
+@pytest.fixture
+def register_test_tool():
+    """Register a synthetic tool without leaking it into later inventory checks."""
+    missing = object()
+    originals = {}
+
+    def register(name: str, **kwargs) -> None:
+        if name not in originals:
+            originals[name] = REGISTRY._items.get(name, missing)
+        register_public_tool(name, **kwargs)
+
+    yield register
+
+    for name, original in originals.items():
+        if original is missing:
+            REGISTRY._items.pop(name, None)
+        else:
+            REGISTRY._items[name] = original
 
 
 class _Transport:
@@ -380,6 +407,436 @@ def test_playmode_start_waits_for_authoritative_play_context() -> None:
     assert result.context == play_context
 
 
+def test_playmode_pause_wait_false_submits_once_and_invalid_budget_submits_never() -> None:
+    class _SessionManager:
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    class _Server:
+        session_manager = _SessionManager()
+        state = StateStore()
+
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None) -> ToolResponse:
+            self.calls.append((name, payload))
+            return ok(request_id, {"state": "pause", "changed": False, "writeCount": 0, "observedState": "pause"})
+
+    service = StatusDomainService()
+    service.server = _Server()
+    service.dispatcher = _Dispatcher()
+    _authoritative_editor_state(service.server.state, play_mode_state="play")
+
+    invalid = asyncio.run(service.playmode_pause(timeout_ms=0))
+    submitted = asyncio.run(service.playmode_pause(wait=False))
+
+    assert not invalid.ok and invalid.error.code == "INVALID_PAYLOAD"
+    assert submitted.ok and submitted.data["commandSubmitted"] is True
+    assert submitted.data["confirmed"] is False and submitted.data["terminal"] is False
+    assert submitted.data["stateObserved"] is True
+    assert submitted.data["changed"] is False and submitted.data["writeCount"] == 0
+    assert submitted.data["commandObservedState"] == "pause"
+    assert submitted.data["commandId"] == submitted.request_id
+    assert service.dispatcher.calls == [("playmode.set", {"action": "pause"})]
+
+
+def test_playmode_pause_rejects_non_boolean_wait_and_boolean_timeout_without_dispatch() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict):
+            self.calls.append((name, payload))
+            raise AssertionError("invalid pause request must not dispatch")
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    service.dispatcher = _Dispatcher()
+
+    invalid_wait = asyncio.run(service.playmode_pause(wait="false"))
+    invalid_timeout = asyncio.run(service.playmode_resume(timeout_ms=True))
+
+    assert not invalid_wait.ok
+    assert invalid_wait.error.code == "INVALID_PAYLOAD"
+    assert invalid_wait.error.detail["field"] == "wait"
+    assert invalid_wait.error.detail["commandSubmitted"] is False
+    assert invalid_wait.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert not invalid_timeout.ok
+    assert invalid_timeout.error.code == "INVALID_PAYLOAD"
+    assert invalid_timeout.error.detail["field"] == "timeoutMs"
+    assert service.dispatcher.calls == []
+
+
+def test_playmode_pause_preflight_rejects_edit_stale_and_transition_without_dispatch() -> None:
+    class _State:
+        def __init__(self, execution: dict) -> None:
+            self.execution = execution
+
+        def execution_state(self) -> dict:
+            return self.execution
+
+        def update_editor_state(self, payload: dict) -> bool:
+            self.execution.update({
+                "authoritative": bool(payload["authoritative"]),
+                "isStale": False,
+                "isCompiling": bool(payload["isCompiling"]),
+                "playModeState": str(payload["playModeState"]),
+            })
+            return True
+
+    class _SessionManager:
+        active = types.SimpleNamespace(session_id="session-pause", process_id=42)
+
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            raise AssertionError("blocked pause must not dispatch")
+
+    base = {"authoritative": True, "isStale": False, "isCompiling": False, "transition": "snapshot"}
+    for execution, code in (
+        ({**base, "playModeState": "edit"}, "PLAYMODE_REQUIRED"),
+        ({**base, "playModeState": "play", "isStale": True}, "EDITOR_STATE_NOT_READY"),
+        ({**base, "playModeState": "play", "transition": "enteringPlayMode"}, "PLAYMODE_TRANSITION_IN_PROGRESS"),
+    ):
+        service = StatusDomainService()
+        service.server = type("Server", (), {"state": _State(execution), "session_manager": _SessionManager()})()
+        service.dispatcher = _Dispatcher()
+        result = asyncio.run(service.playmode_pause())
+        assert not result.ok and result.error.code == code
+        assert result.error.detail["commandSubmitted"] is False
+        assert result.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert _Dispatcher.calls == []
+
+
+def test_playmode_pause_idempotence_and_timeout_keep_write_count_and_budget_bounded() -> None:
+    class _State:
+        def __init__(self, execution: dict) -> None:
+            self.execution = execution
+
+        def execution_state(self) -> dict:
+            return self.execution
+
+        def update_editor_state(self, payload: dict) -> bool:
+            self.execution.update({
+                "authoritative": bool(payload["authoritative"]),
+                "isStale": False,
+                "isCompiling": bool(payload["isCompiling"]),
+                "playModeState": str(payload["playModeState"]),
+            })
+            return True
+
+    class _SessionManager:
+        active = types.SimpleNamespace(session_id="session-pause", process_id=42)
+
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    class _Dispatcher:
+        def __init__(self, observe_pause: bool) -> None:
+            self.observe_pause = observe_pause
+            self.calls: list[tuple[str, dict, int | None]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload, timeout_ms))
+            if name == "playmode.set":
+                return ok(request_id, {})
+            assert name == "resource.editorState"
+            return ok(request_id, {
+                "authoritative": True, "isPlaying": True, "isPaused": self.observe_pause,
+                "isCompiling": False, "activeSceneName": "Acceptance",
+            })
+
+    paused = {"authoritative": True, "isStale": False, "isCompiling": False, "transition": "snapshot", "playModeState": "pause"}
+    idempotent = StatusDomainService()
+    idempotent.server = type("Server", (), {"state": _State(paused), "session_manager": _SessionManager()})()
+    idempotent.dispatcher = _Dispatcher(observe_pause=True)
+    already_paused = asyncio.run(idempotent.playmode_pause())
+    assert already_paused.ok and already_paused.data["changed"] is False
+    assert already_paused.data["writeCount"] == 0
+    assert already_paused.data["commandSubmitted"] is False
+    assert idempotent.dispatcher.calls == []
+
+    playing = {**paused, "playModeState": "play"}
+    timed_out = StatusDomainService()
+    timed_out.server = type("Server", (), {"state": _State(playing), "session_manager": _SessionManager()})()
+    timed_out.dispatcher = _Dispatcher(observe_pause=False)
+    result = asyncio.run(timed_out.playmode_pause(timeout_ms=1))
+    assert not result.ok and result.error.code == "PLAYMODE_PAUSE_TIMEOUT"
+    assert result.error.detail["commandSubmitted"] is True
+    assert result.error.detail["stateObserved"] is False
+    assert result.error.detail["terminal"] is False
+    assert timed_out.dispatcher.calls[0][:2] == ("playmode.set", {"action": "pause"})
+    assert all((timeout_ms or 0) <= 1 for name, _payload, timeout_ms in timed_out.dispatcher.calls if name == "resource.editorState")
+
+
+def test_playmode_pause_never_confirms_from_stale_or_unattributed_observation() -> None:
+    class _State:
+        @staticmethod
+        def execution_state() -> dict:
+            return {
+                "authoritative": True, "isStale": False, "isCompiling": False,
+                "transition": "snapshot", "playModeState": "play",
+            }
+
+        @staticmethod
+        def update_editor_state(_payload: dict) -> bool:
+            return True
+
+    class _SessionManager:
+        active = types.SimpleNamespace(session_id="session-pause", process_id=42)
+
+        @staticmethod
+        def is_connected() -> bool:
+            return True
+
+    class _Dispatcher:
+        def __init__(self, observation: dict) -> None:
+            self.observation = observation
+
+        async def call(self, request_id: str, name: str, _payload: dict, timeout_ms: int | None = None):
+            if name == "playmode.set":
+                return ok(request_id, {})
+            return ok(request_id, self.observation)
+
+    base = {
+        "isPlaying": True, "isPaused": True, "isCompiling": False,
+        "activeSceneName": "Acceptance",
+    }
+    for observation in (
+        {**base, "authoritative": True, "isStale": True},
+        {**base, "authoritative": False, "isStale": False},
+        {**base, "isStale": False},
+    ):
+        service = StatusDomainService()
+        service.server = type("Server", (), {"state": _State(), "session_manager": _SessionManager()})()
+        service.dispatcher = _Dispatcher(observation)
+        result = asyncio.run(service.playmode_pause(timeout_ms=1))
+        assert not result.ok and result.error.code == "PLAYMODE_PAUSE_TIMEOUT"
+        assert result.error.detail["confirmed"] is False
+
+
+def test_sceneview_maximized_requires_exact_instance_id_and_boolean_before_dispatch() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            return ok(request_id, {"ok": True, "instanceId": payload["instanceId"], "maximized": payload["maximized"]})
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+
+    empty = asyncio.run(service.sceneview_set_maximized("", True))
+    string_id = asyncio.run(service.sceneview_set_maximized("42", True))
+    boolean_id = asyncio.run(service.sceneview_set_maximized(True, True))
+    invalid = asyncio.run(service.sceneview_set_maximized(42, 1))
+    applied = asyncio.run(service.sceneview_set_maximized(42, False))
+    numeric = asyncio.run(service.sceneview_set_maximized(43, True))
+    negative = asyncio.run(service.sceneview_set_maximized(-1, True))
+
+    assert not empty.ok and empty.error.code == "INVALID_PAYLOAD"
+    assert not string_id.ok and string_id.error.code == "INVALID_PAYLOAD"
+    assert not boolean_id.ok and boolean_id.error.code == "INVALID_PAYLOAD"
+    assert not invalid.ok and invalid.error.code == "INVALID_PAYLOAD"
+    assert not negative.ok and negative.error.code == "INVALID_PAYLOAD"
+    assert applied.ok
+    assert numeric.ok
+    assert service.dispatcher.calls == [
+        ("sceneview.setMaximized", {"instanceId": "42", "domainGeneration": "", "maximized": False}),
+        ("sceneview.setMaximized", {"instanceId": "43", "domainGeneration": "", "maximized": True}),
+    ]
+    assert applied.data["confirmed"] is False
+    assert applied.data["terminal"] is False
+    assert applied.data["confirmationUnavailableReason"] == "FRESH_AUTHORITATIVE_SCENEVIEW_STATE_REQUIRED"
+
+
+def test_sceneview_restore_precondition_is_forwarded_without_title_fallback() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            return ok(request_id, {"ok": True})
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+    result = asyncio.run(service.sceneview_set_maximized(9, False, expected_current_maximized=True))
+
+    assert result.ok
+    assert service.dispatcher.calls == [(
+        "sceneview.setMaximized",
+        {"instanceId": "9", "domainGeneration": "", "maximized": False, "hasExpectedCurrentMaximized": True, "expectedCurrentMaximized": True},
+    )]
+
+
+def test_sceneview_domain_generation_is_forwarded_without_mutating_defaults() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            return ok(request_id, {"ok": True})
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+
+    result = asyncio.run(service.sceneview_set_maximized(9, False, domain_generation="44"))
+
+    assert result.ok
+    assert service.dispatcher.calls == [(
+        "sceneview.setMaximized", {"instanceId": "9", "domainGeneration": "44", "maximized": False},
+    )]
+
+
+def test_sceneview_restore_token_is_bound_to_exact_instance_domain_and_prior_state() -> None:
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            return ok(request_id, {
+                "ok": True, "commandId": request_id, "instanceId": payload["instanceId"],
+                "domainGeneration": payload["domainGeneration"], "maximized": payload["maximized"],
+                "changed": True, "writeCount": 1,
+            })
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+    changed = asyncio.run(service.sceneview_set_maximized(9, True, domain_generation="44"))
+    token = changed.data["restoreToken"]
+
+    wrong_domain = asyncio.run(service.sceneview_set_maximized(9, False, domain_generation="45", restore_token=token))
+    restored = asyncio.run(service.sceneview_set_maximized(9, False, domain_generation="44", restore_token=token))
+    replay = asyncio.run(service.sceneview_set_maximized(9, False, domain_generation="44", restore_token=token))
+
+    assert not wrong_domain.ok and wrong_domain.error.code == "SCENEVIEW_RESTORE_TOKEN_MISMATCH"
+    assert restored.ok
+    assert service.dispatcher.calls[-1] == (
+        "sceneview.setMaximized",
+        {"instanceId": "9", "domainGeneration": "44", "maximized": False,
+         "hasExpectedCurrentMaximized": True, "expectedCurrentMaximized": True},
+    )
+    assert replay.ok
+    assert replay.data["commandId"] == restored.data["commandId"]
+    assert replay.data["idempotentReplay"] is True
+    assert replay.data["commandSubmitted"] is False
+    assert replay.data["changed"] is False and replay.data["writeCount"] == 0
+    assert len(service.dispatcher.calls) == 2
+
+    restarted = StatusDomainService()
+    restarted.dispatcher = _Dispatcher()
+    after_restart = asyncio.run(restarted.sceneview_set_maximized(9, False, domain_generation="44", restore_token=token))
+    assert not after_restart.ok and after_restart.error.code == "SCENEVIEW_RESTORE_TOKEN_INVALID"
+    assert restarted.dispatcher.calls == []
+
+
+def test_sceneview_wait_false_does_not_submit_a_second_action() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            return ok(request_id, {"ok": True, "instanceId": payload["instanceId"], "maximized": payload["maximized"]})
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+    result = asyncio.run(service.sceneview_set_maximized(9, True, wait=False))
+
+    assert result.ok
+    assert result.data["commandSubmitted"] is True
+    assert result.data["terminal"] is False
+    assert result.data["confirmed"] is False
+    assert len(service.dispatcher.calls) == 1
+
+
+def test_sceneview_persistence_failure_reports_possible_side_effect_without_replay() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None):
+            self.calls.append((name, payload))
+            return ok(request_id, {
+                "ok": False,
+                "commandId": "sceneview-original-command",
+                "changed": True,
+                "writeCount": 1,
+                "persistenceError": "state store write failed",
+            })
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+    result = asyncio.run(service.sceneview_set_maximized(9, True))
+
+    assert result.ok
+    assert result.data["commandId"] == "sceneview-original-command"
+    assert result.data["commandSubmitted"] is True
+    assert result.data["sideEffectsMayHaveOccurred"] is True
+    assert result.data["confirmed"] is False and result.data["terminal"] is False
+    assert result.data["persistenceError"] == "state store write failed"
+    assert len(service.dispatcher.calls) == 1
+
+
+def test_editor_window_history_validates_bounds_before_dispatch_and_preserves_cursor() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict):
+            self.calls.append((name, payload))
+            return ok(request_id, {
+                "events": [], "earliestSequence": 12, "truncated": True,
+                "gap": {"reason": "domain_reload", "afterSequence": 9},
+            })
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+
+    assert not asyncio.run(service.editor_window_history(after_sequence=-1)).ok
+    assert not asyncio.run(service.editor_window_history(count=513)).ok
+    assert not asyncio.run(service.editor_window_history(after_sequence=True)).ok
+    assert not asyncio.run(service.editor_window_history(instance_id=42)).ok
+    accepted = asyncio.run(service.editor_window_history("42", after_sequence=9, count=2))
+
+    assert accepted.ok
+    assert accepted.data == {
+        "events": [], "earliestSequence": 12, "truncated": True,
+        "gap": {"reason": "domain_reload", "afterSequence": 9},
+    }
+    assert service.dispatcher.calls == [(
+        "editor.window.history", {"instanceId": "42", "afterSequence": 9, "count": 2},
+    )]
+
+
+def test_safe_window_open_and_focus_validate_before_dispatch() -> None:
+    class _Dispatcher:
+        calls: list[tuple[str, dict]] = []
+
+        async def call(self, request_id: str, name: str, payload: dict):
+            self.calls.append((name, payload))
+            return ok(request_id, {"ok": True})
+
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher()
+
+    assert not asyncio.run(service.editor_window_open("")).ok
+    assert not asyncio.run(service.editor_window_focus("", "48")).ok
+    assert not asyncio.run(service.editor_window_focus("42", 48)).ok
+    assert asyncio.run(service.editor_window_open("CodingRiver.UPilot.UPilotSafeWindowProbe")).ok
+    assert asyncio.run(service.editor_window_focus("42", "48")).ok
+    assert service.dispatcher.calls == [
+        ("editor.window.open", {"typeName": "CodingRiver.UPilot.UPilotSafeWindowProbe"}),
+        ("editor.window.focus", {"instanceId": "42", "domainGeneration": "48"}),
+    ]
+
+
 def test_sync_existing_compile_is_a_success_intermediate_state_without_failure_signature() -> None:
     source = (Path(__file__).parents[1] / "src" / "upilot_mcp" / "domain" / "resource_service.py").read_text(
         encoding="utf-8"
@@ -432,6 +889,8 @@ def test_safe_compile_verifies_persistent_errors_after_transient_wait_error() ->
         )
 
     async def _compile_errors(_compile_request_id: str = "") -> ToolResponse:
+        state.compile.terminal = True
+        state.compile.errors_verified = True
         return ok("req-errors", {"total": 0, "errors": [], "source": "live"})
 
     service.compile = _compile
@@ -490,6 +949,8 @@ def test_safe_compile_resumes_wait_after_domain_reload_disconnect() -> None:
         return ok("req-wait-2", {"status": "completed", "elapsedS": 0.1})
 
     async def _compile_errors(_compile_request_id: str = "") -> ToolResponse:
+        state.compile.terminal = True
+        state.compile.errors_verified = True
         return ok("req-errors", {"total": 0, "errors": [], "source": "persistent"})
 
     service.compile = _compile
@@ -546,6 +1007,8 @@ def test_safe_compile_preserves_explicit_invocation_compile_identity() -> None:
 
     async def _compile_errors(compile_request_id: str = "") -> ToolResponse:
         assert compile_request_id == "req-snapshot"
+        state.compile.terminal = True
+        state.compile.errors_verified = True
         return ok("req-errors", {"total": 0, "errors": [], "source": "persistent"})
 
     service.compile = _compile
@@ -680,8 +1143,8 @@ def test_prefab_query_components_tool_is_read_only_in_source_registry() -> None:
     assert '"unity_prefab_query_components"' not in text.split("_DESTRUCTIVE_TOOLS", 1)[1].split("}", 1)[0]
 
 
-def test_public_tool_route_and_unknown_tool_are_real_failures() -> None:
-    register_public_tool("unity_contract_echo", facade_method="echo", category="test")
+def test_public_tool_route_and_unknown_tool_are_real_failures(register_test_tool) -> None:
+    register_test_tool("unity_contract_echo", facade_method="echo", category="test")
     facade = _Facade()
     result = asyncio.run(dispatch_public_tool(facade, "unity_contract_echo", {"value": "ok"}))
     missing = asyncio.run(dispatch_public_tool(facade, "unity_contract_missing", {}))
@@ -691,8 +1154,8 @@ def test_public_tool_route_and_unknown_tool_are_real_failures() -> None:
     assert missing.error and missing.error.code == "UNKNOWN_TOOL"
 
 
-def test_generic_tool_call_routes_registered_tools_and_blocks_recursion() -> None:
-    register_public_tool("unity_contract_proxy_echo", facade_method="echo", category="test")
+def test_generic_tool_call_routes_registered_tools_and_blocks_recursion(register_test_tool) -> None:
+    register_test_tool("unity_contract_proxy_echo", facade_method="echo", category="test")
     service = StatusDomainService.__new__(StatusDomainService)
     service.echo = _Facade().echo
 
@@ -704,7 +1167,7 @@ def test_generic_tool_call_routes_registered_tools_and_blocks_recursion() -> Non
     assert recursive.error and recursive.error.code == "RECURSIVE_TOOL_CALL"
 
 
-def test_generic_tool_call_maps_public_camel_case_by_target_signature() -> None:
+def test_generic_tool_call_maps_public_camel_case_by_target_signature(register_test_tool) -> None:
     class _ProxyFacade:
         async def capture(
             self,
@@ -725,7 +1188,7 @@ def test_generic_tool_call_maps_public_camel_case_by_target_signature() -> None:
                 },
             )
 
-    register_public_tool(
+    register_test_tool(
         "unity_contract_proxy_arguments", facade_method="capture", category="test"
     )
     service = StatusDomainService.__new__(StatusDomainService)
@@ -754,8 +1217,8 @@ def test_generic_tool_call_maps_public_camel_case_by_target_signature() -> None:
     }
 
 
-def test_generic_tool_call_rejects_unknown_arguments_with_schema() -> None:
-    register_public_tool(
+def test_generic_tool_call_rejects_unknown_arguments_with_schema(register_test_tool) -> None:
+    register_test_tool(
         "unity_contract_proxy_schema", facade_method="echo", category="test"
     )
     service = StatusDomainService.__new__(StatusDomainService)
@@ -771,8 +1234,8 @@ def test_generic_tool_call_rejects_unknown_arguments_with_schema() -> None:
     assert result.error.detail["expectedArguments"][0]["name"] == "value"
 
 
-def test_tools_find_exposes_proxy_argument_schema() -> None:
-    register_public_tool(
+def test_tools_find_exposes_proxy_argument_schema(register_test_tool) -> None:
+    register_test_tool(
         "unity_contract_proxy_find", facade_method="echo", category="test"
     )
     service = StatusDomainService.__new__(StatusDomainService)
@@ -812,8 +1275,8 @@ def test_console_search_query_alias_is_forwarded_strictly() -> None:
     assert result.data["effectiveQuery"] == "DeliveryPoint"
 
 
-def test_public_tool_route_rejects_destructive_tools_in_safe_mode() -> None:
-    register_public_tool(
+def test_public_tool_route_rejects_destructive_tools_in_safe_mode(register_test_tool) -> None:
+    register_test_tool(
         "unity_contract_write",
         facade_method="echo",
         category="test",
@@ -1106,6 +1569,10 @@ def test_compile_result_does_not_overwrite_completed_phase_with_accepted() -> No
 
     result = asyncio.run(service.compile())
     assert result.ok is True
+    assert result.data["triggerMode"] == "incremental"
+    assert result.data["requestIssued"] is True
+    assert result.data["cleanBuildCache"] is False
+    assert result.data["attachedToExistingCompile"] is False
     assert service.server.state.compile.status == "finished"
     assert service.server.state.compile.phase == "completed"
 
@@ -1126,6 +1593,7 @@ def test_screenshot_editor_window_is_strict_snapshot_wrapper() -> None:
     async def _capture(source: str, target: dict) -> ToolResponse:
         assert source == "editorWindow"
         assert target["instanceId"] == "42"
+        assert target["requireContentRect"] is True
         return ok("req-snapshot", {"source": source, "snapshot": {"snapshotId": "snapshot-1"}})
 
     service = ScreenshotDomainService.__new__(ScreenshotDomainService)
@@ -1249,7 +1717,7 @@ def test_verify_window_uses_editor_window_list_as_truth() -> None:
     async def _resource_console_summary(self) -> ToolResponse:
         return ok("req-console", {"errorCount": 0})
 
-    async def _screenshot_editor_window(self, window_title: str, degrade: str | None = None) -> ToolResponse:
+    async def _screenshot_editor_window(self, window_title: str, degrade: str | None = None, **_: object) -> ToolResponse:
         return ok("req-screenshot", {"source": "editorWindow", "width": 900, "height": 640})
 
     service.compile_wait = types.MethodType(_compile_wait, service)
@@ -1267,6 +1735,110 @@ def test_verify_window_uses_editor_window_list_as_truth() -> None:
     assert result.data["screenshot"]["source"] == "editorWindow"
 
 
+def test_verify_window_reuses_exact_identity_and_default_title_does_not_constrain_it() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    service = TestDomainService.__new__(TestDomainService)
+    list_calls: list[dict] = []
+    screenshot_calls: list[dict] = []
+
+    async def _compile_wait(self, **_: object) -> ToolResponse:
+        return ok("req-compile-wait", {"status": "ready"})
+
+    async def _editor_windows_list(self, type_filter: str = "", title_filter: str = "") -> ToolResponse:
+        list_calls.append({"typeFilter": type_filter, "titleFilter": title_filter})
+        return ok("req-windows", {"windows": [{
+            "title": "Owned Probe",
+            "typeName": "UPilotSafeWindowProbe",
+            "fullTypeName": "CodingRiver.UPilot.UPilotSafeWindowProbe",
+            "instanceId": "42",
+            "domainGeneration": "7",
+            "width": 900,
+            "height": 640,
+        }]})
+
+    async def _resource_window_diagnostics(self) -> ToolResponse:
+        return ok("req-diagnostics", {})
+
+    async def _resource_console_summary(self) -> ToolResponse:
+        return ok("req-console", {})
+
+    async def _screenshot_editor_window(self, **kwargs: object) -> ToolResponse:
+        screenshot_calls.append(kwargs)
+        return ok("req-screenshot", {"source": "editorWindow"})
+
+    service.compile_wait = types.MethodType(_compile_wait, service)
+    service.editor_windows_list = types.MethodType(_editor_windows_list, service)
+    service.resource_window_diagnostics = types.MethodType(_resource_window_diagnostics, service)
+    service.resource_console_summary = types.MethodType(_resource_console_summary, service)
+    service.screenshot_editor_window = types.MethodType(_screenshot_editor_window, service)
+
+    result = asyncio.run(service.verify_window(instance_id="42"))
+
+    assert result.ok is True
+    assert result.data["windowMatch"]["windowOpen"] is True
+    assert result.data["windowMatch"]["identityScope"] == "currentDomain"
+    assert list_calls == [{"typeFilter": "", "titleFilter": ""}]
+    assert screenshot_calls == [{
+        "window_title": "Owned Probe",
+        "degrade": "",
+        "instance_id": "42",
+        "domain_generation": "7",
+        "full_type_name": "CodingRiver.UPilot.UPilotSafeWindowProbe",
+    }]
+
+
+def test_verify_window_rejects_explicit_identity_conflict_without_screenshot_dispatch() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    service = TestDomainService.__new__(TestDomainService)
+    screenshot_calls = 0
+
+    async def _compile_wait(self, **_: object) -> ToolResponse:
+        return ok("req-compile-wait", {"status": "ready"})
+
+    async def _editor_windows_list(self, **_: object) -> ToolResponse:
+        return ok("req-windows", {"windows": [{
+            "title": "Owned Probe",
+            "fullTypeName": "CodingRiver.UPilot.UPilotSafeWindowProbe",
+            "instanceId": "42",
+            "domainGeneration": "7",
+        }]})
+
+    async def _resource_window_diagnostics(self) -> ToolResponse:
+        return ok("req-diagnostics", {})
+
+    async def _resource_console_summary(self) -> ToolResponse:
+        return ok("req-console", {})
+
+    async def _screenshot_editor_window(self, **_: object) -> ToolResponse:
+        nonlocal screenshot_calls
+        screenshot_calls += 1
+        return ok("req-screenshot", {})
+
+    service.compile_wait = types.MethodType(_compile_wait, service)
+    service.editor_windows_list = types.MethodType(_editor_windows_list, service)
+    service.resource_window_diagnostics = types.MethodType(_resource_window_diagnostics, service)
+    service.resource_console_summary = types.MethodType(_resource_console_summary, service)
+    service.screenshot_editor_window = types.MethodType(_screenshot_editor_window, service)
+
+    result = asyncio.run(service.verify_window(window_title="Different", instance_id="42"))
+
+    assert result.ok is True
+    assert result.data["windowMatch"]["windowOpen"] is False
+    assert result.data["windowMatch"]["code"] == "EDITORWINDOW_TITLE_MISMATCH"
+    assert result.data["screenshot"]["sideEffectsMayHaveOccurred"] is False
+    assert screenshot_calls == 0
+
+    type_constrained = asyncio.run(service.verify_window(
+        window_title="Different",
+        full_type_name="CodingRiver.UPilot.UPilotSafeWindowProbe",
+    ))
+    assert type_constrained.data["windowMatch"]["windowOpen"] is False
+    assert type_constrained.data["windowMatch"]["code"] == "WINDOW_NOT_FOUND"
+    assert screenshot_calls == 0
+
+
 def test_editor_state_tracks_freshness_timestamp() -> None:
     state = StateStore()
     assert state.editor.updated_at == 0
@@ -1274,6 +1846,169 @@ def test_editor_state_tracks_freshness_timestamp() -> None:
     assert state.editor.connected is True
     assert state.editor.active_scene == "Launch"
     assert state.editor.updated_at > 0
+
+
+def test_editor_window_set_rect_requires_one_target_and_forwards_exact_instance_id() -> None:
+    from upilot_mcp.domain.status_service import StatusDomainService
+
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, _request_id: str, command: str, payload: dict) -> ToolResponse:
+            self.calls.append((command, payload))
+            return ok("req-window", {"ok": True})
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    dispatcher = _Dispatcher()
+    service.dispatcher = dispatcher
+
+    rejected = asyncio.run(service.editor_window_set_rect(x=1, y=2, width=3, height=4))
+    assert rejected.ok is False
+    assert rejected.error is not None
+    assert rejected.error.code == "INVALID_PAYLOAD"
+    assert dispatcher.calls == []
+
+    accepted = asyncio.run(
+        service.editor_window_set_rect(instance_id="42", x=1, y=2, width=3, height=4)
+    )
+    assert accepted.ok is True
+    assert dispatcher.calls == [
+        (
+            "editor.window.setRect",
+            {"windowTitle": "", "matchMode": "exact", "instanceId": "42", "domainGeneration": "", "fullTypeName": "", "x": 1, "y": 2, "width": 3, "height": 4},
+        )
+    ]
+
+
+def test_editor_window_set_rect_forwards_optional_domain_generation() -> None:
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, _request_id: str, command: str, payload: dict) -> ToolResponse:
+            self.calls.append((command, payload))
+            if command == "editor.windows.list":
+                return ok("req-windows", {"windows": [{
+                    "instanceId": "42", "domainGeneration": "43", "title": "Owned Probe",
+                    "fullTypeName": "CodingRiver.UPilot.UPilotSafeWindowProbe",
+                }]})
+            return ok("req-window", {"ok": True})
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    dispatcher = _Dispatcher()
+    service.dispatcher = dispatcher
+
+    result = asyncio.run(service.editor_window_set_rect(
+        instance_id="42", domain_generation="43", x=1, y=2, width=3, height=4,
+    ))
+
+    assert result.ok
+    assert dispatcher.calls[1][1]["domainGeneration"] == "43"
+
+
+@pytest.mark.parametrize(
+    ("selectors", "expected_code"),
+    [
+        ({"domain_generation": "stale-domain"}, "WINDOW_DOMAIN_MISMATCH"),
+        ({"window_title": "Different title"}, "EDITORWINDOW_TITLE_MISMATCH"),
+    ],
+)
+def test_editor_window_set_rect_rejects_explicit_id_selector_conflicts_before_mutation(
+    selectors: dict[str, str], expected_code: str,
+) -> None:
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, _request_id: str, command: str, payload: dict) -> ToolResponse:
+            self.calls.append((command, payload))
+            if command == "editor.windows.list":
+                return ok("req-windows", {"windows": [{
+                    "instanceId": "42", "domainGeneration": "current-domain", "title": "Owned Probe",
+                    "fullTypeName": "CodingRiver.UPilot.UPilotSafeWindowProbe",
+                }]})
+            raise AssertionError("setRect must not be dispatched for a selector conflict")
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    dispatcher = _Dispatcher()
+    service.dispatcher = dispatcher
+
+    result = asyncio.run(service.editor_window_set_rect(
+        instance_id="42", x=1, y=2, width=3, height=4, **selectors,
+    ))
+
+    assert result.ok is False
+    assert result.error is not None and result.error.code == expected_code
+    assert result.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert [command for command, _ in dispatcher.calls] == ["editor.windows.list"]
+
+
+def test_editor_window_set_rect_rejects_explicit_type_conflict_before_mutation() -> None:
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, _request_id: str, command: str, payload: dict) -> ToolResponse:
+            self.calls.append((command, payload))
+            if command == "editor.windows.list":
+                return ok("req-windows", {"windows": [{
+                    "instanceId": "42", "domainGeneration": "7", "title": "Owned Probe",
+                    "fullTypeName": "CodingRiver.UPilot.UPilotSafeWindowProbe",
+                }]})
+            raise AssertionError("setRect must not be dispatched for a selector conflict")
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    dispatcher = _Dispatcher()
+    service.dispatcher = dispatcher
+
+    result = asyncio.run(service.editor_window_set_rect(
+        instance_id="42", domain_generation="7", full_type_name="Other.Window",
+        x=1, y=2, width=3, height=4,
+    ))
+
+    assert result.ok is False
+    assert result.error is not None and result.error.code == "EDITORWINDOW_TYPE_MISMATCH"
+    assert result.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert [command for command, _ in dispatcher.calls] == ["editor.windows.list"]
+
+
+@pytest.mark.parametrize(
+    ("selectors", "expected_code"),
+    [
+        ({"domain_generation": "stale-domain"}, "WINDOW_DOMAIN_MISMATCH"),
+        ({"window_title": "Different title"}, "EDITORWINDOW_TITLE_MISMATCH"),
+    ],
+)
+def test_editor_window_close_rejects_explicit_id_selector_conflicts_before_mutation(
+    selectors: dict[str, str], expected_code: str,
+) -> None:
+    """P2-WP-04-T02: exact-ID close cannot discard a conflicting target."""
+
+    class _Dispatcher:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call(self, _request_id: str, command: str, payload: dict) -> ToolResponse:
+            self.calls.append((command, payload))
+            if command == "editor.windows.list":
+                return ok("req-windows", {"windows": [{
+                    "instanceId": "42", "domainGeneration": "current-domain", "title": "Owned Probe",
+                }]})
+            raise AssertionError("close must not be dispatched for a selector conflict")
+
+    service = StatusDomainService.__new__(StatusDomainService)
+    dispatcher = _Dispatcher()
+    service.dispatcher = dispatcher
+
+    result = asyncio.run(service.editor_window_close(
+        instance_id="42", close_mode="forceClose", **selectors,
+    ))
+
+    assert result.ok is False
+    assert result.error is not None and result.error.code == expected_code
+    assert result.error.detail["sideEffectsMayHaveOccurred"] is False
+    assert [command for command, _ in dispatcher.calls] == ["editor.windows.list"]
 
 
 def test_client_config_diagnostics_detects_duplicate_endpoint_and_timeout(tmp_path) -> None:
@@ -1634,6 +2369,108 @@ def test_test_domain_service_forwards_staged_stop_commands() -> None:
     ]
 
 
+def test_test_results_incremental_cursor_binds_project_run_and_stream() -> None:
+    from types import SimpleNamespace
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            assert command == "test.results"
+            assert payload == {
+                "runGuid": "run-123", "incremental": True, "afterEventSequence": 0,
+                "expectedResultStreamVersion": 0, "eventCount": 2,
+            }
+            return ok(request_id, {"runGuid": "run-123", "resultStreamVersion": 1,
+                                   "lastDeliveredEventSequence": 2, "events": [{"sequence": 1}, {"sequence": 2}]})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    service.server = SimpleNamespace(state=SimpleNamespace(_project_path="C:/Project"))
+
+    result = asyncio.run(service.test_results("run-123", cursor="begin", count=2))
+
+    assert result.ok
+    assert result.data["events"] == [{"sequence": 1}, {"sequence": 2}]
+    cursor = result.data["nextCursor"]
+    decoded = service._decode_test_result_cursor(cursor)
+    assert decoded == {"v": 1, "projectPath": os.path.normcase(os.path.abspath("C:/Project")),
+                       "runGuid": "run-123", "resultStreamVersion": 1, "sequence": 2}
+    rejected = asyncio.run(service.test_results("other-run", cursor=cursor, count=2))
+    assert rejected.ok is False
+    assert rejected.error.code == "TEST_RESULT_CURSOR_MISMATCH"
+
+
+def test_test_results_without_cursor_preserves_legacy_bridge_payload() -> None:
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        def __init__(self): self.calls = []
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            self.calls.append((command, payload, timeout_ms))
+            return ok(request_id, {"runGuid": "run-123", "events": ["full-history"]})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    result = asyncio.run(service.test_results("run-123"))
+    assert result.ok
+    assert service.dispatcher.calls == [("test.results", {"runGuid": "run-123"}, None)]
+
+
+def test_test_results_incremental_not_found_does_not_issue_cursor() -> None:
+    from types import SimpleNamespace
+    from upilot_mcp.domain.test_service import TestDomainService
+
+    class Dispatcher:
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            return ok(request_id, {"runGuid": "missing", "status": "none", "phase": "not_found"})
+
+    service = TestDomainService()
+    service.dispatcher = Dispatcher()
+    service.server = SimpleNamespace(state=SimpleNamespace(_project_path="C:/Project"))
+    result = asyncio.run(service.test_results("missing", cursor="begin"))
+    assert result.ok
+    assert result.data["phase"] == "not_found"
+    assert "nextCursor" not in result.data
+
+
+def test_console_capture_public_owner_token_is_returned_and_forwarded() -> None:
+    from upilot_mcp.domain.status_service import StatusDomainService
+
+    class Dispatcher:
+        def __init__(self): self.calls = []
+        async def call(self, request_id, command, payload, timeout_ms=None):
+            self.calls.append((command, payload))
+            return ok(request_id, {"session": {"sessionId": "capture-1", "ownerTokenSha256": "hash"}})
+
+    service = StatusDomainService()
+    service.dispatcher = Dispatcher()
+    started = asyncio.run(service.console_capture_start(owner_id="manual-owner"))
+    assert started.ok
+    token = started.data["ownerToken"]
+    assert token and started.data["ownerId"] == "manual-owner"
+    assert service.dispatcher.calls[0][1]["ownerToken"] == token
+    stopped = asyncio.run(service.console_capture_stop("capture-1", owner_token=token))
+    assert stopped.ok
+    assert service.dispatcher.calls[1] == ("console.capture.stop", {"sessionId": "capture-1", "ownerToken": token})
+
+
+def test_console_capture_recovery_does_not_bypass_owner_token(tmp_path) -> None:
+    from types import SimpleNamespace
+    from upilot_mcp.domain.status_service import StatusDomainService
+
+    capture = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    capture.mkdir(parents=True)
+    (capture / "summary.json").write_text("{}", encoding="utf-8")
+    (capture / "session.json").write_text(json.dumps({
+        "sessionId": "capture-1", "active": False, "finishedAtUtcMs": 1, "sha256": "digest",
+        "ownerTokenSha256": hashlib.sha256(b"owner-token").hexdigest(),
+    }), encoding="utf-8")
+    service = StatusDomainService()
+    service.server = SimpleNamespace(session_manager=SimpleNamespace(active=SimpleNamespace(project_path=str(tmp_path))))
+    failed = fail("req", "CAPTURE_OWNERSHIP_REQUIRED", "owner token required")
+    assert service._recover_completed_console_capture("capture-1", "wrong-token", failed) is None
+
+
 def _authoritative_editor_state(
     state: StateStore,
     *,
@@ -1871,6 +2708,39 @@ def test_compile_wait_does_not_report_queued_phase_as_ready() -> None:
     assert result.data["completed"] is False
 
 
+def test_compile_wait_keeps_command_timeout_inside_total_wait_budget() -> None:
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+    state.compile.status = "queued"
+    state.compile.phase = "queued"
+
+    class _Server:
+        def __init__(self) -> None:
+            self.state = state
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict) -> ToolResponse:
+            assert name == "resource.editorState"
+            return fail(request_id, "COMMAND_TIMEOUT", "Editor did not pump the observation command.")
+
+    service = CompileDomainService.__new__(CompileDomainService)
+    service.server = _Server()
+    service.dispatcher = _Dispatcher()
+    service._wake_unity_editor = lambda: False
+
+    result = asyncio.run(
+        service.compile_wait(timeout_s=0, poll_interval_s=0, prefer_events=False)
+    )
+
+    assert result.ok is True
+    assert result.data["status"] == "timeout"
+    assert result.data["completed"] is False
+    assert result.data["lastObservationError"] == "COMMAND_TIMEOUT"
+    assert result.data["waitMode"] == "observation_timeout"
+
+
 def test_ensure_ready_rejects_unknown_editor_context() -> None:
     state = StateStore()
 
@@ -1985,3 +2855,19 @@ def test_mcp_status_exposes_same_unified_execution_state() -> None:
     assert result.data["executionState"]["ready"] == execution["ready"]
     assert result.data["executionState"]["blockedReason"] == execution["blockedReason"]
     assert result.data["compile"]["phase"] == execution["compilePhase"]
+    assert result.data["runtimeIdentity"]["unityEditor"] == {
+        "processId": 42,
+        "bridgeSessionId": "session-current",
+    }
+    assert result.data["runtimeIdentity"]["mcpServer"]["processId"] > 0
+    assert result.data["runtimeIdentity"]["managedDomain"]["producerEpoch"] == execution["producerEpoch"]
+    assert result.data["runtimeIdentity"]["managedDomain"]["domainGeneration"] == execution["domainGeneration"]
+
+
+def test_status_process_existence_handles_missing_current_and_exited_process() -> None:
+    assert StatusDomainService._process_exists(-1) is False
+    assert StatusDomainService._process_exists(os.getpid()) is True
+
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=10)
+    assert StatusDomainService._process_exists(process.pid) is False

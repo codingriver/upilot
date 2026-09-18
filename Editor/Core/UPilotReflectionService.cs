@@ -256,39 +256,89 @@ namespace CodingRiver.UPilot
 
         // ── reflection.call ─────────────────────────────────────────────────────
 
-        private async Task HandleCallAsync(string id, string json, CancellationToken token)
+        private Task HandleCallAsync(string id, string json, CancellationToken token) =>
+            HandleCallAsync(id, json, token, action => _bridge.EnqueueTracked(id, action),
+                result => _bridge.SendResultAsync(id, "reflection.call", result, token),
+                error => _execution.SendContractErrorAsync(id, "reflection.call", error, token));
+
+        internal async Task HandleCallAsync(string id, string json, CancellationToken token,
+            Action<Action> enqueue, Func<ReflectionCallResultPayload, Task> sendResult,
+            Func<ExecutionContractException, Task> sendError)
         {
-            var msg = JsonUtility.FromJson<ReflectionCallMessage>(json);
-            var p   = msg?.payload ?? new ReflectionCallPayload();
+            var boundary = new CallExecutionBoundary();
+            try
+            {
+                var msg = JsonUtility.FromJson<ReflectionCallMessage>(json);
+                var result = await ExecuteCallAsync(msg?.payload ?? new ReflectionCallPayload(),
+                    token, enqueue, boundary);
+                await sendResult(result);
+            }
+            catch (Exception ex)
+            {
+                await sendError(CallError(ex, boundary.SideEffectsMayHaveOccurred));
+            }
+        }
 
-            if (string.IsNullOrEmpty(p.methodName) ||
+        internal sealed class CallExecutionBoundary
+        {
+            private int _entered;
+            internal bool SideEffectsMayHaveOccurred => Volatile.Read(ref _entered) != 0;
+            internal void Enter() => Interlocked.Exchange(ref _entered, 1);
+        }
+
+        internal static void ValidateCall(ReflectionCallPayload p)
+        {
+            p.awaitMode = string.IsNullOrWhiteSpace(p.awaitMode) ? "auto" : p.awaitMode.Trim().ToLowerInvariant();
+            p.resultMode = string.IsNullOrWhiteSpace(p.resultMode) ? "auto" : p.resultMode.Trim().ToLowerInvariant();
+            if (p.awaitMode != "auto" && p.awaitMode != "always" && p.awaitMode != "never")
+                throw new ExecutionContractException("INVALID_AWAIT_MODE", "awaitMode must be auto, always or never.");
+            if (p.resultMode != "auto" && p.resultMode != "inline" && p.resultMode != "handle" && p.resultMode != "legacystring")
+                throw new ExecutionContractException("INVALID_RESULT_MODE", "resultMode must be auto, inline, handle or legacyString.");
+            if (p.resultMode == "handle" && string.IsNullOrWhiteSpace(p.sessionId))
+                throw new ExecutionContractException("SESSION_REQUIRED", "resultMode=handle requires a persistent session.");
+            if (string.IsNullOrWhiteSpace(p.methodName) ||
                 (string.IsNullOrEmpty(p.typeName) && string.IsNullOrEmpty(p.targetHandle)))
-            {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", "methodName and either typeName or targetHandle are required.", token, "reflection.call");
-                return;
-            }
-
+                throw new ExecutionContractException("INVALID_PARAMS", "methodName and either typeName or targetHandle are required.");
             if (!string.IsNullOrWhiteSpace(p.argumentsJson) && p.parameters != null && p.parameters.Length > 0)
-            {
-                await _bridge.SendErrorAsync(id, "REFLECTION_ARGUMENTS_CONFLICT", "arguments and legacy parameters are mutually exclusive.", token, "reflection.call");
-                return;
-            }
-
+                throw new ExecutionContractException("REFLECTION_ARGUMENTS_CONFLICT", "arguments and legacy parameters are mutually exclusive.");
             if (!string.IsNullOrWhiteSpace(p.targetHandle) &&
                 (!string.IsNullOrWhiteSpace(p.targetInstancePath) ||
                  !string.IsNullOrWhiteSpace(p.targetStaticTypeName) ||
                  !string.IsNullOrWhiteSpace(p.targetStaticMemberPath)))
-            {
-                await _bridge.SendErrorAsync(id, "REFLECTION_TARGET_CONFLICT", "targetHandle cannot be combined with instance/static member paths.", token, "reflection.call");
-                return;
-            }
+                throw new ExecutionContractException("REFLECTION_TARGET_CONFLICT", "targetHandle cannot be combined with instance/static member paths.");
+            UPilotExecutionService.ValidateArgumentStructure(p.argumentsJson);
+        }
 
+        internal static ExecutionContractException CallError(Exception ex, bool sideEffects)
+        {
+            if (ex is TargetInvocationException invocation) ex = invocation.InnerException ?? ex;
+            var contract = ex as ExecutionContractException;
+            var detail = new Dictionary<string, object>(contract?.Detail ?? new Dictionary<string, object>());
+            detail["sideEffectsMayHaveOccurred"] = sideEffects;
+            if (!detail.ContainsKey("stage"))
+                detail["stage"] = ex is OperationCanceledException ? "cancelled" : sideEffects ? "runtime" : "bind";
+            detail["nextAction"] = sideEffects
+                ? "Inspect the original request and actual state; do not replay the target."
+                : "Correct the request and call once; the target has not executed.";
+            return new ExecutionContractException(contract?.Code ??
+                (ex is OperationCanceledException ? "EXECUTION_CANCELLED" : "REFLECTION_CALL_FAILED"), ex.Message, detail);
+        }
+
+        internal async Task<ReflectionCallResultPayload> ExecuteCallAsync(
+            ReflectionCallPayload p, CancellationToken token, Action<Action> enqueue,
+            CallExecutionBoundary boundary = null)
+        {
+            boundary = boundary ?? new CallExecutionBoundary();
+            try
+            {
+            ValidateCall(p);
             var invokeTcs = new TaskCompletionSource<ReflectionInvocationState>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _bridge.EnqueueTracked(id, () =>
+            enqueue(() =>
             {
                 try
                 {
                     token.ThrowIfCancellationRequested();
+                    if (!string.IsNullOrWhiteSpace(p.sessionId)) _execution.Sessions.Get(p.sessionId);
                     object target = null;
                     bool isStatic = p.isStatic;
                     if (!string.IsNullOrWhiteSpace(p.targetHandle))
@@ -308,17 +358,31 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    var supplied = !string.IsNullOrWhiteSpace(p.argumentsJson)
-                        ? _execution.DecodeArguments(p.argumentsJson, p.sessionId)
-                        : (p.parameters ?? Array.Empty<string>()).Select(value => new ExecutionValue { Value = value }).ToList();
                     var exactTypes = p.parameterTypeNames ?? Array.Empty<string>();
+                    foreach (var name in exactTypes)
+                        if (ExecutionTypeResolver.Resolve(name) == null)
+                            throw new ExecutionContractException("TYPE_NOT_FOUND", "Parameter type not found: " + name);
                     var genericTypes = (p.genericTypeArguments ?? Array.Empty<string>())
                         .Select(name => ExecutionTypeResolver.Resolve(name) ?? throw new ExecutionContractException("TYPE_NOT_FOUND", "Generic type argument not found: " + name))
                         .ToArray();
+                    _execution.ValidateArgumentBindings(p.argumentsJson, p.sessionId);
+                    var argumentShape = !string.IsNullOrWhiteSpace(p.argumentsJson)
+                        ? JsonUtility.FromJson<ExecutionArgumentsEnvelope>(p.argumentsJson).items
+                            .Select(item => new ExecutionValue { Name = item.name, Direction = item.direction }).ToList()
+                        : (p.parameters ?? Array.Empty<string>()).Select(_ => new ExecutionValue()).ToList();
+                    MethodBinder.ValidateShape(type, p.methodName, isStatic, argumentShape, exactTypes, genericTypes);
+                    var supplied = !string.IsNullOrWhiteSpace(p.argumentsJson)
+                        ? _execution.DecodeArguments(p.argumentsJson, p.sessionId, boundary.Enter)
+                        : (p.parameters ?? Array.Empty<string>()).Select(value => new ExecutionValue { Value = value }).ToList();
+                    // Binding may convert a user-defined value through IConvertible.
+                    if (supplied.Any(value => value.Value != null && !value.Value.GetType().IsPrimitive
+                        && !value.Value.GetType().IsEnum && !(value.Value is string) && !(value.Value is decimal)))
+                        boundary.Enter();
                     var bound = MethodBinder.Bind(type, p.methodName, isStatic, supplied, exactTypes, genericTypes);
 
                     if (!isStatic && target == null)
                     {
+                        boundary.Enter();
                         target = ResolveInstance(p, type);
                         if (target == null)
                         {
@@ -327,6 +391,7 @@ namespace CodingRiver.UPilot
                         }
                     }
 
+                    boundary.Enter();
                     var result = bound.Method.Invoke(target, bound.Arguments);
                     invokeTcs.SetResult(new ReflectionInvocationState
                     {
@@ -342,8 +407,6 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { invokeTcs.SetException(ex); }
             });
 
-            try
-            {
                 var state = await invokeTcs.Task;
                 var awaited = await AwaitableAdapter.AwaitAsync(state.Result, p.awaitMode, p.awaitTimeoutMs, token);
                 var typed = _execution.EncodeResult(awaited.Value, p.sessionId, p.resultMode);
@@ -368,21 +431,11 @@ namespace CodingRiver.UPilot
                         value = _execution.EncodeResult(state.Bound.Arguments[pair.Key], p.sessionId, p.resultMode),
                     });
                 }
-                await _bridge.SendResultAsync(id, "reflection.call", resultPayload, token);
-            }
-            catch (ExecutionContractException ex)
-            {
-                await _execution.SendContractErrorAsync(id, "reflection.call", ex, token);
-            }
-            catch (OperationCanceledException)
-            {
-                await _execution.SendContractErrorAsync(id, "reflection.call",
-                    new ExecutionContractException("EXECUTION_CANCELLED", "Execution was cancelled.",
-                        new Dictionary<string, object> { { "stage", "cancelled" }, { "sideEffectsMayHaveOccurred", true } }), token);
+                return resultPayload;
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "REFLECTION_CALL_FAILED", ex.GetType().FullName + ": " + ex.Message, token, "reflection.call");
+                throw CallError(ex, boundary.SideEffectsMayHaveOccurred);
             }
         }
 

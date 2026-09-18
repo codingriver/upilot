@@ -23,7 +23,24 @@
     "safety": {
         "writeAccessApproved": true,
         "writeAccessApprovedAtUtc": "2026-08-15T05:03:13.9068441+00:00",
-        "unsavedScenePolicy": "ignore"
+        "unsavedScenePolicy": "autoSave",
+        "automationAuthorizationScopes": [
+            "assetMoveDelete",
+            "captureArtifactCleanup",
+            "captureForceStop",
+            "configCsvApply",
+            "destructiveProjectWrite",
+            "editorModeTransition",
+            "editorWindowForceDiscard",
+            "hangRestart",
+            "prefabPatchApply",
+            "scenePolicyExecution",
+            "snapshotBaselineUpdate",
+            "textureImporterApply"
+        ],
+        "automationAuthorizationCatalogHash": "",
+        "automationAuthorizationScopeVersion": 0,
+        "automationAuthorizationApprovedAtUtc": "2026-09-16T09:43:06.0278736+00:00"
     },
     "updates": {
         "manifestUrl": "",

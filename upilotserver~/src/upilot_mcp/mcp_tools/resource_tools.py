@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 from ..models import ToolResponse
@@ -82,6 +82,12 @@ async def unity_asset_refresh():
     r = await _get_facade().asset_refresh()
     return _log_tool_result("unity_asset_refresh", _payload(r))
 
+@mcp.tool(description="Read persisted evidence for one write batch in the current project; never triggers compilation.")
+async def unity_write_batch_status(writeBatchId: str):
+    _log_tool_call("unity_write_batch_status", {"writeBatchId": writeBatchId})
+    r = await _get_facade().write_batch_status(write_batch_id=writeBatchId)
+    return _log_tool_result("unity_write_batch_status", _payload(r))
+
 @mcp.tool(
     description=(
         "Register one saved C#/asmdef/asmref/rsp change batch. paths must exist; optional deletedPaths must be absent. "
@@ -155,10 +161,35 @@ async def unity_asset_subresources_list(assetPath: str, typeFilter: str = "", in
     r = await _get_facade().asset_subresources_list(asset_path=assetPath, type_filter=typeFilter, include_preview=includePreview)
     return _log_tool_result("unity_asset_subresources_list", _payload(r))
 
-@mcp.tool(description="只读列出一个资源的直接或递归依赖，返回路径、类型、GUID 和是否直接依赖。适用于 Prefab 材质/纹理/动画引用审计。")
-async def unity_asset_dependencies(assetPath: str, recursive: bool = True):
-    _log_tool_call("unity_asset_dependencies", {"assetPath": assetPath, "recursive": recursive})
-    r = await _get_facade().asset_dependencies(asset_path=assetPath, recursive=recursive)
+@mcp.tool(description="只读列出资源文件依赖，或在显式 object 模式下执行有界对象引用正反查。默认 file/forward 保留原行为；反查必须提供 referenceQuery 和 Assets/ scope。readOnly/changedEditorState 仅透传 Unity 实测；旧 Bridge 未提供时为 null/unknown，不推断零状态变化。")
+async def unity_asset_dependencies(
+    assetPath: str = "",
+    recursive: bool = True,
+    evidenceMode: Literal["file", "object"] = "file",
+    runtimeBoundary: Literal["none", "ExcludeAssetsEditor"] = "none",
+    direction: Literal["forward", "reverse"] = "forward",
+    referenceQuery: dict | None = None,
+    scope: list[str] | None = None,
+    maxNodes: Annotated[int, Field(strict=True, ge=1, le=5000)] = 500,
+    timeBudgetMs: Annotated[int, Field(strict=True, ge=1, le=30000)] = 5000,
+    continuationToken: str = "",
+):
+    _log_tool_call("unity_asset_dependencies", {"assetPath": assetPath, "recursive": recursive, "evidenceMode": evidenceMode,
+                                                   "runtimeBoundary": runtimeBoundary, "direction": direction, "referenceQuery": referenceQuery,
+                                                   "scope": scope, "maxNodes": maxNodes, "timeBudgetMs": timeBudgetMs,
+                                                   "continuationToken": continuationToken})
+    r = await _get_facade().asset_dependencies(
+        asset_path=assetPath,
+        recursive=recursive,
+        evidence_mode=evidenceMode,
+        runtime_boundary=runtimeBoundary,
+        direction=direction,
+        reference_query=referenceQuery,
+        scope=scope,
+        max_nodes=maxNodes,
+        time_budget_ms=timeBudgetMs,
+        continuation_token=continuationToken,
+    )
     return _log_tool_result("unity_asset_dependencies", _payload(r))
 
 @mcp.tool(description="只读审计 AnimatorController 的层、权重、混合模式、AvatarMask、State、Motion、默认状态和未引用 Clip。")
@@ -290,6 +321,7 @@ async def unity_asset_modify_data(
     description=(
         "只读递归查询 Prefab 子层级组件。不会进入 Prefab 编辑模式、不会保存资源、"
         "不要求写权限；按 componentType 返回 GameObject 路径、组件类型和可选序列化字段。"
+        "readOnly/changedEditorState 仅透传 Unity 实测；缺失观测明确为 unknown。"
     )
 )
 async def unity_prefab_query_components(
@@ -298,6 +330,9 @@ async def unity_prefab_query_components(
     includeSerializedFields: bool = True,
     maxDepth: int = 6,
     maxResults: int = 50,
+    followObjectReferences: bool = False,
+    includeNestedPrefabContents: bool = False,
+    referenceDepth: Annotated[int, Field(strict=True, ge=1, le=4)] = 1,
 ):
     _log_tool_call(
         "unity_prefab_query_components",
@@ -307,6 +342,9 @@ async def unity_prefab_query_components(
             "includeSerializedFields": includeSerializedFields,
             "maxDepth": maxDepth,
             "maxResults": maxResults,
+            "followObjectReferences": followObjectReferences,
+            "includeNestedPrefabContents": includeNestedPrefabContents,
+            "referenceDepth": referenceDepth,
         },
     )
     r = await _get_facade().prefab_query_components(
@@ -315,6 +353,9 @@ async def unity_prefab_query_components(
         include_serialized_fields=includeSerializedFields,
         max_depth=maxDepth,
         max_results=maxResults,
+        follow_object_references=followObjectReferences,
+        include_nested_prefab_contents=includeNestedPrefabContents,
+        reference_depth=referenceDepth,
     )
     return _log_tool_result("unity_prefab_query_components", _payload(r))
 
@@ -461,9 +502,9 @@ async def unity_shader_check_errors(assetPath: str, includeWarnings: bool = True
 @mcp.tool(
     description="执行 Unity 编辑器中指定路径的菜单项。菜单项可能触发任意编辑器行为、编译、窗口打开或项目修改；调用前确认 menuPath，必要时先 unity_menu_list。"
 )
-async def unity_menu_execute(menuPath: str):
-    _log_tool_call("unity_menu_execute", {"menuPath": menuPath})
-    r = await _get_facade().menu_execute(menu_path=menuPath)
+async def unity_menu_execute(menuPath: str, expectedModal: dict | None = None):
+    _log_tool_call("unity_menu_execute", {"menuPath": menuPath, "expectedModal": expectedModal})
+    r = await _get_facade().menu_execute(menu_path=menuPath, expected_modal=expectedModal)
     return _log_tool_result("unity_menu_execute", _payload(r))
 
 @mcp.tool(description="列出 Unity 编辑器中所有可用的菜单项。")
@@ -931,6 +972,7 @@ for _name, _value in list(globals().items()):
         continue
     register_public_tool(
         _name,
+        public_handler=_value,
         destructive=_name in _DESTRUCTIVE_TOOLS,
         idempotent=_name not in _DESTRUCTIVE_TOOLS,
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",

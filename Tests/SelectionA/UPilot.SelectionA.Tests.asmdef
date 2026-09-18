@@ -1,0 +1,6 @@
+{
+    "name": "UPilot.SelectionA.Tests",
+    "includePlatforms": ["Editor"],
+    "optionalUnityReferences": ["TestAssemblies"],
+    "autoReferenced": false
+}

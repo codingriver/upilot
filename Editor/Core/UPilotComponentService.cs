@@ -55,6 +55,28 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public class ComponentTargetPayload
+    {
+        public ulong gameObjectId;
+        public string name;
+        public string hierarchyPath;
+        public string scenePath;
+    }
+
+    [Serializable]
+    public class ComponentRemoveResultPayload
+    {
+        public bool ok;
+        public ComponentTargetPayload target;
+        public string componentType;
+        public int componentIndex;
+        public List<ComponentSummaryPayload> beforeComponents = new();
+        public List<ComponentSummaryPayload> afterComponents = new();
+        public bool sceneDirty;
+        public bool requiresSave;
+    }
+
+    [Serializable]
     public class ComponentGetMessage
     {
         public string id;
@@ -138,6 +160,7 @@ namespace CodingRiver.UPilot
     public class ComponentPropertyPayload
     {
         public string name;
+        public string propertyPath;
         public string type;
         public string value;
     }
@@ -252,7 +275,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<GenericOkPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<ComponentRemoveResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
                 try
@@ -279,8 +302,28 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
+                    var beforeComponents = BuildComponentSummaries(go);
+                    var target = new ComponentTargetPayload
+                    {
+                        gameObjectId = goId,
+                        name = go.name,
+                        hierarchyPath = BuildHierarchyPath(go.transform),
+                        scenePath = go.scene.IsValid() ? go.scene.path : "",
+                    };
                     Undo.DestroyObjectImmediate(comp);
-                    tcs.TrySetResult(new GenericOkPayload { ok = true });
+                    if (go.scene.IsValid())
+                        EditorSceneManager.MarkSceneDirty(go.scene);
+                    tcs.TrySetResult(new ComponentRemoveResultPayload
+                    {
+                        ok = true,
+                        target = target,
+                        componentType = typeName,
+                        componentIndex = compIndex,
+                        beforeComponents = beforeComponents,
+                        afterComponents = BuildComponentSummaries(go),
+                        sceneDirty = go.scene.IsValid() && go.scene.isDirty,
+                        requiresSave = go.scene.IsValid() && go.scene.isDirty,
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -446,27 +489,8 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
-                    var comps = go.GetComponents<Component>();
                     var result = new ComponentListResultPayload();
-                    var typeCount = new Dictionary<string, int>();
-
-                    foreach (var c in comps)
-                    {
-                        if (c == null) continue; // Missing script
-                        var cTypeName = c.GetType().Name;
-                        if (!typeCount.ContainsKey(cTypeName))
-                            typeCount[cTypeName] = 0;
-                        var idx = typeCount[cTypeName];
-                        typeCount[cTypeName] = idx + 1;
-
-                        var summary = new ComponentSummaryPayload
-                        {
-                            componentType = cTypeName,
-                            componentIndex = idx,
-                            enabled = IsComponentEnabled(c),
-                        };
-                        result.components.Add(summary);
-                    }
+                    result.components = BuildComponentSummaries(go);
 
                     tcs.TrySetResult(result);
                 }
@@ -554,6 +578,35 @@ namespace CodingRiver.UPilot
             return 0;
         }
 
+        private static List<ComponentSummaryPayload> BuildComponentSummaries(GameObject go)
+        {
+            var result = new List<ComponentSummaryPayload>();
+            var typeCount = new Dictionary<string, int>();
+            foreach (var component in go.GetComponents<Component>())
+            {
+                if (component == null) continue;
+                var typeName = component.GetType().Name;
+                typeCount.TryGetValue(typeName, out var index);
+                typeCount[typeName] = index + 1;
+                result.Add(new ComponentSummaryPayload
+                {
+                    componentType = typeName,
+                    componentIndex = index,
+                    enabled = IsComponentEnabled(component),
+                });
+            }
+            return result;
+        }
+
+        private static string BuildHierarchyPath(Transform transform)
+        {
+            var names = new List<string>();
+            for (var current = transform; current != null; current = current.parent)
+                names.Add(current.name);
+            names.Reverse();
+            return string.Join("/", names);
+        }
+
         /// <summary>Check if a component is enabled (for Behaviours and Renderers).</summary>
         private static bool IsComponentEnabled(Component c)
         {
@@ -564,7 +617,7 @@ namespace CodingRiver.UPilot
         }
 
         /// <summary>Build a ComponentInfoPayload using SerializedObject.</summary>
-        private static ComponentInfoPayload BuildComponentInfo(Component comp, int index)
+        internal static ComponentInfoPayload BuildComponentInfo(Component comp, int index)
         {
             var info = new ComponentInfoPayload
             {
@@ -585,6 +638,7 @@ namespace CodingRiver.UPilot
                 info.properties.Add(new ComponentPropertyPayload
                 {
                     name = prop.name,
+                    propertyPath = prop.propertyPath,
                     type = prop.propertyType.ToString(),
                     value = GetSerializedPropertyValue(prop),
                 });
@@ -603,26 +657,16 @@ namespace CodingRiver.UPilot
                 case SerializedPropertyType.Float:         return prop.floatValue.ToString("G");
                 case SerializedPropertyType.String:        return prop.stringValue;
                 case SerializedPropertyType.Color:
-                    var c = prop.colorValue;
-                    return $"{{\"r\":{c.r:G},\"g\":{c.g:G},\"b\":{c.b:G},\"a\":{c.a:G}}}";
+                    return UPilotSerializedPropertyUtility.GetDisplayValue(prop);
                 case SerializedPropertyType.ObjectReference:
                     return prop.objectReferenceValue != null ? prop.objectReferenceValue.name : "null";
                 case SerializedPropertyType.Enum:          return prop.enumNames[prop.enumValueIndex];
                 case SerializedPropertyType.Vector2:
-                    var v2 = prop.vector2Value;
-                    return $"{{\"x\":{v2.x:G},\"y\":{v2.y:G}}}";
                 case SerializedPropertyType.Vector3:
-                    var v3 = prop.vector3Value;
-                    return $"{{\"x\":{v3.x:G},\"y\":{v3.y:G},\"z\":{v3.z:G}}}";
                 case SerializedPropertyType.Vector4:
-                    var v4 = prop.vector4Value;
-                    return $"{{\"x\":{v4.x:G},\"y\":{v4.y:G},\"z\":{v4.z:G},\"w\":{v4.w:G}}}";
                 case SerializedPropertyType.Rect:
-                    var r = prop.rectValue;
-                    return $"{{\"x\":{r.x:G},\"y\":{r.y:G},\"width\":{r.width:G},\"height\":{r.height:G}}}";
                 case SerializedPropertyType.Quaternion:
-                    var q = prop.quaternionValue;
-                    return $"{{\"x\":{q.x:G},\"y\":{q.y:G},\"z\":{q.z:G},\"w\":{q.w:G}}}";
+                    return UPilotSerializedPropertyUtility.GetDisplayValue(prop);
                 case SerializedPropertyType.LayerMask:     return prop.intValue.ToString();
                 case SerializedPropertyType.ArraySize:     return prop.intValue.ToString();
                 default:                                   return $"<{prop.propertyType}>";

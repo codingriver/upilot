@@ -53,6 +53,17 @@ namespace CodingRiver.UPilot
     /// </summary>
     public static class UPilotScreenshotService
     {
+        public static bool TrySaveScreenshot(ScreenshotSavePayload payload, out ScreenshotSaveResultPayload result,
+            out string errorCode, out string errorMessage)
+        {
+            result = null;
+            errorCode = payload == null ? "SNAPSHOT_REQUEST_REQUIRED" : "SNAPSHOT_ASYNC_API_REQUIRED";
+            errorMessage = payload == null ? "A screenshot request is required." :
+                "Use UPilotSnapshotApiV1.Start, then Status/Collect by snapshotId. " +
+                "Snapshot capture completes asynchronously; no capture was started by this compatibility call.";
+            return false;
+        }
+
         internal class ScreenshotBytesResult
         {
             public byte[] Bytes;

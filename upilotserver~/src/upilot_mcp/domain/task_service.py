@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import logging
 import math
 from functools import wraps
 import os
+import secrets
 import shlex
 import subprocess
 import sys
@@ -51,7 +53,7 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 29
+_UPILOT_RULES_VERSION = 30
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
@@ -64,9 +66,49 @@ def _serialized_operation(method):
     """Serialize status/cancel so only one caller advances an operation's cleanup."""
     @wraps(method)
     async def guarded(self, operation_id, *args, **kwargs):
+        self._recover_operations()
         locks = self.__dict__.setdefault("_operation_locks", {})
+        collect_after = False
         async with locks.setdefault(operation_id, asyncio.Lock()):
-            return await method(self, operation_id, *args, **kwargs)
+            result = await method(self, operation_id, *args, **kwargs)
+            state = self._operations.get(operation_id)
+            collect_after = bool(state and state.pop("_deferredArtifactCollection", False))
+            if state is not None and not self._save_operation(state):
+                return fail(new_id("req"), "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        if collect_after and result.ok:
+            # Artifact reads can block on project files; they deliberately run after
+            # the status/cancel lock is released so cancellation and newer samples
+            # are never held behind filesystem I/O.
+            collection = await self.operation_collect_artifacts(
+                operation_id,
+                detail_level=str(kwargs.get("detail_level") or "summary"),
+                max_tail_chars=int(kwargs.get("max_tail_chars") or 2000),
+                include_raw_state=bool(kwargs.get("include_raw_state", False)),
+            )
+            state = self._operations.get(operation_id)
+            if state is not None:
+                public = self._public_operation_state(
+                    state, str(kwargs.get("detail_level") or "summary"),
+                    int(kwargs.get("max_tail_chars") or 2000), bool(kwargs.get("include_raw_state", False)),
+                )
+                # Artifact persistence is independent of the business terminal
+                # result.  A deferred collection can fail after the status state
+                # was durably saved; surface that failure to this caller without
+                # overwriting the original business failureSignature or pretending
+                # that the collection was persisted.
+                if not collection.ok and collection.error is not None:
+                    detail = collection.error.detail if isinstance(collection.error.detail, dict) else {}
+                    public.update({
+                        "collectionPersisted": False,
+                        "artifactPersistenceError": detail.get(
+                            "artifactPersistenceError", collection.error.message,
+                        ),
+                        "artifactCollectionSequence": int(detail.get(
+                            "artifactCollectionSequence", state.get("artifactCollectionSequence") or 0,
+                        )),
+                    })
+                return ok(result.request_id, public)
+        return result
     return guarded
 
 
@@ -89,18 +131,25 @@ def _coerce_json_dict(value: object) -> dict:
     return {}
 
 
-def _extract_operation_payload(result: ToolResponse) -> dict:
-    """Return a normalized dict from direct tool data or reflection result text."""
+def _extract_operation_payload(result: ToolResponse) -> tuple[dict, str, dict | None]:
+    """Return a normalized payload, retaining JSON parse evidence for every call kind."""
     if not result.ok or not isinstance(result.data, dict):
-        return {}
+        return {}, "", None
 
     data = result.data
     for key in ("result", "raw", "data", "payload"):
-        parsed = _coerce_json_dict(data.get(key))
+        value = data.get(key)
+        if isinstance(value, dict) and value:
+            return value, "", None
+        if not isinstance(value, str) or not value.strip() or value.strip() == "(null)":
+            continue
+        parsed, parse_error, diagnostic = _operation_parse_object(value)
+        if parse_error:
+            return {}, parse_error, diagnostic
         if parsed:
-            return parsed
+            return parsed, "", None
 
-    return data
+    return data, "", None
 
 
 def _operation_path_get(value: object, path: object) -> tuple[bool, object]:
@@ -127,23 +176,31 @@ def _operation_path_get(value: object, path: object) -> tuple[bool, object]:
     return True, current
 
 
-def _operation_parse_object(value: object) -> tuple[dict, str]:
+def _operation_parse_object(value: object) -> tuple[dict, str, dict | None]:
     if isinstance(value, dict):
-        return value, ""
+        return value, "", None
     if isinstance(value, str):
-        text = value.strip()
-        if not text or text == "(null)":
-            return {}, ""
+        # Parse the original text: JSONDecodeError positions are Unicode-character
+        # offsets into this exact input, including any leading whitespace.
+        text = value
+        if not text.strip() or text.strip() == "(null)":
+            return {}, "", None
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as ex:
-            return {}, f"Operation result is not valid JSON: {ex.msg} at position {ex.pos}."
+            start = max(0, ex.pos - 128)
+            snippet = text[start:start + 256]
+            return {}, f"Operation result is not valid JSON: {ex.msg} at position {ex.pos}.", {
+                "offset": ex.pos, "offsetUnit": "unicodeCharacter", "line": ex.lineno,
+                "column": ex.colno, "path": None, "snippet": snippet,
+                "truncated": start > 0 or start + len(snippet) < len(text),
+            }
         if isinstance(parsed, dict):
-            return parsed, ""
-        return {}, f"Operation result JSON must be an object, got {type(parsed).__name__}."
+            return parsed, "", None
+        return {}, f"Operation result JSON must be an object, got {type(parsed).__name__}.", None
     if value is None:
-        return {}, ""
-    return {}, f"Operation result must be an object or JSON object string, got {type(value).__name__}."
+        return {}, "", None
+    return {}, f"Operation result must be an object or JSON object string, got {type(value).__name__}.", None
 
 
 def _normalize_status(value: object) -> str:
@@ -195,6 +252,33 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _read_stable_artifact(path: Path) -> tuple[dict, str]:
+    """Hash one opened file and reject a source that changes during that read."""
+    h = hashlib.sha256()
+    path_before = path.stat()
+    with path.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+        after = os.fstat(stream.fileno())
+    path_after = path.stat()
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    path_identity_before = (path_before.st_dev, path_before.st_ino, path_before.st_size, path_before.st_mtime_ns)
+    path_identity_after = (path_after.st_dev, path_after.st_ino, path_after.st_size, path_after.st_mtime_ns)
+    if identity_before != identity_after or identity_before != path_identity_before or identity_after != path_identity_after:
+        return {}, "ARTIFACT_CHANGED_DURING_READ"
+    return {
+        "bytes": before.st_size,
+        "sha256": h.hexdigest(),
+        "modifiedAt": int(before.st_mtime * 1000),
+    }, ""
+
+
+def _is_sha256_text(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdefABCDEF" for char in value)
 
 
 def _verify_capture_artifacts(root: Path, session: dict) -> None:
@@ -253,6 +337,64 @@ def _read_text_tail(path: Path, lines: int) -> str:
 
 
 class TaskDomainService:
+    def _save_operation(self, state: dict) -> bool:
+        try:
+            self.server.state.save_operation(state)
+            return True
+        except Exception as exc:
+            state.update(status="RecoveryRequired", phase="persistence_failed", endedAt=0,
+                         error=str(exc), nextAction="Inspect persisted operation evidence; do not replay start.")
+            return False
+
+    def _recover_operations(self) -> None:
+        store = getattr(self.server, "state", None)
+        project = getattr(store, "_project_path", "")
+        if not project or getattr(self, "_operations_loaded_project", "") == project:
+            return
+        if getattr(self, "_operations_loaded_project", ""):
+            for handle in self.__dict__.get("_operation_observers", {}).values():
+                handle.cancel()
+            self._operations.clear()
+        self._operations_loaded_project = project
+        for state in store.load_operations():
+            if state["operationId"] in self._operations:
+                continue
+            state["recovered"] = True
+            self._operations[state["operationId"]] = state
+            if state.get("endedAt"):
+                continue
+            if not state.get("startEstablished") or not state.get("recoveryIdentityEstablished"):
+                state.update(status="RecoveryRequired", phase="start_identity_unknown", endedAt=0,
+                             nextAction="Inspect the original start/capture evidence; start was not replayed.")
+                self._save_operation(state)
+            else:
+                self._resume_operation_observer(state)
+
+    def _resume_operation_observer(self, state: dict) -> None:
+        handles = self.__dict__.setdefault("_operation_observers", {})
+        operation_id = state["operationId"]
+        current = handles.get(operation_id)
+        if not state.get("endedAt") and (current is None or current.done()):
+            handles[operation_id] = asyncio.create_task(self._observe_operation(state), name=operation_id)
+
+    async def _observe_operation(self, state: dict) -> None:
+        try:
+            while not state.get("endedAt"):
+                await asyncio.sleep(max(0.05, float(state.get("pollIntervalSec") or 3)))
+                if state.get("projectPath") != self.server.state._project_path:
+                    return
+                if state.get("status") == "RecoveryRequired":
+                    return
+                await self.operation_status(state["operationId"])
+        except asyncio.CancelledError:
+            # Shutdown stops observation, not the underlying operation.
+            raise
+        except Exception as exc:
+            state.update(status="RecoveryRequired", phase="observer_failed", endedAt=0,
+                         error=str(exc), nextAction="Inspect the original operation; do not replay start.")
+        finally:
+            self._save_operation(state)
+
     async def operation_list(self, status: str = "", limit: int = 50) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
@@ -271,6 +413,31 @@ class TaskDomainService:
         if session and getattr(session, "project_path", ""):
             return Path(session.project_path).resolve()
         return Path.cwd().resolve()
+
+    def _operation_project_matches(self, state: dict) -> bool:
+        """Operations may observe only the exact project that established them."""
+        stored = str(state.get("projectPath") or "")
+        if not stored:
+            # Historical operations have no authoritative project binding.  They
+            # remain recovery records, never cross-project work.
+            return False
+        try:
+            return os.path.normcase(str(Path(stored).resolve())) == os.path.normcase(str(self._project_root()))
+        except OSError:
+            return False
+
+    def _operation_project_mismatch(self, request_id: str, state: dict) -> ToolResponse:
+        return fail(
+            request_id,
+            "OPERATION_PROJECT_MISMATCH",
+            "Operation belongs to a different Unity project; no operation call or artifact read was attempted.",
+            {
+                **self._public_operation_state(state),
+                "operationProject": str(state.get("projectPath") or ""),
+                "connectedProject": str(self._project_root()),
+                "sideEffectsMayHaveOccurred": False,
+            },
+        )
 
     @staticmethod
     def _upilot_package_version() -> str:
@@ -545,6 +712,11 @@ class TaskDomainService:
             fields = rules.get("fromStatusFields")
             if fields is not None and (not isinstance(fields, list) or not all(isinstance(item, str) for item in fields)):
                 errors.append({"path": "artifactRules.fromStatusFields", "code": "type", "message": "fromStatusFields must be an array of field names."})
+            field_kinds = rules.get("fieldKinds")
+            if field_kinds is not None and (not isinstance(field_kinds, dict) or not all(
+                    isinstance(key, str) and str(value).lower() in {"file", "metadata", "sha256", "bytes"}
+                    for key, value in field_kinds.items())):
+                errors.append({"path": "artifactRules.fieldKinds", "code": "type", "message": "fieldKinds must map field names to file, metadata, sha256, or bytes."})
 
         for field in ("resultPath", "statusPath", "phasePath", "errorPath", "detailPath", "progressPath", "failureSignaturePath", "artifactsPath"):
             value = job_spec.get(field)
@@ -618,6 +790,7 @@ class TaskDomainService:
                 errors.append({"path": path, "code": "placeholder_path", "message": f"Unsupported placeholder: {value}"})
 
     async def operation_start(self, job_spec: dict | None) -> ToolResponse:
+        self._recover_operations()
         request_id = new_id("req")
         validation = await self.operation_validate(
             job_spec, inspect_reflection=False, strict_tool_registry=False,
@@ -632,6 +805,8 @@ class TaskDomainService:
         now = now_ms()
         timeout_sec = float(job_spec.get("timeoutSec") or 300)
         state = {
+            "projectPath": str(self._project_root()),
+            "durable": True,
             "operationId": operation_id,
             "displayName": str(job_spec.get("displayName") or operation_id),
             "jobSpec": job_spec,
@@ -642,11 +817,13 @@ class TaskDomainService:
             "progress": 0,
             "failureSignature": "",
             "repeatFailure": False,
+            "startAttemptCount": 0,
             "cancelRequested": False,
             "cancelAccepted": False,
             "cancelRequestedAt": 0,
             "cancelAttemptCount": 0,
             "cleanupPending": False,
+            "editorVerification": "not_requested",
             "startedAt": now,
             "updatedAt": now,
             "endedAt": 0,
@@ -671,19 +848,38 @@ class TaskDomainService:
             "_lastPollMono": 0.0,
         }
         self._operations[operation_id] = state
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
 
         capture = job_spec.get("consoleCapture") if isinstance(job_spec.get("consoleCapture"), dict) else {}
         if capture.get("enabled"):
-            capture_result = await self.console_capture_start(
-                title=str(capture.get("title") or state["displayName"]),
-                path=str(capture.get("path") or ""),
-                include_stack_trace=bool(capture.get("includeStackTrace", True)),
-                exclude_upilot=bool(capture.get("excludeUPilot", True)),
-                clear_unity_console=bool(capture.get("clearUnityConsole", False)),
-            )
+            state["consoleCapture"].update({
+                "ownerId": operation_id,
+                "ownerToken": secrets.token_urlsafe(32),
+                "requestKey": operation_id,
+            })
+            state["captureIntentSent"] = True
+            if not self._save_operation(state):
+                return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+            try:
+                capture_result = await self._start_owned_operation_capture(
+                    state,
+                    title=str(capture.get("title") or state["displayName"]),
+                    path=str(capture.get("path") or ""),
+                    include_stack_trace=bool(capture.get("includeStackTrace", True)),
+                    exclude_upilot=bool(capture.get("excludeUPilot", True)),
+                    clear_unity_console=bool(capture.get("clearUnityConsole", False)),
+                )
+            except Exception as exc:
+                state.update(status="RecoveryRequired", phase="capture_identity_unknown",
+                             error=str(exc), cleanupPending=True,
+                             nextAction="Inspect capture sessions for the original start intent; business was not started. Do not replay capture start.")
+                self._save_operation(state)
+                return fail(request_id, "OPERATION_CAPTURE_START_UNKNOWN", str(exc), self._public_operation_state(state))
             state["consoleCapture"]["start"] = self._tool_response_summary(capture_result)
             if capture_result.ok and isinstance(capture_result.data, dict):
                 session_data = capture_result.data.get("session") if isinstance(capture_result.data.get("session"), dict) else {}
+                session_data = self._redact_operation_secrets(session_data)
                 state["consoleCapture"]["sessionId"] = str(
                     capture_result.data.get("sessionId") or session_data.get("sessionId") or ""
                 )
@@ -692,38 +888,60 @@ class TaskDomainService:
                 )
                 state["consoleCapture"]["session"] = session_data
             if not capture_result.ok or not state["consoleCapture"].get("sessionId"):
-                state.update(status="Failed", phase="CaptureStartFailed",
+                state.update(status="RecoveryRequired", phase="capture_identity_unknown", cleanupPending=True,
                              error="Required console capture did not establish a session; business was not started.",
-                             failureSignature="OperationCaptureStartFailed")
-                await self._operation_stop_console_capture(state)
+                             failureSignature="OperationCaptureStartFailed",
+                             nextAction="Inspect original capture intent and active sessions; do not replay capture start.")
+                self._save_operation(state)
                 return fail(request_id, "OPERATION_CAPTURE_START_FAILED", state["error"], self._public_operation_state(state))
 
-        start_result = await self._operation_invoke(self._resolve_operation_call(start_call, state), operation_id)
+        state["startIntentSent"] = True
+        state["startAttemptCount"] = int(state.get("startAttemptCount") or 0) + 1
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        try:
+            start_result = await self._operation_invoke(self._resolve_operation_call(start_call, state), operation_id)
+        except Exception as exc:
+            state.update(status="RecoveryRequired", phase="start_result_unknown", error=str(exc),
+                         nextAction="Inspect original operation evidence; start was not replayed.")
+            self._save_operation(state)
+            return fail(request_id, "OPERATION_START_UNKNOWN", str(exc), self._public_operation_state(state))
         self._accumulate_timing(state, start_result)
         state["startResult"] = self._tool_response_summary(start_result)
         if not start_result.ok:
-            state["status"] = "Failed"
-            state["phase"] = "StartFailed"
-            state["error"] = start_result.error.message if start_result.error else "startCall failed"
-            state["failureSignature"] = start_result.error.code if start_result.error else "StartCallFailed"
-            state["endedAt"] = now_ms()
-            self._finalize_operation_timing(state)
-            await self._operation_stop_console_capture(state)
-            return fail(request_id, "OPERATION_START_FAILED", state["error"], self._public_operation_state(state))
+            state.update(status="RecoveryRequired", phase="start_result_unknown",
+                         error=start_result.error.message if start_result.error else "startCall failed",
+                         nextAction="A failed tool response does not prove that business never started. Inspect original start evidence; do not replay.")
+            self._save_operation(state)
+            return fail(request_id, "OPERATION_START_UNKNOWN", state["error"], self._public_operation_state(state))
 
-        payload, payload_error = self._operation_adapt_payload(start_result, start_call, job_spec)
+        payload, payload_error, payload_diagnostic = self._operation_adapt_payload(start_result, start_call, job_spec)
         if payload_error:
-            state["status"] = "Failed"
+            state["parseDiagnostic"] = payload_diagnostic
+            state["status"] = "RecoveryRequired"
             state["phase"] = "StartResultInvalid"
             state["error"] = payload_error
             state["failureSignature"] = "OperationResultInvalid"
-            state["endedAt"] = now_ms()
-            await self._operation_stop_console_capture(state)
+            state["nextAction"] = "Inspect the original start response; business may have started. Do not replay start."
             self._finalize_operation_timing(state)
+            self._save_operation(state)
             return fail(request_id, "OPERATION_RESULT_INVALID", payload_error, self._public_operation_state(state))
         if payload:
             state["startData"] = payload
             self._merge_operation_status(state, payload)
+        state["resolvedStatusCall"] = self._resolve_operation_call(job_spec["statusCall"], state)
+        status_spec = json.dumps(job_spec["statusCall"], sort_keys=True)
+        state["recoveryIdentityEstablished"] = bool(
+            "${start." in status_spec or "${operation.operationId}" in status_spec
+        ) and "${" not in json.dumps(state["resolvedStatusCall"], sort_keys=True)
+        state["startEstablished"] = True
+        if self._operation_call_has_missing_identity(job_spec["statusCall"], state["resolvedStatusCall"]):
+            state.update(status="RecoveryRequired", phase="status_identity_unknown", endedAt=0,
+                         nextAction="The original start did not resolve status identity. Inspect its response; do not replay start or query an unspecified job.")
+            self._save_operation(state)
+            return ok(request_id, self._public_operation_state(state))
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
         mapping = job_spec.get("terminalStatusMapping")
         if _is_terminal_status(str(state["status"]), mapping):
             state["businessCleanupPending"] = _operation_cleanup_pending(payload)
@@ -744,6 +962,9 @@ class TaskDomainService:
             state["phase"] = state.get("phase") or "Running"
         state["updatedAt"] = now_ms()
         self._finalize_operation_timing(state)
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        self._resume_operation_observer(state)
         return ok(request_id, self._public_operation_state(state))
 
     @_serialized_operation
@@ -755,7 +976,17 @@ class TaskDomainService:
         state = self._operations.get(operation_id)
         if state is None:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
+        if not self._operation_project_matches(state):
+            return self._operation_project_mismatch(request_id, state)
+        if state.get("status") == "RecoveryRequired":
+            return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+        if not state.get("startEstablished"):
+            return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
         if state.get("endedAt"):
+            mapping = state.get("jobSpec", {}).get("terminalStatusMapping")
+            if _is_success_status(str(state.get("status") or ""), mapping):
+                state["lastObservationError"] = ""
+                state["nextAction"] = ""
             self._finalize_operation_timing(state)
             return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
@@ -763,45 +994,67 @@ class TaskDomainService:
             await self._operation_stop_console_capture(state)
             return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
-        if now_ms() >= int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000):
-            state["status"] = "Timeout"
-            state["phase"] = "JobTimeout"
-            state["error"] = f"Operation exceeded job timeout of {float(state.get('timeoutSec') or 0):.0f}s"
-            state["failureSignature"] = "OperationJobTimeout"
-            state["endedAt"] = now_ms()
-            self._mark_repeat_failure(state)
-            await self._operation_stop_console_capture(state)
-            await self.operation_collect_artifacts(operation_id)
-            self._finalize_operation_timing(state)
-            return fail(request_id, "OPERATION_TIMEOUT", state["error"], self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+        status_call = state.get("resolvedStatusCall") or self._resolve_operation_call(state["jobSpec"].get("statusCall"), state)
+        if self._operation_call_requires_unity(status_call) and not self._operation_has_unity_session():
+            deadline = int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000)
+            if not state.get("timedOut") and deadline > 0 and now_ms() >= deadline:
+                state.update(timedOut=True, timeoutAt=now_ms(), cleanupPending=True)
+            state.update(
+                phase="JobTimeoutAwaitingRecovery" if state.get("timedOut") else "Recovering",
+                lastObservationError="Unity Bridge is disconnected; status was not dispatched.",
+                nextAction="Reconnect the same Unity project, then query this operationId again. Do not replay start.",
+            )
+            return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
-        status_call = state["jobSpec"].get("statusCall")
-        result = await self._operation_invoke(self._resolve_operation_call(status_call, state), operation_id)
+        if not state.get("timedOut") and now_ms() >= int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000):
+            state.update(timedOut=True, phase="JobTimeoutAwaitingBusiness",
+                         timeoutAt=now_ms(), cleanupPending=True)
+            if not self._save_operation(state):
+                return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+            # This caller already holds the job lock. Use the same cancellation
+            # adapter without re-entering it; intent is persisted before effects.
+            if isinstance(state["jobSpec"].get("cancelCall"), dict):
+                await TaskDomainService.operation_cancel.__wrapped__(self, operation_id)
+                if state.get("businessTerminal") or state.get("endedAt"):
+                    return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+
+        try:
+            result = await self._operation_invoke(status_call, operation_id)
+        except Exception as exc:
+            state.update(phase="Recovering", lastObservationError=str(exc))
+            return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
         self._accumulate_timing(state, result)
         state["lastStatusAt"] = now_ms()
         if not result.ok:
-            state["status"] = "Failed"
+            if result.error and result.error.code in {"COMMAND_TIMEOUT", "UNITY_NOT_CONNECTED", "DISCONNECTED", "EDITOR_BUSY"}:
+                state.update(phase="Recovering", lastObservationError=result.error.message)
+                return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+            state["status"] = "RecoveryRequired"
             state["phase"] = "StatusCallFailed"
             state["error"] = result.error.message if result.error else "statusCall failed"
             state["failureSignature"] = result.error.code if result.error else "StatusCallFailed"
-            state["endedAt"] = now_ms()
-            await self._operation_stop_console_capture(state)
-            await self.operation_collect_artifacts(operation_id)
+            state["nextAction"] = "Status observation failed; inspect original operation identity. Do not replay start."
             self._finalize_operation_timing(state)
             return fail(request_id, "OPERATION_STATUS_FAILED", state["error"], self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
 
-        payload, payload_error = self._operation_adapt_payload(result, status_call, state["jobSpec"])
+        payload, payload_error, payload_diagnostic = self._operation_adapt_payload(result, status_call, state["jobSpec"])
         if payload_error:
-            state["status"] = "Failed"
+            state["parseDiagnostic"] = payload_diagnostic
+            state["status"] = "RecoveryRequired"
             state["phase"] = "StatusResultInvalid"
             state["error"] = payload_error
             state["failureSignature"] = "OperationResultInvalid"
-            state["endedAt"] = now_ms()
-            await self._operation_stop_console_capture(state)
-            await self.operation_collect_artifacts(operation_id)
+            state["nextAction"] = "Status could not be parsed; business completion and cleanup remain unknown."
             self._finalize_operation_timing(state)
             return fail(request_id, "OPERATION_RESULT_INVALID", payload_error, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+        state["lastObservationError"] = ""
+        state["nextAction"] = ""
         if payload:
+            mismatch = self._operation_identity_mismatch(state, payload)
+            if mismatch:
+                state.update(status="RecoveryRequired", phase="status_identity_mismatch", error=mismatch,
+                             nextAction="Inspect the original business identity; no terminal or cleanup was accepted.")
+                return fail(request_id, "OPERATION_IDENTITY_MISMATCH", mismatch, self._public_operation_state(state))
             self._merge_operation_status(state, payload)
         mapping = state["jobSpec"].get("terminalStatusMapping")
         if state["jobSpec"].get("failOnUnexpectedPlayModeExit"):
@@ -821,6 +1074,8 @@ class TaskDomainService:
         state["cleanupPending"] = cleanup_pending
         if _is_terminal_status(str(state["status"]), mapping):
             state["businessCleanupPending"] = cleanup_pending
+            if state.get("timedOut") or state.get("cancelRequested"):
+                state["businessCleanupPending"] = cleanup_pending or not _operation_cleanup_state_is_explicit(payload)
             if _is_success_status(str(state["status"]), mapping):
                 state["status"] = "Succeeded"
             elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
@@ -832,10 +1087,12 @@ class TaskDomainService:
             state["endedAt"] = now_ms()
             self._mark_repeat_failure(state)
             await self._operation_stop_console_capture(state)
-            await self.operation_collect_artifacts(operation_id)
+            state["_deferredArtifactCollection"] = True
         elif state.get("cancelRequested"):
             state["status"] = "Stopping"
             state["phase"] = "Cleanup" if cleanup_pending else (state.get("phase") or "Stopping")
+        if state.get("timedOut") and not state.get("businessTerminal"):
+            state.update(phase="JobTimeoutAwaitingBusiness", cleanupPending=True)
         state["updatedAt"] = now_ms()
         self._finalize_operation_timing(state)
         return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
@@ -852,6 +1109,7 @@ class TaskDomainService:
         max_tail_chars: int = 2000,
         include_raw_state: bool = False,
     ) -> ToolResponse:
+        self._recover_operations()
         request_id = new_id("req")
         state = self._operations.get(operation_id)
         if state is None:
@@ -872,6 +1130,12 @@ class TaskDomainService:
         while True:
             status_result = await self.operation_status(operation_id, detail_level="summary", max_tail_chars=max_tail_chars)
             state = self._operations.get(operation_id, state)
+            # A rejected observation (notably a project-boundary or parse
+            # failure) is not a running operation.  Do not hide it behind a
+            # wait-window timeout or issue another status call.
+            if not status_result.ok:
+                self._finalize_operation_timing(state)
+                return status_result
             current_key = self._operation_change_key(state)
             if current_key != last_key:
                 event = {
@@ -927,24 +1191,37 @@ class TaskDomainService:
         state = self._operations.get(operation_id)
         if state is None:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
+        if not self._operation_project_matches(state):
+            return self._operation_project_mismatch(request_id, state)
         if state.get("endedAt"):
             return ok(request_id, self._public_operation_state(state))
+        if not state.get("startEstablished"):
+            return fail(request_id, "OPERATION_RECOVERY_REQUIRED", "Start identity is unknown; cancellation was not dispatched.", self._public_operation_state(state))
         if state.get("businessTerminal"):
             await self._operation_stop_console_capture(state)
             return ok(request_id, self._public_operation_state(state))
-        if state.get("cancelAccepted"):
+        if state.get("cancelAccepted") or state.get("cancelIntentSent"):
             return ok(request_id, self._public_operation_state(state))
         cancel_call = state["jobSpec"].get("cancelCall")
         if not isinstance(cancel_call, dict):
             return fail(request_id, "CANCEL_UNSUPPORTED", "This operation has no cancelCall.", self._public_operation_state(state))
-        result = await self._operation_invoke(self._resolve_operation_call(cancel_call, state), operation_id)
+        state["cancelIntentSent"] = True
+        state["cancelRequested"] = True
+        state["cancelRequestedAt"] = state.get("cancelRequestedAt") or now_ms()
+        state["cancelAttemptCount"] = int(state.get("cancelAttemptCount") or 0) + 1
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        try:
+            result = await self._operation_invoke(self._resolve_operation_call(cancel_call, state), operation_id)
+        except Exception as exc:
+            state.update(phase="CancelResultUnknown", error=str(exc))
+            return fail(request_id, "OPERATION_CANCEL_UNKNOWN", str(exc), self._public_operation_state(state))
         self._accumulate_timing(state, result)
         state["cancelResult"] = self._tool_response_summary(result)
         state["cancelRequested"] = True
         state["cancelRequestedAt"] = state.get("cancelRequestedAt") or now_ms()
-        state["cancelAttemptCount"] = int(state.get("cancelAttemptCount") or 0) + 1
         state["cancelAccepted"] = bool(result.ok)
-        cancel_payload, cancel_payload_error = self._operation_adapt_payload(result, cancel_call, state["jobSpec"])
+        cancel_payload, cancel_payload_error, cancel_payload_diagnostic = self._operation_adapt_payload(result, cancel_call, state["jobSpec"])
         cleanup_state_explicit = _operation_cleanup_state_is_explicit(cancel_payload)
         cleanup_pending = _operation_cleanup_pending(cancel_payload) if cleanup_state_explicit else bool(result.ok)
         state["cleanupPending"] = cleanup_pending
@@ -972,6 +1249,7 @@ class TaskDomainService:
             state["error"] = "" if result.ok else (result.error.message if result.error else "cancelCall failed")
         if cancel_payload_error:
             state["cancelResultParseError"] = cancel_payload_error
+            state["parseDiagnostic"] = cancel_payload_diagnostic
         if not result.ok:
             state["failureSignature"] = result.error.code if result.error else "CancelCallFailed"
         state["updatedAt"] = now_ms()
@@ -982,12 +1260,83 @@ class TaskDomainService:
         self, operation_id: str, detail_level: str = "summary", max_tail_chars: int = 2000,
         include_raw_state: bool = False,
     ) -> ToolResponse:
+        """Snapshot under the operation lock, then perform filesystem I/O outside it."""
+        self._recover_operations()
+        locks = self.__dict__.setdefault("_operation_locks", {})
+        async with locks.setdefault(operation_id, asyncio.Lock()):
+            state = self._operations.get(operation_id)
+            if state is None:
+                return fail(new_id("req"), "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
+            if not self._operation_project_matches(state):
+                return self._operation_project_mismatch(new_id("req"), state)
+            sequence = max(
+                int(state.get("artifactCollectionSequence") or 0),
+                int(state.get("_artifactCollectionIssuedSequence") or 0),
+            ) + 1
+            state["_artifactCollectionIssuedSequence"] = sequence
+            snapshot = copy.deepcopy(state)
+
+        started = time.monotonic()
+        artifacts, errors = await asyncio.to_thread(
+            self._collect_operation_artifacts, snapshot, max_tail_chars,
+        )
+
+        async with locks.setdefault(operation_id, asyncio.Lock()):
+            state = self._operations.get(operation_id)
+            if state is None:
+                return fail(new_id("req"), "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
+            request_id = new_id("req")
+            # A later collection owns the current source snapshot.  A slow earlier
+            # read is evidence only for its own response and must never overwrite it.
+            if int(state.get("_artifactCollectionIssuedSequence") or 0) != sequence:
+                public = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
+                public.update({"collectionPersisted": False, "collectionSuperseded": True,
+                               "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0)})
+                return ok(request_id, public)
+            candidate = copy.deepcopy(state)
+            candidate["artifacts"] = artifacts
+            candidate["artifactErrors"] = errors
+            candidate["artifactCollectionSequence"] = sequence
+            candidate["artifactPersistenceError"] = ""
+            candidate["timing"]["artifactReadMs"] += int((time.monotonic() - started) * 1000)
+            self._finalize_operation_timing(candidate)
+            try:
+                self.server.state.save_operation(candidate)
+            except Exception as exc:
+                public = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
+                public.update({"collectionPersisted": False, "artifactPersistenceError": str(exc),
+                               "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0)})
+                return fail(request_id, "OPERATION_PERSIST_FAILED", str(exc), public)
+            state.clear()
+            state.update(candidate)
+            payload = {"operationId": operation_id, "artifacts": artifacts, "artifactErrors": errors,
+                       "artifactCollectionSequence": sequence, "collectionPersisted": True,
+                       "responseDetailLevel": self._normalize_operation_detail_level(detail_level)}
+            if include_raw_state:
+                payload["operation"] = self._public_operation_state(state, detail_level, max_tail_chars, True)
+            return ok(request_id, payload)
+
+    async def _operation_collect_artifacts_locked(
+        self, operation_id: str, detail_level: str = "summary", max_tail_chars: int = 2000,
+        include_raw_state: bool = False,
+    ) -> ToolResponse:
+        """Compatibility path for callers which already own the operation lock."""
+        self._recover_operations()
         request_id = new_id("req")
         state = self._operations.get(operation_id)
         if state is None:
             return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
 
         started = time.monotonic()
+        artifacts, errors = await asyncio.to_thread(self._collect_operation_artifacts, copy.deepcopy(state), max_tail_chars)
+        return self._commit_operation_artifact_collection(
+            state, request_id, artifacts, errors,
+            int(state.get("artifactCollectionSequence") or 0) + 1,
+            int((time.monotonic() - started) * 1000), detail_level, max_tail_chars, include_raw_state,
+        )
+
+    def _collect_operation_artifacts(self, state: dict, max_tail_chars: int) -> tuple[dict[str, object], list[dict]]:
+        """Classify an immutable status snapshot and read only declared files."""
         artifacts: dict[str, object] = {}
         errors: list[dict] = []
         source_artifacts = {}
@@ -995,31 +1344,82 @@ class TaskDomainService:
         if isinstance(status_data.get("artifacts"), dict):
             source_artifacts.update(status_data["artifacts"])
         rules = state["jobSpec"].get("artifactRules") if isinstance(state["jobSpec"].get("artifactRules"), dict) else {}
+        field_kinds = rules.get("fieldKinds") if isinstance(rules.get("fieldKinds"), dict) else {}
+        root = Path(str(state.get("projectPath") or self._project_root())).resolve()
         for field in rules.get("fromStatusFields") or []:
             if field in status_data:
                 source_artifacts.setdefault(str(field), status_data.get(field))
         tail_lines = int(rules.get("readReportTailLines") or 0)
 
         for name, raw_value in source_artifacts.items():
-            path_text = ""
-            if isinstance(raw_value, str):
-                path_text = raw_value
-            elif isinstance(raw_value, dict):
-                path_text = str(raw_value.get("path") or raw_value.get("file") or "")
+            name = str(name)
+            declared_kind = str(field_kinds.get(str(name)) or "").lower()
+            explicit_kind = str(raw_value.get("kind") or "").lower() if isinstance(raw_value, dict) else ""
+            explicit_path = isinstance(raw_value, dict) and ("path" in raw_value or "file" in raw_value)
+            if explicit_kind and explicit_kind not in {"file", "metadata"}:
+                artifacts[name] = {"kind": "metadata", "value": raw_value, "error": "ARTIFACT_KIND_INVALID"}
+                errors.append({"artifact": name, "error": "ARTIFACT_KIND_INVALID"})
+                continue
+            # A path/file object is an explicit file declaration even when legacy
+            # callers omit kind.  Never let fieldKinds silently recast it as a
+            # scalar, because that would suppress the contract's type conflict.
+            explicit_value_kind = explicit_kind or ("file" if explicit_path else "")
+            if explicit_value_kind and declared_kind and explicit_value_kind != declared_kind:
+                artifacts[name] = {
+                    "kind": explicit_value_kind, "value": raw_value,
+                    "declaredKind": declared_kind, "error": "ARTIFACT_TYPE_CONFLICT",
+                }
+                errors.append({"artifact": name, "error": "ARTIFACT_TYPE_CONFLICT", "declaredKind": declared_kind})
+                continue
+            path_text = str(raw_value.get("path") or raw_value.get("file") or "") if isinstance(raw_value, dict) else (str(raw_value) if declared_kind == "file" else "")
+            is_file = (
+                explicit_value_kind == "file" or declared_kind == "file"
+            )
+            if not is_file:
+                item = {
+                    "kind": declared_kind if declared_kind in {"metadata", "sha256", "bytes"} else "metadata",
+                    "value": raw_value.get("value") if explicit_kind == "metadata" else raw_value,
+                }
+                if not declared_kind and not explicit_kind and _is_sha256_text(raw_value):
+                    item["error"] = "ARTIFACT_AMBIGUOUS_BARE_SHA256"
+                    errors.append({"artifact": name, "error": "ARTIFACT_AMBIGUOUS_BARE_SHA256"})
+                artifacts[name] = item
+                continue
             if not path_text:
+                artifacts[name] = {"kind": "file", "error": "ARTIFACT_FILE_PATH_MISSING"}
+                errors.append({"artifact": name, "error": "ARTIFACT_FILE_PATH_MISSING"})
                 continue
             path = Path(path_text)
             if not path.is_absolute():
-                path = self._project_root() / path
-            item = {"path": str(path), "exists": path.exists()}
+                path = root / path
+            try:
+                path = path.resolve()
+                path.relative_to(root)
+            except ValueError:
+                artifacts[name] = {"kind": "file", "path": str(path), "error": "ARTIFACT_PATH_OUTSIDE_PROJECT"}
+                errors.append({"artifact": name, "path": str(path), "error": "ARTIFACT_PATH_OUTSIDE_PROJECT"})
+                continue
+            item = {"kind": "file", "path": str(path), "exists": path.exists()}
             if path.exists() and path.is_file():
                 try:
-                    stat = path.stat()
-                    item.update({
-                        "bytes": stat.st_size,
-                        "sha256": _sha256_file(path),
-                        "modifiedAt": int(stat.st_mtime * 1000),
-                    })
+                    evidence, read_error = _read_stable_artifact(path)
+                    if read_error:
+                        item["error"] = read_error
+                        errors.append({"artifact": name, "path": str(path), "error": read_error})
+                        artifacts[str(name)] = item
+                        continue
+                    item.update(evidence)
+                    if isinstance(raw_value, dict):
+                        for declared_field, actual_field, mismatch in (
+                            ("bytes", "bytes", "ARTIFACT_DECLARED_BYTES_MISMATCH"),
+                            ("sha256", "sha256", "ARTIFACT_DECLARED_SHA256_MISMATCH"),
+                        ):
+                            if declared_field in raw_value and raw_value[declared_field] != evidence[actual_field]:
+                                item[f"declared{declared_field[:1].upper()}{declared_field[1:]}"] = raw_value[declared_field]
+                                item[f"actual{actual_field[:1].upper()}{actual_field[1:]}"] = evidence[actual_field]
+                                item[declared_field] = raw_value[declared_field]
+                                item["error"] = mismatch
+                                errors.append({"artifact": name, "path": str(path), "error": mismatch})
                     if tail_lines and path.suffix.lower() in {".txt", ".log", ".md", ".json", ".csv"}:
                         tail = _read_text_tail(path, tail_lines)
                         if max_tail_chars > 0 and len(tail) > max_tail_chars:
@@ -1032,14 +1432,42 @@ class TaskDomainService:
                     item["error"] = str(ex)
                     errors.append({"artifact": name, "path": str(path), "error": str(ex)})
             elif not path.exists():
-                errors.append({"artifact": name, "path": str(path), "error": "missing"})
-            artifacts[str(name)] = item
+                item["error"] = "ARTIFACT_MISSING"
+                errors.append({"artifact": name, "path": str(path), "error": "ARTIFACT_MISSING"})
+            else:
+                item["error"] = "ARTIFACT_NOT_A_FILE"
+                errors.append({"artifact": name, "path": str(path), "error": "ARTIFACT_NOT_A_FILE"})
+            artifacts[name] = item
+        return artifacts, errors
 
-        state["artifacts"] = artifacts
-        state["artifactErrors"] = errors
-        state["timing"]["artifactReadMs"] += int((time.monotonic() - started) * 1000)
-        self._finalize_operation_timing(state)
-        payload = {"operationId": operation_id, "artifacts": artifacts, "artifactErrors": errors,
+    def _commit_operation_artifact_collection(
+        self, state: dict, request_id: str, artifacts: dict[str, object], errors: list[dict], sequence: int,
+        elapsed_ms: int, detail_level: str, max_tail_chars: int, include_raw_state: bool,
+    ) -> ToolResponse:
+        # Do not replace a previously durable artifact snapshot until the complete
+        # candidate has been accepted by persistence.
+        candidate = copy.deepcopy(state)
+        candidate["artifacts"] = artifacts
+        candidate["artifactErrors"] = errors
+        candidate["artifactCollectionSequence"] = sequence
+        candidate["artifactPersistenceError"] = ""
+        candidate["timing"]["artifactReadMs"] += elapsed_ms
+        self._finalize_operation_timing(candidate)
+        try:
+            self.server.state.save_operation(candidate)
+        except Exception as exc:
+            public = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
+            public.update({
+                "collectionPersisted": False,
+                "artifactPersistenceError": str(exc),
+                "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0),
+            })
+            return fail(request_id, "OPERATION_PERSIST_FAILED", str(exc), public)
+        state.clear()
+        state.update(candidate)
+        payload = {"operationId": state["operationId"], "artifacts": artifacts, "artifactErrors": errors,
+                   "artifactCollectionSequence": state["artifactCollectionSequence"],
+                   "collectionPersisted": True,
                    "responseDetailLevel": self._normalize_operation_detail_level(detail_level)}
         if include_raw_state:
             payload["operation"] = self._public_operation_state(state, detail_level, max_tail_chars, True)
@@ -1051,6 +1479,24 @@ class TaskDomainService:
             return await self._operation_invoke_unscoped(call)
         finally:
             OPERATION_ID.reset(token)
+
+    def _operation_has_unity_session(self) -> bool:
+        server = getattr(self, "server", None)
+        is_ready = getattr(server, "is_ready", None)
+        if callable(is_ready):
+            return bool(is_ready())
+        manager = getattr(server, "session_manager", None)
+        return manager is None or getattr(manager, "active", None) is not None
+
+    @staticmethod
+    def _operation_call_requires_unity(call: dict | None) -> bool:
+        if not isinstance(call, dict):
+            return True
+        kind = str(call.get("kind") or call.get("type") or "").strip().lower()
+        if kind in {"mcp", "tool", "mcp_tool"}:
+            descriptor = REGISTRY.resolve(str(call.get("toolName") or call.get("name") or ""))
+            return descriptor is None or descriptor.requires_unity_connection
+        return True
 
     async def _operation_invoke_unscoped(self, call: dict | None) -> ToolResponse:
         request_id = new_id("req")
@@ -1086,10 +1532,10 @@ class TaskDomainService:
         return fail(request_id, "UNSUPPORTED_OPERATION_CALL", f"Unsupported operation call kind: {kind}", {"call": call})
 
     @staticmethod
-    def _operation_adapt_payload(result: ToolResponse, call: dict | None, job_spec: dict | None) -> tuple[dict, str]:
+    def _operation_adapt_payload(result: ToolResponse, call: dict | None, job_spec: dict | None) -> tuple[dict, str, dict | None]:
         """Normalize direct and reflection results, then apply optional jobSpec field paths."""
         if not result.ok or not isinstance(result.data, dict):
-            return {}, ""
+            return {}, "", None
         call = call if isinstance(call, dict) else {}
         spec = job_spec if isinstance(job_spec, dict) else {}
         data = result.data
@@ -1099,14 +1545,14 @@ class TaskDomainService:
         if result_path:
             found, selected = _operation_path_get(data, result_path)
             if not found:
-                return {}, f"Configured resultPath was not found: {result_path}"
-            payload, parse_error = _operation_parse_object(selected)
+                return {}, f"Configured resultPath was not found: {result_path}", None
+            payload, parse_error, parse_diagnostic = _operation_parse_object(selected)
         elif kind == "reflection" and "result" in data:
-            payload, parse_error = _operation_parse_object(data.get("result"))
+            payload, parse_error, parse_diagnostic = _operation_parse_object(data.get("result"))
         else:
-            payload, parse_error = _extract_operation_payload(result), ""
+            payload, parse_error, parse_diagnostic = _extract_operation_payload(result)
         if parse_error:
-            return {}, parse_error
+            return {}, parse_error, parse_diagnostic
 
         field_paths = {
             "status": "statusPath",
@@ -1126,9 +1572,9 @@ class TaskDomainService:
             if not found:
                 found, selected = _operation_path_get(data, path)
             if not found:
-                return {}, f"Configured {path_field} was not found: {path}"
+                return {}, f"Configured {path_field} was not found: {path}", None
             adapted[target] = selected
-        return adapted, ""
+        return adapted, "", None
 
     def _resolve_operation_call(self, call: dict | None, state: dict) -> dict | None:
         """Resolve exact ${start.*}/${status.*}/${operation.*} placeholders in a call."""
@@ -1162,15 +1608,38 @@ class TaskDomainService:
         return resolve(call)
 
     @staticmethod
+    def _operation_call_has_missing_identity(spec: object, resolved: object) -> bool:
+        if isinstance(spec, dict):
+            return not isinstance(resolved, dict) or any(
+                TaskDomainService._operation_call_has_missing_identity(value, resolved.get(key))
+                for key, value in spec.items())
+        if isinstance(spec, list):
+            return not isinstance(resolved, list) or len(spec) != len(resolved) or any(
+                TaskDomainService._operation_call_has_missing_identity(a, b) for a, b in zip(spec, resolved))
+        if isinstance(spec, str) and spec.startswith("${"):
+            return resolved is None or resolved == "" or (isinstance(resolved, str) and "${" in resolved)
+        return False
+
+    @staticmethod
+    def _operation_identity_mismatch(state: dict, payload: dict) -> str:
+        for key in ("operationId", "runGuid", "taskId", "captureId"):
+            expected = (state.get("startData") or {}).get(key)
+            if expected and key in payload and payload[key] != expected:
+                return f"Status {key}={payload[key]!r} does not match original {expected!r}."
+        return ""
+
+    @staticmethod
     def _tool_response_summary(result: ToolResponse) -> dict:
-        data = result.data if isinstance(result.data, dict) else {}
+        data = TaskDomainService._redact_operation_secrets(
+            result.data if isinstance(result.data, dict) else {}
+        )
         return {
             "ok": result.ok,
             "requestId": result.request_id,
             "error": {
                 "code": result.error.code,
                 "message": result.error.message,
-                "detail": result.error.detail,
+                "detail": TaskDomainService._redact_operation_secrets(result.error.detail),
             } if result.error else None,
             "data": data,
             "timing": result.timing or {},
@@ -1327,6 +1796,10 @@ class TaskDomainService:
         # All terminal routes converge here; business completion is not final completion.
         first_cleanup = not state.get("businessTerminal")
         if not state.get("businessTerminal"):
+            if state.get("timedOut"):
+                state["observedBusinessResult"] = {key: state.get(key) for key in ("status", "phase", "error", "failureSignature")}
+                state.update(status="Timeout", phase="JobTimeout", failureSignature="OperationJobTimeout",
+                             error="Job deadline elapsed; underlying business termination has now been observed.")
             state.update(
                 businessTerminal=True, businessEndedAt=state.get("endedAt") or now_ms(),
                 businessResult={key: state.get(key) for key in ("status", "phase", "error", "failureSignature")},
@@ -1336,11 +1809,13 @@ class TaskDomainService:
         state["status"], state["phase"] = "CleaningUp", "Cleanup"
         if state.get("businessCleanupPending") and not first_cleanup:
             try:
-                call = state["jobSpec"]["statusCall"]
+                call = state.get("resolvedStatusCall") or self._resolve_operation_call(state["jobSpec"]["statusCall"], state)
                 result = await asyncio.wait_for(
-                    self._operation_invoke(self._resolve_operation_call(call, state), state["operationId"]), timeout=5)
-                payload, error = self._operation_adapt_payload(result, call, state["jobSpec"])
-                if result.ok and not error and _operation_cleanup_state_is_explicit(payload):
+                    self._operation_invoke(call, state["operationId"]), timeout=5)
+                payload, error, diagnostic = self._operation_adapt_payload(result, call, state["jobSpec"])
+                if error:
+                    state["parseDiagnostic"] = diagnostic
+                if result.ok and not error and not self._operation_identity_mismatch(state, payload) and _operation_cleanup_state_is_explicit(payload):
                     state["businessCleanupPending"] = _operation_cleanup_pending(payload)
                     state["cleanupBusinessEvidence"] = payload
             except Exception as exc:
@@ -1358,6 +1833,7 @@ class TaskDomainService:
             state.setdefault("cleanupEndedAt", now_ms())
         require_edit = state["jobSpec"].get("cleanup", {}).get("requireEditMode", False)
         editor_done = not require_edit
+        state["editorVerification"] = "not_requested" if not require_edit else "pending"
         if require_edit:
             try:
                 observed = await asyncio.wait_for(self.mcp_status(force_fresh=True, include_capabilities=False), timeout=5)
@@ -1375,8 +1851,10 @@ class TaskDomainService:
                 )
             except Exception as exc:
                 state["cleanupEditorError"] = str(exc)
+                state["editorVerification"] = "unknown"
         state["editorTerminal"] = bool(editor_done)
-        if editor_done:
+        if require_edit and editor_done:
+            state["editorVerification"] = "verified"
             state.setdefault("editorEndedAt", now_ms())
         state["cleanupPending"] = not (resources_done and editor_done)
         state["unresolvedResources"] = (
@@ -1388,6 +1866,8 @@ class TaskDomainService:
             state.update(state["businessResult"])
             state["endedAt"] = now_ms()
         elif now_ms() >= state["cleanupDeadlineAt"]:
+            if require_edit and not editor_done:
+                state["editorVerification"] = "failed"
             state.update(status="Failed", phase="CleanupTimeout", endedAt=now_ms(),
                          failureSignature="OperationCleanupTimeout",
                          error="Business ended but cleanup is unverified; inspect capture and Editor state before starting another operation.")
@@ -1398,10 +1878,16 @@ class TaskDomainService:
         session_id = capture.get("sessionId")
         if not session_id or capture.get("stopped"):
             return
-        result = await self.console_capture_stop(session_id=session_id)
+        owner_token = str(capture.get("ownerToken") or "")
+        if not owner_token:
+            state.update(status="RecoveryRequired", phase="capture_owner_token_unknown", cleanupPending=True,
+                         nextAction="The operation capture ownership token is unavailable; do not stop or adopt the session automatically.")
+            return
+        result = await self.console_capture_stop(session_id=session_id, owner_token=owner_token)
         capture["stop"] = self._tool_response_summary(result)
         if result.ok and isinstance(result.data, dict):
             session_data = result.data.get("session") if isinstance(result.data.get("session"), dict) else result.data
+            session_data = self._redact_operation_secrets(session_data)
             capture["session"] = session_data
             for key in ("jsonlPath", "summaryPath", "manifestPath", "sha256", "recordCount", "droppedCount", "fileBytes"):
                 if key in session_data:
@@ -1427,10 +1913,27 @@ class TaskDomainService:
                 capture["artifactsVerified"] = False
                 capture["stopError"] = str(exc)
 
+    async def console_capture_stop(self, *, session_id: str, owner_token: str) -> ToolResponse:
+        """Stop only a capture whose one-time ownership credential is established."""
+        return await self.dispatcher.call(
+            new_id("req"), "console.capture.stop", {"sessionId": session_id, "ownerToken": owner_token},
+        )
+
+    async def _start_owned_operation_capture(
+        self, state: dict, *, title: str, path: str, include_stack_trace: bool,
+        exclude_upilot: bool, clear_unity_console: bool,
+    ) -> ToolResponse:
+        capture = state.get("consoleCapture") or {}
+        return await self.dispatcher.call(new_id("req"), "console.capture.start", {
+            "title": title, "path": path, "includeStackTrace": include_stack_trace,
+            "excludeUPilot": exclude_upilot, "clearUnityConsole": clear_unity_console,
+            "ownerId": capture.get("ownerId", ""), "ownerToken": capture.get("ownerToken", ""),
+            "requestKey": capture.get("requestKey", ""),
+        })
+
     @staticmethod
     def _finalize_operation_timing(state: dict) -> None:
-        started = float(state.get("_startedMono") or time.monotonic())
-        state["timing"]["totalWallMs"] = int(max(0, time.monotonic() - started) * 1000)
+        state["timing"]["totalWallMs"] = max(0, (state.get("endedAt") or now_ms()) - int(state.get("startedAt") or now_ms()))
 
     @staticmethod
     def _normalize_operation_detail_level(value: str) -> str:
@@ -1449,6 +1952,23 @@ class TaskDomainService:
             return [TaskDomainService._bounded_operation_value(v, max_chars, f"{path}[{i}]", truncated) for i, v in enumerate(value)]
         return value
 
+    @staticmethod
+    def _redact_operation_secrets(value):
+        if isinstance(value, dict):
+            return {
+                key: (
+                    "[redacted]"
+                    if "".join(char for char in str(key).lower() if char.isalnum())
+                    in {"ownertoken", "ownertokensha256", "ownerhash"}
+                    or "".join(char for char in str(key).lower() if char.isalnum()).endswith("token")
+                    else TaskDomainService._redact_operation_secrets(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [TaskDomainService._redact_operation_secrets(item) for item in value]
+        return value
+
     def _public_operation_state(
         self, state: dict, detail_level: str = "summary", max_tail_chars: int = 2000,
         include_raw_state: bool = False,
@@ -1457,6 +1977,9 @@ class TaskDomainService:
         max_chars = max(128, min(int(max_tail_chars or 2000), 1000000))
         truncated: list[str] = []
         public = {
+            "durable": state.get("durable", False),
+            "recovered": state.get("recovered", False),
+            "nextAction": state.get("nextAction", ""),
             "operationId": state.get("operationId"),
             "displayName": state.get("displayName"),
             "status": state.get("status"),
@@ -1465,7 +1988,9 @@ class TaskDomainService:
             "detail": state.get("detail"),
             "progress": state.get("progress"),
             "failureSignature": state.get("failureSignature"),
+            "parseDiagnostic": state.get("parseDiagnostic"),
             "repeatFailure": state.get("repeatFailure", False),
+            "startAttemptCount": state.get("startAttemptCount", 0),
             "cancelRequested": state.get("cancelRequested", False),
             "cancelAccepted": state.get("cancelAccepted", False),
             "cancelRequestedAt": state.get("cancelRequestedAt", 0),
@@ -1475,6 +2000,7 @@ class TaskDomainService:
             "unresolvedResources": state.get("unresolvedResources", []),
             "cleanupTerminal": state.get("cleanupTerminal", False),
             "editorTerminal": state.get("editorTerminal", False),
+            "editorVerification": state.get("editorVerification", "unknown"),
             "businessEndedAt": state.get("businessEndedAt", 0),
             "cleanupEndedAt": state.get("cleanupEndedAt", 0),
             "editorEndedAt": state.get("editorEndedAt", 0),
@@ -1492,6 +2018,8 @@ class TaskDomainService:
             "pollIntervalSec": state.get("pollIntervalSec"),
             "artifacts": state.get("artifacts") or {},
             "artifactErrors": state.get("artifactErrors") or [],
+            "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0),
+            "artifactPersistenceError": state.get("artifactPersistenceError") or "",
             "timing": state.get("timing") or {},
             "milestones": self._bounded_operation_value(state.get("milestones") or [], max_chars, "milestones", truncated),
             "milestoneCount": len(state.get("milestones") or []),
@@ -1499,26 +2027,34 @@ class TaskDomainService:
             "rawStateAvailable": True,
         }
         status_data = state.get("lastStatusData") or {}
-        if isinstance(status_data.get("metrics"), dict):
-            public["metrics"] = status_data["metrics"]
+        safe_status_data = self._redact_operation_secrets(status_data)
+        if isinstance(safe_status_data.get("metrics"), dict):
+            public["metrics"] = safe_status_data["metrics"]
         capture = state.get("consoleCapture") or {}
+        public_capture = self._redact_operation_secrets(
+            {key: value for key, value in capture.items() if key != "ownerToken"}
+        )
         if level == "summary":
-            public["consoleCapture"] = {key: capture.get(key) for key in (
+            public["consoleCapture"] = {key: public_capture.get(key) for key in (
                 "sessionId", "stopped", "jsonlPath", "summaryPath", "manifestPath", "sha256",
                 "recordCount", "droppedCount", "fileBytes",
             ) if key in capture}
         elif level == "standard":
-            public["lastStatusData"] = self._bounded_operation_value(status_data, max_chars, "lastStatusData", truncated)
-            if isinstance(status_data.get("domain"), dict):
-                public["domain"] = self._bounded_operation_value(status_data["domain"], max_chars, "domain", truncated)
-            public["consoleCapture"] = self._bounded_operation_value(capture, max_chars, "consoleCapture", truncated)
+            public["lastStatusData"] = self._bounded_operation_value(safe_status_data, max_chars, "lastStatusData", truncated)
+            if isinstance(safe_status_data.get("domain"), dict):
+                public["domain"] = self._bounded_operation_value(safe_status_data["domain"], max_chars, "domain", truncated)
+            public["consoleCapture"] = self._bounded_operation_value(public_capture, max_chars, "consoleCapture", truncated)
         else:
-            public["lastStatusData"] = status_data
-            if isinstance(status_data.get("domain"), dict): public["domain"] = status_data["domain"]
-            public["consoleCapture"] = capture
+            public["lastStatusData"] = safe_status_data
+            if isinstance(safe_status_data.get("domain"), dict): public["domain"] = safe_status_data["domain"]
+            public["consoleCapture"] = public_capture
         public["artifacts"] = self._bounded_operation_value(public["artifacts"], max_chars, "artifacts", truncated)
         if include_raw_state:
-            public["rawState"] = self._bounded_operation_value(state, max_chars, "rawState", truncated) if level != "full" else state
+            safe_raw_state = self._redact_operation_secrets(state)
+            public["rawState"] = (
+                self._bounded_operation_value(safe_raw_state, max_chars, "rawState", truncated)
+                if level != "full" else safe_raw_state
+            )
         if state.get("suspectedStuck"):
             public["suspectedStuck"] = True
         if state.get("recommendation"):
@@ -1531,12 +2067,17 @@ class TaskDomainService:
             pass
         return public
 
-    async def ensure_ready(self, timeout_s: float = 300) -> ToolResponse:
-        """Pre-test environment check: connection + compile wait + edit mode."""
+    async def ensure_ready(self, timeout_s: float = 300, required_editor_mode: str = "edit", editor_mode_control: str = "automatic") -> ToolResponse:
+        """Pre-task check; concrete modes are automatically coordinated when authorized."""
         import time
 
         request_id = new_id("req")
         checks: dict = {}
+        required_editor_mode = str(required_editor_mode or "edit").lower()
+        if required_editor_mode not in {"any", "edit", "play", "managed"}:
+            return fail(request_id, "EDITOR_MODE_INVALID", "requiredEditorMode must be any, edit, play, or managed.")
+        checks["requiredEditorMode"] = required_editor_mode
+        checks["editorModeControl"] = editor_mode_control
 
         # 1. Wait for connection
         deadline = time.monotonic() + timeout_s
@@ -1576,6 +2117,26 @@ class TaskDomainService:
             checks["blocked"] = bool(execution["blocked"])
             checks["blockedReason"] = execution["blockedReason"]
             checks["nextAction"] = execution["nextAction"]
+            target = "" if required_editor_mode in {"any", "managed"} else required_editor_mode
+            if target and execution["playModeState"] != target and bool(execution["authoritative"]) and execution["playModeState"] in {"edit", "play", "paused"} and editor_mode_control == "automatic":
+                from ..config import CONFIG
+                from ..automation_authorization import has_scope
+                allowed = not CONFIG.automation_authorization_scopes or has_scope("editorModeTransition", CONFIG.automation_authorization_scopes)
+                if allowed:
+                    transition = await (self.playmode_stop() if target == "edit" else self.playmode_start())
+                    checks["editorModeTransition"] = {"target": target, "ok": transition.ok, "error": transition.error.code if transition.error else ""}
+                    if transition.ok:
+                        await self.dispatcher.call(new_id("req"), "resource.editorState", {})
+                        execution = self.server.state.execution_state()
+                        checks["executionState"] = execution
+                        checks["playModeState"] = execution["playModeState"]
+                        checks["inEditMode"] = execution["playModeState"] == "edit"
+                        checks["blocked"] = bool(execution["blocked"])
+                        checks["blockedReason"] = execution["blockedReason"]
+                else:
+                    checks["blocked"] = True
+                    checks["blockedReason"] = "AutomationAuthorizationRequired"
+                    checks["nextAction"] = "Enable editorModeTransition in Advanced Settings."
         else:
             checks["inEditMode"] = False
             checks["playModeState"] = "unknown"
@@ -1587,10 +2148,10 @@ class TaskDomainService:
         checks["ready"] = (
             checks["connected"]
             and checks.get("compileStatus") == "ready"
-            and checks.get("inEditMode", False)
+            and (required_editor_mode in {"any", "managed"} or (required_editor_mode == "edit" and checks.get("inEditMode", False)) or (required_editor_mode == "play" and checks.get("playModeState") == "play"))
             and checks.get("contextAuthoritative", False)
             and not checks.get("contextStale", True)
-            and not checks.get("blocked", True)
+            and (not checks.get("blocked", True) or (required_editor_mode in {"any", "managed", "play"} and checks.get("blockedReason") == "PlayMode"))
         )
         if not checks["ready"]:
             if checks.get("blockedReason"):
@@ -1832,7 +2393,12 @@ class TaskDomainService:
             state.update({
                 "durable": True, "projectPath": store._project_path, "toolArgs": tool_args or {},
                 "deadlineAt": now_ms() + int(timeout_s * 1000), "runGuid": "",
-                "cancelRequested": False, "startIntentSent": False, "recovered": False,
+                # These fields record the only safe send boundary for a
+                # durable TestRunner task.  Recovery must observe an
+                # established run and must never replay either request.
+                "cancelRequested": False, "startIntentSent": False,
+                "startSendState": "not_sent", "cancelSendState": "not_sent",
+                "recovered": False,
             })
             try:
                 store.save_test_job(state)
@@ -1902,7 +2468,18 @@ class TaskDomainService:
         state["status"] = "cancel_requested"
         state["phase"] = "cancel_requested"
         state["updatedAt"] = now_ms()
-        self.server.state.save_test_job(state)
+        # This is an intent only; the observer marks sent_unknown immediately
+        # before invoking test.cancel.  If persistence fails, do not let this
+        # process (or a restarted Server) retry an unproven cancellation.
+        try:
+            self.server.state.save_test_job(state)
+        except Exception as exc:
+            state.update(
+                status="RecoveryRequired", phase="cancel_intent_persist_failed", terminal=False,
+                error={"code": "TEST_TASK_PERSIST_FAILED", "message": str(exc)},
+                nextAction="Inspect the original run; cancellation was not dispatched and will not be replayed.",
+            )
+            return fail(new_id("req"), "TEST_TASK_PERSIST_FAILED", str(exc), self._public_task_state(state))
         self._resume_test_observer(state)
         return ok(new_id("req"), self._public_task_state(state))
 
@@ -1943,6 +2520,18 @@ class TaskDomainService:
             task_id = state["taskId"]
             if task_id in self._async_tasks:
                 continue
+            # Older durable records predate explicit send-state evidence.  Do
+            # not reinterpret an old intent as proof that nothing was sent.
+            # ``sent_unknown`` makes the observer evidence-only until a human
+            # resolves the original run/cancel request.
+            state.setdefault(
+                "startSendState",
+                "sent_unknown" if state.get("startIntentSent") else "not_sent",
+            )
+            state.setdefault(
+                "cancelSendState",
+                "sent_unknown" if state.get("cancelRequested") else "not_sent",
+            )
             state["recovered"] = True
             self._async_tasks[task_id] = state
             if state.get("terminal"):

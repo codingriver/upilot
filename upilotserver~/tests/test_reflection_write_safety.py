@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pytest
 
 from upilot_mcp import config as config_module
 from upilot_mcp.domain.status_service import StatusDomainService
+from upilot_mcp.domain.reflection_service import ReflectionDomainService
 from upilot_mcp.mcp_tools import reflection_tools
 from upilot_mcp.responses import ok
 from upilot_mcp.tool_registry import REGISTRY, dispatch_public_tool
@@ -193,3 +195,32 @@ def test_proxy_reflection_call_rejects_before_facade_in_safe_mode(tmp_path, monk
     assert result.error is not None
     assert result.error.code == "WRITE_ACCESS_NOT_APPROVED"
     assert calls == 0
+
+
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("invalid", [
+    {"awaitMode": "none"}, {"resultMode": "bad"},
+    {"arguments": [{"direction": "bad", "value": 1}]}, {"options": {"timeoutMs": "soon"}},
+])
+def test_native_and_proxy_preflight_never_dispatch(tmp_path, monkeypatch, native, invalid):
+    original = _configure_write_access(tmp_path, monkeypatch, approved=True)
+    service = ReflectionDomainService()
+
+    class Dispatcher:
+        async def call(self, *args, **kwargs):
+            raise AssertionError("Invalid request must not create a Unity command.")
+
+    service.dispatcher = Dispatcher()
+    monkeypatch.setattr(reflection_tools, "_get_facade", lambda: service)
+    try:
+        arguments = {"typeName": "Fixture", "methodName": "Mutate", **invalid}
+        if native:
+            response = asyncio.run(reflection_tools.unity_reflection_call(**arguments)).structuredContent
+            assert response["ok"] is False
+            assert response["error"]["detail"]["sideEffectsMayHaveOccurred"] is False
+        else:
+            response = asyncio.run(dispatch_public_tool(service, "unity_reflection_call", arguments))
+            assert response.ok is False
+            assert response.error.detail["sideEffectsMayHaveOccurred"] is False
+    finally:
+        _restore_config(original)

@@ -2,8 +2,11 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization.Json;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using CodingRiver.UPilot.Execution;
@@ -108,6 +111,19 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public sealed class CSharpExecutionDiagnosticsPayload
+    {
+        public long resolveMs;
+        public long bindMs;
+        public long invokeMs;
+        public long encodeMs;
+        public int getterCallCount;
+        public int methodCallCount;
+        public string[] completedBoundaries = Array.Empty<string>();
+        public int droppedDiagnosticCount;
+    }
+
+    [Serializable]
     public sealed class CSharpEvalResultPayload
     {
         public string status = "Succeeded";
@@ -121,6 +137,7 @@ namespace CodingRiver.UPilot
         public string sessionId = "";
         public bool sideEffectsMayHaveOccurred;
         public ExecutionBudgetResultPayload budget;
+        public CSharpExecutionDiagnosticsPayload executionDiagnostics;
         public string[] diagnostics = Array.Empty<string>();
     }
 
@@ -306,23 +323,45 @@ namespace CodingRiver.UPilot
             await SendTaskResult(id, "execution.session", tcs.Task, token);
         }
 
-        private async Task HandleCSharpEvalAsync(string id, string json, CancellationToken token)
+        private Task HandleCSharpEvalAsync(string id, string json, CancellationToken token) =>
+            HandleCSharpEvalAsync(id, json, token, action => _bridge.EnqueueTracked(id, action),
+                result => _bridge.SendResultAsync(id, "csharp.eval", result, token),
+                error => SendContractErrorAsync(id, "csharp.eval", error, token));
+
+        internal async Task HandleCSharpEvalAsync(string id, string json, CancellationToken token,
+            Action<Action> enqueue, Func<CSharpEvalResultPayload, Task> sendResult,
+            Func<ExecutionContractException, Task> sendError,
+            Func<Func<object>, object> invocationScheduler = null)
         {
-            var message = JsonUtility.FromJson<CSharpEvalMessage>(json);
-            var payload = message?.payload ?? new CSharpEvalPayload();
-            if (string.IsNullOrWhiteSpace(payload.code))
+            var boundary = new UPilotReflectionService.CallExecutionBoundary();
+            CSharpEvalPayload payload = null;
+            try
             {
-                await _bridge.SendErrorAsync(id, "CSHARP_PARSE_ERROR", "code is required.", token, "csharp.eval");
-                return;
+                payload = JsonUtility.FromJson<CSharpEvalMessage>(json)?.payload ?? new CSharpEvalPayload();
+                ValidateEvaluationPayload(payload);
+                var result = await ExecuteEvaluationAsync(id, payload, token, enqueue, boundary, invocationScheduler);
+                await sendResult(result);
             }
+            catch (Exception ex)
+            {
+                await sendError(WrapEvaluationException(ex, null, payload?.sessionId, boundary));
+            }
+        }
+
+        private Task<CSharpEvalResultPayload> ExecuteEvaluationAsync(string id, CSharpEvalPayload payload,
+            CancellationToken token, Action<Action> enqueue,
+            UPilotReflectionService.CallExecutionBoundary boundary,
+            Func<Func<object>, object> invocationScheduler)
+        {
             var tcs = new TaskCompletionSource<CSharpEvalResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _bridge.EnqueueTracked(id, () =>
+            enqueue(() =>
             {
                 CancellationTokenSource linkedCancellation = null;
                 IAsyncExecutionLease operationLease = null;
                 try
                 {
-                    var limits = ParseLimits(payload.limitsJson);
+                    token.ThrowIfCancellationRequested();
+                    var limits = ParseLimits(payload.limitsJson, payload.languageProfileMode == "reflection-expression");
                     var variables = new Dictionary<string, object>(StringComparer.Ordinal);
                     ExecutionSession session = null;
                     if (!string.IsNullOrWhiteSpace(payload.sessionId))
@@ -330,7 +369,7 @@ namespace CodingRiver.UPilot
                         session = _sessions.Get(payload.sessionId);
                         foreach (var pair in session.SnapshotVariables()) variables[pair.Key] = pair.Value;
                     }
-                    foreach (var variable in DecodeVariables(payload.variablesJson, payload.sessionId)) variables[variable.Key] = variable.Value;
+                    foreach (var variable in DecodeVariables(payload.variablesJson, payload.sessionId, boundary.Enter, limits.maxArrayElements)) variables[variable.Key] = variable.Value;
                     linkedCancellation = session == null
                         ? CancellationTokenSource.CreateLinkedTokenSource(token)
                         : CancellationTokenSource.CreateLinkedTokenSource(token, session.CancellationToken);
@@ -340,22 +379,27 @@ namespace CodingRiver.UPilot
                         (payload.imports == null || payload.imports.Length == 0) ? new[] { "System", "UnityEngine", "UnityEditor" } : payload.imports,
                         new ExecutionBudget(limits.timeoutMs, limits.maxStatements, limits.maxLoopIterations, limits.maxCalls, limits.maxAllocations, limits.maxRecursion, linkedCancellation.Token, limits.maxAwaits, limits.maxArrayElements),
                         new RestrictedEvalExecutionPolicy(),
-                        action => InvokeOnMainThread(id, action, session?.CancellationToken ?? linkedCancellation.Token),
+                        invocationScheduler ?? (action => InvokeOnMainThread(id, action, session?.CancellationToken ?? linkedCancellation.Token)),
                         linkedCancellation.Token,
                         session);
 
                     Task.Run(() => ExecuteEvaluationWorkerAsync(payload, context), linkedCancellation.Token).ContinueWith(workerTask =>
                     {
-                        _bridge.EnqueueTracked(id, () =>
+                        enqueue(() =>
                         {
                             try
                             {
+                                if (context.SideEffectsMayHaveOccurred) boundary.Enter();
                                 if (workerTask.IsCanceled) throw new OperationCanceledException(token);
                                 if (workerTask.IsFaulted) throw workerTask.Exception?.InnerException ?? workerTask.Exception;
                                 var completed = workerTask.Result;
                                 if (session != null)
                                     foreach (var pair in completed.Result.Variables) session.SetVariable(pair.Key, pair.Value);
-                                var typedResult = EncodeResult(completed.Result.Value, payload.sessionId, payload.resultMode, limits.maxResultBytes);
+                                // Encoding may execute a user-defined ToString even for a read-only expression.
+                                if (completed.Result.Value != null && !IsInlineType(completed.Result.Value.GetType()))
+                                    boundary.Enter();
+                                var typedResult = completed.Result.Diagnostics.MeasureEncode(() =>
+                                    EncodeResult(completed.Result.Value, payload.sessionId, payload.resultMode, limits.maxResultBytes));
                                 tcs.TrySetResult(new CSharpEvalResultPayload
                                 {
                                     modeUsed = completed.Result.ModeUsed,
@@ -365,8 +409,10 @@ namespace CodingRiver.UPilot
                                     resultType = completed.Result.Value?.GetType().FullName ?? "(null)",
                                     resultHandle = typedResult.handle,
                                     sessionId = payload.sessionId ?? "",
-                                    sideEffectsMayHaveOccurred = completed.Result.SideEffectsMayHaveOccurred,
+                                    sideEffectsMayHaveOccurred = boundary.SideEffectsMayHaveOccurred,
                                     budget = ToBudget(completed.Result.Budget),
+                                    executionDiagnostics = ToExecutionDiagnostics(completed.Result.Diagnostics),
+                                    diagnostics = completed.Result.Diagnostics.CompletedBoundaries,
                                 });
                             }
                             catch (Exception ex)
@@ -374,7 +420,7 @@ namespace CodingRiver.UPilot
                                 operationLease?.Fail(ex);
                                 if (session != null)
                                     foreach (var pair in context.SnapshotVariables()) session.SetVariable(pair.Key, pair.Value);
-                                tcs.TrySetException(WrapEvaluationException(ex, context, payload.sessionId));
+                                tcs.TrySetException(WrapEvaluationException(ex, context, payload.sessionId, boundary));
                             }
                             finally
                             {
@@ -389,10 +435,35 @@ namespace CodingRiver.UPilot
                     operationLease?.Fail(ex);
                     operationLease?.Dispose();
                     linkedCancellation?.Dispose();
-                    tcs.TrySetException(WrapEvaluationException(ex, null, payload.sessionId));
+                    tcs.TrySetException(WrapEvaluationException(ex, null, payload.sessionId, boundary));
                 }
             });
-            await SendTaskResult(id, "csharp.eval", tcs.Task, token);
+            return tcs.Task;
+        }
+
+        internal static void ValidateEvaluationPayload(CSharpEvalPayload payload)
+        {
+            if (string.IsNullOrWhiteSpace(payload.code))
+                throw new ExecutionContractException("CSHARP_PARSE_ERROR", "code is required.");
+            payload.mode = string.IsNullOrWhiteSpace(payload.mode) ? "auto" : payload.mode.Trim().ToLowerInvariant();
+            payload.executionBackend = string.IsNullOrWhiteSpace(payload.executionBackend) ? "auto" : payload.executionBackend.Trim().ToLowerInvariant();
+            payload.resultMode = string.IsNullOrWhiteSpace(payload.resultMode) ? "auto" : payload.resultMode.Trim().ToLowerInvariant();
+            if (payload.mode != "auto" && payload.mode != "expression" && payload.mode != "statements")
+                throw new ExecutionContractException("INVALID_EVAL_MODE", "mode must be auto, expression or statements.");
+            if (payload.executionBackend != "auto" && payload.executionBackend != "interpret" && payload.executionBackend != "emit")
+                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret or emit.");
+            if (payload.resultMode != "auto" && payload.resultMode != "inline" && payload.resultMode != "handle" && payload.resultMode != "legacystring")
+                throw new ExecutionContractException("INVALID_RESULT_MODE", "resultMode must be auto, inline, handle or legacyString.");
+            if (payload.resultMode == "handle" && string.IsNullOrWhiteSpace(payload.sessionId))
+                throw new ExecutionContractException("SESSION_REQUIRED", "resultMode=handle requires a persistent session.");
+            if (!string.IsNullOrEmpty(payload.languageProfileMode) && payload.languageProfileMode != "reflection-expression")
+                throw new ExecutionContractException("INVALID_PARAMS", "Unknown languageProfileMode.");
+            ParseLimits(payload.limitsJson, payload.languageProfileMode == "reflection-expression");
+            ValidateVariableStructure(payload.variablesJson);
+            var program = CSharpSubsetEngine.Parse(payload.code,
+                payload.languageProfileMode == "reflection-expression" ? "expression" : payload.mode);
+            if (payload.languageProfileMode == "reflection-expression")
+                program.ValidateReflectionExpressionProfile();
         }
 
         private sealed class EvaluationWorkerResult
@@ -508,7 +579,8 @@ namespace CodingRiver.UPilot
             return result;
         }
 
-        private static ExecutionContractException WrapEvaluationException(Exception ex, CSharpEvaluationContext context, string sessionId)
+        private static ExecutionContractException WrapEvaluationException(Exception ex, CSharpEvaluationContext context,
+            string sessionId, UPilotReflectionService.CallExecutionBoundary boundary = null)
         {
             if (ex is AggregateException aggregate && aggregate.InnerExceptions.Count == 1) ex = aggregate.InnerExceptions[0];
             if (ex is OperationCanceledException)
@@ -516,8 +588,17 @@ namespace CodingRiver.UPilot
                     new Dictionary<string, object> { { "stage", "cancelled" } });
             var contract = ex as ExecutionContractException;
             var detail = new Dictionary<string, object>(contract?.Detail ?? new Dictionary<string, object>());
-            detail["sideEffectsMayHaveOccurred"] = context != null && context.SideEffectsMayHaveOccurred;
+            if (context != null && context.SideEffectsMayHaveOccurred) boundary?.Enter();
+            bool sideEffects = (boundary?.SideEffectsMayHaveOccurred ?? false)
+                || (context != null && context.SideEffectsMayHaveOccurred)
+                || (detail.TryGetValue("sideEffectsMayHaveOccurred", out var prior) && prior is bool occurred && occurred);
+            detail["sideEffectsMayHaveOccurred"] = sideEffects;
             detail["sessionId"] = sessionId ?? "";
+            if (context != null)
+                detail["executionDiagnostics"] = ToExecutionDiagnostics(context.Diagnostics);
+            detail["nextAction"] = sideEffects
+                ? "Inspect the original request and actual state; do not replay the target."
+                : "Correct the request and call once; the target has not executed.";
             return contract != null
                 ? new ExecutionContractException(contract.Code, contract.Message, detail)
                 : new ExecutionContractException("CSHARP_RUNTIME_ERROR", ex.GetType().FullName + ": " + ex.Message, detail);
@@ -538,6 +619,11 @@ namespace CodingRiver.UPilot
                 try
                 {
                     var session = _sessions.Get(payload.sessionId);
+                    // Constructor values are part of the request validation boundary.
+                    // Decode them before emitting so a malformed typed value cannot
+                    // leave a new dynamic type behind after the request is rejected.
+                    var constructorArguments = DecodeArguments(payload.constructorArgumentsJson, payload.sessionId)
+                        .Select(value => value.Value).ToArray();
                     var spec = JsonUtility.FromJson<DynamicTypeSpec>(payload.specJson);
                     var emitted = _emit.Emit(
                         spec,
@@ -550,8 +636,7 @@ namespace CodingRiver.UPilot
                     string instanceHandle = "";
                     if (payload.createInstance)
                     {
-                        var arguments = DecodeArguments(payload.constructorArgumentsJson, payload.sessionId).Select(value => value.Value).ToArray();
-                        object instance = Activator.CreateInstance(emitted.Type, arguments);
+                        object instance = Activator.CreateInstance(emitted.Type, constructorArguments);
                         DynamicMethodDispatcher.BindInstance(instance, payload.sessionId);
                         instanceHandle = session.Store("object", instance);
                     }
@@ -572,20 +657,98 @@ namespace CodingRiver.UPilot
             await SendTaskResult(id, "reflection.emitType", tcs.Task, token);
         }
 
-        internal List<ExecutionValue> DecodeArguments(string json, string sessionId)
+        internal static void ValidateArgumentStructure(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return;
+            ValidateTypedEnvelopeJson(json, false);
+            var envelope = JsonUtility.FromJson<ExecutionArgumentsEnvelope>(json);
+            if (envelope?.items == null)
+                throw new ExecutionContractException("INVALID_PARAMS", "argumentsJson must contain an items array.");
+            foreach (var item in envelope.items)
+            {
+                if (item == null || (!string.IsNullOrEmpty(item.direction) &&
+                    item.direction != "in" && item.direction != "ref" && item.direction != "out"))
+                    throw new ExecutionContractException("INVALID_PARAMS", "Argument direction must be in, ref or out.");
+                ValidateValueStructure(item.value, 0);
+            }
+        }
+
+        private static void ValidateValueStructure(TypedValueSpec value, int depth)
+        {
+            if (value == null) return;
+            if (depth > 64)
+                throw new ExecutionContractException("INVALID_PARAMS", "Typed argument nesting exceeds 64.");
+            var kind = string.IsNullOrWhiteSpace(value.kind) ? "literal" : value.kind.Trim().ToLowerInvariant();
+            if (kind != "literal" && kind != "null" && kind != "handle" && kind != "type" && kind != "array" && kind != "unityobject")
+                throw new ExecutionContractException("INVALID_PARAMS", "Unsupported typed argument kind: " + kind);
+            if (kind == "handle" && string.IsNullOrWhiteSpace(value.handle))
+                throw new ExecutionContractException("INVALID_PARAMS", "A handle argument requires a handle.");
+            foreach (var child in value.items ?? Array.Empty<TypedValueSpec>())
+                ValidateValueStructure(child, depth + 1);
+        }
+
+        internal void ValidateArgumentBindings(string json, string sessionId, int maxArrayElements = 100000)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return;
+            ValidateArgumentStructure(json);
+            var envelope = JsonUtility.FromJson<ExecutionArgumentsEnvelope>(json);
+            var arrayBudget = new ExecutionBudget(maxArrayElements: maxArrayElements);
+            foreach (var argument in envelope.items)
+                ValidateValueBinding(argument.value, sessionId, arrayBudget);
+        }
+
+        private void ValidateValueBinding(TypedValueSpec value, string sessionId, ExecutionBudget arrayBudget = null)
+        {
+            if (value == null) return;
+            string kind = string.IsNullOrWhiteSpace(value.kind) ? "literal" : value.kind.Trim().ToLowerInvariant();
+            Type declared = string.IsNullOrWhiteSpace(value.typeName) ? null : ExecutionTypeResolver.Resolve(value.typeName);
+            if (!string.IsNullOrWhiteSpace(value.typeName) && declared == null)
+                throw new ExecutionContractException("TYPE_NOT_FOUND", "Argument type not found: " + value.typeName);
+            if (kind == "handle") _sessions.Resolve(sessionId, value.handle);
+            if (kind == "type")
+            {
+                if (!string.IsNullOrWhiteSpace(value.handle)) _sessions.Resolve(sessionId, value.handle, "type");
+                else if (declared == null)
+                    throw new ExecutionContractException("TYPE_NOT_FOUND", "A type argument requires a valid typeName or type handle.");
+            }
+            if (kind == "array" && (declared == null || !declared.IsArray || declared.GetArrayRank() != 1))
+                throw new ExecutionContractException("INVALID_PARAMS", "A typed array argument requires a supported one-dimensional array type.");
+            if (kind == "array")
+            {
+                Type elementType = declared.GetElementType();
+                if (!IsSupportedInlineArrayElement(elementType))
+                    throw new ExecutionContractException("INVALID_PARAMS", "The typed array element type is not supported: " + elementType.FullName);
+                arrayBudget?.CountArrayElements((value.items ?? Array.Empty<TypedValueSpec>()).Length);
+                foreach (var item in value.items ?? Array.Empty<TypedValueSpec>())
+                {
+                    string itemKind = string.IsNullOrWhiteSpace(item?.kind) ? "literal" : item.kind.Trim().ToLowerInvariant();
+                    if (itemKind != "literal" && itemKind != "null")
+                        throw new ExecutionContractException("INVALID_PARAMS", "Typed primitive array elements must be literal or null values.");
+                    bool nullElement = itemKind == "null" || (itemKind == "literal"
+                        && string.Equals(string.IsNullOrWhiteSpace(item?.valueJson) ? "null" : item.valueJson.Trim(), "null", StringComparison.Ordinal));
+                    if (nullElement && elementType != typeof(string))
+                        throw new ExecutionContractException("INVALID_PARAMS", "Only System.String[] accepts null array elements.");
+                }
+            }
+            foreach (var item in value.items ?? Array.Empty<TypedValueSpec>())
+                ValidateValueBinding(item, sessionId, arrayBudget);
+        }
+
+        internal List<ExecutionValue> DecodeArguments(string json, string sessionId, Action beforeUserCode = null, int maxArrayElements = 100000)
         {
             if (string.IsNullOrWhiteSpace(json)) return new List<ExecutionValue>();
+            ValidateArgumentBindings(json, sessionId, maxArrayElements);
             var envelope = JsonUtility.FromJson<ExecutionArgumentsEnvelope>(json) ?? new ExecutionArgumentsEnvelope();
             return (envelope.items ?? Array.Empty<ExecutionArgumentSpec>()).Select(item => new ExecutionValue
             {
                 Name = item.name ?? "",
                 Direction = string.IsNullOrWhiteSpace(item.direction) ? "in" : item.direction,
                 DeclaredType = string.IsNullOrWhiteSpace(item.value?.typeName) ? null : ExecutionTypeResolver.Resolve(item.value.typeName),
-                Value = DecodeValue(item.value, sessionId),
+                Value = DecodeValue(item.value, sessionId, beforeUserCode),
             }).ToList();
         }
 
-        internal object DecodeValue(TypedValueSpec spec, string sessionId)
+        internal object DecodeValue(TypedValueSpec spec, string sessionId, Action beforeUserCode = null)
         {
             if (spec == null) return null;
             string kind = string.IsNullOrWhiteSpace(spec.kind) ? "literal" : spec.kind.Trim().ToLowerInvariant();
@@ -596,43 +759,177 @@ namespace CodingRiver.UPilot
                 if (!string.IsNullOrWhiteSpace(spec.handle)) return _sessions.Resolve(sessionId, spec.handle, "type");
                 return ExecutionTypeResolver.Resolve(spec.typeName);
             }
-            if (kind == "unityobject") return ResolveUnityObject(spec);
+            if (kind == "unityobject")
+            {
+                beforeUserCode?.Invoke();
+                return ResolveUnityObject(spec);
+            }
             if (kind == "array")
             {
                 Type arrayType = ExecutionTypeResolver.Resolve(spec.typeName);
                 Type elementType = arrayType != null && arrayType.IsArray ? arrayType.GetElementType() : typeof(object);
                 var values = spec.items ?? Array.Empty<TypedValueSpec>();
                 Array array = Array.CreateInstance(elementType, values.Length);
-                for (int i = 0; i < values.Length; i++) array.SetValue(ConvertToType(DecodeValue(values[i], sessionId), elementType, values[i]?.valueJson), i);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    var item = DecodeValue(values[i], sessionId, beforeUserCode);
+                    if (!IsInlineType(elementType) && (item == null || !elementType.IsInstanceOfType(item)))
+                        beforeUserCode?.Invoke();
+                    array.SetValue(ConvertToType(item, elementType, values[i]?.valueJson), i);
+                }
                 return array;
             }
             Type declared = string.IsNullOrWhiteSpace(spec.typeName) ? null : ExecutionTypeResolver.Resolve(spec.typeName);
+            if (!string.IsNullOrWhiteSpace(spec.typeName) && declared == null)
+                throw new ExecutionContractException("TYPE_NOT_FOUND", "Argument type not found: " + spec.typeName);
+            if (declared != null && !IsInlineType(declared)) beforeUserCode?.Invoke();
             return ParseLiteral(spec.valueJson, declared);
         }
 
         internal TypedValueResult EncodeResult(object value, string sessionId, string resultMode, int maxBytes = 1048576)
         {
             string mode = string.IsNullOrWhiteSpace(resultMode) ? "auto" : resultMode.Trim().ToLowerInvariant();
-            if (value == null) return new TypedValueResult { kind = "null", typeName = "(null)", valueJson = "null", summary = "(null)", serializationStatus = "inline" };
+            if (mode != "auto" && mode != "inline" && mode != "handle" && mode != "legacystring")
+                throw new ExecutionContractException("INVALID_RESULT_MODE", "resultMode must be auto, inline, handle or legacyString.");
+            maxBytes = Math.Max(1024, Math.Min(1048576, maxBytes));
+            if (value == null)
+                return new TypedValueResult
+                {
+                    kind = "null", typeName = "(null)", valueJson = "null", summary = "(null)",
+                    serializationStatus = mode == "handle" ? "null" : "inline",
+                };
             Type type = value.GetType();
-            if (IsInlineType(type))
+            if (mode == "handle")
             {
-                string json = ToInlineJson(value);
-                bool truncated = json.Length > maxBytes;
-                if (truncated) json = json.Substring(0, maxBytes);
-                return new TypedValueResult { kind = type.IsEnum ? "enum" : "literal", typeName = type.FullName, valueJson = json, summary = BoundedSummary(value), serializationStatus = truncated ? "truncated" : "inline" };
+                if (string.IsNullOrWhiteSpace(sessionId))
+                    throw new ExecutionContractException("SESSION_REQUIRED", "resultMode=handle requires a persistent session.");
+                return StoreResultHandle(value, sessionId, type);
             }
             if (mode == "legacystring")
+            {
+                if (TryEncodeInlineResult(value, maxBytes, out var legacyInline, out _, out _))
+                    return legacyInline;
                 return new TypedValueResult { kind = "object", typeName = type.FullName, valueJson = "null", summary = BoundedSummary(value), serializationStatus = "unsupported" };
+            }
+            if (TryEncodeInlineResult(value, maxBytes, out var inline, out var actualBytes, out var unsupported))
+                return inline;
+            if (mode == "inline")
+            {
+                string code = unsupported ? "RESULT_NOT_INLINEABLE" : "RESULT_TOO_LARGE";
+                throw new ExecutionContractException(code, unsupported
+                    ? "The result cannot be represented as a supported inline typed value."
+                    : "The complete result exceeds maxResultBytes.", new Dictionary<string, object>
+                    {
+                        { "actualBytes", actualBytes }, { "limitBytes", maxBytes }, { "sideEffectsMayHaveOccurred", true },
+                    });
+            }
             if (string.IsNullOrWhiteSpace(sessionId))
             {
                 if (value is LambdaValue)
                     throw new ExecutionContractException("SESSION_REQUIRED", "A closure or async delegate that escapes the current call requires a persistent execution session.");
-                return new TypedValueResult { kind = "object", typeName = type.FullName, valueJson = "null", summary = BoundedSummary(value), serializationStatus = "requiresSession" };
+                return new TypedValueResult
+                {
+                    kind = "object", typeName = type.FullName, valueJson = "null", summary = BoundedSummary(value),
+                    serializationStatus = "requiresSession", diagnosticCode = unsupported ? "RESULT_NOT_INLINEABLE" : "RESULT_TOO_LARGE",
+                    actualBytes = actualBytes, limitBytes = maxBytes,
+                };
             }
+            return StoreResultHandle(value, sessionId, type);
+        }
+
+        private TypedValueResult StoreResultHandle(object value, string sessionId, Type type)
+        {
             string kind = value is Type ? "type" : value is Delegate ? "delegate" : value is LambdaValue ? "callback" : value is UnityEngine.Object ? "unityObject" : "object";
             string handle = _sessions.Store(sessionId, kind, value);
             return new TypedValueResult { kind = kind, typeName = type.FullName, valueJson = "null", handle = handle, summary = BoundedSummary(value), serializationStatus = "handle" };
+        }
+
+        private static bool TryEncodeInlineResult(object value, int maxBytes, out TypedValueResult result, out int actualBytes, out bool unsupported)
+        {
+            result = null;
+            actualBytes = 0;
+            unsupported = false;
+            Type type = value.GetType();
+            string json;
+            string kind;
+            if (IsInlineType(type))
+            {
+                if (!TryInlineJson(value, out json))
+                {
+                    unsupported = true;
+                    return false;
+                }
+                kind = type.IsEnum ? "enum" : "literal";
+            }
+            else if (type.IsArray && type.GetArrayRank() == 1 && IsSupportedInlineArrayElement(type.GetElementType()))
+            {
+                var array = (Array)value;
+                var builder = new StringBuilder();
+                builder.Append('[');
+                actualBytes = 1;
+                for (int index = 0; index < array.Length; index++)
+                {
+                    if (index > 0 && !TryAppendUtf8(builder, ",", maxBytes, ref actualBytes)) return false;
+                    object item = array.GetValue(index);
+                    if (item == null)
+                    {
+                        if (type.GetElementType() != typeof(string)) { unsupported = true; return false; }
+                        if (!TryAppendUtf8(builder, "null", maxBytes, ref actualBytes)) return false;
+                    }
+                    else if (!TryInlineJson(item, out var itemJson))
+                    {
+                        unsupported = true;
+                        return false;
+                    }
+                    else if (!TryAppendUtf8(builder, itemJson, maxBytes, ref actualBytes)) return false;
+                }
+                if (!TryAppendUtf8(builder, "]", maxBytes, ref actualBytes)) return false;
+                json = builder.ToString();
+                kind = "array";
+            }
+            else
+            {
+                unsupported = true;
+                return false;
+            }
+            if (kind != "array") actualBytes = Encoding.UTF8.GetByteCount(json);
+            if (actualBytes > maxBytes) return false;
+            result = new TypedValueResult
+            {
+                kind = kind, typeName = type.FullName, valueJson = json, summary = BoundedSummary(value),
+                serializationStatus = "inline", actualBytes = actualBytes, limitBytes = maxBytes,
+            };
+            return true;
+        }
+
+        private static bool TryAppendUtf8(StringBuilder builder, string value, int maxBytes, ref int actualBytes)
+        {
+            int bytes = Encoding.UTF8.GetByteCount(value);
+            long next = (long)actualBytes + bytes;
+            if (next > maxBytes)
+            {
+                actualBytes = next > int.MaxValue ? int.MaxValue : (int)next;
+                return false;
+            }
+            builder.Append(value);
+            actualBytes = (int)next;
+            return true;
+        }
+
+        private static bool IsSupportedInlineArrayElement(Type type)
+        {
+            return type == typeof(bool) || type == typeof(char) || type == typeof(string)
+                || type == typeof(sbyte) || type == typeof(byte) || type == typeof(short) || type == typeof(ushort)
+                || type == typeof(int) || type == typeof(uint) || type == typeof(long) || type == typeof(ulong)
+                || type == typeof(float) || type == typeof(double) || type == typeof(decimal);
+        }
+
+        private static bool TryInlineJson(object value, out string json)
+        {
+            if (value is float single && (float.IsNaN(single) || float.IsInfinity(single))) { json = ""; return false; }
+            if (value is double number && (double.IsNaN(number) || double.IsInfinity(number))) { json = ""; return false; }
+            json = ToInlineJson(value);
+            return true;
         }
 
         internal Task SendContractErrorAsync(string id, string command, ExecutionContractException ex, CancellationToken token)
@@ -642,19 +939,238 @@ namespace CodingRiver.UPilot
                 command, ToErrorDetail(ex, id, command));
         }
 
-        private IDictionary<string, object> DecodeVariables(string json, string sessionId)
+        private static ExecutionVariablesEnvelope ValidateVariableStructure(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new ExecutionVariablesEnvelope();
+            ValidateTypedEnvelopeJson(json, true);
+            var envelope = JsonUtility.FromJson<ExecutionVariablesEnvelope>(json);
+            if (envelope?.items == null)
+                throw new ExecutionContractException("INVALID_PARAMS", "variablesJson must contain an items array.");
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in envelope.items)
+            {
+                if (item == null || string.IsNullOrWhiteSpace(item.name) || !names.Add(item.name))
+                    throw new ExecutionContractException("INVALID_PARAMS", "Variable names must be nonempty and unique.");
+                ValidateValueStructure(item.value, 0);
+            }
+            return envelope;
+        }
+
+        private IDictionary<string, object> DecodeVariables(string json, string sessionId, Action beforeUserCode = null, int maxArrayElements = 100000)
         {
             var result = new Dictionary<string, object>(StringComparer.Ordinal);
-            if (string.IsNullOrWhiteSpace(json)) return result;
-            var envelope = JsonUtility.FromJson<ExecutionVariablesEnvelope>(json) ?? new ExecutionVariablesEnvelope();
-            foreach (var item in envelope.items ?? Array.Empty<ExecutionVariableSpec>())
-                if (!string.IsNullOrWhiteSpace(item.name)) result[item.name] = DecodeValue(item.value, sessionId);
+            var envelope = ValidateVariableStructure(json);
+            var arrayBudget = new ExecutionBudget(maxArrayElements: maxArrayElements);
+            foreach (var item in envelope.items)
+                ValidateValueBinding(item.value, sessionId, arrayBudget);
+            foreach (var item in envelope.items)
+                result[item.name] = DecodeValue(item.value, sessionId, beforeUserCode);
             return result;
         }
 
-        private static ExecutionLimitsPayload ParseLimits(string json)
+        // JsonUtility intentionally ignores unknown and duplicate fields. Validate the typed wire
+        // shape first, while it is still possible to reject before DTO construction or conversion.
+        private static void ValidateTypedEnvelopeJson(string json, bool variables)
+        {
+            int byteCount = Encoding.UTF8.GetByteCount(json);
+            if (byteCount > 1048576)
+                throw TypedJsonError("$", "typed JSON exceeds the 1 MiB UTF-8 limit.", byteCount, 1048576);
+            var document = new System.Xml.XmlDocument();
+            try
+            {
+                using (var reader = System.Runtime.Serialization.Json.JsonReaderWriterFactory.CreateJsonReader(
+                    Encoding.UTF8.GetBytes(json), new System.Xml.XmlDictionaryReaderQuotas
+                    {
+                        MaxDepth = 256, MaxStringContentLength = 1048576, MaxArrayLength = 1048576,
+                    }))
+                    document.Load(reader);
+            }
+            catch (Exception ex)
+            {
+                throw TypedJsonError("$", "typed JSON is malformed: " + ex.Message);
+            }
+            var root = document.DocumentElement;
+            if (root == null || root.GetAttribute("type") != "object")
+                throw TypedJsonError("$", "typed JSON must be an object.");
+            var rootFields = ReadObjectFields(root, "$");
+            EnsureOnlyFields(rootFields, new[] { "items" }, "$");
+            if (!rootFields.TryGetValue("items", out var items) || items.GetAttribute("type") != "array")
+                throw TypedJsonError("$.items", "typed JSON must contain an items array.");
+            int index = 0;
+            foreach (var item in ReadArrayItems(items, "$.items"))
+            {
+                string path = "$.items[" + index++ + "]";
+                var fields = ReadObjectFields(item, path);
+                if (variables)
+                {
+                    EnsureOnlyFields(fields, new[] { "name", "value" }, path);
+                    RequireString(fields, "name", path);
+                    if (!fields.TryGetValue("value", out var value))
+                        throw TypedJsonError(path + ".value", "variable value is required.");
+                    ValidateTypedValueJson(value, path + ".value", 0);
+                }
+                else
+                {
+                    EnsureOnlyFields(fields, new[] { "name", "direction", "value" }, path);
+                    if (fields.TryGetValue("name", out var name)) ReadString(name, path + ".name");
+                    if (fields.TryGetValue("direction", out var direction))
+                    {
+                        string directionValue = ReadString(direction, path + ".direction");
+                        if (directionValue != "in" && directionValue != "ref" && directionValue != "out")
+                            throw TypedJsonError(path + ".direction", "argument direction must be in, ref or out.");
+                    }
+                    if (!fields.TryGetValue("value", out var value))
+                        throw TypedJsonError(path + ".value", "argument value is required.");
+                    ValidateTypedValueJson(value, path + ".value", 0);
+                }
+            }
+        }
+
+        private static void ValidateTypedValueJson(System.Xml.XmlElement node, string path, int depth)
+        {
+            if (depth > 64)
+                throw TypedJsonError(path, "typed value nesting exceeds 64.");
+            if (node.GetAttribute("type") != "object")
+                throw TypedJsonError(path, "typed value must be an object.");
+            var fields = ReadObjectFields(node, path);
+            EnsureOnlyFields(fields, new[]
+            {
+                "kind", "typeName", "valueJson", "handle", "instanceId",
+                "globalObjectId", "assetGuid", "hierarchyPath", "items",
+            }, path);
+            string kind = fields.TryGetValue("kind", out var kindField) ? ReadString(kindField, path + ".kind").Trim().ToLowerInvariant() : "literal";
+            if (kind != "literal" && kind != "null" && kind != "handle" && kind != "type" && kind != "array" && kind != "unityobject")
+                throw TypedJsonError(path + ".kind", "unsupported typed value kind.");
+            if (fields.TryGetValue("typeName", out var typeName)) ReadString(typeName, path + ".typeName");
+            if (fields.TryGetValue("valueJson", out var valueJson)) ReadString(valueJson, path + ".valueJson");
+            if (fields.TryGetValue("handle", out var presentHandle)) ReadString(presentHandle, path + ".handle");
+            if (fields.TryGetValue("globalObjectId", out var globalObjectId)) ReadString(globalObjectId, path + ".globalObjectId");
+            if (fields.TryGetValue("assetGuid", out var assetGuid)) ReadString(assetGuid, path + ".assetGuid");
+            if (fields.TryGetValue("hierarchyPath", out var hierarchyPath)) ReadString(hierarchyPath, path + ".hierarchyPath");
+            if (fields.TryGetValue("instanceId", out var instanceId)) ReadInt32(instanceId, path + ".instanceId");
+            if (kind == "handle" && (!fields.TryGetValue("handle", out var handle) || string.IsNullOrWhiteSpace(ReadString(handle, path + ".handle"))))
+                throw TypedJsonError(path + ".handle", "a handle string is required.");
+            if (kind == "array")
+            {
+                if (!fields.TryGetValue("typeName", out var arrayType) || string.IsNullOrWhiteSpace(ReadString(arrayType, path + ".typeName")))
+                    throw TypedJsonError(path + ".typeName", "an array typeName is required.");
+                if (!fields.TryGetValue("items", out var items) || items.GetAttribute("type") != "array")
+                    throw TypedJsonError(path + ".items", "an array items value is required.");
+                int index = 0;
+                foreach (var child in ReadArrayItems(items, path + ".items"))
+                    ValidateTypedValueJson(child, path + ".items[" + index++ + "]", depth + 1);
+            }
+            else if (fields.TryGetValue("items", out var nonArrayItems))
+            {
+                // JsonUtility serializes a default TypedValueSpec.items as [], even when the
+                // value is not an array. Accept only that DTO round-trip shape; any supplied
+                // content or a non-array wire type remains an input-shape error before DTO
+                // construction and conversion.
+                if (nonArrayItems.GetAttribute("type") != "array")
+                    throw TypedJsonError(path + ".items", "items is valid only for kind=array.");
+                foreach (var ignored in ReadArrayItems(nonArrayItems, path + ".items"))
+                    throw TypedJsonError(path + ".items", "items is valid only for kind=array.");
+            }
+        }
+
+        private static Dictionary<string, System.Xml.XmlElement> ReadObjectFields(System.Xml.XmlElement node, string path)
+        {
+            if (node.GetAttribute("type") != "object")
+                throw TypedJsonError(path, "value must be an object.");
+            var fields = new Dictionary<string, System.Xml.XmlElement>(StringComparer.Ordinal);
+            foreach (System.Xml.XmlNode child in node.ChildNodes)
+            {
+                if (!(child is System.Xml.XmlElement element) || fields.ContainsKey(element.LocalName))
+                    throw TypedJsonError(path, "object contains duplicate or invalid fields.");
+                fields.Add(element.LocalName, element);
+            }
+            return fields;
+        }
+
+        private static IEnumerable<System.Xml.XmlElement> ReadArrayItems(System.Xml.XmlElement node, string path)
+        {
+            if (node.GetAttribute("type") != "array")
+                throw TypedJsonError(path, "value must be an array.");
+            foreach (System.Xml.XmlNode child in node.ChildNodes)
+            {
+                if (!(child is System.Xml.XmlElement element) || element.LocalName != "item")
+                    throw TypedJsonError(path, "array contains an invalid item.");
+                yield return element;
+            }
+        }
+
+        private static void EnsureOnlyFields(
+            Dictionary<string, System.Xml.XmlElement> fields,
+            IEnumerable<string> allowed,
+            string path)
+        {
+            var allowedSet = new HashSet<string>(allowed, StringComparer.Ordinal);
+            string unknown = fields.Keys.FirstOrDefault(name => !allowedSet.Contains(name));
+            if (unknown != null)
+                throw TypedJsonError(path + "." + unknown, "unknown typed JSON field.");
+        }
+
+        private static string RequireString(Dictionary<string, System.Xml.XmlElement> fields, string name, string path)
+        {
+            if (!fields.TryGetValue(name, out var field))
+                throw TypedJsonError(path + "." + name, "a string value is required.");
+            return ReadString(field, path + "." + name);
+        }
+
+        private static string ReadString(System.Xml.XmlElement field, string path)
+        {
+            if (field.GetAttribute("type") != "string")
+                throw TypedJsonError(path, "value must be a string.");
+            return field.InnerText;
+        }
+
+        private static int ReadInt32(System.Xml.XmlElement field, string path)
+        {
+            if (field.GetAttribute("type") != "number"
+                || !int.TryParse(field.InnerText, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var value))
+                throw TypedJsonError(path, "value must be a 32-bit integer.");
+            return value;
+        }
+
+        private static ExecutionContractException TypedJsonError(string path, string message, int actualBytes = 0, int limitBytes = 0)
+        {
+            var detail = new Dictionary<string, object> { { "path", path }, { "sideEffectsMayHaveOccurred", false } };
+            if (actualBytes > 0) detail["actualBytes"] = actualBytes;
+            if (limitBytes > 0) detail["limitBytes"] = limitBytes;
+            return new ExecutionContractException("INVALID_PARAMS", message, detail);
+        }
+
+        private static ExecutionLimitsPayload ParseLimits(string json, bool allowLegacyResultMode = false)
         {
             if (string.IsNullOrWhiteSpace(json)) return new ExecutionLimitsPayload();
+            // Validate the wire types before JsonUtility drops unknown fields or coerces values.
+            if (json.Length > 65536)
+                throw new ExecutionContractException("INVALID_PARAMS", "limitsJson exceeds the bounded options size.");
+            var document = new System.Xml.XmlDocument();
+            using (var reader = System.Runtime.Serialization.Json.JsonReaderWriterFactory.CreateJsonReader(
+                System.Text.Encoding.UTF8.GetBytes(json),
+                new System.Xml.XmlDictionaryReaderQuotas { MaxDepth = 64, MaxStringContentLength = 65536 }))
+                document.Load(reader);
+            var root = document.DocumentElement;
+            if (root == null || root.GetAttribute("type") != "object")
+                throw new ExecutionContractException("INVALID_PARAMS", "limitsJson must be an object.");
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (System.Xml.XmlNode child in root.ChildNodes)
+            {
+                if (!(child is System.Xml.XmlElement field) || !names.Add(field.LocalName))
+                    throw new ExecutionContractException("INVALID_PARAMS", "limitsJson contains duplicate or invalid fields.");
+                if (allowLegacyResultMode && field.LocalName == "resultMode")
+                {
+                    string mode = field.InnerText.Trim().ToLowerInvariant();
+                    if (field.GetAttribute("type") == "string" && (mode == "string" || mode == "json" || mode == "type"))
+                        continue;
+                    throw new ExecutionContractException("INVALID_PARAMS", "options.resultMode must be string, json or type.");
+                }
+                var member = typeof(ExecutionLimitsPayload).GetField(field.LocalName, BindingFlags.Public | BindingFlags.Instance);
+                if (member == null || member.FieldType != typeof(int) || field.GetAttribute("type") != "number"
+                    || !int.TryParse(field.InnerText, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
+                    throw new ExecutionContractException("INVALID_PARAMS", "Unknown or non-integer execution budget: " + field.LocalName);
+            }
             var value = JsonUtility.FromJson<ExecutionLimitsPayload>(json) ?? new ExecutionLimitsPayload();
             value.timeoutMs = Math.Max(1, Math.Min(30000, value.timeoutMs <= 0 ? 3000 : value.timeoutMs));
             value.maxStatements = Math.Max(1, Math.Min(100000, value.maxStatements <= 0 ? 10000 : value.maxStatements));
@@ -686,10 +1202,16 @@ namespace CodingRiver.UPilot
         {
             string raw = string.IsNullOrWhiteSpace(json) ? "null" : json.Trim();
             if (raw == "null") return null;
-            if (type == typeof(string) || (type == null && raw.StartsWith("\"", StringComparison.Ordinal))) return Unquote(raw);
-            if (type == typeof(char)) return Unquote(raw).FirstOrDefault();
+            if (type == typeof(string) || (type == null && raw.StartsWith("\"", StringComparison.Ordinal))) return DecodeJsonStringLiteral(raw);
+            if (type == typeof(char))
+            {
+                string character = DecodeJsonStringLiteral(raw);
+                if (character.Length != 1)
+                    throw new ExecutionContractException("TYPED_VALUE_DECODE_FAILED", "System.Char requires a single-character JSON string.");
+                return character[0];
+            }
             if (type == typeof(bool) || (type == null && (raw == "true" || raw == "false"))) return bool.Parse(raw);
-            if (type != null && type.IsEnum) return Enum.Parse(type, Unquote(raw), true);
+            if (type != null && type.IsEnum) return Enum.Parse(type, DecodeJsonStringLiteral(raw), true);
             if (type == typeof(byte)) return byte.Parse(raw, CultureInfo.InvariantCulture);
             if (type == typeof(sbyte)) return sbyte.Parse(raw, CultureInfo.InvariantCulture);
             if (type == typeof(short)) return short.Parse(raw, CultureInfo.InvariantCulture);
@@ -698,9 +1220,21 @@ namespace CodingRiver.UPilot
             if (type == typeof(uint)) return uint.Parse(raw, CultureInfo.InvariantCulture);
             if (type == typeof(long)) return long.Parse(raw, CultureInfo.InvariantCulture);
             if (type == typeof(ulong)) return ulong.Parse(raw, CultureInfo.InvariantCulture);
-            if (type == typeof(float)) return float.Parse(raw, CultureInfo.InvariantCulture);
+            if (type == typeof(float))
+            {
+                float value = float.Parse(raw, CultureInfo.InvariantCulture);
+                if (float.IsNaN(value) || float.IsInfinity(value))
+                    throw new ExecutionContractException("TYPED_VALUE_DECODE_FAILED", "System.Single must be finite.");
+                return value;
+            }
             if (type == typeof(decimal)) return decimal.Parse(raw, CultureInfo.InvariantCulture);
-            if (type == typeof(double) || type == null) return double.Parse(raw, CultureInfo.InvariantCulture);
+            if (type == typeof(double) || type == null)
+            {
+                double value = double.Parse(raw, CultureInfo.InvariantCulture);
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                    throw new ExecutionContractException("TYPED_VALUE_DECODE_FAILED", "System.Double must be finite.");
+                return value;
+            }
             try { return JsonUtility.FromJson(raw, type); }
             catch (Exception ex) { throw new ExecutionContractException("TYPED_VALUE_DECODE_FAILED", "Could not decode " + (type?.FullName ?? "value") + ": " + ex.Message); }
         }
@@ -722,7 +1256,8 @@ namespace CodingRiver.UPilot
         {
             if (value == null) return "null";
             if (value is bool boolean) return boolean ? "true" : "false";
-            if (value is string || value is char || value is Guid || value.GetType().IsEnum) return "\"" + Escape(Convert.ToString(value, CultureInfo.InvariantCulture)) + "\"";
+            if (value is string || value is char || value is Guid || value.GetType().IsEnum)
+                return EncodeJsonStringLiteral(Convert.ToString(value, CultureInfo.InvariantCulture));
             return Convert.ToString(value, CultureInfo.InvariantCulture);
         }
 
@@ -732,13 +1267,36 @@ namespace CodingRiver.UPilot
             string summary = LegacyString(value);
             return summary.Length <= 1024 ? summary : summary.Substring(0, 1024) + "…";
         }
-        private static string Escape(string value) { return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t"); }
-        private static string Unquote(string value)
+        private static string DecodeJsonStringLiteral(string value)
         {
-            value = value?.Trim() ?? "";
-            if (value.Length >= 2 && ((value[0] == '\"' && value[value.Length - 1] == '\"') || (value[0] == '\'' && value[value.Length - 1] == '\'')))
-                value = value.Substring(1, value.Length - 2);
-            return value.Replace("\\\"", "\"").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\\\", "\\");
+            try
+            {
+                var document = new System.Xml.XmlDocument();
+                using (var reader = JsonReaderWriterFactory.CreateJsonReader(
+                    Encoding.UTF8.GetBytes(value ?? ""), new System.Xml.XmlDictionaryReaderQuotas
+                    {
+                        MaxDepth = 16, MaxStringContentLength = 1048576, MaxArrayLength = 1048576,
+                    }))
+                    document.Load(reader);
+                var root = document.DocumentElement;
+                if (root == null || root.GetAttribute("type") != "string")
+                    throw new ExecutionContractException("TYPED_VALUE_DECODE_FAILED", "Expected a JSON string literal.");
+                return root.InnerText;
+            }
+            catch (ExecutionContractException) { throw; }
+            catch (Exception ex)
+            {
+                throw new ExecutionContractException("TYPED_VALUE_DECODE_FAILED", "Invalid JSON string literal: " + ex.Message);
+            }
+        }
+
+        private static string EncodeJsonStringLiteral(string value)
+        {
+            using (var stream = new MemoryStream())
+            {
+                new DataContractJsonSerializer(typeof(string)).WriteObject(stream, value ?? "");
+                return Encoding.UTF8.GetString(stream.ToArray());
+            }
         }
 
         private static ExecutionSessionResultPayload ToSessionPayload(string action, ExecutionSession session)
@@ -784,6 +1342,21 @@ namespace CodingRiver.UPilot
                 awaits = budget.Awaits,
                 arrayElements = budget.ArrayElements,
                 finallyCleanupStatements = budget.FinallyCleanupStatements,
+            };
+        }
+
+        private static CSharpExecutionDiagnosticsPayload ToExecutionDiagnostics(CSharpExecutionDiagnostics diagnostics)
+        {
+            return new CSharpExecutionDiagnosticsPayload
+            {
+                resolveMs = diagnostics.ResolveMs,
+                bindMs = diagnostics.BindMs,
+                invokeMs = diagnostics.InvokeMs,
+                encodeMs = diagnostics.EncodeMs,
+                getterCallCount = diagnostics.GetterCallCount,
+                methodCallCount = diagnostics.MethodCallCount,
+                completedBoundaries = diagnostics.CompletedBoundaries,
+                droppedDiagnosticCount = diagnostics.DroppedDiagnosticCount,
             };
         }
 
@@ -836,6 +1409,9 @@ namespace CodingRiver.UPilot
                 : Array.Empty<string>();
             string candidates = ToJsonStringArray(candidateItems);
             string sourceSpan = span == null ? "" : JsonUtility.ToJson(span);
+            var executionDiagnostics = detail.TryGetValue("executionDiagnostics", out var diagnosticsValue)
+                ? diagnosticsValue as CSharpExecutionDiagnosticsPayload
+                : null;
             return new ErrorDetailPayload
             {
                 commandId = id,
@@ -847,9 +1423,11 @@ namespace CodingRiver.UPilot
                 sourceSpanJson = sourceSpan,
                 diagnosticsJson = "[]",
                 candidatesJson = candidates,
+                executionDiagnosticsJson = executionDiagnostics == null ? "" : JsonUtility.ToJson(executionDiagnostics),
                 sourceSpan = span,
                 diagnostics = Array.Empty<ExecutionDiagnosticPayload>(),
                 candidates = candidateItems,
+                executionDiagnostics = executionDiagnostics,
                 cleanupDiagnostics = cleanupDiagnostics,
                 exceptionType = ex.GetType().FullName,
                 stackTrace = BoundedStack(ex.StackTrace),
@@ -871,7 +1449,7 @@ namespace CodingRiver.UPilot
 
         private static string ToJsonStringArray(IEnumerable<string> values)
         {
-            return "[" + string.Join(",", (values ?? Array.Empty<string>()).Select(value => "\"" + Escape(value ?? "") + "\"")) + "]";
+            return "[" + string.Join(",", (values ?? Array.Empty<string>()).Select(value => EncodeJsonStringLiteral(value ?? ""))) + "]";
         }
 
         private static string BoundedStack(string stack)

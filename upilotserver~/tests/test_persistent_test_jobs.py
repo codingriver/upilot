@@ -146,8 +146,16 @@ class AcceptanceService(TaskDomainService, _AcceptanceService):
         self._async_task_handles = {}
         self.output_root = output_root
         self.start_count = 0
+        self.dispatcher = self
+        self.dispatch_calls = []
         self.hold_result = asyncio.Event()
         self.hold_result.set()
+
+    async def call(self, _request_id, name, payload, **_kwargs):
+        self.dispatch_calls.append((name, payload))
+        if name == "scene.list":
+            return ok("scenes", {"scenes": []})
+        raise AssertionError(f"Unexpected acceptance dispatcher call: {name}")
 
     async def _dispatch_tool(self, name, args):
         return await self.upilot_acceptance_run(**args)
@@ -216,4 +224,123 @@ def test_generic_task_execute_refuses_retries_for_non_idempotent_tool(tmp_path):
     service = Service(tmp_path)
     result = asyncio.run(service.task_execute("unsafe", "unity_prefab_patch", retry_count=1))
     assert not result.ok and result.error.code == "TASK_RETRY_UNSAFE"
+    assert service.start_count == 0
+
+
+def test_acceptance_budget_exhausted_by_compile_never_starts_runner(tmp_path, monkeypatch):
+    from upilot_mcp.domain import test_service
+    clock = {"now": 1000}
+    monkeypatch.setattr(test_service, "now_ms", lambda: clock["now"])
+    service = AcceptanceService(tmp_path)
+
+    async def compile(**kwargs):
+        clock["now"] += 11000
+        return ok("compile", {"status": "success", "errorsVerified": True, "errorTotal": 0})
+
+    service.safe_compile_and_wait = compile
+    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_DEADLINE_EXCEEDED"
+    assert service.start_count == 0
+    assert "testRun" not in result.error.detail["steps"]
+
+
+def test_acceptance_preflight_only_does_not_enter_ready_compile_capture_or_runner(tmp_path):
+    service = AcceptanceService(tmp_path)
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("preflightOnly must not invoke this workflow step")
+
+    service.ensure_ready = forbidden
+    service.test_run = forbidden
+    result = asyncio.run(service.upilot_acceptance_run(preflight_only=True, write_artifact=False))
+
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_PREFLIGHT_ONLY"
+    assert result.error.detail["preflightOnly"] is True
+    assert result.error.detail["runnerStartAttempted"] is False
+    assert result.error.detail["artifactWritten"] is False
+    assert service.dispatch_calls == [("scene.list", {})]
+
+
+def test_acceptance_preflight_reports_import_input_changes_without_starting_runner(tmp_path, monkeypatch):
+    from upilot_mcp.domain import test_service
+
+    snapshots = iter((
+        {"schemaVersion": 1, "projectPath": "project", "inputCount": 1, "inputs": {"project:Assets/A.cs.meta": "before"}},
+        {"schemaVersion": 1, "projectPath": "project", "inputCount": 1, "inputs": {"project:Assets/A.cs.meta": "after"}},
+    ))
+    monkeypatch.setattr(test_service, "acceptance_import_inputs", lambda *_args: next(snapshots))
+    service = AcceptanceService(tmp_path)
+    result = asyncio.run(service.upilot_acceptance_run(preflight_only=True, write_artifact=False))
+
+    assert not result.ok and result.error.code == "UPILOT_ACCEPTANCE_PREFLIGHT_ONLY"
+    detail = result.error.detail
+    assert detail["importState"] == "unknown"
+    assert detail["blockingReasons"] == ["ImportInputsChangedDuringPreflight"]
+    assert detail["importInputChanges"]["changed"] == [{
+        "path": "project:Assets/A.cs.meta", "beforeSha256": "before", "afterSha256": "after",
+    }]
+    assert service.start_count == 0
+
+
+def test_acceptance_rejects_source_unchanged_when_import_inputs_change(tmp_path, monkeypatch):
+    from upilot_mcp.domain import test_service
+
+    snapshots = iter((
+        {"schemaVersion": 1, "projectPath": "project", "inputCount": 1, "inputs": {"project:Assets/A.cs.meta": "before"}},
+        {"schemaVersion": 1, "projectPath": "project", "inputCount": 1, "inputs": {"project:Assets/A.cs.meta": "after"}},
+    ))
+    monkeypatch.setattr(test_service, "acceptance_import_inputs", lambda *_args: next(snapshots))
+    service = AcceptanceService(tmp_path)
+    result = asyncio.run(service.upilot_acceptance_run(write_artifact=False))
+
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_FAILED"
+    assert result.error.detail["sourceUnchanged"] is False
+    assert result.error.detail["importInputsUnchanged"] is False
+
+
+def test_preflight_does_not_promote_stable_hashes_to_import_ready_without_verified_compile(tmp_path):
+    service = AcceptanceService(tmp_path)
+
+    async def status(**_kwargs):
+        return ok("status", {
+            "connected": True, "serverReady": True,
+            "paths": {"unityProjectAbsolute": str(service.expected_project)},
+            "executionState": {"ready": True, "authoritative": True, "isStale": False,
+                               "terminal": True, "errorsVerified": True, "compilePhase": "idle",
+                               "lastCompileVerifiedAt": 0},
+        })
+
+    service.mcp_status = status
+    result = asyncio.run(service.upilot_acceptance_run(preflight_only=True, write_artifact=False))
+
+    assert not result.ok and result.error.code == "UPILOT_ACCEPTANCE_PREFLIGHT_ONLY"
+    assert result.error.detail["importState"] == "unknown"
+    assert result.error.detail["preflightPassed"] is False
+    assert result.error.detail["blockingReasons"] == ["ImportNotVerified"]
+    assert service.start_count == 0
+
+
+def test_preflight_reports_ready_only_from_existing_verified_compile_without_runner(tmp_path):
+    service = AcceptanceService(tmp_path)
+
+    async def status(**_kwargs):
+        return ok("status", {
+            "connected": True, "serverReady": True,
+            "paths": {"unityProjectAbsolute": str(service.expected_project)},
+            "executionState": {"ready": True, "authoritative": True, "isStale": False,
+                               "terminal": True, "errorsVerified": True, "compilePhase": "completed",
+                               "lastCompileVerifiedAt": 10**15},
+        })
+
+    service.mcp_status = status
+    result = asyncio.run(service.upilot_acceptance_run(preflight_only=True, write_artifact=False))
+
+    assert not result.ok and result.error.code == "UPILOT_ACCEPTANCE_PREFLIGHT_ONLY"
+    assert result.error.detail["importState"] == "ready"
+    assert result.error.detail["preflightPassed"] is True
+    assert result.error.detail["blockingReasons"] == []
+    assert result.error.detail["runnerStartAttempted"] is False
     assert service.start_count == 0

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Threading;
 using System.Threading.Tasks;
 using CodingRiver.UPilot.Execution;
@@ -21,8 +22,17 @@ namespace CodingRiver.UPilot.Tests
     {
         public static string Choose(int value) => "int";
         public static string Choose(long value) => "long";
-        public static string Ambiguous(object value) => "object";
-        public static string Ambiguous(string value) => "string";
+        public static string Numeric(long value) => "long";
+        public static string Numeric(double value) => "double";
+        public static string Narrow(byte value) => "byte";
+        public static string NullChoice(object value) => "object";
+        public static string NullChoice(string value) => "string";
+        public static string NullAmbiguous(IComparable value) => "comparable";
+        public static string NullAmbiguous(IFormattable value) => "formattable";
+        public static string Shape(int value) => "fixed";
+        public static string Shape(params int[] values) => "params";
+        public static string OptionalShape(int value) => "required";
+        public static string OptionalShape(int value, int optional = 0) => "optional";
         public static int Named(int first, int second = 4) => first + second;
         public static void RefOut(ref int value, out string text) { value += 2; text = value.ToString(); }
         public static T Identity<T>(T value) => value;
@@ -50,6 +60,78 @@ namespace CodingRiver.UPilot.Tests
         public static void RaiseSharedEvent(int value) { SharedEventSource.Raise(value); }
         public static event Action<int> StaticChanged;
         public static void RaiseStaticEvent(int value) { StaticChanged?.Invoke(value); }
+    }
+
+    public class ExecutionInheritedStaticBaseFixture
+    {
+        public static int SharedValue => 17;
+        public static string SharedMethod() => "inherited";
+    }
+
+    public sealed class ExecutionInheritedStaticDerivedFixture : ExecutionInheritedStaticBaseFixture { }
+
+    public static class ExecutionGenericStaticFixture<T>
+    {
+        public static string TypeName => typeof(T).Name;
+    }
+
+    public static class ExecutionPropertyBudgetFixture
+    {
+        public static int GetterCallCount { get; set; }
+        public static int First => Count(1);
+        public static int Second => Count(2);
+        public static int Third => Count(3);
+        public static int Fourth => Count(4);
+        public static int Slow
+        {
+            get
+            {
+                GetterCallCount++;
+                Thread.Sleep(100);
+                return 5;
+            }
+        }
+        private static int Count(int value) { GetterCallCount++; return value; }
+    }
+
+    public struct ExecutionConversionSource
+    {
+        public int Value;
+        public static int ConversionCount;
+        public static implicit operator ExecutionConversionTarget(ExecutionConversionSource source)
+        {
+            ConversionCount++;
+            return new ExecutionConversionTarget { Value = source.Value };
+        }
+    }
+
+    public struct ExecutionConversionTarget { public int Value; }
+
+    public static class ExecutionConversionFixture
+    {
+        public static int InvocationCount;
+        public static int Accept(ExecutionConversionTarget value) { InvocationCount++; return value.Value; }
+        public static string PreferIdentity(object value) { InvocationCount++; return "object"; }
+        public static string PreferIdentity(ExecutionConversionTarget value) { InvocationCount++; return "converted"; }
+        public static object ProduceUnsupportedResult() { InvocationCount++; return new ExecutionDisposableFixture(); }
+    }
+
+    public static class ExecutionNestedTypeFixture
+    {
+        public enum Mode { First, Second }
+    }
+
+    public static class ExecutionThrowingGetterFixture
+    {
+        public static int GetterCallCount;
+        public static int Value
+        {
+            get
+            {
+                GetterCallCount++;
+                throw new InvalidOperationException("getter failed");
+            }
+        }
     }
 
     public sealed class ExecutionEventFixture
@@ -136,16 +218,104 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(refOut.Arguments[0], Is.EqualTo(7));
             Assert.That(refOut.Arguments[1], Is.EqualTo("7"));
 
+            var nullChoice = MethodBinder.Bind(typeof(ExecutionReflectionFixture), "NullChoice", true,
+                new[] { new ExecutionValue { Value = null } });
+            Assert.That(nullChoice.Method.GetParameters()[0].ParameterType, Is.EqualTo(typeof(string)));
+
             var ambiguous = Assert.Throws<ExecutionContractException>(() =>
-                MethodBinder.Bind(typeof(ExecutionReflectionFixture), "Ambiguous", true,
+                MethodBinder.Bind(typeof(ExecutionReflectionFixture), "NullAmbiguous", true,
                     new[] { new ExecutionValue { Value = null } }));
             Assert.That(ambiguous.Code, Is.EqualTo("REFLECTION_BIND_AMBIGUOUS"));
             Assert.That(ambiguous.Detail.ContainsKey("candidates"), Is.True);
             var candidates = ambiguous.Detail["candidates"] as string[];
             Assert.That(candidates, Is.Not.Null);
             Assert.That(candidates, Has.Length.EqualTo(2));
-            Assert.That(candidates, Has.Some.Contains("System.Object"));
-            Assert.That(candidates, Has.Some.Contains("System.String"));
+            Assert.That(candidates, Has.Some.Contains("System.IComparable"));
+            Assert.That(candidates, Has.Some.Contains("System.IFormattable"));
+        }
+
+        [Test]
+        public void MethodBinderUsesOnlyDocumentedImplicitNumericConversions()
+        {
+            var widened = MethodBinder.Bind(typeof(ExecutionReflectionFixture), "Numeric", true,
+                new[] { new ExecutionValue { Value = 3 } });
+            Assert.That(widened.Method.GetParameters()[0].ParameterType, Is.EqualTo(typeof(long)));
+            var narrow = Assert.Throws<ExecutionContractException>(() => MethodBinder.Bind(
+                typeof(ExecutionReflectionFixture), "Narrow", true, new[] { new ExecutionValue { Value = 3 } }));
+            Assert.That(narrow.Code, Is.EqualTo("REFLECTION_BIND_FAILED"));
+            var text = Assert.Throws<ExecutionContractException>(() => MethodBinder.Bind(
+                typeof(ExecutionReflectionFixture), "Choose", true, new[] { new ExecutionValue { Value = "3" } }));
+            Assert.That(text.Code, Is.EqualTo("REFLECTION_BIND_FAILED"));
+        }
+
+        [Test]
+        public void MethodBinderPrefersNonExpandedAndFewerOptionalParameters()
+        {
+            var fixedShape = MethodBinder.Bind(typeof(ExecutionReflectionFixture), "Shape", true,
+                new[] { new ExecutionValue { Value = 3 } });
+            Assert.That(fixedShape.Method.GetParameters().Length, Is.EqualTo(1));
+            Assert.That(fixedShape.Method.GetParameters()[0].GetCustomAttributes(typeof(ParamArrayAttribute), false), Is.Empty);
+
+            var required = MethodBinder.Bind(typeof(ExecutionReflectionFixture), "OptionalShape", true,
+                new[] { new ExecutionValue { Value = 3 } });
+            Assert.That(required.Method.GetParameters().Length, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void MethodBinderProbesUserConversionsWithoutExecutingAndConvertsOnlySelectedCandidate()
+        {
+            ExecutionConversionSource.ConversionCount = 0;
+            ExecutionConversionFixture.InvocationCount = 0;
+            var source = new ExecutionConversionSource { Value = 23 };
+
+            var converted = MethodBinder.Bind(typeof(ExecutionConversionFixture), "Accept", true,
+                new[] { new ExecutionValue { Value = source } });
+            Assert.That(ExecutionConversionSource.ConversionCount, Is.EqualTo(1));
+            Assert.That(converted.Method.Invoke(null, converted.Arguments), Is.EqualTo(23));
+            Assert.That(ExecutionConversionFixture.InvocationCount, Is.EqualTo(1));
+
+            ExecutionConversionSource.ConversionCount = 0;
+            ExecutionConversionFixture.InvocationCount = 0;
+            var identity = MethodBinder.Bind(typeof(ExecutionConversionFixture), "PreferIdentity", true,
+                new[] { new ExecutionValue { Value = source } });
+            Assert.That(identity.Method.GetParameters()[0].ParameterType, Is.EqualTo(typeof(object)));
+            Assert.That(ExecutionConversionSource.ConversionCount, Is.EqualTo(0));
+            Assert.That(identity.Method.Invoke(null, identity.Arguments), Is.EqualTo("object"));
+            Assert.That(ExecutionConversionFixture.InvocationCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void InterpreterConversionUsesTheSameBoundaryAsTargetInvocation()
+        {
+            ExecutionConversionSource.ConversionCount = 0;
+            ExecutionConversionFixture.InvocationCount = 0;
+            var source = new ExecutionConversionSource { Value = 23 };
+            using (var cancellation = new CancellationTokenSource())
+            {
+                int scheduled = 0;
+                var context = new CSharpEvaluationContext(
+                    new Dictionary<string, object> { { "source", source } },
+                    invocationScheduler: action =>
+                    {
+                        scheduled++;
+                        object result = action();
+                        cancellation.Cancel();
+                        return result;
+                    },
+                    cancellationToken: cancellation.Token,
+                    budget: new ExecutionBudget(cancellationToken: cancellation.Token));
+
+                var error = Assert.Throws<ExecutionContractException>(() => CSharpSubsetEngine.Evaluate(
+                    "CodingRiver.UPilot.Tests.ExecutionConversionFixture.Accept(source)", "expression", context));
+
+                Assert.That(error.Code, Is.EqualTo("EXECUTION_CANCELLED"));
+                Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.True);
+                Assert.That(error.Detail.ContainsKey("lastCompletedSpan"), Is.True);
+                Assert.That(scheduled, Is.EqualTo(1));
+                Assert.That(ExecutionConversionSource.ConversionCount, Is.EqualTo(1));
+                Assert.That(ExecutionConversionFixture.InvocationCount, Is.EqualTo(0));
+                Assert.That(context.Diagnostics.MethodCallCount, Is.EqualTo(1));
+            }
         }
 
         [Test]
@@ -184,6 +354,440 @@ namespace CodingRiver.UPilot.Tests
                 "var values = new System.Collections.Generic.List<int>(); values.Add(4); return values[0];",
                 "statements", new CSharpEvaluationContext());
             Assert.That(closedType.Value, Is.EqualTo(4));
+        }
+
+        [Test]
+        public void TypeValuesUseInstanceSemanticsWhileSyntaxPathsRemainStatic()
+        {
+            var instance = CSharpSubsetEngine.Evaluate(
+                "var captured = System.String; return captured.ToString();", "statements", new CSharpEvaluationContext());
+            Assert.That(instance.Value, Is.EqualTo("System.String"));
+            var staticResult = CSharpSubsetEngine.Evaluate(
+                "System.String.IsNullOrEmpty(\"\")", "expression", new CSharpEvaluationContext());
+            Assert.That(staticResult.Value, Is.True);
+        }
+
+        [Test]
+        public void TypeInstancesSupportGetTypeMetadataWithoutBecomingStaticTargets()
+        {
+            var fullName = CSharpSubsetEngine.Evaluate(
+                "\"x\".GetType().FullName", "expression", new CSharpEvaluationContext());
+            Assert.That(fullName.Value, Is.EqualTo("System.String"));
+            Assert.That(fullName.Diagnostics.MethodCallCount, Is.EqualTo(1));
+            Assert.That(fullName.Diagnostics.GetterCallCount, Is.EqualTo(1));
+
+            var field = CSharpSubsetEngine.Evaluate(
+                "var captured = System.String; return captured.GetField(\"Empty\").Name;",
+                "statements", new CSharpEvaluationContext());
+            Assert.That(field.Value, Is.EqualTo("Empty"));
+            Assert.That(field.Diagnostics.MethodCallCount, Is.EqualTo(1));
+            Assert.That(field.Diagnostics.GetterCallCount, Is.EqualTo(1));
+
+            var nestedEnum = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionNestedTypeFixture.Mode.Second",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(nestedEnum.Value, Is.EqualTo(ExecutionNestedTypeFixture.Mode.Second));
+        }
+
+        [Test]
+        public void InterpreterResolvesInheritedStaticMembersWithoutTreatingTheTypeAsAnInstance()
+        {
+            var property = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionInheritedStaticDerivedFixture.SharedValue",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(property.Value, Is.EqualTo(17));
+            Assert.That(property.Diagnostics.GetterCallCount, Is.EqualTo(1));
+
+            var method = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionInheritedStaticDerivedFixture.SharedMethod()",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(method.Value, Is.EqualTo("inherited"));
+            Assert.That(method.Diagnostics.MethodCallCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void InterpreterResolvesClosedGenericTypePathsBeforeFollowingMembers()
+        {
+            var result = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionGenericStaticFixture<int>.TypeName",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(result.Value, Is.EqualTo("Int32"));
+            Assert.That(result.Diagnostics.GetterCallCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void TypeResolverInvalidatesNegativeCacheAfterSameDomainAssemblyLoad()
+        {
+            var typeName = "ExecutionResolverProbe" + Guid.NewGuid().ToString("N");
+            Assert.That(ExecutionTypeResolver.Resolve(typeName), Is.Null);
+            Assert.That(ExecutionTypeResolver.Resolve(typeName), Is.Null);
+
+            var assembly = AssemblyBuilder.DefineDynamicAssembly(
+                new AssemblyName("UPilotExecutionResolverProbe" + Guid.NewGuid().ToString("N")),
+                AssemblyBuilderAccess.Run);
+            var module = assembly.DefineDynamicModule("Probe");
+            var created = module.DefineType(typeName, TypeAttributes.Public).CreateType();
+
+            Assert.That(ExecutionTypeResolver.Resolve(typeName), Is.EqualTo(created));
+        }
+
+        [Test]
+        public void TypeResolverColdAndHotPropertyPathsStayWithinDefaultBudgetWithoutReplayingGetters()
+        {
+            const string expression =
+                "CodingRiver.UPilot.Tests.ExecutionPropertyBudgetFixture.First + " +
+                "CodingRiver.UPilot.Tests.ExecutionPropertyBudgetFixture.Second + " +
+                "CodingRiver.UPilot.Tests.ExecutionPropertyBudgetFixture.Third + " +
+                "CodingRiver.UPilot.Tests.ExecutionPropertyBudgetFixture.Fourth";
+            ExecutionPropertyBudgetFixture.GetterCallCount = 0;
+
+            for (var index = 0; index < 10; index++)
+            {
+                ClearTypeResolverCache();
+                var cold = CSharpSubsetEngine.Evaluate(expression, "expression", new CSharpEvaluationContext());
+                Assert.That(cold.Value, Is.EqualTo(10));
+                Assert.That(cold.Diagnostics.GetterCallCount, Is.EqualTo(4));
+                Assert.That(cold.Budget.ElapsedMs, Is.LessThan(3000));
+            }
+
+            ClearTypeResolverCache();
+            for (var index = 0; index < 10; index++)
+            {
+                var hot = CSharpSubsetEngine.Evaluate(expression, "expression", new CSharpEvaluationContext());
+                Assert.That(hot.Value, Is.EqualTo(10));
+                Assert.That(hot.Diagnostics.GetterCallCount, Is.EqualTo(4));
+                Assert.That(hot.Budget.ElapsedMs, Is.LessThan(3000));
+            }
+
+            Assert.That(ExecutionPropertyBudgetFixture.GetterCallCount, Is.EqualTo(80));
+        }
+
+        [Test]
+        public void SlowGetterCrossesBudgetAfterOneInvocationWithoutReplay()
+        {
+            Assert.That(ExecutionTypeResolver.Resolve(
+                "CodingRiver.UPilot.Tests.ExecutionPropertyBudgetFixture"),
+                Is.EqualTo(typeof(ExecutionPropertyBudgetFixture)));
+            ExecutionPropertyBudgetFixture.GetterCallCount = 0;
+            var context = new CSharpEvaluationContext(budget: new ExecutionBudget(timeoutMs: 50));
+
+            var error = Assert.Throws<ExecutionContractException>(() => CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionPropertyBudgetFixture.Slow", "expression", context));
+
+            Assert.That(error.Code, Is.EqualTo("EXECUTION_BUDGET_EXCEEDED"));
+            Assert.That(error.Detail["metric"], Is.EqualTo("wallClockMs"));
+            Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.True);
+            Assert.That(error.Detail.ContainsKey("lastCompletedSpan"), Is.True);
+            Assert.That(ExecutionPropertyBudgetFixture.GetterCallCount, Is.EqualTo(1));
+            Assert.That(context.Diagnostics.GetterCallCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ThrowingGetterIsInvokedOnceAndIsNotRetriedThroughAnotherBindingPath()
+        {
+            ExecutionThrowingGetterFixture.GetterCallCount = 0;
+            var context = new CSharpEvaluationContext();
+
+            var error = Assert.Throws<ExecutionContractException>(() => CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionThrowingGetterFixture.Value", "expression", context));
+
+            Assert.That(error.Code, Is.EqualTo("CSHARP_RUNTIME_ERROR"));
+            Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.True);
+            Assert.That(ExecutionThrowingGetterFixture.GetterCallCount, Is.EqualTo(1));
+            Assert.That(context.Diagnostics.GetterCallCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void EncodingFailureAfterInvocationDoesNotReplayTheTarget()
+        {
+            ExecutionConversionFixture.InvocationCount = 0;
+            var evaluation = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionConversionFixture.ProduceUnsupportedResult()",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(ExecutionConversionFixture.InvocationCount, Is.EqualTo(1));
+
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            var encode = typeof(CodingRiver.UPilot.UPilotExecutionService).GetMethod(
+                "EncodeResult", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(encode, Is.Not.Null);
+            var invocation = Assert.Throws<TargetInvocationException>(() =>
+                encode.Invoke(service, new[] { evaluation.Value, "", "inline", (object)1048576 }));
+            Assert.That(invocation.InnerException, Is.TypeOf<ExecutionContractException>());
+            Assert.That(((ExecutionContractException)invocation.InnerException).Code, Is.EqualTo("RESULT_NOT_INLINEABLE"));
+            Assert.That(ExecutionConversionFixture.InvocationCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void DecodeArgumentsRejectsMultidimensionalArraysBeforeConversion()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+
+            var error = Assert.Throws<ExecutionContractException>(() => service.DecodeArguments(
+                "{\"items\":[{\"value\":{\"kind\":\"array\",\"typeName\":\"System.Int32[,]\",\"items\":[]}}]}", ""));
+
+            Assert.That(error.Code, Is.EqualTo("INVALID_PARAMS"));
+            Assert.That(error.Message, Does.Contain("one-dimensional array type"));
+        }
+
+        [Test]
+        public void PrimitiveTypedArraysRejectNonLiteralAndNullElementsBeforeDecode()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            var invalidItems = new[]
+            {
+                "{\"kind\":\"handle\",\"handle\":\"h.current\"}",
+                "{\"kind\":\"type\",\"typeName\":\"System.Int32\"}",
+                "{\"kind\":\"unityobject\",\"instanceId\":1}",
+                "{\"kind\":\"array\",\"typeName\":\"System.Int32[]\",\"items\":[]}",
+                "{\"kind\":\"null\"}",
+                "{\"kind\":\"literal\",\"valueJson\":\"null\"}",
+            };
+
+            foreach (string item in invalidItems)
+            {
+                int beforeUserCode = 0;
+                var error = Assert.Throws<ExecutionContractException>(() => service.DecodeArguments(
+                    "{\"items\":[{\"value\":{\"kind\":\"array\",\"typeName\":\"System.Int32[]\",\"items\":["
+                    + item + "]}}]}", "", () => beforeUserCode++));
+                Assert.That(error.Code, Is.EqualTo("INVALID_PARAMS"));
+                Assert.That(beforeUserCode, Is.Zero);
+            }
+
+            var strings = service.DecodeArguments(
+                "{\"items\":[{\"value\":{\"kind\":\"array\",\"typeName\":\"System.String[]\",\"items\":[{\"kind\":\"null\"}]}}]}", "");
+            Assert.That(((string[])strings[0].Value)[0], Is.Null);
+        }
+
+        [Test]
+        public void PrimitiveTypedArraysRespectTheArrayElementBudgetBeforeDecode()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            int beforeUserCode = 0;
+
+            var error = Assert.Throws<ExecutionContractException>(() => service.DecodeArguments(
+                "{\"items\":[{\"value\":{\"kind\":\"array\",\"typeName\":\"System.Int32[]\",\"items\":[{\"kind\":\"literal\",\"valueJson\":\"1\"},{\"kind\":\"literal\",\"valueJson\":\"2\"}]}}]}",
+                "", () => beforeUserCode++, maxArrayElements: 1));
+
+            Assert.That(error.Code, Is.EqualTo("EXECUTION_BUDGET_EXCEEDED"));
+            Assert.That(error.Detail["metric"], Is.EqualTo("arrayElements"));
+            Assert.That(error.Detail["limit"], Is.EqualTo(1));
+            Assert.That(error.Detail["actual"], Is.EqualTo(2));
+            Assert.That(beforeUserCode, Is.Zero);
+        }
+
+        [Test]
+        public void OversizedInlineArraysStopAtTheUtf8Limit()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            var error = Assert.Throws<ExecutionContractException>(() => service.EncodeResult(
+                Enumerable.Repeat("x", 2048).ToArray(), "", "inline", 1024));
+
+            Assert.That(error.Code, Is.EqualTo("RESULT_TOO_LARGE"));
+            Assert.That(error.Detail["actualBytes"], Is.GreaterThan(1024));
+            Assert.That(error.Detail["actualBytes"], Is.LessThan(2048), "encoding must stop at the bounded UTF-8 prefix");
+            Assert.That(error.Detail["limitBytes"], Is.EqualTo(1024));
+        }
+
+        [Test]
+        public void TypedStringLiteralsRoundTripEveryJsonControlCharacter()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            string value = new string(Enumerable.Range(0, 32).Select(index => (char)index).ToArray()) + "\"\\";
+
+            var encoded = service.EncodeResult(value, "", "inline");
+
+            Assert.That(encoded.valueJson, Does.Contain("\\u0000"));
+            Assert.That(encoded.valueJson, Does.Contain("\\b"));
+            Assert.That(encoded.valueJson, Does.Contain("\\f"));
+            Assert.That(encoded.valueJson, Does.Contain("\\n"));
+            Assert.That(encoded.valueJson, Does.Contain("\\r"));
+            Assert.That(encoded.valueJson, Does.Contain("\\t"));
+            Assert.That(encoded.valueJson.Any(character => character < 0x20), Is.False);
+
+            var decoded = service.DecodeArguments(CreateLiteralArgumentJson("System.String", encoded.valueJson), "");
+            Assert.That(decoded[0].Value, Is.EqualTo(value));
+        }
+
+        [Test]
+        public void TypedStringLiteralsDecodeUnicodeEscapesIncludingSurrogatePairs()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            const string escapedLiteral = "\"\\u0041\\uD83D\\uDE00\\b\\f\"";
+
+            var decoded = service.DecodeArguments(CreateLiteralArgumentJson("System.String", escapedLiteral), "");
+
+            Assert.That(decoded[0].Value, Is.EqualTo("A" + char.ConvertFromUtf32(0x1F600) + "\b\f"));
+        }
+
+        [Test]
+        public void TypedStringLiteralsRejectMalformedEscapesAndRawControlCharacters()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            var invalidLiterals = new[]
+            {
+                "\"\\x\"",
+                string.Concat("\"raw", '\u0001', "\""),
+                "'not json'",
+            };
+
+            foreach (string invalidLiteral in invalidLiterals)
+            {
+                var error = Assert.Throws<ExecutionContractException>(() => service.DecodeArguments(
+                    CreateLiteralArgumentJson("System.String", invalidLiteral), ""));
+                Assert.That(error.Code, Is.EqualTo("TYPED_VALUE_DECODE_FAILED"));
+            }
+        }
+
+        [Test]
+        public void TypedStringArraysDecodeJsonLiteralsAndEncodeValidControlEscapes()
+        {
+            var service = new CodingRiver.UPilot.UPilotExecutionService(null);
+            string argumentsJson = JsonUtility.ToJson(new ExecutionArgumentsEnvelope
+            {
+                items = new[]
+                {
+                    new ExecutionArgumentSpec
+                    {
+                        value = new TypedValueSpec
+                        {
+                            kind = "array",
+                            typeName = "System.String[]",
+                            items = new[]
+                            {
+                                new TypedValueSpec { kind = "literal", valueJson = "\"\\u0041\\b\\f\"" },
+                                new TypedValueSpec { kind = "null" },
+                                new TypedValueSpec { kind = "literal", valueJson = "\"\\uD83D\\uDE00\\u0000\"" },
+                            },
+                        },
+                    },
+                },
+            });
+
+            var decoded = (string[])service.DecodeArguments(argumentsJson, "")[0].Value;
+            CollectionAssert.AreEqual(new[] { "A\b\f", null, char.ConvertFromUtf32(0x1F600) + "\0" }, decoded);
+
+            var encoded = service.EncodeResult(decoded, "", "inline");
+            Assert.That(encoded.kind, Is.EqualTo("array"));
+            Assert.That(encoded.valueJson, Does.Contain("\\b"));
+            Assert.That(encoded.valueJson, Does.Contain("\\f"));
+            Assert.That(encoded.valueJson, Does.Contain("\\u0000"));
+            Assert.That(encoded.valueJson.IndexOfAny(new[] { '\0', '\b', '\f', '\n', '\r', '\t' }), Is.EqualTo(-1));
+        }
+
+        private static string CreateLiteralArgumentJson(string typeName, string valueJson)
+        {
+            return JsonUtility.ToJson(new ExecutionArgumentsEnvelope
+            {
+                items = new[]
+                {
+                    new ExecutionArgumentSpec
+                    {
+                        value = new TypedValueSpec { kind = "literal", typeName = typeName, valueJson = valueJson },
+                    },
+                },
+            });
+        }
+
+        private static void ClearTypeResolverCache()
+        {
+            var method = typeof(ExecutionTypeResolver).GetMethod(
+                "ClearCacheForTests", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            method.Invoke(null, null);
+        }
+
+        [Test]
+        public void InterpreterReportsValueFreeExecutionDiagnosticsAndRejectsUnresolvedResults()
+        {
+            var getter = CSharpSubsetEngine.Evaluate("\"x\".Length", "expression", new CSharpEvaluationContext());
+            Assert.That(getter.Value, Is.EqualTo(1));
+            Assert.That(getter.Diagnostics.GetterCallCount, Is.EqualTo(1));
+            Assert.That(getter.Diagnostics.ResolveMs, Is.GreaterThanOrEqualTo(0));
+            Assert.That(getter.Diagnostics.InvokeMs, Is.GreaterThanOrEqualTo(0));
+
+            var method = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionReflectionFixture.Identity<int>(3)", "expression", new CSharpEvaluationContext());
+            Assert.That(method.Value, Is.EqualTo(3));
+            Assert.That(method.Diagnostics.MethodCallCount, Is.EqualTo(1));
+            Assert.That(method.Diagnostics.BindMs, Is.GreaterThanOrEqualTo(0));
+
+            var unresolved = Assert.Throws<ExecutionContractException>(() => CSharpSubsetEngine.Evaluate(
+                "roots.Count", "expression", new CSharpEvaluationContext()));
+            Assert.That(unresolved.Code, Is.EqualTo("CSHARP_BIND_ERROR"));
+        }
+
+        [Test]
+        public void ExecutionDiagnosticsBoundCompletedBoundariesAndCountDropsExactly()
+        {
+            var context = new CSharpEvaluationContext();
+            var result = CSharpSubsetEngine.Evaluate(
+                "var total = 0; for (var i = 0; i < 70; i++) { total += \"x\".Length; } return total;",
+                "statements", context);
+
+            Assert.That(result.Value, Is.EqualTo(70));
+            Assert.That(result.Diagnostics.GetterCallCount, Is.EqualTo(70));
+            Assert.That(result.Diagnostics.CompletedBoundaries, Has.Length.EqualTo(64));
+            Assert.That(result.Diagnostics.CompletedBoundaries, Has.All.EqualTo("invoke.completed"));
+            Assert.That(result.Diagnostics.DroppedDiagnosticCount, Is.EqualTo(6));
+
+            var map = typeof(CodingRiver.UPilot.UPilotExecutionService).GetMethod(
+                "ToExecutionDiagnostics", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(map, Is.Not.Null);
+            var payload = (CodingRiver.UPilot.CSharpExecutionDiagnosticsPayload)map.Invoke(null, new object[] { result.Diagnostics });
+            Assert.That(payload.completedBoundaries, Is.EqualTo(result.Diagnostics.CompletedBoundaries));
+            Assert.That(payload.completedBoundaries, Has.Length.EqualTo(64));
+            Assert.That(payload.droppedDiagnosticCount, Is.EqualTo(6));
+        }
+
+        [Test]
+        public void EvaluationErrorsRetainBoundedExecutionDiagnostics()
+        {
+            var context = new CSharpEvaluationContext();
+            CSharpSubsetEngine.Evaluate(
+                "var total = 0; for (var i = 0; i < 70; i++) { total += \"x\".Length; } return total;",
+                "statements", context);
+            var wrap = typeof(CodingRiver.UPilot.UPilotExecutionService).GetMethod(
+                "WrapEvaluationException", BindingFlags.Static | BindingFlags.NonPublic);
+            var toError = typeof(CodingRiver.UPilot.UPilotExecutionService).GetMethod(
+                "ToErrorDetail", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(wrap, Is.Not.Null);
+            Assert.That(toError, Is.Not.Null);
+
+            var wrapped = (ExecutionContractException)wrap.Invoke(null, new object[]
+            {
+                new ExecutionContractException("EXECUTION_BUDGET_EXCEEDED", "fixture budget failure"), context, "s.diagnostics", null,
+            });
+            var detail = (CodingRiver.UPilot.ErrorDetailPayload)toError.Invoke(null, new object[]
+            {
+                wrapped, "cmd.diagnostics", "csharp.eval",
+            });
+
+            Assert.That(detail.executionDiagnostics, Is.Not.Null);
+            Assert.That(detail.executionDiagnostics.completedBoundaries, Has.Length.EqualTo(64));
+            Assert.That(detail.executionDiagnostics.droppedDiagnosticCount, Is.EqualTo(6));
+            Assert.That(detail.executionDiagnosticsJson, Does.Contain("droppedDiagnosticCount"));
+            Assert.That(detail.executionDiagnosticsJson, Does.Not.Contain("total"));
+        }
+
+        [Test]
+        public void InterpreterUsesOnlyExactUnityVectorOperatorSignatures()
+        {
+            var sum = (Vector3)CSharpSubsetEngine.Evaluate(
+                "new UnityEngine.Vector3(1f, 2f, 3f) + new UnityEngine.Vector3(4f, 5f, 6f)",
+                "expression", new CSharpEvaluationContext()).Value;
+            Assert.That(sum, Is.EqualTo(new Vector3(5f, 7f, 9f)));
+
+            var scaled = (Vector3)CSharpSubsetEngine.Evaluate(
+                "new UnityEngine.Vector3(1f, 2f, 3f) * 2f", "expression", new CSharpEvaluationContext()).Value;
+            Assert.That(scaled, Is.EqualTo(new Vector3(2f, 4f, 6f)));
+
+            var negated = (Vector2)CSharpSubsetEngine.Evaluate(
+                "-new UnityEngine.Vector2(3f, 4f)", "expression", new CSharpEvaluationContext()).Value;
+            Assert.That(negated, Is.EqualTo(new Vector2(-3f, -4f)));
+
+            var incompatible = Assert.Throws<ExecutionContractException>(() => CSharpSubsetEngine.Evaluate(
+                "new UnityEngine.Vector3(1f, 2f, 3f) * 2.0", "expression", new CSharpEvaluationContext()));
+            Assert.That(incompatible.Code, Is.EqualTo("CSHARP_BIND_ERROR"));
         }
 
         [Test]

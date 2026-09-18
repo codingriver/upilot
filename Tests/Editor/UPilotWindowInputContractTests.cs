@@ -1,7 +1,9 @@
 using System;
 using System.Collections;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
@@ -31,6 +33,33 @@ namespace CodingRiver.UPilot.Tests
                     frame.Add("Clipped", "Button", new Rect(15, 300, 120, 25), new Rect(Vector2.zero, position.size), true);
                 }
             }
+        }
+    }
+
+    public sealed class UPilotWindowGeometryMarkerProbe : EditorWindow
+    {
+        internal const int MarkerThickness = 8;
+
+        private void OnGUI()
+        {
+            var width = Mathf.Max(1f, position.width);
+            var height = Mathf.Max(1f, position.height);
+            EditorGUI.DrawRect(new Rect(0, 0, width, height), Color.magenta);
+            EditorGUI.DrawRect(new Rect(0, 0, MarkerThickness, height), Color.red);
+            EditorGUI.DrawRect(new Rect(width - MarkerThickness, 0, MarkerThickness, height), Color.green);
+            EditorGUI.DrawRect(new Rect(0, 0, width, MarkerThickness), Color.blue);
+            EditorGUI.DrawRect(new Rect(0, height - MarkerThickness, width, MarkerThickness), Color.yellow);
+        }
+    }
+
+    public sealed class UPilotFailingOnEnableWindowProbe : EditorWindow
+    {
+        internal static bool ThrowOnEnable;
+
+        private void OnEnable()
+        {
+            if (ThrowOnEnable)
+                throw new InvalidOperationException("UPILOT_P2_WINDOW_ON_ENABLE_PROBE");
         }
     }
 
@@ -273,6 +302,132 @@ namespace CodingRiver.UPilot.Tests
             finally
             {
                 UPilotWindowDiagnostics.RejectNativeCaptureForTesting = previous;
+                if (window != null) window.Close();
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator NativeCaptureRejectsGeometryChangedAfterPixelRead()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotWindowGeometryMarkerProbe>();
+            var previous = UPilotWindowDiagnostics.AfterNativeCaptureForTesting;
+            try
+            {
+                window.titleContent = new GUIContent("UPilot geometry-change probe");
+                window.position = new Rect(120, 120, 320, 220);
+                window.ShowUtility();
+                window.Repaint();
+                yield return null;
+
+                var original = window.position;
+                UPilotWindowDiagnostics.AfterNativeCaptureForTesting = target =>
+                    target.position = new Rect(original.x + 24, original.y, original.width, original.height);
+                var error = Assert.Throws<EditorWindowCaptureException>(() =>
+                    UPilotWindowDiagnostics.CaptureEditorWindowPixels(window, false));
+                Assert.That(error.Diagnostics.originalError, Is.EqualTo("WINDOW_CHANGED_DURING_CAPTURE"));
+                Assert.That(error.Diagnostics.pixelSourceVerified, Is.False);
+                Assert.That(error.Diagnostics.instanceId, Is.EqualTo(UPilotEntityIds.ToWireId(window)));
+            }
+            finally
+            {
+                UPilotWindowDiagnostics.AfterNativeCaptureForTesting = previous;
+                if (window != null) window.Close();
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator NativeCaptureIncludesAllFourGeometryMarkerEdges()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotWindowGeometryMarkerProbe>();
+            try
+            {
+                window.titleContent = new GUIContent("UPilot four-edge marker probe");
+                window.position = new Rect(160, 160, 320, 220);
+                window.ShowUtility();
+                window.Repaint();
+                yield return null;
+
+                var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(window, false);
+                Assert.That(capture.contentRectVerified, Is.True);
+                Assert.That(capture.cropComplete, Is.True);
+                var texture = new Texture2D(2, 2);
+                try
+                {
+                    Assert.That(texture.LoadImage(Convert.FromBase64String(capture.imageData)), Is.True);
+                    var inset = Mathf.Clamp(
+                        Mathf.RoundToInt(UPilotWindowGeometryMarkerProbe.MarkerThickness * capture.pixelsPerPoint / 2f),
+                        1,
+                        Math.Min(texture.width, texture.height) / 4);
+                    var left = texture.GetPixel(inset, texture.height / 2);
+                    var right = texture.GetPixel(texture.width - 1 - inset, texture.height / 2);
+                    var verticalA = texture.GetPixel(texture.width / 2, inset);
+                    var verticalB = texture.GetPixel(texture.width / 2, texture.height - 1 - inset);
+
+                    Assert.That(left.r, Is.GreaterThan(.8f));
+                    Assert.That(left.g, Is.LessThan(.2f));
+                    Assert.That(right.g, Is.GreaterThan(.8f));
+                    Assert.That(right.r, Is.LessThan(.2f));
+                    Assert.That(
+                        (verticalA.b > .8f && verticalB.r > .8f && verticalB.g > .8f)
+                        || (verticalB.b > .8f && verticalA.r > .8f && verticalA.g > .8f),
+                        Is.True,
+                        "The top/bottom markers must remain distinct blue and yellow edges regardless of PNG row orientation.");
+                }
+                finally
+                {
+                    UnityEngine.Object.DestroyImmediate(texture);
+                }
+            }
+            finally
+            {
+                if (window != null) window.Close();
+            }
+        }
+
+        [Test]
+        public void SnapshotFailureCodePreservesGeometryChangeAndDoesNotPromoteArbitraryNativeErrors()
+        {
+            var changed = new EditorWindowCaptureException("changed", new EditorWindowPixelCapture
+            {
+                originalError = "WINDOW_CHANGED_DURING_CAPTURE",
+            });
+            var nativeFailure = new EditorWindowCaptureException("failed", new EditorWindowPixelCapture
+            {
+                originalError = "PRINT_WINDOW_FAILED:5",
+            });
+
+            Assert.That(UPilotSnapshotService.CaptureFailureCode(changed), Is.EqualTo("WINDOW_CHANGED_DURING_CAPTURE"));
+            Assert.That(UPilotSnapshotService.CaptureFailureCode(nativeFailure), Is.EqualTo("SNAPSHOT_TARGET_CAPTURE_FAILED"));
+            Assert.That(UPilotSnapshotService.CaptureFailureCode(new InvalidOperationException()),
+                Is.EqualTo("SNAPSHOT_TARGET_CAPTURE_FAILED"));
+        }
+
+        [UnityTest]
+        public IEnumerator WindowHistoryDoesNotInventAuthoritativeAttributionForOnEnableFailure()
+        {
+            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
+            UPilotFailingOnEnableWindowProbe window = null;
+            try
+            {
+                UPilotFailingOnEnableWindowProbe.ThrowOnEnable = true;
+                LogAssert.Expect(LogType.Exception, new Regex("UPILOT_P2_WINDOW_ON_ENABLE_PROBE"));
+                window = ScriptableObject.CreateInstance<UPilotFailingOnEnableWindowProbe>();
+                var instanceId = window == null ? string.Empty : UPilotEntityIds.ToWireId(window).ToString();
+                yield return null;
+
+                var history = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
+                Assert.That(
+                    history.gap || history.events.Any(item => item.kind == "observed-open"),
+                    Is.True,
+                    "A failed OnEnable must leave either a bounded observation or an explicit sampling gap.");
+                Assert.That(history.events.All(item => !item.failureReasonAuthoritative), Is.True);
+                Assert.That(history.events.All(item =>
+                    string.IsNullOrEmpty(item.failureReason)
+                    || !item.failureReason.Contains("UPILOT_P2_WINDOW_ON_ENABLE_PROBE")), Is.True);
+            }
+            finally
+            {
+                UPilotFailingOnEnableWindowProbe.ThrowOnEnable = false;
                 if (window != null) window.Close();
             }
         }

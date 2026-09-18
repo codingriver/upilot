@@ -48,6 +48,9 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class OperationPayload
     {
+        public ModalObservationPayload modal;
+        public bool terminal;
+        public bool waitingForModalUi;
         public string commandId;
         public string commandName;
         public string description;
@@ -168,6 +171,7 @@ namespace CodingRiver.UPilot
                 : (long)(DateTime.Now - entry.ReceivedAt).TotalMilliseconds;
             var payload = new OperationPayload
             {
+                modal = UPilotModalObserver.Get(entry.CommandId),
                 commandId = entry.CommandId,
                 commandName = entry.CommandName,
                 description = entry.Description,
@@ -182,6 +186,10 @@ namespace CodingRiver.UPilot
                 errorCode = entry.ErrorCode,
                 errorMessage = entry.ErrorMessage,
             };
+            payload.terminal = payload.modal != null ? payload.modal.terminal : entry.CompletedAt.HasValue;
+            payload.waitingForModalUi = payload.modal?.waitingForModalUi ?? false;
+            if (payload.modal != null)
+                payload.phase = payload.modal.state;
             lock (entry.Steps)
             {
                 foreach (var step in entry.Steps)

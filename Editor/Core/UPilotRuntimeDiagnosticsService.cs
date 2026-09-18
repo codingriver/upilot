@@ -88,6 +88,8 @@ namespace CodingRiver.UPilot
     [Serializable] public class ProfilerCaptureStartMessage { public ProfilerCaptureStartPayload payload; }
     [Serializable] public class ProfilerCaptureStartPayload
     {
+        public string captureMode = "lowOverhead";
+        public int maxSamples = 4096;
         public float durationSec = 30f;
         public int sampleEveryFrames = 1;
         public string title = "runtime-profiler";
@@ -104,6 +106,8 @@ namespace CodingRiver.UPilot
     [Serializable] public class ProfilerCaptureStatusPayload { public string captureId = ""; }
     [Serializable] public class ProfilerCaptureSamplePayload
     {
+        public double collectorMs;
+        public long collectorAllocatedBytes;
         public int frame;
         public double elapsedSec;
         public double mainThreadMs;
@@ -134,6 +138,28 @@ namespace CodingRiver.UPilot
     [Serializable] public class ProfilerArtifactsPayload { public string jsonPath; public string csvPath; public string comparisonPath; }
     [Serializable] public class ProfilerCaptureResultPayload
     {
+        public string captureMode;
+        public int maxSamples;
+        public double discoveryMs;
+        public double startupMs;
+        public double serializationMs;
+        public double actualSamplesPerSec;
+        public string samplingClock;
+        public double editModeSampleHzCap;
+        public bool allocationMeasurementAvailable;
+        public string allocationMeasurementSource;
+        public bool observerEffectDetected;
+        public string observerEffectVerification = "unverified";
+        public bool comparableBaseline;
+        public List<WindowTelemetrySample> windowTelemetry = new();
+        public int droppedWindowTelemetry;
+        internal ProfilerCaptureResultPayload WithoutSamples()
+        {
+            var copy = (ProfilerCaptureResultPayload)MemberwiseClone();
+            copy.samples = new List<ProfilerCaptureSamplePayload>();
+            copy.windowTelemetry = new List<WindowTelemetrySample>();
+            return copy;
+        }
         public bool ok = true;
         public string captureId;
         public string status;
@@ -155,6 +181,8 @@ namespace CodingRiver.UPilot
         public int telemetryErrorCount;
         public string lastTelemetryError;
         public List<string> unavailableCounters = new();
+        public List<string> selectedCounters = new();
+        public List<string> suppressedCounters = new();
         public List<string> selectedMarkers = new();
         public List<string> requestedMarkerPatterns = new();
         public string markerDiscoverySource;
@@ -187,8 +215,16 @@ namespace CodingRiver.UPilot
 
         private sealed class ProfilerCaptureState
         {
+            public ProfilerCaptureSamplePayload[] buffer;
+            public string[] markerKeys;
+            public int editorTick;
             public ProfilerCaptureResultPayload result;
-            public double startedEditorTime;
+            public long startedTimestamp;
+            public bool startedInPlayMode;
+            public System.Threading.Timer editModeSampleTimer;
+            public SynchronizationContext mainThreadContext;
+            public SendOrPostCallback editModeSampleCallback;
+            public int editModeSampleScheduled;
             public int lastSampledFrame = -1;
             public readonly Dictionary<string, ProfilerRecorder> recorders = new();
             public readonly Dictionary<string, string> markerUnits = new();
@@ -449,40 +485,97 @@ namespace CodingRiver.UPilot
         {
             if (_profiler != null && _profiler.result.status == "Running")
                 throw new InvalidOperationException("A profiler capture is already running: " + _profiler.result.captureId);
+            if (payload.captureMode != "lowOverhead" && payload.captureMode != "legacy")
+                throw new ArgumentException("captureMode must be lowOverhead or legacy.");
+            if (!string.IsNullOrWhiteSpace(payload.markerNameRegex))
+                _ = new System.Text.RegularExpressions.Regex(payload.markerNameRegex,
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+            long startup = System.Diagnostics.Stopwatch.GetTimestamp();
             var duration = Mathf.Clamp(payload.durationSec, 1f, 3600f);
+            bool captureInPlayMode = EditorApplication.isPlaying;
+            SynchronizationContext mainThreadContext = SynchronizationContext.Current;
+            if (!captureInPlayMode && payload.captureMode == "lowOverhead" && mainThreadContext == null)
+                throw new InvalidOperationException("Low-overhead EditMode capture requires Unity's main-thread SynchronizationContext.");
             var state = new ProfilerCaptureState
             {
-                startedEditorTime = EditorApplication.timeSinceStartup,
+                startedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp(),
+                startedInPlayMode = captureInPlayMode,
+                mainThreadContext = mainThreadContext,
                 result = new ProfilerCaptureResultPayload
                 {
+                    captureMode = payload.captureMode,
+                    maxSamples = Mathf.Clamp(payload.maxSamples, 1, 16384),
                     captureId = "profiler_" + DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture),
                     status = "Running",
                     title = string.IsNullOrWhiteSpace(payload.title) ? "runtime-profiler" : payload.title.Trim(),
                     startedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     durationSec = duration,
-                    elapsedSource = "EditorApplication.timeSinceStartup",
+                    elapsedSource = "Stopwatch.GetTimestamp",
                     elapsedFrozen = false,
                     sampleEveryFrames = Mathf.Clamp(payload.sampleEveryFrames, 1, 600),
+                    samplingClock = captureInPlayMode || payload.captureMode == "legacy"
+                        ? "UnityFrame" : "ThreadingTimer60HzToEditorUpdate",
+                    editModeSampleHzCap = captureInPlayMode || payload.captureMode == "legacy" ? 0 : 60,
                     jsonPath = ResolveProfilerPath(payload.outputDirectory, payload.title, ".json"),
                     csvPath = ResolveProfilerPath(payload.outputDirectory, payload.title, ".csv"),
                     comparisonPath = ResolveProfilerPath(payload.outputDirectory, payload.title + "_comparison", ".json"),
                     baselineJsonPath = payload.baselineJsonPath ?? "",
                 }
             };
-            AddRecorder(state, "mainThreadMs", ProfilerCategory.Internal, "Main Thread", state.result.unavailableCounters);
-            AddRecorder(state, "renderThreadMs", ProfilerCategory.Internal, "Render Thread", state.result.unavailableCounters);
-            AddRecorder(state, "gpuFrameMs", ProfilerCategory.Render, "GPU Frame Time", state.result.unavailableCounters);
-            AddRecorder(state, "gcAllocatedBytes", ProfilerCategory.Memory, "GC Allocated In Frame", state.result.unavailableCounters);
-            AddRecorder(state, "gcCollectionCount", ProfilerCategory.Memory, "GC Collection Count", state.result.unavailableCounters);
-            AddRecorder(state, "managedHeapUsedBytes", ProfilerCategory.Memory, "GC Used Memory", state.result.unavailableCounters);
-            AddRecorder(state, "managedHeapReservedBytes", ProfilerCategory.Memory, "GC Reserved Memory", state.result.unavailableCounters);
-            AddRecorder(state, "drawCalls", ProfilerCategory.Render, "Draw Calls Count", state.result.unavailableCounters);
-            AddRecorder(state, "setPassCalls", ProfilerCategory.Render, "SetPass Calls Count", state.result.unavailableCounters);
-            AddRecorder(state, "batches", ProfilerCategory.Render, "Batches Count", state.result.unavailableCounters);
-            AddRecorder(state, "triangles", ProfilerCategory.Render, "Triangles Count", state.result.unavailableCounters);
-            AddRecorder(state, "vertices", ProfilerCategory.Render, "Vertices Count", state.result.unavailableCounters);
-            AddRequestedMarkerRecorders(state, payload);
-            ConfigureTelemetrySampler(state, payload);
+            if (payload.captureMode == "legacy")
+            {
+                AddRecorder(state, "mainThreadMs", ProfilerCategory.Internal, "Main Thread", state.result.unavailableCounters);
+                AddRecorder(state, "gcAllocatedBytes", ProfilerCategory.Memory, "GC Allocated In Frame", state.result.unavailableCounters);
+                AddRecorder(state, "renderThreadMs", ProfilerCategory.Internal, "Render Thread", state.result.unavailableCounters);
+                AddRecorder(state, "gpuFrameMs", ProfilerCategory.Render, "GPU Frame Time", state.result.unavailableCounters);
+                AddRecorder(state, "gcCollectionCount", ProfilerCategory.Memory, "GC Collection Count", state.result.unavailableCounters);
+                AddRecorder(state, "managedHeapUsedBytes", ProfilerCategory.Memory, "GC Used Memory", state.result.unavailableCounters);
+                AddRecorder(state, "managedHeapReservedBytes", ProfilerCategory.Memory, "GC Reserved Memory", state.result.unavailableCounters);
+                AddRecorder(state, "drawCalls", ProfilerCategory.Render, "Draw Calls Count", state.result.unavailableCounters);
+                AddRecorder(state, "setPassCalls", ProfilerCategory.Render, "SetPass Calls Count", state.result.unavailableCounters);
+                AddRecorder(state, "batches", ProfilerCategory.Render, "Batches Count", state.result.unavailableCounters);
+                AddRecorder(state, "triangles", ProfilerCategory.Render, "Triangles Count", state.result.unavailableCounters);
+                AddRecorder(state, "vertices", ProfilerCategory.Render, "Vertices Count", state.result.unavailableCounters);
+            }
+            else
+            {
+                state.result.suppressedCounters.AddRange(new[] { "mainThreadMs", "gcAllocatedBytes", "renderThreadMs",
+                    "gpuFrameMs", "gcCollectionCount", "managedHeapUsedBytes", "managedHeapReservedBytes", "drawCalls",
+                    "setPassCalls", "batches", "triangles", "vertices" });
+            }
+            long discovery = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                AddRequestedMarkerRecorders(state, payload);
+                ConfigureTelemetrySampler(state, payload);
+            }
+            catch
+            {
+                foreach (var recorder in state.recorders.Values) recorder.Dispose();
+                throw;
+            }
+            state.result.discoveryMs = ElapsedMilliseconds(discovery);
+            state.markerKeys = state.recorders.Keys.Where(key => key.StartsWith("marker:", StringComparison.Ordinal)).ToArray();
+            state.result.maxSamples = Math.Min(state.result.maxSamples, 262144 / Math.Max(1, state.markerKeys.Length));
+            state.buffer = new ProfilerCaptureSamplePayload[state.result.maxSamples];
+            state.result.samples = new List<ProfilerCaptureSamplePayload>(state.result.maxSamples);
+            for (int index = 0; index < state.buffer.Length; index++)
+            {
+                var sample = state.buffer[index] = new ProfilerCaptureSamplePayload();
+                foreach (string key in state.markerKeys)
+                    sample.markers.Add(new ProfilerMarkerValuePayload
+                    {
+                        name = key.Substring("marker:".Length), unit = state.markerUnits[key],
+                    });
+            }
+            UPilotWindowTelemetry.BeginCapture();
+            state.result.allocationMeasurementAvailable = UPilotWindowTelemetry.AllocationMeasurementAvailable;
+            state.result.allocationMeasurementSource = UPilotAllocationMeasurement.Source;
+            if (!state.result.allocationMeasurementAvailable)
+            {
+                state.result.unavailableCounters.Add("collectorAllocatedBytes");
+                state.result.limitations.Add("The thread allocation counter failed its startup allocation probe; collector/window allocation -1 means unavailable, not zero.");
+            }
             state.result.artifacts = new ProfilerArtifactsPayload
             {
                 jsonPath = state.result.jsonPath,
@@ -491,9 +584,35 @@ namespace CodingRiver.UPilot
             };
             state.result.limitations.Add("ProfilerRecorder provides aggregate marker/counter values, not full per-thread Timeline event trees.");
             state.result.limitations.Add("URP pass timing is available only when matching ProfilerRecorder markers are exposed by the active Unity/URP version.");
+            state.result.limitations.Add("Window attribution requires explicit UPilotWindowTelemetry scopes; uninstrumented windows remain aggregate-only.");
+            state.result.limitations.Add("Collector timings exclude native Recorder instrumentation. No verified before/during/after control has been supplied; this capture is not a comparable baseline.");
+            if (payload.captureMode == "lowOverhead")
+                state.result.limitations.Add("Per-sample object inventory is disabled; component count -1 means not sampled.");
+            if (payload.captureMode == "lowOverhead")
+                state.result.limitations.Add("Built-in ProfilerRecorder counters are disabled to avoid their fixed observer cost; request explicit markers or use legacy mode when those counters are required.");
+            if (payload.captureMode == "lowOverhead" && !captureInPlayMode)
+                state.result.limitations.Add("EditMode low-overhead sampling uses a 60 Hz clock cap; sampleEveryFrames is applied to that clock.");
+            state.result.startupMs = ElapsedMilliseconds(startup);
+            state.startedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
             _profiler = state;
             EditorApplication.update -= SampleProfiler;
-            EditorApplication.update += SampleProfiler;
+            if (!captureInPlayMode && payload.captureMode == "lowOverhead")
+            {
+                int intervalMs = Math.Max(1, (int)Math.Round(1000d * state.result.sampleEveryFrames /
+                    state.result.editModeSampleHzCap));
+                state.editModeSampleCallback = _ =>
+                {
+                    Interlocked.Exchange(ref state.editModeSampleScheduled, 0);
+                    if (ReferenceEquals(_profiler, state) && state.result.status == "Running") SampleProfiler();
+                };
+                state.editModeSampleTimer = new System.Threading.Timer(
+                    _ =>
+                    {
+                        if (Interlocked.Exchange(ref state.editModeSampleScheduled, 1) == 0)
+                            state.mainThreadContext.Post(state.editModeSampleCallback, null);
+                    }, null, 0, intervalMs);
+            }
+            else EditorApplication.update += SampleProfiler;
             return CloneProfilerResult(state.result, false);
         }
 
@@ -504,6 +623,7 @@ namespace CodingRiver.UPilot
                 var recorder = ProfilerRecorder.StartNew(category, marker, 1);
                 if (!recorder.Valid) { recorder.Dispose(); unavailable.Add(marker); return; }
                 state.recorders[key] = recorder;
+                state.result.selectedCounters.Add(key);
             }
             catch { unavailable.Add(marker); }
         }
@@ -534,7 +654,10 @@ namespace CodingRiver.UPilot
                 state.result.requestedMarkerPatterns.Add(name);
             System.Text.RegularExpressions.Regex regex = null;
             if (!string.IsNullOrWhiteSpace(payload.markerNameRegex))
+            {
+                state.result.requestedMarkerPatterns.Add("regex:" + payload.markerNameRegex);
                 regex = new System.Text.RegularExpressions.Regex(payload.markerNameRegex, System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+            }
             int maxMarkers = Mathf.Clamp(payload.maxMarkers, 0, 256);
             foreach (var item in descriptions
                 .Where(item => requested.Contains(item.description.Name) || (regex != null && regex.IsMatch(item.description.Name)))
@@ -575,58 +698,81 @@ namespace CodingRiver.UPilot
         {
             var state = _profiler;
             if (state == null || state.result.status != "Running") return;
-            var elapsed = EditorApplication.timeSinceStartup - state.startedEditorTime;
+            long callbackTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+            double elapsed = ElapsedSeconds(state.startedTimestamp, callbackTimestamp);
             if (elapsed >= state.result.durationSec) { StopProfiler(state.result.captureId, "Completed"); return; }
-            if (Time.frameCount == state.lastSampledFrame || Time.frameCount % state.result.sampleEveryFrames != 0) return;
-            state.lastSampledFrame = Time.frameCount;
-            var sample = new ProfilerCaptureSamplePayload
+            int sampleFrame;
+            if (!state.startedInPlayMode && state.result.captureMode == "lowOverhead")
             {
-                frame = Time.frameCount,
-                elapsedSec = elapsed,
-                mainThreadMs = ReadTimeMs(state, "mainThreadMs"),
-                renderThreadMs = ReadTimeMs(state, "renderThreadMs"),
-                gpuFrameMs = ReadTimeMs(state, "gpuFrameMs"),
-                gcAllocatedBytes = ReadValue(state, "gcAllocatedBytes"),
-                gcCollectionCount = ReadValue(state, "gcCollectionCount"),
-                managedHeapUsedBytes = ReadValue(state, "managedHeapUsedBytes"),
-                managedHeapReservedBytes = ReadValue(state, "managedHeapReservedBytes"),
-                drawCalls = ReadValue(state, "drawCalls"),
-                setPassCalls = ReadValue(state, "setPassCalls"),
-                batches = ReadValue(state, "batches"),
-                triangles = ReadValue(state, "triangles"),
-                vertices = ReadValue(state, "vertices"),
-                navMeshAgents = Resources.FindObjectsOfTypeAll<NavMeshAgent>().Length,
-                animators = Resources.FindObjectsOfTypeAll<Animator>().Length,
-                skinnedMeshRenderers = Resources.FindObjectsOfTypeAll<SkinnedMeshRenderer>().Length,
-                particleSystems = Resources.FindObjectsOfTypeAll<ParticleSystem>().Length,
-            };
-            foreach (var pair in state.recorders.Where(pair => pair.Key.StartsWith("marker:", StringComparison.Ordinal)))
-            {
-                string unit = state.markerUnits.TryGetValue(pair.Key, out var value) ? value : "Count";
-                double raw = pair.Value.Valid ? pair.Value.LastValueAsDouble : 0d;
-                sample.markers.Add(new ProfilerMarkerValuePayload
-                {
-                    name = pair.Key.Substring("marker:".Length),
-                    unit = unit,
-                    value = IsTimeUnit(unit) ? raw / 1000000.0 : raw,
-                });
+                sampleFrame = ++state.editorTick;
             }
-            if (state.telemetryMethod != null)
+            else
             {
-                try
-                {
-                    object telemetry = state.telemetryMethod.Invoke(null, null);
-                    sample.telemetryJson = telemetry is string text ? text : JsonUtility.ToJson(telemetry);
-                }
-                catch (Exception ex)
-                {
-                    state.result.telemetryErrorCount++;
-                    state.result.lastTelemetryError = ex.InnerException?.Message ?? ex.Message;
-                }
+                sampleFrame = state.startedInPlayMode ? Time.frameCount : ++state.editorTick;
+                if (sampleFrame == state.lastSampledFrame || sampleFrame % state.result.sampleEveryFrames != 0) return;
             }
-            state.result.samples.Add(sample);
-            state.result.sampleCount = state.result.samples.Count;
-            state.result.elapsedSec = elapsed;
+            state.lastSampledFrame = sampleFrame;
+            if (state.result.sampleCount >= state.buffer.Length)
+            {
+                state.result.droppedSamples++;
+                return;
+            }
+            var allocation = state.result.allocationMeasurementAvailable
+                ? UPilotAllocationMeasurement.Begin() : default;
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var sample = state.buffer[state.result.sampleCount];
+            try
+            {
+                sample.frame = sampleFrame;
+                sample.elapsedSec = elapsed;
+                sample.mainThreadMs = ReadTimeMs(state, "mainThreadMs");
+                sample.renderThreadMs = ReadTimeMs(state, "renderThreadMs");
+                sample.gpuFrameMs = ReadTimeMs(state, "gpuFrameMs");
+                sample.gcAllocatedBytes = ReadValue(state, "gcAllocatedBytes");
+                sample.gcCollectionCount = ReadValue(state, "gcCollectionCount");
+                sample.managedHeapUsedBytes = ReadValue(state, "managedHeapUsedBytes");
+                sample.managedHeapReservedBytes = ReadValue(state, "managedHeapReservedBytes");
+                sample.drawCalls = ReadValue(state, "drawCalls");
+                sample.setPassCalls = ReadValue(state, "setPassCalls");
+                sample.batches = ReadValue(state, "batches");
+                sample.triangles = ReadValue(state, "triangles");
+                sample.vertices = ReadValue(state, "vertices");
+                bool legacy = state.result.captureMode == "legacy";
+                sample.navMeshAgents = legacy ? Resources.FindObjectsOfTypeAll<NavMeshAgent>().Length : -1;
+                sample.animators = legacy ? Resources.FindObjectsOfTypeAll<Animator>().Length : -1;
+                sample.skinnedMeshRenderers = legacy ? Resources.FindObjectsOfTypeAll<SkinnedMeshRenderer>().Length : -1;
+                sample.particleSystems = legacy ? Resources.FindObjectsOfTypeAll<ParticleSystem>().Length : -1;
+                for (int index = 0; index < state.markerKeys.Length; index++)
+                {
+                    var marker = sample.markers[index];
+                    var recorder = state.recorders[state.markerKeys[index]];
+                    double raw = recorder.Valid ? recorder.LastValueAsDouble : 0d;
+                    marker.value = IsTimeUnit(marker.unit) ? raw / 1000000.0 : raw;
+                }
+                if (state.telemetryMethod != null)
+                {
+                    try
+                    {
+                        object telemetry = state.telemetryMethod.Invoke(null, null);
+                        sample.telemetryJson = telemetry is string text ? text : JsonUtility.ToJson(telemetry);
+                    }
+                    catch (Exception ex)
+                    {
+                        state.result.telemetryErrorCount++;
+                        state.result.lastTelemetryError = ex.InnerException?.Message ?? ex.Message;
+                    }
+                }
+                state.result.samples.Add(sample);
+                state.result.sampleCount = state.result.samples.Count;
+                state.result.elapsedSec = elapsed;
+            }
+            finally
+            {
+                sample.collectorAllocatedBytes = state.result.allocationMeasurementAvailable
+                    ? UPilotAllocationMeasurement.End(allocation) : -1;
+                sample.collectorMs = ElapsedMilliseconds(started);
+            }
+            state.result.actualSamplesPerSec = elapsed > 0 ? state.result.sampleCount / elapsed : 0;
         }
 
         private static ProfilerCaptureResultPayload GetProfilerStatus(string captureId)
@@ -635,7 +781,7 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrWhiteSpace(captureId) && !string.Equals(captureId, _profiler.result.captureId, StringComparison.Ordinal))
                 throw new InvalidOperationException("Profiler capture not found: " + captureId);
             if (_profiler.result.status == "Running")
-                _profiler.result.elapsedSec = EditorApplication.timeSinceStartup - _profiler.startedEditorTime;
+                _profiler.result.elapsedSec = ElapsedSeconds(_profiler.startedTimestamp);
             return CloneProfilerResult(_profiler.result, false);
         }
 
@@ -646,42 +792,62 @@ namespace CodingRiver.UPilot
                 throw new InvalidOperationException("Profiler capture not found: " + captureId);
             EditorApplication.update -= SampleProfiler;
             var state = _profiler;
+            state.editModeSampleTimer?.Dispose();
+            state.editModeSampleTimer = null;
+            if (state.result.status != "Running") return CloneProfilerResult(state.result, state.result.captureMode == "legacy");
             state.result.status = terminalStatus;
             state.result.endedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            state.result.elapsedSec = EditorApplication.timeSinceStartup - state.startedEditorTime;
+            state.result.elapsedSec = ElapsedSeconds(state.startedTimestamp);
             state.result.elapsedFrozen = true;
             foreach (var recorder in state.recorders.Values) recorder.Dispose();
             state.recorders.Clear();
-            state.result.summaries = BuildProfilerSummaries(state.result.samples);
+            state.result.windowTelemetry = UPilotWindowTelemetry.EndCapture(out state.result.droppedWindowTelemetry);
+            state.result.summaries = BuildProfilerSummaries(state.result.samples, state.result.selectedCounters);
+            AddSummary(state.result.summaries, "collectorMs", "ms", state.result.samples.Select(sample => sample.collectorMs));
+            if (state.result.allocationMeasurementAvailable)
+                AddSummary(state.result.summaries, "collectorAllocatedBytes", "bytes", state.result.samples.Select(sample => (double)sample.collectorAllocatedBytes));
+            var collectorCpu = state.result.summaries.FirstOrDefault(item => item.name == "collectorMs");
+            var collectorAllocation = state.result.summaries.FirstOrDefault(item => item.name == "collectorAllocatedBytes");
+            state.result.observerEffectDetected = (collectorCpu?.p95 ?? 0) >= 1 ||
+                (state.result.allocationMeasurementAvailable && (collectorAllocation?.p95 ?? 0) >= 10240);
+            state.result.observerEffectVerification = state.result.observerEffectDetected ? "budgetExceeded" : "unverified";
             state.result.topMarkers = BuildMarkerSummaries(state.result.samples).Take(20).ToList();
-            state.result.peakFrames = BuildPeakFrames(state.result.samples);
+            state.result.peakFrames = BuildPeakFrames(state.result.samples, state.result.selectedCounters);
             state.result.comparison = BuildProfilerComparison(state.result);
             WriteProfilerArtifacts(state.result);
-            return CloneProfilerResult(state.result, true);
+            return CloneProfilerResult(state.result, state.result.captureMode == "legacy");
         }
+
+        private static double ElapsedMilliseconds(long started) =>
+            (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000d / System.Diagnostics.Stopwatch.Frequency;
+
+        private static double ElapsedSeconds(long started, long ended = 0) =>
+            ((ended == 0 ? System.Diagnostics.Stopwatch.GetTimestamp() : ended) - started) /
+            (double)System.Diagnostics.Stopwatch.Frequency;
 
         private static long ReadValue(ProfilerCaptureState state, string key) => state.recorders.TryGetValue(key, out var recorder) && recorder.Valid ? recorder.LastValue : 0;
         private static double ReadTimeMs(ProfilerCaptureState state, string key) => ReadValue(state, key) / 1000000.0;
 
-        private static List<ProfilerMetricSummaryPayload> BuildProfilerSummaries(List<ProfilerCaptureSamplePayload> samples)
+        private static List<ProfilerMetricSummaryPayload> BuildProfilerSummaries(
+            List<ProfilerCaptureSamplePayload> samples, List<string> selectedCounters)
         {
             var result = new List<ProfilerMetricSummaryPayload>();
-            AddSummary(result, "mainThreadMs", "ms", samples.Select(v => v.mainThreadMs));
-            AddSummary(result, "renderThreadMs", "ms", samples.Select(v => v.renderThreadMs));
-            AddSummary(result, "gpuFrameMs", "ms", samples.Select(v => v.gpuFrameMs));
-            AddSummary(result, "gcAllocatedBytes", "bytes", samples.Select(v => (double)v.gcAllocatedBytes));
-            AddSummary(result, "gcCollectionCount", "count", samples.Select(v => (double)v.gcCollectionCount));
-            AddSummary(result, "managedHeapUsedBytes", "bytes", samples.Select(v => (double)v.managedHeapUsedBytes));
-            AddSummary(result, "managedHeapReservedBytes", "bytes", samples.Select(v => (double)v.managedHeapReservedBytes));
-            AddSummary(result, "drawCalls", "count", samples.Select(v => (double)v.drawCalls));
-            AddSummary(result, "setPassCalls", "count", samples.Select(v => (double)v.setPassCalls));
-            AddSummary(result, "batches", "count", samples.Select(v => (double)v.batches));
-            AddSummary(result, "triangles", "count", samples.Select(v => (double)v.triangles));
-            AddSummary(result, "vertices", "count", samples.Select(v => (double)v.vertices));
-            AddSummary(result, "navMeshAgents", "count", samples.Select(v => (double)v.navMeshAgents));
-            AddSummary(result, "animators", "count", samples.Select(v => (double)v.animators));
-            AddSummary(result, "skinnedMeshRenderers", "count", samples.Select(v => (double)v.skinnedMeshRenderers));
-            AddSummary(result, "particleSystems", "count", samples.Select(v => (double)v.particleSystems));
+            if (selectedCounters.Contains("mainThreadMs")) AddSummary(result, "mainThreadMs", "ms", samples.Select(v => v.mainThreadMs));
+            if (selectedCounters.Contains("renderThreadMs")) AddSummary(result, "renderThreadMs", "ms", samples.Select(v => v.renderThreadMs));
+            if (selectedCounters.Contains("gpuFrameMs")) AddSummary(result, "gpuFrameMs", "ms", samples.Select(v => v.gpuFrameMs));
+            if (selectedCounters.Contains("gcAllocatedBytes")) AddSummary(result, "gcAllocatedBytes", "bytes", samples.Select(v => (double)v.gcAllocatedBytes));
+            if (selectedCounters.Contains("gcCollectionCount")) AddSummary(result, "gcCollectionCount", "count", samples.Select(v => (double)v.gcCollectionCount));
+            if (selectedCounters.Contains("managedHeapUsedBytes")) AddSummary(result, "managedHeapUsedBytes", "bytes", samples.Select(v => (double)v.managedHeapUsedBytes));
+            if (selectedCounters.Contains("managedHeapReservedBytes")) AddSummary(result, "managedHeapReservedBytes", "bytes", samples.Select(v => (double)v.managedHeapReservedBytes));
+            if (selectedCounters.Contains("drawCalls")) AddSummary(result, "drawCalls", "count", samples.Select(v => (double)v.drawCalls));
+            if (selectedCounters.Contains("setPassCalls")) AddSummary(result, "setPassCalls", "count", samples.Select(v => (double)v.setPassCalls));
+            if (selectedCounters.Contains("batches")) AddSummary(result, "batches", "count", samples.Select(v => (double)v.batches));
+            if (selectedCounters.Contains("triangles")) AddSummary(result, "triangles", "count", samples.Select(v => (double)v.triangles));
+            if (selectedCounters.Contains("vertices")) AddSummary(result, "vertices", "count", samples.Select(v => (double)v.vertices));
+            AddSummary(result, "navMeshAgents", "count", samples.Where(v => v.navMeshAgents >= 0).Select(v => (double)v.navMeshAgents));
+            AddSummary(result, "animators", "count", samples.Where(v => v.animators >= 0).Select(v => (double)v.animators));
+            AddSummary(result, "skinnedMeshRenderers", "count", samples.Where(v => v.skinnedMeshRenderers >= 0).Select(v => (double)v.skinnedMeshRenderers));
+            AddSummary(result, "particleSystems", "count", samples.Where(v => v.particleSystems >= 0).Select(v => (double)v.particleSystems));
             return result;
         }
 
@@ -708,14 +874,15 @@ namespace CodingRiver.UPilot
                 .OrderByDescending(item => item.p95);
         }
 
-        private static List<ProfilerPeakFramePayload> BuildPeakFrames(List<ProfilerCaptureSamplePayload> samples)
+        private static List<ProfilerPeakFramePayload> BuildPeakFrames(
+            List<ProfilerCaptureSamplePayload> samples, List<string> selectedCounters)
         {
             var result = new List<ProfilerPeakFramePayload>();
-            AddPeak(result, samples, "mainThreadMs", sample => sample.mainThreadMs);
-            AddPeak(result, samples, "renderThreadMs", sample => sample.renderThreadMs);
-            AddPeak(result, samples, "gpuFrameMs", sample => sample.gpuFrameMs);
-            AddPeak(result, samples, "gcAllocatedBytes", sample => sample.gcAllocatedBytes);
-            AddPeak(result, samples, "drawCalls", sample => sample.drawCalls);
+            if (selectedCounters.Contains("mainThreadMs")) AddPeak(result, samples, "mainThreadMs", sample => sample.mainThreadMs);
+            if (selectedCounters.Contains("renderThreadMs")) AddPeak(result, samples, "renderThreadMs", sample => sample.renderThreadMs);
+            if (selectedCounters.Contains("gpuFrameMs")) AddPeak(result, samples, "gpuFrameMs", sample => sample.gpuFrameMs);
+            if (selectedCounters.Contains("gcAllocatedBytes")) AddPeak(result, samples, "gcAllocatedBytes", sample => sample.gcAllocatedBytes);
+            if (selectedCounters.Contains("drawCalls")) AddPeak(result, samples, "drawCalls", sample => sample.drawCalls);
             return result;
         }
 
@@ -729,6 +896,11 @@ namespace CodingRiver.UPilot
         private static ProfilerComparisonPayload BuildProfilerComparison(ProfilerCaptureResultPayload current)
         {
             if (string.IsNullOrWhiteSpace(current.baselineJsonPath)) return null;
+            if (!current.comparableBaseline || current.observerEffectDetected)
+            {
+                current.limitations.Add("Baseline comparison withheld: observer effect and matching control conditions have not been verified.");
+                return null;
+            }
             string path = current.baselineJsonPath;
             if (!Path.IsPathRooted(path)) path = Path.Combine(Path.GetFullPath(Directory.GetCurrentDirectory()), path);
             path = Path.GetFullPath(path);
@@ -787,6 +959,9 @@ namespace CodingRiver.UPilot
         private static void WriteProfilerArtifacts(ProfilerCaptureResultPayload result)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(result.jsonPath) ?? "Log/UPilotProfiler");
+            long serializeStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            JsonUtility.ToJson(result, true);
+            result.serializationMs = ElapsedMilliseconds(serializeStart);
             File.WriteAllText(result.jsonPath, JsonUtility.ToJson(result, true));
             if (result.comparison != null)
                 File.WriteAllText(result.comparisonPath, JsonUtility.ToJson(result.comparison, true));
@@ -814,7 +989,7 @@ namespace CodingRiver.UPilot
 
         private static ProfilerCaptureResultPayload CloneProfilerResult(ProfilerCaptureResultPayload value, bool includeSamples)
         {
-            var json = JsonUtility.ToJson(value);
+            var json = JsonUtility.ToJson(includeSamples ? value : value.WithoutSamples());
             var clone = JsonUtility.FromJson<ProfilerCaptureResultPayload>(json);
             if (!includeSamples) clone.samples = new List<ProfilerCaptureSamplePayload>();
             return clone;

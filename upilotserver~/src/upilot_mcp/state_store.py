@@ -128,14 +128,34 @@ class StateStore:
             db.execute("CREATE TABLE IF NOT EXISTS write_batches (write_batch_id TEXT PRIMARY KEY, project_path TEXT NOT NULL, operation_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, status TEXT NOT NULL, compile_when_edit_mode INTEGER NOT NULL, paths_json TEXT NOT NULL, files_sha256 TEXT NOT NULL, compile_operation_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '')")
             if "changes_json" not in {row[1] for row in db.execute("PRAGMA table_info(write_batches)")}:
                 db.execute("ALTER TABLE write_batches ADD COLUMN changes_json TEXT")
+            if "terminal_snapshot_json" not in {row[1] for row in db.execute("PRAGMA table_info(write_batches)")}:
+                db.execute("ALTER TABLE write_batches ADD COLUMN terminal_snapshot_json TEXT")
+            if "compile_request_id" not in {row[1] for row in db.execute("PRAGMA table_info(write_batches)")}:
+                db.execute("ALTER TABLE write_batches ADD COLUMN compile_request_id TEXT NOT NULL DEFAULT ''")
+            # Warning details are a property of one correlated compilation, not
+            # of the project-wide current diagnostic cache.  Keep the columns
+            # nullable/defaulted so existing databases retain the deliberate
+            # "details unavailable" meaning rather than acquiring an empty list.
+            write_batch_columns = {row[1] for row in db.execute("PRAGMA table_info(write_batches)")}
+            if "warning_details_json" not in write_batch_columns:
+                db.execute("ALTER TABLE write_batches ADD COLUMN warning_details_json TEXT")
+            if "warning_details_available" not in write_batch_columns:
+                db.execute("ALTER TABLE write_batches ADD COLUMN warning_details_available INTEGER NOT NULL DEFAULT 0")
+            if "warnings_truncated" not in write_batch_columns:
+                db.execute("ALTER TABLE write_batches ADD COLUMN warnings_truncated INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE TABLE IF NOT EXISTS test_jobs (project_path TEXT NOT NULL, task_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, task_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS operation_jobs (project_path TEXT NOT NULL, operation_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, operation_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS capture_attachments (project_path TEXT NOT NULL, attachment_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, attachment_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS capture_start_intents (project_path TEXT NOT NULL, request_key TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, request_key))")
             db.execute(
-                "UPDATE write_batches SET status='deferred',updated_at=? WHERE project_path=? AND status IN ('syncing','compiling')",
+                "UPDATE write_batches SET status='recovery_required',updated_at=?,"
+                "error=CASE WHEN error='' THEN 'Server restarted while compile execution was in flight.' ELSE error END "
+                "WHERE project_path=? AND status IN ('syncing','compiling')",
                 (_now_ms(), resolved),
             )
             row = db.execute("SELECT snapshot_json FROM project_state WHERE project_path = ?", (resolved,)).fetchone()
             pending = db.execute(
-                "SELECT write_batch_id FROM write_batches WHERE project_path=? AND status IN ('pending','deferred') ORDER BY updated_at DESC LIMIT 1",
+                "SELECT write_batch_id FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') ORDER BY updated_at DESC LIMIT 1",
                 (resolved,),
             ).fetchone()
         if row:
@@ -149,6 +169,10 @@ class StateStore:
                 self.persist_failure_count += 1
         if pending:
             self.pending_write_batch_id = str(pending[0])
+
+    @property
+    def project_path(self) -> str:
+        return self._project_path
 
     def register_write_batch(
         self,
@@ -243,12 +267,125 @@ class StateStore:
             rows = db.execute("SELECT state_json FROM test_jobs WHERE project_path=?", (self._project_path,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def save_operation(self, state: dict) -> None:
+        if self._db_path is None or state.get("projectPath") != self._project_path:
+            raise RuntimeError("Operation persistence is not configured for this project.")
+        persisted = {key: value for key, value in state.items() if not key.startswith("_")}
+        with sqlite3.connect(self._db_path) as db:
+            db.execute(
+                "INSERT INTO operation_jobs(project_path,operation_id,state_json) VALUES(?,?,?) "
+                "ON CONFLICT(project_path,operation_id) DO UPDATE SET state_json=excluded.state_json",
+                (self._project_path, state["operationId"], json.dumps(persisted, ensure_ascii=False)),
+            )
+
+    def load_operations(self) -> list[dict]:
+        if self._db_path is None:
+            return []
+        with sqlite3.connect(self._db_path) as db:
+            rows = db.execute("SELECT state_json FROM operation_jobs WHERE project_path=?", (self._project_path,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_capture_attachment(self, state: dict) -> None:
+        if self._db_path is None or state.get("projectPath") != self._project_path:
+            raise RuntimeError("Capture attachment persistence is not configured for this project.")
+        with sqlite3.connect(self._db_path) as db:
+            db.execute(
+                "INSERT INTO capture_attachments(project_path,attachment_id,state_json) VALUES(?,?,?) "
+                "ON CONFLICT(project_path,attachment_id) DO UPDATE SET state_json=excluded.state_json",
+                (self._project_path, state["attachmentId"], json.dumps(state, ensure_ascii=False)),
+            )
+
+    def create_capture_attachment(self, state: dict) -> tuple[str, dict | None]:
+        """Atomically create one active attachment or recover its idempotent request."""
+        if self._db_path is None or state.get("projectPath") != self._project_path:
+            raise RuntimeError("Capture attachment persistence is not configured for this project.")
+        request_key = str(state.get("requestKey") or "")
+        if not request_key:
+            raise RuntimeError("Capture attachment requestKey is required.")
+        with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT state_json FROM capture_attachments WHERE project_path=?",
+                (self._project_path,),
+            ).fetchall()
+            parsed: list[dict] = []
+            for row in rows:
+                try:
+                    item = json.loads(row[0])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(item, dict):
+                    parsed.append(item)
+            matches = [item for item in parsed if item.get("requestKey") == request_key]
+            if matches:
+                existing = matches[0]
+                if str(existing.get("sessionId") or "") == str(state.get("sessionId") or ""):
+                    return "existing", existing
+                return "conflict", existing
+            # Attachments are bounded per source capture.  An attachment to a
+            # different session must not consume this source's read-only slot.
+            if sum(
+                1 for item in parsed
+                if str(item.get("sessionId") or "") == str(state.get("sessionId") or "")
+                and not bool(item.get("detached"))
+            ) >= 64:
+                return "limit", None
+            db.execute(
+                "INSERT INTO capture_attachments(project_path,attachment_id,state_json) VALUES(?,?,?)",
+                (self._project_path, state["attachmentId"], json.dumps(state, ensure_ascii=False)),
+            )
+        return "created", state
+
+    def load_capture_attachments(self) -> list[dict]:
+        if self._db_path is None:
+            return []
+        with sqlite3.connect(self._db_path) as db:
+            rows = db.execute("SELECT state_json FROM capture_attachments WHERE project_path=?", (self._project_path,)).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            try:
+                state = json.loads(row[0])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(state, dict):
+                result.append(state)
+        return result
+
+    def save_capture_start_intent(self, state: dict) -> None:
+        if self._db_path is None or state.get("projectPath") != self._project_path:
+            raise RuntimeError("Capture start persistence is not configured for this project.")
+        request_key = str(state.get("requestKey") or "")
+        if not request_key:
+            raise RuntimeError("Capture start requestKey is required.")
+        with sqlite3.connect(self._db_path) as db:
+            db.execute(
+                "INSERT INTO capture_start_intents(project_path,request_key,state_json) VALUES(?,?,?) "
+                "ON CONFLICT(project_path,request_key) DO UPDATE SET state_json=excluded.state_json",
+                (self._project_path, request_key, json.dumps(state, ensure_ascii=False)),
+            )
+
+    def load_capture_start_intent(self, request_key: str) -> dict | None:
+        if self._db_path is None or not request_key:
+            return None
+        with sqlite3.connect(self._db_path) as db:
+            row = db.execute(
+                "SELECT state_json FROM capture_start_intents WHERE project_path=? AND request_key=?",
+                (self._project_path, request_key),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            state = json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return state if isinstance(state, dict) else None
+
     def pending_write_batches(self) -> list[dict[str, Any]]:
         if self._db_path is None or not self._project_path:
             return []
         with sqlite3.connect(self._db_path) as db:
             rows = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json FROM write_batches WHERE project_path=? AND status IN ('pending','deferred') ORDER BY created_at",
+                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') ORDER BY created_at",
                 (self._project_path,),
             ).fetchall()
         return [
@@ -267,8 +404,8 @@ class StateStore:
             return
         with sqlite3.connect(self._db_path) as db:
             db.execute(
-                "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE write_batch_id=?",
-                (status, _now_ms(), compile_operation_id, compile_operation_id, error, write_batch_id),
+                "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL",
+                (status, _now_ms(), compile_operation_id, compile_operation_id, error, self._project_path, write_batch_id),
             )
         if status in ("verified", "failed", "canceled") and self.pending_write_batch_id == write_batch_id:
             self.pending_write_batch_id = ""
@@ -279,18 +416,159 @@ class StateStore:
             return None
         with sqlite3.connect(self._db_path) as db:
             row = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json FROM write_batches WHERE project_path=? AND write_batch_id=?",
+                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated FROM write_batches WHERE project_path=? AND write_batch_id=?",
                 (self._project_path, write_batch_id),
             ).fetchone()
         if row is None:
             return None
-        return {
+        evidence = json.loads(row[11]) if row[11] else None
+        correlation = bool(
+            evidence and evidence.get("errorsVerified") is True and evidence.get("terminal") is True
+            and evidence.get("writeBatchId") == row[0]
+            and evidence.get("compileOperationId") == row[8] and row[8]
+            and (not row[12] or evidence.get("compileRequestId") == row[12])
+            and evidence.get("writeBatchCreatedAt") == row[2]
+            and int(evidence.get("lastCompileVerifiedAt") or 0) >= row[2] > 0
+        )
+        details_available = bool(row[14])
+        warnings: list[dict[str, Any]] | None = None
+        if details_available and row[13]:
+            try:
+                candidate = json.loads(row[13])
+                if isinstance(candidate, list):
+                    warnings = candidate[:1000]
+                else:
+                    details_available = False
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details_available = False
+        elif details_available:
+            # A corrupt/incomplete row is unknown, never an asserted empty list.
+            details_available = False
+        result = {
             "writeBatchId": row[0], "operationId": row[1], "writeBatchCreatedAt": row[2],
             "updatedAt": row[3], "status": row[4], "compileWhenEditMode": bool(row[5]),
             "paths": json.loads(row[6]), "filesSha256": row[7],
             "compileOperationId": row[8], "error": row[9],
             **self._write_batch_change_fields(row[10]),
+            "terminalSnapshot": evidence,
+            "terminal": (correlation or row[4] in {"failed", "canceled"}),
+            "errorsVerified": bool(evidence and evidence.get("errorsVerified")),
+            "correlationVerified": correlation,
+            "compileRequestId": row[12] or (evidence or {}).get("compileRequestId", ""),
+            "lastCompileVerifiedAt": (evidence or {}).get("lastCompileVerifiedAt", 0),
+            "outcome": (("passed" if evidence.get("compilePhase") == "completed" else "failed")
+                        if correlation else "unknown"),
+            "supersededBy": "",
         }
+        result["warningDetailsAvailable"] = details_available
+        result["warningsTruncated"] = bool(row[15]) if details_available else False
+        if details_available and warnings is not None:
+            result["warnings"] = warnings
+        return result
+
+    def persist_write_batch_warnings(
+        self,
+        *,
+        write_batch_id: str,
+        compile_operation_id: str,
+        compile_request_id: str,
+        details_available: bool,
+        warnings_truncated: bool,
+        warnings: list[dict[str, Any]] | None,
+    ) -> bool:
+        """Persist bounded warning details for one exact write-batch identity.
+
+        A failed write deliberately leaves the prior row untouched.  In
+        particular, diagnostics from an automatic/unattributed compilation must
+        not acquire a batch merely because a registration happened later.
+        """
+        if (
+            self._db_path is None
+            or not self._project_path
+            or not write_batch_id
+            or not compile_operation_id
+            or not compile_request_id
+        ):
+            return False
+        if details_available:
+            if not isinstance(warnings, list):
+                return False
+            persisted_warnings = warnings[:1000]
+            raw_warnings = json.dumps(persisted_warnings, ensure_ascii=False, separators=(",", ":"))
+            persisted_available = 1
+            persisted_truncated = int(bool(warnings_truncated or len(warnings) > 1000))
+        else:
+            raw_warnings = None
+            persisted_available = 0
+            persisted_truncated = 0
+        try:
+            with sqlite3.connect(self._db_path) as db:
+                cursor = db.execute(
+                    "UPDATE write_batches SET warning_details_json=?,warning_details_available=?,warnings_truncated=?,updated_at=? "
+                    "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? AND compile_request_id=?",
+                    (
+                        raw_warnings, persisted_available, persisted_truncated, _now_ms(),
+                        self._project_path, write_batch_id, compile_operation_id, compile_request_id,
+                    ),
+                )
+            return cursor.rowcount == 1
+        except sqlite3.Error:
+            self.persist_failure_count += 1
+            return False
+
+    def _persist_batch_evidence(self, payload: dict[str, Any]) -> None:
+        batch_id = str(payload.get("writeBatchId") or "")
+        batch = self.get_write_batch(batch_id)
+        if not batch or batch.get("terminalSnapshot") is not None:
+            return
+        operation_id = str(payload.get("compileOperationId") or "")
+        if not (
+            payload.get("terminal") is True and payload.get("errorsVerified") is True
+            and payload.get("authoritative", True) is True
+            # Unity's auto compiler has no input-manifest proof for a batch
+            # registered after it began.  Its timestamp/identity must never be
+            # promoted into terminal write-batch evidence.
+            and payload.get("compileOrigin") == "mcp"
+            and operation_id
+            and batch["compileOperationId"] == operation_id
+            and (not batch["compileRequestId"] or payload.get("compileRequestId") == batch["compileRequestId"])
+            and payload.get("writeBatchCreatedAt") == batch["writeBatchCreatedAt"]
+            and int(payload.get("lastCompileVerifiedAt") or 0) >= batch["writeBatchCreatedAt"] > 0
+            and payload.get("compilePhase") in {"completed", "failed"}
+        ):
+            return
+        with sqlite3.connect(self._db_path) as db:
+            db.execute(
+                "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=? "
+                "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL",
+                ("verified" if payload["compilePhase"] == "completed" else "failed",
+                 _now_ms(), json.dumps(payload, ensure_ascii=False), self._project_path, batch_id),
+            )
+
+    def _apply_compile_identity(self, payload: dict[str, Any]) -> None:
+        fields = {
+            "compileRequestId": "compile_request_id", "compileOperationId": "compile_operation_id",
+            "originatingCommandRequestId": "originating_command_request_id",
+            "writeBatchId": "write_batch_id", "writeBatchCreatedAt": "write_batch_created_at",
+            "compileOrigin": "compile_origin", "reloadId": "reload_id",
+            "lastCompileRequestedAt": "last_compile_requested_at",
+            "lastCompileStartedAt": "last_compile_started_at",
+            "lastCompilerFinishedAt": "last_compiler_finished_at",
+            "lastCompileVerifiedAt": "last_compile_verified_at",
+            "lastTerminalCompileAt": "last_terminal_compile_at",
+        }
+        current = self.compile
+        if "compileOperationId" in payload and str(payload["compileOperationId"] or "") != current.compile_operation_id:
+            empty = CompileSnapshot()
+            for attribute in (*fields.values(), "terminal", "verification_pending", "errors_verified",
+                              "domain_reload_observed", "errors", "error_count", "warning_count",
+                              "started_at", "finished_at"):
+                setattr(current, attribute, getattr(empty, attribute))
+            self.correlation_verified = False
+        for key, attribute in fields.items():
+            if key in payload:
+                value = payload[key]
+                setattr(current, attribute, int(value or 0) if attribute.endswith("_at") else str(value or ""))
 
     def _update_write_batch_terminal(self, write_batch_id: str, status: str, compile_operation_id: str) -> None:
         current = self.get_write_batch(write_batch_id)
@@ -359,7 +637,15 @@ class StateStore:
         self.transition = str(payload.get("transition") or "snapshot")
         self.observed_at = int(payload.get("observedAt") or payload.get("updatedAt") or 0)
         self.received_at = _now_ms()
-        self.pending_write_batch_id = str(payload.get("pendingWriteBatchId") or self.pending_write_batch_id)
+        if "pendingWriteBatchId" in payload:
+            incoming_pending = str(payload.get("pendingWriteBatchId") or "")
+            if incoming_pending != self.pending_write_batch_id:
+                owned_batch = self.get_write_batch(self.pending_write_batch_id)
+                # Unity does not own the Server's durable write authorization.
+                if not owned_batch or owned_batch["status"] not in {
+                    "pending", "deferred", "syncing", "compiling", "recovery_required"
+                }:
+                    self.pending_write_batch_id = incoming_pending
         incoming_deferred_reason = str(payload.get("compileDeferredReason") or "")
         if incoming_deferred_reason:
             self.compile_deferred_reason = incoming_deferred_reason
@@ -383,6 +669,7 @@ class StateStore:
         self.editor.last_dequeued_command_id = str(payload.get("lastDequeuedCommandId") or self.editor.last_dequeued_command_id)
         self.editor.process_id = int(payload.get("processId") or self.editor.process_id)
 
+        self._apply_compile_identity(payload)
         compile_state = self.compile
         compile_state.status = str(payload.get("compileStatus") or payload.get("compilePhase") or compile_state.status)
         compile_state.phase = self._normalize_compile_phase(compile_state.status, str(payload.get("compilePhase") or ""))
@@ -413,12 +700,31 @@ class StateStore:
             compile_state.compile_operation_id
             and (not registered_operation_id or registered_operation_id == compile_state.compile_operation_id)
         )
-        if registered_batch and compile_state.compile_operation_id and not registered_operation_id:
+        if (compile_state.compile_origin == "mcp" and registered_batch
+                and compile_state.compile_operation_id and not registered_operation_id):
             self.mark_write_batch(
                 compile_state.write_batch_id,
                 "compiling" if not compile_state.terminal else str(registered_batch["status"]),
                 compile_operation_id=compile_state.compile_operation_id,
             )
+        if (not restored and compile_state.compile_origin == "mcp" and registered_batch and operation_matches
+                and payload.get("authoritative", True) is True
+                and payload.get("writeBatchCreatedAt") == registered_batch["writeBatchCreatedAt"]
+                and payload.get("compileRequestId")):
+            with sqlite3.connect(self._db_path) as db:
+                db.execute(
+                    "UPDATE write_batches SET compile_request_id=?,updated_at=? "
+                    "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? "
+                    "AND compile_request_id='' AND terminal_snapshot_json IS NULL",
+                    (str(payload["compileRequestId"]), _now_ms(), self._project_path,
+                     compile_state.write_batch_id, compile_state.compile_operation_id),
+                )
+            registered_batch = self.get_write_batch(compile_state.write_batch_id)
+        request_matches = not (registered_batch or {}).get("compileRequestId") or (
+            compile_state.compile_request_id == registered_batch["compileRequestId"]
+        )
+        if not restored:
+            self._persist_batch_evidence(payload)
         preserves_verified_terminal = bool(
             not self.pending_write_batch_id
             and (
@@ -429,10 +735,12 @@ class StateStore:
             and compile_state.errors_verified
             and registered_batch is not None
             and operation_matches
+            and request_matches
         )
         self.correlation_verified = bool(
             compile_state.terminal
             and compile_state.errors_verified
+            and compile_state.compile_origin == "mcp"
             and compile_state.write_batch_id
             and (
                 compile_state.write_batch_id == self.pending_write_batch_id
@@ -441,6 +749,7 @@ class StateStore:
             and registered_batch is not None
             and int(registered_batch["writeBatchCreatedAt"]) == compile_state.write_batch_created_at
             and operation_matches
+            and request_matches
             and compile_state.last_compile_verified_at >= compile_state.write_batch_created_at > 0
         )
         if self.correlation_verified:
@@ -594,7 +903,33 @@ class StateStore:
             self.compile.last_duration_ms = int(payload.get("durationMs", self.compile.last_duration_ms))
         self.compile.last_progress_at = _now_ms()
 
-    def update_compile_errors(self, payload: dict[str, Any]) -> None:
+    def matches_authoritative_compile_identity(self, payload: dict[str, Any]) -> bool:
+        """Reject diagnostics that name a different v2 authoritative compile."""
+        if not (self.producer_epoch and self.editor.authoritative):
+            return True
+        incoming = {
+            "compileRequestId": str(payload.get("compileRequestId") or payload.get("requestId") or ""),
+            "compileOperationId": str(payload.get("compileOperationId") or ""),
+            "writeBatchId": str(payload.get("writeBatchId") or ""),
+            "writeBatchCreatedAt": int(payload.get("writeBatchCreatedAt") or 0),
+        }
+        current = {
+            "compileRequestId": self.compile.compile_request_id,
+            "compileOperationId": self.compile.compile_operation_id,
+            "writeBatchId": self.compile.write_batch_id,
+            "writeBatchCreatedAt": self.compile.write_batch_created_at,
+        }
+        return all(
+            not incoming[key] or not current[key] or incoming[key] == current[key]
+            for key in incoming
+        )
+
+    def update_compile_errors(self, payload: dict[str, Any]) -> bool:
+        if not self.matches_authoritative_compile_identity(payload):
+            self.rejected_out_of_order_count += 1
+            return False
+        if not self.producer_epoch:
+            self._apply_compile_identity(payload)
         errors = payload.get("errors") or []
         self.compile.errors = list(errors)
         self.compile.error_count = int(payload.get("total", len(self.compile.errors)))
@@ -602,7 +937,7 @@ class StateStore:
             payload.get("currentCompileWarningCount", payload.get("warningCount", self.compile.warning_count))
         )
         if self.producer_epoch:
-            return
+            return True
         self.compile.compile_operation_id = str(
             payload.get("compileOperationId") or self.compile.compile_operation_id
         )
@@ -643,6 +978,7 @@ class StateStore:
             self.editor.is_compiling = False
             self.compile.finished_at = self.compile.finished_at or _now_ms()
             self.compile.last_progress_at = _now_ms()
+        return True
 
     def update_editor_state(self, payload: dict[str, Any]) -> bool:
         incoming_session_id = str(payload.get("sessionId") or "")
@@ -776,18 +1112,20 @@ class StateStore:
             self.compile.status,
             self.compile.phase,
         )
-        if self.editor.is_compiling and compile_phase not in (
+        compile_identity_pending = bool(self.editor.is_compiling and compile_phase not in (
             "queued",
             "compiling",
             "compiler_finished",
             "domain_reload",
             "verifying",
-        ):
+        ))
+        if compile_identity_pending and not self.producer_epoch:
             compile_phase = "compiling"
         is_compiling = bool(
             self.editor.is_compiling or compile_phase in ("queued", "compiling", "compiler_finished", "domain_reload", "verifying")
         )
 
+        pending_batch = self.get_write_batch(self.pending_write_batch_id) if self.pending_write_batch_id else None
         blocked_reason = ""
         next_action = ""
         status = "ready"
@@ -812,9 +1150,18 @@ class StateStore:
             blocked_reason = "EditorModeUnknown"
             next_action = "Wait for an authoritative EditMode response before mutating the Editor."
         elif self.pending_write_batch_id and not self.correlation_verified:
-            status = "pending_code_sync"
-            blocked_reason = "PendingCodeSync"
-            next_action = "Wait for the registered write batch to synchronize and reach a correlated compile terminal state."
+            if str((pending_batch or {}).get("status") or "") == "recovery_required":
+                status = "recovery_required"
+                blocked_reason = "WriteBatchRecoveryRequired"
+                next_action = "Observe the original compile identity; do not trigger a replacement compile for this batch."
+            else:
+                status = "pending_code_sync"
+                blocked_reason = "PendingCodeSync"
+                next_action = "Wait for the registered write batch to synchronize and reach a correlated compile terminal state."
+        elif compile_identity_pending and self.producer_epoch:
+            status = "unknown"
+            blocked_reason = "CompilationStatePending"
+            next_action = "Unity reports compiler activity without a matching lifecycle snapshot; observe the original batch and wait for its compile identity."
         elif compile_phase == "failed":
             status = "failed"
             blocked_reason = "CompileErrors"
@@ -840,10 +1187,8 @@ class StateStore:
         if suspected_stuck:
             next_action = "Inspect unity_hang_status before retrying or restarting Unity."
         pending_batch_age_ms = 0
-        if self.pending_write_batch_id:
-            pending_batch = self.get_write_batch(self.pending_write_batch_id)
-            if pending_batch:
-                pending_batch_age_ms = max(0, now - int(pending_batch["writeBatchCreatedAt"] or 0))
+        if pending_batch:
+            pending_batch_age_ms = max(0, now - int(pending_batch["writeBatchCreatedAt"] or 0))
 
         return {
             "status": status,
@@ -871,9 +1216,9 @@ class StateStore:
             "writeBatchId": self.compile.write_batch_id,
             "writeBatchCreatedAt": self.compile.write_batch_created_at,
             "compileOrigin": self.compile.compile_origin,
-            "terminal": self.compile.terminal,
-            "verificationPending": self.compile.verification_pending,
-            "errorsVerified": self.compile.errors_verified,
+            "terminal": self.compile.terminal and not compile_identity_pending,
+            "verificationPending": self.compile.verification_pending or compile_identity_pending,
+            "errorsVerified": self.compile.errors_verified and not compile_identity_pending,
             "lastCompileRequestedAt": self.compile.last_compile_requested_at,
             "lastCompileStartedAt": self.compile.last_compile_started_at,
             "lastCompilerFinishedAt": self.compile.last_compiler_finished_at,
@@ -892,7 +1237,7 @@ class StateStore:
             "transition": self.transition,
             "observedAt": self.observed_at,
             "receivedAt": self.received_at,
-            "correlationVerified": self.correlation_verified,
+            "correlationVerified": self.correlation_verified and not compile_identity_pending,
             "acceptedSnapshotCount": self.accepted_snapshot_count,
             "rejectedOutOfOrderCount": self.rejected_out_of_order_count,
             "persistFailureCount": self.persist_failure_count,

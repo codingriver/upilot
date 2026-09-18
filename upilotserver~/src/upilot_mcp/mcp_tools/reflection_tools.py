@@ -75,15 +75,15 @@ async def unity_reflection_call(
     expression: Annotated[str, Field(description="expression 模式的一条受限表达式；不能同时传 typeName/methodName。")]= "",
     variables: Annotated[dict | None, Field(description="expression 模式的 JSON 或 TypedValue 变量映射。")]= None,
     options: Annotated[dict | None, Field(description="旧版 expression 选项；新调用通常留空。")]= None,
-    kind: Annotated[str, Field(description="auto、method 或 expression；auto 在执行前按互斥请求形态选择唯一引擎。")]= "auto",
+    kind: Annotated[str, Field(description="auto、method 或 expression；auto 在执行前按互斥请求形态选择唯一引擎。", json_schema_extra={"enum": ["auto", "method", "expression"]})]= "auto",
     arguments: Annotated[list | None, Field(description="typed/named 参数列表；每项可含 name、direction=in|ref|out 和 value；与 parameters 互斥。")]= None,
     parameterTypeNames: Annotated[list[str] | None, Field(description="用于精确选择重载的参数类型名列表。")]= None,
     genericTypeArguments: Annotated[list[str] | None, Field(description="显式闭合泛型方法的类型参数名列表。")]= None,
     targetHandle: Annotated[str, Field(description="persistent session 中的实例 handle；强制 instance 调用且不能与旧路径目标混用。")]= "",
     sessionId: Annotated[str, Field(description="targetHandle 或 handle 结果使用的 persistent session ID。")]= "",
-    awaitMode: Annotated[str, Field(description="awaitable 处理：auto、always 或 never。")]= "auto",
+    awaitMode: Annotated[str, Field(description="awaitable 处理：auto、always 或 never。", json_schema_extra={"enum": ["auto", "always", "never"]})]= "auto",
     awaitTimeoutMs: Annotated[int, Field(description="等待 Task/ValueTask 的有界超时毫秒数。")]= 3000,
-    resultMode: Annotated[str, Field(description="结果编码：auto、inline、handle 或 legacyString；handle 结果需要 session。")]= "auto",
+    resultMode: Annotated[str, Field(description="结果编码：auto、inline、handle 或 legacyString；handle 结果需要 session。", json_schema_extra={"enum": ["auto", "inline", "handle", "legacyString"]})]= "auto",
 ):
     _log_tool_call(
         "unity_reflection_call",

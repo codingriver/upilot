@@ -4,6 +4,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -31,6 +32,8 @@ namespace CodingRiver.UPilot.Tests
         public int count;
         public SerializedWriteProbeMode mode;
         public SerializedWriteNestedValue nested = new();
+        public Vector3 vectorValue;
+        public Vector3 multiplier = Vector3.one;
     }
 
     internal sealed class SerializedWriteAssetProbe : ScriptableObject
@@ -208,6 +211,76 @@ namespace CodingRiver.UPilot.Tests
             {
                 UnityEngine.Object.DestroyImmediate(probe);
             }
+        }
+
+        [Test]
+        public void Vector3ValuesAreFiniteInvariantJsonAcrossComponentModifyAndQuery()
+        {
+            var previousCulture = CultureInfo.CurrentCulture;
+            var gameObject = new GameObject("UPilotVector3JsonProbe");
+            try
+            {
+                CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("fr-FR");
+                var probe = gameObject.AddComponent<SerializedWriteComponentProbe>();
+
+                var initial = UPilotComponentService.BuildComponentInfo(probe, 0);
+                AssertVector3Json(initial.properties.Find(item => item.propertyPath == "vectorValue"), Vector3.zero);
+                AssertVector3Json(initial.properties.Find(item => item.propertyPath == "multiplier"), Vector3.one);
+
+                var expected = new Vector3(-1.25f, 0.5f, 2.75f);
+                var modified = UPilotSerializedPropertyUtility.Apply(
+                    new SerializedObject(probe),
+                    probe,
+                    new List<SerializedPropertyWrite>
+                    {
+                        new() { propertyPath = "vectorValue", value = "{\"x\":-1.25,\"y\":0.5,\"z\":2.75}" },
+                    },
+                    "Test Vector3 JSON");
+                Assert.That(modified.changes, Has.Count.EqualTo(1));
+                AssertVector3Json(modified.changes[0].propertyPath, modified.changes[0].newValue, expected);
+
+                var queried = UPilotAssetService.ReadSerializedProperties(
+                    new SerializedObject(probe), 2, 500, "");
+                var queriedVector = queried.properties.Find(item => item.propertyPath == "vectorValue");
+                Assert.That(queriedVector, Is.Not.Null);
+                AssertVector3Json(queriedVector.propertyPath, queriedVector.value, expected);
+
+                var invalid = Assert.Throws<InvalidOperationException>(() =>
+                    UPilotSerializedPropertyUtility.Apply(
+                        new SerializedObject(probe),
+                        probe,
+                        new List<SerializedPropertyWrite>
+                        {
+                            new() { propertyPath = "vectorValue", value = "{\"x\":NaN,\"y\":0,\"z\":1}" },
+                        },
+                        "Reject Non-finite Vector3"));
+                Assert.That(invalid.Message, Does.Contain("vectorValue.x").And.Contain("finite JSON number"));
+                Assert.That(probe.vectorValue, Is.EqualTo(expected));
+            }
+            finally
+            {
+                CultureInfo.CurrentCulture = previousCulture;
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        private static void AssertVector3Json(ComponentPropertyPayload property, Vector3 expected)
+        {
+            Assert.That(property, Is.Not.Null);
+            Assert.That(property.name, Is.Not.Empty);
+            AssertVector3Json(property.propertyPath, property.value, expected);
+        }
+
+        private static void AssertVector3Json(string propertyPath, string json, Vector3 expected)
+        {
+            Assert.That(propertyPath, Is.Not.Empty);
+            Assert.That(json, Does.StartWith("{").And.EndWith("}"));
+            Assert.That(json, Does.Not.Contain(":G"));
+            var fields = UPilotComponentService.ParseSimpleJson(json);
+            Assert.That(fields.Keys, Is.EquivalentTo(new[] { "x", "y", "z" }));
+            Assert.That(float.Parse(fields["x"], CultureInfo.InvariantCulture), Is.EqualTo(expected.x));
+            Assert.That(float.Parse(fields["y"], CultureInfo.InvariantCulture), Is.EqualTo(expected.y));
+            Assert.That(float.Parse(fields["z"], CultureInfo.InvariantCulture), Is.EqualTo(expected.z));
         }
     }
 

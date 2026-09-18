@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Process = System.Diagnostics.Process;
@@ -37,6 +38,18 @@ namespace CodingRiver.UPilot
         public ulong instanceId;
         public float pixelsPerPoint;
         public string mappingEvidence;
+        public int contentLeft;
+        public int contentTop;
+        public int contentRight;
+        public int contentBottom;
+        public int cropLeft;
+        public int cropTop;
+        public int cropRight;
+        public int cropBottom;
+        public bool contentRectVerified;
+        public bool cropComplete;
+        public bool includesDecorations;
+        public string geometrySource;
     }
 
     public sealed class EditorWindowCaptureException : InvalidOperationException
@@ -56,6 +69,7 @@ namespace CodingRiver.UPilot
     public static class UPilotWindowDiagnostics
     {
         internal static Func<EditorWindow, bool> RejectNativeCaptureForTesting;
+        internal static Action<EditorWindow> AfterNativeCaptureForTesting;
         private const string DomainReloadTsKey = "UPilot.DomainReloadTimestamp";
 
         static UPilotWindowDiagnostics()
@@ -212,6 +226,15 @@ namespace CodingRiver.UPilot
 #endif
         }
 
+#if !UNITY_EDITOR_WIN
+        public static bool TryGetMappedWindowHandle(EditorWindow window, bool requireExclusive, out IntPtr handle, out string evidence)
+        {
+            handle = IntPtr.Zero;
+            evidence = "WINDOW_MAPPING_UNSUPPORTED_PLATFORM";
+            return false;
+        }
+#endif
+
 #if UNITY_EDITOR_WIN
         private static string CaptureEditorWindowWin(string windowTitle)
         {
@@ -249,11 +272,27 @@ namespace CodingRiver.UPilot
                 IntPtr hwnd = FindMappedUnityWindow(win, target, out var mappingEvidence);
                 string nativeError = hwnd == IntPtr.Zero ? "WINDOW_MAPPING_UNVERIFIED" : "PRINT_WINDOW_FAILURE_INJECTED";
                 if (hwnd != IntPtr.Zero && RejectNativeCaptureForTesting?.Invoke(win) != true
-                    && TryPrintWindowCrop(hwnd, target, out byte[] nativePng, out int width, out int height, out NativeRect hwndRect, out nativeError))
+                    && TryPrintWindowCrop(hwnd, target, out byte[] nativePng, out int width, out int height,
+                        out NativeRect hwndRect, out NativeRect clientRect, out NativeRect cropRect, out bool contentRectVerified,
+                        out nativeError))
                 {
+                    AfterNativeCaptureForTesting?.Invoke(win);
                     if (win == null || win.position != pos || FindMappedUnityWindow(win, target, out _) != hwnd)
                         throw new EditorWindowCaptureException("Window identity or geometry changed during capture.", new EditorWindowPixelCapture
-                        { windowHandle = hwnd.ToInt64(), captureApi = "Win32.PrintWindow", originalError = "WINDOW_CHANGED_DURING_CAPTURE" });
+                        {
+                            windowHandle = hwnd.ToInt64(),
+                            unityProcessId = Process.GetCurrentProcess().Id,
+                            captureApi = "Win32.PrintWindow",
+                            originalError = "WINDOW_CHANGED_DURING_CAPTURE",
+                            instanceId = win == null ? 0 : UPilotEntityIds.ToWireId(win),
+                            pixelsPerPoint = scale,
+                            windowLeft = target.Left,
+                            windowTop = target.Top,
+                            windowRight = target.Right,
+                            windowBottom = target.Bottom,
+                            pixelSourceVerified = false,
+                            occlusionSensitive = false,
+                        });
                     return new EditorWindowPixelCapture
                     {
                         imageData = Convert.ToBase64String(nativePng),
@@ -276,6 +315,18 @@ namespace CodingRiver.UPilot
                         instanceId = UPilotEntityIds.ToWireId(win),
                         pixelsPerPoint = scale,
                         mappingEvidence = mappingEvidence,
+                        contentLeft = clientRect.Left,
+                        contentTop = clientRect.Top,
+                        contentRight = clientRect.Right,
+                        contentBottom = clientRect.Bottom,
+                        cropLeft = cropRect.Left,
+                        cropTop = cropRect.Top,
+                        cropRight = cropRect.Right,
+                        cropBottom = cropRect.Bottom,
+                        contentRectVerified = contentRectVerified,
+                        cropComplete = contentRectVerified,
+                        includesDecorations = SameRect(cropRect, hwndRect),
+                        geometrySource = "Win32.GetWindowRect+GetClientRect+ClientToScreen",
                     };
                 }
 
@@ -304,6 +355,23 @@ namespace CodingRiver.UPilot
                 tex.Apply();
                 byte[] png = tex.EncodeToPNG();
                 UnityEngine.Object.DestroyImmediate(tex);
+                AfterNativeCaptureForTesting?.Invoke(win);
+                if (win == null || win.position != pos || (hwnd != IntPtr.Zero && FindMappedUnityWindow(win, target, out _) != hwnd))
+                    throw new EditorWindowCaptureException("Window identity or geometry changed during capture.", new EditorWindowPixelCapture
+                    {
+                        windowHandle = hwnd.ToInt64(),
+                        unityProcessId = Process.GetCurrentProcess().Id,
+                        captureApi = "InternalEditorUtility.ReadScreenPixel",
+                        originalError = "WINDOW_CHANGED_DURING_CAPTURE",
+                        instanceId = win == null ? 0 : UPilotEntityIds.ToWireId(win),
+                        pixelsPerPoint = scale,
+                        windowLeft = target.Left,
+                        windowTop = target.Top,
+                        windowRight = target.Right,
+                        windowBottom = target.Bottom,
+                        pixelSourceVerified = false,
+                        occlusionSensitive = true,
+                    });
                 return new EditorWindowPixelCapture
                 {
                     imageData = Convert.ToBase64String(png),
@@ -453,6 +521,30 @@ namespace CodingRiver.UPilot
             return count == 1 ? match : IntPtr.Zero;
         }
 
+        public static bool TryGetMappedWindowHandle(EditorWindow window, bool requireExclusive, out IntPtr handle, out string evidence)
+        {
+            handle = IntPtr.Zero;
+            evidence = "WINDOW_MAPPING_UNAVAILABLE";
+            if (window == null || !RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return false;
+            var container = ReadWindowMember(ReadWindowMember(window, "m_Parent"), "window");
+            if (container == null) return false;
+            if (requireExclusive && (window.docked || Resources.FindObjectsOfTypeAll<EditorWindow>().Any(
+                other => other != window && ReferenceEquals(container, ReadWindowMember(ReadWindowMember(other, "m_Parent"), "window")))))
+            {
+                evidence = "WINDOW_CONTAINER_NOT_EXCLUSIVE";
+                return false;
+            }
+            var position = window.position;
+            float scale = Mathf.Max(1f, EditorGUIUtility.pixelsPerPoint);
+            var target = new NativeRect
+            {
+                Left = Mathf.RoundToInt(position.x * scale), Top = Mathf.RoundToInt(position.y * scale),
+                Right = Mathf.RoundToInt(position.xMax * scale), Bottom = Mathf.RoundToInt(position.yMax * scale),
+            };
+            handle = FindMappedUnityWindow(window, target, out evidence);
+            return handle != IntPtr.Zero;
+        }
+
         private static string RectText(NativeRect rect) => $"{rect.Left},{rect.Top},{rect.Right},{rect.Bottom}";
         private static bool Contains(NativeRect outer, NativeRect inner) =>
             inner.Left >= outer.Left && inner.Top >= outer.Top && inner.Right <= outer.Right && inner.Bottom <= outer.Bottom;
@@ -460,14 +552,38 @@ namespace CodingRiver.UPilot
         private static bool SameRect(NativeRect a, NativeRect b) =>
             a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
 
-        private static bool TryPrintWindowCrop(IntPtr hwnd, NativeRect target, out byte[] png, out int cropWidth, out int cropHeight, out NativeRect hwndRect, out string originalError)
+        private static bool TryPrintWindowCrop(
+            IntPtr hwnd,
+            NativeRect target,
+            out byte[] png,
+            out int cropWidth,
+            out int cropHeight,
+            out NativeRect hwndRect,
+            out NativeRect clientRect,
+            out NativeRect cropRect,
+            out bool contentRectVerified,
+            out string originalError)
         {
             png = null;
             originalError = "WINDOW_GEOMETRY_UNVERIFIED";
             cropWidth = cropHeight = 0;
             hwndRect = default;
+            clientRect = default;
+            cropRect = default;
+            contentRectVerified = false;
             if (!GetWindowRect(hwnd, out hwndRect)) return false;
             if (!Contains(hwndRect, target)) return false;
+            var clientOrigin = new NativePoint();
+            if (!GetClientRect(hwnd, out clientRect) || !ClientToScreen(hwnd, ref clientOrigin))
+            {
+                originalError = "WINDOW_CONTENT_RECT_UNVERIFIED";
+                return false;
+            }
+            clientRect.Left += clientOrigin.X;
+            clientRect.Top += clientOrigin.Y;
+            clientRect.Right += clientOrigin.X;
+            clientRect.Bottom += clientOrigin.Y;
+            contentRectVerified = SameRect(target, clientRect);
             int width = Math.Max(1, hwndRect.Right - hwndRect.Left);
             int height = Math.Max(1, hwndRect.Bottom - hwndRect.Top);
             var info = new BitmapInfo
@@ -502,6 +618,13 @@ namespace CodingRiver.UPilot
                 int top = Mathf.Clamp(target.Top - hwndRect.Top, 0, height - 1);
                 int right = Mathf.Clamp(target.Right - hwndRect.Left, left + 1, width);
                 int bottom = Mathf.Clamp(target.Bottom - hwndRect.Top, top + 1, height);
+                cropRect = new NativeRect
+                {
+                    Left = hwndRect.Left + left,
+                    Top = hwndRect.Top + top,
+                    Right = hwndRect.Left + right,
+                    Bottom = hwndRect.Top + bottom,
+                };
                 cropWidth = right - left;
                 cropHeight = bottom - top;
                 var rgba = new byte[cropWidth * cropHeight * 4];

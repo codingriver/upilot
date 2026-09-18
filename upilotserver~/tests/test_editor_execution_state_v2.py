@@ -5,10 +5,12 @@ import inspect
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from upilot_mcp.config import CONFIG
 from upilot_mcp.domain.resource_service import ResourceDomainService
 from upilot_mcp.models import WsMessage
-from upilot_mcp.responses import ok
+from upilot_mcp.responses import fail, ok
 from upilot_mcp.server import WsOrchestratorServer
 from upilot_mcp.state_store import StateStore
 
@@ -99,7 +101,7 @@ def test_sqlite_restart_restores_stale_snapshot_and_inflight_batch(tmp_path: Pat
     assert execution["source"] == "server-persisted"
     assert execution["authoritative"] is False
     assert execution["isStale"] is True
-    assert restored.pending_write_batches()[0]["status"] == "deferred"
+    assert restored.pending_write_batches()[0]["status"] == "recovery_required"
 
     heartbeat = _snapshot(2, observed_at=1100, transition="heartbeat")
     heartbeat["playModeState"] = "play"
@@ -171,7 +173,8 @@ def test_only_correlated_terminal_snapshot_verifies_pending_batch(tmp_path: Path
     assert restored.execution_state()["correlationVerified"] is True
 
 
-def test_historical_verified_heartbeat_cannot_hide_new_deferred_batch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pending_field", ["missing", "", None, "unrelated"])
+def test_historical_verified_heartbeat_cannot_hide_new_deferred_batch(tmp_path: Path, pending_field) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
 
@@ -200,6 +203,8 @@ def test_historical_verified_heartbeat_cannot_hide_new_deferred_batch(tmp_path: 
         transition="heartbeat",
     )
     historical_heartbeat["playModeState"] = "play"
+    if pending_field != "missing":
+        historical_heartbeat["pendingWriteBatchId"] = pending_field
     assert state.update_editor_execution_state(historical_heartbeat)
 
     execution = state.execution_state()
@@ -207,6 +212,28 @@ def test_historical_verified_heartbeat_cannot_hide_new_deferred_batch(tmp_path: 
     assert execution["pendingWriteBatchId"] == deferred_id
     assert execution["compileDeferredReason"] == "PlayMode"
     assert state.get_write_batch(deferred_id)["status"] == "deferred"
+
+
+def test_v2_busy_flag_does_not_invent_phase_or_reuse_terminal_evidence(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(["A.cs"], created_at=500, files_sha256="a", compile_when_edit_mode=True)
+    completed = _snapshot(1, write_batch_id=batch["writeBatchId"],
+                          write_batch_created_at=500, observed_at=900)
+    assert state.update_editor_execution_state(completed)
+    terminal = state.get_write_batch(batch["writeBatchId"])
+    busy = dict(completed, sequence=2, snapshotId="epoch-a:0:2", isCompiling=True, observedAt=1000)
+    assert state.update_editor_execution_state(busy)
+    execution = state.execution_state()
+    assert execution["isCompiling"] is True
+    assert execution["compilePhase"] == "completed"
+    assert execution["status"] == "unknown"
+    assert execution["blockedReason"] == "CompilationStatePending"
+    assert execution["terminal"] is False and execution["verificationPending"] is True
+    assert execution["errorsVerified"] is False and execution["correlationVerified"] is False
+    assert state.get_write_batch(batch["writeBatchId"]) == terminal
+    assert state.update_editor_execution_state(dict(completed, sequence=3, snapshotId="epoch-a:0:3"))
+    assert state.execution_state()["correlationVerified"] is True
 
 
 def test_verified_batch_terminal_timestamp_is_not_rewritten_by_heartbeats(tmp_path: Path) -> None:
@@ -253,6 +280,30 @@ def test_compiler_finished_is_non_ready_and_legacy_context_cannot_overwrite_v2(t
     assert state.compile.phase == "compiler_finished"
     assert state.update_editor_context({"snapshotId": execution["snapshotId"], "compilePhase": "completed"})
     assert state.compile.phase == "compiler_finished"
+
+
+def test_v2_mismatched_compile_diagnostics_do_not_overwrite_authoritative_current(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    current = _snapshot(1, operation_id="compile-a", write_batch_id="batch-a", write_batch_created_at=1000)
+    current["compileRequestId"] = "request-a"
+    current["errorCount"] = 3
+    current["warningCount"] = 7
+    assert state.update_editor_execution_state(current)
+    state.compile.errors = [{"message": "current"}]
+
+    assert not state.update_compile_errors({
+        "compileRequestId": "request-b", "compileOperationId": "compile-b",
+        "writeBatchId": "batch-b", "writeBatchCreatedAt": 2000,
+        "total": 0, "errors": [], "warningCount": 99,
+    })
+    assert state.compile.compile_request_id == "request-a"
+    assert state.compile.compile_operation_id == "compile-a"
+    assert state.compile.write_batch_id == "batch-a"
+    assert state.compile.write_batch_created_at == 1000
+    assert state.compile.errors == [{"message": "current"}]
+    assert state.compile.error_count == 3
+    assert state.compile.warning_count == 7
 
 
 def test_state_events_keep_transitions_and_exclude_heartbeats(tmp_path: Path) -> None:
@@ -349,7 +400,7 @@ def test_playmode_write_batch_is_durable_and_resumes_once_on_editmode(tmp_path: 
     assert service.resume_calls == 1
 
 
-def test_auto_resumed_compile_failure_does_not_verify_write_batch(tmp_path: Path, monkeypatch) -> None:
+def test_auto_resumed_compile_failure_without_persisted_snapshot_requires_recovery(tmp_path: Path, monkeypatch) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
     state.editor.connected = True
@@ -380,7 +431,92 @@ def test_auto_resumed_compile_failure_does_not_verify_write_batch(tmp_path: Path
 
     stored = state.get_write_batch(batch["writeBatchId"])
     assert stored is not None
-    assert stored["status"] == "failed"
+    assert stored["status"] == "recovery_required"
+    assert stored["outcome"] == "unknown"
+    assert stored["terminal"] is False
+
+
+def test_auto_resumed_compile_accepts_only_a_persisted_correlated_terminal(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.updated_at = 10**15
+    state.editor.play_mode_state = "edit"
+    batch = state.register_write_batch(
+        [str(tmp_path / "Assets" / "A.cs")],
+        created_at=1000,
+        files_sha256="digest",
+        compile_when_edit_mode=True,
+    )
+    service = _ResourceService(tmp_path, state)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def completed_compile(**_kwargs):
+        terminal = _snapshot(
+            1,
+            operation_id="compile-persisted",
+            write_batch_id=batch["writeBatchId"],
+            write_batch_created_at=1000,
+            observed_at=2000,
+        )
+        assert state.update_editor_execution_state(terminal)
+        return ok("req-completed", {"status": "completed", "phase": "completed", "terminal": True, "correlationVerified": True})
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(service, "safe_compile_and_wait", completed_compile, raising=False)
+
+    asyncio.run(service._resume_pending_write_batches())
+
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored is not None
+    assert stored["status"] == "verified"
+    assert stored["terminal"] is True
+    assert stored["correlationVerified"] is True
+    assert stored["outcome"] == "passed"
+
+
+def test_auto_resumed_compile_timeout_requires_recovery_without_replay(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.updated_at = 10**15
+    state.editor.play_mode_state = "edit"
+    batch = state.register_write_batch(
+        [str(tmp_path / "Assets" / "A.cs")],
+        created_at=1000,
+        files_sha256="digest",
+        compile_when_edit_mode=True,
+    )
+    service = _ResourceService(tmp_path, state)
+    calls = []
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def timed_out_compile(**kwargs):
+        calls.append(kwargs)
+        state.compile.compile_operation_id = "compile-timeout"
+        return fail("req-timeout", "COMMAND_TIMEOUT", "compile.request timed out")
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(service, "safe_compile_and_wait", timed_out_compile, raising=False)
+
+    asyncio.run(service._resume_pending_write_batches())
+    asyncio.run(service._resume_pending_write_batches())
+
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert len(calls) == 1
+    assert stored is not None
+    assert stored["status"] == "recovery_required"
+    assert stored["compileOperationId"] == "compile-timeout"
+    assert stored["outcome"] == "unknown"
+    assert stored["terminal"] is False
+    assert state.pending_write_batch_id == batch["writeBatchId"]
+    assert state.execution_state()["blockedReason"] == "WriteBatchRecoveryRequired"
 
 
 def test_write_batch_tool_is_registered_write_gated_and_has_public_schema() -> None:

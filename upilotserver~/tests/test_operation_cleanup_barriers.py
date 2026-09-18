@@ -68,6 +68,35 @@ def test_success_waits_for_fresh_editmode_and_serializes_pollers(tmp_path):
     asyncio.run(run())
 
 
+def test_editor_verification_distinguishes_not_requested_pending_and_failed(tmp_path):
+    async def run():
+        normal = _OperationService(tmp_path / "normal", [{"status": "Succeeded"}])
+        ordinary = await normal.operation_start(spec())
+        ordinary_status = await normal.operation_status(ordinary.data["operationId"])
+        assert ordinary_status.data["terminal"] and ordinary_status.data["editorVerification"] == "not_requested"
+
+        required = _OperationService(tmp_path / "required", [{"status": "Succeeded"}])
+        async def play_status(**_):
+            return ok("editor", {"executionState": {
+                "ready": False, "authoritative": True, "isStale": False,
+                "playModeState": "play", "observedAt": 1,
+            }})
+        required.mcp_status = play_status
+        started = await required.operation_start(spec(cleanup={"requireEditMode": True, "timeoutSec": 1}))
+        pending = await required.operation_status(started.data["operationId"])
+        assert not pending.data["terminal"] and pending.data["editorVerification"] == "pending"
+        required._operations[started.data["operationId"]]["cleanupDeadlineAt"] = 1
+        failed = await required.operation_status(started.data["operationId"])
+        assert failed.data["terminal"] and failed.data["editorVerification"] == "failed"
+    asyncio.run(run())
+
+
+def test_historical_operation_without_editor_verification_is_unknown(tmp_path):
+    service = _OperationService(tmp_path, [])
+    public = service._public_operation_state({"operationId": "historic", "startedAt": 1})
+    assert public["editorVerification"] == "unknown"
+
+
 def test_capture_failure_is_not_stopped_or_success(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [{"status": "Succeeded"}])
@@ -77,7 +106,7 @@ def test_capture_failure_is_not_stopped_or_success(tmp_path):
         start = await service.operation_start(spec())
         operation_id = start.data["operationId"]
         state = service._operations[operation_id]
-        state["consoleCapture"] = {"sessionId": "capture"}
+        state["consoleCapture"] = {"sessionId": "capture", "ownerToken": "owner"}
         result = await service.operation_status(operation_id)
         assert result.data["terminal"] is False
         assert state["consoleCapture"]["stopped"] is False
@@ -129,7 +158,7 @@ def test_capture_stop_requires_actual_matching_artifacts(tmp_path):
         service.console_capture_stop = stop
         start = await service.operation_start(spec())
         state = service._operations[start.data["operationId"]]
-        state["consoleCapture"] = {"sessionId": "capture"}
+        state["consoleCapture"] = {"sessionId": "capture", "ownerToken": "owner"}
         first = await service.operation_status(start.data["operationId"])
         assert not first.data["terminal"]
         assert state["consoleCapture"]["artifactsVerified"] is False
@@ -176,7 +205,7 @@ def test_rotated_capture_requires_all_segments_and_matching_summary(tmp_path):
         service.console_capture_stop = stop
         start = await service.operation_start(spec())
         state = service._operations[start.data["operationId"]]
-        state["consoleCapture"] = {"sessionId": "rotated"}
+        state["consoleCapture"] = {"sessionId": "rotated", "ownerToken": "owner"}
         result = await service.operation_status(start.data["operationId"])
         assert not result.data["terminal"]
         (tmp_path / "summary.json").write_text(json.dumps(session))
@@ -202,7 +231,7 @@ def test_capture_is_not_marked_stopped_when_artifact_verification_is_canceled(tm
             return ok("stop", {"session": dict(sessionId="capture", active=False, finishedAtUtcMs=1,
                        sha256="digest", summaryPath="summary.json", fileBytes=1)})
         service.console_capture_stop = stop
-        state = {"consoleCapture": {"sessionId": "capture"}}
+        state = {"consoleCapture": {"sessionId": "capture", "ownerToken": "owner"}}
         stopping = asyncio.create_task(service._stop_owned_operation_capture(state))
         await entered.wait()
         assert state["consoleCapture"]["stopped"] is False

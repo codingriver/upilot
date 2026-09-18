@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from pathlib import Path
+import threading
 
-from upilot_mcp.domain.task_service import TaskDomainService
+from upilot_mcp.domain.task_service import TaskDomainService, _operation_parse_object, _read_stable_artifact
 from upilot_mcp.responses import ok
 from upilot_mcp.tool_registry import REGISTRY
+from upilot_mcp.state_store import StateStore
 
 
 class _Session:
@@ -21,6 +25,8 @@ class _SessionManager:
 class _Server:
     def __init__(self, project_path: Path) -> None:
         self.session_manager = _SessionManager(project_path)
+        self.state = StateStore()
+        self.state.configure_project(str(project_path))
 
 
 class _OperationService(TaskDomainService):
@@ -79,7 +85,7 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 29" in text
+    assert "rulesVersion: 30" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
@@ -144,7 +150,7 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "29"
+    assert checked.data["recommendedRulesVersion"] == "30"
     assert "rulesVersion differs" in checked.data["diffSummary"]
 
 
@@ -171,7 +177,7 @@ def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:
         "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
         "timeoutSec": 5,
         "pollIntervalSec": 0.01,
-        "artifactRules": {"readReportTailLines": 2},
+        "artifactRules": {"readReportTailLines": 2, "fieldKinds": {"reportPath": "file"}},
     }
 
     started = asyncio.run(service.operation_start(job_spec))
@@ -184,6 +190,299 @@ def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:
     assert waited.data["timing"]["projectElapsedMs"] == 1250
 
 
+def test_operation_artifact_reader_hashes_one_stable_open_file(tmp_path: Path) -> None:
+    report = tmp_path / "report.bin"
+    report.write_bytes(b"upilot-artifact")
+
+    evidence, error = _read_stable_artifact(report)
+
+    assert error == ""
+    assert evidence["bytes"] == len(b"upilot-artifact")
+    assert len(evidence["sha256"]) == 64
+
+
+def test_operation_json_diagnostic_uses_unicode_character_offsets_and_bounds_snippet() -> None:
+    text = '{"中文": }' + "x" * 400
+    _, error, diagnostic = _operation_parse_object(text)
+
+    with __import__("pytest").raises(json.JSONDecodeError) as expected:
+        json.loads(text)
+    assert error
+    assert diagnostic == {
+        "offset": expected.value.pos, "offsetUnit": "unicodeCharacter",
+        "line": expected.value.lineno, "column": expected.value.colno,
+        "path": None, "snippet": text[:256], "truncated": True,
+    }
+
+
+def test_operation_json_diagnostic_offset_includes_leading_whitespace() -> None:
+    text = " \n{\"中文\": }"
+
+    _, error, diagnostic = _operation_parse_object(text)
+
+    with __import__("pytest").raises(json.JSONDecodeError) as expected:
+        json.loads(text)
+    assert error
+    assert diagnostic["offset"] == expected.value.pos
+    assert diagnostic["line"] == expected.value.lineno
+    assert diagnostic["column"] == expected.value.colno
+    assert diagnostic["snippet"] == text
+
+
+def test_operation_artifact_classification_reads_only_declared_files_and_retains_mismatches(tmp_path: Path, monkeypatch) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("actual", encoding="utf-8")
+    reads = []
+    original = _read_stable_artifact
+    def counted(path):
+        reads.append(path)
+        return original(path)
+    monkeypatch.setattr("upilot_mcp.domain.task_service._read_stable_artifact", counted)
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "artifactRules": {"fieldKinds": {"hash": "sha256", "size": "bytes", "meta": "metadata"}},
+    }))
+    state = service._operations[started.data["operationId"]]
+    state["lastStatusData"] = {"artifacts": {
+        "hash": "a" * 64, "size": 42, "meta": str(report),
+        "file": {"path": str(report), "sha256": "0" * 64, "bytes": 1},
+    }}
+
+    result = asyncio.run(service.operation_collect_artifacts(started.data["operationId"]))
+
+    assert result.ok and reads == [report.resolve()]
+    assert result.data["artifacts"]["meta"] == {"kind": "metadata", "value": str(report)}
+    file = result.data["artifacts"]["file"]
+    assert file["sha256"] == "0" * 64 and file["actualSha256"] == hashlib.sha256(b"actual").hexdigest()
+    assert file["bytes"] == 1 and file["actualBytes"] == len(b"actual")
+    assert {entry["error"] for entry in result.data["artifactErrors"]} >= {
+        "ARTIFACT_DECLARED_BYTES_MISMATCH", "ARTIFACT_DECLARED_SHA256_MISMATCH",
+    }
+
+
+def test_operation_artifact_rejects_outside_and_marks_bare_hash_ambiguous(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "wp07-outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    hash_named = tmp_path / ("c" * 64)
+    hash_named.write_text("inside", encoding="utf-8")
+    outside_link = tmp_path / "outside-link.txt"
+    try:
+        outside_link.symlink_to(outside)
+        link_created = True
+    except OSError:
+        link_created = False
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "artifactRules": {"fieldKinds": {"external": "file", "link": "file"}},
+    }))
+    state = service._operations[started.data["operationId"]]
+    state["lastStatusData"] = {"artifacts": {
+        "external": str(outside), "digest": "b" * 64,
+        "explicitPath": {"path": hash_named.name},
+        **({"link": outside_link.name} if link_created else {}),
+    }}
+
+    result = asyncio.run(service.operation_collect_artifacts(started.data["operationId"]))
+
+    assert result.ok
+    assert result.data["artifacts"]["external"]["error"] == "ARTIFACT_PATH_OUTSIDE_PROJECT"
+    assert result.data["artifacts"]["digest"]["error"] == "ARTIFACT_AMBIGUOUS_BARE_SHA256"
+    assert result.data["artifacts"]["explicitPath"]["sha256"] == hashlib.sha256(b"inside").hexdigest()
+    if link_created:
+        assert result.data["artifacts"]["link"]["error"] == "ARTIFACT_PATH_OUTSIDE_PROJECT"
+
+
+def test_operation_artifact_late_collection_cannot_overwrite_newer_snapshot(tmp_path: Path, monkeypatch) -> None:
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+    }))
+    operation_id = started.data["operationId"]
+    entered, release = threading.Event(), threading.Event()
+    def collect(snapshot, _max_tail_chars):
+        marker = snapshot["lastStatusData"]["marker"]
+        if marker == "old":
+            entered.set()
+            assert release.wait(2)
+        return {"value": {"kind": "metadata", "value": marker}}, []
+    monkeypatch.setattr(service, "_collect_operation_artifacts", collect)
+
+    async def run():
+        service._operations[operation_id]["lastStatusData"] = {"marker": "old"}
+        old = asyncio.create_task(service.operation_collect_artifacts(operation_id))
+        assert await asyncio.to_thread(entered.wait, 1)
+        service._operations[operation_id]["lastStatusData"] = {"marker": "new"}
+        newer = await service.operation_collect_artifacts(operation_id)
+        release.set()
+        return await old, newer
+    old, newer = asyncio.run(run())
+
+    assert newer.data["artifactCollectionSequence"] == 2
+    assert old.data["collectionSuperseded"] is True
+    assert service._operations[operation_id]["artifacts"]["value"]["value"] == "new"
+
+
+def test_operation_cancel_is_not_blocked_by_artifact_file_io(tmp_path: Path, monkeypatch) -> None:
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
+    }))
+    operation_id = started.data["operationId"]
+    entered, release = threading.Event(), threading.Event()
+    def collect(_snapshot, _max_tail_chars):
+        entered.set()
+        assert release.wait(2)
+        return {}, []
+    monkeypatch.setattr(service, "_collect_operation_artifacts", collect)
+
+    async def run():
+        reading = asyncio.create_task(service.operation_collect_artifacts(operation_id))
+        assert await asyncio.to_thread(entered.wait, 1)
+        canceled = await service.operation_cancel(operation_id)
+        release.set()
+        await reading
+        return canceled
+    canceled = asyncio.run(run())
+
+    assert canceled.ok
+    assert [name for name, _ in service.calls].count("cancel") == 1
+
+
+def test_operation_artifact_kind_conflict_does_not_read_declared_file(tmp_path: Path) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("must not be read", encoding="utf-8")
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "artifactRules": {"fieldKinds": {"reportPath": "file", "hash": "sha256"}},
+    }))
+    operation_id = started.data["operationId"]
+    service._operations[operation_id]["lastStatusData"] = {
+        "artifacts": {
+            "reportPath": {"kind": "metadata", "value": str(report)},
+            "hash": "a" * 64,
+        },
+    }
+
+    collected = asyncio.run(service.operation_collect_artifacts(operation_id))
+
+    assert collected.ok
+    assert collected.data["artifacts"]["reportPath"]["error"] == "ARTIFACT_TYPE_CONFLICT"
+    assert "path" not in collected.data["artifacts"]["reportPath"]
+    assert collected.data["artifacts"]["hash"] == {"kind": "sha256", "value": "a" * 64}
+    assert collected.data["artifactErrors"] == [
+        {"artifact": "reportPath", "error": "ARTIFACT_TYPE_CONFLICT", "declaredKind": "file"},
+    ]
+
+
+def test_operation_explicit_path_object_conflicting_with_scalar_declaration_is_not_read(tmp_path: Path, monkeypatch) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("must not be read", encoding="utf-8")
+    reads = []
+    monkeypatch.setattr(
+        "upilot_mcp.domain.task_service._read_stable_artifact",
+        lambda path: reads.append(path) or ({}, ""),
+    )
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "artifactRules": {"fieldKinds": {"reportPath": "metadata"}},
+    }))
+    service._operations[started.data["operationId"]]["lastStatusData"] = {
+        "artifacts": {"reportPath": {"path": str(report)}},
+    }
+
+    collected = asyncio.run(service.operation_collect_artifacts(started.data["operationId"]))
+
+    assert collected.ok
+    assert reads == []
+    assert collected.data["artifacts"]["reportPath"]["error"] == "ARTIFACT_TYPE_CONFLICT"
+    assert collected.data["artifactErrors"] == [
+        {"artifact": "reportPath", "error": "ARTIFACT_TYPE_CONFLICT", "declaredKind": "metadata"},
+    ]
+
+
+def test_operation_artifact_collection_keeps_last_durable_snapshot_when_persist_fails(tmp_path: Path) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("first", encoding="utf-8")
+    service = _OperationService(tmp_path, [])
+    job_spec = {
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "artifactRules": {"fieldKinds": {"reportPath": "file"}},
+    }
+    started = asyncio.run(service.operation_start(job_spec))
+    operation_id = started.data["operationId"]
+    state = service._operations[operation_id]
+    state["lastStatusData"] = {"artifacts": {"reportPath": str(report)}}
+
+    first = asyncio.run(service.operation_collect_artifacts(operation_id))
+    assert first.ok and first.data["artifactCollectionSequence"] == 1
+    first_hash = state["artifacts"]["reportPath"]["sha256"]
+
+    report.write_text("second", encoding="utf-8")
+
+    def fail_save(_state: dict) -> None:
+        raise OSError("injected persistence failure")
+
+    service.server.state.save_operation = fail_save
+    failed = asyncio.run(service.operation_collect_artifacts(operation_id))
+
+    assert not failed.ok and failed.error.code == "OPERATION_PERSIST_FAILED"
+    assert failed.error.detail["collectionPersisted"] is False
+    assert state["artifactCollectionSequence"] == 1
+    assert state["artifacts"]["reportPath"]["sha256"] == first_hash
+
+
+def test_operation_artifact_collections_serialize_per_operation(tmp_path: Path) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("concurrent", encoding="utf-8")
+    service = _OperationService(tmp_path, [])
+    started = asyncio.run(service.operation_start({
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "artifactRules": {"fieldKinds": {"reportPath": "file"}},
+    }))
+    operation_id = started.data["operationId"]
+    service._operations[operation_id]["lastStatusData"] = {"artifacts": {"reportPath": str(report)}}
+
+    async def collect_twice():
+        return await asyncio.gather(
+            service.operation_collect_artifacts(operation_id),
+            service.operation_collect_artifacts(operation_id),
+        )
+
+    first, second = asyncio.run(collect_twice())
+
+    assert first.ok and second.ok
+    assert any(item.data.get("collectionSuperseded") for item in (first, second))
+    assert any(item.data.get("artifactCollectionSequence") == 2 for item in (first, second))
+    assert service._operations[operation_id]["artifactCollectionSequence"] == 2
+
+
+def test_operation_public_capture_state_redacts_owner_token(tmp_path: Path) -> None:
+    service = _OperationService(tmp_path, [])
+    state = {
+        "operationId": "op-capture", "startedAt": 1, "consoleCapture": {
+            "ownerId": "op-capture", "ownerToken": "must-not-leak", "sessionId": "console-1",
+        },
+    }
+
+    public = service._public_operation_state(state, detail_level="full", include_raw_state=False)
+
+    assert public["consoleCapture"]["ownerId"] == "op-capture"
+    assert "ownerToken" not in public["consoleCapture"]
+
+
 def test_operation_parses_nested_reflection_business_status_and_artifacts(tmp_path: Path) -> None:
     report = tmp_path / "reflection-report.json"
     report.write_text("{}", encoding="utf-8")
@@ -194,7 +493,7 @@ def test_operation_parses_nested_reflection_business_status_and_artifacts(tmp_pa
     job_spec = {
         "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
         "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
-        "artifactRules": {"readReportTailLines": 1},
+        "artifactRules": {"readReportTailLines": 1, "fieldKinds": {"summaryPath": "file"}},
         "timeoutSec": 5,
     }
 
@@ -230,7 +529,7 @@ def test_operation_supports_explicit_result_and_field_paths(tmp_path: Path) -> N
     assert terminal.data["phase"] == "Complete"
 
 
-def test_operation_invalid_reflection_json_is_a_diagnostic_terminal_failure(tmp_path: Path) -> None:
+def test_operation_invalid_reflection_json_requires_recovery(tmp_path: Path) -> None:
     service = _ReflectionOperationService(tmp_path, [
         {"result": '{"status":"Running"}'},
         {"result": "{not-json"},
@@ -245,10 +544,11 @@ def test_operation_invalid_reflection_json_is_a_diagnostic_terminal_failure(tmp_
 
     assert failed.ok is False
     assert failed.error.code == "OPERATION_RESULT_INVALID"
-    assert failed.error.detail["status"] == "Failed"
+    assert failed.error.detail["status"] == "RecoveryRequired"
+    assert failed.error.detail["terminal"] is False
     assert failed.error.detail["phase"] == "StatusResultInvalid"
     assert failed.error.detail["failureSignature"] == "OperationResultInvalid"
-    assert failed.error.detail["terminal"] is True
+    assert failed.error.detail["parseDiagnostic"]["offsetUnit"] == "unicodeCharacter"
 
 
 def test_operation_cancel_accepts_nested_terminal_result(tmp_path: Path) -> None:

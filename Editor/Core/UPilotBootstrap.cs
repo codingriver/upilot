@@ -12,6 +12,9 @@ namespace CodingRiver.UPilot
     public static class UPilotBootstrap
     {
         public const string EnabledPrefKey = "CodingRiver.UPilot.BridgeEnabled";
+        private const int ServerStartMaxAttempts = 4;
+        private static readonly int[] ServerStartRetryDelaysMs = { 2000, 8000, 20000 };
+        private static readonly string ServerStartCycleId = Guid.NewGuid().ToString("N");
 
         public static bool IsEnabled
         {
@@ -23,6 +26,8 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                UPilotStartupDiagnostics.EnterBootstrap();
+                UPilotStartupDiagnostics.BeginServerStartCycle(ServerStartCycleId);
                 UnityEngine.Debug.Log("[UPilotBootstrap] static constructor");
                 UPilotProjectConfig.Reload();
                 UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
@@ -60,11 +65,30 @@ namespace CodingRiver.UPilot
             try
             {
                 if (!IsEnabled)
+                {
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "bridge_disabled",
+                        "UPilot Bridge is disabled in Editor preferences.");
+                    EditorApplication.update -= TryStartBridge;
                     return;
+                }
 
                 if (!UPilotSetupState.IsCompleted)
                 {
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "setup_required",
+                        "UPilot first setup is not completed.");
                     EditorApplication.update -= TryStartBridge;
+                    return;
+                }
+
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "bridge_update_blocked",
+                        UPilotUpdateService.ServiceStartBlockedMessage);
+                    if (UPilotStartupDiagnostics.IsServerStartRetryFinished)
+                        EditorApplication.update -= TryStartBridge;
                     return;
                 }
 
@@ -86,27 +110,83 @@ namespace CodingRiver.UPilot
                 if (EditorApplication.isPlayingOrWillChangePlaymode)
                     return;
 
-                EditorApplication.update -= TryStartMcpServer;
-                if (System.IO.File.Exists(UPilotProjectConfig.ConfigPath) &&
-                    !UPilotPortRegistration.TrySyncCurrent())
+                if (!IsEnabled)
+                {
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "bridge_disabled",
+                        "UPilot Bridge is disabled in Editor preferences.");
+                    UPilotStartupDiagnostics.MarkServerStartRetryBlocked("bridge_disabled");
+                    EditorApplication.update -= TryStartMcpServer;
                     return;
+                }
+
                 if (!UPilotSetupState.IsCompleted)
+                {
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "setup_required",
+                        "UPilot first setup is not completed.");
+                    UPilotStartupDiagnostics.MarkServerStartRetryBlocked("setup_required");
+                    EditorApplication.update -= TryStartMcpServer;
                     return;
+                }
 
                 var mgr = UPilotMcpServerManager.Instance;
                 if (!mgr.AutoStartEnabled)
                 {
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "server_auto_start_disabled",
+                        "MCP Server automatic startup is disabled.");
+                    UPilotStartupDiagnostics.MarkServerStartRetryBlocked("server_auto_start_disabled");
                     UnityEngine.Debug.Log("[UPilotBootstrap] MCP server auto start disabled.");
+                    EditorApplication.update -= TryStartMcpServer;
                     return;
                 }
 
-                UnityEngine.Debug.Log("[UPilotBootstrap] TryStartMcpServer -> StartServer");
+                if (UPilotStartupDiagnostics.IsServerStartRetryFinished)
+                {
+                    EditorApplication.update -= TryStartMcpServer;
+                    return;
+                }
+
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (!UPilotStartupDiagnostics.TryBeginServerStartAttempt(
+                        now,
+                        ServerStartMaxAttempts,
+                        ServerStartRetryDelaysMs,
+                        out var attemptNumber))
+                {
+                    if (UPilotStartupDiagnostics.IsServerStartRetryFinished)
+                        EditorApplication.update -= TryStartMcpServer;
+                    return;
+                }
+
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                {
+                    UPilotStartupDiagnostics.RecordServerStartAttemptReason("server_update_blocked");
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "server_update_blocked",
+                        UPilotUpdateService.ServiceStartBlockedMessage);
+                    return;
+                }
+
+                if (System.IO.File.Exists(UPilotProjectConfig.ConfigPath) &&
+                    !UPilotPortRegistration.TrySyncCurrent())
+                {
+                    UPilotStartupDiagnostics.RecordServerStartAttemptReason("server_port_registration_failed");
+                    UPilotStartupDiagnostics.RecordBlockingReason(
+                        "server_port_registration_failed",
+                        "Current project port registration could not be synchronized.");
+                    return;
+                }
+
+                UnityEngine.Debug.Log($"[UPilotBootstrap] TryStartMcpServer attempt {attemptNumber}/{ServerStartMaxAttempts} -> StartServer");
                 mgr.ValidateAndAutoFixPath();
+                UPilotStartupDiagnostics.BeginServerObservation(mgr, restartProbeWindow: attemptNumber > 1);
                 mgr.StartServer();
             }
             catch (Exception ex)
             {
-                EditorApplication.update -= TryStartMcpServer;
+                UPilotStartupDiagnostics.RecordServerStartAttemptReason("server_start_exception");
                 ReportBootstrapError("自动启动 MCP 服务失败", ex);
             }
         }

@@ -74,6 +74,15 @@ Use exactly one request shape. A typed static call:
 
 For an instance, pass `targetHandle` plus `sessionId`; do not combine it with hierarchy/static-member paths. Named arguments use `name`; by-reference arguments use `direction=ref|out`. Generic methods use `genericTypeArguments`. Awaitables use `awaitMode=auto|always|never` with bounded `awaitTimeoutMs`.
 
+`resultMode` accepts `auto|inline|handle|legacyString`; `handle` requires a valid persistent session. Invalid modes, conflicting shapes and malformed typed arguments are rejected before target dispatch. Metadata errors are checked before instance getters or custom conversions. Once user code may have run, failures retain `sideEffectsMayHaveOccurred=true`, including await and result encoding failures; do not infer rollback from an error code.
+
+The shared expression/evaluation Bridge handler also validates modes, syntax,
+budget field names and integer wire types before dispatch. All variable type and
+handle metadata is checked before any custom decoding. Decode, execution, result
+summary and response failures retain the same request's side-effect evidence.
+Budget defaults and clamping remain compatible; unknown, duplicate or non-integer
+budget fields are rejected instead of silently selecting a default.
+
 ## C# subset
 
 ```json

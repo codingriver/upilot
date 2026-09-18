@@ -201,17 +201,30 @@ namespace CodingRiver.UPilot
     {
         public string commandId;
         public string commandName;
+        public bool commandSubmitted;
+        public bool stateObserved;
+        public bool changed;
+        public int writeCount;
         public string stage;
+        public string blockedReason;
         public string nextAction;
         public bool sideEffectsMayHaveOccurred;
+        public bool runnerStartAttempted;
+        public string dirtyScenePolicy;
+        public string dirtySceneAction;
+        public int dirtySceneCount;
+        public TestDirtyScenePayload[] dirtyScenes = Array.Empty<TestDirtyScenePayload>();
         public string sessionId;
         public string sourceSpanJson;
         public string diagnosticsJson;
         public string candidatesJson;
+        public string executionDiagnosticsJson;
         public SourceSpanPayload sourceSpan;
         public ExecutionDiagnosticPayload[] diagnostics = Array.Empty<ExecutionDiagnosticPayload>();
         public string[] candidates = Array.Empty<string>();
+        public CSharpExecutionDiagnosticsPayload executionDiagnostics;
         public string[] cleanupDiagnostics = Array.Empty<string>();
+        public TestListResultPayload selection;
         public string exceptionType;
         public string stackTrace;
     }
@@ -291,6 +304,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class CompileErrorItemPayload
     {
+        public string assemblyName;
         public string file;
         public int line;
         public int column;
@@ -313,6 +327,8 @@ namespace CodingRiver.UPilot
         public bool errorsVerified;
         public int total;
         public int warningCount;
+        public bool warningDetailsAvailable;
+        public bool warningsTruncated;
         public long startedAt;
         public long finishedAt;
         public long lastProgressAt;
@@ -324,6 +340,7 @@ namespace CodingRiver.UPilot
         public string reloadId;
         public bool domainReloadObserved;
         public List<CompileErrorItemPayload> errors = new();
+        public List<CompileErrorItemPayload> warnings = new();
     }
 
     /// <summary>MCP-initiated compile lifecycle (explicit compile.started / compile.finished events).</summary>
@@ -360,6 +377,18 @@ namespace CodingRiver.UPilot
         public long timestamp;
         public string sessionId;
         public string protocolVersion;
+    }
+
+    [Serializable]
+    public class CompileErrorsGetMessage
+    {
+        public CompileErrorsGetPayload payload;
+    }
+
+    [Serializable]
+    public class CompileErrorsGetPayload
+    {
+        public bool includeWarnings;
     }
 
     [Serializable]
@@ -401,6 +430,9 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class EditorWindowClosePayload
     {
+        public string instanceId;
+        public string domainGeneration;
+        public string closeMode = "requestUserClose";
         public string windowTitle;
         public string matchMode;
     }
@@ -408,6 +440,22 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class EditorWindowCloseResultPayload
     {
+        public string commandId;
+        // SceneView mutations retain this bounded observation in-process so a
+        // caller that lost the original response can query it without replaying
+        // a setter. A reload intentionally yields recoveryRequired/unknown.
+        public string observationStatus;
+        public bool recoveryRequired;
+        public string nextAction;
+        public long observationUpdatedAtUtcMs;
+        public string instanceId;
+        public string domainGeneration;
+        public bool terminal = true;
+        public bool waitingForModalUi;
+        public bool discardRisk;
+        public bool closeVerified;
+        public long windowHandle;
+        public string mappingEvidence;
         public bool ok;
         public string state;
         public string deniedReason;
@@ -417,6 +465,28 @@ namespace CodingRiver.UPilot
         public float windowWidth;
         public float windowHeight;
         public bool multipleMatches;
+        public bool changed;
+        public int writeCount;
+        public bool maximized;
+        public bool commandSubmitted;
+        public bool stateObserved;
+        public bool confirmed;
+        public bool authoritative;
+        public bool isStale;
+        public bool sideEffectsMayHaveOccurred;
+        public string requestedState;
+        public string observedState;
+        public WindowRectPayload originalRect;
+        public WindowRectPayload observedRect;
+    }
+
+    [Serializable]
+    public class WindowRectPayload
+    {
+        public float x;
+        public float y;
+        public float width;
+        public float height;
     }
 
     [Serializable]
@@ -434,12 +504,112 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class EditorWindowSetRectPayload
     {
+        public string instanceId;
+        public string domainGeneration;
+        public string fullTypeName;
         public string windowTitle;
         public string matchMode;
         public float x;
         public float y;
         public float width;
         public float height;
+    }
+
+    [Serializable]
+    public class EditorWindowHistoryMessage
+    {
+        public string id;
+        public string type;
+        public string name;
+        public EditorWindowHistoryPayload payload;
+        public long timestamp;
+        public string sessionId;
+        public string protocolVersion;
+    }
+
+    [Serializable]
+    public class EditorWindowHistoryPayload
+    {
+        public string instanceId;
+        public long afterSequence;
+        public int count = 100;
+    }
+
+    [Serializable]
+    public class EditorWindowOpenMessage
+    {
+        public string id;
+        public string type;
+        public string name;
+        public EditorWindowOpenPayload payload;
+        public long timestamp;
+        public string sessionId;
+        public string protocolVersion;
+    }
+
+    [Serializable]
+    public class EditorWindowOpenPayload
+    {
+        public string typeName;
+    }
+
+    [Serializable]
+    public class EditorWindowFocusMessage
+    {
+        public string id;
+        public string type;
+        public string name;
+        public EditorWindowFocusPayload payload;
+        public long timestamp;
+        public string sessionId;
+        public string protocolVersion;
+    }
+
+    [Serializable]
+    public class EditorWindowFocusPayload
+    {
+        public string instanceId;
+        public string domainGeneration;
+    }
+
+    [Serializable]
+    public class SceneViewSetMaximizedMessage
+    {
+        public string id;
+        public string type;
+        public string name;
+        public SceneViewSetMaximizedPayload payload;
+        public long timestamp;
+        public string sessionId;
+        public string protocolVersion;
+    }
+
+    [Serializable]
+    public class SceneViewSetMaximizedPayload
+    {
+        public string instanceId;
+        public string domainGeneration;
+        public bool maximized;
+        public bool hasExpectedCurrentMaximized;
+        public bool expectedCurrentMaximized;
+    }
+
+    [Serializable]
+    public class SceneViewCommandStatusMessage
+    {
+        public string id;
+        public string type;
+        public string name;
+        public SceneViewCommandStatusPayload payload;
+        public long timestamp;
+        public string sessionId;
+        public string protocolVersion;
+    }
+
+    [Serializable]
+    public class SceneViewCommandStatusPayload
+    {
+        public string commandId;
     }
 
     [Serializable]
@@ -551,6 +721,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class MouseEventPayload
     {
+        public bool escapeGenericMenu;
         public string windowInstanceId;
         public string targetWindow;
         public string action;
@@ -571,11 +742,21 @@ namespace CodingRiver.UPilot
         public bool ok;
         public string state;
         public string status;
+        public bool changed;
+        public int writeCount;
+        public string commandId;
+        public bool stateObserved;
+        public string requestedState;
+        public string observedState;
         public bool blocked;
         public string blockedReason;
         public string nextAction;
         public string playModeState;
         public string compilePhase;
+        public bool commandSubmitted;
+        public bool confirmed;
+        public bool authoritative;
+        public bool isStale;
     }
 
     [Serializable]
@@ -605,6 +786,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class KeyboardEventPayload
     {
+        public bool escapeGenericMenu;
         public string windowInstanceId;
         public string targetWindow;
         public string action;    // keydown, keyup, keypress, type

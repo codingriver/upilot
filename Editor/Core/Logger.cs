@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -13,8 +14,9 @@ using UnityEngine;
 namespace CodingRiver.UPilot
 {
     /// <summary>
-    /// 将 upilot 编辑器日志写入项目根目录下 <c>Logs/UPilot/UPilot.log</c>。
-    /// 每次打开 Unity 编辑器（新会话）首次写入前会清空并写入会话头；同一会话内脚本域重载不清空，继续追加。
+    /// 将 upilot 编辑器日志写入项目根目录下 <c>Logs/UPilot/upilot.log</c>。
+    /// 每次打开 Unity 编辑器（新会话）首次写入前会将上一会话日志轮转为备份并写入新会话头；
+    /// 同一会话内脚本域重载不轮转，继续追加。
     /// 所有写入均立即落盘（无缓冲），时间戳精确到毫秒（本地时区）。
     /// 支持标签、主线程帧号检测、LogLevel 过滤、日志按大小滚动，并双写到 Unity Editor Console。
     /// </summary>
@@ -25,9 +27,17 @@ namespace CodingRiver.UPilot
         private static readonly int MainThreadId;
         private static readonly int CurrentProcessId;
         private static readonly DateTime CurrentProcessStartTime;
+        private static readonly bool IsAssetImportWorker;
 
         private static readonly string SessionMarkerPath;
         private static bool _sessionPrepared;
+        private static bool _fileFailureReportedToConsole;
+
+        internal const long MaxLogSizeBytes = 10L * 1024 * 1024;
+        internal const int MaxBackupFiles = 2;
+        internal const int MaxLogEntryChars = 64 * 1024;
+
+        public static string LastFileError { get; private set; } = string.Empty;
 
         public static string ProjectLogsDirectory
         {
@@ -51,6 +61,8 @@ namespace CodingRiver.UPilot
         /// 是否同时将日志输出到 Unity Editor Console。默认开启。
         /// </summary>
         public static bool LogToUnityConsole = EditorPrefs.GetBool(UPilotPreferences.LogToUnityConsoleKey, true);
+        private static bool _debugWireLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.DebugWireLogsKey, false);
+        private static bool _verboseLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.VerboseLogsKey, false);
 
         /// <summary>
         /// 当前线程是否为主线程。
@@ -66,10 +78,15 @@ namespace CodingRiver.UPilot
             var process = System.Diagnostics.Process.GetCurrentProcess();
             CurrentProcessId = process.Id;
             CurrentProcessStartTime = process.StartTime;
+            IsAssetImportWorker = AssetDatabase.IsAssetImportWorkerProcess();
 
             SessionMarkerPath = Path.Combine(ProjectLogsDirectory, ".session");
 
-            if (IsNewSession())
+            if (IsAssetImportWorker)
+            {
+                _sessionPrepared = true;
+            }
+            else if (IsNewSession())
             {
                 InitializeNewSession();
             }
@@ -85,6 +102,12 @@ namespace CodingRiver.UPilot
             EditorPrefs.SetBool(UPilotPreferences.LogToUnityConsoleKey, enabled);
         }
 
+        internal static void SetRuntimeLogOptions(bool debugWireLogsEnabled, bool verboseLogsEnabled)
+        {
+            _debugWireLogsEnabled = debugWireLogsEnabled;
+            _verboseLogsEnabled = verboseLogsEnabled;
+        }
+
         // ── 会话检测与初始化 ──────────────────────────────────────────────────
 
         private static bool IsNewSession()
@@ -94,9 +117,12 @@ namespace CodingRiver.UPilot
                 if (!File.Exists(SessionMarkerPath)) return true;
                 var content = File.ReadAllText(SessionMarkerPath, Encoding.UTF8);
                 var parts = content.Split('|');
-                if (parts.Length >= 2 && int.TryParse(parts[0], out var pid))
+                if (parts.Length >= 2 &&
+                    int.TryParse(parts[0], out var pid) &&
+                    DateTime.TryParse(parts[1], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind,
+                        out var processStartTime))
                 {
-                    return pid != CurrentProcessId;
+                    return pid != CurrentProcessId || processStartTime.ToUniversalTime() != CurrentProcessStartTime.ToUniversalTime();
                 }
             }
             catch
@@ -110,29 +136,43 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                Directory.CreateDirectory(ProjectLogsDirectory);
-                File.WriteAllText(SessionMarkerPath, $"{CurrentProcessId}|{CurrentProcessStartTime:O}", Encoding.UTF8);
+                lock (FileLock)
+                {
+                    Directory.CreateDirectory(ProjectLogsDirectory);
+                    File.WriteAllText(SessionMarkerPath, $"{CurrentProcessId}|{CurrentProcessStartTime:O}", Encoding.UTF8);
 
-                var header = new StringBuilder();
-                header.AppendLine("════════════════════════════════════════════════════════════");
-                header.AppendLine("Session Start");
-                header.AppendLine($"Timestamp    : {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
-                header.AppendLine($"Unity Ver    : {Application.unityVersion}");
-                header.AppendLine($"Platform     : {Application.platform}");
-                header.AppendLine($"Product Name : {Application.productName}");
-                header.AppendLine($"Process Id   : {CurrentProcessId}");
-                header.AppendLine($"MainThreadId : {MainThreadId}");
-                header.AppendLine("════════════════════════════════════════════════════════════");
+                    var header = new StringBuilder();
+                    header.AppendLine("════════════════════════════════════════════════════════════");
+                    header.AppendLine("Session Start");
+                    header.AppendLine($"Timestamp    : {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
+                    header.AppendLine($"Unity Ver    : {Application.unityVersion}");
+                    header.AppendLine($"Platform     : {Application.platform}");
+                    header.AppendLine($"Product Name : {Application.productName}");
+                    header.AppendLine($"Process Id   : {CurrentProcessId}");
+                    header.AppendLine($"MainThreadId : {MainThreadId}");
+                    header.AppendLine("════════════════════════════════════════════════════════════");
 
-                File.WriteAllText(LogFilePath, header.ToString() + Environment.NewLine, Encoding.UTF8);
+                    var headerText = header.ToString() + Environment.NewLine;
+                    try
+                    {
+                        RotateLogForNewSession(LogFilePath, MaxBackupFiles);
+                        File.WriteAllText(LogFilePath, headerText, Encoding.UTF8);
+                    }
+                    catch (Exception ex)
+                    {
+                        ReportFileFailure("初始化新会话日志", ex);
+                        File.AppendAllText(LogFilePath, Environment.NewLine + headerText, Encoding.UTF8);
+                    }
 
-                if (LogToUnityConsole)
-                    UnityEngine.Debug.Log(header.ToString());
+                    if (LogToUnityConsole)
+                        UnityEngine.Debug.Log(header.ToString());
 
-                _sessionPrepared = true;
+                    _sessionPrepared = true;
+                }
             }
             catch (Exception ex)
             {
+                ReportFileFailure("准备日志文件", ex);
                 Debug.LogError($"[UPilot] 无法准备日志文件: {ex.Message}");
             }
         }
@@ -149,33 +189,78 @@ namespace CodingRiver.UPilot
 
         private static bool ShouldLog(LogLevel level) => level >= MinLevel;
 
-        private static bool SuppressTransportConsole(string category) =>
-            UPilotTestService.Instance?.IsRunning == true && (category == "COMMAND" || category == "NETWORK");
+        internal static bool ShouldMirrorInfoToUnityConsole(string category, bool verboseLogsEnabled, bool testRunning)
+        {
+            if (testRunning && (category == "COMMAND" || category == "NETWORK"))
+                return false;
+
+            return !IsVerboseConsoleCategory(category) || verboseLogsEnabled;
+        }
+
+        private static bool IsVerboseConsoleCategory(string category)
+        {
+            return string.Equals(category, "COMMAND", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(category, "COMPILE", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(category, "EntityIds", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(category, "NETWORK", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(category, "UPilot.Flow", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldMirrorInfoToUnityConsole(string category)
+        {
+            return ShouldMirrorInfoToUnityConsole(
+                category,
+                _verboseLogsEnabled,
+                UPilotTestService.Instance?.IsRunning == true);
+        }
 
         // ── 日志滚动 ──────────────────────────────────────────────────────────
 
-        private const long MaxLogSize = 10L * 1024 * 1024; // 10 MB
-        private const int MaxBackups = 2;
-
-        private static void RotateLogIfNeeded()
+        internal static void RotateLogIfNeeded(
+            string logFilePath,
+            long incomingByteCount,
+            long maxLogSizeBytes = MaxLogSizeBytes,
+            int maxBackupFiles = MaxBackupFiles)
         {
-            if (!File.Exists(LogFilePath)) return;
-            var info = new FileInfo(LogFilePath);
-            if (info.Length < MaxLogSize) return;
+            if (!File.Exists(logFilePath)) return;
+            var info = new FileInfo(logFilePath);
+            if (info.Length == 0 || info.Length + Math.Max(0, incomingByteCount) <= maxLogSizeBytes) return;
 
-            for (int i = MaxBackups; i > 0; i--)
+            RotateLogFiles(logFilePath, maxBackupFiles);
+        }
+
+        internal static void RotateLogForNewSession(string logFilePath, int maxBackupFiles = MaxBackupFiles)
+        {
+            if (!File.Exists(logFilePath) || new FileInfo(logFilePath).Length == 0) return;
+            RotateLogFiles(logFilePath, maxBackupFiles);
+        }
+
+        private static void RotateLogFiles(string logFilePath, int maxBackupFiles)
+        {
+            for (int i = maxBackupFiles; i > 0; i--)
             {
-                var src = i == 1 ? LogFilePath : $"{LogFilePath}.{i - 1}";
-                var dst = $"{LogFilePath}.{i}";
+                var src = i == 1 ? logFilePath : $"{logFilePath}.{i - 1}";
+                var dst = $"{logFilePath}.{i}";
                 if (File.Exists(dst))
-                {
-                    try { File.Delete(dst); } catch { }
-                }
+                    File.Delete(dst);
                 if (File.Exists(src))
-                {
-                    try { File.Move(src, dst); } catch { }
-                }
+                    File.Move(src, dst);
             }
+        }
+
+        private static void ReportFileFailure(string operation, Exception ex)
+        {
+            LastFileError = $"{operation}: {ex.Message}";
+            if (_fileFailureReportedToConsole) return;
+
+            _fileFailureReportedToConsole = true;
+            UnityEngine.Debug.LogWarning($"[UPilot] 日志文件异常（本会话后续同类异常不再刷屏）: {LastFileError}");
+        }
+
+        internal static string TruncateLogEntry(string value, int maxChars = MaxLogEntryChars)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length <= maxChars) return value;
+            return value.Substring(0, maxChars) + $" ... [truncated, total={value.Length}]";
         }
 
         // ── 核心写入 ──────────────────────────────────────────────────────────
@@ -187,7 +272,7 @@ namespace CodingRiver.UPilot
         /// <param name="tags">可选标签列表，会追加在行尾。</param>
         public static void AppendLine(string line, params string[] tags)
         {
-            if (string.IsNullOrEmpty(line)) return;
+            if (IsAssetImportWorker || string.IsNullOrEmpty(line)) return;
             EnsureSessionLogFile();
 
             var sb = new StringBuilder();
@@ -209,16 +294,27 @@ namespace CodingRiver.UPilot
                 sb.Append($" [{string.Join(",", tags)}]");
             }
 
+            var entry = TruncateLogEntry(sb.ToString()) + Environment.NewLine;
+            var incomingByteCount = Encoding.UTF8.GetByteCount(entry);
+
             lock (FileLock)
             {
                 try
                 {
-                    RotateLogIfNeeded();
-                    File.AppendAllText(LogFilePath, sb.ToString() + Environment.NewLine, Encoding.UTF8);
+                    RotateLogIfNeeded(LogFilePath, incomingByteCount);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 避免日志失败反噬编辑器
+                    ReportFileFailure("滚动日志文件", ex);
+                }
+
+                try
+                {
+                    File.AppendAllText(LogFilePath, entry, Encoding.UTF8);
+                }
+                catch (Exception ex)
+                {
+                    ReportFileFailure("追加日志文件", ex);
                 }
             }
         }
@@ -255,7 +351,7 @@ namespace CodingRiver.UPilot
 
         private static void WriteToUnityConsole(string line, LogType logType, params string[] tags)
         {
-            if (!LogToUnityConsole) return;
+            if (IsAssetImportWorker || !LogToUnityConsole) return;
             if (string.IsNullOrEmpty(line)) return;
 
             var sb = new StringBuilder();
@@ -265,7 +361,7 @@ namespace CodingRiver.UPilot
                 sb.Append($" [{string.Join(",", tags)}]");
             }
 
-            var message = sb.ToString();
+            var message = TruncateLogEntry(sb.ToString());
             switch (logType)
             {
                 case LogType.Warning:
@@ -292,7 +388,7 @@ namespace CodingRiver.UPilot
         {
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [{category,-8}] {message}");
-            if (!SuppressTransportConsole(category))
+            if (ShouldMirrorInfoToUnityConsole(category))
                 WriteToUnityConsole($"[INFO ] [{category,-8}] {message}", LogType.Log);
         }
 
@@ -301,7 +397,7 @@ namespace CodingRiver.UPilot
         {
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [{category,-8}] {message}", tags);
-            if (!SuppressTransportConsole(category))
+            if (ShouldMirrorInfoToUnityConsole(category))
                 WriteToUnityConsole($"[INFO ] [{category,-8}] {message}", LogType.Log, tags);
         }
 
@@ -401,6 +497,7 @@ namespace CodingRiver.UPilot
 
         public static void LogNetwork(string category, string message, bool isSend = true)
         {
+            if (!_debugWireLogsEnabled) return;
             var sign = isSend ? "SEND" : "RECV";
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [{category,-8}] [{sign}] {message}");
@@ -411,6 +508,7 @@ namespace CodingRiver.UPilot
         /// <summary>兼容旧网络日志接口。</summary>
         public static void LogNetwork(string message, bool isSend = true)
         {
+            if (!_debugWireLogsEnabled) return;
             var sign = isSend ? "SEND" : "RECV";
             if (!ShouldLog(LogLevel.Info)) return;
             AppendLine($"[INFO ] [NET     ] [{sign}] {message}");

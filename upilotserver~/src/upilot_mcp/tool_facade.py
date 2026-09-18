@@ -63,3 +63,4 @@ class McpToolFacade(
         await self._on_editor_execution_state(execution)
         if execution.get("authoritative") and not execution.get("isStale"):
             self._recover_test_jobs()
+            self._recover_operations()

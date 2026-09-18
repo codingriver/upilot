@@ -93,7 +93,11 @@ class CommandDispatcher:
             from .operation_context import OPERATION_ID
             payload = {**payload, "requestId": request_id, "operationId": OPERATION_ID.get()}
             if name == "playmode.set":
-                payload["toolName"] = "unity_playmode_start" if payload.get("action") == "play" else "unity_playmode_stop"
+                action = str(payload.get("action") or "")
+                payload["toolName"] = {
+                    "play": "unity_playmode_start", "stop": "unity_playmode_stop",
+                    "pause": "unity_playmode_pause", "resume": "unity_playmode_resume",
+                }.get(action, "unity_playmode_set")
         self.state.create_command(command_id=command_id, request_id=request_id, name=name, payload=payload)
 
         future = self.transport.register_pending(command_id)

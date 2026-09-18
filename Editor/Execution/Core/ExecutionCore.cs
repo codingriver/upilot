@@ -89,6 +89,9 @@ namespace CodingRiver.UPilot.Execution
         public string handle = "";
         public string summary = "";
         public string serializationStatus = "inline";
+        public string diagnosticCode = "";
+        public int actualBytes;
+        public int limitBytes;
     }
 
     public sealed class ExecutionValue
@@ -351,10 +354,37 @@ namespace CodingRiver.UPilot.Execution
             { "void", typeof(void) }, { "Type", typeof(Type) },
         };
 
+        // Type lookup is on the expression hot path and includes negative results.
+        // Individual assemblies cannot be unloaded, but the set is mutable within a
+        // managed domain (notably Reflection.Emit), so cache misses as well as hits
+        // must be invalidated on every AssemblyLoad notification.
+        private static readonly object ResolveCacheGate = new object();
+        private const int ResolveCacheCapacity = 1024;
+        private static readonly Dictionary<string, Type> ResolveCache = new Dictionary<string, Type>(StringComparer.Ordinal);
+        private static long _resolveCacheEpoch;
+
+        static ExecutionTypeResolver()
+        {
+            AppDomain.CurrentDomain.AssemblyLoad += (_, __) =>
+            {
+                lock (ResolveCacheGate)
+                {
+                    _resolveCacheEpoch++;
+                    ResolveCache.Clear();
+                }
+            };
+        }
+
         public static Type Resolve(string typeName, IEnumerable<string> imports = null, bool allowVoid = false)
         {
             if (string.IsNullOrWhiteSpace(typeName)) return null;
             string name = typeName.Trim();
+            var normalizedImports = NormalizeImports(imports);
+            return ResolveCached("full", name, normalizedImports, allowVoid, () => ResolveUncached(name, normalizedImports, allowVoid));
+        }
+
+        private static Type ResolveUncached(string name, IEnumerable<string> imports, bool allowVoid)
+        {
             var parsed = TryResolveComposite(name, imports, allowVoid);
             if (parsed.Handled) return parsed.Type;
             if (Aliases.TryGetValue(name, out var alias))
@@ -390,6 +420,44 @@ namespace CodingRiver.UPilot.Execution
                     "Type name is ambiguous: " + name,
                     new Dictionary<string, object> { { "candidates", candidates.Select(t => t.AssemblyQualifiedName).ToArray() } });
             return null;
+        }
+
+        private static string[] NormalizeImports(IEnumerable<string> imports) =>
+            imports == null ? Array.Empty<string>() : imports.Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim()).ToArray();
+
+        private static Type ResolveCached(string kind, string name, string[] imports, bool allowVoid, Func<Type> resolve)
+        {
+            string key = kind + "\u001f" + (allowVoid ? "1" : "0") + "\u001f" + name.Length + ":" + name
+                + "\u001f" + string.Join("\u001f", imports.Select(value => value.Length + ":" + value));
+            long epoch;
+            lock (ResolveCacheGate)
+            {
+                if (ResolveCache.TryGetValue(key, out var cached)) return cached;
+                epoch = _resolveCacheEpoch;
+            }
+
+            Type resolved = resolve();
+            lock (ResolveCacheGate)
+            {
+                // Do not repopulate the cache with a result observed before an
+                // AssemblyLoad callback completed while the lookup was in flight.
+                if (epoch == _resolveCacheEpoch)
+                {
+                    if (ResolveCache.Count >= ResolveCacheCapacity) ResolveCache.Clear();
+                    ResolveCache[key] = resolved;
+                }
+            }
+            return resolved;
+        }
+
+        internal static void ClearCacheForTests()
+        {
+            lock (ResolveCacheGate)
+            {
+                _resolveCacheEpoch++;
+                ResolveCache.Clear();
+            }
         }
 
         private struct CompositeResolution { public bool Handled; public Type Type; }
@@ -484,6 +552,13 @@ namespace CodingRiver.UPilot.Execution
         {
             if (string.IsNullOrWhiteSpace(typeName)) return null;
             string name = typeName.Trim();
+            var normalizedImports = NormalizeImports(imports);
+            return ResolveCached("root", name, normalizedImports, allowVoid: false,
+                () => ResolveExpressionRootUncached(name, normalizedImports));
+        }
+
+        private static Type ResolveExpressionRootUncached(string name, IEnumerable<string> imports)
+        {
             if (Aliases.TryGetValue(name, out var alias) && alias != typeof(void)) return alias;
             var exact = AppDomain.CurrentDomain.GetAssemblies()
                 .Select(assembly =>
@@ -985,6 +1060,8 @@ namespace CodingRiver.UPilot.Execution
             public object[] Arguments;
             public Dictionary<int, ExecutionValue> Sources;
             public int Score;
+            public int OptionalDefaults;
+            public int ExpandedParams;
         }
 
         public static BoundInvocation Bind(
@@ -995,13 +1072,31 @@ namespace CodingRiver.UPilot.Execution
             IReadOnlyList<string> exactParameterTypes = null,
             IReadOnlyList<Type> genericTypeArguments = null,
             bool allowNonPublic = true,
-            bool inferGenericTypeArguments = false)
+            bool inferGenericTypeArguments = false,
+            Func<Func<object>, object> userConversionInvoker = null)
+        {
+            return BindCore(declaringType, methodName, isStatic, supplied, exactParameterTypes,
+                genericTypeArguments, allowNonPublic, inferGenericTypeArguments, false, userConversionInvoker);
+        }
+
+        public static void ValidateShape(Type declaringType, string methodName, bool isStatic,
+            IReadOnlyList<ExecutionValue> supplied, IReadOnlyList<string> exactParameterTypes,
+            IReadOnlyList<Type> genericTypeArguments)
+        {
+            BindCore(declaringType, methodName, isStatic, supplied, exactParameterTypes,
+                genericTypeArguments, true, false, true, null);
+        }
+
+        private static BoundInvocation BindCore(Type declaringType, string methodName, bool isStatic,
+            IReadOnlyList<ExecutionValue> supplied, IReadOnlyList<string> exactParameterTypes,
+            IReadOnlyList<Type> genericTypeArguments, bool allowNonPublic, bool inferGenericTypeArguments, bool shapeOnly,
+            Func<Func<object>, object> userConversionInvoker)
         {
             if (declaringType == null) throw new ExecutionContractException("TYPE_NOT_FOUND", "Declaring type is required.");
             if (string.IsNullOrWhiteSpace(methodName)) throw new ExecutionContractException("METHOD_NAME_REQUIRED", "Method name is required.");
             supplied = supplied ?? Array.Empty<ExecutionValue>();
             var flags = BindingFlags.Public | (allowNonPublic ? BindingFlags.NonPublic : 0) |
-                        (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+                        (isStatic ? BindingFlags.Static | BindingFlags.FlattenHierarchy : BindingFlags.Instance);
             var methods = ReflectionCache.GetMethods(declaringType, methodName, flags);
             var successes = new List<Candidate>();
             var failures = new List<string>();
@@ -1045,8 +1140,17 @@ namespace CodingRiver.UPilot.Execution
                     if (!exact) continue;
                 }
 
-                if (TryBindCandidate(method, supplied, out var args, out var sources, out var score, out var failure))
-                    successes.Add(new Candidate { Method = method, Arguments = args, Sources = sources, Score = score });
+                if (TryBindCandidate(method, supplied, out var args, out var sources, out var score, out var optionalDefaults,
+                        out var expandedParams, out var failure, shapeOnly, probeOnly: !shapeOnly, userConversionInvoker: userConversionInvoker))
+                    successes.Add(new Candidate
+                    {
+                        Method = method,
+                        Arguments = args,
+                        Sources = sources,
+                        Score = score,
+                        OptionalDefaults = optionalDefaults,
+                        ExpandedParams = expandedParams,
+                    });
                 else
                     failures.Add(FormatSignature(method) + ": " + failure);
             }
@@ -1063,8 +1167,14 @@ namespace CodingRiver.UPilot.Execution
                         { "failures", failures.ToArray() },
                     });
 
+            if (shapeOnly) return null;
             int bestScore = successes.Max(c => c.Score);
             var best = successes.Where(c => c.Score == bestScore).ToList();
+            int leastExpandedParams = best.Min(c => c.ExpandedParams);
+            best = best.Where(c => c.ExpandedParams == leastExpandedParams).ToList();
+            int fewestOptionalDefaults = best.Min(c => c.OptionalDefaults);
+            best = best.Where(c => c.OptionalDefaults == fewestOptionalDefaults).ToList();
+            best = SelectMostSpecificNullCandidate(best);
             if (best.Count != 1)
                 throw new ExecutionContractException(
                     "REFLECTION_BIND_AMBIGUOUS",
@@ -1072,12 +1182,17 @@ namespace CodingRiver.UPilot.Execution
                     new Dictionary<string, object> { { "candidates", best.Select(c => FormatSignature(c.Method)).ToArray() } });
 
             var selected = best[0];
+            if (!TryBindCandidate(selected.Method, supplied, out var selectedArguments, out var selectedSources,
+                    out _, out _, out _, out var selectedFailure, shapeOnly: false, probeOnly: false,
+                    userConversionInvoker: userConversionInvoker))
+                throw new ExecutionContractException("REFLECTION_BIND_FAILED",
+                    "The selected overload could not convert its arguments: " + selectedFailure);
             return new BoundInvocation
             {
                 Method = selected.Method,
-                Arguments = selected.Arguments,
+                Arguments = selectedArguments,
                 Parameters = selected.Method.GetParameters(),
-                SourceArguments = selected.Sources,
+                SourceArguments = selectedSources,
             };
         }
 
@@ -1192,12 +1307,19 @@ namespace CodingRiver.UPilot.Execution
             out object[] arguments,
             out Dictionary<int, ExecutionValue> sources,
             out int score,
-            out string failure)
+            out int optionalDefaults,
+            out int expandedParams,
+            out string failure,
+            bool shapeOnly = false,
+            bool probeOnly = false,
+            Func<Func<object>, object> userConversionInvoker = null)
         {
             var parameters = method.GetParameters();
             arguments = new object[parameters.Length];
             sources = new Dictionary<int, ExecutionValue>();
             score = 0;
+            optionalDefaults = 0;
+            expandedParams = 0;
             failure = "";
             var used = new HashSet<int>();
             int nextPositional = 0;
@@ -1230,7 +1352,14 @@ namespace CodingRiver.UPilot.Execution
                     if (suppliedIndex >= 0) remaining.Add(supplied[suppliedIndex]);
                     for (int i = nextPositional; i < supplied.Count; i++)
                         if (!used.Contains(i) && string.IsNullOrWhiteSpace(supplied[i].Name)) remaining.Add(supplied[i]);
-                    if (remaining.Count == 1 && TryConvert(remaining[0], parameter.ParameterType, out var directArray, out var directScore, out _))
+                    if (shapeOnly)
+                    {
+                        foreach (var item in remaining)
+                            for (int index = 0; index < supplied.Count; index++)
+                                if (ReferenceEquals(supplied[index], item)) { used.Add(index); break; }
+                        continue;
+                    }
+                    if (remaining.Count == 1 && TryConvert(remaining[0], parameter.ParameterType, out var directArray, out var directScore, out _, probeOnly, userConversionInvoker))
                     {
                         arguments[parameterIndex] = directArray;
                         score += directScore;
@@ -1238,10 +1367,11 @@ namespace CodingRiver.UPilot.Execution
                         continue;
                     }
                     var array = Array.CreateInstance(elementType, remaining.Count);
+                    expandedParams++;
                     for (int i = 0; i < remaining.Count; i++)
                     {
-                        if (!TryConvert(remaining[i], elementType, out var converted, out var itemScore, out failure)) return false;
-                        array.SetValue(converted, i);
+                        if (!TryConvert(remaining[i], elementType, out var converted, out var itemScore, out failure, probeOnly, userConversionInvoker)) return false;
+                        if (!probeOnly) array.SetValue(converted, i);
                         score += itemScore;
                     }
                     arguments[parameterIndex] = array;
@@ -1263,13 +1393,13 @@ namespace CodingRiver.UPilot.Execution
                 {
                     if (parameter.IsOut)
                     {
-                        arguments[parameterIndex] = DefaultValue(parameter.ParameterType.GetElementType());
+                        if (!shapeOnly) arguments[parameterIndex] = DefaultValue(parameter.ParameterType.GetElementType());
                         continue;
                     }
                     if (parameter.HasDefaultValue || parameter.IsOptional)
                     {
                         arguments[parameterIndex] = parameter.DefaultValue == DBNull.Value ? Type.Missing : parameter.DefaultValue;
-                        score += 1;
+                        optionalDefaults++;
                         continue;
                     }
                     failure = "missing required parameter " + parameter.Name;
@@ -1290,8 +1420,9 @@ namespace CodingRiver.UPilot.Execution
                     return false;
                 }
                 var targetType = parameter.ParameterType.IsByRef ? parameter.ParameterType.GetElementType() : parameter.ParameterType;
+                if (shapeOnly) continue;
                 int conversionScore = 0;
-                if (!parameter.IsOut && !TryConvert(source, targetType, out arguments[parameterIndex], out conversionScore, out failure))
+                if (!parameter.IsOut && !TryConvert(source, targetType, out arguments[parameterIndex], out conversionScore, out failure, probeOnly, userConversionInvoker))
                     return false;
                 if (parameter.IsOut) arguments[parameterIndex] = DefaultValue(targetType);
                 else score += conversionScore;
@@ -1306,7 +1437,65 @@ namespace CodingRiver.UPilot.Execution
             return true;
         }
 
-        private static bool TryConvert(ExecutionValue source, Type targetType, out object result, out int score, out string failure)
+        private static List<Candidate> SelectMostSpecificNullCandidate(List<Candidate> candidates)
+        {
+            if (candidates == null || candidates.Count < 2) return candidates;
+            var mostSpecific = new List<Candidate>();
+            foreach (var candidate in candidates)
+            {
+                bool isMoreSpecificThanAll = true;
+                bool isStrictlyMoreSpecific = false;
+                foreach (var other in candidates)
+                {
+                    if (ReferenceEquals(candidate, other)) continue;
+                    if (!IsMoreSpecificForNullSources(candidate, other, out var strictlyMoreSpecific))
+                    {
+                        isMoreSpecificThanAll = false;
+                        break;
+                    }
+                    isStrictlyMoreSpecific |= strictlyMoreSpecific;
+                }
+                if (isMoreSpecificThanAll && isStrictlyMoreSpecific) mostSpecific.Add(candidate);
+            }
+            return mostSpecific.Count == 1 ? mostSpecific : candidates;
+        }
+
+        private static bool IsMoreSpecificForNullSources(Candidate candidate, Candidate other, out bool strictlyMoreSpecific)
+        {
+            strictlyMoreSpecific = false;
+            bool comparedNullSource = false;
+            foreach (var pair in candidate.Sources)
+            {
+                var source = pair.Value;
+                if (source == null || source.Value != null) continue;
+                int otherParameterIndex = -1;
+                foreach (var otherPair in other.Sources)
+                {
+                    if (!ReferenceEquals(otherPair.Value, source)) continue;
+                    otherParameterIndex = otherPair.Key;
+                    break;
+                }
+                if (otherParameterIndex < 0) continue;
+
+                var candidateType = ParameterValueType(candidate.Method.GetParameters()[pair.Key]);
+                var otherType = ParameterValueType(other.Method.GetParameters()[otherParameterIndex]);
+                if (candidateType == otherType) continue;
+                comparedNullSource = true;
+                if (candidateType == null || otherType == null || !otherType.IsAssignableFrom(candidateType)) return false;
+                if (!candidateType.IsAssignableFrom(otherType)) strictlyMoreSpecific = true;
+            }
+            return comparedNullSource;
+        }
+
+        private static Type ParameterValueType(ParameterInfo parameter)
+        {
+            if (parameter == null) return null;
+            var type = parameter.ParameterType;
+            return type.IsByRef ? type.GetElementType() : type;
+        }
+
+        private static bool TryConvert(ExecutionValue source, Type targetType, out object result, out int score, out string failure,
+            bool probeOnly = false, Func<Func<object>, object> userConversionInvoker = null)
         {
             result = null;
             score = 0;
@@ -1321,68 +1510,96 @@ namespace CodingRiver.UPilot.Execution
                 return false;
             }
             Type valueType = value.GetType();
-            if (targetType == valueType) { result = value; score = 100; return true; }
-            if (targetType.IsAssignableFrom(valueType)) { result = value; score = 90; return true; }
+            if (targetType == valueType) { if (!probeOnly) result = value; score = 100; return true; }
+            if (targetType.IsAssignableFrom(valueType)) { if (!probeOnly) result = value; score = 90; return true; }
             if (value is LambdaValue lambda && typeof(Delegate).IsAssignableFrom(targetType))
             {
-                result = lambda.ToDelegate(targetType);
+                if (!probeOnly) result = lambda.ToDelegate(targetType);
                 score = 85;
                 return true;
             }
             if (source.DeclaredType != null && source.DeclaredType == targetType)
             {
-                result = value;
+                if (!probeOnly) result = value;
                 score = 95;
                 return true;
             }
             if (nullable != null) targetType = nullable;
-
-            try
+            if (IsImplicitNumericConversion(valueType, targetType))
             {
-                if (targetType.IsEnum)
-                {
-                    result = value is string text
-                        ? Enum.Parse(targetType, text, true)
-                        : Enum.ToObject(targetType, Convert.ToInt64(value, CultureInfo.InvariantCulture));
-                    score = 70;
-                    return true;
-                }
-                if (targetType == typeof(Guid))
-                {
-                    result = Guid.Parse(Convert.ToString(value, CultureInfo.InvariantCulture));
-                    score = 70;
-                    return true;
-                }
-                if (targetType == typeof(Type) && value is string typeName)
-                {
-                    result = ExecutionTypeResolver.Resolve(typeName);
-                    if (result == null) throw new InvalidOperationException("type not found");
-                    score = 70;
-                    return true;
-                }
-                if (targetType.IsArray && value is IEnumerable enumerable && !(value is string))
-                {
-                    var items = enumerable.Cast<object>().ToList();
-                    var elementType = targetType.GetElementType();
-                    var array = Array.CreateInstance(elementType, items.Count);
-                    for (int i = 0; i < items.Count; i++)
-                    {
-                        if (!TryConvert(new ExecutionValue { Value = items[i] }, elementType, out var converted, out _, out failure)) return false;
-                        array.SetValue(converted, i);
-                    }
-                    result = array;
-                    score = 60;
-                    return true;
-                }
-                result = Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
-                score = 50;
+                if (!probeOnly) result = Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+                score = NumericConversionScore(valueType, targetType);
                 return true;
             }
-            catch (Exception ex)
+            if (targetType.IsArray && value is IEnumerable enumerable && !(value is string))
             {
-                failure = "cannot convert " + FriendlyName(valueType) + " to " + FriendlyName(targetType) + ": " + ex.Message;
+                var items = enumerable.Cast<object>().ToList();
+                var elementType = targetType.GetElementType();
+                var array = Array.CreateInstance(elementType, items.Count);
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (!TryConvert(new ExecutionValue { Value = items[i] }, elementType, out var converted, out _, out failure,
+                        probeOnly, userConversionInvoker)) return false;
+                    if (!probeOnly) array.SetValue(converted, i);
+                }
+                if (!probeOnly) result = array;
+                score = 60;
+                return true;
+            }
+            var implicitConversions = valueType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Concat(targetType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+                .Where(method => method.Name == "op_Implicit" && method.ReturnType == targetType)
+                .Where(method =>
+                {
+                    var parameters = method.GetParameters();
+                    return parameters.Length == 1 && parameters[0].ParameterType.IsAssignableFrom(valueType);
+                })
+                .GroupBy(method => method.Module.ModuleVersionId.ToString("N") + ":" + method.MetadataToken)
+                .Select(group => group.First())
+                .ToArray();
+            if (implicitConversions.Length == 1)
+            {
+                if (!probeOnly)
+                {
+                    Func<object> invokeConversion = () =>
+                    {
+                        try { return implicitConversions[0].Invoke(null, new[] { value }); }
+                        catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+                    };
+                    result = userConversionInvoker == null ? invokeConversion() : userConversionInvoker(invokeConversion);
+                }
+                score = 70;
+                return true;
+            }
+            if (implicitConversions.Length > 1)
+            {
+                failure = "multiple implicit conversions from " + FriendlyName(valueType) + " to " + FriendlyName(targetType);
                 return false;
             }
+            failure = "no supported implicit conversion from " + FriendlyName(valueType) + " to " + FriendlyName(targetType);
+            return false;
+        }
+
+        private static bool IsImplicitNumericConversion(Type source, Type target)
+        {
+            if (source == target || source == null || target == null || source.IsEnum || target.IsEnum) return false;
+            if (source == typeof(sbyte)) return target == typeof(short) || target == typeof(int) || target == typeof(long) || target == typeof(float) || target == typeof(double) || target == typeof(decimal);
+            if (source == typeof(byte)) return target == typeof(short) || target == typeof(ushort) || target == typeof(int) || target == typeof(uint) || target == typeof(long) || target == typeof(ulong) || target == typeof(float) || target == typeof(double) || target == typeof(decimal);
+            if (source == typeof(short)) return target == typeof(int) || target == typeof(long) || target == typeof(float) || target == typeof(double) || target == typeof(decimal);
+            if (source == typeof(ushort) || source == typeof(char)) return target == typeof(int) || target == typeof(uint) || target == typeof(long) || target == typeof(ulong) || target == typeof(float) || target == typeof(double) || target == typeof(decimal) || (source == typeof(char) && target == typeof(ushort));
+            if (source == typeof(int)) return target == typeof(long) || target == typeof(float) || target == typeof(double) || target == typeof(decimal);
+            if (source == typeof(uint)) return target == typeof(long) || target == typeof(ulong) || target == typeof(float) || target == typeof(double) || target == typeof(decimal);
+            if (source == typeof(long) || source == typeof(ulong)) return target == typeof(float) || target == typeof(double) || target == typeof(decimal);
+            return source == typeof(float) && target == typeof(double);
+        }
+
+        private static int NumericConversionScore(Type source, Type target)
+        {
+            if (target == typeof(long) || target == typeof(ulong)) return 84;
+            if (target == typeof(float)) return 80;
+            if (target == typeof(double)) return 78;
+            if (target == typeof(decimal)) return 76;
+            return 82;
         }
 
         private static object DefaultValue(Type type) { return type != null && type.IsValueType ? Activator.CreateInstance(type) : null; }

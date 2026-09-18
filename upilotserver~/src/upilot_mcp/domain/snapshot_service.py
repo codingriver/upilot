@@ -18,10 +18,75 @@ from ..operation_context import TASK_TOOL
 
 
 _TERMINAL_SNAPSHOT_STATES = {"completed", "partial", "failed", "cancelled"}
+_PERSISTENCE_SHA256 = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 
 
 class SnapshotDomainService:
     """Facade methods for the versioned Unity Snapshot job contract."""
+
+    @staticmethod
+    def _annotate_persistence(data: dict[str, Any]) -> dict[str, Any]:
+        """Expose a conservative persistence verdict without changing job outcome.
+
+        The Unity service owns manifest/state recovery.  The server must not
+        infer durable evidence from a terminal business result, though: a
+        completed capture can still have a missing, stale, or unrebuildable
+        state sidecar.  Keep the original diagnostics intact and add a derived
+        boolean that is true only for the v2 evidence shape.
+        """
+        result = dict(data)
+        persistence_status = str(result.get("persistenceStatus") or "").lower()
+        persistence_error = str(result.get("persistenceError") or "").strip()
+        # These are Unity-produced evidence fields, not permissive user input.
+        # A string such as "2" must not become a signed v2 record merely by
+        # Python coercion (and bool is an int subclass, so reject it as well).
+        schema_raw = result.get("persistenceSchemaVersion")
+        sequence_raw = result.get("snapshotSequence")
+        bytes_raw = result.get("manifestBytes")
+        schema_version = schema_raw if type(schema_raw) is int else 0
+        sequence = sequence_raw if type(sequence_raw) is int else 0
+        manifest_bytes = bytes_raw if type(bytes_raw) is int else 0
+        manifest_hash = str(result.get("manifestSha256") or "")
+        result["persistenceVerified"] = bool(
+            persistence_status == "verified"
+            and result.get("terminal") is True
+            and not persistence_error
+            and schema_version >= 2
+            and sequence > 0
+            and manifest_bytes > 0
+            and _PERSISTENCE_SHA256.fullmatch(manifest_hash)
+        )
+        return result
+
+    @staticmethod
+    def _require_snapshot_identity(response, snapshot_id: str, operation: str):
+        """Reject a bridge reply for another job instead of attaching it to ours."""
+        if not response.ok:
+            return response
+        if not isinstance(response.data, dict):
+            return fail(
+                response.request_id,
+                "SNAPSHOT_IDENTITY_MISSING",
+                f"{operation} returned no Snapshot payload to bind to the requested identity.",
+                {"expectedSnapshotId": snapshot_id, "operation": operation},
+            )
+        actual = str(response.data.get("snapshotId") or "")
+        if not actual:
+            return fail(
+                response.request_id,
+                "SNAPSHOT_IDENTITY_MISSING",
+                f"{operation} did not return the Snapshot identity it was asked to observe.",
+                {"expectedSnapshotId": snapshot_id, "operation": operation},
+            )
+        if actual != snapshot_id:
+            return fail(
+                response.request_id,
+                "SNAPSHOT_IDENTITY_MISMATCH",
+                f"{operation} returned a different Snapshot identity.",
+                {"expectedSnapshotId": snapshot_id, "actualSnapshotId": actual, "operation": operation},
+            )
+        response.data = SnapshotDomainService._annotate_persistence(response.data)
+        return response
 
     async def _bounded_snapshot_task(self, tool_name: str, arguments: dict, wait_ms: int = 4500):
         deadline = time.monotonic() + min(max(wait_ms, 0), 4500) / 1000
@@ -106,15 +171,22 @@ class SnapshotDomainService:
             return started
 
         snapshot_id = str(started.data.get("snapshotId") or "")
+        if request_key and str(started.data.get("requestKey") or "") != request_key:
+            return fail(
+                started.request_id,
+                "SNAPSHOT_REQUEST_KEY_MISMATCH",
+                "Snapshot start returned a requestKey belonging to another request.",
+                {"expectedRequestKey": request_key, "actualRequestKey": started.data.get("requestKey")},
+            )
         if not snapshot_id or wait_ms <= 0:
-            return started
+            return self._require_snapshot_identity(started, snapshot_id, "snapshot.start")
 
         deadline = time.monotonic() + min(max(int(wait_ms), 0), 30000) / 1000.0
         current = started
         while time.monotonic() < deadline:
             status = str((current.data or {}).get("status") or "").lower()
             if status in _TERMINAL_SNAPSHOT_STATES:
-                return current
+                return self._require_snapshot_identity(current, snapshot_id, "snapshot.status")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -126,29 +198,35 @@ class SnapshotDomainService:
             )
             if not current.ok:
                 return current
+            current = self._require_snapshot_identity(current, snapshot_id, "snapshot.status")
+            if not current.ok:
+                return current
         data = dict(current.data or {})
         data["waitWindowElapsed"] = True
         data["terminal"] = False
         data.setdefault("snapshotId", snapshot_id)
         current.data = data
-        return current
+        return self._require_snapshot_identity(current, snapshot_id, "snapshot.status")
 
     async def snapshot_status(self, snapshot_id: str, detail_level: str = "summary"):
-        return await self.dispatcher.call(
+        response = await self.dispatcher.call(
             new_id("req"),
             "snapshot.status",
             {"snapshotId": snapshot_id, "detailLevel": detail_level},
         )
+        return self._require_snapshot_identity(response, snapshot_id, "snapshot.status")
 
     async def snapshot_cancel(self, snapshot_id: str):
-        return await self.dispatcher.call(
+        response = await self.dispatcher.call(
             new_id("req"), "snapshot.cancel", {"snapshotId": snapshot_id}
         )
+        return self._require_snapshot_identity(response, snapshot_id, "snapshot.cancel")
 
     async def snapshot_collect_artifacts(self, snapshot_id: str):
-        return await self.dispatcher.call(
+        response = await self.dispatcher.call(
             new_id("req"), "snapshot.collect", {"snapshotId": snapshot_id}
         )
+        return self._require_snapshot_identity(response, snapshot_id, "snapshot.collect")
 
     def _snapshot_project_root(self) -> Path | None:
         session = self.server.session_manager.active

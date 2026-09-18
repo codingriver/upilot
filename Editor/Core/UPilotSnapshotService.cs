@@ -61,11 +61,13 @@ namespace CodingRiver.UPilot
         public string targetId = string.Empty;
         public string kind = "camera";
         public string instanceId = string.Empty;
+        public string domainGeneration = string.Empty;
         public string hierarchyPath = string.Empty;
         public string exactName = string.Empty;
         public string cameraName = string.Empty;
         public string fullTypeName = string.Empty;
         public string title = string.Empty;
+        public bool requireContentRect;
         public int targetDisplay;
         public string[] channels = Array.Empty<string>();
         public bool depthPreview;
@@ -138,9 +140,20 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public sealed class SnapshotWindowRectPayload
+    {
+        public string coordinateSpace = "screenPixels";
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
+    }
+
+    [Serializable]
     public sealed class SnapshotEditorWindowEvidencePayload
     {
         public string instanceId;
+        public string domainGeneration;
         public string title;
         public string fullTypeName;
         public bool focused;
@@ -148,6 +161,22 @@ namespace CodingRiver.UPilot
         public float y;
         public float width;
         public float height;
+        public float pixelsPerPoint;
+        public bool contentRectVerified;
+        public bool cropComplete;
+        public bool includesDecorations;
+        public string geometrySource;
+        public SnapshotWindowRectPayload hostRect;
+        public SnapshotWindowRectPayload contentRect;
+        public SnapshotWindowRectPayload cropRect;
+        public int contentLeft;
+        public int contentTop;
+        public int contentRight;
+        public int contentBottom;
+        public int cropLeft;
+        public int cropTop;
+        public int cropRight;
+        public int cropBottom;
     }
 
     [Serializable]
@@ -180,6 +209,14 @@ namespace CodingRiver.UPilot
         public long repaintSequence;
         public bool includesSceneGui;
         public bool includesHandles;
+        public float pixelsPerPoint;
+        public bool contentRectVerified;
+        public bool cropComplete;
+        public bool includesDecorations;
+        public string geometrySource;
+        public SnapshotWindowRectPayload hostRect;
+        public SnapshotWindowRectPayload contentRect;
+        public SnapshotWindowRectPayload cropRect;
     }
 
     [Serializable]
@@ -240,6 +277,12 @@ namespace CodingRiver.UPilot
     public sealed class SnapshotJobPayload
     {
         public int snapshotSchemaVersion = 1;
+        public int persistenceSchemaVersion = 2;
+        public long snapshotSequence;
+        public string persistenceStatus = "pending";
+        public string persistenceError = "";
+        public bool persistenceRecovered;
+        public long manifestBytes;
         public string snapshotId;
         public string status;
         public bool terminal;
@@ -274,19 +317,36 @@ namespace CodingRiver.UPilot
         private const long MaxPixels = 64L * 1024L * 1024L;
         private const int MaxRecoveredJobs = 512;
         private const string SnapshotStateDirectory = "Library/UPilot/SnapshotJobs";
+        // Test-only, deliberately opt-in fault seam for the two-file commit
+        // boundary.  Production leaves it null.
+        internal static Func<string, Exception> PersistenceWriteFaultForTests;
         private readonly UPilotBridge _bridge;
+        // Test-only, instance-scoped observation seam. A recovered record must
+        // never schedule a new capture; this observes that scheduling point.
+        private readonly Action<string> _captureScheduleObserverForTests;
         private readonly object _gate = new object();
         private readonly Dictionary<string, SnapshotJobPayload> _jobs =
             new Dictionary<string, SnapshotJobPayload>(StringComparer.Ordinal);
+        // The global gate owns only the job indexes.  A Snapshot can write several
+        // files, so its disk work must be serialized independently instead of
+        // blocking unrelated jobs behind the index lock.
+        private readonly Dictionary<string, object> _jobWriters =
+            new Dictionary<string, object>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _requestKeys =
             new Dictionary<string, string>(StringComparer.Ordinal);
         private readonly HashSet<string> _scheduledJobs =
             new HashSet<string>(StringComparer.Ordinal);
 
-        public UPilotSnapshotService(UPilotBridge bridge)
+        public UPilotSnapshotService(UPilotBridge bridge) : this(bridge, null)
+        {
+        }
+
+        internal UPilotSnapshotService(UPilotBridge bridge, Action<string> captureScheduleObserverForTests)
         {
             _bridge = bridge;
+            _captureScheduleObserverForTests = captureScheduleObserverForTests;
             LoadPersistedJobs();
+            if (bridge != null) UPilotSnapshotApiV1.Bind(this);
         }
 
         public void RegisterCommands()
@@ -351,22 +411,29 @@ namespace CodingRiver.UPilot
         private async Task HandleCancelAsync(string id, string json, CancellationToken token)
         {
             var request = JsonUtility.FromJson<SnapshotIdMessage>(json)?.payload;
-            var job = FindJob(request?.snapshotId);
+            var job = CancelJob(request?.snapshotId);
             if (job == null)
             {
                 await _bridge.SendErrorAsync(id, "SNAPSHOT_NOT_FOUND", $"Snapshot not found: {request?.snapshotId}", token, "snapshot.cancel");
                 return;
             }
-            lock (_gate)
+            await _bridge.SendResultAsync(id, "snapshot.cancel", job, token);
+        }
+
+        internal SnapshotJobPayload CancelJob(string snapshotId)
+        {
+            var job = FindJob(snapshotId);
+            if (job == null) return null;
+            lock (WriterFor(job.snapshotId))
             {
                 if (!job.terminal)
                 {
                     job.cancelRequested = true;
                     job.updatedAtUtcMs = UtcNowMs();
-                    PersistJob(job);
+                    PersistJobLocked(job);
                 }
             }
-            await _bridge.SendResultAsync(id, "snapshot.cancel", job, token);
+            return job;
         }
 
         private async Task HandleCollectAsync(string id, string json, CancellationToken token)
@@ -393,6 +460,7 @@ namespace CodingRiver.UPilot
             }
             if (shouldSchedule)
             {
+                _captureScheduleObserverForTests?.Invoke(job.snapshotId);
                 EditorApplication.CallbackFunction scheduled = null;
                 scheduled = () =>
                 {
@@ -405,10 +473,14 @@ namespace CodingRiver.UPilot
             return job;
         }
 
+        internal SnapshotJobPayload StartFromApi(SnapshotCapturePayload request) => CreateAndSchedule(request);
+        internal SnapshotJobPayload ReadFromApi(string snapshotId) => FindJob(snapshotId);
+
         private SnapshotJobPayload CreateJob(SnapshotCapturePayload request)
         {
             ValidateRequest(request);
             var requestHash = Sha256(Encoding.UTF8.GetBytes(JsonUtility.ToJson(request)));
+            SnapshotJobPayload created = null;
             lock (_gate)
             {
                 if (!string.IsNullOrWhiteSpace(request.requestKey) && _requestKeys.TryGetValue(request.requestKey, out var existingId))
@@ -441,16 +513,26 @@ namespace CodingRiver.UPilot
                     manifestPath = ToProjectRelative(Path.Combine(output, "manifest.json")),
                 };
                 _jobs.Add(snapshotId, job);
+                _jobWriters.Add(snapshotId, new object());
                 if (!string.IsNullOrWhiteSpace(request.requestKey)) _requestKeys.Add(request.requestKey, snapshotId);
-                PersistJob(job);
-                return job;
+                created = job;
             }
+            // Do not hold _gate over filesystem I/O.  The job has a dedicated
+            // writer from the instant it becomes visible in the in-memory index.
+            PersistJob(created);
+            return created;
         }
 
         private async void ExecuteJob(SnapshotJobPayload job, SnapshotCapturePayload request)
         {
             try
             {
+                if (job.terminal) return;
+                if (job.cancelRequested)
+                {
+                    FinishJob(job, "cancelled", false);
+                    return;
+                }
                 UpdateJob(job, "running", "resolving", false, false);
                 var resolved = ResolveTargets(request);
                 RecordResolutionFailures(job, resolved);
@@ -521,9 +603,7 @@ namespace CodingRiver.UPilot
                     }
                     catch (Exception ex)
                     {
-                        var code = ex is SnapshotRequestException sre
-                            ? sre.Code
-                            : "SNAPSHOT_TARGET_CAPTURE_FAILED";
+                        var code = CaptureFailureCode(ex);
                         RecordTargetFailure(job, item.request, code, ex.Message, "rendering");
                         if (ex is EditorWindowCaptureException captureError)
                             job.failures[job.failures.Count - 1].captureDiagnostics = captureError.Diagnostics;
@@ -577,6 +657,19 @@ namespace CodingRiver.UPilot
                 RejectArtifacts(job);
                 FinishJob(job, "failed", false);
             }
+        }
+
+        internal static string CaptureFailureCode(Exception exception)
+        {
+            if (exception is SnapshotRequestException requestException)
+                return requestException.Code;
+            if (exception is EditorWindowCaptureException captureException
+                && string.Equals(
+                    captureException.Diagnostics?.originalError,
+                    "WINDOW_CHANGED_DURING_CAPTURE",
+                    StringComparison.Ordinal))
+                return "WINDOW_CHANGED_DURING_CAPTURE";
+            return "SNAPSHOT_TARGET_CAPTURE_FAILED";
         }
 
         private Task CaptureTargetAsync(
@@ -800,6 +893,7 @@ namespace CodingRiver.UPilot
                 editorWindow = new SnapshotEditorWindowEvidencePayload
                 {
                     instanceId = WireId(sceneView),
+                    domainGeneration = CurrentWindowDomainGeneration(),
                     title = sceneView.titleContent?.text ?? string.Empty,
                     fullTypeName = sceneView.GetType().FullName,
                     focused = EditorWindow.focusedWindow == sceneView,
@@ -905,6 +999,8 @@ namespace CodingRiver.UPilot
             var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(window, capturePolicy.allowFallback);
             if (capture == null || string.IsNullOrWhiteSpace(capture.imageData))
                 throw new SnapshotRequestException("SNAPSHOT_EDITORWINDOW_CAPTURE_UNAVAILABLE", "The exact EditorWindow did not produce pixels.");
+            if (requested.requireContentRect && !capture.contentRectVerified)
+                throw new SnapshotRequestException("WINDOW_CONTENT_RECT_UNVERIFIED", "The mapped native client rectangle did not exactly match this EditorWindow target.");
             var bytes = Convert.FromBase64String(capture.imageData);
             var provenance = new SnapshotProvenancePayload
             {
@@ -920,6 +1016,14 @@ namespace CodingRiver.UPilot
                 unityProcessId = capture.unityProcessId,
                 foreground = capture.foreground,
                 repaintRequestedAtUtcMs = capture.repaintRequestedAtUtcMs,
+                pixelsPerPoint = capture.pixelsPerPoint,
+                contentRectVerified = capture.contentRectVerified,
+                cropComplete = capture.cropComplete,
+                includesDecorations = capture.includesDecorations,
+                geometrySource = capture.geometrySource ?? string.Empty,
+                hostRect = WindowRect(capture.windowLeft, capture.windowTop, capture.windowRight, capture.windowBottom),
+                contentRect = WindowRect(capture.contentLeft, capture.contentTop, capture.contentRight, capture.contentBottom),
+                cropRect = WindowRect(capture.cropLeft, capture.cropTop, capture.cropRight, capture.cropBottom),
             };
             ValidateEvidencePolicy(provenance, capturePolicy);
             var rect = window.position;
@@ -948,6 +1052,7 @@ namespace CodingRiver.UPilot
                 editorWindow = new SnapshotEditorWindowEvidencePayload
                 {
                     instanceId = WireId(window),
+                    domainGeneration = CurrentWindowDomainGeneration(),
                     title = window.titleContent?.text ?? string.Empty,
                     fullTypeName = window.GetType().FullName,
                     focused = EditorWindow.focusedWindow == window,
@@ -955,11 +1060,38 @@ namespace CodingRiver.UPilot
                     y = rect.y,
                     width = rect.width,
                     height = rect.height,
+                    pixelsPerPoint = capture.pixelsPerPoint,
+                    contentRectVerified = capture.contentRectVerified,
+                    cropComplete = capture.cropComplete,
+                    includesDecorations = capture.includesDecorations,
+                    geometrySource = capture.geometrySource ?? string.Empty,
+                    hostRect = WindowRect(capture.windowLeft, capture.windowTop, capture.windowRight, capture.windowBottom),
+                    contentRect = WindowRect(capture.contentLeft, capture.contentTop, capture.contentRight, capture.contentBottom),
+                    cropRect = WindowRect(capture.cropLeft, capture.cropTop, capture.cropRight, capture.cropBottom),
+                    contentLeft = capture.contentLeft,
+                    contentTop = capture.contentTop,
+                    contentRight = capture.contentRight,
+                    contentBottom = capture.contentBottom,
+                    cropLeft = capture.cropLeft,
+                    cropTop = capture.cropTop,
+                    cropRight = capture.cropRight,
+                    cropBottom = capture.cropBottom,
                 },
                 provenance = provenance,
                 artifactIds = new[] { artifactId },
             });
             UpdateJob(job, "running", "writing", false, false);
+        }
+
+        private static SnapshotWindowRectPayload WindowRect(int left, int top, int right, int bottom)
+        {
+            return new SnapshotWindowRectPayload
+            {
+                left = left,
+                top = top,
+                right = right,
+                bottom = bottom,
+            };
         }
 
         private static string AddArtifact(
@@ -1451,6 +1583,7 @@ namespace CodingRiver.UPilot
             var sceneView = UPilotEntityIds.ObjectFromWireId(wireId) as SceneView;
             if (sceneView == null)
                 throw new SnapshotRequestException("SCENEVIEW_NOT_FOUND", $"SceneView not found for instanceId={target.instanceId}.");
+            ValidateEditorWindowTargetIdentity(sceneView, target);
             return sceneView;
         }
 
@@ -1465,8 +1598,42 @@ namespace CodingRiver.UPilot
                 throw new SnapshotRequestException("EDITORWINDOW_NOT_FOUND", $"EditorWindow not found for instanceId={target.instanceId}.");
             if (window is SceneView)
                 throw new SnapshotRequestException("EDITORWINDOW_KIND_MISMATCH", "Use kind=sceneView for UnityEditor.SceneView so repaint and Handles evidence can be verified.");
+            ValidateEditorWindowTargetIdentity(window, target);
             return window;
         }
+
+        private static void ValidateEditorWindowTargetIdentity(EditorWindow window, SnapshotTargetRequestPayload target)
+        {
+            var actualDomain = CurrentWindowDomainGeneration();
+            if (!string.IsNullOrWhiteSpace(target.domainGeneration)
+                && !string.Equals(target.domainGeneration, actualDomain, StringComparison.Ordinal))
+            {
+                throw new SnapshotRequestException(
+                    "WINDOW_DOMAIN_MISMATCH",
+                    $"EditorWindow instanceId={target.instanceId} belongs to domainGeneration={actualDomain}; the supplied domainGeneration is stale.");
+            }
+
+            var actualType = window.GetType().FullName ?? window.GetType().Name;
+            if (!string.IsNullOrWhiteSpace(target.fullTypeName)
+                && !string.Equals(target.fullTypeName, actualType, StringComparison.Ordinal))
+            {
+                throw new SnapshotRequestException(
+                    "EDITORWINDOW_TYPE_MISMATCH",
+                    $"EditorWindow instanceId={target.instanceId} has fullTypeName={actualType}.");
+            }
+
+            var actualTitle = window.titleContent?.text ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(target.title)
+                && !string.Equals(target.title, actualTitle, StringComparison.Ordinal))
+            {
+                throw new SnapshotRequestException(
+                    "EDITORWINDOW_TITLE_MISMATCH",
+                    $"EditorWindow instanceId={target.instanceId} has a different title.");
+            }
+        }
+
+        private static string CurrentWindowDomainGeneration() =>
+            UPilotWindowDiagnostics.DomainReloadEpoch.ToString(CultureInfo.InvariantCulture);
 
         private static void ValidateGameViewSelector(SnapshotTargetRequestPayload target)
         {
@@ -1621,30 +1788,31 @@ namespace CodingRiver.UPilot
 
         private void UpdateJob(SnapshotJobPayload job, string status, string phase, bool terminal, bool success)
         {
-            lock (_gate)
+            lock (WriterFor(job.snapshotId))
             {
                 job.status = status;
                 job.phase = phase;
                 job.terminal = terminal;
                 job.success = success;
                 job.updatedAtUtcMs = UtcNowMs();
-                PersistJob(job);
+                PersistJobLocked(job);
             }
         }
 
         private void FinishJob(SnapshotJobPayload job, string status, bool success)
         {
-            lock (_gate)
+            lock (WriterFor(job.snapshotId))
             {
+                // A delayed capture continuation must never overwrite a terminal
+                // record produced by cancellation or an earlier completion.
+                if (job.terminal) return;
                 job.status = status;
                 job.phase = status;
                 job.terminal = true;
                 job.success = success;
                 job.updatedAtUtcMs = UtcNowMs();
                 job.endedAtUtcMs = job.updatedAtUtcMs;
-                PersistJob(job);
-                var manifest = ProjectAbsolute(job.manifestPath);
-                if (File.Exists(manifest)) job.manifestSha256 = Sha256(File.ReadAllBytes(manifest));
+                PersistJobLocked(job);
             }
         }
 
@@ -1751,34 +1919,128 @@ namespace CodingRiver.UPilot
             return full;
         }
 
-        private static void PersistJob(SnapshotJobPayload job)
+        private void PersistJob(SnapshotJobPayload job)
         {
-            var target = ProjectAbsolute(job.manifestPath);
-            var bytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(job, true));
-            WriteAtomic(target, bytes);
-            WriteAtomic(StatePath(job.snapshotId), bytes);
+            if (job == null) throw new ArgumentNullException(nameof(job));
+            lock (WriterFor(job.snapshotId)) PersistJobLocked(job);
+        }
+
+        // The caller holds the per-snapshot writer.  Returning a persistence
+        // failure through the payload (rather than throwing) keeps the capture's
+        // business outcome separate from evidence-signing failure.
+        private bool PersistJobLocked(SnapshotJobPayload job)
+        {
+            if (job.persistenceSchemaVersion != 2)
+            {
+                MarkUnverified(job, "PERSISTENCE_SCHEMA_UNSUPPORTED");
+                RejectArtifacts(job);
+                return false;
+            }
+
+            job.snapshotSequence = Math.Max(0, job.snapshotSequence) + 1;
+            job.persistenceStatus = "pending";
+            job.persistenceError = string.Empty;
+            job.persistenceRecovered = false;
+            // A pending write must not expose a hash for a prior revision.
+            job.manifestSha256 = string.Empty;
+            job.manifestBytes = 0;
+
+            var manifest = CopyForPersistence(job);
+            manifest.manifestSha256 = string.Empty;
+            manifest.manifestBytes = 0;
+            manifest.persistenceStatus = "pending";
+            manifest.persistenceError = string.Empty;
+            manifest.persistenceRecovered = false;
+            var manifestBytes = Encoding.UTF8.GetBytes(JsonUtility.ToJson(manifest, true));
+            try
+            {
+                ThrowPersistenceFaultForTests("manifest");
+                // Preserve an interrupted manifest staging file for diagnostics.
+                // Recovery never treats .tmp files as authoritative, but deleting
+                // this exact boundary evidence would make a replace failure
+                // indistinguishable from a write that never reached staging.
+                WriteAtomic(ProjectAbsolute(job.manifestPath), manifestBytes, "manifest-replace", preserveTemporaryOnFailure: true);
+            }
+            catch (Exception ex)
+            {
+                MarkUnverified(job, "MANIFEST_REPLACE_FAILED");
+                RejectArtifacts(job);
+                Logger.LogWarning("SNAPSHOT", $"Snapshot manifest write failed for {job.snapshotId}: {ex.Message}");
+                return false;
+            }
+
+            var manifestSha256 = Sha256(manifestBytes);
+            var manifestLength = manifestBytes.LongLength;
+            // Only the state copy describes a completed persistence transaction.
+            // Keep the public job pending until that complete state file replaces.
+            var state = CopyForPersistence(job);
+            state.manifestSha256 = manifestSha256;
+            state.manifestBytes = manifestLength;
+            state.persistenceStatus = "verified";
+            state.persistenceError = string.Empty;
+            state.persistenceRecovered = false;
+            try
+            {
+                ThrowPersistenceFaultForTests("state");
+                WriteAtomic(StatePath(job.snapshotId), Encoding.UTF8.GetBytes(JsonUtility.ToJson(state, true)), "state-replace");
+            }
+            catch (Exception ex)
+            {
+                // The new manifest is retained for recovery, while the prior state
+                // remains authoritative.  Do not expose the just-computed hash as
+                // verified in memory.
+                MarkUnverified(job, "STATE_REPLACE_FAILED");
+                RejectArtifacts(job);
+                Logger.LogWarning("SNAPSHOT", $"Snapshot state write failed for {job.snapshotId}: {ex.Message}");
+                return false;
+            }
+
+            job.manifestSha256 = manifestSha256;
+            job.manifestBytes = manifestLength;
+            job.persistenceStatus = "verified";
+            job.persistenceError = string.Empty;
+            return true;
         }
 
         private void LoadPersistedJobs()
         {
-            var stateRoot = ProjectAbsolute(SnapshotStateDirectory);
-            if (!Directory.Exists(stateRoot)) return;
+            var states = ReadPersistedStates();
+            var manifests = ReadPersistedManifests(states.Values);
+            var snapshotIds = new HashSet<string>(states.Keys, StringComparer.Ordinal);
+            snapshotIds.UnionWith(manifests.Keys);
 
-            foreach (var path in Directory.EnumerateFiles(stateRoot, "*.json", SearchOption.TopDirectoryOnly)
-                         .Select(value => new FileInfo(value))
-                         .OrderByDescending(value => value.LastWriteTimeUtc)
-                         .Take(MaxRecoveredJobs)
-                         .Select(value => value.FullName))
+            foreach (var snapshotId in snapshotIds.OrderBy(value => value, StringComparer.Ordinal).Take(MaxRecoveredJobs))
             {
                 try
                 {
-                    var job = JsonUtility.FromJson<SnapshotJobPayload>(File.ReadAllText(path, Encoding.UTF8));
-                    if (job == null || string.IsNullOrWhiteSpace(job.snapshotId)) continue;
-                    if (!string.Equals(Path.GetFullPath(path), StatePath(job.snapshotId), StringComparison.OrdinalIgnoreCase)) continue;
-                    job.targets = job.targets ?? new List<SnapshotTargetResultPayload>();
-                    job.artifacts = job.artifacts ?? new List<SnapshotArtifactPayload>();
-                    job.failures = job.failures ?? new List<SnapshotFailurePayload>();
-                    if (!job.terminal)
+                    states.TryGetValue(snapshotId, out var stateRecord);
+                    manifests.TryGetValue(snapshotId, out var manifestRecord);
+                    var state = stateRecord?.job;
+                    var manifest = manifestRecord?.job;
+                    var manifestBytes = manifestRecord?.bytes;
+                    var rebuildState = false;
+                    var job = ResolvePersistedSnapshot(state, manifest, manifestBytes, out rebuildState);
+                    if (job == null) continue;
+                    EnsureJobCollections(job);
+
+                    if (rebuildState)
+                    {
+                        try { WriteRecoveredState(job); }
+                        catch (Exception ex)
+                        {
+                            MarkUnverified(job, "STATE_REBUILD_FAILED");
+                            RejectArtifacts(job);
+                            Logger.LogWarning("SNAPSHOT", $"Snapshot state recovery failed for {job.snapshotId}: {ex.Message}");
+                        }
+                    }
+
+                    // A v2 non-terminal record cannot be resumed after Reload.
+                    // Do not synthesize a manifest from state-only, legacy, or
+                    // unknown-schema data: that would overwrite its evidence.
+                    if (!job.terminal && job.persistenceSchemaVersion == 2 &&
+                        !string.Equals(job.persistenceError, "MANIFEST_MISSING", StringComparison.Ordinal) &&
+                        !string.Equals(job.persistenceError, "MANIFEST_PATH_INVALID", StringComparison.Ordinal) &&
+                        !string.Equals(job.persistenceError, "PERSISTENCE_SCHEMA_UNSUPPORTED", StringComparison.Ordinal))
                     {
                         job.failures.Add(Failure(
                             string.Empty,
@@ -1794,15 +2056,11 @@ namespace CodingRiver.UPilot
                         job.endedAtUtcMs = job.updatedAtUtcMs;
                         PersistJob(job);
                     }
-                    var manifest = ProjectAbsolute(job.manifestPath);
-                    if (File.Exists(manifest)) job.manifestSha256 = Sha256(File.ReadAllBytes(manifest));
-                    _jobs[job.snapshotId] = job;
-                    if (!string.IsNullOrWhiteSpace(job.requestKey) && !_requestKeys.ContainsKey(job.requestKey))
-                        _requestKeys[job.requestKey] = job.snapshotId;
+                    RegisterRecoveredJob(job);
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("SNAPSHOT", $"Ignored invalid persisted Snapshot state '{path}': {ex.Message}");
+                    Logger.LogWarning("SNAPSHOT", $"Ignored invalid persisted Snapshot '{snapshotId}': {ex.Message}");
                 }
             }
         }
@@ -1810,20 +2068,331 @@ namespace CodingRiver.UPilot
         private static string StatePath(string snapshotId) =>
             ProjectAbsolute(Path.Combine(SnapshotStateDirectory, SafeFileName(snapshotId) + ".json"));
 
-        private static void WriteAtomic(string target, byte[] bytes)
+        private sealed class PersistedSnapshotRecord
+        {
+            public SnapshotJobPayload job;
+            public byte[] bytes;
+            public string path;
+        }
+
+        private Dictionary<string, PersistedSnapshotRecord> ReadPersistedStates()
+        {
+            var records = new Dictionary<string, PersistedSnapshotRecord>(StringComparer.Ordinal);
+            var stateRoot = ProjectAbsolute(SnapshotStateDirectory);
+            if (!Directory.Exists(stateRoot)) return records;
+            foreach (var path in Directory.EnumerateFiles(stateRoot, "*.json", SearchOption.TopDirectoryOnly)
+                         .Select(value => new FileInfo(value))
+                         .OrderByDescending(value => value.LastWriteTimeUtc)
+                         .Take(MaxRecoveredJobs)
+                         .Select(value => value.FullName))
+            {
+                try
+                {
+                    var bytes = File.ReadAllBytes(path);
+                    var job = JsonUtility.FromJson<SnapshotJobPayload>(Encoding.UTF8.GetString(bytes));
+                    if (job == null || string.IsNullOrWhiteSpace(job.snapshotId) ||
+                        !string.Equals(Path.GetFullPath(path), StatePath(job.snapshotId), StringComparison.OrdinalIgnoreCase) ||
+                        records.ContainsKey(job.snapshotId))
+                        continue;
+                    records.Add(job.snapshotId, new PersistedSnapshotRecord { job = job, bytes = bytes, path = path });
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning("SNAPSHOT", $"Ignored invalid persisted Snapshot state '{path}': {ex.Message}");
+                }
+            }
+            return records;
+        }
+
+        private Dictionary<string, PersistedSnapshotRecord> ReadPersistedManifests(
+            IEnumerable<PersistedSnapshotRecord> stateRecords)
+        {
+            var records = new Dictionary<string, PersistedSnapshotRecord>(StringComparer.Ordinal);
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var state in stateRecords)
+            {
+                if (TryResolvePersistedManifestPath(state.job, out var manifestPath) && File.Exists(manifestPath))
+                    paths.Add(manifestPath);
+            }
+
+            // State loss is recoverable only from the product-owned output roots.
+            // We intentionally do not scan Assets, Packages, or arbitrary caller
+            // directories and never consider temporary files authoritative.
+            foreach (var rootName in new[] { "Log", "Temp" })
+            {
+                var root = ProjectAbsolute(rootName);
+                if (!Directory.Exists(root)) continue;
+                try
+                {
+                    foreach (var path in Directory.EnumerateFiles(root, "manifest.json", SearchOption.AllDirectories)
+                                 .Take(MaxRecoveredJobs * 4))
+                        paths.Add(Path.GetFullPath(path));
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning("SNAPSHOT", $"Snapshot manifest discovery skipped '{root}': {ex.Message}");
+                }
+            }
+
+            foreach (var path in paths.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var bytes = File.ReadAllBytes(path);
+                    var job = JsonUtility.FromJson<SnapshotJobPayload>(Encoding.UTF8.GetString(bytes));
+                    if (job == null || string.IsNullOrWhiteSpace(job.snapshotId) || records.ContainsKey(job.snapshotId) ||
+                        !TryResolvePersistedManifestPath(job, out var expectedPath) ||
+                        !string.Equals(Path.GetFullPath(path), expectedPath, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    records.Add(job.snapshotId, new PersistedSnapshotRecord { job = job, bytes = bytes, path = path });
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning("SNAPSHOT", $"Ignored invalid Snapshot manifest '{path}': {ex.Message}");
+                }
+            }
+            return records;
+        }
+
+        private void RegisterRecoveredJob(SnapshotJobPayload job)
+        {
+            lock (_gate)
+            {
+                if (_jobs.ContainsKey(job.snapshotId)) return;
+                _jobs.Add(job.snapshotId, job);
+                if (!_jobWriters.ContainsKey(job.snapshotId)) _jobWriters.Add(job.snapshotId, new object());
+                if (!string.IsNullOrWhiteSpace(job.requestKey) && !_requestKeys.ContainsKey(job.requestKey))
+                    _requestKeys.Add(job.requestKey, job.snapshotId);
+            }
+        }
+
+        private object WriterFor(string snapshotId)
+        {
+            lock (_gate)
+            {
+                if (!_jobWriters.TryGetValue(snapshotId, out var writer))
+                {
+                    writer = new object();
+                    _jobWriters.Add(snapshotId, writer);
+                }
+                return writer;
+            }
+        }
+
+        private static void EnsureJobCollections(SnapshotJobPayload job)
+        {
+            job.targets = job.targets ?? new List<SnapshotTargetResultPayload>();
+            job.artifacts = job.artifacts ?? new List<SnapshotArtifactPayload>();
+            job.failures = job.failures ?? new List<SnapshotFailurePayload>();
+        }
+
+        private static SnapshotJobPayload CopyForPersistence(SnapshotJobPayload job) =>
+            JsonUtility.FromJson<SnapshotJobPayload>(JsonUtility.ToJson(job));
+
+        internal static SnapshotJobPayload ResolvePersistedSnapshotForTests(
+            SnapshotJobPayload state,
+            SnapshotJobPayload manifest,
+            byte[] manifestBytes,
+            out bool stateNeedsRebuild) =>
+            ResolvePersistedSnapshot(state, manifest, manifestBytes, out stateNeedsRebuild);
+
+        internal static bool TryResolvePersistedManifestPathForTests(SnapshotJobPayload job, out string path) =>
+            TryResolvePersistedManifestPath(job, out path);
+
+        private static SnapshotJobPayload ResolvePersistedSnapshot(
+            SnapshotJobPayload state,
+            SnapshotJobPayload manifest,
+            byte[] manifestBytes,
+            out bool stateNeedsRebuild)
+        {
+            stateNeedsRebuild = false;
+            if (state == null)
+            {
+                if (manifest == null || manifestBytes == null) return null;
+                if (manifest.persistenceSchemaVersion != 2)
+                    return MarkUnverified(manifest, "PERSISTENCE_SCHEMA_UNSUPPORTED");
+                if (!string.IsNullOrEmpty(manifest.manifestSha256) || manifest.manifestBytes != 0)
+                    return MarkUnverified(manifest, "MANIFEST_STATE_MISMATCH");
+                var recoveredManifestOnly = CopyForPersistence(manifest);
+                recoveredManifestOnly.manifestSha256 = Sha256(manifestBytes);
+                recoveredManifestOnly.manifestBytes = manifestBytes.LongLength;
+                recoveredManifestOnly.persistenceRecovered = true;
+                if (!recoveredManifestOnly.terminal)
+                    return MarkUnverified(recoveredManifestOnly, "NONTERMINAL_MANIFEST_STATE_MISSING");
+                recoveredManifestOnly.persistenceStatus = "verified";
+                recoveredManifestOnly.persistenceError = string.Empty;
+                stateNeedsRebuild = true;
+                return recoveredManifestOnly;
+            }
+
+            if (state.persistenceSchemaVersion != 2)
+            {
+                state.persistenceStatus = state.persistenceSchemaVersion <= 1 ? "unknown" : "unverified";
+                state.persistenceError = state.persistenceSchemaVersion <= 1
+                    ? "LEGACY_PERSISTENCE_SCHEMA"
+                    : "PERSISTENCE_SCHEMA_UNSUPPORTED";
+                return state;
+            }
+            if (manifest == null || manifestBytes == null)
+                return MarkUnverified(state, "MANIFEST_MISSING");
+
+            if (manifest.persistenceSchemaVersion != 2)
+                return MarkUnverified(state, "PERSISTENCE_SCHEMA_UNSUPPORTED");
+
+            if (!string.Equals(manifest.snapshotId, state.snapshotId, StringComparison.Ordinal) ||
+                !string.Equals(manifest.requestKey ?? string.Empty, state.requestKey ?? string.Empty, StringComparison.Ordinal) ||
+                !string.Equals(manifest.requestHash ?? string.Empty, state.requestHash ?? string.Empty, StringComparison.Ordinal) ||
+                !string.Equals(manifest.outputDirectory ?? string.Empty, state.outputDirectory ?? string.Empty, StringComparison.Ordinal) ||
+                !string.Equals(manifest.manifestPath ?? string.Empty, state.manifestPath ?? string.Empty, StringComparison.Ordinal) ||
+                !string.IsNullOrEmpty(manifest.manifestSha256) || manifest.manifestBytes != 0)
+                return MarkUnverified(state, "MANIFEST_STATE_MISMATCH");
+
+            // Terminality is an irreversible fence.  Evaluate it before the
+            // sequence relation so a delayed non-terminal state cannot mask a
+            // valid terminal manifest just because its number is larger.
+            if (state.terminal && !manifest.terminal)
+                return MarkUnverified(state, "TERMINAL_STATE_ROLLBACK_REJECTED");
+            if (!state.terminal && manifest.terminal)
+            {
+                var terminal = BuildRecoveredManifest(manifest, manifestBytes);
+                stateNeedsRebuild = true;
+                return terminal;
+            }
+
+            if (manifest.snapshotSequence == state.snapshotSequence)
+            {
+                if (!string.Equals(state.manifestSha256, Sha256(manifestBytes), StringComparison.OrdinalIgnoreCase) ||
+                    state.manifestBytes != manifestBytes.LongLength || !EquivalentSnapshotEvidence(state, manifest))
+                {
+                    return MarkUnverified(state, "MANIFEST_STATE_MISMATCH");
+                }
+                state.persistenceStatus = "verified";
+                state.persistenceError = string.Empty;
+                return state;
+            }
+
+            if (manifest.snapshotSequence < state.snapshotSequence)
+                return MarkUnverified(state, "MANIFEST_SEQUENCE_STALE");
+
+            if (!manifest.terminal)
+            {
+                manifest.persistenceStatus = "unverified";
+                manifest.persistenceError = "NONTERMINAL_MANIFEST_AHEAD";
+                manifest.persistenceRecovered = true;
+                return manifest;
+            }
+
+            var recovered = BuildRecoveredManifest(manifest, manifestBytes);
+            stateNeedsRebuild = true;
+            return recovered;
+        }
+
+        private static SnapshotJobPayload BuildRecoveredManifest(SnapshotJobPayload manifest, byte[] manifestBytes)
+        {
+            var recovered = CopyForPersistence(manifest);
+            recovered.manifestSha256 = Sha256(manifestBytes);
+            recovered.manifestBytes = manifestBytes.LongLength;
+            recovered.persistenceStatus = "verified";
+            recovered.persistenceError = string.Empty;
+            recovered.persistenceRecovered = true;
+            return recovered;
+        }
+
+        private static bool EquivalentSnapshotEvidence(SnapshotJobPayload state, SnapshotJobPayload manifest)
+        {
+            var stateProjection = CopyForPersistence(state);
+            var manifestProjection = CopyForPersistence(manifest);
+            stateProjection.manifestSha256 = string.Empty;
+            stateProjection.manifestBytes = 0;
+            stateProjection.persistenceStatus = string.Empty;
+            stateProjection.persistenceError = string.Empty;
+            stateProjection.persistenceRecovered = false;
+            manifestProjection.manifestSha256 = string.Empty;
+            manifestProjection.manifestBytes = 0;
+            manifestProjection.persistenceStatus = string.Empty;
+            manifestProjection.persistenceError = string.Empty;
+            manifestProjection.persistenceRecovered = false;
+            return string.Equals(JsonUtility.ToJson(stateProjection), JsonUtility.ToJson(manifestProjection), StringComparison.Ordinal);
+        }
+
+        private static void WriteRecoveredState(SnapshotJobPayload job)
+        {
+            var state = CopyForPersistence(job);
+            state.persistenceStatus = "verified";
+            state.persistenceError = string.Empty;
+            WriteAtomic(StatePath(job.snapshotId), Encoding.UTF8.GetBytes(JsonUtility.ToJson(state, true)));
+        }
+
+        internal void PersistJobForTests(SnapshotJobPayload job) => PersistJob(job);
+
+        private static void ThrowPersistenceFaultForTests(string stage)
+        {
+            var exception = PersistenceWriteFaultForTests?.Invoke(stage);
+            if (exception != null) throw exception;
+        }
+
+        private static SnapshotJobPayload MarkUnverified(SnapshotJobPayload job, string error)
+        {
+            job.persistenceStatus = "unverified";
+            job.persistenceError = error;
+            return job;
+        }
+
+        private static bool TryResolvePersistedManifestPath(SnapshotJobPayload job, out string manifestPath)
+        {
+            manifestPath = null;
+            if (job == null || !TryProjectRelativePath(job.outputDirectory, out var outputDirectory) ||
+                !TryProjectRelativePath(job.manifestPath, out var candidate))
+                return false;
+
+            var expected = Path.GetFullPath(Path.Combine(outputDirectory, "manifest.json"));
+            if (!string.Equals(candidate, expected, StringComparison.OrdinalIgnoreCase)) return false;
+            manifestPath = candidate;
+            return true;
+        }
+
+        private static bool TryProjectRelativePath(string value, out string path)
+        {
+            path = null;
+            if (string.IsNullOrWhiteSpace(value) || Path.IsPathRooted(value)) return false;
+            var root = ProjectRoot().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var candidate = Path.GetFullPath(Path.Combine(root, value.Replace('/', Path.DirectorySeparatorChar)));
+            if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return false;
+            path = candidate;
+            return true;
+        }
+
+        private static void WriteAtomic(
+            string target,
+            byte[] bytes,
+            string replacementFaultStage = null,
+            bool preserveTemporaryOnFailure = false)
         {
             var directory = Path.GetDirectoryName(target);
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
             var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            var replaced = false;
             try
             {
-                File.WriteAllBytes(temporary, bytes);
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+                if (!string.IsNullOrEmpty(replacementFaultStage))
+                    ThrowPersistenceFaultForTests(replacementFaultStage);
                 if (File.Exists(target)) File.Replace(temporary, target, null);
                 else File.Move(temporary, target);
+                replaced = true;
             }
             finally
             {
-                if (File.Exists(temporary)) File.Delete(temporary);
+                // A successfully moved/replaced staging path no longer exists.
+                // For the manifest transaction boundary, retain an uncommitted
+                // staging file so it can be diagnosed without becoming recovery
+                // input. Other callers retain their historical cleanup behavior.
+                if ((replaced || !preserveTemporaryOnFailure) && File.Exists(temporary))
+                    File.Delete(temporary);
             }
         }
 
@@ -2014,7 +2583,7 @@ namespace CodingRiver.UPilot
             public SnapshotFailurePayload failure;
         }
 
-        private sealed class SnapshotRequestException : Exception
+        internal sealed class SnapshotRequestException : Exception
         {
             public string Code { get; }
             public SnapshotRequestException(string code, string message) : base(message) { Code = code; }

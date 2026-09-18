@@ -16,7 +16,7 @@ namespace CodingRiver.UPilot
     // ── DTOs ────────────────────────────────────────────────────────────────────
 
     [Serializable] public class MenuExecuteMessage   { public MenuExecutePayload payload; }
-    [Serializable] public class MenuExecutePayload   { public string menuPath = ""; }
+    [Serializable] public class MenuExecutePayload   { public string menuPath = ""; public ExpectedModalPayload expectedModal; }
 
     [Serializable]
     public class MenuExecuteResultPayload
@@ -64,25 +64,12 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<bool>();
-            _bridge.EnqueueTracked(id, () =>
-            {
-                try
-                {
-                    bool ok = EditorApplication.ExecuteMenuItem(p.menuPath);
-                    tcs.SetResult(ok);
-                }
-                catch (Exception ex) { tcs.SetException(ex); }
-            });
-
             try
             {
-                bool executed = await tcs.Task;
-                var payload = new MenuExecuteResultPayload
+                var payload = await UPilotModalObserver.RunAsync(_bridge, id, () => new MenuExecuteResultPayload
                 {
-                    menuPath = p.menuPath,
-                    executed = executed,
-                };
+                    menuPath = p.menuPath, executed = EditorApplication.ExecuteMenuItem(p.menuPath),
+                }, p.expectedModal);
                 await _bridge.SendResultAsync(id, "menu.execute", payload, token);
             }
             catch (Exception ex)

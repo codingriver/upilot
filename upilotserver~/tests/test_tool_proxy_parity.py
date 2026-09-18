@@ -143,12 +143,19 @@ def test_task_rejects_flow_retries_before_start(flow, name):
 
 def test_compile_compatibility_alias_uses_existing_handler(flow, monkeypatch):
     class CompileService:
-        async def compile_errors(self, compile_request_id=""):
-            return ok("compile", {"compileRequestId": compile_request_id, "total": 0})
+        async def compile_errors(self, compile_request_id="", include_warnings=False):
+            return ok("compile", {
+                "compileRequestId": compile_request_id,
+                "includeWarnings": include_warnings,
+                "total": 0,
+            })
 
     service = CompileService()
     monkeypatch.setattr(compile_tools, "_get_facade", lambda: service)
-    native = asyncio.run(compile_tools.unity_compile_errors_get(compileRequestId="compile-1"))
-    proxy = asyncio.run(dispatch_public_tool(service, "unity_compile_errors_get", {"compileRequestId": "compile-1"}))
+    native = asyncio.run(compile_tools.unity_compile_errors_get(compileRequestId="compile-1", includeWarnings=True))
+    proxy = asyncio.run(dispatch_public_tool(service, "unity_compile_errors_get", {
+        "compileRequestId": "compile-1", "includeWarnings": True,
+    }))
     assert REGISTRY.resolve("unity_compile_errors_get").facade_method == "compile_errors"
     assert native.ok and proxy.ok and native.data == proxy.data
+    assert native.data["includeWarnings"] is True

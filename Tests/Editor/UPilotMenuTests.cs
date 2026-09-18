@@ -28,6 +28,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(paths, Does.Contain("UPilot/高级设置"));
             Assert.That(paths, Does.Contain("UPilot/Flow/Enable"));
             Assert.That(paths, Does.Contain("UPilot/Flow/Disable"));
+            Assert.That(paths, Does.Not.Contain("UPilot/端口登记管理"));
 
             foreach (string path in paths)
                 Assert.That(AllowedMenuPaths, Does.Contain(path), "Unexpected UPilot menu item: " + path);

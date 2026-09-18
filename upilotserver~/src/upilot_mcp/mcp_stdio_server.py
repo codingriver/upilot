@@ -29,7 +29,12 @@ from .models import ToolResponse
 from .protocol import new_id
 from .responses import fail, ok
 from .config import CONFIG, refresh_config_if_changed
-from .tool_registry import REGISTRY, REGISTRY_VERSION, register_public_tool
+from .tool_registry import (
+    REGISTRY,
+    REGISTRY_VERSION,
+    normalize_public_mcp_arguments,
+    register_public_tool,
+)
 from .version import version_payload
 from .wire_ids import stringify_wire_ids
 
@@ -729,17 +734,37 @@ def _reject_write_if_unapproved(tool_name: str):
     )
 
 
+_SENSITIVE_LOG_KEYS = {"ownertoken", "authorization", "password", "secret", "token"}
+
+
+def _redact_log_value(value: Any, key: str = "") -> Any:
+    if key.lower() in _SENSITIVE_LOG_KEYS or key.lower().endswith("token"):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {str(item_key): _redact_log_value(item_value, str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    return value
+
+
+def _redact_log_text(value: str) -> str:
+    try:
+        return json.dumps(_redact_log_value(json.loads(value)), ensure_ascii=False)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value
+
+
 def _log_tool_result(tool_name: str, result_payload: CallToolResult | str):
     if isinstance(result_payload, CallToolResult):
         log_text = result_payload.content[0].text if result_payload.content else ""
     else:
         log_text = result_payload
-    _log_stdio_message("RESULT", tool_name, log_text)
+    _log_stdio_message("RESULT", tool_name, _redact_log_text(log_text))
     return result_payload
 
 
 def _log_tool_call(tool_name: str, args: dict[str, Any]) -> None:
-    _log_stdio_message("CALL", tool_name, json.dumps(args, ensure_ascii=False))
+    _log_stdio_message("CALL", tool_name, json.dumps(_redact_log_value(args), ensure_ascii=False))
 
 
 # ── Tool definitions ─────────────────────────────────────────────────────────
@@ -1089,7 +1114,29 @@ from .mcp_tools import monohook_tools as _monohook_tools
 
 
 _original_mcp_list_tools = mcp.list_tools
+_original_tool_manager_call_tool = mcp._tool_manager.call_tool
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
+
+
+async def _call_tool_with_strict_arguments(
+    name: str,
+    arguments: dict[str, Any],
+    context=None,
+    convert_result: bool = False,
+):
+    tool = mcp._tool_manager.get_tool(name)
+    if tool is not None:
+        arguments, argument_error = normalize_public_mcp_arguments(
+            name, arguments or {}, tool.parameters
+        )
+        if argument_error:
+            raise ValueError(json.dumps(argument_error, ensure_ascii=False))
+    return await _original_tool_manager_call_tool(
+        name, arguments, context=context, convert_result=convert_result
+    )
+
+
+mcp._tool_manager.call_tool = _call_tool_with_strict_arguments
 
 
 async def _list_tools_stable():

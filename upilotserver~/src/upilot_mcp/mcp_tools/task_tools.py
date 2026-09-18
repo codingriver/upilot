@@ -28,9 +28,9 @@ logger = logging.getLogger("upilot.mcp")
 @mcp.tool(
     description="预检测试环境就绪：检查 Unity 连接 + 编译完成 + 编辑模式。返回 ready=true/false 及各项状态。"
 )
-async def unity_ensure_ready(timeoutS: float = 120):
+async def unity_ensure_ready(timeoutS: float = 120, requiredEditorMode: str = "edit", editorModeControl: str = "automatic"):
     _log_tool_call("unity_ensure_ready", {"timeoutS": timeoutS})
-    r = await _get_facade().ensure_ready(timeout_s=timeoutS)
+    r = await _get_facade().ensure_ready(timeout_s=timeoutS, required_editor_mode=requiredEditorMode, editor_mode_control=editorModeControl)
     return _log_tool_result("unity_ensure_ready", _payload(r))
 
 @mcp.tool(
@@ -238,6 +238,7 @@ for _name, _value in list(globals().items()):
         continue
     register_public_tool(
         _name,
+        public_handler=_value,
         destructive=_name in _DESTRUCTIVE_TOOLS,
         idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",

@@ -20,7 +20,7 @@ namespace CodingRiver.UPilot
     [Serializable] public class EditorRedoPayload       { public int steps = 1; }
 
     [Serializable] public class EditorExecuteCommandMessage  { public EditorExecuteCommandPayload payload; }
-    [Serializable] public class EditorExecuteCommandPayload  { public string commandName = ""; }
+    [Serializable] public class EditorExecuteCommandPayload  { public string commandName = ""; public ExpectedModalPayload expectedModal; }
 
     [Serializable] public class SceneViewNavigateMessage   { public SceneViewNavigatePayload payload; }
     [Serializable]
@@ -139,28 +139,15 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _bridge.EnqueueTracked(id, () =>
-            {
-                try
-                {
-                    // EditorApplication.ExecuteMenuItem covers menu commands
-                    // For non-menu commands, use EditorWindow.focusedWindow.SendEvent
-                    bool result = EditorApplication.ExecuteMenuItem(p.commandName);
-                    if (!result)
-                    {
-                        tcs.TrySetException(new Exception($"命令执行失败或不存在：{p.commandName}"));
-                        return;
-                    }
-                    tcs.TrySetResult(true);
-                }
-                catch (Exception ex) { tcs.TrySetException(ex); }
-            });
-
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "editor.executeCommand", new GenericOkPayload { ok = true }, token);
+                var result = await UPilotModalObserver.RunAsync(_bridge, id, () =>
+                {
+                    if (!EditorApplication.ExecuteMenuItem(p.commandName))
+                        throw new InvalidOperationException("Command failed or does not exist: " + p.commandName);
+                    return new GenericOkPayload { ok = true };
+                }, p.expectedModal);
+                await _bridge.SendResultAsync(id, "editor.executeCommand", result, token);
             }
             catch (Exception ex)
             {

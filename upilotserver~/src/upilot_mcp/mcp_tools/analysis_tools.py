@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Annotated, Literal
+
+from pydantic import Field
+
 from ..tool_registry import register_public_tool
 from .. import mcp_stdio_server as runtime
 
@@ -10,12 +14,12 @@ _log_tool_call = runtime._log_tool_call
 _log_tool_result = runtime._log_tool_result
 
 
-@mcp.tool(description="按主键读取 CSV 配置字段，自动识别并报告 UTF-8/GBK、换行、分隔符、列数和唯一性。")
+@mcp.tool(description="按主键读取 CSV 配置字段，自动识别并报告 UTF-8/GB18030、BOM、换行、分隔符、列数和唯一性。headerRowIndex=0 自动识别，正数为 1 基逻辑 CSV 记录索引（不是物理文本行）；结果包含表头候选、重复列诊断及表头/业务记录的物理行和去 BOM 解码字符位置。")
 async def unity_config_csv_get(
     path: str,
     keys: dict,
     fields: list[str] | None = None,
-    headerRowIndex: int = 0,
+    headerRowIndex: Annotated[int, Field(strict=True, ge=0)] = 0,
     encoding: str = "auto",
 ):
     args = {"path": path, "keys": keys, "fields": fields, "headerRowIndex": headerRowIndex, "encoding": encoding}
@@ -24,13 +28,13 @@ async def unity_config_csv_get(
     return _log_tool_result("unity_config_csv_get", _payload(result))
 
 
-@mcp.tool(description="按主键安全修改 CSV 字段。默认 dryRun=true；应用时必须使用预览返回的 confirmToken，并保持编码、换行及目标记录之外的字节不变。")
+@mcp.tool(description="按主键安全修改 CSV 字段。headerRowIndex=0 自动识别，正数为 1 基逻辑 CSV 记录索引（不是物理文本行）。默认 dryRun=true；预览包含选中逻辑记录的位置说明但 apply 只信任 confirmToken 绑定的原文件 hash、请求形状和唯一目标。应用时必须使用预览返回的 confirmToken，并保持编码、换行及目标记录之外的字节不变。")
 async def unity_config_csv_patch(
     path: str,
     keys: dict,
     changes: dict,
     expectedValues: dict | None = None,
-    headerRowIndex: int = 0,
+    headerRowIndex: Annotated[int, Field(strict=True, ge=0)] = 0,
     encoding: str = "auto",
     dryRun: bool = True,
     confirmToken: str = "",
@@ -48,10 +52,14 @@ async def unity_hang_status(sampleWindowSec: float = 0.5):
     return _log_tool_result("unity_hang_status", _payload(result))
 
 
-@mcp.tool(description="Windows 下为当前 Unity 进程生成非终止式 minidump。默认写入项目 Log/UPilotDiagnostics，不会结束 Unity。")
-async def unity_hang_capture(outputPath: str = "", dumpType: str = "mini"):
-    _log_tool_call("unity_hang_capture", {"outputPath": outputPath, "dumpType": dumpType})
-    result = await _get_facade().hang_capture(output_path=outputPath, dump_type=dumpType)
+@mcp.tool(description="Windows 下为当前 Unity 主 Editor 生成非终止式 dump。采集前校验进程身份、预计大小、目标卷空间和安全余量；支持 mini/heap/full。")
+async def unity_hang_capture(
+    outputPath: str = "",
+    dumpType: Literal["mini", "heap", "full"] = "mini",
+    reserveBytes: int = 2147483648,
+):
+    _log_tool_call("unity_hang_capture", {"outputPath": outputPath, "dumpType": dumpType, "reserveBytes": reserveBytes})
+    result = await _get_facade().hang_capture(output_path=outputPath, dump_type=dumpType, reserve_bytes=reserveBytes)
     return _log_tool_result("unity_hang_capture", _payload(result))
 
 
@@ -111,10 +119,14 @@ async def unity_profiler_capture_start(
     telemetryTypeName: str = "",
     telemetryMethodName: str = "",
     baselineJsonPath: str = "",
+    captureMode: str = "lowOverhead",
+    maxSamples: int = 4096,
+    includeDefaultAiMarkers: bool = True,
 ):
     args = {"durationSec": durationSec, "sampleEveryFrames": sampleEveryFrames, "title": title, "outputDirectory": outputDirectory, "markerNames": markerNames, "markerNameRegex": markerNameRegex, "maxMarkers": maxMarkers, "telemetryTypeName": telemetryTypeName, "telemetryMethodName": telemetryMethodName, "baselineJsonPath": baselineJsonPath}
+    args.update(captureMode=captureMode, maxSamples=maxSamples, includeDefaultAiMarkers=includeDefaultAiMarkers)
     _log_tool_call("unity_profiler_capture_start", args)
-    result = await _get_facade().profiler_capture_start(duration_sec=durationSec, sample_every_frames=sampleEveryFrames, title=title, output_directory=outputDirectory, marker_names=markerNames, marker_name_regex=markerNameRegex, max_markers=maxMarkers, telemetry_type_name=telemetryTypeName, telemetry_method_name=telemetryMethodName, baseline_json_path=baselineJsonPath)
+    result = await _get_facade().profiler_capture_start(duration_sec=durationSec, sample_every_frames=sampleEveryFrames, title=title, output_directory=outputDirectory, marker_names=markerNames, marker_name_regex=markerNameRegex, max_markers=maxMarkers, telemetry_type_name=telemetryTypeName, telemetry_method_name=telemetryMethodName, baseline_json_path=baselineJsonPath, capture_mode=captureMode, max_samples=maxSamples, include_default_ai_markers=includeDefaultAiMarkers)
     return _log_tool_result("unity_profiler_capture_start", _payload(result))
 
 
@@ -138,6 +150,7 @@ for _name, _value in list(globals().items()):
     if callable(_value) and _name.startswith("unity_"):
         register_public_tool(
             _name,
+            public_handler=_value,
             destructive=_name in _DESTRUCTIVE,
             idempotent=_name not in (_DESTRUCTIVE | _NON_IDEMPOTENT),
             requires_unity_connection=_name not in {"unity_hang_status", "unity_hang_capture"},

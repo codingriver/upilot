@@ -47,6 +47,102 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 class CompileDomainService:
+    def _compile_waiting_diagnostics(self, execution: dict | None = None) -> dict:
+        """Return a read-only diagnosis for the currently observed compile.
+
+        This deliberately reports observation state only.  In particular, an
+        attention flag is never a timeout, cancellation, mode change, or a
+        reason to submit another compilation.
+        """
+        execution = execution or self.server.state.execution_state(
+            stale_after_ms=CONFIG.context_stale_ms
+        )
+        compile_state = self.server.state.compile
+        get_batch = getattr(self.server.state, "get_write_batch", None)
+        batch_id = str(compile_state.write_batch_id or execution.get("pendingWriteBatchId") or "")
+        batch = get_batch(batch_id) if batch_id and callable(get_batch) else None
+        terminal = bool(execution.get("terminal"))
+        created_at = int((batch or {}).get("writeBatchCreatedAt") or compile_state.write_batch_created_at or 0)
+        last_progress_at = int(execution.get("lastProgressAt") or created_at or 0)
+        now = now_ms()
+        progress_age_ms = max(0, now - last_progress_at) if last_progress_at and not terminal else 0
+        phase = str(execution.get("compilePhase") or "").lower()
+
+        if terminal:
+            reason = "none"
+        elif str((batch or {}).get("status") or "") == "recovery_required":
+            reason = "recovery_required"
+        elif execution.get("unityConnected") is False:
+            reason = "disconnected"
+        elif phase in {"domain_reload", "verifying"}:
+            reason = "reload"
+        # A stale snapshot can retain a raw isPlaying flag.  Only an
+        # authoritative snapshot may ask the caller to leave PlayMode.
+        elif execution.get("authoritative") and str(execution.get("playModeState") or "") in {"play", "pause"}:
+            reason = "playmode"
+        elif not execution.get("authoritative") or execution.get("isStale"):
+            reason = "stale"
+        elif phase in {"queued", "compiling", "compiler_finished"} or bool(execution.get("isCompiling")):
+            reason = "compile_in_progress"
+        else:
+            reason = "none"
+
+        actions = {
+            "playmode": "Exit PlayMode only after user confirmation, then observe the same batch.",
+            "reload": "Wait for the same batch to recover; do not switch PlayMode.",
+            "disconnected": "Reconnect the intended Unity project and observe the same batch; do not recompile.",
+            "stale": "Wait for a fresh authoritative Editor snapshot; do not change PlayMode or recompile.",
+            "recovery_required": "Observe the original compile identity; do not trigger a replacement compile for this batch.",
+            "compile_in_progress": "Continue observing the current compile; do not submit a second compile.",
+        }
+        return {
+            "waitingReason": reason,
+            "pendingAgeMs": max(0, now - created_at) if created_at and not terminal else 0,
+            "lastProgressAt": int(execution.get("lastProgressAt") or 0),
+            "attentionRequired": bool(not terminal and progress_age_ms > 30000),
+            "waitingNextAction": actions.get(reason, "No compile wait is currently required."),
+        }
+
+    def _automatic_compile_reuse_diagnostics(self) -> dict:
+        """Describe whether the current automatic compile may cover a write batch.
+
+        Unity's automatic compiler callbacks identify their own operation, but do
+        not expose a complete input manifest.  Do not turn timing or a matching
+        current file hash into proof that an unregistered change was compiled.
+        This is deliberately a rejection diagnosis, not a fallback compiler.
+        """
+        compile_state = self.server.state.compile
+        if str(compile_state.compile_origin or "") != "unity_auto":
+            return {}
+        observed_batch_id = str(compile_state.write_batch_id or "")
+        missing_evidence = [
+            "complete_input_manifest",
+            "verified_input_coverage",
+            "no_later_related_changes",
+        ]
+        if observed_batch_id:
+            # A batch identity arriving with an automatic pipeline event is not
+            # proof that the batch was registered before this compilation began,
+            # nor that every write/delete/asmdef input was in scope.  The state
+            # contract currently has no complete input manifest, so it cannot
+            # satisfy the P2 reuse admission rule.
+            missing_evidence.insert(0, "batch_registered_before_automatic_compile")
+        else:
+            missing_evidence.insert(0, "registered_write_batch")
+        return {
+            "reuseDecision": "unattributed_auto_compile",
+            "inputCoverageVerified": False,
+            "replayStartAttempted": False,
+            "observedWriteBatchId": observed_batch_id,
+            "missingEvidence": missing_evidence,
+            "reuseNextAction": "Register the saved change batch and use its correlated compile result; do not treat this automatic compile as reusable evidence.",
+        }
+
+    @staticmethod
+    def _response_compile_request_id(data: dict) -> str:
+        """Read the compile identity from either current or legacy Unity payloads."""
+        return str(data.get("compileRequestId") or data.get("requestId") or "")
+
     def _compile_diagnostics(self) -> dict:
         compile_state = self.server.state.compile
         execution = self.server.state.execution_state(
@@ -80,6 +176,8 @@ class CompileDomainService:
             "blocked": execution["blocked"],
             "blockedReason": execution["blockedReason"],
             "nextAction": execution["nextAction"],
+            **self._compile_waiting_diagnostics(execution),
+            **self._automatic_compile_reuse_diagnostics(),
         }
 
     async def _refresh_execution_state(self) -> tuple[ToolResponse, dict]:
@@ -225,6 +323,10 @@ class CompileDomainService:
                         {
                             "accepted": True,
                             "compileRequestId": request_id,
+                            "triggerMode": "incremental",
+                            "requestIssued": True,
+                            "cleanBuildCache": False,
+                            "attachedToExistingCompile": False,
                             "status": "finished_after_reload",
                             "reconnected": True,
                             "errors": errors_result.data if errors_result.ok else {},
@@ -267,6 +369,10 @@ class CompileDomainService:
                 request_id,
                 {
                     **(result.data or {}),
+                    "triggerMode": "incremental",
+                    "requestIssued": True,
+                    "cleanBuildCache": False,
+                    "attachedToExistingCompile": False,
                     "status": str(execution.get("compilePhase") or "queued"),
                     "phase": str(execution.get("compilePhase") or "queued"),
                     "terminal": bool(execution.get("terminal")),
@@ -284,22 +390,190 @@ class CompileDomainService:
         data["compileRequestId"] = compile_request_id or compile_state.compile_request_id
         return ok(request_id, data, context=data["executionState"])
 
-    async def compile_errors(self, compile_request_id: str = "") -> ToolResponse:
+    async def compile_errors(self, compile_request_id: str = "", include_warnings: bool = False) -> ToolResponse:
         request_id = new_id("req")
+        # Do not use Python truthiness here: `{}`/`[]`/`"true"` must not turn
+        # into an opt-in request for potentially large warning details.
+        if not isinstance(include_warnings, bool):
+            return fail(
+                request_id,
+                "INVALID_PAYLOAD",
+                "includeWarnings must be a boolean.",
+                {
+                    "includeWarnings": include_warnings,
+                    "dispatchAttempted": False,
+                },
+            )
         # Force a live persisted error query. Transport failure is unknown, never "no errors".
         result = await self.dispatcher.call(
-            request_id, "compile.errors.get", {}, timeout_ms=45000
+            request_id, "compile.errors.get", {"includeWarnings": include_warnings}, timeout_ms=45000
         )
         if result.ok:
-            data = result.data or {}
-            self.server.state.update_compile_errors(data)
+            if not isinstance(result.data, dict):
+                return fail(
+                    request_id,
+                    "INVALID_COMPILE_DIAGNOSTICS",
+                    "Unity returned a non-object compile diagnostics payload.",
+                    {"compileRequestId": compile_request_id, "diagnosticType": type(result.data).__name__},
+                )
+            data = dict(result.data)
+            source_compile_request_id = self._response_compile_request_id(data)
+            if (compile_request_id and source_compile_request_id
+                    and source_compile_request_id != compile_request_id):
+                # A query scoped to A must not overwrite the current B snapshot
+                # merely because B happened to finish while it was in flight.
+                return fail(
+                    request_id,
+                    "COMPILE_IDENTITY_MISMATCH",
+                    "Unity returned diagnostics for a different compile request.",
+                    {
+                        "expectedCompileRequestId": compile_request_id,
+                        "actualCompileRequestId": source_compile_request_id,
+                        "stateUpdated": False,
+                    },
+                )
+            if source_compile_request_id:
+                data["compileRequestId"] = source_compile_request_id
+
+            if include_warnings:
+                warnings = data.get("warnings")
+                details_available = data.get("warningDetailsAvailable")
+                if warnings is not None and not isinstance(warnings, list):
+                    return fail(
+                        request_id,
+                        "INVALID_COMPILE_DIAGNOSTICS",
+                        "Unity returned warning details in a non-array form.",
+                        {"compileRequestId": source_compile_request_id or compile_request_id,
+                         "warningsType": type(warnings).__name__},
+                    )
+                if details_available is not None and not isinstance(details_available, bool):
+                    return fail(
+                        request_id,
+                        "INVALID_COMPILE_DIAGNOSTICS",
+                        "Unity returned warningDetailsAvailable in a non-boolean form.",
+                        {"compileRequestId": source_compile_request_id or compile_request_id,
+                         "warningDetailsAvailableType": type(details_available).__name__},
+                    )
+                warning_count = data.get("warningCount")
+                if (warning_count is not None
+                        and (not isinstance(warning_count, int) or isinstance(warning_count, bool)
+                             or warning_count < 0)):
+                    return fail(
+                        request_id,
+                        "INVALID_COMPILE_DIAGNOSTICS",
+                        "Unity returned warningCount in an invalid form.",
+                        {"compileRequestId": source_compile_request_id or compile_request_id,
+                         "warningCountType": type(warning_count).__name__},
+                    )
+                warnings_truncated = data.get("warningsTruncated")
+                if warnings_truncated is not None and not isinstance(warnings_truncated, bool):
+                    return fail(
+                        request_id,
+                        "INVALID_COMPILE_DIAGNOSTICS",
+                        "Unity returned warningsTruncated in a non-boolean form.",
+                        {"compileRequestId": source_compile_request_id or compile_request_id,
+                         "warningsTruncatedType": type(warnings_truncated).__name__},
+                    )
+                if isinstance(warnings, list) and any(not isinstance(item, dict) for item in warnings):
+                    return fail(
+                        request_id,
+                        "INVALID_COMPILE_DIAGNOSTICS",
+                        "Unity returned a warning detail that was not an object.",
+                        {"compileRequestId": source_compile_request_id or compile_request_id,
+                         "warningDetailType": next(type(item).__name__ for item in warnings if not isinstance(item, dict))},
+                    )
+                details_available = bool(details_available) if details_available is not None else isinstance(warnings, list)
+                if details_available and warnings is None:
+                    return fail(
+                        request_id,
+                        "INVALID_COMPILE_DIAGNOSTICS",
+                        "Unity reported available warning details without a warnings array.",
+                        {"compileRequestId": source_compile_request_id or compile_request_id},
+                    )
+                if details_available and isinstance(warnings, list):
+                    limited_warnings = warnings[:1000]
+                    data["warnings"] = limited_warnings
+                    data["warningsTruncated"] = bool(data.get("warningsTruncated")) or len(warnings) > 1000 or (
+                        isinstance(warning_count, int) and not isinstance(warning_count, bool)
+                        and warning_count > len(limited_warnings)
+                    )
+                else:
+                    # An old persisted record may know the count but have lost
+                    # its per-warning payload.  Absence is deliberately not an
+                    # empty warning list.  An explicit unavailable response is
+                    # also authoritative: it must clear, rather than leak, any
+                    # contradictory warnings array supplied alongside it.
+                    data.pop("warnings", None)
+                    data["warningsTruncated"] = False
+                data["warningDetailsAvailable"] = details_available
+            else:
+                data.pop("warnings", None)
+
+            state = self.server.state
+            if not state.matches_authoritative_compile_identity(data):
+                current = state.compile
+                return fail(
+                    request_id,
+                    "COMPILE_IDENTITY_MISMATCH",
+                    "Unity returned diagnostics for a different authoritative compilation.",
+                    {
+                        "expectedCompileRequestId": current.compile_request_id,
+                        "actualCompileRequestId": source_compile_request_id,
+                        "expectedCompileOperationId": current.compile_operation_id,
+                        "actualCompileOperationId": str(data.get("compileOperationId") or ""),
+                        "expectedWriteBatchId": current.write_batch_id,
+                        "actualWriteBatchId": str(data.get("writeBatchId") or ""),
+                        "stateUpdated": False,
+                    },
+                )
+            if not state.update_compile_errors(data):
+                return fail(
+                    request_id,
+                    "COMPILE_IDENTITY_MISMATCH",
+                    "Unity diagnostics were rejected because the authoritative compilation changed.",
+                    {"stateUpdated": False},
+                )
+            if include_warnings:
+                current = state.compile
+                # Never attribute an automatic compile to a batch registered
+                # after it began.  The current state contract has no input
+                # manifest sufficient to turn that event into evidence.
+                can_persist = bool(
+                    state.producer_epoch
+                    and state.editor.authoritative
+                    # Only an explicitly request-scoped origin is enough to
+                    # bind diagnostics to a durable batch.  Unknown is not a
+                    # harmless legacy default: it is insufficient evidence.
+                    and current.compile_origin == "mcp"
+                    and current.write_batch_id
+                    and current.compile_operation_id
+                    and current.compile_request_id
+                    and source_compile_request_id == current.compile_request_id
+                )
+                if can_persist:
+                    data["warningDetailsPersisted"] = state.persist_write_batch_warnings(
+                        write_batch_id=current.write_batch_id,
+                        compile_operation_id=current.compile_operation_id,
+                        compile_request_id=current.compile_request_id,
+                        details_available=bool(data.get("warningDetailsAvailable")),
+                        warnings_truncated=bool(data.get("warningsTruncated")),
+                        warnings=data.get("warnings") if isinstance(data.get("warnings"), list) else None,
+                    )
+                else:
+                    # State persistence is an evidence claim.  Report an
+                    # explicit false rather than leaving callers to mistake an
+                    # omitted field for successful association.
+                    data["warningDetailsPersisted"] = False
             data.setdefault("source", "live")
             data.setdefault("mode", "strict_live")
             data.setdefault("compileRequestId", compile_request_id)
+            data["includeWarnings"] = include_warnings
             data["currentCompileWarningCount"] = int(data.get("warningCount") or 0)
             data.setdefault("historicalWarningCount", 0)
             data.setdefault("importerWarningCount", 0)
             data.setdefault("diagnosticSource", "compile.errors.get")
+            if not include_warnings:
+                data.pop("warnings", None)
             data["status"] = "failed" if int(data.get("total") or 0) > 0 else str(
                 data.get("status") or self.server.state.compile.status or "completed"
             )
@@ -389,8 +663,10 @@ class CompileDomainService:
                     "UNITY_NOT_CONNECTED",
                     "CONNECTION_LOST",
                     "DOMAIN_RELOAD_TIMEOUT",
+                    "COMMAND_TIMEOUT",
                 ):
                     if time.monotonic() >= deadline:
+                        observation_timed_out = err_code == "COMMAND_TIMEOUT"
                         return ok(
                             request_id,
                             {
@@ -399,9 +675,16 @@ class CompileDomainService:
                                 "isCompiling": True,
                                 "pollCount": polls,
                                 "elapsedS": timeout_s,
-                                "note": "Unity disconnected (likely domain reload)",
+                                "note": (
+                                    "Unity state observation timed out; the original compile outcome remains unknown."
+                                    if observation_timed_out
+                                    else "Unity disconnected (likely domain reload)"
+                                ),
+                                "lastObservationError": err_code,
                                 "reconnectedDuringWait": reconnect_waited,
-                                "waitMode": "disconnect_timeout",
+                                "waitMode": "observation_timeout" if observation_timed_out else "disconnect_timeout",
+                                "completed": False,
+                                "timedOut": True,
                             },
                         )
                     reconnect_waited = True
@@ -581,6 +864,71 @@ class CompileDomainService:
         write_batch_created_at: int = 0,
         compile_operation_id: str = "",
     ) -> ToolResponse:
+        request_id = new_id("req")
+        # The batch identity is an authorization and correlation boundary, not
+        # a hint.  Reject malformed values before the workflow can attach to
+        # or dispatch any Unity compilation.
+        if not isinstance(write_batch_id, str):
+            return fail(
+                request_id,
+                "INVALID_WRITE_BATCH_ID",
+                "writeBatchId must be a string.",
+                {"writeBatchId": write_batch_id, "dispatchAttempted": False},
+            )
+        if not isinstance(write_batch_created_at, int) or isinstance(write_batch_created_at, bool) or write_batch_created_at < 0:
+            return fail(
+                request_id,
+                "INVALID_WRITE_BATCH_TIMESTAMP",
+                "writeBatchCreatedAt must be a non-negative integer.",
+                {"writeBatchCreatedAt": write_batch_created_at, "dispatchAttempted": False},
+            )
+        if not isinstance(compile_operation_id, str):
+            return fail(
+                request_id,
+                "INVALID_COMPILE_OPERATION_ID",
+                "compileOperationId must be a string.",
+                {"compileOperationId": compile_operation_id, "dispatchAttempted": False},
+            )
+        if write_batch_id and not write_batch_id.strip():
+            return fail(
+                request_id,
+                "INVALID_WRITE_BATCH_ID",
+                "writeBatchId must not be whitespace only.",
+                {"writeBatchId": write_batch_id, "dispatchAttempted": False},
+            )
+        identity = {
+            "compileRequestId": attach_compile_request_id,
+            "compileOperationId": compile_operation_id,
+            "writeBatchId": write_batch_id,
+            "writeBatchCreatedAt": write_batch_created_at,
+        }
+        try:
+            return await self._safe_compile_and_wait(
+                timeout_s, poll_interval_s, prefer_events, post_compile_delay_s,
+                attach_compile_request_id, write_batch_id, write_batch_created_at,
+                compile_operation_id, request_id, identity,
+            )
+        except Exception as exc:
+            return fail(
+                request_id, "COMPILE_WORKFLOW_EXCEPTION", str(exc),
+                {**identity, "exceptionType": type(exc).__name__,
+                 "errorsVerified": False, "correlationVerified": False,
+                 "nextAction": "Observe the original compile or write batch; do not trigger another compile."},
+            )
+
+    async def _safe_compile_and_wait(
+        self,
+        timeout_s: float = 300,
+        poll_interval_s: float = 1.0,
+        prefer_events: bool = True,
+        post_compile_delay_s: float = 3.0,
+        attach_compile_request_id: str = "",
+        write_batch_id: str = "",
+        write_batch_created_at: int = 0,
+        compile_operation_id: str = "",
+        request_id: str = "",
+        identity: dict | None = None,
+    ) -> ToolResponse:
         """Robust compile wait with post-compile cooldown and double-verification.
 
         Workflow:
@@ -596,8 +944,76 @@ class CompileDomainService:
         """
         import time
 
-        request_id = new_id("req")
         workflow_started = time.monotonic()
+
+        if write_batch_id and not attach_compile_request_id:
+            get_write_batch = getattr(self.server.state, "get_write_batch", None)
+            stored_batch = get_write_batch(write_batch_id) if callable(get_write_batch) else None
+            if stored_batch is None:
+                return fail(
+                    request_id,
+                    "WRITE_BATCH_NOT_FOUND",
+                    "No write batch with this identity exists for the connected project.",
+                    {
+                        "writeBatchId": write_batch_id,
+                        "dispatchAttempted": False,
+                        "nextAction": "Register the saved changes for the connected project before compiling.",
+                    },
+                )
+            stored_created_at = int(stored_batch.get("writeBatchCreatedAt") or 0)
+            if write_batch_created_at and stored_created_at != int(write_batch_created_at):
+                return fail(
+                    request_id,
+                    "WRITE_BATCH_TIMESTAMP_MISMATCH",
+                    "The supplied writeBatchCreatedAt does not match the persisted batch.",
+                    {
+                        "writeBatchId": write_batch_id,
+                        "expected": stored_created_at,
+                        "actual": int(write_batch_created_at),
+                        "nextAction": "Query unity_write_batch_status and keep the original batch identity.",
+                    },
+                )
+            write_batch_created_at = stored_created_at
+            identity["writeBatchCreatedAt"] = stored_created_at
+            terminal_snapshot = stored_batch.get("terminalSnapshot")
+            if stored_batch.get("correlationVerified") and isinstance(terminal_snapshot, dict):
+                outcome = str(stored_batch.get("outcome") or "unknown")
+                return ok(
+                    request_id,
+                    {
+                        **terminal_snapshot,
+                        "status": "success" if outcome == "passed" else "failed",
+                        "phase": str(terminal_snapshot.get("compilePhase") or outcome),
+                        "terminal": True,
+                        "compileRequestId": str(stored_batch.get("compileRequestId") or ""),
+                        "compileOperationId": str(stored_batch.get("compileOperationId") or ""),
+                        "writeBatchId": write_batch_id,
+                        "writeBatchCreatedAt": stored_created_at,
+                        "errorsVerified": True,
+                        "correlationVerified": True,
+                        "errorTotal": int(terminal_snapshot.get("errorCount") or 0),
+                        "attachedToExistingCompile": False,
+                        "reusedVerifiedBatch": True,
+                    },
+                    context=terminal_snapshot,
+                )
+            if str(stored_batch.get("status") or "") in {
+                "verified", "failed", "canceled", "recovery_required"
+            }:
+                return fail(
+                    request_id,
+                    "COMPILE_CORRELATION_NOT_VERIFIED",
+                    "The persisted write batch is terminal or requires recovery without correlated compile evidence.",
+                    {
+                        "writeBatchId": write_batch_id,
+                        "writeBatchCreatedAt": stored_created_at,
+                        "batchStatus": stored_batch.get("status"),
+                        "outcome": stored_batch.get("outcome", "unknown"),
+                        "errorsVerified": bool(stored_batch.get("errorsVerified")),
+                        "correlationVerified": False,
+                        "nextAction": "Query unity_write_batch_status for the original batch; do not trigger a replacement compile.",
+                    },
+                )
 
         def active_session_id() -> str:
             manager = getattr(self.server, "session_manager", None)
@@ -689,6 +1105,17 @@ class CompileDomainService:
             compile_r.data.get("compileRequestId", "") if compile_r.data else ""
         )
 
+        expected_compile_operation_id = str(
+            compile_operation_id
+            or (compile_r.data or {}).get("compileOperationId")
+            or self.server.state.compile.compile_operation_id
+            or ""
+        )
+        identity.update(
+            compileRequestId=compile_request_id,
+            compileOperationId=expected_compile_operation_id,
+        )
+        # Keep the attached identity before waiting; another batch can become current.
         # Step 2: Wait for compile idle
         wait_r = await self.compile_wait(
             timeout_s=timeout_s,
@@ -704,12 +1131,6 @@ class CompileDomainService:
             not wait_r.ok
             and wait_r.error
             and wait_r.error.code == "COMPILE_ERROR"
-        )
-        expected_compile_operation_id = str(
-            compile_operation_id
-            or (compile_r.data or {}).get("compileOperationId")
-            or self.server.state.compile.compile_operation_id
-            or ""
         )
         wait_interrupted_by_reload = bool(
             not wait_r.ok
@@ -782,8 +1203,65 @@ class CompileDomainService:
 
         # Step 5: Double-verify compile errors (reads from disk on Unity side)
         errors_r = await self.compile_errors(compile_request_id)
-        if errors_r.ok and errors_r.data:
-            error_total = errors_r.data.get("total", 0)
+        if not errors_r.ok:
+            return fail(
+                request_id, "COMPILE_ERRORS_NOT_VERIFIED",
+                "The compile error query failed; the compile outcome is not verified.",
+                {
+                    **self._compile_diagnostics(),
+                    "compileRequestId": compile_request_id,
+                    "compileOperationId": expected_compile_operation_id,
+                    "writeBatchId": write_batch_id,
+                    "errorQuery": asdict(errors_r),
+                    "nextAction": "Observe the original compile identity; do not trigger a replacement compile.",
+                },
+            )
+        terminal_execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+        correlation_verified = bool(
+            write_batch_id
+            and terminal_execution.get("writeBatchId") == write_batch_id
+            and terminal_execution.get("compileOperationId") == expected_compile_operation_id
+            and expected_compile_operation_id
+            and terminal_execution.get("terminal")
+            and terminal_execution.get("errorsVerified")
+            and terminal_execution.get("lastCompileVerifiedAt", 0) >= int(write_batch_created_at) > 0
+        )
+        if write_batch_id and not correlation_verified:
+            return fail(
+                request_id, "COMPILE_CORRELATION_NOT_VERIFIED",
+                "The terminal snapshot does not verify the requested write batch.",
+                {
+                    "compileRequestId": compile_request_id,
+                    "compileOperationId": expected_compile_operation_id,
+                    "writeBatchId": write_batch_id,
+                    "writeBatchCreatedAt": write_batch_created_at,
+                    "correlationVerified": False,
+                    "executionState": terminal_execution,
+                    "nextAction": "Query unity_write_batch_status for the original writeBatchId.",
+                },
+            )
+        if (not isinstance(errors_r.data, dict)
+                or type(errors_r.data.get("total")) is not int or errors_r.data["total"] < 0):
+            return fail(request_id, "COMPILE_ERRORS_NOT_VERIFIED",
+                        "The error query returned no verified error count.",
+                        {**identity, "executionState": terminal_execution})
+        if expected_compile_operation_id and terminal_execution.get("compileOperationId") != expected_compile_operation_id:
+            return fail(request_id, "COMPILE_OPERATION_MISMATCH",
+                        "The terminal snapshot belongs to another compile operation.",
+                        {**identity, "executionState": terminal_execution,
+                         "nextAction": "Observe the original compile identity; do not recompile."})
+        if (not terminal_execution.get("terminal") or not terminal_execution.get("errorsVerified")
+                or (compile_request_id and terminal_execution.get("compileRequestId") != compile_request_id)):
+            return fail(request_id, "COMPILE_ERRORS_NOT_VERIFIED",
+                        "Unity has not published a verified terminal for this compile request.",
+                        {**identity, "executionState": terminal_execution,
+                         "nextAction": "Observe the original compile request; do not recompile."})
+        if errors_r.data["total"] == 0 and terminal_execution.get("compilePhase") != "completed":
+            return fail(request_id, "COMPILE_TERMINAL_CONFLICT",
+                        "The zero-error query conflicts with Unity's terminal compilation phase.",
+                        {**identity, "executionState": terminal_execution})
+        if errors_r.data:
+            error_total = errors_r.data["total"]
             if error_total > 0:
                 return ok(
                     request_id,
@@ -792,6 +1270,11 @@ class CompileDomainService:
                         "phase": "failed",
                         "terminal": True,
                         "compileRequestId": compile_request_id,
+                        "compileOperationId": expected_compile_operation_id,
+                        "writeBatchId": write_batch_id,
+                        "writeBatchCreatedAt": write_batch_created_at,
+                        "errorsVerified": terminal_execution.get("errorsVerified", False),
+                        "correlationVerified": correlation_verified,
                         "errors": errors_r.data.get("errors", []),
                         "errorTotal": error_total,
                         "source": errors_r.data.get("source", "unknown"),
@@ -801,34 +1284,7 @@ class CompileDomainService:
                     context=terminal_execution,
                 )
 
-        # Step 6: require the Unity-produced terminal identity/timestamp when a
-        # write batch was supplied. Legacy uncorrelated calls remain supported
-        # but explicitly report correlationVerified=false.
-        final_compile = self.server.state.compile
-        correlation_verified = bool(
-            write_batch_id
-            and final_compile.write_batch_id == write_batch_id
-            and final_compile.compile_operation_id
-            and final_compile.compile_operation_id == expected_compile_operation_id
-            and final_compile.terminal
-            and final_compile.errors_verified
-            and final_compile.last_compile_verified_at >= int(write_batch_created_at) > 0
-        )
-        if write_batch_id and not correlation_verified:
-            return fail(
-                request_id,
-                "COMPILE_CORRELATION_NOT_VERIFIED",
-                "Unity finished the workflow without proving that the registered write batch was the verified compilation input.",
-                {
-                    **self._compile_diagnostics(),
-                    "writeBatchId": write_batch_id,
-                    "writeBatchCreatedAt": write_batch_created_at,
-                    "compileOperationId": expected_compile_operation_id,
-                    "correlationVerified": False,
-                },
-            )
-
-        # Step 7: Success
+        # Assemble both outcomes from the same snapshot validated above.
         final_session_id = active_session_id()
         session_changed_during_compile = bool(
             initial_session_id
@@ -836,18 +1292,15 @@ class CompileDomainService:
             and initial_session_id != final_session_id
         )
         reconnected_after_reload = reconnected_after_reload or session_changed_during_compile
-        final_execution = self.server.state.execution_state(
-            stale_after_ms=CONFIG.context_stale_ms
-        )
         return ok(
             request_id,
             {
-                **self._compile_diagnostics(),
+                **terminal_execution,
                 "status": "success",
                 "compileRequestId": compile_request_id,
                 "compileOperationId": expected_compile_operation_id,
-                "writeBatchId": write_batch_id or final_compile.write_batch_id,
-                "writeBatchCreatedAt": write_batch_created_at or final_compile.write_batch_created_at,
+                "writeBatchId": write_batch_id or terminal_execution.get("writeBatchId", ""),
+                "writeBatchCreatedAt": write_batch_created_at or terminal_execution.get("writeBatchCreatedAt", 0),
                 "correlationVerified": correlation_verified,
                 "postCompileDelayS": actual_delay,
                 "reconnectedAfterReload": reconnected_after_reload,
@@ -855,10 +1308,10 @@ class CompileDomainService:
                 "initialSessionId": initial_session_id,
                 "finalSessionId": final_session_id,
                 "waitInterruptedByReload": wait_interrupted_by_reload,
-                "errorsVerified": True,
+                "errorsVerified": bool(terminal_execution.get("errorsVerified")),
                 "errorTotal": 0,
                 "attachedToExistingCompile": attached_to_existing,
                 "waitReportedCompileError": wait_reported_compile_error,
             },
-            context=final_execution,
+            context=terminal_execution,
         )

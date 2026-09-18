@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace CodingRiver.UPilot.Flow
 {
+    public interface IFlowModalObserver : IDisposable
+    {
+        void Recover();
+        bool ActionPosted { get; }
+        string Error { get; }
+    }
     /// <summary>
     /// Background watchdog for Unity native modal menus. It never terminates Unity:
     /// recovery is limited to posting Escape to a top-level window owned by the exact
@@ -13,9 +17,7 @@ namespace CodingRiver.UPilot.Flow
     /// </summary>
     public static class UPilotFlowModalWatchdog
     {
-        private const uint WmKeyDown = 0x0100;
-        private const uint WmKeyUp = 0x0101;
-        private const int VkEscape = 0x1B;
+        public static Func<UnityEditor.EditorWindow, int, IFlowModalObserver> CreateObserver;
 
         private sealed class Watch : IDisposable
         {
@@ -23,12 +25,11 @@ namespace CodingRiver.UPilot.Flow
             private readonly string _executionId;
             private readonly string _owner;
             private readonly string _modalType;
-            private readonly int _processId;
-            private IntPtr _windowHandle;
             private Timer _timer;
             private IDisposable _registryLease;
             private int _disposed;
             private int _recoveryAttempted;
+            private readonly IFlowModalObserver _observer;
 
             public Watch(ActionContext context, string modalType, int timeoutMs)
             {
@@ -37,8 +38,7 @@ namespace CodingRiver.UPilot.Flow
                     ? (context?.CurrentCaseName ?? "flow-action")
                     : context.CurrentStepId;
                 _modalType = string.IsNullOrWhiteSpace(modalType) ? "native-modal" : modalType;
-                _processId = Process.GetCurrentProcess().Id;
-                _windowHandle = ResolveUnityWindow(_processId);
+                _observer = CreateObserver?.Invoke(UnityEditor.EditorWindow.focusedWindow, timeoutMs);
                 long deadline = NowMs() + Math.Max(500, timeoutMs);
 
                 if (!string.IsNullOrWhiteSpace(_executionId))
@@ -73,33 +73,10 @@ namespace CodingRiver.UPilot.Flow
                 string error = string.Empty;
                 try
                 {
-                    if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    {
-                        error = "Native modal recovery is only available on Windows.";
-                    }
-                    else
-                    {
-                        int attempted = 0;
-                        int posted = 0;
-                        foreach (IntPtr handle in ResolveUnityWindows(_processId, _windowHandle))
-                        {
-                            attempted++;
-                            if (PostEscape(handle))
-                                posted++;
-                        }
-
-                        if (attempted == 0)
-                        {
-                            error = "No visible top-level windows owned by the current Unity process were found.";
-                        }
-                        else
-                        {
-                            succeeded = posted > 0;
-                            source = $"win32_postmessage_escape_all_windows:{posted}/{attempted}";
-                            if (!succeeded)
-                                error = $"PostMessage failed with Win32 error {Marshal.GetLastWin32Error()}.";
-                        }
-                    }
+                    _observer?.Recover();
+                    succeeded = _observer?.ActionPosted ?? false;
+                    source = "core_exact_owner_generic_menu";
+                    error = _observer?.Error ?? "Core modal observer adapter unavailable.";
                 }
                 catch (Exception ex)
                 {
@@ -123,6 +100,7 @@ namespace CodingRiver.UPilot.Flow
                     return;
 
                 _timer?.Dispose();
+                _observer?.Dispose();
                 _timer = null;
                 if (!string.IsNullOrWhiteSpace(_executionId))
                 {
@@ -187,102 +165,11 @@ namespace CodingRiver.UPilot.Flow
             }
         }
 
-        private static IntPtr ResolveUnityWindow(int processId)
-        {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                return IntPtr.Zero;
-
-            IntPtr foreground = GetForegroundWindow();
-            if (IsOwnedUnityWindow(foreground, processId))
-                return foreground;
-
-            using (Process process = Process.GetCurrentProcess())
-            {
-                IntPtr main = process.MainWindowHandle;
-                if (IsOwnedUnityWindow(main, processId))
-                    return main;
-            }
-
-            IntPtr match = IntPtr.Zero;
-            EnumWindows((handle, _) =>
-            {
-                if (!IsOwnedUnityWindow(handle, processId))
-                    return true;
-                match = handle;
-                return false;
-            }, IntPtr.Zero);
-            return match;
-        }
-
-        private static IEnumerable<IntPtr> ResolveUnityWindows(int processId, IntPtr preferred)
-        {
-            var seen = new HashSet<IntPtr>();
-            if (IsOwnedUnityWindow(preferred, processId) && seen.Add(preferred))
-                yield return preferred;
-
-            IntPtr foreground = GetForegroundWindow();
-            if (IsOwnedUnityWindow(foreground, processId) && seen.Add(foreground))
-                yield return foreground;
-
-            using (Process process = Process.GetCurrentProcess())
-            {
-                IntPtr main = process.MainWindowHandle;
-                if (IsOwnedUnityWindow(main, processId) && seen.Add(main))
-                    yield return main;
-            }
-
-            var matches = new List<IntPtr>();
-            EnumWindows((handle, _) =>
-            {
-                if (IsOwnedUnityWindow(handle, processId) && seen.Add(handle))
-                    matches.Add(handle);
-                return true;
-            }, IntPtr.Zero);
-
-            foreach (IntPtr handle in matches)
-                yield return handle;
-        }
-
-        private static bool PostEscape(IntPtr handle)
-        {
-            bool down = PostMessage(handle, WmKeyDown, new IntPtr(VkEscape), IntPtr.Zero);
-            bool up = PostMessage(handle, WmKeyUp, new IntPtr(VkEscape), IntPtr.Zero);
-            return down && up;
-        }
-
-        private static bool IsOwnedUnityWindow(IntPtr handle, int processId)
-        {
-            if (handle == IntPtr.Zero || !IsWindow(handle) || !IsWindowVisible(handle))
-                return false;
-            GetWindowThreadProcessId(handle, out uint ownerProcessId);
-            return ownerProcessId == (uint)processId;
-        }
-
         private sealed class EmptyDisposable : IDisposable
         {
             public static readonly EmptyDisposable Instance = new EmptyDisposable();
             public void Dispose() { }
         }
-
-        private delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
-
-        [DllImport("user32.dll")]
-        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindow(IntPtr handle);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindowVisible(IntPtr handle);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
 
         private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     }
