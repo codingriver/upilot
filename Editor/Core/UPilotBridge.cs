@@ -174,6 +174,8 @@ namespace CodingRiver.UPilot
         private readonly UPilotCommandRouter   _router            = new();
 
         public UPilotCompileService CompileService => _compileService;
+        internal UPilotExecutionService ExecutionService => _executionService;
+        internal UPilotReflectionService ReflectionService => _reflectionService;
         private readonly ConcurrentQueue<Action>   _mainThreadQueue   = new();
         private readonly SemaphoreSlim             _sendLock          = new(1, 1);
         private readonly object                    _executionStatePublicationLock = new();

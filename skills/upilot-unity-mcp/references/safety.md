@@ -20,6 +20,7 @@
 - Compile only after code or assembly changes.
 - Register assembly-related disk writes immediately. Do not invoke sync or compile in PlayMode; an authorized write batch resumes automatically only after Unity reports authoritative EditMode.
 - Read structured errors before editing.
+- Compile verification must come from Unity's Roslyn pipeline. External compilers (`csc`, `mcs`, `dotnet build`) differ in defines, asmdef references, and assembly injection — do not treat their results as compile evidence.
 
 ## Configuration CSV
 

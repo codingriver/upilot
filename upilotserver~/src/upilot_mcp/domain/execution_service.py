@@ -364,3 +364,44 @@ class ExecutionDomainService:
 
     async def execution_capabilities(self) -> ToolResponse:
         return normalize_execution_error(await self.dispatcher.call(new_id("req"), "execution.capabilities", {}))
+
+    async def csharp_object_dump(
+        self,
+        session_id: str = "",
+        handle: str = "",
+        max_depth: int = 3,
+        max_fields_per_node: int = 100,
+        max_total_nodes: int = 5000,
+        include_static: bool = False,
+        ignore_types: list[str] | None = None,
+        output_format: str = "json",
+        indentation: str = "  ",
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        def reject(code: str, message: str) -> ToolResponse:
+            return fail(request_id, code, message, {
+                "stage": "policy",
+                "sideEffectsMayHaveOccurred": False,
+                "nextAction": "Open an execution session, evaluate objects via csharp_eval with resultMode=handle, then pass sessionId+handle.",
+            })
+        if not session_id.strip() or not handle.strip():
+            return reject("INVALID_PARAMS", "Both sessionId and handle are required.")
+        if not (0 <= max_depth <= 64):
+            return reject("INVALID_PARAMS", "maxDepth must be 0-64.")
+        if not (1 <= max_fields_per_node <= 500):
+            return reject("INVALID_PARAMS", "maxFieldsPerNode must be 1-500.")
+        if not (1 <= max_total_nodes <= 20000):
+            return reject("INVALID_PARAMS", "maxTotalNodes must be 1-20000.")
+        if output_format not in ("json", "text"):
+            return reject("INVALID_PARAMS", "outputFormat must be json or text.")
+        return await self.dispatcher.call(request_id, "csharp.objectDump", {
+            "sessionId": session_id,
+            "handle": handle,
+            "maxDepth": max_depth,
+            "maxFieldsPerNode": max_fields_per_node,
+            "maxTotalNodes": max_total_nodes,
+            "includeStatic": include_static,
+            "ignoreTypes": ignore_types or [],
+            "outputFormat": output_format,
+            "indentation": indentation,
+        }, timeout_ms=60000)

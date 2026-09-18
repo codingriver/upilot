@@ -12,6 +12,7 @@ namespace CodingRiver.UPilot.Tests
         {
             "UPilot/打开 UPilot",
             "UPilot/高级设置",
+            "UPilot/快捷调试",
             "UPilot/Flow/Test Runner",
             "UPilot/Flow/Settings",
             "UPilot/Flow/Enable",

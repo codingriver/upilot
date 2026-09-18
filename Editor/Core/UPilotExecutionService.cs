@@ -257,6 +257,7 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("csharp.eval", HandleCSharpEvalAsync);
             _bridge.Router.Register("reflection.emitType", HandleReflectionEmitAsync);
             _bridge.Router.Register("execution.capabilities", HandleCapabilitiesAsync);
+            _bridge.Router.Register("csharp.objectDump", HandleObjectDumpAsync);
         }
 
         public void OnPlayModeStateChanged(PlayModeStateChange change)
@@ -270,6 +271,80 @@ namespace CodingRiver.UPilot
         private async Task HandleCapabilitiesAsync(string id, string json, CancellationToken token)
         {
             await _bridge.SendResultAsync(id, "execution.capabilities", Capabilities, token);
+        }
+
+        private Task HandleObjectDumpAsync(string id, string json, CancellationToken token) =>
+            HandleObjectDumpAsync(id, json, token, action => _bridge.EnqueueTracked(id, action),
+                result => _bridge.SendResultAsync(id, "csharp.objectDump", result, token),
+                error => SendContractErrorAsync(id, "csharp.objectDump", error, token));
+
+        internal async Task HandleObjectDumpAsync(string id, string json, CancellationToken token,
+            Action<Action> enqueue, Func<ObjectDumpResultPayload, Task> sendResult,
+            Func<ExecutionContractException, Task> sendError)
+        {
+            ObjectDumpPayload payload = null;
+            try
+            {
+                var message = JsonUtility.FromJson<ObjectDumpMessage>(json);
+                payload = message?.payload ?? new ObjectDumpPayload();
+
+                if (string.IsNullOrWhiteSpace(payload.sessionId) || string.IsNullOrWhiteSpace(payload.handle))
+                    throw new ExecutionContractException("INVALID_PARAMS",
+                        "Both sessionId and handle are required.");
+
+                payload.maxDepth = Math.Max(0, Math.Min(64, payload.maxDepth));
+                payload.maxFieldsPerNode = Math.Max(1, Math.Min(500, payload.maxFieldsPerNode));
+                payload.maxTotalNodes = Math.Max(1, Math.Min(20000, payload.maxTotalNodes));
+                payload.outputFormat = (payload.outputFormat ?? "json").Trim().ToLowerInvariant();
+                if (payload.outputFormat != "json" && payload.outputFormat != "text")
+                    payload.outputFormat = "json";
+
+                var ignoreSet = new HashSet<string>(payload.ignoreTypes ?? Array.Empty<string>());
+                ignoreSet.UnionWith(ObjectDumper.DefaultSkipTypes);
+
+                var tcs = new TaskCompletionSource<ObjectDumpResultPayload>();
+                enqueue(() =>
+                {
+                    try
+                    {
+                        object target = _sessions.Resolve(payload.sessionId, payload.handle);
+
+                        int totalNodes = 0;
+                        var root = ObjectDumper.Dump(
+                            target,
+                            payload.maxDepth,
+                            payload.maxFieldsPerNode,
+                            payload.maxTotalNodes,
+                            payload.includeStatic,
+                            ignoreSet,
+                            ref totalNodes);
+
+                        var result = new ObjectDumpResultPayload
+                        {
+                            typeName = target.GetType().FullName ?? target.GetType().Name,
+                            root = root,
+                            totalNodes = totalNodes,
+                            truncated = totalNodes >= payload.maxTotalNodes,
+                        };
+                        if (result.truncated)
+                            result.truncateReason = "Reached maxTotalNodes limit (" + payload.maxTotalNodes + ")";
+
+                        result.text = ObjectDumper.FormatAsText(root, payload.indentation);
+                        tcs.SetResult(result);
+                    }
+                    catch (Exception ex) { tcs.SetException(ex); }
+                });
+                await sendResult(await tcs.Task);
+            }
+            catch (ExecutionContractException ex)
+            {
+                await sendError(ex);
+            }
+            catch (Exception ex)
+            {
+                await sendError(new ExecutionContractException("INTERNAL_ERROR",
+                    ex.GetType().FullName + ": " + ex.Message));
+            }
         }
 
         private async Task HandleSessionAsync(string id, string json, CancellationToken token)
