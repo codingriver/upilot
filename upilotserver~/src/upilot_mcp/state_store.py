@@ -143,10 +143,73 @@ class StateStore:
                 db.execute("ALTER TABLE write_batches ADD COLUMN warning_details_available INTEGER NOT NULL DEFAULT 0")
             if "warnings_truncated" not in write_batch_columns:
                 db.execute("ALTER TABLE write_batches ADD COLUMN warnings_truncated INTEGER NOT NULL DEFAULT 0")
+            if "superseded_by" not in write_batch_columns:
+                db.execute("ALTER TABLE write_batches ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
+            verified_successors = db.execute(
+                "SELECT write_batch_id,created_at,changes_json FROM write_batches WHERE project_path=? "
+                "AND status='verified' AND terminal_snapshot_json IS NOT NULL ORDER BY rowid",
+                (resolved,),
+            ).fetchall()
+            for successor_id, successor_created_at, successor_changes_json in verified_successors:
+                try:
+                    successor_changes = json.loads(successor_changes_json) if successor_changes_json else []
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                self._supersede_covered_recovery_batches(db, {
+                    "writeBatchId": str(successor_id),
+                    "writeBatchCreatedAt": int(successor_created_at),
+                    "changes": successor_changes,
+                })
             db.execute("CREATE TABLE IF NOT EXISTS test_jobs (project_path TEXT NOT NULL, task_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, task_id))")
             db.execute("CREATE TABLE IF NOT EXISTS operation_jobs (project_path TEXT NOT NULL, operation_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, operation_id))")
             db.execute("CREATE TABLE IF NOT EXISTS capture_attachments (project_path TEXT NOT NULL, attachment_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, attachment_id))")
             db.execute("CREATE TABLE IF NOT EXISTS capture_start_intents (project_path TEXT NOT NULL, request_key TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, request_key))")
+            db.execute("CREATE TABLE IF NOT EXISTS hang_captures (project_path TEXT NOT NULL, capture_id TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, capture_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS console_evidence (project_path TEXT NOT NULL, identity_kind TEXT NOT NULL, identity_value TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(project_path, identity_kind, identity_value))")
+            unfinished = db.execute(
+                "SELECT capture_id,state_json FROM hang_captures WHERE project_path=?",
+                (resolved,),
+            ).fetchall()
+            for capture_id, state_json in unfinished:
+                try:
+                    capture_state = json.loads(state_json)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(capture_state, dict) or bool(capture_state.get("terminal")):
+                    continue
+                result = capture_state.get("result") if isinstance(capture_state.get("result"), dict) else {}
+                artifact_path = str(capture_state.get("outputPath") or result.get("path") or "").strip()
+                partial_artifact = None
+                if artifact_path:
+                    try:
+                        resolved_artifact = Path(artifact_path).resolve()
+                        resolved_artifact.relative_to(Path(resolved))
+                        exists = resolved_artifact.is_file()
+                        partial_artifact = {
+                            "path": str(resolved_artifact),
+                            "exists": exists,
+                            "bytes": resolved_artifact.stat().st_size if exists else 0,
+                            "sha256": "",
+                            "hashVerified": False,
+                        }
+                    except (OSError, ValueError):
+                        partial_artifact = None
+                capture_state.update({
+                    "status": "interrupted",
+                    "terminal": True,
+                    "success": False,
+                    "endedAt": _now_ms(),
+                    "error": {
+                        "code": "HANG_CAPTURE_INTERRUPTED",
+                        "message": "Server restarted before dump capture reached a persisted terminal result.",
+                    },
+                })
+                if partial_artifact is not None:
+                    capture_state["partialArtifact"] = partial_artifact
+                db.execute(
+                    "UPDATE hang_captures SET state_json=? WHERE project_path=? AND capture_id=?",
+                    (json.dumps(capture_state, ensure_ascii=False), resolved, capture_id),
+                )
             db.execute(
                 "UPDATE write_batches SET status='recovery_required',updated_at=?,"
                 "error=CASE WHEN error='' THEN 'Server restarted while compile execution was in flight.' ELSE error END "
@@ -155,7 +218,9 @@ class StateStore:
             )
             row = db.execute("SELECT snapshot_json FROM project_state WHERE project_path = ?", (resolved,)).fetchone()
             pending = db.execute(
-                "SELECT write_batch_id FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') ORDER BY updated_at DESC LIMIT 1",
+                "SELECT write_batch_id FROM write_batches WHERE project_path=? "
+                "AND status IN ('pending','deferred','recovery_required') AND superseded_by='' "
+                "ORDER BY updated_at DESC LIMIT 1",
                 (resolved,),
             ).fetchone()
         if row:
@@ -244,9 +309,15 @@ class StateStore:
     @staticmethod
     def _write_batch_change_fields(changes_json: str | None) -> dict[str, Any]:
         changes = json.loads(changes_json) if changes_json is not None else None
+        code_extensions = {".cs", ".asmdef", ".asmref", ".rsp"}
+        asset_changes = [
+            item for item in changes or []
+            if Path(str(item.get("path") or "")).suffix.lower() not in code_extensions
+        ]
         return {
             "changes": changes,
             "deletedPaths": [item["path"] for item in changes or [] if item["kind"] == "delete"],
+            "assetChanges": asset_changes,
             "filesHashScope": "changes-v1" if changes is not None else "legacy",
         }
 
@@ -380,12 +451,88 @@ class StateStore:
             return None
         return state if isinstance(state, dict) else None
 
+    def create_hang_capture(self, state: dict) -> tuple[str, dict | None]:
+        if self._db_path is None or state.get("projectPath") != self._project_path:
+            raise RuntimeError("Hang capture persistence is not configured for this project.")
+        with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT state_json FROM hang_captures WHERE project_path=?",
+                (self._project_path,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    existing = json.loads(row[0])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(existing, dict) and not bool(existing.get("terminal")):
+                    return "busy", existing
+            db.execute(
+                "INSERT INTO hang_captures(project_path,capture_id,state_json) VALUES(?,?,?)",
+                (self._project_path, state["captureId"], json.dumps(state, ensure_ascii=False)),
+            )
+        return "created", state
+
+    def save_hang_capture(self, state: dict) -> None:
+        if self._db_path is None or state.get("projectPath") != self._project_path:
+            raise RuntimeError("Hang capture persistence is not configured for this project.")
+        with sqlite3.connect(self._db_path) as db:
+            db.execute(
+                "INSERT INTO hang_captures(project_path,capture_id,state_json) VALUES(?,?,?) "
+                "ON CONFLICT(project_path,capture_id) DO UPDATE SET state_json=excluded.state_json",
+                (self._project_path, state["captureId"], json.dumps(state, ensure_ascii=False)),
+            )
+
+    def get_hang_capture(self, capture_id: str) -> dict | None:
+        if self._db_path is None or not capture_id:
+            return None
+        with sqlite3.connect(self._db_path) as db:
+            row = db.execute(
+                "SELECT state_json FROM hang_captures WHERE project_path=? AND capture_id=?",
+                (self._project_path, capture_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            state = json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return state if isinstance(state, dict) else None
+
+    def save_console_evidence(self, identity_kind: str, identity_value: str, state: dict) -> None:
+        if self._db_path is None or not identity_kind or not identity_value:
+            raise RuntimeError("Console evidence persistence is not configured.")
+        with sqlite3.connect(self._db_path) as db:
+            db.execute(
+                "INSERT INTO console_evidence(project_path,identity_kind,identity_value,state_json) VALUES(?,?,?,?) "
+                "ON CONFLICT(project_path,identity_kind,identity_value) DO UPDATE SET state_json=excluded.state_json",
+                (self._project_path, identity_kind, identity_value, json.dumps(state, ensure_ascii=False)),
+            )
+
+    def get_console_evidence(self, identity_kind: str, identity_value: str) -> dict | None:
+        if self._db_path is None or not identity_kind or not identity_value:
+            return None
+        with sqlite3.connect(self._db_path) as db:
+            row = db.execute(
+                "SELECT state_json FROM console_evidence WHERE project_path=? AND identity_kind=? AND identity_value=?",
+                (self._project_path, identity_kind, identity_value),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
     def pending_write_batches(self) -> list[dict[str, Any]]:
         if self._db_path is None or not self._project_path:
             return []
         with sqlite3.connect(self._db_path) as db:
             rows = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') ORDER BY created_at",
+                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json "
+                "FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') "
+                "AND superseded_by='' ORDER BY created_at",
                 (self._project_path,),
             ).fetchall()
         return [
@@ -411,12 +558,25 @@ class StateStore:
             self.pending_write_batch_id = ""
             self.compile_deferred_reason = ""
 
+    def defer_write_batch_after_predispatch_failure(self, write_batch_id: str, expected_error: str) -> bool:
+        if self._db_path is None or not write_batch_id or not expected_error:
+            return False
+        with sqlite3.connect(self._db_path) as db:
+            cursor = db.execute(
+                "UPDATE write_batches SET status='deferred',updated_at=?,compile_operation_id='',error='' "
+                "WHERE project_path=? AND write_batch_id=? AND status='recovery_required' "
+                "AND terminal_snapshot_json IS NULL AND error=?",
+                (_now_ms(), self._project_path, write_batch_id, expected_error),
+            )
+        return cursor.rowcount == 1
+
     def get_write_batch(self, write_batch_id: str) -> dict[str, Any] | None:
         if self._db_path is None or not write_batch_id:
             return None
         with sqlite3.connect(self._db_path) as db:
             row = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated FROM write_batches WHERE project_path=? AND write_batch_id=?",
+                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by "
+                "FROM write_batches WHERE project_path=? AND write_batch_id=?",
                 (self._project_path, write_batch_id),
             ).fetchone()
         if row is None:
@@ -458,7 +618,7 @@ class StateStore:
             "lastCompileVerifiedAt": (evidence or {}).get("lastCompileVerifiedAt", 0),
             "outcome": (("passed" if evidence.get("compilePhase") == "completed" else "failed")
                         if correlation else "unknown"),
-            "supersededBy": "",
+            "supersededBy": row[16],
         }
         result["warningDetailsAvailable"] = details_available
         result["warningsTruncated"] = bool(row[15]) if details_available else False
@@ -538,12 +698,53 @@ class StateStore:
         ):
             return
         with sqlite3.connect(self._db_path) as db:
-            db.execute(
+            cursor = db.execute(
                 "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=? "
                 "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL",
                 ("verified" if payload["compilePhase"] == "completed" else "failed",
                  _now_ms(), json.dumps(payload, ensure_ascii=False), self._project_path, batch_id),
             )
+            if cursor.rowcount == 1 and payload["compilePhase"] == "completed":
+                superseded = self._supersede_covered_recovery_batches(db, batch)
+                if self.pending_write_batch_id in superseded:
+                    self.pending_write_batch_id = ""
+                    self.compile_deferred_reason = ""
+
+    def _supersede_covered_recovery_batches(self, db: sqlite3.Connection, successor: dict[str, Any]) -> set[str]:
+        successor_changes = successor.get("changes")
+        if not isinstance(successor_changes, list) or not successor_changes:
+            return set()
+        successor_paths = {
+            os.path.normcase(str(change.get("path") or ""))
+            for change in successor_changes if isinstance(change, dict) and change.get("path")
+        }
+        if not successor_paths:
+            return set()
+        rows = db.execute(
+            "SELECT write_batch_id,changes_json FROM write_batches WHERE project_path=? "
+            "AND status='recovery_required' AND superseded_by='' "
+            "AND rowid < (SELECT rowid FROM write_batches WHERE project_path=? AND write_batch_id=?)",
+            (self._project_path, self._project_path, successor["writeBatchId"]),
+        ).fetchall()
+        superseded: set[str] = set()
+        for write_batch_id, changes_json in rows:
+            try:
+                changes = json.loads(changes_json) if changes_json else []
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            recovery_paths = {
+                os.path.normcase(str(change.get("path") or ""))
+                for change in changes if isinstance(change, dict) and change.get("path")
+            }
+            if not recovery_paths or not recovery_paths.issubset(successor_paths):
+                continue
+            db.execute(
+                "UPDATE write_batches SET superseded_by=?,updated_at=? WHERE project_path=? "
+                "AND write_batch_id=? AND status='recovery_required' AND superseded_by=''",
+                (successor["writeBatchId"], _now_ms(), self._project_path, write_batch_id),
+            )
+            superseded.add(str(write_batch_id))
+        return superseded
 
     def _apply_compile_identity(self, payload: dict[str, Any]) -> None:
         fields = {

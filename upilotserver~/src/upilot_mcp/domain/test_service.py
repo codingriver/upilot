@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import CONFIG, diagnose_client_configs
+from ..console_evidence import begin_console_evidence, finish_console_evidence
 from ..automation_authorization import authorization_status, has_scope
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
@@ -274,6 +275,13 @@ class TestDomainService:
         # Persist the send boundary before entering the dispatcher.  A thrown
         # transport call leaves this at ``sent_unknown`` so restart recovery
         # observes the original run rather than issuing a second Execute.
+        try:
+            console_evidence = await begin_console_evidence(self.dispatcher, self.server.state)
+        except Exception as exc:
+            console_evidence = {
+                "source": "unavailable", "coverage": "unavailable",
+                "gapReason": f"start_boundary_failed:{type(exc).__name__}", "logs": [],
+            }
         checkpoint("starting", startIntentSent=True, startSendState="sent_unknown")
         result = await self.dispatcher.call(
             request_id, "test.run", payload, timeout_ms=300000
@@ -285,6 +293,11 @@ class TestDomainService:
         )
         if result.data is not None:
             result.data.update(filter_diagnostics)
+            result.data["consoleEvidence"] = console_evidence
+            run_guid = str(result.data.get("runGuid") or "")
+            state_store = getattr(getattr(self, "server", None), "state", None)
+            if run_guid and hasattr(state_store, "save_console_evidence"):
+                state_store.save_console_evidence("runGuid", run_guid, console_evidence)
         elif result.error is not None:
             result.error.detail.update(filter_diagnostics)
         return result
@@ -421,7 +434,10 @@ class TestDomainService:
             )
         if not cursor:
             payload = {"runGuid": run_guid} if run_guid else {}
-            return await self.dispatcher.call(request_id, "test.results", payload)
+            response = await self.dispatcher.call(request_id, "test.results", payload)
+            resolved_run_guid = str(run_guid or (response.data or {}).get("runGuid") or "")
+            await self._attach_test_console_evidence(response, resolved_run_guid)
+            return response
         if not run_guid:
             return fail(request_id, "TEST_RESULT_CURSOR_INVALID",
                         "Incremental test results require runGuid; the cursor never selects a run implicitly.",
@@ -505,7 +521,35 @@ class TestDomainService:
                         "The Unity Bridge returned non-contiguous incremental cursor progress.",
                         {**data, "sideEffectsMayHaveOccurred": False})
         data["nextCursor"] = self._encode_test_result_cursor(project_path, run_guid, actual_version, delivered)
-        return ok(request_id, data)
+        response = ok(request_id, data)
+        await self._attach_test_console_evidence(response, run_guid)
+        return response
+
+    async def _attach_test_console_evidence(self, response: ToolResponse, run_guid: str) -> None:
+        state_store = getattr(getattr(self, "server", None), "state", None)
+        if not run_guid or not hasattr(state_store, "get_console_evidence"):
+            return
+        evidence = state_store.get_console_evidence("runGuid", run_guid)
+        data = response.data if isinstance(response.data, dict) else None
+        terminal = bool(data and (
+            data.get("terminal")
+            or str(data.get("status") or "").lower()
+            in {"completed", "failed", "aborted", "cancelled", "canceled", "no_tests"}
+        ))
+        if evidence and terminal and evidence.get("coverage") == "pending":
+            try:
+                evidence = await finish_console_evidence(self.dispatcher, self.server.state, evidence)
+            except Exception as exc:
+                evidence = {
+                    **evidence,
+                    "coverage": "partial",
+                    "gapReason": f"end_boundary_failed:{type(exc).__name__}",
+                }
+            state_store.save_console_evidence("runGuid", run_guid, evidence)
+        if data is not None and evidence:
+            data["consoleEvidence"] = evidence
+        elif response.error is not None and evidence:
+            response.error.detail["consoleEvidence"] = evidence
 
     async def test_status(self) -> ToolResponse:
         request_id = new_id("req")

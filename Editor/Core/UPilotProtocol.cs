@@ -25,10 +25,13 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class HelloPayload
     {
+        public int identityContractVersion;
         public string unityVersion;
         public string projectPath;
         public string platform;
         public int processId;
+        public long processCreatedAt;
+        public string processRole;
     }
 
     [Serializable]
@@ -96,6 +99,10 @@ namespace CodingRiver.UPilot
     public class HelloAckPayload
     {
         public bool accepted;
+        public int identityContractVersion;
+        public string verificationLevel;
+        public string rejectionCode;
+        public string rejectionReason;
         public int heartbeatIntervalMs;
         public string mcpLabel;
         public string mcpHost;
@@ -226,6 +233,8 @@ namespace CodingRiver.UPilot
         public string[] cleanupDiagnostics = Array.Empty<string>();
         public TestListResultPayload selection;
         public string exceptionType;
+        public string exceptionMessage;
+        public string wrapperExceptionType;
         public string stackTrace;
     }
 

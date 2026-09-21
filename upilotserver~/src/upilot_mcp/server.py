@@ -7,6 +7,7 @@ import os
 import socket
 import sqlite3
 import struct
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +18,22 @@ from websockets.server import WebSocketServerProtocol
 from .dispatcher import WsTransport
 from .env import env_float
 from .protocol import PROTOCOL_VERSION, from_wire, now_ms, to_wire
+from .process_identity import (
+    MAIN_EDITOR_ROLE,
+    classify_unity_process,
+    paths_equal,
+    process_creation_time,
+    process_exists,
+    query_unity_processes,
+)
 from .session_manager import SessionManager
 from .state_store import CompileSnapshot, StateStore
 
 logger = logging.getLogger("upilot.server")
 wire_logger = logging.getLogger("upilot.wire")
+
+IDENTITY_CONTRACT_VERSION = 1
+_CANDIDATE_HANDSHAKE_TIMEOUT_S = 10.0
 
 
 def _short_session_id(session_id: str | None) -> str:
@@ -55,13 +67,17 @@ class WsOrchestratorServer(WsTransport):
         port: int = 8765,
         heartbeat_interval_ms: int = 2000,
         mcp_label: str = "",
+        expected_project_path: str = "",
     ) -> None:
         self.host = host
         self.port = port
         self.heartbeat_interval_ms = heartbeat_interval_ms
         self.mcp_label = (mcp_label or "").strip()
+        self.expected_project_path = self._resolve_expected_project_path(expected_project_path)
         self.session_manager = SessionManager(heartbeat_timeout_ms=heartbeat_interval_ms * 3)
         self.state = StateStore()
+        if self.expected_project_path:
+            self.state.configure_project(self.expected_project_path)
         self._ws: WebSocketServerProtocol | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._suspended: dict[str, asyncio.Future] = {}
@@ -76,6 +92,43 @@ class WsOrchestratorServer(WsTransport):
         self._reconnect_grace_task: asyncio.Task[None] | None = None
         self._grace_deadline_monotonic: float | None = None
         self._active_ws_connections: set[WebSocketServerProtocol] = set()
+        self._promotion_lock = asyncio.Lock()
+        self._latest_session_rejection: dict[str, Any] = {}
+
+    @staticmethod
+    def _resolve_expected_project_path(configured: str) -> str:
+        raw = str(configured or "").strip()
+        if not raw:
+            explicit_config = os.getenv("UPILOT_CONFIG", "").strip()
+            if explicit_config:
+                try:
+                    raw = str(Path(explicit_config).expanduser().resolve().parent.parent)
+                except OSError:
+                    raw = ""
+        if not raw:
+            candidate = Path.cwd()
+            if (candidate / "Assets").is_dir() and (candidate / "ProjectSettings").is_dir():
+                raw = str(candidate)
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).resolve())
+        except OSError:
+            return os.path.abspath(raw)
+
+    def session_identity_status(self) -> dict[str, Any]:
+        session = self.session_manager.active
+        current = {
+            "sessionId": session.session_id if session else "",
+            "processId": session.process_id if session else 0,
+            "processCreatedAt": session.process_created_at if session else 0,
+            "processRole": session.process_role if session else "",
+            "identityContractVersion": session.identity_contract_version if session else 0,
+            "verificationLevel": session.verification_level if session else "",
+            "identityVerified": bool(session and session.identity_verified),
+            "expectedProjectPath": self.expected_project_path,
+        }
+        return {"current": current, "latestRejection": dict(self._latest_session_rejection)}
 
     @staticmethod
     def _abortive_linger_bytes() -> bytes:
@@ -360,9 +413,11 @@ class WsOrchestratorServer(WsTransport):
             future.cancel()
 
     async def send_command(self, command_id: str, name: str, payload: dict[str, Any]) -> None:
-        if not self._ws or not self.session_manager.active:
+        websocket = self._ws
+        active = self.session_manager.active
+        if websocket is None or active is None:
             return
-        session_id = self.session_manager.active.session_id
+        session_id = active.session_id
         if name == "upilot_flow.results":
             logger.debug("[%s] >>> %s  cmd=%s", session_id[:12], name, command_id[:16])
         else:
@@ -378,7 +433,9 @@ class WsOrchestratorServer(WsTransport):
         }
         raw = json.dumps(msg, ensure_ascii=False)
         _log_ws_message("SEND", raw, session_id=session_id, message_type=msg["type"], name=msg["name"])
-        await self._ws.send(raw)
+        if websocket is not self._ws or self.session_manager.active is not active:
+            raise ConnectionError("Editor session changed before command dispatch")
+        await websocket.send(raw)
 
     async def _resend_pending_commands(self) -> None:
         """After domain reload, Unity lost in-flight commands — send again with same ids."""
@@ -410,23 +467,207 @@ class WsOrchestratorServer(WsTransport):
     def ws_connection_count(self) -> int:
         return len(self._active_ws_connections)
 
+    async def _candidate_timeout(
+        self,
+        websocket: WebSocketServerProtocol,
+        auth_box: list[str | None],
+    ) -> None:
+        try:
+            await asyncio.sleep(_CANDIDATE_HANDSHAKE_TIMEOUT_S)
+            if auth_box[0] is None and websocket is not self._ws:
+                self._record_session_rejection(
+                    "SESSION_HANDSHAKE_TIMEOUT",
+                    "Candidate did not complete the required identity handshake within 10 seconds.",
+                    {},
+                )
+                await self._close_websocket(websocket, reason="candidate identity handshake timeout")
+        except asyncio.CancelledError:
+            raise
+
+    def _record_session_rejection(self, code: str, reason: str, detail: dict[str, Any]) -> None:
+        self._latest_session_rejection = {
+            "code": code,
+            "reason": reason,
+            "detail": detail,
+            "rejectedAt": now_ms(),
+        }
+
+    async def _send_candidate_ack(
+        self,
+        websocket: WebSocketServerProtocol,
+        message,
+        payload: dict[str, Any],
+    ) -> None:
+        ack = {
+            "id": message.id,
+            "type": "result",
+            "name": "session.hello",
+            "payload": payload,
+            "timestamp": now_ms(),
+            "sessionId": message.session_id,
+            "protocolVersion": PROTOCOL_VERSION,
+        }
+        raw = json.dumps(ack, ensure_ascii=False)
+        _log_ws_message(
+            "SEND",
+            raw,
+            session_id=message.session_id,
+            message_type=ack["type"],
+            name=ack["name"],
+        )
+        await websocket.send(raw)
+
+    def _probe_candidate_identity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contract_version = int(payload.get("identityContractVersion") or 0)
+        project_path = str(payload.get("projectPath") or "").strip()
+        process_id = int(payload.get("processId") or 0)
+        process_created_at = int(payload.get("processCreatedAt") or 0)
+        process_role = str(payload.get("processRole") or "").strip()
+        common = {
+            "identityContractVersion": contract_version,
+            "projectPath": project_path,
+            "processId": process_id,
+            "processCreatedAt": process_created_at,
+            "processRole": process_role,
+            "expectedProjectPath": self.expected_project_path,
+        }
+        if contract_version != IDENTITY_CONTRACT_VERSION:
+            return {**common, "accepted": False, "code": "IDENTITY_CONTRACT_MISMATCH", "reason": "Server and Bridge identity contracts must be upgraded together."}
+        if not self.expected_project_path:
+            return {**common, "accepted": False, "code": "EXPECTED_PROJECT_UNKNOWN", "reason": "The Server has no trusted startup project path."}
+        if not project_path or not paths_equal(project_path, self.expected_project_path):
+            return {**common, "accepted": False, "code": "PROJECT_IDENTITY_MISMATCH", "reason": "Candidate project does not match the Server startup project."}
+        if process_id <= 0 or process_created_at <= 0:
+            return {**common, "accepted": False, "code": "PROCESS_IDENTITY_INCOMPLETE", "reason": "Candidate PID and process creation time are required."}
+        if process_role != MAIN_EDITOR_ROLE:
+            return {**common, "accepted": False, "code": "AUXILIARY_EDITOR_ROLE", "reason": "Only the main Unity Editor may own the Bridge session."}
+
+        if os.name != "nt":
+            return {
+                **common,
+                "accepted": True,
+                "identityVerified": True,
+                "verificationLevel": "contract-role-project-no-os-process-proof",
+                "platformVerificationLimited": True,
+            }
+
+        rows, query_diagnostics = query_unity_processes()
+        if not query_diagnostics.get("processQuerySucceeded"):
+            return {
+                **common,
+                **query_diagnostics,
+                "accepted": False,
+                "code": "PROCESS_QUERY_FAILED",
+                "reason": "The Windows Unity process identity could not be queried.",
+            }
+        row = next((item for item in rows if int(item.get("ProcessId") or 0) == process_id), None)
+        if row is None:
+            return {**common, **query_diagnostics, "accepted": False, "code": "UNITY_PROCESS_NOT_FOUND", "reason": "The reported Unity process is not running."}
+        classification = classify_unity_process(row, Path(self.expected_project_path))
+        if not classification.get("eligibleMainEditor"):
+            return {
+                **common,
+                **query_diagnostics,
+                "classification": classification,
+                "accepted": False,
+                "code": "UNITY_PROCESS_NOT_MAIN_EDITOR",
+                "reason": "The reported process is not the verified main Editor for this project.",
+            }
+        kernel_created_at = process_creation_time(process_id)
+        cim_created_at = int(row.get("ProcessCreatedAt") or 0)
+        same_kernel_identity = bool(kernel_created_at and kernel_created_at // 10 == process_created_at // 10)
+        same_cim_identity = bool(cim_created_at and cim_created_at // 10 == process_created_at // 10)
+        if not same_kernel_identity or not same_cim_identity:
+            return {
+                **common,
+                **query_diagnostics,
+                "classification": classification,
+                "kernelProcessCreatedAt": kernel_created_at,
+                "queriedProcessCreatedAt": cim_created_at,
+                "accepted": False,
+                "code": "PROCESS_CREATION_TIME_MISMATCH",
+                "reason": "The reported PID creation identity is stale or does not match Windows.",
+            }
+        return {
+            **common,
+            **query_diagnostics,
+            "classification": classification,
+            "accepted": True,
+            "identityVerified": True,
+            "verificationLevel": "windows-pid-creation-executable-role-project",
+        }
+
+    def _active_process_liveness(self) -> str:
+        active = self.session_manager.active
+        if active is None or active.process_id <= 0:
+            return "dead"
+        if os.name != "nt":
+            return "alive" if process_exists(active.process_id) else "dead"
+        rows, diagnostics = query_unity_processes()
+        if not diagnostics.get("processQuerySucceeded"):
+            return "unknown"
+        row = next((item for item in rows if int(item.get("ProcessId") or 0) == active.process_id), None)
+        if row is None:
+            return "dead"
+        observed = process_creation_time(active.process_id)
+        if not observed:
+            return "unknown"
+        return "alive" if observed // 10 == active.process_created_at // 10 else "dead"
+
+    async def _admit_candidate(self, websocket: WebSocketServerProtocol, message) -> tuple[bool, dict[str, Any]]:
+        try:
+            probe = await asyncio.wait_for(
+                asyncio.to_thread(self._probe_candidate_identity, dict(message.payload)),
+                timeout=_CANDIDATE_HANDSHAKE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            probe = {"accepted": False, "code": "PROCESS_QUERY_TIMEOUT", "reason": "Candidate identity verification exceeded 10 seconds."}
+        except (OSError, TypeError, ValueError) as exc:
+            probe = {"accepted": False, "code": "PROCESS_IDENTITY_INVALID", "reason": str(exc)}
+        if not probe.get("accepted"):
+            return False, probe
+
+        incoming_identity = (
+            int(message.payload.get("processId") or 0),
+            int(message.payload.get("processCreatedAt") or 0),
+            str(message.payload.get("projectPath") or ""),
+        )
+        async with self._promotion_lock:
+            active = self.session_manager.active
+            if active is not None and active.process_id > 0:
+                active_identity = (active.process_id, active.process_created_at, active.project_path)
+                same_process = (
+                    incoming_identity[:2] == active_identity[:2]
+                    and paths_equal(incoming_identity[2], active_identity[2])
+                )
+                if not same_process:
+                    liveness = await asyncio.to_thread(self._active_process_liveness)
+                    if liveness != "dead":
+                        return False, {
+                            **probe,
+                            "accepted": False,
+                            "code": "ACTIVE_EDITOR_CONFLICT",
+                            "reason": "A different verified main Editor still owns the session.",
+                            "activeProcessId": active.process_id,
+                            "activeProcessCreatedAt": active.process_created_at,
+                            "activeProcessLiveness": liveness,
+                        }
+            previous = self._ws
+            self._ws = websocket
+            message.payload["verificationLevel"] = str(probe.get("verificationLevel") or "")
+            message.payload["identityVerified"] = bool(probe.get("identityVerified"))
+            self.session_manager.on_hello(message.session_id, message.payload)
+            if previous is not None and previous is not websocket:
+                asyncio.create_task(self._close_websocket(previous, reason="replaced by verified reconnect"))
+        return True, probe
+
     async def _handle(self, websocket: WebSocketServerProtocol) -> None:
         self._active_ws_connections.add(websocket)
         remote = websocket.remote_address
         logger.info("Unity client connected from %s (total ws=%d)", remote, len(self._active_ws_connections))
-        prev = self._ws
-        if prev is not None and prev is not websocket:
-            logger.info("Closing previous WebSocket — new connection supersedes (latest client wins)")
-            await self._close_websocket(prev, reason="superseded by newer upilot connection")
-        self._ws = websocket
         auth_box: list[str | None] = [None]
-
-        if self._domain_reloading:
-            logger.info("Unity TCP reconnected during domain reload — awaiting session.hello")
-            self._reconnected_after_domain_reload = True
-            self._domain_reloading = False
-
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        heartbeat_task: asyncio.Task[None] | None = None
+        candidate_timeout_task = asyncio.create_task(self._candidate_timeout(websocket, auth_box))
         try:
             try:
                 async for raw in websocket:
@@ -438,7 +679,10 @@ class WsOrchestratorServer(WsTransport):
                         message_type=incoming.type,
                         name=incoming.name,
                     )
-                    await self._handle_message(incoming, auth_box)
+                    await self._handle_message(incoming, auth_box, websocket)
+                    if auth_box[0] and heartbeat_task is None:
+                        candidate_timeout_task.cancel()
+                        heartbeat_task = asyncio.create_task(self._heartbeat_loop(websocket, auth_box[0]))
             except (ConnectionClosed, ConnectionResetError, OSError) as ex:
                 close_code = getattr(ex, "code", None)
                 if self._shutting_down:
@@ -452,15 +696,25 @@ class WsOrchestratorServer(WsTransport):
                     )
         finally:
             self._active_ws_connections.discard(websocket)
-            heartbeat_task.cancel()
-            superseded = self._ws is not websocket
-            if self._ws is websocket:
-                self._ws = None
+            candidate_timeout_task.cancel()
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
             auth_session_id = auth_box[0]
             sid_log = auth_session_id or (
                 self.session_manager.active.session_id if self.session_manager.active else "unknown"
             )
             logger.info("[%s] Unity client disconnected from %s", sid_log[:12], remote)
+            active = self.session_manager.active
+            owns_active_session = bool(
+                auth_session_id
+                and self._ws is websocket
+                and active is not None
+                and active.session_id == auth_session_id
+            )
+            if not owns_active_session:
+                logger.info("[%s] Candidate/stale socket closed without changing active Editor state", sid_log[:12])
+                return
+            self._ws = None
             self.session_manager.disconnect(auth_session_id)
             if self.state.compile.status in ("queued", "accepted", "compiling", "verifying"):
                 if self._domain_reloading:
@@ -480,11 +734,6 @@ class WsOrchestratorServer(WsTransport):
 
             if self._shutting_down:
                 self._fail_all_pending_and_suspended("SERVER_STOPPED", "MCP 服务器已关闭")
-            elif superseded:
-                logger.info(
-                    "[%s] Previous socket superseded — keeping in-flight pending commands for new session",
-                    sid_log[:12],
-                )
             else:
                 self._suspend_or_fail_pending_on_disconnect(sid_log)
 
@@ -496,12 +745,66 @@ class WsOrchestratorServer(WsTransport):
         if asyncio.iscoroutine(result):
             asyncio.create_task(result)
 
-    async def _handle_message(self, message, auth_box: list[str | None] | None = None) -> None:
-        if message.session_id:
-            self.session_manager.touch(message.session_id)
-
+    async def _handle_message(
+        self,
+        message,
+        auth_box: list[str | None] | None = None,
+        websocket: WebSocketServerProtocol | None = None,
+    ) -> None:
         if message.type == "hello" and message.name == "session.hello":
+            candidate = websocket or self._ws
+            if candidate is None:
+                return
+            if not message.session_id:
+                rejection = {
+                    "accepted": False,
+                    "code": "SESSION_ID_REQUIRED",
+                    "reason": "sessionId is required for the identity handshake.",
+                }
+                self._record_session_rejection(rejection["code"], rejection["reason"], {})
+                await self._send_candidate_ack(candidate, message, {
+                    "accepted": False,
+                    "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+                    "verificationLevel": "rejected",
+                    "rejectionCode": rejection["code"],
+                    "rejectionReason": rejection["reason"],
+                })
+                return
+            if auth_box is not None and auth_box[0] is not None:
+                return
+            admitted, identity = await self._admit_candidate(candidate, message)
+            if not admitted:
+                code = str(identity.get("code") or "SESSION_IDENTITY_REJECTED")
+                reason = str(identity.get("reason") or "Candidate identity was rejected.")
+                detail = {key: value for key, value in identity.items() if key not in {"accepted", "code", "reason"}}
+                self._record_session_rejection(code, reason, detail)
+                active = self.session_manager.active
+                logger.warning(
+                    "Rejected Unity Bridge candidate: code=%s reason=%s candidatePid=%s "
+                    "candidateRole=%s candidateProject=%s activeSessionId=%s activePid=%s",
+                    code,
+                    reason,
+                    message.payload.get("processId", 0),
+                    message.payload.get("processRole", ""),
+                    message.payload.get("projectPath", ""),
+                    getattr(active, "session_id", "") if active else "",
+                    getattr(active, "process_id", 0) if active else 0,
+                )
+                await self._send_candidate_ack(candidate, message, {
+                    "accepted": False,
+                    "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+                    "verificationLevel": "rejected",
+                    "rejectionCode": code,
+                    "rejectionReason": reason,
+                })
+                await self._close_websocket(candidate, reason=f"identity rejected: {code}")
+                return
             self._cancel_reconnect_grace()
+            preserve_compile_snapshot = self._domain_reloading
+            if preserve_compile_snapshot:
+                logger.info("Unity reconnected during domain reload after identity verification")
+                self._reconnected_after_domain_reload = True
+                self._domain_reloading = False
             raw_project_for_state = str(message.payload.get("projectPath", "") or "").strip()
             if raw_project_for_state:
                 try:
@@ -554,7 +857,6 @@ class WsOrchestratorServer(WsTransport):
                 self._compile_idle_event.clear()
             else:
                 self._compile_idle_event.set()
-            self.session_manager.on_hello(message.session_id, message.payload)
             self.state.reset_editor_session(
                 message.session_id,
                 incoming_process_id,
@@ -583,6 +885,8 @@ class WsOrchestratorServer(WsTransport):
 
             hello_payload: dict[str, Any] = {
                 "accepted": True,
+                "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+                "verificationLevel": str(identity.get("verificationLevel") or ""),
                 "heartbeatIntervalMs": self.heartbeat_interval_ms,
                 "mcpHost": self.host,
                 "mcpPort": self.port,
@@ -591,28 +895,25 @@ class WsOrchestratorServer(WsTransport):
             }
             if self.mcp_label:
                 hello_payload["mcpLabel"] = self.mcp_label
-            ack = {
-                "id": message.id,
-                "type": "result",
-                "name": "session.hello",
-                "payload": hello_payload,
-                "timestamp": now_ms(),
-                "sessionId": message.session_id,
-                "protocolVersion": PROTOCOL_VERSION,
-            }
-            if self._ws:
-                ack_raw = json.dumps(ack, ensure_ascii=False)
-                _log_ws_message(
-                    "SEND",
-                    ack_raw,
-                    session_id=message.session_id,
-                    message_type=ack["type"],
-                    name=ack["name"],
-                )
-                await self._ws.send(ack_raw)
+            await self._send_candidate_ack(candidate, message, hello_payload)
             if preserve_compile_snapshot:
                 await self._resend_pending_commands()
             return
+
+        if websocket is not None:
+            active = self.session_manager.active
+            authenticated_session = auth_box[0] if auth_box is not None else None
+            if (
+                websocket is not self._ws
+                or active is None
+                or not authenticated_session
+                or message.session_id != authenticated_session
+                or active.session_id != authenticated_session
+            ):
+                logger.debug("Ignoring message from unauthenticated or stale socket: %s", message.name)
+                return
+        if message.session_id:
+            self.session_manager.touch(message.session_id)
 
         if message.type == "heartbeat":
             self.session_manager.on_heartbeat(message.session_id)
@@ -729,23 +1030,28 @@ class WsOrchestratorServer(WsTransport):
                         }
                     )
 
-    async def _heartbeat_loop(self) -> None:
+    async def _heartbeat_loop(
+        self,
+        websocket: WebSocketServerProtocol,
+        session_id: str,
+    ) -> None:
         while True:
             try:
                 await asyncio.sleep(self.heartbeat_interval_ms / 1000)
-                if not self._ws or not self.session_manager.active:
-                    continue
+                active = self.session_manager.active
+                if websocket is not self._ws or active is None or active.session_id != session_id:
+                    return
                 hb = {
                     "id": f"hb-{now_ms()}",
                     "type": "heartbeat",
                     "name": "session.heartbeat",
                     "payload": {},
                     "timestamp": now_ms(),
-                    "sessionId": self.session_manager.active.session_id,
+                    "sessionId": session_id,
                     "protocolVersion": PROTOCOL_VERSION,
                 }
                 hb_raw = json.dumps(hb, ensure_ascii=False)
-                await self._ws.send(hb_raw)
+                await websocket.send(hb_raw)
             except asyncio.CancelledError:
                 raise
             except (ConnectionClosed, ConnectionResetError, OSError) as ex:

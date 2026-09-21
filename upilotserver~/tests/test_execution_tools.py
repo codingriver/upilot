@@ -137,6 +137,44 @@ def test_csharp_eval_dispatches_once_with_normalized_contract():
     assert json.loads(payload["variablesJson"])["items"][0]["name"] == "value"
 
 
+def test_csharp_object_dump_forwards_text_and_reflection_options_once():
+    service = _service()
+    result = asyncio.run(service.csharp_object_dump(
+        session_id="s.domain.id",
+        handle="h.domain.object.id",
+        include_type_names=True,
+        expand_reflection_types=True,
+    ))
+    assert result.ok
+    assert len(service.dispatcher.calls) == 1
+    command, payload, _ = service.dispatcher.calls[0]
+    assert command == "csharp.objectDump"
+    assert payload["includeTypeNames"] is True
+    assert payload["expandReflectionTypes"] is True
+
+
+def test_csharp_object_dump_wrapper_forwards_text_and_reflection_options_once(monkeypatch):
+    calls = []
+
+    class _Facade:
+        async def csharp_object_dump(self, **kwargs):
+            calls.append(kwargs)
+            return ok("req", {"received": kwargs})
+
+    monkeypatch.setattr(execution_tools, "_get_facade", lambda: _Facade())
+    monkeypatch.setattr(execution_tools, "_reject_write_if_unapproved", lambda _name: None)
+    result = asyncio.run(execution_tools.csharp_object_dump(
+        "s.domain.id",
+        "h.domain.object.id",
+        includeTypeNames=True,
+        expandReflectionTypes=True,
+    ))
+    assert result.isError is False
+    assert len(calls) == 1
+    assert calls[0]["include_type_names"] is True
+    assert calls[0]["expand_reflection_types"] is True
+
+
 def test_emit_uses_canonical_sha256_and_dispatches_once():
     service = _service()
     spec = {"typeName": "Example.Dynamic", "isSealed": True}

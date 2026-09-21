@@ -56,6 +56,7 @@ def test_proxy_discovery_uses_exact_public_schema_names_and_types() -> None:
         "execution_session": service.execution_session,
         "csharp_eval": service.csharp_eval,
         "reflection_emit_type": service.reflection_emit_type,
+        "csharp_object_dump": service.csharp_object_dump,
     }
 
     for tool_name, method in cases.items():
@@ -72,6 +73,35 @@ def test_proxy_discovery_uses_exact_public_schema_names_and_types() -> None:
     search = proxy_argument_schema(service.console_search_logs, "unity_console_search_logs")
     contains = next(entry for entry in search if entry["name"] == "contains")
     assert {item.get("type") for item in contains["schema"]["anyOf"]} >= {"string", "array", "null"}
+
+
+def test_session_isolation_p1_tools_are_present_in_public_schemas() -> None:
+    hang = _schema("unity_hang_capture")
+    wait = hang["properties"]["waitTimeoutSec"]
+    assert wait["default"] == 10
+    assert wait["minimum"] == 0 and wait["maximum"] == 30
+
+    status = _schema("unity_hang_capture_status")
+    assert list(status["properties"]) == ["captureId"]
+    assert "captureId" in status["required"]
+
+    find = _schema("unity_gameobject_find")
+    assert find["properties"]["includeHidden"]["default"] is False
+
+    console = _schema("unity_console_search_logs")
+    assert console["properties"]["runGuid"]["default"] == ""
+    assert console["properties"]["compileOperationId"]["default"] == ""
+
+
+def test_object_dump_schema_defaults_complex_value_types_to_summaries() -> None:
+    schema = _schema("csharp_object_dump")
+
+    assert schema["properties"]["expandUnityValueTypes"]["default"] is False
+    assert "Unity" in schema["properties"]["expandUnityValueTypes"]["description"]
+    assert schema["properties"]["expandReflectionTypes"]["default"] is False
+    assert "MemberInfo" in schema["properties"]["expandReflectionTypes"]["description"]
+    assert schema["properties"]["includeTypeNames"]["default"] is False
+    assert ".root" in schema["properties"]["includeTypeNames"]["description"]
 
 
 @pytest.mark.parametrize("tool_name,method_name", [

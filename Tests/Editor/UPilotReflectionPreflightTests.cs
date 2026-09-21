@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CodingRiver.UPilot.Execution;
@@ -20,6 +21,7 @@ namespace CodingRiver.UPilot.Tests
         }
         public static int Count() { Calls++; return Calls; }
         public static int Throw() { Calls++; throw new InvalidOperationException("P0_TARGET_FAILURE"); }
+        public static void MutateThenThrow() { Calls++; throw new InvalidOperationException("P0_TARGET_THROW"); }
         public static Task<int> Slow() { Calls++; return new TaskCompletionSource<int>().Task; }
         public static object BadSummary() { Calls++; return new ThrowingSummary(); }
         public int InstanceCount() { Calls++; return Calls; }
@@ -76,6 +78,24 @@ namespace CodingRiver.UPilot.Tests
                 await service.ExecuteCallAsync(p, CancellationToken.None, action => action()));
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.True);
             Assert.That(Calls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void TargetFailurePreservesOriginalEvidenceAcrossRepeatedWrapping()
+        {
+            var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
+            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
+                await service.ExecuteCallAsync(Payload("MutateThenThrow"), CancellationToken.None, action => action()));
+            var wrappedAgain = UPilotReflectionService.CallError(error, false);
+            var wire = UPilotExecutionService.ToErrorDetail(wrappedAgain, "cmd-p0-target", "reflection.call");
+
+            Assert.That(Calls, Is.EqualTo(1));
+            Assert.That(wrappedAgain.Detail["sideEffectsMayHaveOccurred"], Is.True);
+            Assert.That(wire.sideEffectsMayHaveOccurred, Is.True);
+            Assert.That(wire.exceptionType, Is.EqualTo(typeof(InvalidOperationException).FullName));
+            Assert.That(wire.exceptionMessage, Does.Contain("P0_TARGET_THROW"));
+            Assert.That(wire.stackTrace, Does.Contain(nameof(MutateThenThrow)));
+            Assert.That(wire.commandId, Is.EqualTo("cmd-p0-target"));
         }
 
         [UnityTest]
@@ -139,7 +159,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void ArrayElementCustomConversionCrossesExecutionBoundary()
+        public void UnsupportedArrayElementIsRejectedBeforeExecutionBoundary()
         {
             var p = Payload("AcceptObjects");
             p.argumentsJson = "{\"items\":[{\"value\":{\"kind\":\"array\",\"typeName\":\""
@@ -148,7 +168,7 @@ namespace CodingRiver.UPilot.Tests
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
             var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
                 await service.ExecuteCallAsync(p, CancellationToken.None, action => action()));
-            Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.True);
+            Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
             Assert.That(Calls, Is.Zero);
             Assert.That(GetterCalls, Is.Zero);
         }
@@ -323,6 +343,22 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
         }
 
+        [Test]
+        public void TypedReaderBuildsRecursiveDtoFromTheValidatedTree()
+        {
+            var envelope = UPilotExecutionService.ParseArguments(BuildNestedArray(8));
+            var value = envelope.items.Single().value;
+            for (int index = 0; index < 8; index++)
+            {
+                Assert.That(value.kind, Is.EqualTo("array"));
+                Assert.That(value.items, Has.Length.EqualTo(1));
+                value = value.items[0];
+            }
+            Assert.That(value.kind, Is.EqualTo("literal"));
+            Assert.That(value.typeName, Is.EqualTo("System.Int32"));
+            Assert.That(value.valueJson, Is.EqualTo("1"));
+        }
+
         private static string BuildNestedArray(int depth)
         {
             string value = "{\"kind\":\"literal\",\"typeName\":\"System.Int32\",\"valueJson\":\"1\"}";
@@ -449,6 +485,17 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [UnityTest]
+        public IEnumerator RawMethodTargetFailurePreservesOriginalEvidence()
+        {
+            yield return Dispatch("reflection.call", Wire(Method("MutateThenThrow")));
+            Assert.That(UPilotReflectionPreflightTests.Calls, Is.EqualTo(1));
+            Assert.That(_error.Detail["sideEffectsMayHaveOccurred"], Is.True);
+            Assert.That(_error.Detail["exceptionType"], Is.EqualTo(typeof(InvalidOperationException).FullName));
+            Assert.That(_error.Detail["exceptionMessage"], Does.Contain("P0_TARGET_THROW"));
+            Assert.That(_error.Detail["stackTrace"], Does.Contain(nameof(UPilotReflectionPreflightTests.MutateThenThrow)));
+        }
+
+        [UnityTest]
         public IEnumerator RawExpressionRejectsInvalidMetadataBeforeCustomDecoding()
         {
             foreach (var invalid in new[] { "mode", "backend", "result", "handle", "type", "typed", "parse", "limits",
@@ -509,7 +556,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [UnityTest]
-        public IEnumerator RawExpressionCustomDecodeAndSummaryFailureRetainBoundary()
+        public IEnumerator RawExpressionDecodeFailureStaysFalseAndSummaryFailureTurnsTrue()
         {
             foreach (var json in new[] { "\"invalid-object\"", "{}" })
             {
@@ -526,8 +573,15 @@ namespace CodingRiver.UPilot.Tests
                 };
                 yield return Dispatch("csharp.eval", Wire(payload));
                 Assert.That(_error, Is.Not.Null, json);
-                Assert.That(_error.Detail["sideEffectsMayHaveOccurred"], Is.False, json);
-                Assert.That(UPilotReflectionPreflightTests.Calls, Is.Zero, json);
+                bool summaryExecuted = json == "{}";
+                Assert.That(_error.Detail["sideEffectsMayHaveOccurred"], Is.EqualTo(summaryExecuted), json);
+                Assert.That(UPilotReflectionPreflightTests.Calls, Is.EqualTo(summaryExecuted ? 1 : 0), json);
+                if (summaryExecuted)
+                {
+                    Assert.That(_error.Detail["exceptionType"], Is.EqualTo(typeof(InvalidOperationException).FullName));
+                    Assert.That(_error.Detail["exceptionMessage"], Does.Contain("P0_VARIABLE_SUMMARY_FAILURE"));
+                    Assert.That(_error.Detail["stackTrace"], Does.Contain(nameof(SummaryProbe.ToString)));
+                }
             }
         }
 
@@ -553,6 +607,23 @@ namespace CodingRiver.UPilot.Tests
                     Assert.That(_error.Detail["sideEffectsMayHaveOccurred"], Is.True, method);
                 }
             }
+        }
+
+        [UnityTest]
+        public IEnumerator RawExpressionTargetFailurePreservesOriginalEvidence()
+        {
+            var payload = new CSharpEvalPayload
+            {
+                code = typeof(UPilotReflectionPreflightTests).FullName + ".MutateThenThrow()",
+                mode = "expression",
+                languageProfileMode = "reflection-expression",
+            };
+            yield return Dispatch("csharp.eval", Wire(payload));
+            Assert.That(UPilotReflectionPreflightTests.Calls, Is.EqualTo(1));
+            Assert.That(_error.Detail["sideEffectsMayHaveOccurred"], Is.True);
+            Assert.That(_error.Detail["exceptionType"], Is.EqualTo(typeof(InvalidOperationException).FullName));
+            Assert.That(_error.Detail["exceptionMessage"], Does.Contain("P0_TARGET_THROW"));
+            Assert.That(_error.Detail["stackTrace"], Does.Contain(nameof(UPilotReflectionPreflightTests.MutateThenThrow)));
         }
 
         [UnityTest]

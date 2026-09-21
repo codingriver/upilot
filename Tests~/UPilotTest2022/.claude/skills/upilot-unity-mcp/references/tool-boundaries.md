@@ -14,6 +14,8 @@
 - `unity_snapshot_capture` and legacy screenshot wrappers generate project-relative artifacts and are non-idempotent. `unity_snapshot_baseline_compare` is observational but writes non-evidence diff/heatmap diagnostics.
 - `unity_snapshot_baseline_update` is the only managed-baseline write path and always requires dry-run inspection plus the matching current-state confirm token; never retry or approve it automatically.
 - Manual Unity YAML editing is a last resort and must preserve GUID/fileID integrity.
+- External compilers (`csc.exe`, `mcs`, `dotnet build`, etc.) are never a substitute for Unity compilation and must not be used to validate C# changes. Only Unity script compilation (through `unity_write_batch_register` + `unity_safe_compile_and_wait`) produces authoritative results.
+- Shell-invoked Unity batchmode (`-executeMethod`, `-runTests`) bypasses MCP compile identity and error verification; route test execution through `unity_test_run` or `unity_upilot_acceptance_run`.
 - Persistent jobs initially cover only tests and package acceptance. They store identities, deadlines and report references in the existing project SQLite database; uncertain starts are never replayed.
 - `RecoveryRequired` and `cancel_requested` are non-terminal. A stopped Python observer does not prove the Unity business operation stopped.
 - Prefab patch v1 is a guarded single-file commit with backup and conditional restoration, not a global transaction. External changes prevent automatic restoration. Enum names only; arrays may only retain their structure.

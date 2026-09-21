@@ -53,10 +53,10 @@ def _json_dumps_or_empty(value: object | None) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-_UPILOT_RULES_VERSION = 30
 _UPILOT_BLOCK_START = "<!-- upilot:start -->"
 _UPILOT_BLOCK_END = "<!-- upilot:end -->"
-_AGENT_RULES_TEMPLATE_RELATIVE = Path("skills") / "upilot-unity-mcp" / "AGENTS.md.template"
+_SKILL_TEMPLATE_ROOT_RELATIVE = Path("skills") / "upilot-unity-mcp"
+_TEMPLATE_MANIFEST_RELATIVE = _SKILL_TEMPLATE_ROOT_RELATIVE / "template-manifest.json"
 _DEFAULT_OPERATION_SUCCESS = {"succeeded", "success", "complete", "completed", "passed", "ok"}
 _DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "aborted", "timeout", "timedout", "error"}
 _TERMINAL_STATUSES = _DEFAULT_OPERATION_SUCCESS | _DEFAULT_OPERATION_FAILURE
@@ -449,55 +449,102 @@ class TaskDomainService:
             return "unknown"
 
     @staticmethod
-    def _read_agent_rules_template() -> tuple[str, Path]:
+    def _read_template_resource(relative: Path) -> tuple[str, Path]:
         candidates = []
         bundle_root = getattr(sys, "_MEIPASS", "")
         if bundle_root:
-            candidates.append(Path(bundle_root) / _AGENT_RULES_TEMPLATE_RELATIVE)
-        candidates.append(Path(__file__).resolve().parents[4] / _AGENT_RULES_TEMPLATE_RELATIVE)
-        candidates.append(Path.cwd() / _AGENT_RULES_TEMPLATE_RELATIVE)
+            candidates.append(Path(bundle_root) / relative)
+        candidates.append(Path(__file__).resolve().parents[4] / relative)
+        candidates.append(Path.cwd() / relative)
 
         for path in candidates:
             try:
                 text = path.read_text(encoding="utf-8")
-                logger.info("UPilot Agent rules template loaded: template=%s", path)
+                logger.info("UPilot template resource loaded: path=%s", path)
                 return text, path
             except OSError:
                 continue
-        raise FileNotFoundError(f"UPilot Agent rules template is missing: {_AGENT_RULES_TEMPLATE_RELATIVE}")
+        raise FileNotFoundError(f"UPilot template resource is missing: {relative}")
+
+    @classmethod
+    def _read_agent_rules_template(cls, manifest: dict) -> tuple[str, Path]:
+        return cls._read_template_resource(
+            _SKILL_TEMPLATE_ROOT_RELATIVE / manifest["templates"]["agentRules"]
+        )
+
+    @classmethod
+    def _read_template_manifest(cls) -> tuple[dict, Path]:
+        text, path = cls._read_template_resource(_TEMPLATE_MANIFEST_RELATIVE)
+        try:
+            manifest = json.loads(text)
+            if (
+                not isinstance(manifest, dict)
+                or manifest.get("schemaVersion") != 1
+                or type(manifest.get("agentRulesVersion")) is not int
+                or manifest["agentRulesVersion"] <= 0
+                or type(manifest.get("skillPackVersion")) is not int
+                or manifest["skillPackVersion"] <= 0
+                or type(manifest.get("defaultHttpPort")) is not int
+                or not 1 <= manifest["defaultHttpPort"] <= 65535
+            ):
+                raise ValueError("invalid required fields")
+            templates = manifest.get("templates")
+            if not isinstance(templates, dict) or set(templates) != {"agentRules", "skill", "openai"}:
+                raise ValueError("invalid template mappings")
+            relative_paths = []
+            for key, value in templates.items():
+                relative = Path(value) if isinstance(value, str) else Path()
+                if not value or relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError(f"invalid {key} template path")
+                relative_paths.append(relative.as_posix().lower())
+                cls._read_template_resource(_SKILL_TEMPLATE_ROOT_RELATIVE / relative)
+            if len(set(relative_paths)) != len(relative_paths):
+                raise ValueError("template paths must be unique")
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"UPilot template manifest is invalid: {path}: {exc}") from exc
+        return manifest, path
 
     def _build_agent_rules_block(self, project_root: Path) -> str:
         project_path = str(project_root)
         version = self._upilot_package_version()
         generated_at = _utc_iso()
-        template, template_path = self._read_agent_rules_template()
+        manifest, manifest_path = self._read_template_manifest()
+        template, template_path = self._read_agent_rules_template(manifest)
+        rules_version = int(manifest["agentRulesVersion"])
         parent_agent_rules_path = self._find_parent_agent_rules_relative_path(project_root)
+        http_port = int(CONFIG.http_port)
+        mcp_url = f"http://127.0.0.1:{http_port}/mcp"
+        health_url = f"http://127.0.0.1:{http_port}/health"
         logger.info(
-            "Rendering UPilot Agent rules template: template=%s target=%s rulesVersion=%s "
+            "Rendering UPilot Agent rules template: template=%s manifest=%s target=%s rulesVersion=%s "
             "upilotPackageVersion=%s projectPath=%s generatedAt=%s parentAgentRulesPath=%s mcpUrl=%s healthUrl=%s",
             template_path,
+            manifest_path,
             project_root / "AGENTS.md",
-            _UPILOT_RULES_VERSION,
+            rules_version,
             version,
             project_path,
             generated_at,
             parent_agent_rules_path,
-            "http://127.0.0.1:8011/mcp",
-            "http://127.0.0.1:8011/health",
+            mcp_url,
+            health_url,
         )
         rendered = (
             template
-            .replace("{{rulesVersion}}", str(_UPILOT_RULES_VERSION))
+            .replace("{{rulesVersion}}", str(rules_version))
+            .replace("{{skillPackVersion}}", str(manifest["skillPackVersion"]))
             .replace("{{upilotPackageVersion}}", version)
             .replace("{{projectPath}}", project_path)
             .replace("{{generatedAt}}", generated_at)
             .replace("{{parentAgentRulesPath}}", parent_agent_rules_path)
-            .replace("{{mcpUrl}}", "http://127.0.0.1:8011/mcp")
-            .replace("{{healthUrl}}", "http://127.0.0.1:8011/health")
+            .replace("{{mcpUrl}}", mcp_url)
+            .replace("{{healthUrl}}", health_url)
             .replace("\r\n", "\n")
             .replace("\r", "\n")
             .strip()
         )
+        if "{{" in rendered or "}}" in rendered:
+            raise ValueError("UPilot Agent rules template contains an unresolved or malformed token")
         return f"{_UPILOT_BLOCK_START}\n{rendered}\n{_UPILOT_BLOCK_END}"
 
     @staticmethod
@@ -527,129 +574,69 @@ class TaskDomainService:
         return metadata
 
     async def agent_rules_check(self) -> ToolResponse:
-        request_id = new_id("req")
-        project_root = self._project_root()
-        rules_path = project_root / "AGENTS.md"
-        logger.info("Checking UPilot Agent rules: target=%s", rules_path)
-        recommended_block = self._build_agent_rules_block(project_root)
-        diff_summary: list[str] = []
-        current_block = ""
-        text = ""
-        has_block = False
-        marker_error = ""
-
-        if rules_path.exists():
-            text = rules_path.read_text(encoding="utf-8", errors="replace")
-            start_count = text.count(_UPILOT_BLOCK_START)
-            end_count = text.count(_UPILOT_BLOCK_END)
-            if start_count == 1 and end_count == 1:
-                start = text.index(_UPILOT_BLOCK_START)
-                end = text.index(_UPILOT_BLOCK_END) + len(_UPILOT_BLOCK_END)
-                if start < end:
-                    has_block = True
-                    current_block = text[start:end]
-            elif start_count or end_count:
-                marker_error = "Expected exactly one upilot:start and one upilot:end marker."
-        else:
-            diff_summary.append("AGENTS.md missing; install will create it")
-
-        current_meta = self._parse_rules_metadata(current_block)
-        recommended_meta = self._parse_rules_metadata(recommended_block)
-        if marker_error:
-            diff_summary.append(marker_error)
-        if not has_block:
-            diff_summary.append("upilot block missing")
-        else:
-            for key in ("rulesVersion", "upilotPackageVersion", "projectPath"):
-                if current_meta.get(key) != recommended_meta.get(key):
-                    diff_summary.append(f"{key} differs")
-            if "unity_operation_start" not in current_block:
-                diff_summary.append("operation runner rules missing")
-            if "unity_compile_errors" not in current_block:
-                diff_summary.append("compile error tool guidance missing")
-            if _normalize_agent_rules_block(current_block) != _normalize_agent_rules_block(recommended_block):
-                diff_summary.append("upilot controlled block differs from recommended template")
-
-        needs_import = not has_block
-        needs_update = bool(diff_summary) and not marker_error
-        logger.info(
-            "Checked UPilot Agent rules: target=%s hasBlock=%s needsImport=%s needsUpdate=%s markerError=%s diffs=%s",
-            rules_path,
-            has_block,
-            needs_import,
-            needs_update,
-            marker_error or "",
-            "; ".join(diff_summary) if diff_summary else "(none)",
-        )
-        return ok(
-            request_id,
-            {
-                "action": "CheckAgentRules",
-                "rulesPath": str(rules_path),
-                "hasUpilotBlock": has_block,
-                "needsImport": needs_import,
-                "needsUpdate": needs_update,
-                "currentRulesVersion": current_meta.get("rulesVersion", ""),
-                "recommendedRulesVersion": recommended_meta.get("rulesVersion", str(_UPILOT_RULES_VERSION)),
-                "currentUpilotPackageVersion": current_meta.get("upilotPackageVersion", ""),
-                "recommendedUpilotPackageVersion": recommended_meta.get("upilotPackageVersion", self._upilot_package_version()),
-                "projectPathMatches": current_meta.get("projectPath", str(project_root)) == str(project_root),
-                "diffSummary": diff_summary,
-                "recommendedBlock": recommended_block,
-                "markerError": marker_error,
-            },
-        )
+        return await self._agent_rules_adapter(sync=False, apply=False)
 
     async def agent_rules_install(self, apply: bool = False) -> ToolResponse:
+        return await self._agent_rules_adapter(sync=True, apply=apply)
+
+    async def _agent_integrations(self, *, sync: bool, apply: bool = False, scope: str = "all") -> ToolResponse:
         request_id = new_id("req")
-        check = await self.agent_rules_check()
-        if not check.ok or not check.data:
-            return check
-        data = dict(check.data)
-        data["dryRun"] = not apply
-        data["applied"] = False
-        logger.info(
-            "Preparing UPilot Agent rules install: target=%s dryRun=%s needsImport=%s needsUpdate=%s",
-            data.get("rulesPath", ""),
-            not apply,
-            data.get("needsImport", False),
-            data.get("needsUpdate", False),
-        )
-        if not apply:
-            return ok(request_id, data)
-        if data.get("markerError"):
-            return fail(request_id, "AGENT_RULES_MARKER_ERROR", str(data["markerError"]), data)
+        # Unity resolves its installed UPM package. Never fall back to Server/EXE template resources.
+        response = await self.dispatcher.call(request_id,
+            "agent.integrations.sync" if sync else "agent.integrations.check",
+            {"apply": apply, "scope": scope})
+        if not response.ok:
+            if response.error and response.error.code in {"UNKNOWN_COMMAND", "UNSUPPORTED_COMMAND", "COMMAND_NOT_FOUND"}:
+                return fail(request_id, "AGENT_INTEGRATIONS_UNSUPPORTED",
+                            "Upgrade the Unity Bridge to support agent.integrations; no file-write fallback is used.")
+            return response
+        data = response.data
+        if not isinstance(data, dict) or data.get("schemaVersion") != 1 or not isinstance(data.get("targets"), list):
+            return fail(request_id, "AGENT_INTEGRATIONS_UNSUPPORTED",
+                        "The Unity Bridge must support agent.integrations schema v1; no file-write fallback is used.")
+        if not data.get("ok"):
+            return fail(request_id, "AGENT_INTEGRATIONS_FAILED", data.get("error") or data.get("status"), data)
+        return response
 
-        rules_path = Path(str(data["rulesPath"]))
-        recommended_block = str(data["recommendedBlock"])
-        if rules_path.exists():
-            text = rules_path.read_text(encoding="utf-8", errors="replace")
-            if _UPILOT_BLOCK_START in text and _UPILOT_BLOCK_END in text:
-                start = text.index(_UPILOT_BLOCK_START)
-                end = text.index(_UPILOT_BLOCK_END) + len(_UPILOT_BLOCK_END)
-                text = text[:start] + recommended_block + text[end:]
-                logger.info("Updating UPilot Agent rules block: target=%s", rules_path)
-            else:
-                text = text.rstrip() + "\n\n" + recommended_block + "\n"
-                logger.info("Appending UPilot Agent rules block: target=%s", rules_path)
-        else:
-            rules_path.parent.mkdir(parents=True, exist_ok=True)
-            text = recommended_block + "\n"
-            logger.info("Creating UPilot Agent rules file: target=%s", rules_path)
+    async def agent_integrations_check(self) -> ToolResponse:
+        return await self._agent_integrations(sync=False)
 
-        rules_path.write_text(text, encoding="utf-8", newline="\n")
-        data["applied"] = True
-        data["fileSha256"] = _sha256_file(rules_path)
-        data["installedRulesVersion"] = str(_UPILOT_RULES_VERSION)
-        data["installedUpilotPackageVersion"] = self._upilot_package_version()
-        logger.info(
-            "Installed UPilot Agent rules: target=%s sha256=%s rulesVersion=%s upilotPackageVersion=%s",
-            rules_path,
-            data["fileSha256"],
-            data["installedRulesVersion"],
-            data["installedUpilotPackageVersion"],
-        )
-        return ok(request_id, data)
+    async def agent_integrations_sync(self, apply: bool = False) -> ToolResponse:
+        return await self._agent_integrations(sync=True, apply=apply)
+
+    async def _agent_rules_adapter(self, *, sync: bool, apply: bool) -> ToolResponse:
+        response = await self._agent_integrations(sync=sync, apply=apply, scope="shared")
+        report = response.data if isinstance(response.data, dict) else {}
+        targets = report.get("targets", [])
+        if not targets:
+            return response
+        target = targets[0]
+        current = self._parse_rules_metadata(target.get("currentBlock", ""))
+        recommended = self._parse_rules_metadata(target.get("recommendedBlock", ""))
+        marker_error = target.get("error", "") if "marker" in target.get("error", "").lower() else ""
+        project = report.get("renderContext", {}).get("projectPath", "")
+        data = {
+            "action": "CheckAgentRules", "rulesPath": target["path"],
+            "hasUpilotBlock": target["hasUpilotBlock"], "needsImport": not target["hasUpilotBlock"],
+            "needsUpdate": target["needsUpdate"] and not marker_error,
+            "currentRulesVersion": current.get("rulesVersion", ""),
+            "recommendedRulesVersion": str(report["agentRulesVersion"]),
+            "currentUpilotPackageVersion": current.get("upilotPackageVersion", ""),
+            "recommendedUpilotPackageVersion": recommended.get("upilotPackageVersion", ""),
+            "projectPathMatches": current.get("projectPath", project).replace("\\", "/") == project.replace("\\", "/"),
+            "diffSummary": target["reasons"], "recommendedBlock": target["recommendedBlock"], "markerError": marker_error,
+        }
+        if sync:
+            data.update(dryRun=not apply, applied=apply and response.ok)
+            if apply and response.ok:
+                data.update(fileSha256=target["afterSha256"], installedRulesVersion=str(report["agentRulesVersion"]),
+                            installedUpilotPackageVersion=recommended.get("upilotPackageVersion", ""))
+        if not response.ok:
+            if marker_error and not apply:
+                return ok(new_id("req"), data)
+            return fail(new_id("req"), "AGENT_RULES_MARKER_ERROR" if marker_error else "AGENT_INTEGRATIONS_FAILED",
+                        marker_error or target.get("error") or report.get("status", "failed"), data)
+        return ok(new_id("req"), data)
 
     async def operation_validate(
         self, job_spec: dict | None, inspect_reflection: bool = True, strict_tool_registry: bool = True,
@@ -681,6 +668,11 @@ class TaskDomainService:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 errors.append({"path": "cleanup.timeoutSec", "code": "range", "message": "Expected a finite positive number."})
             normalized["cleanup"] = cleanup
+            if cleanup.get("requireEditMode") is True:
+                normalized["_editorVerificationExpected"] = (
+                    "After business terminal, cleanup verifies authoritative "
+                    "EditMode readiness before declaring editorTerminal=true."
+                )
         if normalized["timeoutSec"] <= 0:
             errors.append({"path": "timeoutSec", "code": "range", "message": "timeoutSec must be greater than zero."})
         if normalized["pollIntervalSec"] <= 0:
@@ -717,6 +709,10 @@ class TaskDomainService:
                     isinstance(key, str) and str(value).lower() in {"file", "metadata", "sha256", "bytes"}
                     for key, value in field_kinds.items())):
                 errors.append({"path": "artifactRules.fieldKinds", "code": "type", "message": "fieldKinds must map field names to file, metadata, sha256, or bytes."})
+            elif field_kinds is None:
+                rules = dict(rules)
+                rules["_fieldKindsDefault"] = "file for absolute/relative paths, metadata otherwise"
+                normalized["artifactRules"] = rules
 
         for field in ("resultPath", "statusPath", "phasePath", "errorPath", "detailPath", "progressPath", "failureSignaturePath", "artifactsPath"):
             value = job_spec.get(field)

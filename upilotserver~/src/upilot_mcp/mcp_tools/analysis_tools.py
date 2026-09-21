@@ -52,15 +52,23 @@ async def unity_hang_status(sampleWindowSec: float = 0.5):
     return _log_tool_result("unity_hang_status", _payload(result))
 
 
-@mcp.tool(description="Windows 下为当前 Unity 主 Editor 生成非终止式 dump。采集前校验进程身份、预计大小、目标卷空间和安全余量；支持 mini/heap/full。")
+@mcp.tool(description="Windows 下为当前 Unity 主 Editor 生成非终止式 dump。采集前校验进程身份、预计大小、目标卷空间和安全余量；支持 mini/heap/full。waitTimeoutSec 仅限制本次等待，窗口结束后用返回的 captureId 查询后台终态。")
 async def unity_hang_capture(
     outputPath: str = "",
     dumpType: Literal["mini", "heap", "full"] = "mini",
     reserveBytes: int = 2147483648,
+    waitTimeoutSec: Annotated[float, Field(ge=0, le=30)] = 10,
 ):
-    _log_tool_call("unity_hang_capture", {"outputPath": outputPath, "dumpType": dumpType, "reserveBytes": reserveBytes})
-    result = await _get_facade().hang_capture(output_path=outputPath, dump_type=dumpType, reserve_bytes=reserveBytes)
+    _log_tool_call("unity_hang_capture", {"outputPath": outputPath, "dumpType": dumpType, "reserveBytes": reserveBytes, "waitTimeoutSec": waitTimeoutSec})
+    result = await _get_facade().hang_capture(output_path=outputPath, dump_type=dumpType, reserve_bytes=reserveBytes, wait_timeout_sec=waitTimeoutSec)
     return _log_tool_result("unity_hang_capture", _payload(result))
+
+
+@mcp.tool(description="查询持久化 Hang Dump 捕获状态。只读、幂等，Unity 断连时仍可使用。")
+async def unity_hang_capture_status(captureId: str):
+    _log_tool_call("unity_hang_capture_status", {"captureId": captureId})
+    result = await _get_facade().hang_capture_status(capture_id=captureId)
+    return _log_tool_result("unity_hang_capture_status", _payload(result))
 
 
 @mcp.tool(description="只读分析一个 C# 文件或类型，返回类型、using、成员和启发式引用位置。")
@@ -153,5 +161,5 @@ for _name, _value in list(globals().items()):
             public_handler=_value,
             destructive=_name in _DESTRUCTIVE,
             idempotent=_name not in (_DESTRUCTIVE | _NON_IDEMPOTENT),
-            requires_unity_connection=_name not in {"unity_hang_status", "unity_hang_capture"},
+    requires_unity_connection=_name not in {"unity_hang_status", "unity_hang_capture", "unity_hang_capture_status"},
         )

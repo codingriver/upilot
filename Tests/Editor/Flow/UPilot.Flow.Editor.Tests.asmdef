@@ -1,0 +1,25 @@
+{
+    "name": "UPilot.Flow.Editor.Tests",
+    "rootNamespace": "CodingRiver.UPilot.Flow.Tests",
+    "references": [
+        "UPilot.Flow",
+        "UPilot.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_6000_0_OR_NEWER",
+        "UPILOT_ENABLE_FLOW"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false,
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}

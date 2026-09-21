@@ -23,6 +23,12 @@ Do not infer readiness from raw `isPlaying` or `isCompiling` values. Treat `queu
 
 Do not trigger another compile when no C# or assembly file changed. Never infer that Unity compiled the latest edits from a pre-existing `completed` state, an unchanged timestamp, or missing immediate Console errors.
 
+### Forbidden Compile Shortcuts
+
+- **Never use `csc.exe`, `mcs`, `dotnet build`, or any external compiler** to validate Unity C# code. External compilers lack Unity's platform defines, asmdef references, preprocessor symbols, and assembly injection — their errors and success are not evidence of Unity compile state.
+- **Never invoke Unity batchmode `-executeMethod` or `-runTests` directly from the shell** to bypass the MCP compile pipeline. Use `unity_test_run` or the project's acceptance workflow through MCP.
+- **Never substitute shell-based `diff`/`grep` over log files** for `unity_compile_errors` or `unity_console_search_logs` — these tools carry the MCP Server's compile identity and error-verification metadata.
+
 ## Scene Or Asset Change
 
 1. Read/find the exact target.

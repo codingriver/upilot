@@ -18,8 +18,11 @@ REPO_ROOT = ROOT.parents[1]
 
 REQUIRED_FILES = [
     "SKILL.md",
+    "SKILL.md.template",
     "AGENTS.md.template",
+    "template-manifest.json",
     "agents/openai.yaml",
+    "agents/openai.yaml.template",
     "references/workflows.md",
     "references/tool-routing.md",
     "references/tool-boundaries.md",
@@ -31,6 +34,8 @@ REQUIRED_FILES = [
     "references/flow.md",
     "scripts/install_upilot.py",
     "scripts/check_skill_pack.py",
+    "scripts/render_skill_pack.py",
+    "scripts/sync_integrations.py",
 ]
 
 REQUIRED_SKILL_REFERENCES = [
@@ -55,6 +60,38 @@ def require_file(relative: str) -> Path:
     if not path.is_file():
         fail(f"missing required file: {relative}")
     return path
+
+
+def load_renderer():
+    path = Path(__file__).with_name("render_skill_pack.py")
+    spec = importlib.util.spec_from_file_location("_upilot_skill_renderer", path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+def check_generated_source_artifacts() -> dict:
+    renderer = load_renderer()
+    try:
+        manifest, context = renderer.source_context(ROOT)
+        expected = renderer.render_skill_outputs(ROOT, context, manifest)
+        documentation_path, documentation_content = renderer.render_agent_documentation(ROOT, manifest)
+        expected[documentation_path] = documentation_content
+    except (OSError, ValueError) as exc:
+        fail(f"Skill template validation failed: {exc}")
+    for path, content in expected.items():
+        if not path.is_file() or path.read_bytes() != content.encode("utf-8"):
+            try:
+                relative = path.relative_to(ROOT)
+            except ValueError:
+                relative = path.relative_to(REPO_ROOT)
+            fail(f"generated template artifact is stale: {relative}")
+    return manifest
 
 
 def check_skill_frontmatter() -> None:
@@ -111,6 +148,7 @@ def check_unity_meta_files() -> None:
 
 
 def check_repository_consistency() -> None:
+    check_generated_source_artifacts()
     package_path = REPO_ROOT / "package.json"
     pyproject_path = REPO_ROOT / "upilotserver~" / "pyproject.toml"
     package = package_path.read_text(encoding="utf-8")
@@ -141,26 +179,17 @@ def check_repository_consistency() -> None:
     installation = (ROOT / "references" / "installation.md").read_text(encoding="utf-8")
     client_configs = (ROOT / "references" / "client-configs.md").read_text(encoding="utf-8")
     installer = (ROOT / "scripts" / "install_upilot.py").read_text(encoding="utf-8")
+    sync_engine = (ROOT / "scripts" / "sync_integrations.py").read_text(encoding="utf-8")
     release_builder = (REPO_ROOT / "upilotserver~" / "deploy" / "build_release.py").read_text(encoding="utf-8")
     mcp_example_path = REPO_ROOT / "upilotserver~" / "mcp.example.json"
     mcp_example_text = mcp_example_path.read_text(encoding="utf-8")
     repo_entry = (REPO_ROOT / ".agents" / "skills" / "upilot-unity-mcp" / "SKILL.md").read_text(encoding="utf-8")
 
-    rules_versions = {
-        "C# generator": re.search(r"AgentRulesTemplateVersion\s*=\s*(\d+)", agent_setup),
-        "Python installer": re.search(r"_UPILOT_RULES_VERSION\s*=\s*(\d+)", task_service),
-        "reference document": re.search(r"^rulesVersion:\s*(\d+)\s*$", agent_reference, re.MULTILINE),
-    }
-    missing_versions = [label for label, match in rules_versions.items() if match is None]
-    if missing_versions:
-        fail("missing Agent rules version in " + ", ".join(missing_versions))
-    resolved_versions = {label: match.group(1) for label, match in rules_versions.items()}
-    if len(set(resolved_versions.values())) != 1:
-        fail(f"Agent rules version mismatch: {resolved_versions}")
-    skill_version = re.search(r"SkillInstallTemplateVersion\s*=\s*(\d+)", agent_setup)
-    if skill_version is None or int(skill_version.group(1)) != 29:
-        fail("Skill install template version must be 29 for source/installed validation")
-
+    if "Generated from skills/upilot-unity-mcp/AGENTS.md.template" not in agent_reference:
+        fail("Agent rules reference is not marked as a managed template artifact")
+    for label, text in {"C# generator": agent_setup, "Python renderer": (ROOT / "scripts/render_skill_pack.py").read_text(encoding="utf-8")}.items():
+        if "template-manifest.json" not in text:
+            fail(f"{label} does not read the shared template manifest")
     required = {
         "package id": (package, '"name": "io.github.codingriver.upilot"'),
         "HTTP default": (config, "http_port: int = 8011"),
@@ -187,8 +216,9 @@ def check_repository_consistency() -> None:
         "explicit remote UPM ref documentation": (installation, "--upm-ref <STABLE_RELEASE_TAG>"),
         "local UPM documentation": (installation, "--use-local-upm"),
         "HTTP installer config": (installer, "url = {toml_string(f'http://127.0.0.1:{args.http_port}/mcp')}"),
-        "Claude Skill install": (installer, 'targets.append(unity_project / ".claude" / "skills" / SKILL_NAME)'),
-        "shared Codex Cursor OpenCode Skill install": (installer, 'clients.intersection({"codex", "cursor", "opencode"})'),
+        "Claude Skill install": (sync_engine, '".claude/skills/upilot-unity-mcp"'),
+        "shared Codex Cursor OpenCode Skill install": (sync_engine, '".agents/skills/upilot-unity-mcp"'),
+        "Unity-owned online sync": (task_service, '"agent.integrations.sync"'),
         "multi-client Skill documentation": (installation, "Codex, Cursor, and OpenCode use `.agents/skills/upilot-unity-mcp`; Claude Code uses `.claude/skills/upilot-unity-mcp`"),
         "OpenCode MCP documentation": (client_configs, "OpenCode project MCP config belongs in `opencode.json`"),
         "explicit remote ref error": (installer, "Remote UPM installation requires --upm-ref"),
@@ -199,6 +229,9 @@ def check_repository_consistency() -> None:
         "persistent test job recovery": (skill, "RecoveryRequired"),
         "bounded scene summary": (skill, "unity_scene_summary"),
         "guarded prefab patch": (skill, "unity_prefab_patch"),
+        "no external compilers": (agent_template, "Never use external compilers"),
+        "no shell batchmode": (agent_template, "Never invoke Unity batchmode"),
+        "no shell compile errors": (agent_template, "Never substitute shell-based"),
     }
     for label, (text, fragment) in required.items():
         if fragment not in text:
@@ -263,12 +296,27 @@ def check_installed_integrity() -> None:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if not isinstance(metadata, dict):
             raise ValueError("expected a JSON object")
+        schema_version = metadata.get("schemaVersion", 1)
         version = metadata.get("templateVersion")
         recorded = metadata.get("contentSha256")
+        if type(schema_version) is not int or schema_version not in {1, 2}:
+            raise ValueError("schemaVersion must be 1 or 2")
         if type(version) is not int or version <= 0:
             raise ValueError("templateVersion must be a positive integer")
         if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", recorded):
             raise ValueError("contentSha256 must be a SHA256 hex string")
+        if schema_version == 2:
+            template_hash = metadata.get("templateSha256")
+            context = metadata.get("renderContext")
+            if not isinstance(template_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", template_hash):
+                raise ValueError("templateSha256 must be a SHA256 hex string")
+            if not isinstance(context, dict) or not all(
+                isinstance(context.get(key), str)
+                for key in ("projectPath", "mcpUrl", "healthUrl", "upilotPackageVersion")
+            ):
+                raise ValueError("renderContext is incomplete")
+            if not isinstance(metadata.get("renderedAt"), str) or not metadata["renderedAt"]:
+                raise ValueError("renderedAt is required")
     except (OSError, ValueError) as exc:
         fail(f"installed Skill metadata invalid: {exc}")
 
@@ -285,6 +333,19 @@ def check_installed_integrity() -> None:
         sys.dont_write_bytecode = previous
     if recorded.lower() != actual:
         fail(f"installed Skill content hash mismatch: recorded={recorded} actual={actual}; checker did not modify files")
+    if schema_version == 2:
+        renderer = load_renderer()
+        manifest = renderer.load_manifest(ROOT)
+        if version != manifest["skillPackVersion"] or template_hash != renderer.template_sha256(ROOT, manifest):
+            fail("installed Skill template hash/version mismatch")
+        render_context = renderer.build_context(
+            manifest, http_port=urlsplit(context["mcpUrl"]).port, project_path=context["projectPath"],
+            package=context["upilotPackageVersion"])
+        if render_context["mcpUrl"] != context["mcpUrl"] or render_context["healthUrl"] != context["healthUrl"]:
+            fail("installed endpoint context mismatch")
+        for path, expected in renderer.render_skill_outputs(ROOT, render_context, manifest).items():
+            if path.read_bytes() != expected.encode("utf-8"):
+                fail(f"installed generated artifact differs from its template: {path}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -312,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Checking UPilot Skill: mode={mode} root={ROOT}")
     for relative in REQUIRED_FILES:
         require_file(relative)
+    if mode == "source":
+        check_generated_source_artifacts()
     check_skill_frontmatter()
     check_openai_yaml(installed=mode == "installed")
     if mode == "source":

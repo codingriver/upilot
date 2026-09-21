@@ -1,18 +1,33 @@
-# UPilot Unity MCP Agent Rules Template
+<!-- Generated from skills/upilot-unity-mcp/AGENTS.md.template. Do not edit directly. -->
 
-rulesVersion: 30
-upilotPackageVersion: 0.3.27
+# UPilot Unity MCP
 
-This template is the generic UPilot rule source for Unity projects that install
-`io.github.codingriver.upilot`. Project-specific business rules outside the
-controlled UPilot block take precedence over these generic rules.
+rulesVersion: 35
+upilotPackageVersion: 0.3.32
+projectPath: <UNITY_PROJECT_ROOT>
+generatedAt: (documentation profile)
+
+This Unity project has the `io.github.codingriver.upilot` UPM package installed.
+Project-specific business rules outside this controlled UPilot block take precedence.
 
 ## Parent Agent Rules
 
-- Parent Agent rules path: nearest ancestor `AGENTS.md` relative to the project root `AGENTS.md`, for example `../../AGENTS.md` when installed under `Tests~/UPilotTest`.
-- Before applying this UPilot block, automatically load the parent rules when a parent path exists.
+- Parent Agent rules path: `(nearest ancestor AGENTS.md, or none)` (relative to the project root `AGENTS.md`).
+- Before applying this UPilot block, automatically load the parent rules when the path is not `(none)`.
 - Resolve every loaded `AGENTS.md` to a canonical absolute path and keep a visited set, including this file, so repeated or circular references are skipped.
 - Apply inherited parent rules first, then this project's local rules, then this UPilot block.
+
+## Template-First Maintenance
+
+- Resolve source templates through `skills/upilot-unity-mcp/template-manifest.json` in the UPilot package source. `AGENTS.md.template` generates the UPilot blocks in project `AGENTS.md` and `.cursor/rules/upilot-unity-mcp.mdc`, plus `Documentation~/AgentRules/AGENTS.upilot.md`; the installer maintains the `CLAUDE.md` block referencing `@AGENTS.md`.
+- Author package-wide UPilot rules only in `AGENTS.md.template`. Never append them to the unmanaged area of project or parent `AGENTS.md`, or directly edit Cursor rules. The generated UPilot managed blocks remain the standing rule entry points; they are outputs, not independent authoring sources.
+- Author UPilot Skill instructions in `SKILL.md.template` and metadata in `agents/openai.yaml.template`. Never hand-create or hand-update an installed UPilot Skill, modify installed template copies, or create a parallel test-project-specific UPilot Skill to bypass this workflow. Fix the authoritative package source instead of patching generated repository files or installed copies.
+- Maintain distributed `references`, `scripts`, and other non-generated resources directly in package source, then distribute them through the same synchronization workflow; do not add templates for these resources. These ownership rules do not replace genuine project business rules/Skills, repository release rules, or `AGENT_Distill.md`.
+- Increment manifest `agentRulesVersion` for Agent behavior changes, and `skillPackVersion` for any distributed Skill file or template change, including `AGENTS.md.template`. Keep the manifest as the version source of truth.
+- After every authorized batch of template or distributed-resource changes, automatically complete source generation, source validation, project synchronization, and installed validation within the same task, without waiting for a separate user reminder. Follow the existing UPilot Skill's `references/installation.md` maintenance procedure. Saving templates alone is not completion; there is no background file watcher.
+- Verify project identity before using `unity_agent_integrations_check` and `unity_agent_integrations_sync(apply=true)`. These tools use that project's installed UPM templates, not Server-bundled templates. The legacy `unity_agent_rules_check/install` tools affect only `AGENTS.md` and cannot prove complete synchronization.
+- Claim completion only after all five targets match the expected versions, context, and hashes, both `.agents/skills/upilot-unity-mcp` and `.claude/skills/upilot-unity-mcp` pass installed validation, and a repeat complete check returns `current`.
+- Preserve bytes outside managed blocks and parent-rule inheritance. Keep verified backups for customized or unverifiable targets under `.upilot/backups/agent-integrations/`. If source is missing, markers are malformed, a path is unsafe, a lock is busy, or backup/verification fails, report the incomplete targets; never bypass the failure by directly editing outputs.
 
 ## UPilot Package Acceptance
 
@@ -31,8 +46,13 @@ controlled UPilot block take precedence over these generic rules.
 - When multiple Unity projects run concurrently, allocate a unique HTTP/WebSocket port pair per project internally, give each client registration a distinct name, and expose only that project's HTTP `/mcp` endpoint to the AI tool.
 1. Call `unity_mcp_status`.
 2. Require `connected: true` and `serverReady: true`.
-3. Verify `paths.unityProjectAbsolute` matches the intended project path (allow equivalent slash normalization).
+3. Verify `paths.unityProjectAbsolute` matches `<UNITY_PROJECT_ROOT>` (allow equivalent slash normalization).
 4. Stop and report the mismatch if another Unity project is connected.
+
+## Deployment Freshness
+
+- After Server, Bridge or protocol changes, and when diagnosing suspected version mismatch, verify deployment evidence for each intended endpoint before attributing failures to networking or compatibility. A healthy endpoint, matching version string, recent disk files or process timestamps alone do not prove which code is loaded; report verified, suspected-stale or unverified evidence explicitly.
+- Follow the existing Skill's deployment-freshness workflow. Unknown identity is not restart authorization: inspect in-flight tasks, tests, operations and Capture ownership, then refresh only affected components in an authorized maintenance window. Do not cancel other work, automatically restart Unity with the Server, or replay existing operation starts.
 
 ## Capabilities
 
@@ -62,6 +82,9 @@ controlled UPilot block take precedence over these generic rules.
 - Treat compilation as covering the current edit batch only when the terminal snapshot belongs to that batch/compile operation, `errorsVerified=true`, and `lastCompileVerifiedAt` is at or after `writeBatchCreatedAt`. A pre-existing `completed` snapshot, `lastCompilerFinishedAt` without verification, or a timestamp older than the write batch is not acceptance evidence. Until those correlation fields are available, require the result of the one `unity_safe_compile_and_wait` call started after returning to EditMode rather than relying on cached status.
 - Treat `ok` as protocol/tool success only. A successfully observed compile failure is `ok=true` with `status/phase=failed`; inspect `terminal`, `errorsVerified`, identities, and timestamps before deciding the business result.
 - After compilation, read structured compile errors and relevant Console errors before editing again. Do not claim Unity compiled the latest code when the terminal identity/timestamp evidence is missing, stale, or predates the edits.
+- **Never use external compilers** (`csc.exe`, `mcs`, `dotnet build`, Roslyn outside Unity, or any non-Unity build tool) to validate or simulate Unity C# compilation. Only Unity's own Roslyn-based script compilation pipeline (invoked through `unity_write_batch_register` + `unity_safe_compile_and_wait` or `unity_compile`) produces authoritative compile results. External compilers differ in Unity-specific assemblies, `UNITY_EDITOR`/platform defines, conditional compilation symbols, asmdef reference resolution, `csc.rsp`/`mcs.rsp` files, and preprocessor behavior.
+- **Never invoke Unity batchmode `-executeMethod` or `-runTests` directly from the shell** to bypass the MCP compile pipeline. Route test execution through `unity_test_run` or the project's acceptance workflow.
+- **Never substitute shell-based `diff`/`grep` over log files** for `unity_compile_errors` or `unity_console_search_logs`. These tools carry the MCP Server's compile identity and error-verification metadata.
 
 ## Optional UPilot Tracer
 
@@ -71,7 +94,8 @@ controlled UPilot block take precedence over these generic rules.
 - `自动注入追踪点位` is the master opt-in setting and defaults to disabled. Domain Reload and PlayMode timing switches are subordinate and cannot inject while it is off; manual `应用` is unaffected. Enable automatic injection only when explicitly requested.
 - Do not enable, apply, auto-restore, or consume tracing events unless explicitly requested. Query status first and preserve the existing configuration.
 - `unity_monohook_tracing_configure` saves without applying by default; use `apply=true` only when hook installation or application is explicitly required.
-- Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor, scene/resource path, Layer/Tag, Active/enabled, Prefab, selection, point/method/phase, EditMode/PlayMode, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
+- Use target filters to narrow object source/type, GameObject name, hierarchy/parent/ancestor/root/direct-child, scene/resource path, Layer/Tag, Active/enabled, required-component state, Prefab/source path, selection, point/method/phase/event source, EditMode/PlayMode, object identity, and value changes. Conditions in one rule are AND; include rules are OR; exclude rules take priority.
+- Optional global/per-object rate limits and duplicate suppression are disabled by default; when enabled, report their dropped counters separately from filter rejections.
 - Target filtering uses a global default profile plus optional per-point overrides; an empty point override inherits the global profile. Stack capture uses `Disabled`, `SelectedPoints`, or `AllEnabledPoints` and defaults to disabled. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
 - Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 - Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
@@ -95,8 +119,8 @@ controlled UPilot block take precedence over these generic rules.
 ## Persistent Console Capture
 
 - For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation and retain its exact `sessionId` and one-time `ownerToken` outside ordinary logs. Call `unity_console_capture_stop` only with that matching token for the task's own session; unknown or another task's capture is not an automatic cleanup target. `forceStop=true` requires an exact session and explicit authorized human disposition.
-- Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`.
-- Before concluding cleanup, call `unity_console_capture_list` and inspect recovered or historical active sessions. Do not infer ownership from list data or stop them automatically; package acceptance must block and report the exact session instead.
+- Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`; a filtered no-match result advances to the last scanned record, while a read that scans nothing preserves the input cursor.
+- Before concluding cleanup, call `unity_console_capture_list(activeOnly=true)` and inspect `activeCount/returnedCount`. Do not combine `activeOnly=true` with `includeActive=false`, infer ownership from list data, or stop sessions automatically; package acceptance must block and report the exact session instead.
 - Keep raw Console capture separate from domain-specific reports. Prefer project-relative output paths and do not allow paths outside the project unless the user explicitly requests one.
 - Console capture cleanup must use dry-run, target inspection, and confirm-token execution.
 - For canonical UPilot package acceptance, prefer `unity_upilot_acceptance_run`. It blocks on another or unknown active capture before ConsoleCaptureService self-tests and does not start a persistent capture around that test run. Use `unity_console_capture_attach`/`unity_console_capture_detach` for read-only fixed ranges; detach never stops the source.
@@ -110,12 +134,12 @@ controlled UPilot block take precedence over these generic rules.
 ## Hang Diagnostics
 
 - When Unity stops pumping commands or appears stuck, call `unity_hang_status` before retrying or restarting it.
-- On Windows, collect `unity_hang_capture` before restart when diagnostic evidence is needed. Confirm the output path and report dump metadata; the capture must not terminate Unity.
+- On Windows, collect `unity_hang_capture` before restart when diagnostic evidence is needed. Choose `dumpType=mini|heap|full`; the tool verifies the exact main Editor identity and enforces an effective `reserveBytes` of at least 2 GiB. An insufficient-space result must have `dumpAttempted=false`; a completed capture must report path, bytes, SHA256, `reserveMaintained=true`, and `processTerminated=false`.
 
 ## Artifacts And Screenshots
 
 - Prefer project-relative artifact paths returned by the project bridge.
-- Prefer `unity_snapshot_capture`; treat `unity_screenshot_*` as compatibility wrappers over the same Snapshot implementation.
+- Prefer `unity_snapshot_capture`; treat `unity_screenshot_*` as compatibility wrappers over the same Snapshot implementation. Use `syncMode=sameFrame` and `completionPolicy=allOrNothing|bestEffort`.
 - For multi-Camera or depth evidence, use exact Camera IDs from `unity_camera_list`. Depth v1 is Built-in/URP Raw Depth and Linear Depth Float EXR with optional PNG previews; HDRP is unsupported.
 - GameView Snapshot is PlayMode-only, Display 0, Color-only final composition. Camera and GameView capture are offscreen-capable while Unity is minimized; SceneView and EditorWindow fail fast when minimized.
 - For EditorWindow/SceneView capture, resolve the exact Unity `instanceId` with `unity_editor_windows_list`; never select an operating-system window by title. SceneView evidence also requires exact `UnityEditor.SceneView`, a completed Repaint, `includesSceneGui=true`, and `includesHandles=true`.
@@ -146,9 +170,3 @@ controlled UPilot block take precedence over these generic rules.
 - Each item should include the observed problem, affected workflow/tool, proposed UPilot or integration improvement, reproduction or evidence when available, and current status.
 - Do not bury UPilot improvement ideas only in external client project TODO files; the UPilot repository-root `TODO_UPilot.mcd` is the source of truth for UPilot product/backlog follow-up.
 - Do not block the main task just to write feedback unless the missing MCP capability prevents safe completion; summarize any recorded UPilot improvement in the final handoff.
-
-## Advanced Automation Authorization
-
-- Advanced Settings contains a persistent, human-controlled catalog of finite automation scopes. A current catalog select-all is explicit human disposition only for modeled, current-project actions with exact targets; it does not authorize unknown native dialogs, other Unity projects/processes, external release actions, or ambiguous business windows.
-- A `block` unsaved-scene policy remains a deliberate data decision. `autoSave` saves unnamed scenes as `Assets/UPilotAutoSave_<number>.unity`; `ignore` discards modifications before the Runner. Mode transitions and scene policy execution may proceed when their respective scopes are enabled.
-- An ownerless Console Capture can be force-stopped only when both the workflow and persistent `captureForceStop` authorization identify the exact current-project `sessionId`. Acceptance additionally requires `captureAcceptanceClearance`, processes sessions one by one, and verifies manifest/summary evidence without deletion.

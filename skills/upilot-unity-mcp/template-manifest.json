@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "agentRulesVersion": 35,
+  "skillPackVersion": 37,
+  "defaultHttpPort": 8011,
+  "templates": {
+    "agentRules": "AGENTS.md.template",
+    "skill": "SKILL.md.template",
+    "openai": "agents/openai.yaml.template"
+  }
+}

@@ -261,6 +261,12 @@ namespace CodingRiver.UPilot
                 {
                     // Closing without save is the only way to make the Test Runner unable to show a save modal.
                     var activePath = SceneManager.GetActiveScene().path;
+                    Scene fallbackScene = default;
+                    if (SceneManager.sceneCount == result.items.Length)
+                    {
+                        fallbackScene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
+                        sideEffects = true;
+                    }
                     foreach (var item in result.items)
                     {
                         var scene = string.IsNullOrEmpty(item.scenePath) ? FindLoadedUntitled(item.sceneName) : SceneManager.GetSceneByPath(item.scenePath);
@@ -273,6 +279,8 @@ namespace CodingRiver.UPilot
                     }
                     if (SceneManager.sceneCount == 0) EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
                     if (!string.IsNullOrEmpty(activePath)) { var active = SceneManager.GetSceneByPath(activePath); if (active.IsValid()) SceneManager.SetActiveScene(active); }
+                    if (fallbackScene.IsValid() && fallbackScene.isLoaded && SceneManager.sceneCount > 1)
+                        EditorSceneManager.CloseScene(fallbackScene, true);
                     result.action = "ignored";
                 }
                 result.remainingDirtyScenes = CaptureLoadedScenes().Where(x => x.isDirty).ToArray();

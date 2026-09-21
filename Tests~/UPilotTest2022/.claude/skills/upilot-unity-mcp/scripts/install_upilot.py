@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext, redirect_stdout
+from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_URL = "https://github.com/codingriver/upilot.git"
@@ -176,11 +181,21 @@ def update_unity_manifest(args: argparse.Namespace, upilot_dir: Path) -> None:
 
 
 def _skill_template_version(upilot_dir: Path) -> int:
-    setup_path = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
-    match = re.search(r"SkillInstallTemplateVersion\s*=\s*(\d+)", setup_path.read_text(encoding="utf-8"))
-    if not match:
-        raise SystemExit(f"SkillInstallTemplateVersion not found: {setup_path}")
-    return int(match.group(1))
+    manifest = _skill_renderer().load_manifest(upilot_dir / "skills" / SKILL_NAME)
+    return int(manifest["skillPackVersion"])
+
+
+def _skill_renderer():
+    path = Path(__file__).with_name("render_skill_pack.py")
+    spec = importlib.util.spec_from_file_location("_upilot_skill_renderer", path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
 
 
 def _skill_content_hash(target: Path) -> str:
@@ -203,50 +218,211 @@ def _skill_content_hash(target: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_skill_metadata(target: Path, upilot_dir: Path) -> None:
+def _skill_content_hash_from_source(source: Path, rendered: dict[Path, str]) -> str:
+    rendered_by_relative = {
+        path.relative_to(source).as_posix(): content.encode("utf-8")
+        for path, content in rendered.items()
+    }
+    content_by_relative: dict[str, bytes] = {}
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source).as_posix()
+        if path.name.lower() == ".upilot-install.json" or any(
+            part.lower() == "__pycache__" or part.lower().endswith((".meta", ".pyc", ".pyo"))
+            for part in path.relative_to(source).parts
+        ):
+            continue
+        content_by_relative[relative] = path.read_bytes()
+    content_by_relative.update(rendered_by_relative)
+    digest = hashlib.sha256()
+    for relative in sorted(content_by_relative, key=str.lower):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content_by_relative[relative])
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _exact_target_hash(target: Path) -> tuple[str, int, int]:
+    if target.is_file():
+        data = target.read_bytes()
+        return hashlib.sha256(data).hexdigest(), 1, len(data)
+    if not target.is_dir():
+        raise FileNotFoundError(target)
+
+    digest = hashlib.sha256()
+    files = sorted(
+        (path for path in target.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(target).as_posix().lower(),
+    )
+    total_bytes = 0
+    for path in files:
+        relative = path.relative_to(target).as_posix()
+        data = path.read_bytes()
+        total_bytes += len(data)
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(b"\0")
+    return digest.hexdigest(), len(files), total_bytes
+
+
+def _backup_relative_target(project_root: Path, target: Path) -> Path:
+    project_root = project_root.resolve()
+    target = target.resolve()
+    try:
+        return target.relative_to(project_root)
+    except ValueError:
+        anchor = target.anchor.replace(":", "_").strip("/\\") or "root"
+        remaining = target.parts[1:] if target.anchor else target.parts
+        return Path("external") / anchor / Path(*remaining)
+
+
+def _backup_skill_target(
+    target: Path,
+    project_root: Path,
+    *,
+    trigger: str,
+    reason: str,
+    agent_rules_version: int,
+    skill_pack_version: int,
+) -> Path:
+    timestamp = datetime.now(timezone.utc)
+    backup_root = project_root / ".upilot" / "backups" / "agent-integrations"
+    session = backup_root / f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
+    backup_target = session / _backup_relative_target(project_root, target)
+    try:
+        backup_target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_dir():
+            shutil.copytree(target, backup_target)
+        elif target.is_file():
+            shutil.copy2(target, backup_target)
+        else:
+            raise FileNotFoundError(target)
+
+        original_hash, file_count, total_bytes = _exact_target_hash(target)
+        backup_hash, backup_count, backup_bytes = _exact_target_hash(backup_target)
+        if (original_hash, file_count, total_bytes) != (backup_hash, backup_count, backup_bytes):
+            raise OSError(f"backup verification failed for {target}")
+        manifest = {
+            "schemaVersion": 1,
+            "trigger": trigger,
+            "reason": reason,
+            "originalTargetPath": str(target.resolve()),
+            "originalContentSha256": original_hash,
+            "agentRulesVersion": agent_rules_version,
+            "skillPackVersion": skill_pack_version,
+            "backedUpAt": timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "fileCount": file_count,
+            "totalBytes": total_bytes,
+        }
+        session.joinpath("manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
+        return session
+    except Exception as exc:
+        raise OSError(
+            f"could not back up UPilot-managed target; original was not changed: {target}"
+        ) from exc
+
+
+def _read_skill_metadata(target: Path) -> dict | None:
+    path = target / ".upilot-install.json"
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    schema = metadata.get("schemaVersion", 1)
+    version = metadata.get("templateVersion")
+    content_hash = metadata.get("contentSha256")
+    if schema not in {1, 2} or type(version) is not int or version <= 0:
+        return None
+    if not isinstance(content_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", content_hash):
+        return None
+    if schema == 2:
+        template_hash = metadata.get("templateSha256")
+        render_context = metadata.get("renderContext")
+        if not isinstance(template_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", template_hash):
+            return None
+        if not isinstance(render_context, dict) or not all(
+            isinstance(render_context.get(key), str) and bool(render_context[key])
+            for key in ("projectPath", "mcpUrl", "healthUrl", "upilotPackageVersion")
+        ):
+            return None
+        if not isinstance(metadata.get("renderedAt"), str) or not metadata["renderedAt"]:
+            return None
+    return metadata
+
+
+def _write_skill_metadata(
+    target: Path,
+    upilot_dir: Path,
+    *,
+    template_hash: str,
+    context: dict[str, str],
+) -> None:
     metadata = {
+        "schemaVersion": 2,
         "templateVersion": _skill_template_version(upilot_dir),
+        "templateSha256": template_hash,
         "contentSha256": _skill_content_hash(target),
+        "renderContext": {
+            "projectPath": context["projectPath"],
+            "mcpUrl": context["mcpUrl"],
+            "healthUrl": context["healthUrl"],
+            "upilotPackageVersion": context["upilotPackageVersion"],
+        },
+        "renderedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     target.joinpath(".upilot-install.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="\n"
     )
 
 
-def install_skill(args: argparse.Namespace, upilot_dir: Path) -> None:
-    if args.install_skill == "none":
-        return
-    source = upilot_dir / "skills" / SKILL_NAME
-    if not source.is_dir():
-        raise SystemExit(f"source skill not found: {source}")
+def _integration_engine():
+    path = Path(__file__).with_name("sync_integrations.py")
+    spec = importlib.util.spec_from_file_location("_upilot_integrations", path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
 
-    clients = set(args.skill_client or ("codex", "claude", "cursor", "opencode"))
-    targets: list[Path] = []
-    unity_project = Path(args.unity_project).expanduser().resolve() if args.unity_project else Path.cwd()
+
+def synchronize_integrations(args, upilot_dir: Path, scope="all", root: Path | None = None) -> dict:
+    project = Path(args.unity_project).expanduser().absolute() if args.unity_project else Path.cwd()
+    helpers = SimpleNamespace(**{name: globals()[name] for name in (
+        "_skill_renderer", "_skill_content_hash", "_read_skill_metadata", "_exact_target_hash", "_backup_skill_target")})
+    return _integration_engine().synchronize(root or project, upilot_dir, apply=not args.dry_run, scope=scope,
+        http_port=args.http_port, context_project=project, trigger="python-install", helpers=helpers)
+
+
+def _report_integrations(report: dict) -> None:
+    for target in report["targets"]:
+        print(f"{target['status']}: {target['path']}" +
+              (f" -> backup: {target['backupPath']}" if target["backupPath"] else "") +
+              (f": {target['error']}" if target["error"] else ""))
+    if not report["ok"]:
+        raise SystemExit("one or more UPilot integration targets failed to synchronize: " +
+                         report["error"] + "\n" + "\n".join(t["error"] for t in report["targets"] if t["error"]))
+
+
+def install_skill(args: argparse.Namespace, upilot_dir: Path) -> list[dict]:
+    reports = []
     if args.install_skill in {"repo", "both"}:
-        if clients.intersection({"codex", "cursor", "opencode"}):
-            targets.append(unity_project / ".agents" / "skills" / SKILL_NAME)
-        if "claude" in clients:
-            targets.append(unity_project / ".claude" / "skills" / SKILL_NAME)
+        reports.append(synchronize_integrations(args, upilot_dir, "skills"))
     if args.install_skill in {"user", "both"}:
-        if clients.intersection({"codex", "cursor", "opencode"}):
-            targets.append(Path.home() / ".agents" / "skills" / SKILL_NAME)
-        if "claude" in clients:
-            targets.append(Path.home() / ".claude" / "skills" / SKILL_NAME)
-
-    for target in dict.fromkeys(targets):
-        if target.exists():
-            if not args.force:
-                raise SystemExit(f"skill already exists, pass --force to replace: {target}")
-            if args.dry_run:
-                print(f"Would remove {target}")
-            else:
-                shutil.rmtree(target)
-        print(f"Installing skill: {source} -> {target}")
-        if not args.dry_run:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(source, target, ignore=shutil.ignore_patterns("*.meta"))
-            _write_skill_metadata(target, upilot_dir)
+        reports.append(synchronize_integrations(args, upilot_dir, "skills", Path.home()))
+    for report in reports:
+        if not getattr(args, "json", False):
+            _report_integrations(report)
+    return reports
 
 
 def toml_string(value: str) -> str:
@@ -316,22 +492,53 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         choices=["codex", "claude", "cursor", "opencode"],
         help=(
-            "Agent that should discover the installed Skill; repeat for multiple Agents. "
-            "Defaults to all. Codex, Cursor, and OpenCode share .agents/skills; Claude uses .claude/skills."
+            "Compatibility option. All supported project Skill targets are synchronized; "
+            "Codex, Cursor, and OpenCode share .agents/skills, while Claude uses .claude/skills."
         ),
     )
     parser.add_argument("--skill-only", action="store_true", help="Synchronize Skill content without modifying Packages/manifest.json")
+    parser.add_argument("--integrations-only", action="store_true", help="Sync all five project Agent/Skill targets only")
+    parser.add_argument("--json", action="store_true", help="Emit structured integration results to stdout")
     parser.add_argument("--write-codex-mcp", choices=["none", "project", "user"], default="none")
-    parser.add_argument("--http-port", type=parse_port, default=8011, help="Public Streamable HTTP MCP port")
+    parser.add_argument("--http-port", type=parse_port, help="Public HTTP port; defaults to project config then template manifest")
     parser.add_argument("--mcp-name", type=parse_mcp_name, default="upilot", help="Codex MCP registration name")
     parser.add_argument("--port", help=argparse.SUPPRESS)
-    parser.add_argument("--force", action="store_true", help="Replace existing installed skill")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Compatibility option; UPilot-owned Skill targets are always synchronized authoritatively",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    output = sys.stdout
+    with redirect_stdout(sys.stderr) if args.json else nullcontext():
+        reports, code = _main(args)
+    if args.json:
+        result = reports[0] if len(reports) == 1 else {"ok": code == 0, "results": reports}
+        print(json.dumps(result, ensure_ascii=False), file=output)
+    return code
+
+
+def _main(args) -> tuple[list[dict], int]:
+    if args.port is not None:
+        raise SystemExit("Unity Bridge WebSocket ports are internal; use --http-port for the external MCP endpoint.")
+    if args.skill_only and (args.setup_python or args.write_codex_mcp != "none"):
+        raise SystemExit("--skill-only cannot modify Python environments or MCP client configurations")
+    if args.integrations_only:
+        if not args.unity_project or not (Path(args.unity_project) / "Packages/manifest.json").is_file():
+            raise SystemExit("--integrations-only requires an explicit Unity project containing Packages/manifest.json")
+        if (args.skill_only or args.install_skill != "repo" or args.write_codex_mcp != "none"
+                or args.setup_python or args.clone_to or args.upm_ref or args.use_local_upm or args.enable_flow or args.upm_dep):
+            raise SystemExit("--integrations-only cannot be combined with Skill-only, user-level, dependency or environment options")
+        source = Path(args.upilot_dir).expanduser().absolute()
+        report = synchronize_integrations(args, source)
+        if not args.json:
+            _report_integrations(report)
+        return [report], 0 if report["ok"] else 1
     if args.port is not None:
         raise SystemExit(
             "--port is no longer a client configuration option. "
@@ -345,6 +552,9 @@ def main(argv: list[str] | None = None) -> int:
     if not upilot_dir.exists() and not args.dry_run:
         raise SystemExit(f"upilot directory does not exist: {upilot_dir}")
 
+    source_manifest = _skill_renderer().load_manifest(upilot_dir / "skills" / SKILL_NAME)
+    project = Path(args.unity_project).expanduser().absolute() if args.unity_project else Path.cwd()
+    args.http_port = _integration_engine().resolve_port(project, args.http_port, source_manifest)
     if args.setup_python and not args.no_python:
         venv = Path(args.venv).expanduser().resolve() if args.venv else upilot_dir / "upilotserver~" / ".venv"
         setup_python_env(upilot_dir, venv, args.python, args.dry_run)
@@ -356,11 +566,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.skill_only and args.install_skill == "none":
         raise SystemExit("--skill-only requires --install-skill repo, user, or both")
-    install_skill(args, upilot_dir)
+    reports = []
+    if args.unity_project and not args.skill_only:
+        report = synchronize_integrations(args, upilot_dir, "all" if args.install_skill in {"repo", "both"} else "rules")
+        reports.append(report)
+        if args.install_skill in {"user", "both"}:
+            reports.append(synchronize_integrations(args, upilot_dir, "skills", Path.home()))
+        if not args.json:
+            for report in reports:
+                _report_integrations(report)
+    else:
+        reports = install_skill(args, upilot_dir)
+    if any(not r["ok"] for r in reports):
+        return reports, 1
     write_codex_mcp(args)
 
     print("upilot install complete")
-    return 0
+    return reports, 0
 
 
 if __name__ == "__main__":

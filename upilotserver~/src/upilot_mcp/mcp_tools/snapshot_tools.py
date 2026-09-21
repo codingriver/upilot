@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -139,8 +139,8 @@ async def unity_camera_list():
 async def unity_snapshot_capture(
     targets: list[_SnapshotTargetInput],
     channels: list[StrictStr] | None = None,
-    syncMode: StrictStr = "sameFrame",
-    completionPolicy: StrictStr = "allOrNothing",
+    syncMode: Literal["sameFrame"] = "sameFrame",
+    completionPolicy: Literal["allOrNothing", "bestEffort"] = "allOrNothing",
     capturePolicy: _SnapshotCapturePolicyInput | None = None,
     outputDirectory: StrictStr = "",
     waitMs: StrictInt = 5000,

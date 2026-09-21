@@ -73,7 +73,53 @@ def _call_tool(
     )
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         envelope = _parse_sse_json(response.read())
-    return envelope.get("result", {}).get("structuredContent", {})
+    if not isinstance(envelope, dict):
+        return {
+            "ok": False,
+            "code": "MCP_RESPONSE_INVALID",
+            "error": "MCP response was not a JSON object.",
+            "executionStatus": "unknown",
+        }
+
+    rpc_error = envelope.get("error")
+    if isinstance(rpc_error, dict):
+        return {
+            "ok": False,
+            "code": "MCP_JSONRPC_ERROR",
+            "error": str(rpc_error.get("message") or "MCP returned a JSON-RPC error."),
+            "mcpError": rpc_error,
+            "executionStatus": "unknown",
+        }
+
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        return {
+            "ok": False,
+            "code": "MCP_RESULT_MISSING",
+            "error": "MCP response did not contain a result object.",
+            "executionStatus": "unknown",
+        }
+
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+
+    content = result.get("content")
+    text_content = []
+    if isinstance(content, list):
+        text_content = [
+            str(item.get("text"))
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text") is not None
+        ]
+    return {
+        "ok": False,
+        "code": "MCP_TOOL_ERROR" if result.get("isError") is True else "MCP_STRUCTURED_CONTENT_MISSING",
+        "error": "\n".join(text_content) or "MCP tool response did not contain structuredContent.",
+        "isError": result.get("isError"),
+        "content": content if isinstance(content, list) else [],
+        "executionStatus": "unknown",
+    }
 
 
 def run_compile_driver(

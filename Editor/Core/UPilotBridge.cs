@@ -162,6 +162,7 @@ namespace CodingRiver.UPilot
         private static string WsPortPrefsKey => $"upilot.WsPort.{ProjectPathHashSuffix}";
         private static string HttpPortPrefsKey => $"upilot.HttpPort.{ProjectPathHashSuffix}";
         private const int    HeartbeatIntervalMs = 2000;
+        private const int    IdentityContractVersion = 1;
         private const int    MaxLogEntries    = 1000;
         private const int    ExecutionStatePersistenceAttempts = 3;
         private const int    ExecutionStatePersistenceRetryDelayMs = 5;
@@ -229,6 +230,7 @@ namespace CodingRiver.UPilot
         public bool                  IsStarted => _started;
         private bool                 _isAuthenticated;
         private long                 _lastHeartbeatSentAt;
+        private string               _processRole = "unknown";
         private string               _activeSceneName = string.Empty;
         private long                 _lastMainThreadPumpAt;
         private string               _lastDequeuedCommandId = string.Empty;
@@ -444,9 +446,11 @@ namespace CodingRiver.UPilot
                 StartConnectLoop();
                 return;
             }
-            if (Application.isBatchMode)
+            var processRole = DetermineProcessRole();
+            _processRole = processRole;
+            if (!IsMainEditorProcess(processRole))
             {
-                Logger.LogWarning("SYSTEM", "Bridge startup skipped: batch mode is temporarily disabled.");
+                Logger.LogWarning("SYSTEM", $"Bridge startup skipped: auxiliary Unity process role '{processRole}'.");
                 return;
             }
             _connectFailureStreak = 0;
@@ -782,15 +786,104 @@ namespace CodingRiver.UPilot
                 name = "session.hello",
                 payload = new HelloPayload
                 {
+                    identityContractVersion = IdentityContractVersion,
                     unityVersion = Application.unityVersion,
                     projectPath = projectRoot,
-                    platform = Application.platform == RuntimePlatform.OSXEditor ? "macos" : "windows",
+                    platform = Application.platform == RuntimePlatform.OSXEditor ? "macos" :
+                        Application.platform == RuntimePlatform.LinuxEditor ? "linux" : "windows",
                     processId = Process.GetCurrentProcess().Id,
+                    processCreatedAt = GetCurrentProcessCreatedAt(),
+                    processRole = _processRole,
                 },
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
             };
             await SendJsonAsync(JsonUtility.ToJson(msg), token);
+        }
+
+        internal static string DetermineProcessRole()
+        {
+            var isAssetImportWorker = false;
+            try
+            {
+                isAssetImportWorker = AssetDatabase.IsAssetImportWorkerProcess();
+            }
+            catch { /* older Unity versions may not expose worker state here */ }
+
+            var args = Environment.GetCommandLineArgs() ?? Array.Empty<string>();
+            return DetermineProcessRoleFromArguments(Application.isBatchMode, isAssetImportWorker, args);
+        }
+
+        internal static bool IsMainEditorProcess()
+        {
+            return IsMainEditorProcess(DetermineProcessRole());
+        }
+
+        internal static bool IsMainEditorProcess(string processRole)
+        {
+            return string.Equals(processRole, "mainEditor", StringComparison.Ordinal);
+        }
+
+        internal static string DetermineProcessRoleFromArguments(
+            bool isBatchMode,
+            bool isAssetImportWorker,
+            string[] args)
+        {
+            if (isBatchMode) return "batchMode";
+            if (isAssetImportWorker) return "assetImportWorker";
+            args ??= Array.Empty<string>();
+
+            for (var index = 0; index < args.Length; index++)
+            {
+                var value = (args[index] ?? "").Trim();
+                if (value.IndexOf("assetimportworker", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return "assetImportWorker";
+            }
+
+            // Explicit role switches take precedence over the generic -ump worker marker.
+            for (var index = 0; index < args.Length; index++)
+            {
+                var value = (args[index] ?? "").Trim();
+                if ((string.Equals(value, "-ump-process-role", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(value, "-editor-mode", StringComparison.OrdinalIgnoreCase)) &&
+                    index + 1 < args.Length &&
+                    string.Equals(args[index + 1], "profiler", StringComparison.OrdinalIgnoreCase))
+                    return "profiler";
+                if (string.Equals(value, "-ump-process-role", StringComparison.OrdinalIgnoreCase) &&
+                    index + 1 < args.Length)
+                {
+                    var declaredRole = (args[index + 1] ?? "").Trim();
+                    if (!string.IsNullOrEmpty(declaredRole) &&
+                        !string.Equals(declaredRole, "editor", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(declaredRole, "main", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(declaredRole, "main-editor", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(declaredRole, "mainEditor", StringComparison.OrdinalIgnoreCase))
+                        return "worker";
+                }
+            }
+
+            for (var index = 0; index < args.Length; index++)
+            {
+                var value = (args[index] ?? "").Trim();
+                if (string.Equals(value, "-adb2", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(value, "-ump", StringComparison.OrdinalIgnoreCase) ||
+                    value.StartsWith("-worker", StringComparison.OrdinalIgnoreCase))
+                    return "worker";
+            }
+            return "mainEditor";
+        }
+
+        private static long GetCurrentProcessCreatedAt()
+        {
+            try
+            {
+                using var process = Process.GetCurrentProcess();
+                return process.StartTime.ToUniversalTime().ToFileTimeUtc();
+            }
+            catch
+            {
+                return 0;
+            }
         }
 
         private async Task HeartbeatLoopAsync(CancellationToken token)
@@ -928,6 +1021,15 @@ namespace CodingRiver.UPilot
                         try { _ws?.Abort(); } catch { /* ignored */ }
                         return;
                     }
+                    if (ack.payload.identityContractVersion != IdentityContractVersion ||
+                        string.IsNullOrEmpty(ack.payload.verificationLevel))
+                    {
+                        UPilotOperationTracker.Instance.RecordSystemEvent(
+                            "sys.auth.contract_mismatch", "身份契约不匹配",
+                            $"server={ack.payload.identityContractVersion} bridge={IdentityContractVersion}", "error");
+                        try { _ws?.Abort(); } catch { /* ignored */ }
+                        return;
+                    }
                     _mcpLabelFromServer = ack.payload.mcpLabel ?? "";
                     _mcpHostFromServer = ack.payload.mcpHost ?? "";
                     _mcpPortFromServer = ack.payload.mcpPort;
@@ -1027,6 +1129,8 @@ namespace CodingRiver.UPilot
 
         private void RegisterModuleServices()
         {
+            new UPilotAgentIntegrationService(this).RegisterCommands();
+
             _consoleService = new UPilotConsoleService(this);
             _consoleService.RegisterCommands();
 

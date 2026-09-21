@@ -266,7 +266,7 @@ async def dispatch_public_tool(facade: Any, public_name: str, args: dict[str, An
     descriptor = REGISTRY.resolve(public_name)
     if descriptor is None:
         return fail(new_id("req"), "UNKNOWN_TOOL", f"Unknown MCP tool: {public_name}", {"tool": public_name})
-    if descriptor.destructive and not CONFIG.write_access_approved:
+    if descriptor.destructive and descriptor.write_access_predicate is None and not CONFIG.write_access_approved:
         return fail(
             new_id("req"),
             "WRITE_ACCESS_NOT_APPROVED",

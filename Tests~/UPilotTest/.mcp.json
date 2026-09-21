@@ -1,8 +1,42 @@
 {
   "mcpServers": {
-                                                "upilot": {
+    "upilot": {
       "type": "http",
       "url": "http://127.0.0.1:8011/mcp"
+    },
+    "AgentsRoom-MCP": {
+      "command": "node",
+      "args": [
+        "G:\\Program Files\\AgentsRoom\\resources\\app-mcp-server.cjs"
+      ],
+      "env": {
+        "AR_PROJECT_ID": "proj-1789805080474-jqd5r6",
+        "AR_PROJECT_PATH": "D:\\upilot\\Tests~\\UPilotTest",
+        "AR_API_BASE_URL": "https://agentsroom.dev",
+        "AR_SETTINGS_FILE": "C:\\Users\\coding\\.agentsroom\\settings.json",
+        "AR_BRIDGE_FILE": "C:\\Users\\coding\\.agentsroom\\browser-bridge.json"
+      }
+    },
+    "AgentsRoom-Test-Runner": {
+      "command": "node",
+      "args": [
+        "G:\\Program Files\\AgentsRoom\\resources\\test-runner-mcp-server.cjs"
+      ],
+      "env": {
+        "AR_BROWSER_BRIDGE_FILE": "C:\\Users\\coding\\.agentsroom\\browser-bridge.json",
+        "AR_BROWSER_PROJECT_ID": "proj-1789805080474-jqd5r6",
+        "AR_PROJECT_PATH": "D:\\upilot\\Tests~\\UPilotTest"
+      }
+    },
+    "AgentsRoom-QA-Tester": {
+      "command": "node",
+      "args": [
+        "G:\\Program Files\\AgentsRoom\\resources\\qa-tester-mcp-server.cjs"
+      ],
+      "env": {
+        "AR_BROWSER_BRIDGE_FILE": "C:\\Users\\coding\\.agentsroom\\browser-bridge.json",
+        "AR_BROWSER_PROJECT_ID": "proj-1789805080474-jqd5r6"
+      }
     }
   }
 }

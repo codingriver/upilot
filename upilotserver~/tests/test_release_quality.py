@@ -113,6 +113,7 @@ def _write_wp12_repository(root: Path) -> Path:
     (root / "Documentation~").mkdir(parents=True)
     (root / "upilotserver~" / "src" / "upilot_mcp" / "domain").mkdir(parents=True)
     (root / "upilotserver~" / "src" / "upilot_mcp").mkdir(exist_ok=True)
+    (root / "skills" / "upilot-unity-mcp").mkdir(parents=True)
     (root / "TODO_UPilot.mcd").write_text("# UPilot Improvement Backlog\n\n## UP-001 Demo\n", encoding="utf-8")
     (root / "Documentation~" / "P2-Development-Plan-20260915.md").write_text(
         "当前开发与验收状态仍以 [根 TODO](../TODO_UPilot.mcd) 为准。\n"
@@ -121,8 +122,9 @@ def _write_wp12_repository(root: Path) -> Path:
     )
     (root / "Documentation~" / "TODO_UPilot_Integrated.md").write_text("# Archive\n", encoding="utf-8")
     (root / "Documentation~" / "ToolStatus.md").write_text("Current generated Registry v7.\n", encoding="utf-8")
-    (root / "upilotserver~" / "src" / "upilot_mcp" / "domain" / "task_service.py").write_text(
-        "_UPILOT_RULES_VERSION = 30\n", encoding="utf-8"
+    (root / "upilotserver~" / "src" / "upilot_mcp" / "domain" / "task_service.py").write_text("# fixture\n", encoding="utf-8")
+    (root / "skills" / "upilot-unity-mcp" / "template-manifest.json").write_text(
+        json.dumps({"agentRulesVersion": 30, "skillPackVersion": 29}), encoding="utf-8"
     )
     (root / "upilotserver~" / "src" / "upilot_mcp" / "tool_registry.py").write_text("REGISTRY_VERSION = 7\n", encoding="utf-8")
     return root
@@ -224,10 +226,6 @@ def test_documentation_checks_reports_installed_manifest_without_claiming_client
 
 def test_documentation_checks_validates_read_only_installed_skill_metadata_without_inferring_source_or_injection(tmp_path):
     root = _write_wp12_repository(tmp_path / "repo")
-    (root / "Editor" / "Core").mkdir(parents=True)
-    (root / "Editor" / "Core" / "UPilotAgentSetup.cs").write_text(
-        "const int SkillInstallTemplateVersion = 29;\n", encoding="utf-8"
-    )
     installed_root = tmp_path / "client" / "upilot-unity-mcp"
     installed_root.mkdir(parents=True)
     (installed_root / "SKILL.md").write_text("installed skill\n", encoding="utf-8")

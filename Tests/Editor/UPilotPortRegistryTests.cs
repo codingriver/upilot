@@ -269,6 +269,58 @@ namespace CodingRiver.UPilot.Tests
 
         [Test]
         [Platform("Win")]
+        public void RealExternalListenerBlocksStartupSyncWithoutChangingConfigOrStoppingOwner()
+        {
+            const string script =
+                "$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0);" +
+                "$l.Start();[Console]::WriteLine(([Net.IPEndPoint]$l.LocalEndpoint).Port);" +
+                "[Console]::Out.Flush();[Console]::ReadLine()|Out-Null;$l.Stop()";
+            using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -NonInteractive -EncodedCommand " +
+                            Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardInput = true,
+            });
+
+            try
+            {
+                var ready = child.StandardOutput.ReadLineAsync();
+                Assert.That(ready.Wait(5000), Is.True, "external listener did not publish its port");
+                Assert.That(int.TryParse(ready.Result, out int occupiedPort), Is.True, ready.Result);
+                int availablePort = Enumerable.Range(30000, 20000)
+                    .First(port => port != occupiedPort && UPilotPortAllocator.IsPortAvailable(port));
+                DiskConfig(_a, occupiedPort, availablePort);
+                string configPath = UPilotPortRegistry.ConfigPath(_a);
+                byte[] before = File.ReadAllBytes(configPath);
+                var realRegistry = new UPilotPortRegistry(_user, UPilotPortAllocator.IsPortAvailable, 2000);
+
+                var error = Assert.Throws<IOException>(() => realRegistry.Sync(_a, requireAvailable: true));
+
+                Assert.That(error.Message, Does.Contain($"端口 {occupiedPort} 已被系统进程占用"));
+                Assert.That(File.ReadAllBytes(configPath), Is.EqualTo(before));
+                Assert.That(child.HasExited, Is.False, "startup conflict handling terminated the external owner");
+                Assert.That(UPilotPortAllocator.IsPortAvailable(occupiedPort), Is.False);
+            }
+            finally
+            {
+                if (child != null && !child.HasExited)
+                {
+                    child.StandardInput.WriteLine("release");
+                    if (!child.WaitForExit(3000))
+                    {
+                        child.Kill();
+                        child.WaitForExit(3000);
+                    }
+                }
+            }
+        }
+
+        [Test]
+        [Platform("Win")]
         public void CrossProcessLockTimesOutAndRecoversWithoutDeletingLockFile()
         {
             Directory.CreateDirectory(_user);

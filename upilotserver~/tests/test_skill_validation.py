@@ -115,3 +115,82 @@ def test_forced_source_mode_does_not_accept_an_installation(installed, capsys):
 
 def test_repository_source_retains_strict_checks():
     assert module("check_skill_pack").main(["--mode", "source", "--root", str(SOURCE)]) == 0
+
+
+def test_repository_checker_accepts_manifest_version_upgrade(tmp_path, monkeypatch):
+    target = tmp_path / "skills" / "upilot-unity-mcp"
+    shutil.copytree(SOURCE, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+    manifest_path = target / "template-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["agentRulesVersion"] += 1
+    manifest["skillPackVersion"] += 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    renderer = module("render_skill_pack")
+    assert renderer.main(["--root", str(target), "--write"]) == 0
+    documentation_path, documentation_content = renderer.render_agent_documentation(target)
+    documentation_path.parent.mkdir(parents=True)
+    documentation_path.write_text(documentation_content, encoding="utf-8", newline="\n")
+    checker = module("check_skill_pack")
+    monkeypatch.setattr(checker, "ROOT", target)
+
+    assert checker.check_generated_source_artifacts() == manifest
+    checker.check_repository_consistency()
+
+
+def test_renderer_rejects_missing_template(tmp_path):
+    target = tmp_path / "skill"
+    shutil.copytree(SOURCE, target, ignore=shutil.ignore_patterns("*.meta", "__pycache__", "*.pyc", "*.pyo"))
+    (target / "SKILL.md.template").unlink()
+
+    assert module("render_skill_pack").main(["--root", str(target), "--check"]) == 1
+
+
+def test_renderer_rejects_unknown_or_unresolved_tokens(tmp_path):
+    target = tmp_path / "skill"
+    shutil.copytree(SOURCE, target, ignore=shutil.ignore_patterns("*.meta", "__pycache__", "*.pyc", "*.pyo"))
+    template = target / "SKILL.md.template"
+    template.write_text(template.read_text(encoding="utf-8") + "\n{{unknownToken}}\n", encoding="utf-8")
+
+    assert module("render_skill_pack").main(["--root", str(target), "--check"]) == 1
+
+
+def test_renderer_rejects_malformed_residual_placeholder(tmp_path):
+    target = tmp_path / "skill"
+    shutil.copytree(SOURCE, target, ignore=shutil.ignore_patterns("*.meta", "__pycache__", "*.pyc", "*.pyo"))
+    template = target / "SKILL.md.template"
+    template.write_text(template.read_text(encoding="utf-8") + "\n{{not-a-valid-token}}\n", encoding="utf-8")
+
+    assert module("render_skill_pack").main(["--root", str(target), "--check"]) == 1
+
+
+def test_renderer_rejects_duplicate_template_paths(tmp_path):
+    target = tmp_path / "skill"
+    shutil.copytree(SOURCE, target, ignore=shutil.ignore_patterns("*.meta", "__pycache__", "*.pyc", "*.pyo"))
+    manifest_path = target / "template-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["templates"]["openai"] = manifest["templates"]["skill"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert module("render_skill_pack").main(["--root", str(target), "--check"]) == 1
+
+
+def test_renderer_detects_generated_artifact_drift_without_writing(tmp_path):
+    target = tmp_path / "skill"
+    shutil.copytree(SOURCE, target, ignore=shutil.ignore_patterns("*.meta", "__pycache__", "*.pyc", "*.pyo"))
+    skill = target / "SKILL.md"
+    skill.write_text(skill.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8")
+    before = contents(target)
+
+    assert module("render_skill_pack").main(["--root", str(target), "--check"]) == 1
+    assert contents(target) == before
+
+
+def test_renderer_custom_port_updates_both_generated_artifacts():
+    renderer = module("render_skill_pack")
+    manifest = renderer.load_manifest(SOURCE)
+    context = renderer.build_context(manifest, http_port=8021, package="1.2.3")
+    outputs = renderer.render_skill_outputs(SOURCE, context, manifest)
+
+    assert "http://127.0.0.1:8021/mcp" in outputs[SOURCE / "SKILL.md"]
+    assert "http://127.0.0.1:8021/health" in outputs[SOURCE / "SKILL.md"]
+    assert "http://127.0.0.1:8021/mcp" in outputs[SOURCE / "agents/openai.yaml"]

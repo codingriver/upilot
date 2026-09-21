@@ -1,3 +1,4 @@
+# Generated from agents/openai.yaml.template. Do not edit agents/openai.yaml directly.
 interface:
   display_name: "UPilot Unity MCP"
   short_description: "Control Unity Editor through MCP"
@@ -10,7 +11,7 @@ dependencies:
       value: "upilot"
       description: "Local UPilot MCP server connected to a Unity Editor bridge"
       transport: "streamable_http"
-      url: "http://127.0.0.1:8011/mcp"
+      url: "http://127.0.0.1:8017/mcp"
 
 policy:
   allow_implicit_invocation: true

@@ -1115,6 +1115,43 @@ def test_long_reflection_call_returns_single_pollable_operation_without_reexecut
     assert calls == 1
 
 
+def test_failed_reflection_operation_preserves_bridge_exception_evidence_at_top_level() -> None:
+    from upilot_mcp.domain.reflection_service import ReflectionDomainService
+
+    calls = 0
+
+    class _Dispatcher:
+        async def call(self, request_id: str, name: str, payload: dict, timeout_ms: int | None = None) -> ToolResponse:
+            nonlocal calls
+            calls += 1
+            return fail(request_id, "REFLECTION_CALL_FAILED", "P0_TARGET_THROW", {
+                "stage": "runtime",
+                "sideEffectsMayHaveOccurred": True,
+                "exceptionType": "System.InvalidOperationException",
+                "exceptionMessage": "P0_TARGET_THROW",
+                "stackTrace": "Fixture.MutateThenThrow()",
+                "commandId": "cmd-p0-target",
+            })
+
+    async def scenario():
+        service = ReflectionDomainService()
+        service.dispatcher = _Dispatcher()
+        started = await service.reflection_call("Fixture", "MutateThenThrow", force_async=True)
+        result = await service.reflection_operation_wait(
+            started.data["operationId"], timeout_sec=1, poll_interval_sec=0.005,
+        )
+        assert not result.ok
+        assert result.error.detail["sideEffectsMayHaveOccurred"] is True
+        assert result.error.detail["exceptionType"] == "System.InvalidOperationException"
+        assert result.error.detail["exceptionMessage"] == "P0_TARGET_THROW"
+        assert "MutateThenThrow" in result.error.detail["stackTrace"]
+        assert result.error.detail["commandId"] == "cmd-p0-target"
+        assert result.error.detail["resultError"]["sideEffectsMayHaveOccurred"] is True
+
+    asyncio.run(scenario())
+    assert calls == 1
+
+
 def test_running_reflection_operation_rejects_unsafe_cancel_explicitly() -> None:
     from upilot_mcp.domain.reflection_service import ReflectionDomainService
 

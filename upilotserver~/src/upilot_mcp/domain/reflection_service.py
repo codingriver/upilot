@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -321,14 +322,31 @@ class ReflectionDomainService:
         except asyncio.CancelledError:
             return ok(request_id, {**base, "status": "Canceled", "terminal": True})
         except Exception as ex:
-            return fail(request_id, "REFLECTION_OPERATION_FAILED", str(ex), {**base, "status": "Failed", "terminal": True})
+            return fail(request_id, "REFLECTION_OPERATION_FAILED", str(ex), {
+                **base,
+                "status": "Failed",
+                "terminal": True,
+                "stage": "runtime",
+                "sideEffectsMayHaveOccurred": True,
+                "exceptionType": type(ex).__name__,
+                "exceptionMessage": str(ex),
+                "stackTrace": "".join(traceback.format_exception(type(ex), ex, ex.__traceback__))[:4096],
+                "nextAction": "Inspect the original request and actual state; do not replay the target.",
+            })
         if result.ok:
             return ok(request_id, {**base, "status": "Succeeded", "terminal": True, "result": result.data or {}, "timing": result.timing or {}})
+        result_error = dict(result.error.detail or {}) if result.error else {}
         return fail(
             request_id,
             result.error.code if result.error else "REFLECTION_OPERATION_FAILED",
             result.error.message if result.error else "Reflection operation failed.",
-            {**base, "status": "Failed", "terminal": True, "resultError": result.error.detail if result.error else {}},
+            {
+                **result_error,
+                **base,
+                "status": "Failed",
+                "terminal": True,
+                "resultError": result_error,
+            },
         )
 
     async def reflection_operation_wait(

@@ -141,7 +141,82 @@ def test_focus_failure_is_not_reported_as_focused(monkeypatch, tmp_path):
     assert result.ok is False
     assert result.error.code == "FOCUS_NOT_ACQUIRED"
     assert result.error.detail["focused"] is False
+    assert result.error.detail["requestIssued"] is True
+    assert result.error.detail["setForegroundResult"] is False
+    assert result.error.detail["foregroundVerified"] is False
+    assert result.error.detail["foregroundPid"] == 7
     assert result.error.detail["targetPid"] == 42
+
+
+def test_focus_reports_win32_result_separately_from_observed_foreground(monkeypatch, tmp_path):
+    service = _service(tmp_path)
+    target = {
+        "ok": True,
+        "hwnd": 123,
+        "targetPid": 42,
+        "processCreatedAt": 123,
+        "projectIdentityVerified": True,
+    }
+    service._resolve_verified_unity_window = lambda: target
+    service._revalidate_window_target = lambda value: (True, "")
+    service._show_and_focus_window = lambda hwnd: True
+    service._foreground_window = lambda: 456
+    service._window_process_id = lambda hwnd: 7
+    monkeypatch.setattr("upilot_mcp.domain.status_service.sys.platform", "win32")
+
+    result = asyncio.run(service.editor_focus())
+
+    assert result.ok is False
+    assert result.error.code == "FOCUS_NOT_ACQUIRED"
+    assert result.error.detail["requestIssued"] is True
+    assert result.error.detail["setForegroundResult"] is True
+    assert result.error.detail["foregroundVerified"] is False
+
+
+def test_focus_success_requires_observed_foreground_pid(monkeypatch, tmp_path):
+    service = _service(tmp_path)
+    target = {
+        "ok": True,
+        "hwnd": 123,
+        "targetPid": 42,
+        "processCreatedAt": 123,
+        "projectIdentityVerified": True,
+    }
+    service._resolve_verified_unity_window = lambda: target
+    service._revalidate_window_target = lambda value: (True, "")
+    service._show_and_focus_window = lambda hwnd: True
+    service._foreground_window = lambda: 456
+    service._window_process_id = lambda hwnd: 42
+    monkeypatch.setattr("upilot_mcp.domain.status_service.sys.platform", "win32")
+
+    result = asyncio.run(service.editor_focus())
+
+    assert result.ok is True
+    assert result.data["requestIssued"] is True
+    assert result.data["setForegroundResult"] is True
+    assert result.data["foregroundVerified"] is True
+    assert result.data["foregroundPid"] == 42
+
+
+def test_focus_rejects_window_identity_change_before_request(monkeypatch, tmp_path):
+    service = _service(tmp_path)
+    service._resolve_verified_unity_window = lambda: {
+        "ok": True,
+        "hwnd": 123,
+        "targetPid": 42,
+        "processCreatedAt": 123,
+    }
+    service._revalidate_window_target = lambda value: (False, "window_pid_changed")
+    calls = []
+    service._show_and_focus_window = lambda hwnd: calls.append(hwnd) or True
+    monkeypatch.setattr("upilot_mcp.domain.status_service.sys.platform", "win32")
+
+    result = asyncio.run(service.editor_focus())
+
+    assert result.ok is False
+    assert result.error.code == "WINDOW_IDENTITY_CHANGED"
+    assert result.error.detail["reason"] == "window_pid_changed"
+    assert calls == []
 
 
 def test_focus_state_uses_foreground_pid_so_floating_project_windows_count(monkeypatch, tmp_path):

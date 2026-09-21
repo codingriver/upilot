@@ -52,7 +52,6 @@ namespace CodingRiver.UPilot
         private UPilotPythonProbeResult _setupPythonProbe;
         private bool _showPythonAdvanced;
 
-        private bool _setupWriteAgentRules = true;
         private bool _setupWriteCodexConfig = true;
         private bool _setupWriteClaudeConfig;
         private bool _setupWriteCursorConfig;

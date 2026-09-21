@@ -50,6 +50,45 @@ def _manifest_dependency(project: Path) -> str:
     return manifest["dependencies"][install_upilot.UPM_PACKAGE]
 
 
+def _template_upilot(tmp_path: Path, version: int) -> tuple[Path, Path]:
+    upilot_dir = tmp_path / "upilot"
+    upilot_dir.mkdir(parents=True)
+    upilot_dir.joinpath("package.json").write_text(
+        json.dumps({"name": install_upilot.UPM_PACKAGE, "version": "1.2.3"}),
+        encoding="utf-8",
+    )
+    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
+    source.joinpath("agents").mkdir(parents=True)
+    source.joinpath("AGENTS.md.template").write_text(
+        "rulesVersion: {{rulesVersion}}\nendpoint: {{mcpUrl}}\n",
+        encoding="utf-8",
+    )
+    source.joinpath("SKILL.md.template").write_text(
+        "---\nname: upilot-unity-mcp\ndescription: fixture\n---\nendpoint={{mcpUrl}}\nhealth={{healthUrl}}\n",
+        encoding="utf-8",
+    )
+    source.joinpath("agents/openai.yaml.template").write_text(
+        'dependencies:\n  tools:\n    - url: "{{mcpUrl}}"\n',
+        encoding="utf-8",
+    )
+    source.joinpath("template-manifest.json").write_text(
+        json.dumps({
+            "schemaVersion": 1,
+            "agentRulesVersion": 31,
+            "skillPackVersion": version,
+            "defaultHttpPort": 8011,
+            "templates": {
+                "agentRules": "AGENTS.md.template",
+                "skill": "SKILL.md.template",
+                "openai": "agents/openai.yaml.template",
+            },
+        }),
+        encoding="utf-8",
+    )
+    source.joinpath("helper.py").write_text("print('fixture')\n", encoding="utf-8")
+    return upilot_dir, source
+
+
 def test_remote_install_requires_explicit_upm_ref(tmp_path: Path) -> None:
     project = _unity_project(tmp_path)
 
@@ -86,6 +125,9 @@ def test_local_upm_preserves_equivalent_relative_reference_and_manifest_bytes(tm
     )
     manifest_path.write_bytes(original)
     upilot_dir = tmp_path / "repo"
+    import shutil
+    fixture, _ = _template_upilot(tmp_path, 31)
+    shutil.copytree(fixture, upilot_dir, dirs_exist_ok=True)
 
     assert install_upilot.main([
         "--unity-project", str(project),
@@ -98,14 +140,7 @@ def test_local_upm_preserves_equivalent_relative_reference_and_manifest_bytes(tm
 
 
 def test_skill_only_installs_editor_compatible_metadata_without_touching_manifest(tmp_path: Path) -> None:
-    upilot_dir = tmp_path / "upilot"
-    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
-    source.mkdir(parents=True)
-    source.joinpath("SKILL.md").write_text("# fixture\n", encoding="utf-8")
-    source.joinpath("helper.py").write_text("print('fixture')\n", encoding="utf-8")
-    setup = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
-    setup.parent.mkdir(parents=True)
-    setup.write_text("private const int SkillInstallTemplateVersion = 27;\n", encoding="utf-8")
+    upilot_dir, source = _template_upilot(tmp_path, 27)
     project = _unity_project(tmp_path)
     manifest_path = project / "Packages" / "manifest.json"
     original_manifest = manifest_path.read_bytes()
@@ -119,8 +154,11 @@ def test_skill_only_installs_editor_compatible_metadata_without_touching_manifes
 
     target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
     metadata = json.loads(target.joinpath(".upilot-install.json").read_text(encoding="utf-8"))
+    assert metadata["schemaVersion"] == 2
     assert metadata["templateVersion"] == 27
+    assert metadata["templateSha256"] == install_upilot._skill_renderer().template_sha256(source)
     assert metadata["contentSha256"] == install_upilot._skill_content_hash(target)
+    assert metadata["renderContext"]["projectPath"] == str(project.resolve())
     claude_target = project / ".claude" / "skills" / install_upilot.SKILL_NAME
     claude_metadata = json.loads(
         claude_target.joinpath(".upilot-install.json").read_text(encoding="utf-8")
@@ -131,14 +169,219 @@ def test_skill_only_installs_editor_compatible_metadata_without_touching_manifes
     assert manifest_path.read_bytes() == original_manifest
 
 
+def test_skill_templates_render_custom_port_in_instructions_and_openai_metadata(tmp_path: Path) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+
+    assert install_upilot.main([
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+        "--skill-client", "codex",
+        "--http-port", "8021",
+    ]) == 0
+
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    assert "http://127.0.0.1:8021/mcp" in target.joinpath("SKILL.md").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:8021/health" in target.joinpath("SKILL.md").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:8021/mcp" in target.joinpath("agents/openai.yaml").read_text(encoding="utf-8")
+
+
+def test_clean_v1_skill_install_upgrades_metadata_without_requiring_force(tmp_path: Path) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+    args = [
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+        "--skill-client", "codex",
+    ]
+    assert install_upilot.main(args) == 0
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    content_hash = install_upilot._skill_content_hash(target)
+    target.joinpath(".upilot-install.json").write_text(
+        json.dumps({"templateVersion": 31, "contentSha256": content_hash}) + "\n",
+        encoding="utf-8",
+    )
+    content_before = {
+        path.relative_to(target).as_posix(): path.read_bytes()
+        for path in target.rglob("*")
+        if path.is_file() and path.name != ".upilot-install.json"
+    }
+
+    assert install_upilot.main(args) == 0
+
+    metadata = json.loads(target.joinpath(".upilot-install.json").read_text(encoding="utf-8"))
+    assert metadata["schemaVersion"] == 2
+    assert metadata["contentSha256"] == content_hash
+    assert content_before == {
+        path.relative_to(target).as_posix(): path.read_bytes()
+        for path in target.rglob("*")
+        if path.is_file() and path.name != ".upilot-install.json"
+    }
+    assert not (project / ".upilot" / "backups" / "agent-integrations").exists()
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_customized_skill_install_is_backed_up_and_replaced_without_force(
+    tmp_path: Path, schema_version: int
+) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+    args = [
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+        "--skill-client", "codex",
+    ]
+    assert install_upilot.main(args) == 0
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    if schema_version == 1:
+        metadata = json.loads(target.joinpath(".upilot-install.json").read_text(encoding="utf-8"))
+        target.joinpath(".upilot-install.json").write_text(
+            json.dumps({
+                "templateVersion": metadata["templateVersion"],
+                "contentSha256": metadata["contentSha256"],
+            }) + "\n",
+            encoding="utf-8",
+        )
+    with target.joinpath("SKILL.md").open("a", encoding="utf-8") as stream:
+        stream.write("local customization\n")
+    before = {
+        path.relative_to(target).as_posix(): path.read_bytes()
+        for path in target.rglob("*") if path.is_file()
+    }
+    original_hash, file_count, total_bytes = install_upilot._exact_target_hash(target)
+
+    assert install_upilot.main(args) == 0
+
+    assert "local customization" not in target.joinpath("SKILL.md").read_text(encoding="utf-8")
+    sessions = list((project / ".upilot" / "backups" / "agent-integrations").iterdir())
+    assert len(sessions) == 1
+    backup_target = sessions[0] / ".agents" / "skills" / install_upilot.SKILL_NAME
+    assert before == {
+        path.relative_to(backup_target).as_posix(): path.read_bytes()
+        for path in backup_target.rglob("*") if path.is_file()
+    }
+    backup_manifest = json.loads(sessions[0].joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert "unmanaged_or_modified" in backup_manifest["reason"]
+    assert backup_manifest["originalContentSha256"] == original_hash
+    assert backup_manifest["fileCount"] == file_count
+    assert backup_manifest["totalBytes"] == total_bytes
+    assert backup_manifest["agentRulesVersion"] == 31
+    assert backup_manifest["skillPackVersion"] == 31
+
+    assert install_upilot.main([*args, "--force"]) == 0
+
+
+def test_clean_skill_updates_when_render_context_changes(tmp_path: Path) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+    common = [
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+        "--skill-client", "codex",
+    ]
+    assert install_upilot.main(common) == 0
+
+    assert install_upilot.main([*common, "--http-port", "8021"]) == 0
+
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    assert "http://127.0.0.1:8021/mcp" in target.joinpath("SKILL.md").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:8021/mcp" in target.joinpath("agents/openai.yaml").read_text(encoding="utf-8")
+    metadata = json.loads(target.joinpath(".upilot-install.json").read_text(encoding="utf-8"))
+    assert metadata["renderContext"]["mcpUrl"] == "http://127.0.0.1:8021/mcp"
+
+
+def test_incomplete_v2_metadata_is_not_treated_as_clean_managed_install(tmp_path: Path) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+    args = [
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+        "--skill-client", "codex",
+    ]
+    assert install_upilot.main(args) == 0
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    metadata_path = target / ".upilot-install.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["renderContext"] = {}
+    metadata_path.write_text(json.dumps(metadata) + "\n", encoding="utf-8")
+    before = metadata_path.read_bytes()
+
+    assert install_upilot.main(args) == 0
+
+    assert metadata_path.read_bytes() != before
+    sessions = list((project / ".upilot" / "backups" / "agent-integrations").iterdir())
+    assert len(sessions) == 1
+    backup_metadata = sessions[0] / ".agents" / "skills" / install_upilot.SKILL_NAME / ".upilot-install.json"
+    assert backup_metadata.read_bytes() == before
+
+
+def test_unmanaged_skill_is_backed_up_and_authoritatively_replaced(tmp_path: Path) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+    target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    target.mkdir(parents=True)
+    target.joinpath("custom.txt").write_text("unmanaged bytes", encoding="utf-8")
+
+    assert install_upilot.main([
+        "--unity-project", str(project),
+        "--upilot-dir", str(upilot_dir),
+        "--skill-only",
+        "--install-skill", "repo",
+    ]) == 0
+
+    assert not target.joinpath("custom.txt").exists()
+    sessions = list((project / ".upilot" / "backups" / "agent-integrations").iterdir())
+    assert len(sessions) == 1
+    assert (
+        sessions[0] / ".agents" / "skills" / install_upilot.SKILL_NAME / "custom.txt"
+    ).read_text(encoding="utf-8") == "unmanaged bytes"
+
+
+def test_backup_failure_preserves_failed_target_and_continues_other_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upilot_dir, _ = _template_upilot(tmp_path, 31)
+    project = _unity_project(tmp_path)
+    agents_target = project / ".agents" / "skills" / install_upilot.SKILL_NAME
+    claude_target = project / ".claude" / "skills" / install_upilot.SKILL_NAME
+    for target, marker in ((agents_target, "agents-original"), (claude_target, "claude-original")):
+        target.mkdir(parents=True)
+        target.joinpath("custom.txt").write_text(marker, encoding="utf-8")
+
+    real_backup = install_upilot._backup_skill_target
+
+    def fail_agents_backup(target: Path, *args, **kwargs):
+        if target == agents_target:
+            raise OSError("simulated backup failure")
+        return real_backup(target, *args, **kwargs)
+
+    monkeypatch.setattr(install_upilot, "_backup_skill_target", fail_agents_backup)
+
+    with pytest.raises(SystemExit, match="simulated backup failure"):
+        install_upilot.main([
+            "--unity-project", str(project),
+            "--upilot-dir", str(upilot_dir),
+            "--skill-only",
+            "--install-skill", "repo",
+        ])
+
+    assert agents_target.joinpath("custom.txt").read_text(encoding="utf-8") == "agents-original"
+    assert not claude_target.joinpath("custom.txt").exists()
+    assert claude_target.joinpath("SKILL.md").is_file()
+
+
 def test_cursor_skill_reuses_agents_directory_without_cursor_copy(tmp_path: Path) -> None:
-    upilot_dir = tmp_path / "upilot"
-    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
-    source.mkdir(parents=True)
-    source.joinpath("SKILL.md").write_text("# fixture\n", encoding="utf-8")
-    setup = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
-    setup.parent.mkdir(parents=True)
-    setup.write_text("private const int SkillInstallTemplateVersion = 28;\n", encoding="utf-8")
+    upilot_dir, _ = _template_upilot(tmp_path, 28)
     project = _unity_project(tmp_path)
 
     assert install_upilot.main([
@@ -151,17 +394,11 @@ def test_cursor_skill_reuses_agents_directory_without_cursor_copy(tmp_path: Path
 
     assert (project / ".agents" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
     assert not (project / ".cursor" / "skills" / install_upilot.SKILL_NAME).exists()
-    assert not (project / ".claude" / "skills" / install_upilot.SKILL_NAME).exists()
+    assert (project / ".claude" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
 
 
 def test_claude_skill_uses_native_project_directory(tmp_path: Path) -> None:
-    upilot_dir = tmp_path / "upilot"
-    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
-    source.mkdir(parents=True)
-    source.joinpath("SKILL.md").write_text("# fixture\n", encoding="utf-8")
-    setup = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
-    setup.parent.mkdir(parents=True)
-    setup.write_text("private const int SkillInstallTemplateVersion = 29;\n", encoding="utf-8")
+    upilot_dir, _ = _template_upilot(tmp_path, 29)
     project = _unity_project(tmp_path)
 
     assert install_upilot.main([
@@ -173,17 +410,11 @@ def test_claude_skill_uses_native_project_directory(tmp_path: Path) -> None:
     ]) == 0
 
     assert (project / ".claude" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
-    assert not (project / ".agents" / "skills" / install_upilot.SKILL_NAME).exists()
+    assert (project / ".agents" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
 
 
 def test_opencode_skill_reuses_agents_directory_without_opencode_copy(tmp_path: Path) -> None:
-    upilot_dir = tmp_path / "upilot"
-    source = upilot_dir / "skills" / install_upilot.SKILL_NAME
-    source.mkdir(parents=True)
-    source.joinpath("SKILL.md").write_text("# fixture\n", encoding="utf-8")
-    setup = upilot_dir / "Editor" / "Core" / "UPilotAgentSetup.cs"
-    setup.parent.mkdir(parents=True)
-    setup.write_text("private const int SkillInstallTemplateVersion = 30;\n", encoding="utf-8")
+    upilot_dir, _ = _template_upilot(tmp_path, 30)
     project = _unity_project(tmp_path)
 
     assert install_upilot.main([
@@ -196,7 +427,7 @@ def test_opencode_skill_reuses_agents_directory_without_opencode_copy(tmp_path: 
 
     assert (project / ".agents" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
     assert not (project / ".opencode" / "skills" / install_upilot.SKILL_NAME).exists()
-    assert not (project / ".claude" / "skills" / install_upilot.SKILL_NAME).exists()
+    assert (project / ".claude" / "skills" / install_upilot.SKILL_NAME / "SKILL.md").is_file()
 
 
 def test_local_upm_and_remote_ref_are_mutually_exclusive(tmp_path: Path) -> None:

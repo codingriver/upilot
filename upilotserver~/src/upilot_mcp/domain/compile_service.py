@@ -20,6 +20,7 @@ from ..dispatcher import CommandDispatcher
 from ..env import getenv
 from ..models import ToolResponse
 from ..protocol import new_id, now_ms
+from ..console_evidence import begin_console_evidence, finish_console_evidence
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
 
@@ -196,21 +197,21 @@ class CompileDomainService:
                 request_id,
                 "EDITOR_IN_PLAY_MODE",
                 "Unity is in PlayMode or paused; script compilation is blocked.",
-                {**execution, "playModeBlocked": True},
+                {**execution, "playModeBlocked": True, "dispatchAttempted": False},
             )
         if not execution.get("authoritative") or execution.get("isStale"):
             return fail(
                 request_id,
                 "EDITOR_CONTEXT_NOT_READY",
                 "Unity Editor context is stale, unknown, or recovering after Domain Reload.",
-                execution,
+                {**execution, "dispatchAttempted": False},
             )
         if str(execution.get("playModeState") or "") != "edit":
             return fail(
                 request_id,
                 "EDITOR_CONTEXT_NOT_READY",
                 "Unity Editor mode is not authoritatively known to be EditMode.",
-                execution,
+                {**execution, "dispatchAttempted": False},
             )
         return None
 
@@ -258,6 +259,8 @@ class CompileDomainService:
         request_id = new_id("req")
         state_r, execution = await self._refresh_execution_state()
         if not state_r.ok:
+            if state_r.error is not None:
+                state_r.error.detail["dispatchAttempted"] = False
             return state_r
         precondition_error = self._compile_precondition_error(request_id, execution)
         if precondition_error is not None:
@@ -290,6 +293,52 @@ class CompileDomainService:
             compile_state.terminal = False
             compile_state.errors_verified = False
             compile_state.verification_pending = True
+        console_evidence: dict | None = None
+        if not bool(getattr(self, "_suppress_compile_console_evidence", False)):
+            try:
+                console_evidence = await begin_console_evidence(self.dispatcher, self.server.state)
+            except Exception as exc:
+                console_evidence = {
+                    "source": "unavailable",
+                    "coverage": "unavailable",
+                    "gapReason": f"start_boundary_failed:{type(exc).__name__}",
+                    "logs": [],
+                }
+
+        async def attach_console_evidence(response: ToolResponse, *, close_boundary: bool = False) -> ToolResponse:
+            nonlocal console_evidence
+            if console_evidence is None:
+                return response
+            if close_boundary and console_evidence.get("coverage") == "pending":
+                try:
+                    console_evidence = await finish_console_evidence(
+                        self.dispatcher, self.server.state, console_evidence
+                    )
+                except Exception as exc:
+                    console_evidence = {
+                        **console_evidence,
+                        "coverage": "partial",
+                        "gapReason": f"end_boundary_failed:{type(exc).__name__}",
+                    }
+            response_identity = (
+                response.data
+                if isinstance(response.data, dict)
+                else response.error.detail if response.error is not None else {}
+            )
+            operation_id = str(
+                response_identity.get("compileOperationId")
+                or self.server.state.compile.compile_operation_id
+                or ""
+            )
+            if operation_id:
+                self.server.state.save_console_evidence(
+                    "compileOperationId", operation_id, console_evidence
+                )
+            if response.data is not None:
+                response.data["consoleEvidence"] = console_evidence
+            elif response.error is not None:
+                response.error.detail["consoleEvidence"] = console_evidence
+            return response
         result = await self.dispatcher.call(
             request_id,
             "compile.request",
@@ -318,7 +367,7 @@ class CompileDomainService:
                         new_id("req"), "compile.errors.get", {}, timeout_ms=15000
                     )
                     compile_state = self.server.state.compile
-                    return ok(
+                    return await attach_console_evidence(ok(
                         request_id,
                         {
                             "accepted": True,
@@ -335,13 +384,13 @@ class CompileDomainService:
                                 "errorCount": compile_state.error_count,
                             },
                         },
-                    )
-            return fail(
+                    ), close_boundary=True)
+            return await attach_console_evidence(fail(
                 request_id,
                 "COMPILE_RECONNECT_TIMEOUT",
                 "编译触发域重载后 Unity 未能重连",
                 {"requestId": request_id},
-            )
+            ))
 
         if result.ok:
             compile_state.unity_accepted_at = now_ms()
@@ -365,7 +414,7 @@ class CompileDomainService:
             execution = self.server.state.execution_state(
                 stale_after_ms=CONFIG.context_stale_ms
             )
-            return ok(
+            return await attach_console_evidence(ok(
                 request_id,
                 {
                     **(result.data or {}),
@@ -380,8 +429,8 @@ class CompileDomainService:
                 },
                 context=result.context,
                 timing=result.timing,
-            )
-        return result
+            ), close_boundary=bool(execution.get("terminal")))
+        return await attach_console_evidence(result, close_boundary=True)
 
     async def compile_status(self, compile_request_id: str = "") -> ToolResponse:
         request_id = new_id("req")
@@ -631,6 +680,42 @@ class CompileDomainService:
         return ok(request_id, asdict(loop))
 
     async def compile_wait(
+        self,
+        timeout_s: float = 300,
+        poll_interval_s: float = 1.0,
+        prefer_events: bool = True,
+    ) -> ToolResponse:
+        response = await self._compile_wait(timeout_s, poll_interval_s, prefer_events)
+        operation_id = str(self.server.state.compile.compile_operation_id or "")
+        if not operation_id:
+            return response
+        evidence = self.server.state.get_console_evidence("compileOperationId", operation_id)
+        if not evidence:
+            return response
+        data = response.data if isinstance(response.data, dict) else {}
+        execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+        terminal = bool(
+            data.get("terminal")
+            or execution.get("terminal")
+            or str(data.get("status") or "").lower() in {"ready", "failed", "completed"}
+        )
+        if terminal and evidence.get("coverage") == "pending":
+            try:
+                evidence = await finish_console_evidence(self.dispatcher, self.server.state, evidence)
+            except Exception as exc:
+                evidence = {
+                    **evidence,
+                    "coverage": "partial",
+                    "gapReason": f"end_boundary_failed:{type(exc).__name__}",
+                }
+            self.server.state.save_console_evidence("compileOperationId", operation_id, evidence)
+        if response.data is not None:
+            response.data["consoleEvidence"] = evidence
+        elif response.error is not None:
+            response.error.detail["consoleEvidence"] = evidence
+        return response
+
+    async def _compile_wait(
         self,
         timeout_s: float = 300,
         poll_interval_s: float = 1.0,
@@ -903,18 +988,38 @@ class CompileDomainService:
             "writeBatchCreatedAt": write_batch_created_at,
         }
         try:
-            return await self._safe_compile_and_wait(
+            console_evidence = await begin_console_evidence(self.dispatcher, self.server.state)
+        except Exception as exc:
+            console_evidence = {
+                "source": "unavailable", "coverage": "unavailable",
+                "gapReason": f"start_boundary_failed:{type(exc).__name__}", "logs": [],
+            }
+        try:
+            response = await self._safe_compile_and_wait(
                 timeout_s, poll_interval_s, prefer_events, post_compile_delay_s,
                 attach_compile_request_id, write_batch_id, write_batch_created_at,
                 compile_operation_id, request_id, identity,
             )
         except Exception as exc:
-            return fail(
+            response = fail(
                 request_id, "COMPILE_WORKFLOW_EXCEPTION", str(exc),
                 {**identity, "exceptionType": type(exc).__name__,
                  "errorsVerified": False, "correlationVerified": False,
                  "nextAction": "Observe the original compile or write batch; do not trigger another compile."},
             )
+        try:
+            console_evidence = await finish_console_evidence(self.dispatcher, self.server.state, console_evidence)
+        except Exception as exc:
+            console_evidence = {**console_evidence, "coverage": "partial", "gapReason": f"end_boundary_failed:{type(exc).__name__}"}
+        response_identity = response.data if isinstance(response.data, dict) else response.error.detail if response.error is not None else {}
+        resolved_operation_id = str(response_identity.get("compileOperationId") or compile_operation_id or self.server.state.compile.compile_operation_id or "")
+        if resolved_operation_id:
+            self.server.state.save_console_evidence("compileOperationId", resolved_operation_id, console_evidence)
+        if response.data is not None:
+            response.data["consoleEvidence"] = console_evidence
+        elif response.error is not None:
+            response.error.detail["consoleEvidence"] = console_evidence
+        return response
 
     async def _safe_compile_and_wait(
         self,
@@ -1078,14 +1183,19 @@ class CompileDomainService:
                     },
                 )
             else:
-                compile_r = await (
-                    self.compile(
-                        write_batch_id=write_batch_id,
-                        write_batch_created_at=write_batch_created_at,
+                suppress_before = bool(getattr(self, "_suppress_compile_console_evidence", False))
+                self._suppress_compile_console_evidence = True
+                try:
+                    compile_r = await (
+                        self.compile(
+                            write_batch_id=write_batch_id,
+                            write_batch_created_at=write_batch_created_at,
+                        )
+                        if write_batch_id
+                        else self.compile()
                     )
-                    if write_batch_id
-                    else self.compile()
-                )
+                finally:
+                    self._suppress_compile_console_evidence = suppress_before
                 if not compile_r.ok and compile_r.error and compile_r.error.code == "EDITOR_BUSY":
                     verify_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
                     if verify_r.ok and verify_r.data and bool(verify_r.data.get("isCompiling", False)):

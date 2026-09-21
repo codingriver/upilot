@@ -31,6 +31,28 @@ namespace CodingRiver.UPilot
         public int          selectionCount;
     }
 
+    [Serializable]
+    public class SelectionObjectIdentityPayload
+    {
+        public ulong instanceId;
+        public string name;
+        public string typeName;
+        public string assetPath;
+    }
+
+    [Serializable]
+    public class SelectionClearResultPayload
+    {
+        public bool ok;
+        public bool businessEffectVerified;
+        public bool changed;
+        public string status;
+        public int beforeSelectionCount;
+        public int afterSelectionCount;
+        public SelectionObjectIdentityPayload beforeActiveObject;
+        public SelectionObjectIdentityPayload afterActiveObject;
+    }
+
     // ── Service ─────────────────────────────────────────────────────────────────
 
     public class UPilotSelectionService
@@ -124,25 +146,40 @@ namespace CodingRiver.UPilot
 
         private async Task HandleClearAsync(string id, string json, CancellationToken token)
         {
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<SelectionClearResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
+                    var beforeCount = Selection.objects?.Length ?? 0;
+                    var beforeActive = BuildSelectionIdentity(Selection.activeObject);
                     Selection.objects = new UnityEngine.Object[0];
-                    tcs.SetResult(true);
+                    var afterCount = Selection.objects?.Length ?? 0;
+                    var afterActive = BuildSelectionIdentity(Selection.activeObject);
+                    var verified = afterCount == 0 && Selection.activeObject == null;
+                    tcs.TrySetResult(new SelectionClearResultPayload
+                    {
+                        ok = verified,
+                        businessEffectVerified = verified,
+                        changed = beforeCount > 0 || beforeActive != null,
+                        status = beforeCount > 0 || beforeActive != null ? "cleared" : "already_empty",
+                        beforeSelectionCount = beforeCount,
+                        afterSelectionCount = afterCount,
+                        beforeActiveObject = beforeActive,
+                        afterActiveObject = afterActive,
+                    });
                 }
-                catch (Exception ex) { tcs.SetException(ex); }
+                catch (Exception ex) { tcs.TrySetException(ex); }
             });
 
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "selection.clear", new GenericOkPayload(), token);
+                await _bridge.SendResultAsync(id, "selection.clear", await tcs.Task, token);
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SELECTION_CLEAR_FAILED", ex.Message, token, "selection.clear");
+                await _bridge.SendErrorAsync(id, "SELECTION_CLEAR_FAILED", ex.Message, token, "selection.clear",
+                    new ErrorDetailPayload { commandSubmitted = true, sideEffectsMayHaveOccurred = true });
             }
         }
 
@@ -174,6 +211,18 @@ namespace CodingRiver.UPilot
             result.selectionCount = Selection.objects.Length;
 
             return result;
+        }
+
+        private static SelectionObjectIdentityPayload BuildSelectionIdentity(UnityEngine.Object value)
+        {
+            if (value == null) return null;
+            return new SelectionObjectIdentityPayload
+            {
+                instanceId = UPilotEntityIds.ToWireId(value),
+                name = value.name,
+                typeName = value.GetType().FullName,
+                assetPath = AssetDatabase.GetAssetPath(value) ?? string.Empty,
+            };
         }
     }
 }

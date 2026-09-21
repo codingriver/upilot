@@ -578,6 +578,12 @@ namespace CodingRiver.UPilot.Execution
                 ex.Detail["sideEffectsMayHaveOccurred"] = context?.SideEffectsMayHaveOccurred ?? false;
         }
 
+        internal static object RethrowTargetInvocation(TargetInvocationException ex)
+        {
+            ExceptionDispatchInfo.Capture(ex?.InnerException ?? ex).Throw();
+            return null;
+        }
+
         private static string InferFailureStage(string code)
         {
             code = code ?? "";
@@ -1298,12 +1304,12 @@ namespace CodingRiver.UPilot.Execution
             if (context == null)
             {
                 try { return method.Invoke(null, arguments); }
-                catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+                catch (TargetInvocationException ex) { return CSharpSubsetEngine.RethrowTargetInvocation(ex); }
             }
             context.Policy.EnsureMemberAllowed(method);
             context.Diagnostics.CountMethod();
             try { return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => method.Invoke(null, arguments))); }
-            catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+            catch (TargetInvocationException ex) { return CSharpSubsetEngine.RethrowTargetInvocation(ex); }
         }
 
         private static bool IsUnityVector(object value)
@@ -1378,7 +1384,7 @@ namespace CodingRiver.UPilot.Execution
                 context.SideEffectsMayHaveOccurred = true;
                 context.Diagnostics.CountMethod();
                 try { return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => bound.Method.Invoke(isStatic ? null : target, bound.Arguments))); }
-                catch (TargetInvocationException ex) { throw ex.InnerException ?? ex; }
+                catch (TargetInvocationException ex) { return CSharpSubsetEngine.RethrowTargetInvocation(ex); }
             }
             object callable = _callee.Evaluate(context);
             if (callable is LambdaValue lambda)

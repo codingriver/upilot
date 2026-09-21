@@ -26,6 +26,14 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                var processRole = UPilotBridge.DetermineProcessRole();
+                if (!UPilotBridge.IsMainEditorProcess(processRole))
+                {
+                    UnityEngine.Debug.Log(
+                        $"[UPilotBootstrap] Startup skipped for auxiliary Unity process role '{processRole}'.");
+                    return;
+                }
+
                 UPilotStartupDiagnostics.EnterBootstrap();
                 UPilotStartupDiagnostics.BeginServerStartCycle(ServerStartCycleId);
                 UnityEngine.Debug.Log("[UPilotBootstrap] static constructor");
@@ -109,6 +117,18 @@ namespace CodingRiver.UPilot
             {
                 if (EditorApplication.isPlayingOrWillChangePlaymode)
                     return;
+
+                var processRole = UPilotBridge.DetermineProcessRole();
+                if (!UPilotBridge.IsMainEditorProcess(processRole))
+                {
+                    var reason = "MCP Server automatic startup is disabled for auxiliary Unity process role '" +
+                                 processRole + "'.";
+                    UPilotStartupDiagnostics.RecordBlockingReason("server_auxiliary_process_role", reason);
+                    UPilotStartupDiagnostics.MarkServerStartRetryBlocked("server_auxiliary_process_role");
+                    UnityEngine.Debug.Log("[UPilotBootstrap] " + reason);
+                    EditorApplication.update -= TryStartMcpServer;
+                    return;
+                }
 
                 if (!IsEnabled)
                 {

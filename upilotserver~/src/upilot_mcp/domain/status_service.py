@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import shlex
 import secrets
 import subprocess
@@ -309,6 +310,11 @@ class StatusDomainService:
                     "platform": session.platform if session else "",
                     "processId": reported_process_id,
                     "reportedProcessId": bridge_reported_process_id,
+                    "processCreatedAt": int(getattr(session, "process_created_at", 0) or 0),
+                    "processRole": str(getattr(session, "process_role", "") or ""),
+                    "identityContractVersion": int(getattr(session, "identity_contract_version", 0) or 0),
+                    "verificationLevel": str(getattr(session, "verification_level", "") or ""),
+                    "identityVerified": bool(getattr(session, "identity_verified", False)),
                     "lastHeartbeatAt": session.last_heartbeat_at if session else 0,
                 },
                 "paths": {
@@ -339,6 +345,11 @@ class StatusDomainService:
                     },
                 },
                 "processIdentity": process_identity,
+                "sessionIdentity": (
+                    self.server.session_identity_status()
+                    if hasattr(self.server, "session_identity_status")
+                    else {"current": {}, "latestRejection": {}}
+                ),
                 "startup": self._read_startup_summary(startup_root, process_identity),
                 "serverRestart": self._read_server_restart_summary(startup_root, session),
                 "timeouts": self.dispatcher.timeout_policy_snapshot(),
@@ -792,7 +803,8 @@ class StatusDomainService:
             focused = foreground_pid == int(target["targetPid"])
             data = {
                 "focused": focused,
-                "hwnd": hwnd,
+                "foregroundVerified": focused,
+                "requestIssued": True,
                 "setForegroundResult": result,
                 "foregroundHwnd": foreground_hwnd,
                 "foregroundPid": foreground_pid,
@@ -2046,11 +2058,78 @@ class StatusDomainService:
         newest_first: bool = True,
         max_message_length: int = 0,
         max_count: int = 0,
+        run_guid: str = "",
+        compile_operation_id: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
+        if run_guid and compile_operation_id:
+            return fail(
+                request_id,
+                "CONSOLE_EVIDENCE_FILTER_CONFLICT",
+                "runGuid and compileOperationId are mutually exclusive.",
+                {"dispatchAttempted": False},
+            )
         effective_count = max_count if max_count > 0 else count
         if isinstance(contains, str):
             contains = [contains]
+        identity_kind = "runGuid" if run_guid else "compileOperationId" if compile_operation_id else ""
+        identity_value = run_guid or compile_operation_id
+        if identity_kind:
+            evidence = self.server.state.get_console_evidence(identity_kind, identity_value)
+            if evidence is None:
+                return fail(
+                    request_id,
+                    "CONSOLE_EVIDENCE_NOT_FOUND",
+                    "No persisted Console evidence boundary exists for the requested run identity.",
+                    {identity_kind: identity_value, "dispatchAttempted": False},
+                )
+            if evidence.get("source") == "persistentCapture":
+                requested_contains = list(contains or [])
+                if query:
+                    requested_contains.append(query)
+                response = await self.console_capture_read(
+                    session_id=str(evidence.get("captureSessionId") or ""),
+                    from_sequence=int(evidence.get("startSequence") or 0),
+                    to_sequence=int(evidence.get("endSequence") if evidence.get("endSequence") is not None else -1),
+                    count=max(1, min(effective_count, 5000)),
+                    log_type=log_type,
+                    include_stack_trace=include_stack_trace,
+                    contains=requested_contains or None,
+                    contains_all=contains_all,
+                    regex=regex,
+                    newest_first=newest_first,
+                )
+                if response.data is not None:
+                    response.data["consoleEvidence"] = evidence
+                    response.data["association"] = "observed_during_run_not_causal"
+                    response.data[identity_kind] = identity_value
+                return response
+            logs = [item for item in (evidence.get("logs") or []) if isinstance(item, dict)]
+            def matches(item: dict) -> bool:
+                text = f"{item.get('message', '')}\n{item.get('stackTrace', '')}"
+                if log_type and str(item.get("type") or item.get("logType") or "").lower() != log_type.lower():
+                    return False
+                terms = list(contains or []) + ([query] if query else [])
+                checks = [term.lower() in text.lower() for term in terms]
+                if checks and not (all(checks) if contains_all else any(checks)):
+                    return False
+                if regex:
+                    try:
+                        if re.search(regex, text) is None:
+                            return False
+                    except re.error:
+                        return False
+                return True
+            filtered = [item for item in logs if matches(item)]
+            if newest_first:
+                filtered.reverse()
+            return ok(request_id, {
+                "logs": filtered[:max(1, min(effective_count, 5000))],
+                "total": len(filtered),
+                "consoleEvidence": evidence,
+                "association": "observed_during_run_not_causal",
+                identity_kind: identity_value,
+            })
         payload: dict = {
             "count": max(1, min(effective_count, 5000)),
             "includeStackTrace": include_stack_trace,
@@ -2251,6 +2330,12 @@ class StatusDomainService:
         if continuation_token:
             payload["continuationToken"] = continuation_token
         result = await self.dispatcher.call(request_id, "console.capture.read", payload)
+        if result.ok and isinstance(result.data, dict):
+            scan_complete = bool(result.data.get("scanComplete"))
+            scanned_to = int(result.data.get("scannedToSequence") or 0)
+            next_seq = int(result.data.get("nextSequence") or -1)
+            if scan_complete and scanned_to > 0 and next_seq < scanned_to:
+                result.data["nextSequence"] = scanned_to
         return self._sanitize_capture_response(result)
 
     async def console_capture_stop(
@@ -2894,18 +2979,37 @@ class StatusDomainService:
             return ok(request_id, result)
 
     async def console_capture_list(
-        self, count: int = 20, include_active: bool = True
+        self, count: int = 20, include_active: bool = True, active_only: bool = False
     ) -> ToolResponse:
         request_id = new_id("req")
-        if isinstance(count, bool) or not isinstance(count, int) or not isinstance(include_active, bool):
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not isinstance(include_active, bool)
+            or not isinstance(active_only, bool)
+        ):
             return fail(request_id, "INVALID_PAYLOAD", "Console capture list arguments have invalid types.", {
-                "field": "count" if isinstance(count, bool) or not isinstance(count, int) else "includeActive",
+                "field": (
+                    "count" if isinstance(count, bool) or not isinstance(count, int)
+                    else "includeActive" if not isinstance(include_active, bool)
+                    else "activeOnly"
+                ),
                 "dispatchAttempted": False,
+            })
+        if active_only and not include_active:
+            return fail(request_id, "INVALID_PAYLOAD", "activeOnly=true conflicts with includeActive=false.", {
+                "field": "activeOnly",
+                "dispatchAttempted": False,
+                "sideEffectsMayHaveOccurred": False,
             })
         result = await self.dispatcher.call(
             request_id,
             "console.capture.list",
-            {"count": max(1, min(count, 200)), "includeActive": include_active},
+            {
+                "count": max(1, min(count, 200)),
+                "includeActive": include_active,
+                "activeOnly": active_only,
+            },
         )
         return self._sanitize_capture_response(result)
 

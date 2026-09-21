@@ -12,6 +12,7 @@ from typing import Any
 
 from PIL import Image
 
+from ..models import ToolResponse
 from ..protocol import new_id
 from ..responses import fail, ok
 from ..operation_context import TASK_TOOL
@@ -109,6 +110,20 @@ class SnapshotDomainService:
                   "deadlineSource": "task-timeout", "repaintDeadline": None,
                   "lastRepaintAt": None, "nextAction": "Poll unity_task_status with this taskId; do not start another capture."})
 
+    def _normalize_snapshot_targets(self, targets: list[dict]) -> list[dict] | ToolResponse:
+        result = []
+        for t in targets:
+            kind = str(t.get("kind") or "").lower()
+            target = dict(t)
+            if kind in ("sceneview", "editorwindow"):
+                target.setdefault("requireContentRect", True)
+                if t.get("docked") and not t.get("requireContentRect"):
+                    return fail(new_id("req"), "SNAPSHOT_DOCKED_WINDOW_REQUIRES_CONTENT_RECT",
+                                "A docked window must use requireContentRect=true to capture the content area instead of the floating container.",
+                                {"target": t, "docked": True})
+            result.append(target)
+        return result
+
     async def camera_list(self):
         return await self.dispatcher.call(new_id("req"), "snapshot.cameraList", {})
 
@@ -147,11 +162,31 @@ class SnapshotDomainService:
                 "requestKey": request_key,
             }, wait_ms)
 
+        normalized_targets = self._normalize_snapshot_targets(targets)
+        if isinstance(normalized_targets, ToolResponse):
+            return normalized_targets
+
+        payload_extra: dict = {}
+        try:
+            state_store = getattr(self.dispatcher, "server", None)
+            if state_store is not None:
+                state_store = getattr(state_store, "state", None)
+            if state_store is not None:
+                execution_state = getattr(state_store, "execution_state", None)
+                if callable(execution_state):
+                    execution = execution_state()
+                    if isinstance(execution, dict) and execution.get("playModeState") == "paused":
+                        payload_extra["_playModeState"] = "paused"
+                        if sync_mode == "sameFrame":
+                            payload_extra["_syncModeNote"] = "PlayMode is paused; sameFrame capture may report FRAME_ADVANCED_DURING_CAPTURE if global rendering frames advance while the logical clock is frozen."
+        except Exception:
+            pass
+
         started = await self.dispatcher.call(
             new_id("req"),
             "snapshot.start",
             {
-                "targets": targets,
+                "targets": normalized_targets,
                 "channels": channels or ["color"],
                 "syncMode": sync_mode,
                 "completionPolicy": completion_policy,
@@ -165,6 +200,7 @@ class SnapshotDomainService:
                 },
                 "outputDirectory": output_directory,
                 "requestKey": request_key,
+                **payload_extra,
             },
         )
         if not started.ok or not isinstance(started.data, dict):

@@ -137,6 +137,8 @@ def test_snapshot_capture_nested_schema_rejects_before_native_or_proxy_dispatch(
     }["unity_snapshot_capture"].inputSchema
     target = schema["properties"]["targets"]["items"]
     policy = schema["properties"]["capturePolicy"]["anyOf"][0]
+    assert schema["properties"]["syncMode"]["const"] == "sameFrame"
+    assert schema["properties"]["completionPolicy"]["enum"] == ["allOrNothing", "bestEffort"]
     assert target["additionalProperties"] is False
     assert target["properties"]["kind"]["default"] == "camera"
     assert target["properties"]["width"]["default"] == 1280
@@ -229,6 +231,40 @@ def test_snapshot_capture_nested_schema_rejects_before_native_or_proxy_dispatch(
     assert rejected_proxy.error.detail["sideEffectsMayHaveOccurred"] is False
     assert len(calls) == 2
 
+
+def test_editor_window_target_normalization_returns_structured_failure_without_name_error() -> None:
+    service = _service()
+    result = asyncio.run(service.snapshot_capture([
+        {"kind": "editorWindow", "instanceId": "42", "docked": True, "requireContentRect": False}
+    ]))
+
+    assert result.ok is False
+    assert result.error.code == "SNAPSHOT_DOCKED_WINDOW_REQUIRES_CONTENT_RECT"
+    assert service.dispatcher.calls == []
+
+    calls: list[dict] = []
+
+    class Facade:
+        async def snapshot_capture(
+            self,
+            targets,
+            *,
+            channels=None,
+            sync_mode="sameFrame",
+            completion_policy="allOrNothing",
+            capture_policy=None,
+            output_directory="",
+            wait_ms=5000,
+            request_key="",
+        ):
+            calls.append({
+                "targets": targets,
+                "channels": channels,
+                "capturePolicy": capture_policy,
+            })
+            return ok("snapshot", {"targetCount": len(targets)})
+
+    facade = Facade()
     rejected_policy_proxy = asyncio.run(dispatch_public_tool(
         facade,
         "unity_snapshot_capture",
@@ -237,7 +273,7 @@ def test_snapshot_capture_nested_schema_rejects_before_native_or_proxy_dispatch(
     assert rejected_policy_proxy.ok is False
     assert rejected_policy_proxy.error.code == "INVALID_TOOL_ARGUMENTS"
     assert rejected_policy_proxy.error.detail["sideEffectsMayHaveOccurred"] is False
-    assert len(calls) == 2
+    assert len(calls) == 0
 
 
 def test_snapshot_capture_wait_window_is_not_a_terminal_timeout() -> None:

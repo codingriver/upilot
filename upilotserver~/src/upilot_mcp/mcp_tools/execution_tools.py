@@ -77,7 +77,7 @@ async def reflection_emit_type(
     ))
 
 
-@mcp.tool(description="递归打印任意 C# 运行时对象所有字段/属性。需配合 execution_session + csharp_eval(resultMode=handle) 先获得对象 handle。支持配置嵌套深度、静态字段、忽略类型、JSON/文本双格式输出。纯只读操作。\n\n响应始终包含 .root（JSON 树）和 .text（缩进文本），outputFormat 仅指示首选视图。\n\n支持的类型：基元类型、Decimal、String、Enum、Type、Guid、DateTime、DateTimeOffset、TimeSpan、Uri、Version、IFormattable、数组、IEnumerable。\n\nignoreTypes 与默认跳过集（IntPtr、UIntPtr、RuntimeType、RuntimeMethodHandle、RuntimeFieldHandle、Thread）是并集关系，非替换。\n\n限制：编译器生成字段(IsSpecialName)、const 字段(IsLiteral)、索引器属性始终跳过；非泛型集合元素无 declaredType；字段/属性 getter 异常静默返回 null；静态属性与实例属性同名时静态属性被跳过；循环引用输出 circular ref 标记。硬限制：maxDepth ≤64、maxFieldsPerNode ≤500（隐式下限1）、maxTotalNodes ≤20000。")
+@mcp.tool(description="递归打印任意 C# 运行时对象所有字段/属性。需配合 execution_session + csharp_eval(resultMode=handle) 先获得对象 handle。支持配置嵌套深度、静态字段、忽略类型、JSON/文本双格式输出。纯只读操作。\n\n响应始终包含 .root（JSON 树）和 .text（缩进文本），outputFormat 仅指示首选视图。文本默认隐藏节点类型注记；需要显示 (Type) 或 (DeclaredType -> RuntimeType) 时设置 includeTypeNames=true，.root 中的类型字段始终保留。\n\n常见 Unity 值类型（Vector、Quaternion、Color、Rect、Bounds、Matrix 等）默认作为叶子摘要，避免递归计算属性；仅在明确需要时设置 expandUnityValueTypes=true。Delegate、Assembly、Module 和 MemberInfo 默认仅显示摘要；仅在明确需要 CLR 内部结构时设置 expandReflectionTypes=true。普通对象的字段和属性值不受此摘要规则影响。\n\nignoreTypes 与默认跳过集（IntPtr、UIntPtr、RuntimeType、RuntimeMethodHandle、RuntimeFieldHandle、Thread）是并集关系，非替换。\n\n限制：编译器生成字段(IsSpecialName)、const 字段(IsLiteral)、索引器属性始终跳过；非泛型集合元素无 declaredType；字段/属性 getter 异常静默返回 null；静态属性与实例属性同名时静态属性被跳过；循环引用输出 circular ref 标记。硬限制：maxDepth ≤64、maxFieldsPerNode ≤500（隐式下限1）、maxTotalNodes ≤20000。")
 async def csharp_object_dump(
     sessionId: Annotated[str, Field(description="persistent execution session ID。")],
     handle: Annotated[str, Field(description="来自 session 的对象 handle（如 csharp_eval resultMode=handle 返回的 handle）。")],
@@ -85,6 +85,9 @@ async def csharp_object_dump(
     maxFieldsPerNode: Annotated[int, Field(description="每个对象节点最多展开的字段数，默认 100（上限 500）。")] = 100,
     maxTotalNodes: Annotated[int, Field(description="全局最大节点数限制防膨胀，默认 5000（上限 20000）。")] = 5000,
     includeStatic: Annotated[bool, Field(description="是否包含静态字段/属性；默认 false。")] = False,
+    includeTypeNames: Annotated[bool, Field(description="是否在 .text 中显示 (Type) 和 (DeclaredType -> RuntimeType) 类型注记；默认 false。.root 中的 declaredType/runtimeType 始终保留。")] = False,
+    expandUnityValueTypes: Annotated[bool, Field(description="是否递归展开常见 Unity 值类型；默认 false，仅返回有界叶子摘要。")] = False,
+    expandReflectionTypes: Annotated[bool, Field(description="是否递归展开 Delegate、Assembly、Module、MemberInfo 等反射基础类型；默认 false，仅返回有界摘要，普通成员值不受影响。")] = False,
     ignoreTypes: Annotated[list[str] | None, Field(description="不展开子字段的完整类型名列表，如 ['System.String', 'UnityEngine.Vector3']；匹配时仅显示类型名。")] = None,
     outputFormat: Annotated[str, Field(description="输出格式：json 返回结构化树，text 返回缩进文本。默认 json。")] = "json",
     indentation: Annotated[str, Field(description="text 模式缩进字符串，默认两个空格。")] = "  ",
@@ -93,7 +96,10 @@ async def csharp_object_dump(
     return await _run("csharp_object_dump", args, lambda: _get_facade().csharp_object_dump(
         session_id=sessionId, handle=handle, max_depth=maxDepth,
         max_fields_per_node=maxFieldsPerNode, max_total_nodes=maxTotalNodes,
-        include_static=includeStatic, ignore_types=ignoreTypes,
+        include_static=includeStatic, include_type_names=includeTypeNames,
+        expand_unity_value_types=expandUnityValueTypes,
+        expand_reflection_types=expandReflectionTypes,
+        ignore_types=ignoreTypes,
         output_format=outputFormat, indentation=indentation,
     ))
 

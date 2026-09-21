@@ -997,11 +997,7 @@ namespace CodingRiver.UPilot.Flow
                 context.Dispose();
                 HeadedRunEventBus.PublishRunFinished(result);
                 
-                {
-                    string stepSummary = $"通过={result.StepResults.Count(s => s.Status == TestStatus.Passed)} 失败={result.StepResults.Count(s => s.Status == TestStatus.Failed)} 错误={result.StepResults.Count(s => s.Status == TestStatus.Error)} 跳过={result.StepResults.Count(s => s.Status == TestStatus.Skipped)}";
-                    string progressPrefix = options.TotalCases > 1 ? $"[{options.CaseIndex}/{options.TotalCases}]" : "";
-                    Codingriver.Logger.LogWarning($"[UPilot Flow] {progressPrefix}用例 \"{definition.Name}\" 完成 状态={result.Status} 耗时={result.DurationMs}ms | {stepSummary}");
-                }
+                LogCompletionSummary(definition, options, result);
             }
 
             registryTerminalStatus = result.ErrorCode == ErrorCodes.TestRunAborted
@@ -1014,6 +1010,19 @@ namespace CodingRiver.UPilot.Flow
                 UPilotFlowExecutionRegistry.MarkTerminal(executionId, registryTerminalStatus);
                 executionLease.Dispose();
             }
+        }
+
+        private static void LogCompletionSummary(TestCaseDefinition definition, TestOptions options, TestResult result)
+        {
+            string stepSummary = $"通过={result.StepResults.Count(s => s.Status == TestStatus.Passed)} 失败={result.StepResults.Count(s => s.Status == TestStatus.Failed)} 错误={result.StepResults.Count(s => s.Status == TestStatus.Error)} 跳过={result.StepResults.Count(s => s.Status == TestStatus.Skipped)}";
+            string progressPrefix = options.TotalCases > 1 ? $"[{options.CaseIndex}/{options.TotalCases}]" : "";
+            string completionMessage = $"[UPilot Flow] {progressPrefix}用例 \"{definition.Name}\" 完成 状态={result.Status} 耗时={result.DurationMs}ms | {stepSummary}";
+            if (result.Status == TestStatus.Error)
+                Codingriver.Logger.LogError(completionMessage);
+            else if (result.Status == TestStatus.Failed)
+                Codingriver.Logger.LogWarning(completionMessage);
+            else
+                Codingriver.Logger.Log(completionMessage);
         }
 
         private static TestStatus ComputeStatus(List<StepResult> steps)

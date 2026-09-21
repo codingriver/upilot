@@ -451,8 +451,8 @@ http://127.0.0.1:8011/health
 - **配置**：当前 Agent 还没有 UPilot MCP 配置，点击后新增配置。
 - **更新配置**：当前 Agent 已有 UPilot 配置。点击后会二次确认，只更新该 Agent 的 UPilot MCP 配置项。
 - **更新规则**：为当前 Agent 更新对应的 UPilot Agent 规则。
-- **更新 Skill**：更新当前 Agent 使用的 UPilot Skill；Codex、Cursor 与 OpenCode 的操作会更新同一个 `.agents/skills` 受管安装。
-- **更新全部**：更新已启用 Agent 的现有 UPilot MCP 连接条目，并重新同步共享的 UPilot Skill/AGENT 规则；若已启用 Agent 缺少 MCP 配置，会先提示选择“补齐并更新”或“仅更新现有”。
+- **更新 Skill**：权威同步所有 UPilot Skill 目标；Codex、Cursor 与 OpenCode 共用 `.agents/skills`，Claude 使用独立的 `.claude/skills`。
+- **更新全部**：更新已启用 Agent 的现有 UPilot MCP 连接条目，并权威同步全部 UPilot Skill/Agent 规则；若已启用 Agent 缺少 MCP 配置，会先提示选择“补齐并更新”或“仅更新现有”。
 - **检查配置**：位于“更新全部”右侧的下拉菜单中，只刷新状态，不修改文件。
 - **强制重新配置全部已启用 Agent**：只为用户已启用的 Agent 创建或更新 MCP 配置，并重新生成共享的 UPilot Skill/Agent 规则；不会自动启用或写入未使用的客户端。
 
@@ -460,7 +460,7 @@ http://127.0.0.1:8011/health
 
 Claude Code、Codex、Cursor 和 OpenCode 都支持 UPilot Skill。Claude Code 使用 `.claude/skills`；Codex、Cursor 和 OpenCode 默认共享 `.agents/skills`，避免重复维护。Cursor 与 OpenCode 的 Tooltip 会列出其可发现的项目级 Skill 目录，按 Skill 名称去重统计，并在同名副本内容哈希不一致时显示冲突。
 
-如果 Skill/规则包含本地修改，强制更新可能覆盖 UPilot 管理的内容。确认前请先保存需要保留的自定义内容。
+UPilot 的规则 managed block 与固定目标下的 `upilot-unity-mcp` Skill 和包版本深度绑定，因此首次安装、重复安装、UPM 升级与自动刷新都会权威同步。检测到本地修改、无元数据或无法验证的旧副本时，会先备份到 `.upilot/backups/agent-integrations/`，再覆盖受管内容；自动流程和普通更新不再弹出本地定制二次确认。Agent managed block 外的项目业务规则以及非 UPilot MCP 配置保持不变。
 
 ### 授权与运行详情
 
@@ -472,13 +472,15 @@ Claude Code、Codex、Cursor 和 OpenCode 都支持 UPilot Skill。Claude Code �
 
 ### Skill/规则模板维护
 
-UPilot 的 Agent 规则只维护一份源模板：
+UPilot 的 Agent 规则、Skill 指令和 OpenAI Skill 元数据分别只维护以下源模板：
 
 ```text
 skills/upilot-unity-mcp/AGENTS.md.template
+skills/upilot-unity-mcp/SKILL.md.template
+skills/upilot-unity-mcp/agents/openai.yaml.template
 ```
 
-正式版和 `main` 分支都使用这同一份模板。安装或更新规则时，UPilot 会读取包内模板并渲染动态字段，包括工程路径、MCP 地址、健康检查地址、规则版本、UPilot 包版本和生成时间。
+三份模板及版本统一由 `skills/upilot-unity-mcp/template-manifest.json` 描述。安装或更新时，UPilot 会渲染工程路径、MCP 地址、健康检查地址、规则版本、Skill 包版本、UPilot 包版本和生成时间等上下文。模板引擎仅支持简单的 `{{token}}`；未知、缺失或残留占位符会直接失败。
 
 模板会部署到这些目标位置：
 
@@ -490,14 +492,22 @@ CLAUDE.md
 .claude/skills/upilot-unity-mcp/AGENTS.md.template
 ```
 
-`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter；OpenCode 原生复用 `AGENTS.md`。Skill 只维护 `skills/upilot-unity-mcp/` 一份主源，安装时生成 `.agents/skills` 和 `.claude/skills` 受管副本；Cursor 与 OpenCode 直接复用 `.agents/skills`。
+`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter；OpenCode 原生复用 `AGENTS.md`。仓库中的 `SKILL.md`、`agents/openai.yaml` 以及 `Documentation~/AgentRules/AGENTS.upilot.md` 是提交到版本库的受管生成产物；安装时再按项目实际端口生成 `.agents/skills` 和 `.claude/skills` 副本，Cursor 与 OpenCode 直接复用 `.agents/skills`。
+
+可使用以下命令检查或重新生成受管产物：
+
+```powershell
+python skills/upilot-unity-mcp/scripts/render_skill_pack.py --check
+python skills/upilot-unity-mcp/scripts/render_skill_pack.py --write
+```
 
 main 分支维护规则：
 
-- 修改规则内容时，只改 `skills/upilot-unity-mcp/AGENTS.md.template`。
-- 规则语义变化时递增 `AgentRulesTemplateVersion`。
-- Skill 目录结构变化时递增 `SkillInstallTemplateVersion`。
-- 纯重构、读取方式变化或文案不影响 Agent 行为时，不需要递增 `AgentRulesTemplateVersion`。
+- 只编辑 `AGENTS.md.template`、`SKILL.md.template` 和 `agents/openai.yaml.template`，不要直接编辑生成的 `SKILL.md`、`agents/openai.yaml` 或 Agent 规则参考产物。
+- Agent 行为发生语义变化时，递增 manifest 中的 `agentRulesVersion`。
+- 任意已安装 Skill 文件或模板发生变化时，递增 manifest 中的 `skillPackVersion`。
+- 纯重构、读取方式变化或文案不影响 Agent 行为时，不需要递增 `agentRulesVersion`。
+- `.upilot-install.json` schema v2 同时记录模板哈希、最终内容哈希和渲染上下文；清洁旧版本直接升级，本地定制、无元数据或无法验证的副本自动备份后权威重建。`--force` 仅为兼容旧调用保留，不再决定是否覆盖 UPilot 自有目标。
 - `main` / source 安装仍按 source 通道运行本机 Python，不使用自动管理 EXE；正式 tag 发布时由 Action 写入 tag 版本。
 
 ## 高级设置、停止与诊断
@@ -632,9 +642,40 @@ python3 --version
 
 在主界面点击 **自动修复**。UPilot 会尝试选择空闲端口并重新启动。端口变化后，还需要更新 Agent 配置并刷新 Agent 客户端。
 
-### 修改了 Skill/规则，更新时提示会覆盖
+### 修改了 Skill/规则，更新后内容被恢复
 
-UPilot 会保护普通项目内容，但强制更新会覆盖 UPilot 管理的 Skill/规则内容。请先备份本地自定义内容，再确认更新。
+UPilot 会权威同步固定目标下的 Skill 和 Agent managed block，以保证它们与当前 UPM 包版本一致。覆盖前会自动备份本地修改到 `.upilot/backups/agent-integrations/<UTC时间>-<随机ID>/`；备份失败时对应目标不会被修改。项目业务规则应写在 Agent managed block 外，不要直接维护生成的 Skill 文件。
+
+### 统一模板生成与同步
+
+维护顺序固定为：修改 `skills/upilot-unity-mcp/` 的权威模板/资源 → 递增
+`template-manifest.json` 版本 → `scripts/render_skill_pack.py --write` →
+`--check` 和 `scripts/check_skill_pack.py --mode source` → 项目同步 → 两份 installed 校验。
+Agent 行为变化递增 `agentRulesVersion`，任意分发 Skill 文件变化递增 `skillPackVersion`；
+不直接维护生成的 `SKILL.md`、`agents/openai.yaml` 或 Agent 参考文档。
+
+`unity_agent_integrations_check()` 只读检查全部五个目标；
+`unity_agent_integrations_sync(apply=false)` 预览，`apply=true` 使用项目写入授权同步。
+在线模板源是当前 Unity 安装的 UPM 包，不是 Server EXE 内置副本。
+旧 `unity_agent_rules_check/install` 仍只处理项目 `AGENTS.md`。
+
+| 权威源 | 项目目标 | 管理边界 |
+|---|---|---|
+| `AGENTS.md.template` | `AGENTS.md`、`.cursor/rules/upilot-unity-mcp.mdc` | 仅 UPilot 区块，保留外部字节/BOM |
+| 安装器固定引用 | `CLAUDE.md` | 仅 `@AGENTS.md` 受管区块 |
+| `SKILL.md.template`、`agents/openai.yaml.template`、资源 | `.agents/skills/upilot-unity-mcp/` | 全目录，Codex/Cursor/OpenCode 共用 |
+| 同上 | `.claude/skills/upilot-unity-mcp/` | 全目录，Claude 独立 |
+
+离线使用 `scripts/install_upilot.py --integrations-only --unity-project <项目> --upilot-dir <源码> --dry-run --json`，
+移除 `--dry-run` 后执行；不修改依赖、Python 环境或 MCP 配置。
+项目端口取显式参数、项目配置、manifest 默认值的首个有效来源。
+保存模板不代表已同步项目，不新增后台文件监听。当前测试项目仍继承 `../../AGENTS.md`，
+父规则与 `AGENT_Distill.md` 不纳入 UPilot 模板覆盖。
+
+同步使用 C#/Python 共用项目文件锁，暂存和回滚位于 `.upilot`、Skill 发现路径之外。
+受管区块标记损坏、路径越界或锁占用会明确失败；备份失败不覆盖原目标，
+替换/最终验证失败会回滚该目标，其余独立目标继续并汇总结果。
+无内容/上下文差异则不改文件时间戳。历史备份不自动清理。
 
 ### 浏览器访问 /mcp 返回 406
 

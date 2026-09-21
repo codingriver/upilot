@@ -189,6 +189,22 @@ async def unity_operation_collect_artifacts(operationId: str, detailLevel: str =
     r = await _get_facade().operation_collect_artifacts(operation_id=operationId, detail_level=detailLevel, max_tail_chars=maxTailChars, include_raw_state=includeRawState)
     return _log_tool_result("unity_operation_collect_artifacts", _payload(r))
 
+@mcp.tool(description="通过 Unity 当前 UPM 模板只读检查全部五个 Agent/Skill 目标，不创建目录或元数据。")
+async def unity_agent_integrations_check():
+    _log_tool_call("unity_agent_integrations_check", {})
+    r = await _get_facade().agent_integrations_check()
+    return _log_tool_result("unity_agent_integrations_check", _payload(r))
+
+@mcp.tool(description="同步全部五个 Agent/Skill 目标；默认 apply=false 只预览。apply=true 需项目写授权；自动备份本地定制，逐目标验证及回滚。")
+async def unity_agent_integrations_sync(apply: bool = False):
+    _log_tool_call("unity_agent_integrations_sync", {"apply": apply})
+    if apply:
+        rejected = _reject_write_if_unapproved("unity_agent_integrations_sync")
+        if rejected is not None:
+            return rejected
+    r = await _get_facade().agent_integrations_sync(apply=apply)
+    return _log_tool_result("unity_agent_integrations_sync", _payload(r))
+
 @mcp.tool(description="只读检查项目根 AGENTS.md 的 UPilot 受控规则块，返回 diff 摘要和 recommendedBlock，不写文件。")
 async def unity_agent_rules_check():
     _log_tool_call("unity_agent_rules_check", {})
@@ -222,12 +238,14 @@ _DESTRUCTIVE_TOOLS = {
     "unity_package_add", "unity_package_remove", "unity_scene_save",
     "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
     "unity_agent_rules_install",
+    "unity_agent_integrations_sync",
 }
 _NON_IDEMPOTENT_TOOLS = {
     "unity_operation_start",
     "unity_operation_wait",
     "unity_operation_cancel",
     "unity_agent_rules_install",
+    "unity_agent_integrations_sync",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
 _PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
@@ -240,6 +258,9 @@ for _name, _value in list(globals().items()):
         _name,
         public_handler=_value,
         destructive=_name in _DESTRUCTIVE_TOOLS,
+        requires_write_access=False if _name == "unity_agent_integrations_sync" else None,
+        write_access_predicate=(lambda args: bool(args.get("apply", False))) if _name == "unity_agent_integrations_sync" else None,
+        write_access_condition="apply=true" if _name == "unity_agent_integrations_sync" else "",
         idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",

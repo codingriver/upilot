@@ -21,9 +21,8 @@ namespace CodingRiver.UPilot
 
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                _setupWriteAgentRules = EditorGUILayout.ToggleLeft(
-                    "写入 Agent 识别规则与 Skill（Codex、Claude Code、Cursor、OpenCode）",
-                    _setupWriteAgentRules);
+                EditorGUILayout.LabelField(
+                    "自动同步 Agent 识别规则与 Skill（Codex、Claude Code、Cursor、OpenCode）");
                 EditorGUILayout.LabelField(
                     "规则保留其它内容；Codex、Cursor、OpenCode 共享 .agents/skills，Claude Code 使用 .claude/skills。",
                     EditorStyles.miniLabel);
@@ -115,8 +114,7 @@ namespace CodingRiver.UPilot
                 if (_setupWriteOpenCodeConfig) enabledAgentClients.Add("OpenCode");
                 UPilotAgentSetup.SetEnabledAgentClients(enabledAgentClients);
 
-                if (_setupWriteAgentRules)
-                    Debug.Log("[UPilot] First setup agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
+                Debug.Log("[UPilot] First setup agent rules:\n" + UPilotAgentSetup.WriteAgentRules(overwriteExisting: false));
                 if (_setupWriteCodexConfig)
                     Debug.Log("[UPilot] First setup Codex MCP config:\n" + UPilotAgentSetup.WriteCodexMcpConfig(promptBeforeOverwrite: true));
                 if (_setupWriteClaudeConfig)

@@ -189,6 +189,99 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void SelectionClearReceiptPreservesBusinessOutcomeAndIdentity()
+        {
+            var payload = new SelectionClearResultPayload
+            {
+                ok = true,
+                businessEffectVerified = true,
+                changed = true,
+                status = "cleared",
+                beforeSelectionCount = 2,
+                afterSelectionCount = 0,
+                beforeActiveObject = new SelectionObjectIdentityPayload
+                {
+                    instanceId = 42,
+                    name = "Selected",
+                    typeName = typeof(GameObject).FullName,
+                },
+            };
+
+            var restored = JsonUtility.FromJson<SelectionClearResultPayload>(JsonUtility.ToJson(payload));
+
+            Assert.That(restored.ok, Is.True);
+            Assert.That(restored.businessEffectVerified, Is.True);
+            Assert.That(restored.changed, Is.True);
+            Assert.That(restored.status, Is.EqualTo("cleared"));
+            Assert.That(restored.beforeSelectionCount, Is.EqualTo(2));
+            Assert.That(restored.afterSelectionCount, Is.Zero);
+            Assert.That(restored.beforeActiveObject.instanceId, Is.EqualTo(42));
+            Assert.That(restored.afterActiveObject.instanceId, Is.Zero);
+        }
+
+        [Test]
+        public void GameObjectDeleteReceiptPreservesTargetPersistenceAndSideEffectEvidence()
+        {
+            var payload = new GameObjectDeleteResultPayload
+            {
+                ok = true,
+                operation = "delete",
+                target = new GameObjectDeleteTargetPayload
+                {
+                    instanceId = 77,
+                    name = "Deleted",
+                    hierarchyPath = "Root/Deleted",
+                    sceneName = "Scene",
+                    scenePath = "Assets/Scene.unity",
+                },
+                beforeExists = true,
+                afterExists = false,
+                businessEffectVerified = true,
+                sceneDirty = true,
+                saveRequired = true,
+                sideEffectsMayHaveOccurred = true,
+            };
+
+            var restored = JsonUtility.FromJson<GameObjectDeleteResultPayload>(JsonUtility.ToJson(payload));
+
+            Assert.That(restored.ok, Is.True);
+            Assert.That(restored.operation, Is.EqualTo("delete"));
+            Assert.That(restored.target.instanceId, Is.EqualTo(77));
+            Assert.That(restored.target.hierarchyPath, Is.EqualTo("Root/Deleted"));
+            Assert.That(restored.beforeExists, Is.True);
+            Assert.That(restored.afterExists, Is.False);
+            Assert.That(restored.businessEffectVerified, Is.True);
+            Assert.That(restored.sceneDirty, Is.True);
+            Assert.That(restored.saveRequired, Is.True);
+            Assert.That(restored.sideEffectsMayHaveOccurred, Is.True);
+        }
+
+        [Test]
+        public void ObjectDumpSummarizesUnityValueTypesUnlessExpansionIsExplicit()
+        {
+            var ignoredTypes = new HashSet<string>(ObjectDumper.DefaultSkipTypes, StringComparer.Ordinal);
+            var summarizedCount = 0;
+            var summarized = ObjectDumper.Dump(
+                new Vector3(1f, 2f, 3f), 6, 100, 5000, false, ignoredTypes,
+                ref summarizedCount);
+            var expandedCount = 0;
+            var expanded = ObjectDumper.Dump(
+                new Vector3(1f, 2f, 3f), 6, 100, 5000, false, ignoredTypes,
+                ref expandedCount, expandUnityValueTypes: true);
+
+            Assert.That(summarized.children, Is.Empty);
+            Assert.That(summarized.value, Does.Contain("1").And.Contain("2").And.Contain("3"));
+            Assert.That(summarizedCount, Is.EqualTo(1));
+            Assert.That(expanded.children, Is.Not.Empty);
+            Assert.That(expandedCount, Is.GreaterThan(summarizedCount));
+            var expandedNames = expanded.children.Select(child => child.name).ToArray();
+            Assert.That(expandedNames, Is.EquivalentTo(new[] { "x", "y", "z" }));
+            Assert.That(expandedNames, Does.Not.Contain(".normalized"));
+            Assert.That(expandedNames, Does.Not.Contain(".magnitude"));
+            Assert.That(expandedNames, Does.Not.Contain(".sqrMagnitude"));
+        }
+
+        [Test]
         public void ScreenshotPathRejectsOutsideProjectByDefault()
         {
             var method = typeof(UPilotSnapshotService).GetMethod(
@@ -1158,6 +1251,51 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void ConsoleCaptureReadAdvancesPastScannedRecordsWhenFilterHasNoMatches()
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-empty-read-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var records = Enumerable.Range(10, 5).Select(index => new ConsoleCaptureRecord
+                {
+                    sequence = index,
+                    timestampUtcMs = index,
+                    logType = "Log",
+                    message = "ordinary " + index,
+                    stackTrace = string.Empty,
+                });
+                File.WriteAllLines(Path.Combine(directory, "console.jsonl"), records.Select(JsonUtility.ToJson));
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_empty_read",
+                    directory = directory,
+                    nextSequence = 15,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles", BindingFlags.NonPublic | BindingFlags.Static);
+                var result = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest,
+                    new ConsoleCaptureReadPayload { afterSequence = 9, contains = new[] { "missing" } },
+                    CancellationToken.None,
+                });
+
+                Assert.That(result.ok, Is.True);
+                Assert.That(result.logs, Is.Empty);
+                Assert.That(result.scannedCount, Is.EqualTo(5));
+                Assert.That(result.scannedToSequence, Is.EqualTo(14));
+                Assert.That(result.nextSequence, Is.EqualTo(14));
+                Assert.That(result.scanComplete, Is.True);
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
         public void ConsoleCaptureLiteralRegexPaginatesMoreThanPageLimitWithoutLoss()
         {
             var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
@@ -1300,7 +1438,8 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(text, Does.Contain("unity_console_capture_start"));
             Assert.That(text, Does.Contain("Call `unity_console_capture_stop` only with that matching token"));
             Assert.That(text, Does.Contain("`nextSequence` as the next call's `afterSequence`"));
-            Assert.That(text, Does.Contain("recovered or historical active sessions"));
+            Assert.That(text, Does.Contain("unity_console_capture_list(activeOnly=true)"));
+            Assert.That(text, Does.Contain("inspect `activeCount/returnedCount`"));
             Assert.That(text, Does.Contain("separate from domain-specific reports"));
             Assert.That(text, Does.Contain("unity_config_csv_get"));
             Assert.That(text, Does.Contain("unity_config_csv_patch"));
@@ -1394,6 +1533,46 @@ namespace CodingRiver.UPilot.Tests
             {
                 if (Directory.Exists(directory))
                     Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Test]
+        public void CustomizedAgentManagedBlockIsBackedUpAndRepairedWithoutChangingBusinessRules()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-agent-rule-" + Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "AGENTS.md");
+            var backupRoot = Path.Combine(directory, ".upilot", "backups", "agent-integrations");
+            var backupsBefore = Directory.Exists(backupRoot)
+                ? new HashSet<string>(Directory.GetDirectories(backupRoot), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string createdBackup = null;
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var customized = "rulesVersion: " + GetAgentRulesTemplateVersion() + "\nmanaged: customized\n";
+                var original = "# Business rules\n\n" + WrapManagedRule(customized);
+                File.WriteAllText(path, original);
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/io.github.codingriver.upilot/package.json").resolvedPath;
+                var result = UPilotAgentSetup.SyncAgentIntegrationsAt(directory, package, 8011, true,
+                    AgentIntegrationScope.SharedAgents);
+                Assert.That(result.ok, Is.True, result.error);
+
+                var updated = File.ReadAllText(path);
+                Assert.That(updated, Does.StartWith("# Business rules"));
+                Assert.That(updated, Does.Contain("rulesVersion: " + GetAgentRulesTemplateVersion()));
+                Assert.That(updated, Does.Not.Contain("managed: customized"));
+                Assert.That(result.targets[0].backupPath, Is.Not.Empty);
+                createdBackup = Directory.GetDirectories(backupRoot)
+                    .Single(candidate => !backupsBefore.Contains(candidate));
+                var backupFile = Directory.GetFiles(createdBackup, "AGENTS.md", SearchOption.AllDirectories).Single();
+                Assert.That(File.ReadAllText(backupFile), Is.EqualTo(original));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+                if (!string.IsNullOrEmpty(createdBackup) && Directory.Exists(createdBackup))
+                    Directory.Delete(createdBackup, recursive: true);
             }
         }
 
@@ -1634,7 +1813,10 @@ namespace CodingRiver.UPilot.Tests
                 File.WriteAllText(Path.Combine(claudeSkill, "SKILL.md"), "---\nname: upilot-unity-mcp\ndescription: claude changed\n---\n");
                 var writeMetadata = typeof(UPilotAgentSetup).GetMethod(
                     "WriteSkillInstallMetadata",
-                    BindingFlags.NonPublic | BindingFlags.Static);
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string) },
+                    null);
                 writeMetadata.Invoke(null, new object[] { agentsSkill });
                 var inspect = typeof(UPilotAgentSetup).GetMethod(
                     "InspectSkillConfig",
@@ -2703,12 +2885,18 @@ namespace CodingRiver.UPilot.Tests
 
                 var writeMethod = typeof(UPilotAgentSetup).GetMethod(
                     "WriteSkillInstallMetadata",
-                    BindingFlags.NonPublic | BindingFlags.Static);
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string) },
+                    null);
                 writeMethod.Invoke(null, new object[] { directory });
 
                 var readMethod = typeof(UPilotAgentSetup).GetMethod(
                     "TryReadSkillInstallMetadata",
-                    BindingFlags.NonPublic | BindingFlags.Static);
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string), typeof(int).MakeByRefType(), typeof(string).MakeByRefType() },
+                    null);
                 var readArgs = new object[] { directory, 0, null };
                 var readOk = (bool)readMethod.Invoke(null, readArgs);
 
@@ -2744,6 +2932,49 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void CustomizedManagedSkillIsBackedUpAndRewrittenWithoutForce()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-skill-customized-" + Guid.NewGuid().ToString("N"));
+            var backupRoot = Path.Combine(directory, ".upilot", "backups", "agent-integrations");
+            var backupsBefore = Directory.Exists(backupRoot)
+                ? new HashSet<string>(Directory.GetDirectories(backupRoot), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string createdBackup = null;
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/io.github.codingriver.upilot/package.json").resolvedPath;
+            try
+            {
+                Assert.That(UPilotAgentSetup.SyncAgentIntegrationsAt(directory, package, 8011, true,
+                    AgentIntegrationScope.Skills).ok, Is.True);
+                var skillPath = Path.Combine(directory, ".agents/skills/upilot-unity-mcp/SKILL.md");
+                File.AppendAllText(skillPath, "\nlocal customization\n");
+                var before = File.ReadAllBytes(skillPath);
+
+                var updateResult = UPilotAgentSetup.SyncAgentIntegrationsAt(directory, package, 8011, true,
+                    AgentIntegrationScope.Skills);
+                Assert.That(updateResult.ok, Is.True, updateResult.error);
+
+                Assert.That(File.ReadAllText(skillPath), Does.Not.Contain("local customization"));
+                Assert.That(updateResult.targets[0].backupPath, Is.Not.Empty);
+                var backupsAfter = Directory.GetDirectories(backupRoot);
+                createdBackup = backupsAfter.Single(path => !backupsBefore.Contains(path));
+                var externalBackupSkill = Directory.GetFiles(
+                        createdBackup,
+                        "SKILL.md",
+                        SearchOption.AllDirectories)
+                    .Single();
+                Assert.That(File.ReadAllBytes(externalBackupSkill), Is.EqualTo(before));
+                Assert.That(File.Exists(Path.Combine(createdBackup, "manifest.json")), Is.True);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, recursive: true);
+                if (!string.IsNullOrEmpty(createdBackup) && Directory.Exists(createdBackup))
+                    Directory.Delete(createdBackup, recursive: true);
+            }
+        }
+
+        [Test]
         public void ManagedSkillRefreshDetectsSourceChangeWithoutTemplateVersionBump()
         {
             var currentVersion = GetSkillInstallTemplateVersion();
@@ -2760,46 +2991,71 @@ namespace CodingRiver.UPilot.Tests
                     "matching-hash",
                     "matching-hash"),
                 Is.False);
+            Assert.That(
+                UPilotAgentSetup.IsManagedSkillInstallUpdateAvailable(
+                    currentVersion,
+                    "matching-hash",
+                    "matching-hash",
+                    "old-template-hash",
+                    "new-template-hash"),
+                Is.True);
         }
 
         [Test]
-        public void ManagedSkillSourceHashUsesTheInstalledEndpoint()
+        public void LegacyV1SkillInstallMetadataRemainsReadable()
         {
-            var directory = Path.Combine(Path.GetTempPath(), "upilot-skill-source-" + Guid.NewGuid().ToString("N"));
-            var source = Path.Combine(directory, "source");
-            var installed = Path.Combine(directory, "installed");
-            Directory.CreateDirectory(source);
-            Directory.CreateDirectory(installed);
-
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-skill-v1-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
             try
             {
-                const string sourceText = "endpoint=http://127.0.0.1:9999/mcp\nhealth=http://127.0.0.1:9999/health\n";
-                File.WriteAllText(Path.Combine(source, "SKILL.md"), sourceText);
-                var rewrite = typeof(UPilotAgentSetup).GetMethod(
-                    "RewriteSkillEndpoints",
-                    BindingFlags.NonPublic | BindingFlags.Static);
+                var hash = new string('a', 64);
                 File.WriteAllText(
-                    Path.Combine(installed, "SKILL.md"),
-                    (string)rewrite.Invoke(null, new object[] { sourceText }));
-
-                var sourceHash = typeof(UPilotAgentSetup).GetMethod(
-                    "ComputeManagedSkillSourceHash",
-                    BindingFlags.NonPublic | BindingFlags.Static);
-                var installedHash = typeof(UPilotAgentSetup).GetMethod(
-                    "ComputeSkillInstallHash",
+                    Path.Combine(directory, ".upilot-install.json"),
+                    "{\"templateVersion\":30,\"contentSha256\":\"" + hash + "\"}");
+                var method = typeof(UPilotAgentSetup).GetMethod(
+                    "TryReadSkillInstallMetadata",
                     BindingFlags.NonPublic | BindingFlags.Static,
                     null,
-                    new[] { typeof(string) },
+                    new[]
+                    {
+                        typeof(string),
+                        typeof(int).MakeByRefType(),
+                        typeof(string).MakeByRefType(),
+                        typeof(string).MakeByRefType(),
+                    },
                     null);
+                var args = new object[] { directory, 0, null, null };
 
-                Assert.That(sourceHash.Invoke(null, new object[] { source }),
-                    Is.EqualTo(installedHash.Invoke(null, new object[] { installed })));
+                Assert.That((bool)method.Invoke(null, args), Is.True);
+                Assert.That(args[1], Is.EqualTo(30));
+                Assert.That(args[2], Is.EqualTo(hash));
+                Assert.That(args[3], Is.EqualTo(""));
             }
             finally
             {
                 if (Directory.Exists(directory))
                     Directory.Delete(directory, recursive: true);
             }
+        }
+
+        [Test]
+        public void ManagedSkillTemplatesRenderBothEndpointArtifacts()
+        {
+            var resolveMethod = typeof(UPilotAgentSetup).GetMethod(
+                "ResolvePackageRoot",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var packageRoot = (string)resolveMethod.Invoke(null, null);
+            var skillRoot = Path.Combine(packageRoot, "skills", "upilot-unity-mcp");
+            var renderMethod = typeof(UPilotAgentSetup).GetMethod(
+                "BuildRenderedSkillOutputs",
+                BindingFlags.NonPublic | BindingFlags.Static);
+
+            var outputs = (Dictionary<string, string>)renderMethod.Invoke(null, new object[] { skillRoot });
+
+            Assert.That(outputs["SKILL.md"], Does.Contain(UPilotAgentSetup.McpUrl));
+            Assert.That(outputs["SKILL.md"], Does.Contain(UPilotAgentSetup.HealthUrl));
+            Assert.That(outputs["agents/openai.yaml"], Does.Contain(UPilotAgentSetup.McpUrl));
+            Assert.That(outputs.Values.Any(value => value.Contains("{{")), Is.False);
         }
 
         [Test]
@@ -3053,10 +3309,10 @@ namespace CodingRiver.UPilot.Tests
 
         private static int GetAgentRulesTemplateVersion()
         {
-            var field = typeof(UPilotAgentSetup).GetField(
+            var property = typeof(UPilotAgentSetup).GetProperty(
                 "AgentRulesTemplateVersion",
                 BindingFlags.NonPublic | BindingFlags.Static);
-            return (int)field.GetRawConstantValue();
+            return (int)property.GetValue(null);
         }
 
         [Test]
@@ -3104,10 +3360,10 @@ namespace CodingRiver.UPilot.Tests
 
         private static int GetSkillInstallTemplateVersion()
         {
-            var field = typeof(UPilotAgentSetup).GetField(
+            var property = typeof(UPilotAgentSetup).GetProperty(
                 "SkillInstallTemplateVersion",
                 BindingFlags.NonPublic | BindingFlags.Static);
-            return (int)field.GetRawConstantValue();
+            return (int)property.GetValue(null);
         }
 
         private static string GetUpdateServiceProjectKey(string key)

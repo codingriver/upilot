@@ -248,12 +248,26 @@ def test_console_capture_direct_invalid_id_boolean_and_integer_inputs_never_disp
         asyncio.run(service.console_capture_read(after_sequence=True)),
         asyncio.run(service.console_capture_list(count=True)),
         asyncio.run(service.console_capture_list(include_active=1)),
+        asyncio.run(service.console_capture_list(active_only=1)),
+        asyncio.run(service.console_capture_list(include_active=False, active_only=True)),
         asyncio.run(service.console_capture_stop(session_id=1, force_stop=True)),
         asyncio.run(service.console_capture_stop(session_id="capture-a", force_stop="true")),
     ]
 
     assert all(not result.ok and result.error.code == "INVALID_PAYLOAD" for result in rejected)
     assert dispatcher.calls == []
+
+
+def test_console_capture_list_forwards_active_only_without_changing_legacy_filter() -> None:
+    service, dispatcher = _service()
+
+    result = asyncio.run(service.console_capture_list(count=7, include_active=True, active_only=True))
+
+    assert result.ok
+    assert dispatcher.calls == [(
+        "console.capture.list",
+        {"count": 7, "includeActive": True, "activeOnly": True},
+    )]
 
 
 def test_console_capture_force_stop_observes_persisted_terminal_without_second_stop(tmp_path) -> None:

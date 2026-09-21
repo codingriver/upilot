@@ -26,7 +26,12 @@ namespace CodingRiver.UPilot.Tests
         public IEnumerator CancelableProgressThirtySeconds() => ProgressFor(30);
 
         [Test, Explicit("Deliberate failure for UP-011 failure evidence.")]
-        public void ExpectedBusinessFailure() => Assert.Fail("P1_EXPECTED_BUSINESS_FAILURE");
+        public void ExpectedBusinessFailure()
+        {
+            LogAssert.Expect(LogType.Error, "P1_EXPECTED_CONSOLE_ERROR");
+            Debug.LogError("P1_EXPECTED_CONSOLE_ERROR");
+            Assert.Fail("P1_EXPECTED_BUSINESS_FAILURE");
+        }
 
         private static IEnumerator ProgressFor(double seconds)
         {
@@ -687,6 +692,58 @@ namespace CodingRiver.UPilot.Tests
             s_measurementStartFrame = 0;
             s_requestedRepaints = 0;
             s_active = false;
+        }
+    }
+
+    public static class UPilotWriteBatchHangAcceptanceFixture
+    {
+        private static bool s_armed;
+        private static double s_executeAt;
+        private static int s_durationMs;
+        private static string s_evidencePath;
+
+        public static string Arm(string delayMilliseconds, string durationMilliseconds, string evidenceId)
+        {
+            if (s_armed)
+                throw new InvalidOperationException("A write-batch Hang fixture is already armed.");
+            if (!Guid.TryParse(evidenceId, out _))
+                throw new ArgumentException("evidenceId must be a GUID.", nameof(evidenceId));
+            int delayMs = int.Parse(delayMilliseconds, CultureInfo.InvariantCulture);
+            int durationMs = int.Parse(durationMilliseconds, CultureInfo.InvariantCulture);
+            if (delayMs < 3000 || delayMs > 30000 || durationMs < 5000 || durationMs > 30000)
+                throw new ArgumentOutOfRangeException("The fixture requires delay 3-30s and duration 5-30s.");
+
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            s_evidencePath = Path.Combine(projectRoot, "Artifacts", "UnifiedAcceptance", "WriteBatchHang", evidenceId + ".json");
+            Directory.CreateDirectory(Path.GetDirectoryName(s_evidencePath));
+            s_executeAt = EditorApplication.timeSinceStartup + delayMs / 1000.0;
+            s_durationMs = durationMs;
+            s_armed = true;
+            EditorApplication.update -= Tick;
+            EditorApplication.update += Tick;
+            return Status();
+        }
+
+        public static string Status()
+        {
+            if (!string.IsNullOrEmpty(s_evidencePath) && File.Exists(s_evidencePath))
+                return File.ReadAllText(s_evidencePath);
+            return $"{{\"armed\":{s_armed.ToString().ToLowerInvariant()},\"durationMs\":{s_durationMs}}}";
+        }
+
+        private static void Tick()
+        {
+            if (!s_armed || EditorApplication.timeSinceStartup < s_executeAt)
+                return;
+            EditorApplication.update -= Tick;
+            long startedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            File.WriteAllText(s_evidencePath,
+                $"{{\"armed\":true,\"startedAt\":{startedAt},\"endedAt\":0,\"durationMs\":{s_durationMs}}}");
+            Thread.Sleep(s_durationMs);
+            long endedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            File.WriteAllText(s_evidencePath,
+                $"{{\"armed\":false,\"startedAt\":{startedAt},\"endedAt\":{endedAt},\"durationMs\":{s_durationMs}}}");
+            s_armed = false;
         }
     }
 }

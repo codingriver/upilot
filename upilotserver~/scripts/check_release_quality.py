@@ -39,6 +39,7 @@ _P2_PLAN = Path("Documentation~") / "P2-Development-Plan-20260915.md"
 _ARCHIVE = Path("Documentation~") / "TODO_UPilot_Integrated.md"
 _TOOL_STATUS = Path("Documentation~") / "ToolStatus.md"
 _RULES_SOURCE = Path("upilotserver~") / "src" / "upilot_mcp" / "domain" / "task_service.py"
+_TEMPLATE_MANIFEST = Path("skills") / "upilot-unity-mcp" / "template-manifest.json"
 _REGISTRY_SOURCE = Path("upilotserver~") / "src" / "upilot_mcp" / "tool_registry.py"
 
 
@@ -223,11 +224,11 @@ def _iter_artifact_claims(value: object, *, source_context: bool = False):
 
 def _current_rules_version(repo: Path) -> str:
     try:
-        text = (repo / _RULES_SOURCE).read_text(encoding="utf-8")
-    except OSError:
+        manifest = json.loads((repo / _TEMPLATE_MANIFEST).read_text(encoding="utf-8"))
+        value = manifest.get("agentRulesVersion")
+    except (OSError, ValueError):
         return ""
-    match = re.search(r"_UPILOT_RULES_VERSION\s*=\s*(\d+)", text)
-    return match.group(1) if match else ""
+    return str(value) if type(value) is int and value > 0 else ""
 
 
 def _current_registry_version(repo: Path) -> str:
@@ -241,11 +242,11 @@ def _current_registry_version(repo: Path) -> str:
 
 def _current_skill_template_version(repo: Path) -> str:
     try:
-        text = (repo / "Editor" / "Core" / "UPilotAgentSetup.cs").read_text(encoding="utf-8")
-    except OSError:
+        manifest = json.loads((repo / _TEMPLATE_MANIFEST).read_text(encoding="utf-8"))
+        value = manifest.get("skillPackVersion")
+    except (OSError, ValueError):
         return ""
-    match = re.search(r"SkillInstallTemplateVersion\s*=\s*(\d+)", text)
-    return match.group(1) if match else ""
+    return str(value) if type(value) is int and value > 0 else ""
 
 
 def _installed_skill_content_hash(root: Path) -> str:

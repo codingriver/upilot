@@ -57,6 +57,7 @@ class McpToolFacade(
         self._operations: dict[str, dict] = {}
         self._operation_failure_history: dict[str, int] = {}
         self._write_batch_resume_task: asyncio.Task | None = None
+        self._hang_capture_tasks: dict[str, asyncio.Task] = {}
         server.on_editor_execution_state = self._on_execution_state_with_test_recovery
 
     async def _on_execution_state_with_test_recovery(self, execution: dict) -> None:

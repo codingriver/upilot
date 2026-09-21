@@ -9,6 +9,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 namespace CodingRiver.UPilot
@@ -55,6 +56,7 @@ namespace CodingRiver.UPilot
         public ulong instanceId;
         public string componentType = "";
         public bool includeInactive = true;
+        public bool includeHidden;
         public int limit = 100;
     }
 
@@ -98,6 +100,30 @@ namespace CodingRiver.UPilot
     public class GameObjectDeletePayload
     {
         public ulong instanceId;
+    }
+
+    [Serializable]
+    public class GameObjectDeleteTargetPayload
+    {
+        public ulong instanceId;
+        public string name;
+        public string hierarchyPath;
+        public string sceneName;
+        public string scenePath;
+    }
+
+    [Serializable]
+    public class GameObjectDeleteResultPayload
+    {
+        public bool ok;
+        public string operation;
+        public GameObjectDeleteTargetPayload target;
+        public bool beforeExists;
+        public bool afterExists;
+        public bool businessEffectVerified;
+        public bool sceneDirty;
+        public bool saveRequired;
+        public bool sideEffectsMayHaveOccurred;
     }
 
     [Serializable]
@@ -158,6 +184,11 @@ namespace CodingRiver.UPilot
         public bool isStatic;
         public ulong parentId;
         public string hierarchyPath;
+        public int hideFlags;
+        public string hideFlagsName;
+        public string sceneName;
+        public string scenePath;
+        public ulong sceneHandle;
         public List<string> componentTypes = new();
         public TransformPayload transform;
     }
@@ -174,6 +205,11 @@ namespace CodingRiver.UPilot
     public class GameObjectFindResultPayload
     {
         public List<GameObjectInfoPayload> gameObjects = new();
+        public bool includeHidden;
+        public bool exactInstanceIdLookup;
+        public bool truncated;
+        public int returnedCount;
+        public int matchedAtLeast;
     }
 
     // ── M08 GameObject Service ──────────────────────────────────────────────
@@ -262,14 +298,17 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    var result = new GameObjectFindResultPayload();
+                    var result = new GameObjectFindResultPayload { includeHidden = p.includeHidden };
 
                     // Find by instanceId (exact match, single result)
                     if (p.instanceId != 0)
                     {
+                        result.exactInstanceIdLookup = true;
                         var go = FindByInstanceId(p.instanceId);
                         if (go != null)
                             result.gameObjects.Add(BuildInfo(go));
+                        result.returnedCount = result.gameObjects.Count;
+                        result.matchedAtLeast = result.returnedCount;
                         tcs.TrySetResult(result);
                         return;
                     }
@@ -284,16 +323,21 @@ namespace CodingRiver.UPilot
 
                     int limit = Math.Max(1, Math.Min(p.limit <= 0 ? 100 : p.limit, 1000));
                     var matches = Resources.FindObjectsOfTypeAll<GameObject>()
-                        .Where(go => go != null && go.hideFlags == HideFlags.None)
+                        .Where(go => go != null)
+                        .Where(go => p.includeHidden || go.hideFlags == HideFlags.None)
                         .Where(go => go.scene.IsValid() && go.scene.isLoaded)
                         .Where(go => p.includeInactive || go.activeInHierarchy)
                         .Where(go => string.IsNullOrEmpty(p.name) || go.name.IndexOf(p.name, StringComparison.OrdinalIgnoreCase) >= 0)
                         .Where(go => string.IsNullOrEmpty(p.tag) || string.Equals(go.tag, p.tag, StringComparison.Ordinal))
                         .Where(go => requiredComponentType == null || go.GetComponent(requiredComponentType) != null)
                         .OrderBy(BuildHierarchyPath, StringComparer.Ordinal)
-                        .Take(limit);
-                    foreach (var go in matches)
+                        .Take(limit + 1)
+                        .ToList();
+                    result.truncated = matches.Count > limit;
+                    result.matchedAtLeast = matches.Count;
+                    foreach (var go in matches.Take(limit))
                         result.gameObjects.Add(BuildInfo(go));
+                    result.returnedCount = result.gameObjects.Count;
 
                     tcs.TrySetResult(result);
                 }
@@ -395,7 +439,8 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<GameObjectDeleteResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var mutationStarted = false;
             _bridge.EnqueueTracked(id, () =>
             {
                 try
@@ -407,20 +452,47 @@ namespace CodingRiver.UPilot
                         return;
                     }
 
+                    var scene = go.scene;
+                    var target = new GameObjectDeleteTargetPayload
+                    {
+                        instanceId = p.instanceId,
+                        name = go.name,
+                        hierarchyPath = BuildHierarchyPath(go),
+                        sceneName = scene.IsValid() ? scene.name : string.Empty,
+                        scenePath = scene.IsValid() ? scene.path : string.Empty,
+                    };
+                    mutationStarted = true;
                     Undo.DestroyObjectImmediate(go);
-                    tcs.TrySetResult(true);
+                    if (scene.IsValid()) EditorSceneManager.MarkSceneDirty(scene);
+                    var afterExists = FindByInstanceId(p.instanceId) != null;
+                    tcs.TrySetResult(new GameObjectDeleteResultPayload
+                    {
+                        ok = !afterExists,
+                        operation = "delete",
+                        target = target,
+                        beforeExists = true,
+                        afterExists = afterExists,
+                        businessEffectVerified = !afterExists,
+                        sceneDirty = scene.IsValid() && scene.isDirty,
+                        saveRequired = scene.IsValid() && scene.isDirty,
+                        sideEffectsMayHaveOccurred = true,
+                    });
                 }
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
 
             try
             {
-                await tcs.Task;
-                await _bridge.SendResultAsync(id, "gameobject.delete", new GenericOkPayload { ok = true }, token);
+                await _bridge.SendResultAsync(id, "gameobject.delete", await tcs.Task, token);
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"删除 GameObject 失败：{ex.Message}", token, "gameobject.delete");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"删除 GameObject 失败：{ex.Message}", token,
+                    "gameobject.delete", new ErrorDetailPayload
+                    {
+                        commandSubmitted = true,
+                        sideEffectsMayHaveOccurred = mutationStarted,
+                    });
             }
         }
 
@@ -547,6 +619,15 @@ namespace CodingRiver.UPilot
                 isStatic = go.isStatic,
                 parentId = t.parent != null ? UPilotEntityIds.ToWireId(t.parent.gameObject) : 0,
                 hierarchyPath = BuildHierarchyPath(go),
+                hideFlags = (int)go.hideFlags,
+                hideFlagsName = go.hideFlags.ToString(),
+                sceneName = go.scene.name,
+                scenePath = go.scene.path,
+#if UNITY_6000_0_OR_NEWER
+                sceneHandle = go.scene.handle.GetRawData(),
+#else
+                sceneHandle = unchecked((ulong)(uint)go.scene.handle),
+#endif
                 componentTypes = go.GetComponents<Component>()
                     .Where(component => component != null)
                     .Select(component => component.GetType().FullName ?? component.GetType().Name)

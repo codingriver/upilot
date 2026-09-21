@@ -262,6 +262,14 @@ namespace CodingRiver.UPilot
         [InitializeOnLoadMethod]
         private static void BootstrapPersistedRunRecovery()
         {
+            string processRole = UPilotBridge.DetermineProcessRole();
+            if (!UPilotBridge.IsMainEditorProcess(processRole))
+            {
+                Debug.Log(
+                    $"[UPilotTestService] Persisted test run recovery skipped for auxiliary Unity process role '{processRole}'.");
+                return;
+            }
+
             // The bridge is initialized later than Unity Test Framework's post-PlayMode
             // resume path. Reattach during editor assembly initialization so a short test
             // cannot finish before the MCP-facing service has been constructed.

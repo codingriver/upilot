@@ -91,6 +91,7 @@ async def unity_write_batch_status(writeBatchId: str):
 @mcp.tool(
     description=(
         "Register one saved C#/asmdef/asmref/rsp change batch. paths must exist; optional deletedPaths must be absent. "
+        "A code batch may also include project-local prefab/meta or other asset deletions in deletedPaths; they are persisted as assetChanges without adding a compile. Asset-only batches remain invalid. "
         "Represent a move as its new path plus its deleted old path. Registration does not delete or move files. "
         "When compileWhenEditMode=true, EditMode batches compile after a 500ms settle window; PlayMode batches remain durable and resume only after Unity publishes authoritative EditMode."
     )
@@ -229,7 +230,11 @@ async def unity_prefab_patch(
 
 
 @mcp.tool(description="Read a bounded summary of loaded scenes, nodes, components, missing scripts, cameras and lights. Partial coverage is explicit; no complete hierarchy download.")
-async def unity_scene_summary(maxNodes: int = 2000, maxMilliseconds: int = 100, maxExamples: int = 12):
+async def unity_scene_summary(
+    maxNodes: Annotated[int, Field(strict=True, ge=1, le=10000)] = 2000,
+    maxMilliseconds: Annotated[int, Field(strict=True, ge=1, le=1000)] = 100,
+    maxExamples: Annotated[int, Field(strict=True, ge=0, le=50)] = 12,
+):
     r = await _get_facade().scene_summary(max_nodes=maxNodes, max_milliseconds=maxMilliseconds, max_examples=maxExamples)
     return _log_tool_result("unity_scene_summary", _payload(r))
 
@@ -645,16 +650,17 @@ async def unity_gameobject_create(
     return _log_tool_result("unity_gameobject_create", _payload(r))
 
 @mcp.tool(
-    description="在 Unity 场景中查找 GameObject，支持按名称、标签或 InstanceID 查找。"
+    description="在已加载 Unity 场景中查找 GameObject，支持按名称、标签、组件或 InstanceID 查找；includeHidden 默认关闭，开启时返回 HideFlags、场景身份和截断信息。"
 )
 async def unity_gameobject_find(
     name: str = "", tag: str = "", instanceId: WireIdInput = 0,
-    componentType: str = "", includeInactive: bool = True, limit: int = 100
+    componentType: str = "", includeInactive: bool = True,
+    includeHidden: bool = False, limit: int = 100
 ):
     _log_tool_call(
-        "unity_gameobject_find", {"name": name, "tag": tag, "instanceId": instanceId, "componentType": componentType, "includeInactive": includeInactive, "limit": limit}
+        "unity_gameobject_find", {"name": name, "tag": tag, "instanceId": instanceId, "componentType": componentType, "includeInactive": includeInactive, "includeHidden": includeHidden, "limit": limit}
     )
-    r = await _get_facade().gameobject_find(name=name, tag=tag, instance_id=instanceId, component_type=componentType, include_inactive=includeInactive, limit=limit)
+    r = await _get_facade().gameobject_find(name=name, tag=tag, instance_id=instanceId, component_type=componentType, include_inactive=includeInactive, include_hidden=includeHidden, limit=limit)
     return _log_tool_result("unity_gameobject_find", _payload(r))
 
 @mcp.tool(
@@ -693,7 +699,7 @@ async def unity_gameobject_modify(
     return _log_tool_result("unity_gameobject_modify", _payload(r))
 
 @mcp.tool(
-    description="销毁 Unity 场景中的 GameObject。破坏性操作：调用前先用 find/list/get 确认 instanceId 属于目标对象；不会删除磁盘资源，但会修改当前场景，之后需要 scene_save 才会持久化。"
+    description="销毁 Unity 场景中的 GameObject。破坏性操作：调用前先用 find/list/get 确认 instanceId 属于目标对象；成功回执包含目标身份、删除前后存在性、场景 dirty/saveRequired 与副作用状态。不会删除磁盘资源，但会修改当前场景，之后需要 scene_save 才会持久化。"
 )
 async def unity_gameobject_delete(instanceId: WireIdInput):
     _log_tool_call("unity_gameobject_delete", {"instanceId": instanceId})
@@ -938,7 +944,7 @@ async def unity_selection_set(
     )
     return _log_tool_result("unity_selection_set", _payload(r))
 
-@mcp.tool(description="清空 Unity 编辑器的当前选中项。")
+@mcp.tool(description="清空 Unity 编辑器的当前选中项；返回业务效果核验、changed/no-op、前后选择数量及活动对象身份。")
 async def unity_selection_clear():
     _log_tool_call("unity_selection_clear", {})
     r = await _get_facade().selection_clear()

@@ -25,6 +25,11 @@ class SessionState:
     project_path: str = ""
     platform: str = ""
     process_id: int = 0
+    process_created_at: int = 0
+    process_role: str = ""
+    identity_contract_version: int = 0
+    verification_level: str = ""
+    identity_verified: bool = False
     connected: bool = False
     authenticated: bool = False
     last_heartbeat_at: int = 0

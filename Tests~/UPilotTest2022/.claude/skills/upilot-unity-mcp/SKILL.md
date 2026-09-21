@@ -1,13 +1,21 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, and long-running Unity task monitoring.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
 ---
+
+<!-- Generated from SKILL.md.template. Do not edit SKILL.md directly. -->
 
 # UPilot Unity MCP
 
 Use UPilot with projects that install `io.github.codingriver.upilot`.
 
 Terminology: in a UPilot context, `Tracer`, `追踪器`, and `the tracer` mean UPilot Tracer (`UPilot 追踪器`). MonoHook names the internal implementation technology or preserved compatibility identifiers, not a separate user-facing feature.
+
+## Template-First Maintenance
+
+- For UPilot Agent/Skill instruction, metadata, or distributed-resource changes, read `references/installation.md` and follow its complete maintenance procedure. Use this existing Skill; do not create a parallel test-project UPilot Skill or hand-edit generated instructions, installed copies, or installed templates.
+- After each authorized editing batch, complete versioning, source generation/checks, all-five-target synchronization, and installed validation in the same task, without a separate user reminder. The completion condition is matching source and targets, not a saved template or a successful tool envelope.
+- Report missing source or synchronization/validation failures as incomplete work; do not repair outputs by hand or claim partial success as complete. Template/Markdown-only changes do not require Unity compilation or a full test suite. This is task-driven synchronization, not a background file watcher.
 
 ## Start
 
@@ -30,7 +38,7 @@ Use the unified execution state: require `ready=true`, `authoritative=true`, and
 - Target filtering uses one global default profile plus optional explicit per-point overrides; an empty point override inherits the global profile. Stack capture uses `Disabled`, `SelectedPoints`, or `AllEnabledPoints`, and defaults to `Disabled`. Name/hierarchy filters suppress events before stack capture, buffering, and Console output, while type-only lifecycle filters may reduce physical installation candidates.
 - Keep high-frequency points, stack capture, and Console output bounded; use filter statistics and rejection reasons before widening the scope.
 
-Use Streamable HTTP such as `http://127.0.0.1:8017/mcp` as the only third-party AI client transport. Never configure an AI client with a WebSocket URL, the internal Bridge port, stdio, or a command that launches the MCP Server. WebSocket transport is internal to MCP Server <-> Unity Bridge.
+Use Streamable HTTP at `http://127.0.0.1:8017/mcp` as the only third-party AI client transport. The matching health endpoint is `http://127.0.0.1:8017/health`. Never configure an AI client with a WebSocket URL, the internal Bridge port, stdio, or a command that launches the MCP Server. WebSocket transport is internal to MCP Server <-> Unity Bridge.
 
 For concurrent Unity projects, use a distinct MCP registration name and a unique HTTP/WebSocket port pair per project, but expose only each project's HTTP `/mcp` endpoint to the AI client. Always verify project identity after connecting.
 
@@ -58,6 +66,7 @@ For concurrent Unity projects, use a distinct MCP registration name and a unique
 - Accept compilation for the current batch only when the terminal state identifies that write batch/compile operation, reports `errorsVerified=true`, and has `lastCompileVerifiedAt >= writeBatchCreatedAt`. Treat `lastCompilerFinishedAt` as a compiler-boundary observation, not verified completion. Until those fields are exposed, use the result of the one safe-compile call started after EditMode rather than cached compile state.
 - Treat envelope `ok` as protocol/tool success only; an observed compiler failure may be `ok=true/status=failed`. Decide the business result from phase, terminal verification, identities, timestamps, and structured errors.
 - Never claim the latest code was compiled from a historical `completed` state, an unchanged completion timestamp, or the absence of immediate Console errors.
+- **Never use external compilers** (`csc.exe`, `mcs`, `dotnet build`, Roslyn outside Unity, or any non-Unity build tool) to validate or simulate Unity C# compilation. Only Unity's own Roslyn-based script compilation pipeline (invoked through `unity_write_batch_register` + `unity_safe_compile_and_wait` or `unity_compile`) produces authoritative compile results. External compilers differ in Unity-specific assemblies, `UNITY_EDITOR`/`UNITY_ANDROID`/platform defines, conditional compilation symbols, asmdef reference resolution, `csc.rsp`/`mcs.rsp` files, and preprocessor behavior — no external tooling can reproduce this environment.
 - Compile only after C# or assembly-related changes. Do not repeat compilation when no code changed.
 - `unity_compile` already forces one incremental script-compilation request (`AssetDatabase.Refresh` + `RequestScriptCompilation`); it is not a Clean Build and cannot bypass a disconnected Bridge, PlayMode, an active compile, or stale Editor state. Prefer the correlated write-batch workflow after code changes.
 - Starting a test, build, or async task is not success; poll to a terminal state.
@@ -79,9 +88,9 @@ Use persistent capture when logs must survive long waits, Console clears, or Age
 
 1. Call `unity_console_capture_start` before the operation. Keep its exact `sessionId`, returned one-time `ownerToken`, and output directory; never write the token to normal logs or reports.
 2. Run the task normally. Unity writes JSONL independently of MCP polling.
-3. Call `unity_console_capture_status` for counters and write failures. For simple live tails, use the previous `nextSequence` as the next `afterSequence`. For filtered or large captures, prefer `fromSequence/toSequence`, regex or keyword filters, and continue with the returned `continuationToken`; keep the first page's stable snapshot and report `totalMatchCount`, scan range/count, elapsed time, and index status.
+3. Call `unity_console_capture_status` for counters and write failures. For simple live tails, use the previous `nextSequence` as the next `afterSequence`. Filtered reads advance `nextSequence` to the last scanned record even when no records match; only a read that scans no record preserves the input cursor. For filtered or large captures, prefer `fromSequence/toSequence`, regex or keyword filters, and continue with the returned `continuationToken`; keep the first page's stable snapshot and report `totalMatchCount`, scan range/count, elapsed time, and index status.
 4. Call `unity_console_capture_stop(sessionId, ownerToken)` only for the capture owned by this task when it ends, including failure paths. An unknown or another task's capture is not an automatic cleanup target; `forceStop=true` requires an exact session and explicit authorized human disposition.
-5. Use `unity_console_capture_list` to inspect recent sessions. Do not infer ownership from a list entry or stop recovered/unknown sessions; package acceptance blocks on them instead of stopping them.
+5. Use `unity_console_capture_list(activeOnly=true)` when only the active-session summary is needed; the response reports `activeCount/returnedCount`. Do not combine it with `includeActive=false`, infer ownership from a list entry, or stop recovered/unknown sessions; package acceptance blocks on them instead of stopping them.
 6. Use `unity_console_capture_attach` and `unity_console_capture_detach` for a fixed, read-only range of another capture. Detach never stops or adopts the source; paginate an export with the same attachment request key and continuation token.
 7. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
 
@@ -110,7 +119,8 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 ## Acceptance Evidence
 
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
-- Prefer `unity_snapshot_capture`; the legacy `unity_screenshot_*` tools are compatibility wrappers over Snapshot schema v1.
+- For Profiler out-of-process (OOP) acceptance, do not automatically invoke `ShowProfilerOOP` without a verified, non-blocking, closable launch fixture with exact process identity, or guess command-line launch arguments. Identity observation is not a process start/stop cycle. Read `references/safety.md` before this workflow; abandoned acceptance stays unexecuted without renewed authorization.
+- Prefer `unity_snapshot_capture`; the legacy `unity_screenshot_*` tools are compatibility wrappers over Snapshot schema v1. Snapshot v1 exposes `syncMode=sameFrame` and `completionPolicy=allOrNothing|bestEffort`.
 - Use exact IDs from `unity_camera_list` for multi-Camera or depth capture. Depth v1 supports Built-in/URP Raw Depth and Linear Depth Float EXR with optional PNG preview; HDRP is unsupported.
 - GameView Snapshot is PlayMode-only, Display 0, Color-only final composition. Camera and GameView are offscreen-capable while Unity is minimized; SceneView and EditorWindow fail fast when minimized.
 - Resolve SceneView/EditorWindow targets with `unity_editor_windows_list` and pass the exact Unity `instanceId`; never select an operating-system window by title. SceneView evidence also requires exact `UnityEditor.SceneView`, a completed Repaint, `includesSceneGui=true`, and `includesHandles=true`.

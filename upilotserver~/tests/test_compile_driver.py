@@ -4,7 +4,7 @@ import json
 import urllib.error
 import urllib.request
 
-from upilot_mcp.compile_driver import run_compile_driver
+from upilot_mcp.compile_driver import _call_tool, run_compile_driver
 
 
 class _Response:
@@ -124,3 +124,31 @@ def test_compile_driver_reports_unavailable_service_without_starting_second_unit
     assert result["attachedToExistingEditor"] is False
     assert result["startedSecondUnityInstance"] is False
     assert "Do not launch a second Unity instance" in result["nextAction"]
+
+
+def test_compile_driver_preserves_jsonrpc_and_unstructured_tool_errors(monkeypatch) -> None:
+    responses = iter([
+        {
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32602, "message": "invalid arguments", "data": {"field": "paths"}},
+        },
+        {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {"isError": True, "content": [{"type": "text", "text": "tool failed"}]},
+        },
+    ])
+
+    def fake_urlopen(_request: urllib.request.Request, timeout: float):
+        envelope = next(responses)
+        return _Response(("event: message\r\ndata: " + json.dumps(envelope) + "\r\n\r\n").encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    rpc = _call_tool("http://127.0.0.1:1/mcp", 1, "bad", {}, 1)
+    tool = _call_tool("http://127.0.0.1:1/mcp", 2, "bad", {}, 1)
+
+    assert rpc["code"] == "MCP_JSONRPC_ERROR"
+    assert rpc["mcpError"]["data"] == {"field": "paths"}
+    assert rpc["executionStatus"] == "unknown"
+    assert tool["code"] == "MCP_TOOL_ERROR"
+    assert tool["isError"] is True
+    assert tool["content"] == [{"type": "text", "text": "tool failed"}]

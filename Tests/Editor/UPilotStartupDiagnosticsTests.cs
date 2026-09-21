@@ -6,6 +6,18 @@ namespace CodingRiver.UPilot.Tests
 {
     public class UPilotStartupDiagnosticsTests
     {
+        [TestCase("mainEditor", true)]
+        [TestCase("assetImportWorker", false)]
+        [TestCase("batchMode", false)]
+        [TestCase("worker", false)]
+        [TestCase("unknown", false)]
+        [TestCase("", false)]
+        [TestCase(null, false)]
+        public void UnifiedMainEditorProcessPredicateRejectsAuxiliaryRoles(string role, bool expected)
+        {
+            Assert.That(UPilotBridge.IsMainEditorProcess(role), Is.EqualTo(expected));
+        }
+
         [Test]
         public void MilestonesAreDeduplicatedAndLimitedToTheFiveStartupStages()
         {
@@ -227,6 +239,49 @@ namespace CodingRiver.UPilot.Tests
             status.HealthServerProcessId = 77;
             status.ProcessOwnershipEvidence = "UPilot 健康检查响应";
             Assert.That(UPilotMcpServerManager.IsVerifiedStartupHealth(status), Is.False);
+        }
+
+        [Test]
+        public void ExistingProjectServiceCanBeReattachedFromHealthAndPortIdentity()
+        {
+            var project = Path.Combine(Path.GetTempPath(), "upilot-existing-server");
+            var status = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                HealthEndpointResponded = true,
+                HealthIdentifiesUPilot = true,
+                HealthServerProcessId = 77,
+                HealthProjectPath = project,
+                ProcessId = 77,
+                ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+                ProcessOwnershipEvidence = "UPilot 健康检查响应",
+            };
+
+            Assert.That(
+                UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project),
+                Is.True,
+                "A Domain Reload may lose the tracked process and command-line evidence while health and port PID remain exact.");
+
+            status.HealthProjectPath = project + "-other";
+            Assert.That(UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project), Is.False);
+            status.HealthProjectPath = project;
+
+            status.ProcessId = 78;
+            Assert.That(UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project), Is.False);
+            status.ProcessId = 77;
+
+            status.HealthEndpointResponded = false;
+            Assert.That(UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project), Is.False);
+            status.HealthEndpointResponded = true;
+
+            status.WsPortListening = false;
+            Assert.That(UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project), Is.False);
+            status.WsPortListening = true;
+
+            status.ProcessOwnership = McpProcessOwnership.Foreign;
+            Assert.That(UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project), Is.False);
         }
 
         [Test]

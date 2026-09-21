@@ -15,11 +15,21 @@
 5. Retry once only if the operation is idempotent and non-destructive.
 6. Stop when Unity is disconnected, connected to the wrong project, or still stuck after the bounded retry.
 
+## Profiler Out-of-Process Acceptance
+
+- A Unity 6 acceptance attempt using `ProfilerWindow.ShowProfilerOOP` blocked the main Editor without establishing a manageable Profiler process. Treat this as an observed workflow risk, not proof that every Unity version has the same fault.
+- Before automatic OOP launch, require a verified, non-blocking launch fixture that identifies the exact Profiler process and can close it safely. Without that fixture, do not invoke `ShowProfilerOOP` or guess command-line arguments as a retry.
+- Report read-only process/session identity observations separately from actual process start/stop cycles. Observing an unchanged main session does not satisfy a requested cycle count.
+- Do not resume cancelled or abandoned acceptance merely because a TODO or this reference describes it. Without renewed authorization, retain its unexecuted/abandoned result rather than reporting a pass.
+- If an attempted launch blocks the Editor, follow the existing Hang diagnostics: inspect `unity_hang_status`, preserve the exact main-session identity, and collect `unity_hang_capture` when diagnostic evidence is needed. Do not automatically terminate or restart the Editor.
+- These limits concern OOP process-lifecycle acceptance, not ordinary authorized `unity_profiler_capture_start/status/stop` data collection.
+
 ## Compile
 
 - Compile only after code or assembly changes.
 - Register assembly-related disk writes immediately. Do not invoke sync or compile in PlayMode; an authorized write batch resumes automatically only after Unity reports authoritative EditMode.
 - Read structured errors before editing.
+- Compile verification must come from Unity's Roslyn pipeline. External compilers (`csc`, `mcs`, `dotnet build`) differ in defines, asmdef references, and assembly injection — do not treat their results as compile evidence.
 
 ## Configuration CSV
 

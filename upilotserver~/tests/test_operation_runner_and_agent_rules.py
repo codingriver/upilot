@@ -5,8 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 import threading
+from types import SimpleNamespace
+import importlib.util
 
 from upilot_mcp.domain.task_service import TaskDomainService, _operation_parse_object, _read_stable_artifact
+from upilot_mcp.config import CONFIG
 from upilot_mcp.responses import ok
 from upilot_mcp.tool_registry import REGISTRY
 from upilot_mcp.state_store import StateStore
@@ -62,6 +65,23 @@ class _ReflectionOperationService(_OperationService):
         return ok("req-reflection", payload)
 
 
+def _agent_service(project: Path):
+    """Bridge test double runs the parity engine; server never writes project files itself."""
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("fixture_installer", root / "skills/upilot-unity-mcp/scripts/install_upilot.py")
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    service = _OperationService(project, [])
+
+    async def call(request_id, command, payload, **kwargs):
+        assert command in {"agent.integrations.check", "agent.integrations.sync"}
+        assert payload["scope"] == "shared"
+        args = SimpleNamespace(unity_project=str(project), dry_run=not payload["apply"], http_port=CONFIG.http_port)
+        return ok(request_id, installer.synchronize_integrations(args, root, "shared"))
+    service.dispatcher = SimpleNamespace(call=call)
+    return service
+
+
 def _replace_line(text: str, prefix: str, replacement: str) -> str:
     lines = text.splitlines()
     for index, line in enumerate(lines):
@@ -74,7 +94,7 @@ def _replace_line(text: str, prefix: str, replacement: str) -> str:
 def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path: Path) -> None:
     agents = tmp_path / "AGENTS.md"
     agents.write_text("# Project Rules\n\nbusiness rule stays\n", encoding="utf-8")
-    service = _OperationService(tmp_path, [])
+    service = _agent_service(tmp_path)
 
     dry = asyncio.run(service.agent_rules_install(apply=False))
     assert dry.ok and dry.data
@@ -85,7 +105,7 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     text = agents.read_text(encoding="utf-8")
     assert applied.ok and applied.data["applied"] is True
     assert "business rule stays" in text
-    assert "rulesVersion: 30" in text
+    assert f"rulesVersion: {applied.data['installedRulesVersion']}" in text
     assert "Parent Agent rules path" in text
     assert "circular references are skipped" in text
     assert "Streamable HTTP: `http://127.0.0.1:8011/mcp`" in text
@@ -113,9 +133,22 @@ def test_agent_rules_check_and_install_preserve_existing_business_rules(tmp_path
     assert applied.data["fileSha256"]
 
 
+def test_agent_rules_renderer_uses_current_configured_http_port(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(CONFIG, "http_port", 8021)
+    service = _agent_service(tmp_path)
+
+    applied = asyncio.run(service.agent_rules_install(apply=True))
+
+    assert applied.ok and applied.data["applied"] is True
+    text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:8021/mcp" in text
+    assert "http://127.0.0.1:8021/health" in text
+    assert "http://127.0.0.1:8011/mcp" not in text
+
+
 def test_agent_rules_check_ignores_generated_timestamp_only(tmp_path: Path) -> None:
     agents = tmp_path / "AGENTS.md"
-    service = _OperationService(tmp_path, [])
+    service = _agent_service(tmp_path)
 
     applied = asyncio.run(service.agent_rules_install(apply=True))
     assert applied.ok and applied.data["applied"] is True
@@ -135,7 +168,7 @@ def test_agent_rules_check_ignores_generated_timestamp_only(tmp_path: Path) -> N
 
 def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
     agents = tmp_path / "AGENTS.md"
-    service = _OperationService(tmp_path, [])
+    service = _agent_service(tmp_path)
 
     applied = asyncio.run(service.agent_rules_install(apply=True))
     assert applied.ok and applied.data["applied"] is True
@@ -150,8 +183,8 @@ def test_agent_rules_check_detects_rules_version_change(tmp_path: Path) -> None:
 
     assert checked.ok and checked.data
     assert checked.data["needsUpdate"] is True
-    assert checked.data["recommendedRulesVersion"] == "30"
-    assert "rulesVersion differs" in checked.data["diffSummary"]
+    assert checked.data["recommendedRulesVersion"] == applied.data["installedRulesVersion"]
+    assert "managed_block_differs" in checked.data["diffSummary"]
 
 
 def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:

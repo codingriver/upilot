@@ -9,16 +9,23 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
-import subprocess
+import sqlite3
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from ..config import CONFIG
 from ..protocol import new_id, now_ms
+from ..process_identity import (
+    classify_unity_process as shared_classify_unity_process,
+    command_line_args as shared_command_line_args,
+    process_creation_time as shared_process_creation_time,
+    process_exists as shared_process_exists,
+    query_unity_processes as shared_query_unity_processes,
+)
 from ..responses import fail, ok
 
 
@@ -719,6 +726,191 @@ class ProjectAnalysisDomainService:
         output_path: str = "",
         dump_type: str = "mini",
         reserve_bytes: int = _DEFAULT_DUMP_RESERVE_BYTES,
+        wait_timeout_sec: float = 10.0,
+    ):
+        request_id = new_id("req")
+        try:
+            wait_window = float(wait_timeout_sec)
+        except (TypeError, ValueError, OverflowError):
+            wait_window = -1
+        if wait_window < 0 or wait_window > 30:
+            return fail(
+                request_id,
+                "HANG_CAPTURE_WAIT_INVALID",
+                "waitTimeoutSec must be between 0 and 30 seconds.",
+                {"waitTimeoutSec": wait_timeout_sec, "minimum": 0, "maximum": 30},
+            )
+        root = self._analysis_project_root()
+        if root is None:
+            return fail(request_id, "UNITY_PROJECT_UNKNOWN", "Unity project path is not available.")
+        state_store = getattr(self.server, "state", None)
+        if state_store is None or not hasattr(state_store, "create_hang_capture"):
+            return fail(request_id, "HANG_CAPTURE_PERSISTENCE_UNAVAILABLE", "Durable hang capture state is unavailable; no dump was started.")
+        capture_id = f"hang-{uuid.uuid4().hex}"
+        capture_state = {
+            "captureId": capture_id,
+            "projectPath": str(root.resolve()),
+            "status": "running",
+            "terminal": False,
+            "success": False,
+            "startedAt": now_ms(),
+            "endedAt": 0,
+            "outputPath": output_path,
+            "dumpType": str(dump_type or ""),
+            "reserveBytes": reserve_bytes,
+            "result": None,
+            "error": None,
+        }
+        try:
+            create_status, existing = state_store.create_hang_capture(capture_state)
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            return fail(
+                request_id,
+                "HANG_CAPTURE_PERSIST_FAILED",
+                "The capture record could not be persisted; no dump was started.",
+                {"error": str(exc), "dumpAttempted": False, "processTerminated": False},
+            )
+        if create_status != "created":
+            current = existing or {}
+            return fail(
+                request_id,
+                "HANG_CAPTURE_BUSY",
+                "Another dump capture is already active for this Server.",
+                {
+                    "captureId": str(current.get("captureId") or ""),
+                    "status": str(current.get("status") or "running"),
+                    "terminal": bool(current.get("terminal")),
+                    "dumpAttempted": bool((current.get("result") or {}).get("dumpAttempted")),
+                },
+            )
+        tasks = getattr(self, "_hang_capture_tasks", None)
+        if tasks is None:
+            tasks = {}
+            self._hang_capture_tasks = tasks
+        task = asyncio.create_task(
+            self._run_persisted_hang_capture(
+                capture_state,
+                output_path=output_path,
+                dump_type=dump_type,
+                reserve_bytes=reserve_bytes,
+            ),
+            name=f"upilot-{capture_id}",
+        )
+        tasks[capture_id] = task
+        if wait_window == 0:
+            await asyncio.sleep(0)
+            return ok(request_id, {"captureId": capture_id, "status": "running", "terminal": False})
+        try:
+            terminal_response = await asyncio.wait_for(asyncio.shield(task), timeout=wait_window)
+        except asyncio.TimeoutError:
+            current = state_store.get_hang_capture(capture_id) or capture_state
+            return ok(request_id, {
+                "captureId": capture_id,
+                "status": str(current.get("status") or "running"),
+                "terminal": False,
+                "waitWindowElapsed": True,
+            })
+        return terminal_response
+
+    async def _run_persisted_hang_capture(
+        self,
+        capture_state: dict[str, Any],
+        *,
+        output_path: str,
+        dump_type: str,
+        reserve_bytes: int,
+    ):
+        capture_id = str(capture_state["captureId"])
+        state_store = self.server.state
+
+        def persist_progress(progress: dict[str, Any]) -> None:
+            snapshot = dict(progress or {})
+            path = str(snapshot.get("path") or "")
+            if path:
+                capture_state["outputPath"] = path
+            capture_state["result"] = snapshot
+            state_store.save_hang_capture(capture_state)
+
+        try:
+            response = await self._hang_capture_execute(
+                output_path=output_path,
+                dump_type=dump_type,
+                reserve_bytes=reserve_bytes,
+                progress_callback=persist_progress,
+            )
+        except Exception as exc:
+            response = fail(new_id("req"), "HANG_CAPTURE_INTERNAL_ERROR", str(exc), {"dumpAttempted": False})
+        capture_state.update({
+            "status": "completed" if response.ok else "failed",
+            "terminal": True,
+            "success": bool(response.ok),
+            "endedAt": now_ms(),
+            "result": dict(response.data or {}) if response.ok else None,
+            "error": ({
+                "code": response.error.code,
+                "message": response.error.message,
+                "detail": dict(response.error.detail),
+            } if response.error is not None else None),
+        })
+        try:
+            state_store.save_hang_capture(capture_state)
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            original_detail = (
+                dict(response.data or {})
+                if response.ok
+                else dict(response.error.detail) if response.error is not None else {}
+            )
+            response = fail(
+                new_id("req"),
+                "HANG_CAPTURE_PERSIST_FAILED",
+                "The dump attempt ended, but its terminal result could not be persisted.",
+                {
+                    **original_detail,
+                    "captureId": capture_id,
+                    "status": "persistence_failed",
+                    "terminal": False,
+                    "persistenceError": str(exc),
+                    "nextAction": "Query the same captureId after Server recovery; do not infer success from file existence or start another dump.",
+                },
+            )
+        finally:
+            tasks = getattr(self, "_hang_capture_tasks", {})
+            tasks.pop(capture_id, None)
+        if response.error is not None and response.error.code == "HANG_CAPTURE_PERSIST_FAILED":
+            return response
+        if response.ok:
+            response.data = {
+                **(response.data or {}),
+                "captureId": capture_id,
+                "status": "completed",
+                "terminal": True,
+            }
+        elif response.error is not None:
+            response.error.detail.update({
+                "captureId": capture_id,
+                "status": "failed",
+                "terminal": True,
+            })
+        return response
+
+    async def hang_capture_status(self, capture_id: str):
+        request_id = new_id("req")
+        normalized = str(capture_id or "").strip()
+        if not normalized:
+            return fail(request_id, "HANG_CAPTURE_ID_REQUIRED", "captureId is required.")
+        state_store = getattr(self.server, "state", None)
+        state = state_store.get_hang_capture(normalized) if state_store is not None and hasattr(state_store, "get_hang_capture") else None
+        if state is None:
+            return fail(request_id, "HANG_CAPTURE_NOT_FOUND", "The requested hang capture was not found.", {"captureId": normalized})
+        result = dict(state.get("result") or {})
+        return ok(request_id, {**result, **state})
+
+    async def _hang_capture_execute(
+        self,
+        output_path: str = "",
+        dump_type: str = "mini",
+        reserve_bytes: int = _DEFAULT_DUMP_RESERVE_BYTES,
+        progress_callback: Any = None,
     ):
         request_id = new_id("req")
         if not self._windows_dump_supported():
@@ -766,6 +958,13 @@ class ProjectAnalysisDomainService:
             target.relative_to(root)
         except (OSError, ValueError):
             return fail(request_id, "HANG_DUMP_PATH_INVALID", "Dump path must stay under the Unity project.", {"path": str(target)})
+        if target.exists():
+            return fail(
+                request_id,
+                "HANG_DUMP_PATH_EXISTS",
+                "Dump output already exists and will not be overwritten.",
+                {"path": str(target), "dumpAttempted": False, "processTerminated": False},
+            )
 
         effective_reserve = max(requested_reserve, _DEFAULT_DUMP_RESERVE_BYTES)
         memory = await asyncio.to_thread(
@@ -784,6 +983,20 @@ class ProjectAnalysisDomainService:
             "dumpAttempted": False,
             "processTerminated": False,
         }
+        if progress_callback is not None:
+            try:
+                progress_callback(preflight)
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                return fail(
+                    request_id,
+                    "HANG_CAPTURE_PERSIST_FAILED",
+                    "The capture target could not be persisted; no dump was started.",
+                    {
+                        **preflight,
+                        "persistenceError": str(exc),
+                        "nextAction": "Restore durable capture state before starting another dump.",
+                    },
+                )
         memory_details = {key: value for key, value in memory.items() if key != "ok"}
         if not memory.get("ok"):
             preflight.update(memory_details)
@@ -848,6 +1061,21 @@ class ProjectAnalysisDomainService:
 
         target.parent.mkdir(parents=True, exist_ok=True)
         preflight["dumpAttempted"] = True
+        if progress_callback is not None:
+            try:
+                progress_callback(preflight)
+            except (OSError, sqlite3.Error, RuntimeError) as exc:
+                preflight["dumpAttempted"] = False
+                return fail(
+                    request_id,
+                    "HANG_CAPTURE_PERSIST_FAILED",
+                    "The dump-start intent could not be persisted; no dump was started.",
+                    {
+                        **preflight,
+                        "persistenceError": str(exc),
+                        "nextAction": "Restore durable capture state before starting another dump.",
+                    },
+                )
         success, error_code = await asyncio.to_thread(
             self._write_windows_minidump,
             pid,
@@ -870,7 +1098,7 @@ class ProjectAnalysisDomainService:
             )
         try:
             actual_bytes = target.stat().st_size
-            sha256 = self._file_sha256(target)
+            sha256 = await asyncio.to_thread(self._file_sha256, target)
             after_space = await asyncio.to_thread(self._volume_space, self._existing_ancestor(target.parent))
         except OSError as ex:
             partial = self._partial_dump_metadata(target)
@@ -1106,41 +1334,11 @@ class ProjectAnalysisDomainService:
 
     @staticmethod
     def _process_creation_time(pid: int, handle=None) -> int:
-        if os.name != "nt" or pid <= 0:
-            return 0
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.restype = ctypes.c_void_p
-        kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel.GetProcessTimes.argtypes = [ctypes.c_void_p, *([ctypes.POINTER(ctypes.c_ulonglong)] * 4)]
-        owned = handle is None
-        handle = kernel.OpenProcess(0x1000, False, pid) if owned else handle
-        if not handle:
-            return 0
-        try:
-            times = [ctypes.c_ulonglong() for _ in range(4)]
-            return times[0].value if kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)) else 0
-        finally:
-            if owned:
-                kernel.CloseHandle(handle)
+        return shared_process_creation_time(pid, handle)
 
     @staticmethod
     def _command_line_args(command_line: str) -> list[str]:
-        if os.name != "nt":
-            return shlex.split(command_line)
-        shell = ctypes.WinDLL("shell32", use_last_error=True)
-        shell.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
-        shell.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.LocalFree.argtypes = [ctypes.c_void_p]
-        count = ctypes.c_int()
-        arguments = shell.CommandLineToArgvW(command_line, ctypes.byref(count))
-        if not arguments:
-            return []
-        try:
-            return [arguments[i] for i in range(count.value)]
-        finally:
-            kernel.LocalFree(arguments)
+        return shared_command_line_args(command_line)
 
     @classmethod
     def _matches_editor_process(cls, row: dict, project_root: Path | None) -> bool:
@@ -1148,138 +1346,15 @@ class ProjectAnalysisDomainService:
 
     @classmethod
     def _classify_unity_process(cls, row: dict, project_root: Path | None) -> dict[str, Any]:
-        process_id = int(row.get("ProcessId") or 0)
-        executable_path = str(row.get("ExecutablePath") or "")
-        command_line = str(row.get("CommandLine") or "")
-        details: dict[str, Any] = {
-            "processId": process_id,
-            "executablePath": executable_path,
-            "processCreatedAt": int(row.get("ProcessCreatedAt") or 0),
-            "processRole": "unknown",
-            "projectPath": "",
-            "projectPathMatches": False,
-            "executableVerified": False,
-            "eligibleMainEditor": False,
-            "exclusionReasons": [],
-        }
-        reasons: list[str] = details["exclusionReasons"]
-        if process_id <= 0:
-            reasons.append("invalid_process_id")
-        if not executable_path or Path(executable_path).name.lower() != "unity.exe":
-            reasons.append("executable_not_unity")
-        else:
-            details["executableVerified"] = True
-        if not command_line:
-            reasons.append("command_line_unavailable")
-            return details
-        try:
-            args = cls._command_line_args(command_line)
-            lowered = [arg.lower() for arg in args]
-            asset_import_worker = any("assetimportworker" in arg for arg in lowered)
-            worker_switch = any(
-                arg in ("-adb2", "-batchmode", "/batchmode", "-ump") or arg.startswith("-worker")
-                for arg in lowered
-            )
-            if asset_import_worker:
-                details["processRole"] = "assetImportWorker"
-                reasons.append("worker_role")
-            elif worker_switch:
-                details["processRole"] = "worker"
-                reasons.append("worker_role")
-            else:
-                details["processRole"] = "editor"
-            indexes = [i for i, arg in enumerate(lowered) if arg == "-projectpath"]
-            if len(indexes) != 1 or indexes[0] + 1 >= len(args):
-                reasons.append("project_path_missing_or_ambiguous")
-                return details
-            actual = Path(args[indexes[0] + 1]).resolve()
-            details["projectPath"] = str(actual)
-            if project_root is None:
-                reasons.append("project_path_unavailable")
-            elif os.path.normcase(str(actual)) == os.path.normcase(str(project_root.resolve())):
-                details["projectPathMatches"] = True
-            else:
-                reasons.append("project_path_mismatch")
-        except (OSError, ValueError) as ex:
-            reasons.append("command_line_parse_failed")
-            details["parseError"] = str(ex)
-        details["eligibleMainEditor"] = not reasons
-        return details
+        return shared_classify_unity_process(row, project_root)
 
     @staticmethod
     def _process_exists(pid: int) -> bool:
-        if pid <= 0:
-            return False
-        if os.name == "nt":
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if not handle:
-                return False
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+        return shared_process_exists(pid)
 
     @staticmethod
     def _query_unity_processes() -> tuple[list[dict], dict[str, Any]]:
-        if os.name != "nt":
-            return [], {
-                "processQuerySucceeded": False,
-                "processQueryError": "unsupported_platform",
-                "processQueryExitCode": None,
-            }
-        command = (
-            "@(Get-CimInstance Win32_Process -Filter \"Name='Unity.exe'\" | "
-            "Select-Object ProcessId,CommandLine,ExecutablePath,"
-            "@{Name='ProcessCreatedAt';Expression={$_.CreationDate.ToFileTimeUtc()}}) | ConvertTo-Json -Compress"
-        )
-        try:
-            completed = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if completed.returncode != 0:
-                return [], {
-                    "processQuerySucceeded": False,
-                    "processQueryError": (completed.stderr or "process query failed").strip()[:2048],
-                    "processQueryExitCode": completed.returncode,
-                }
-            if not completed.stdout.strip():
-                return [], {
-                    "processQuerySucceeded": True,
-                    "processQueryError": "",
-                    "processQueryExitCode": 0,
-                }
-            parsed = json.loads(completed.stdout)
-            rows = parsed if isinstance(parsed, list) else [parsed]
-            return [row for row in rows if isinstance(row, dict)], {
-                "processQuerySucceeded": True,
-                "processQueryError": "",
-                "processQueryExitCode": 0,
-            }
-        except subprocess.TimeoutExpired:
-            return [], {
-                "processQuerySucceeded": False,
-                "processQueryError": "process_query_timeout",
-                "processQueryExitCode": None,
-            }
-        except json.JSONDecodeError as ex:
-            return [], {
-                "processQuerySucceeded": False,
-                "processQueryError": f"invalid_process_query_json: {ex}",
-                "processQueryExitCode": None,
-            }
-        except (OSError, ValueError, subprocess.SubprocessError) as ex:
-            return [], {
-                "processQuerySucceeded": False,
-                "processQueryError": str(ex),
-                "processQueryExitCode": None,
-            }
+        return shared_query_unity_processes()
 
     @staticmethod
     def _write_windows_minidump(pid: int, target: Path, dump_type: str, expected_created_at: int) -> tuple[bool, int]:

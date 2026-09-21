@@ -25,6 +25,7 @@ from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+_PREDISPATCH_STALE_ERROR = "Unity Editor context is stale, unknown, or recovering after Domain Reload."
 
 
 def _normalize_reflection_parameters(parameters: list | None) -> list:
@@ -249,6 +250,7 @@ class ResourceDomainService:
         roots = self._code_write_roots(project_root)
         changes: dict[str, dict] = {}
         newest_mtime = 0
+        has_code_change = False
         for kind, entries in (("write", paths), ("delete", deleted_paths or [])):
             for raw in entries:
                 try:
@@ -256,7 +258,8 @@ class ResourceDomainService:
                     if not original.is_absolute():
                         original = project_root / original
                     candidate = original.resolve()
-                    if candidate.suffix.lower() not in self._CODE_WRITE_EXTENSIONS:
+                    is_code_change = candidate.suffix.lower() in self._CODE_WRITE_EXTENSIONS
+                    if kind == "write" and not is_code_change:
                         return fail(request_id, "UNSUPPORTED_WRITE_BATCH_FILE", f"Unsupported assembly-related file: {raw}")
                     if not any(candidate == root or root in candidate.parents for root in roots):
                         return fail(request_id, "WRITE_BATCH_PATH_OUTSIDE_PROJECT", f"Path is outside the Unity project and resolved local UPM roots: {raw}")
@@ -278,8 +281,17 @@ class ResourceDomainService:
                             return fail(request_id, "WRITE_BATCH_FILE_CHANGED", f"File changed while registering: {raw}")
                         newest_mtime = max(newest_mtime, int(after.st_mtime_ns // 1_000_000))
                     changes[key] = {"path": normalized_path, "kind": kind, "contentSha256": content_hash}
+                    has_code_change = has_code_change or is_code_change
                 except (OSError, ValueError, RuntimeError) as exc:
                     return fail(request_id, "WRITE_BATCH_PATH_INVALID", f"Could not inspect {raw}: {exc}")
+
+        if not has_code_change:
+            return fail(
+                request_id,
+                "WRITE_BATCH_CODE_CHANGE_REQUIRED",
+                "Asset deletions may accompany an assembly-related change but cannot form a compile batch by themselves.",
+                {"sideEffectsMayHaveOccurred": False},
+            )
 
         self.server.state.configure_project(str(project_root))
         batch = self.server.state.register_write_batch(
@@ -344,7 +356,11 @@ class ResourceDomainService:
             if not batch["compileWhenEditMode"]:
                 continue
             if batch["status"] == "recovery_required":
-                continue
+                if not self.server.state.defer_write_batch_after_predispatch_failure(
+                    str(batch["writeBatchId"]), _PREDISPATCH_STALE_ERROR
+                ):
+                    continue
+                batch = self.server.state.get_write_batch(str(batch["writeBatchId"])) or batch
             # A write registered after Unity had already begun an automatic
             # compile cannot borrow that compile's result.  Leave this batch
             # pending; the next fresh EditMode execution snapshot schedules
@@ -361,6 +377,9 @@ class ResourceDomainService:
             ):
                 continue
             batch_id = str(batch["writeBatchId"])
+            stored = self.server.state.get_write_batch(batch_id)
+            if stored and stored.get("terminal") and stored.get("correlationVerified"):
+                continue
             self.server.state.mark_write_batch(batch_id, "syncing")
             self.server.state.mark_write_batch(batch_id, "compiling")
             result = await self.safe_compile_and_wait(
@@ -383,6 +402,20 @@ class ResourceDomainService:
                 and stored.get("outcome") in {"passed", "failed"}
             )
             if not (result.ok and correlation_verified and phase in {"completed", "failed"} and persisted_terminal):
+                error_code = str(result.error.code if result.error else "")
+                error_detail = result.error.detail if result.error else {}
+                if (
+                    error_detail.get("dispatchAttempted") is False
+                    and error_code in {
+                        "COMMAND_TIMEOUT",
+                        "EDITOR_BUSY",
+                        "EDITOR_CONTEXT_NOT_READY",
+                        "EDITOR_IN_PLAY_MODE",
+                        "UNITY_NOT_CONNECTED",
+                    }
+                ):
+                    self.server.state.mark_write_batch(batch_id, "deferred")
+                    continue
                 message = (
                     result.error.message
                     if result.error
@@ -1469,7 +1502,8 @@ class ResourceDomainService:
 
     async def gameobject_find(
         self, name: str = "", tag: str = "", instance_id: int | str = 0,
-        component_type: str = "", include_inactive: bool = True, limit: int = 100,
+        component_type: str = "", include_inactive: bool = True,
+        include_hidden: bool = False, limit: int = 100,
     ) -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {}
@@ -1482,6 +1516,7 @@ class ResourceDomainService:
         if component_type:
             payload["componentType"] = component_type
         payload["includeInactive"] = include_inactive
+        payload["includeHidden"] = include_hidden
         payload["limit"] = max(1, min(int(limit), 1000))
         return await self.dispatcher.call(request_id, "gameobject.find", payload)
 

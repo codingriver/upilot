@@ -37,6 +37,11 @@ def _project_config_path() -> Path:
     return (Path.cwd() / ".upilot" / "config.json").resolve()
 
 
+def configured_project_root() -> Path:
+    """Return the trusted project root implied by the Server startup config."""
+    return _project_config_path().parent.parent.resolve()
+
+
 def load_config() -> UPilotConfig:
     raw: dict[str, Any] = {}
     path = _project_config_path()

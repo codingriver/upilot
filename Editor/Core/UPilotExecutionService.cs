@@ -317,7 +317,9 @@ namespace CodingRiver.UPilot
                             payload.maxTotalNodes,
                             payload.includeStatic,
                             ignoreSet,
-                            ref totalNodes);
+                            ref totalNodes,
+                            payload.expandUnityValueTypes,
+                            payload.expandReflectionTypes);
 
                         var result = new ObjectDumpResultPayload
                         {
@@ -325,11 +327,15 @@ namespace CodingRiver.UPilot
                             root = root,
                             totalNodes = totalNodes,
                             truncated = totalNodes >= payload.maxTotalNodes,
+                            unityValueTypesExpanded = payload.expandUnityValueTypes,
                         };
                         if (result.truncated)
                             result.truncateReason = "Reached maxTotalNodes limit (" + payload.maxTotalNodes + ")";
 
-                        result.text = ObjectDumper.FormatAsText(root, payload.indentation);
+                        result.text = ObjectDumper.FormatAsText(
+                            root,
+                            payload.indentation,
+                            payload.includeTypeNames);
                         tcs.SetResult(result);
                     }
                     catch (Exception ex) { tcs.SetException(ex); }
@@ -657,12 +663,13 @@ namespace CodingRiver.UPilot
         private static ExecutionContractException WrapEvaluationException(Exception ex, CSharpEvaluationContext context,
             string sessionId, UPilotReflectionService.CallExecutionBoundary boundary = null)
         {
-            if (ex is AggregateException aggregate && aggregate.InnerExceptions.Count == 1) ex = aggregate.InnerExceptions[0];
+            ex = UnwrapInvocationException(ex);
             if (ex is OperationCanceledException)
                 ex = new ExecutionContractException("EXECUTION_CANCELLED", "Execution was cancelled.",
                     new Dictionary<string, object> { { "stage", "cancelled" } });
             var contract = ex as ExecutionContractException;
             var detail = new Dictionary<string, object>(contract?.Detail ?? new Dictionary<string, object>());
+            PreserveExceptionEvidence(detail, ex);
             if (context != null && context.SideEffectsMayHaveOccurred) boundary?.Enter();
             bool sideEffects = (boundary?.SideEffectsMayHaveOccurred ?? false)
                 || (context != null && context.SideEffectsMayHaveOccurred)
@@ -735,10 +742,7 @@ namespace CodingRiver.UPilot
         internal static void ValidateArgumentStructure(string json)
         {
             if (string.IsNullOrWhiteSpace(json)) return;
-            ValidateTypedEnvelopeJson(json, false);
-            var envelope = JsonUtility.FromJson<ExecutionArgumentsEnvelope>(json);
-            if (envelope?.items == null)
-                throw new ExecutionContractException("INVALID_PARAMS", "argumentsJson must contain an items array.");
+            var envelope = ParseArguments(json);
             foreach (var item in envelope.items)
             {
                 if (item == null || (!string.IsNullOrEmpty(item.direction) &&
@@ -765,10 +769,13 @@ namespace CodingRiver.UPilot
         internal void ValidateArgumentBindings(string json, string sessionId, int maxArrayElements = 100000)
         {
             if (string.IsNullOrWhiteSpace(json)) return;
-            ValidateArgumentStructure(json);
-            var envelope = JsonUtility.FromJson<ExecutionArgumentsEnvelope>(json);
+            ValidateArgumentBindings(ParseArguments(json), sessionId, maxArrayElements);
+        }
+
+        internal void ValidateArgumentBindings(ExecutionArgumentsEnvelope envelope, string sessionId, int maxArrayElements = 100000)
+        {
             var arrayBudget = new ExecutionBudget(maxArrayElements: maxArrayElements);
-            foreach (var argument in envelope.items)
+            foreach (var argument in envelope?.items ?? Array.Empty<ExecutionArgumentSpec>())
                 ValidateValueBinding(argument.value, sessionId, arrayBudget);
         }
 
@@ -812,8 +819,14 @@ namespace CodingRiver.UPilot
         internal List<ExecutionValue> DecodeArguments(string json, string sessionId, Action beforeUserCode = null, int maxArrayElements = 100000)
         {
             if (string.IsNullOrWhiteSpace(json)) return new List<ExecutionValue>();
-            ValidateArgumentBindings(json, sessionId, maxArrayElements);
-            var envelope = JsonUtility.FromJson<ExecutionArgumentsEnvelope>(json) ?? new ExecutionArgumentsEnvelope();
+            return DecodeArguments(ParseArguments(json), sessionId, beforeUserCode, maxArrayElements);
+        }
+
+        internal List<ExecutionValue> DecodeArguments(ExecutionArgumentsEnvelope envelope, string sessionId,
+            Action beforeUserCode = null, int maxArrayElements = 100000)
+        {
+            envelope = envelope ?? new ExecutionArgumentsEnvelope();
+            ValidateArgumentBindings(envelope, sessionId, maxArrayElements);
             return (envelope.items ?? Array.Empty<ExecutionArgumentSpec>()).Select(item => new ExecutionValue
             {
                 Name = item.name ?? "",
@@ -857,7 +870,8 @@ namespace CodingRiver.UPilot
             Type declared = string.IsNullOrWhiteSpace(spec.typeName) ? null : ExecutionTypeResolver.Resolve(spec.typeName);
             if (!string.IsNullOrWhiteSpace(spec.typeName) && declared == null)
                 throw new ExecutionContractException("TYPE_NOT_FOUND", "Argument type not found: " + spec.typeName);
-            if (declared != null && !IsInlineType(declared)) beforeUserCode?.Invoke();
+            // JsonUtility DTO decoding does not invoke user constructors or members. The
+            // boundary is crossed later if binding, invocation, or result encoding runs user code.
             return ParseLiteral(spec.valueJson, declared);
         }
 
@@ -1017,10 +1031,7 @@ namespace CodingRiver.UPilot
         private static ExecutionVariablesEnvelope ValidateVariableStructure(string json)
         {
             if (string.IsNullOrWhiteSpace(json)) return new ExecutionVariablesEnvelope();
-            ValidateTypedEnvelopeJson(json, true);
-            var envelope = JsonUtility.FromJson<ExecutionVariablesEnvelope>(json);
-            if (envelope?.items == null)
-                throw new ExecutionContractException("INVALID_PARAMS", "variablesJson must contain an items array.");
+            var envelope = ParseVariables(json);
             var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in envelope.items)
             {
@@ -1045,7 +1056,72 @@ namespace CodingRiver.UPilot
 
         // JsonUtility intentionally ignores unknown and duplicate fields. Validate the typed wire
         // shape first, while it is still possible to reject before DTO construction or conversion.
-        private static void ValidateTypedEnvelopeJson(string json, bool variables)
+        internal static ExecutionArgumentsEnvelope ParseArguments(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new ExecutionArgumentsEnvelope();
+            var root = ValidateTypedEnvelopeJson(json, false);
+            var rootFields = ReadObjectFields(root, "$");
+            var result = new List<ExecutionArgumentSpec>();
+            int index = 0;
+            foreach (var item in ReadArrayItems(rootFields["items"], "$.items"))
+            {
+                string path = "$.items[" + index++ + "]";
+                var fields = ReadObjectFields(item, path);
+                result.Add(new ExecutionArgumentSpec
+                {
+                    name = fields.TryGetValue("name", out var name) ? ReadString(name, path + ".name") : string.Empty,
+                    direction = fields.TryGetValue("direction", out var direction)
+                        ? ReadString(direction, path + ".direction") : "in",
+                    value = BuildTypedValue(fields["value"], path + ".value"),
+                });
+            }
+            return new ExecutionArgumentsEnvelope { items = result.ToArray() };
+        }
+
+        private static ExecutionVariablesEnvelope ParseVariables(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new ExecutionVariablesEnvelope();
+            var root = ValidateTypedEnvelopeJson(json, true);
+            var rootFields = ReadObjectFields(root, "$");
+            var result = new List<ExecutionVariableSpec>();
+            int index = 0;
+            foreach (var item in ReadArrayItems(rootFields["items"], "$.items"))
+            {
+                string path = "$.items[" + index++ + "]";
+                var fields = ReadObjectFields(item, path);
+                result.Add(new ExecutionVariableSpec
+                {
+                    name = ReadString(fields["name"], path + ".name"),
+                    value = BuildTypedValue(fields["value"], path + ".value"),
+                });
+            }
+            return new ExecutionVariablesEnvelope { items = result.ToArray() };
+        }
+
+        private static TypedValueSpec BuildTypedValue(System.Xml.XmlElement node, string path)
+        {
+            var fields = ReadObjectFields(node, path);
+            var value = new TypedValueSpec();
+            if (fields.TryGetValue("kind", out var kind)) value.kind = ReadString(kind, path + ".kind");
+            if (fields.TryGetValue("typeName", out var typeName)) value.typeName = ReadString(typeName, path + ".typeName");
+            if (fields.TryGetValue("valueJson", out var valueJson)) value.valueJson = ReadString(valueJson, path + ".valueJson");
+            if (fields.TryGetValue("handle", out var handle)) value.handle = ReadString(handle, path + ".handle");
+            if (fields.TryGetValue("instanceId", out var instanceId)) value.instanceId = ReadInt32(instanceId, path + ".instanceId");
+            if (fields.TryGetValue("globalObjectId", out var globalObjectId)) value.globalObjectId = ReadString(globalObjectId, path + ".globalObjectId");
+            if (fields.TryGetValue("assetGuid", out var assetGuid)) value.assetGuid = ReadString(assetGuid, path + ".assetGuid");
+            if (fields.TryGetValue("hierarchyPath", out var hierarchyPath)) value.hierarchyPath = ReadString(hierarchyPath, path + ".hierarchyPath");
+            if (fields.TryGetValue("items", out var items))
+            {
+                var children = new List<TypedValueSpec>();
+                int index = 0;
+                foreach (var child in ReadArrayItems(items, path + ".items"))
+                    children.Add(BuildTypedValue(child, path + ".items[" + index++ + "]"));
+                value.items = children.ToArray();
+            }
+            return value;
+        }
+
+        private static System.Xml.XmlElement ValidateTypedEnvelopeJson(string json, bool variables)
         {
             int byteCount = Encoding.UTF8.GetByteCount(json);
             if (byteCount > 1048576)
@@ -1099,6 +1175,7 @@ namespace CodingRiver.UPilot
                     ValidateTypedValueJson(value, path + ".value", 0);
                 }
             }
+            return root;
         }
 
         private static void ValidateTypedValueJson(System.Xml.XmlElement node, string path, int depth)
@@ -1458,9 +1535,10 @@ namespace CodingRiver.UPilot
             catch (Exception ex) { await _bridge.SendErrorAsync(id, "EXECUTION_RUNTIME_ERROR", ex.GetType().FullName + ": " + ex.Message, token, command); }
         }
 
-        private static ErrorDetailPayload ToErrorDetail(ExecutionContractException ex, string id, string command)
+        internal static ErrorDetailPayload ToErrorDetail(ExecutionContractException ex, string id, string command)
         {
             var detail = ex.Detail ?? new Dictionary<string, object>();
+            PreserveExceptionEvidence(detail, ex);
             string stage = detail.TryGetValue("stage", out var stageValue) ? Convert.ToString(stageValue, CultureInfo.InvariantCulture) :
                 ex.Code == "EXECUTION_CANCELLED" ? "cancelled" :
                 ex.Code.StartsWith("CSHARP_PARSE", StringComparison.Ordinal) || ex.Code == "CSHARP_UNSUPPORTED_SYNTAX" ? "parse" :
@@ -1504,9 +1582,51 @@ namespace CodingRiver.UPilot
                 candidates = candidateItems,
                 executionDiagnostics = executionDiagnostics,
                 cleanupDiagnostics = cleanupDiagnostics,
-                exceptionType = ex.GetType().FullName,
-                stackTrace = BoundedStack(ex.StackTrace),
+                exceptionType = DetailString(detail, "exceptionType", ex.GetType().FullName),
+                exceptionMessage = DetailString(detail, "exceptionMessage", ex.Message),
+                wrapperExceptionType = DetailString(detail, "wrapperExceptionType", ""),
+                stackTrace = BoundedStack(DetailString(detail, "stackTrace", ex.StackTrace)),
             };
+        }
+
+        internal static Exception UnwrapInvocationException(Exception ex)
+        {
+            while (ex != null)
+            {
+                if (ex is AggregateException aggregate && aggregate.InnerExceptions.Count == 1)
+                {
+                    ex = aggregate.InnerExceptions[0];
+                    continue;
+                }
+                if (ex is TargetInvocationException invocation && invocation.InnerException != null)
+                {
+                    ex = invocation.InnerException;
+                    continue;
+                }
+                break;
+            }
+            return ex ?? new InvalidOperationException("Unknown execution failure.");
+        }
+
+        internal static void PreserveExceptionEvidence(IDictionary<string, object> detail, Exception ex)
+        {
+            if (detail == null || ex == null) return;
+            var original = UnwrapInvocationException(ex);
+            if (!detail.ContainsKey("exceptionType")) detail["exceptionType"] = original.GetType().FullName;
+            if (!detail.ContainsKey("exceptionMessage")) detail["exceptionMessage"] = original.Message ?? "";
+            if (!detail.ContainsKey("stackTrace")) detail["stackTrace"] = BoundedStack(original.StackTrace);
+            string originalType = Convert.ToString(detail["exceptionType"], CultureInfo.InvariantCulture);
+            string wrapperType = ex.GetType().FullName;
+            if (!string.Equals(originalType, wrapperType, StringComparison.Ordinal)
+                && !detail.ContainsKey("wrapperExceptionType"))
+                detail["wrapperExceptionType"] = wrapperType;
+        }
+
+        private static string DetailString(IDictionary<string, object> detail, string key, string fallback)
+        {
+            if (detail != null && detail.TryGetValue(key, out var value) && value != null)
+                return Convert.ToString(value, CultureInfo.InvariantCulture) ?? fallback ?? "";
+            return fallback ?? "";
         }
 
         private static SourceSpanPayload ToSourceSpan(IDictionary<string, object> detail)

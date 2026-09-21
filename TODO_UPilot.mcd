@@ -1,6 +1,42 @@
 ﻿# UPilot Improvement Backlog
 
-## UPilot-20260918-WriteBatchMixedResourceDeletion：写入批次应可同时记录资源删除（P3，Open）
+## 2026-09-21 xclient2 现场补充：WriteBatch 关联与 TypeValueBinding（P1/P2，Open）
+
+- 日期/触发场景：2026-09-21，`F:\xclient2` 合并弹道编辑器预警资源生成入口。
+- 当前痛点：批次 `wb-158d717f-03eb-45c7-b43a-0217ebe91024` 的编译状态已携带同一批次 ID/创建时间、`errorsVerified=true`、0 Error / 0 Warning且验证时间晚于创建时间，但 `unity_safe_compile_and_wait` 仍返回 `COMPILE_CORRELATION_NOT_VERIFIED` 并再次编译；`csharp_eval` 同时把显式 `System.Type` 值的 `GetMethod` 错绑为被代表窗口类型的成员，并给出不准确的可能副作用标记。
+- 期望能力：合并到既有 WriteBatch 持久查询/attach-or-start 与 `TypeValueBinding` 条目；匹配的自动编译只附着一次并返回一致关联终态，Type 值按 `System.Type` 实例绑定并报告候选签名、被代表类型和准确执行边界。
+- 预期效率收益：每批减少 2～4 次状态查询及一次 Domain Reload；每次私有成员核验减少 2～4 次失败调用。
+- 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 复现自动编译抢先开始后登记批次，安全等待启动计数为 1 且同批次 `terminal/errorsVerified/correlationVerified=true`；覆盖 `Type.GetType`、对象 `GetType()`、显式 Type 变量的 `GetMethod/GetField` 唯一绑定与零副作用失败。
+- 相关工具/路径：`unity_write_batch_register`、`unity_mcp_status`、`unity_safe_compile_and_wait`、`csharp_eval`、`F:\xclient2\TODO_UPilot.mcd`。建议归属：通用 UPilot/MCP。状态：Open。WriteBatch 优先级 P1，TypeValueBinding 优先级 P2。
+
+## UPilot-20260920-MethodProfilingInstrumentation：无业务源码修改的方法计时需验证覆盖与观测扰动（P2，待评估）
+
+- 日期/场景：2026-09-20，用户要求联网比较 C#/Unity 自动性能插桩、运行时 Hook 与 DLL IL 改写；本轮仅调研与只读源码核对，未安装工具、启用追踪、改写 DLL 或运行性能测试。
+- 现象/证据：`Editor/Optional/MonoHook.Tracing/UPilotMonoHookInstallationService.cs:1029` 的动态生命周期入口扫描 MonoBehaviour 无参 void 方法；`UPilotMonoHookProxyFactory.cs:68` 按既有模板生成代理，不是已验证的任意签名计时器。`Editor/Core/UPilotRuntimeDiagnosticsService.cs:585` 明确 Recorder 只提供聚合值；已有低扰动采集、自遥测和 UP-029 验收不应重建或误记为缺失。
+- 影响流程：希望通过 MCP 按 assembly/namespace/type/method 筛选、无需改业务 C# 即获得方法耗时的诊断；目前不能把已有生命周期代理等同于任意方法覆盖，也不能从每帧聚合值宣称逐次调用 P95、self time 或完整调用树。
+- 建议改进：先验证一个有界的同步托管方法计时原型，复用现有采集服务；返回候选/安装/跳过/失败及具体原因、实际运行时/架构、安装耗时、调用数与 inclusive 时间口径、采集器开销和清理结果。保留按当前调用语义执行一次、异常不变、try/finally 收尾、Hook 所有权及 Reload 清理；泛型共享、内联、ref/out/值类型返回、async/iterator、Burst/native 和并发安装边界未经验证时明确拒绝或标记不覆盖。
+- 选型依据：Needle Selective Profiling 的原始仓库提供无 Domain Reload 的按方法启停；Unity Netcode 官方 `NetworkBehaviourILPP` 展示 `ILPostProcessor + Mono.Cecil` 处理程序集。允许重编译/Reload 时应将 IL 后处理列为候选，预编译 DLL 单独验证加载前改写及备份恢复，不预先要求实现双后端。Unity 官方 2026-06-16《CoreCLR, Scripting, and Serialization Update》将 CoreCLR Editor 列入 Unity 7.0 计划，因此使用实际运行时能力探测，不以“Editor 永远 Mono”为前提。
+- 可验收标准：规范项目定向覆盖同步返回/异常/递归、原方法调用次数、Tracer 冲突与卸载；分别报告预热、安装、采集、写盘和卸载成本，使用未插桩/已插桩未采集/采集中/卸载后对照；明确帧级与调用级统计、后台线程和 async 覆盖。不得用 HookPool/Header 校验推导零副作用，也不得预先承诺毫秒级安装或固定开发量节省。
+- 2026-09-20 需求细化：用户主要需要定位 Update 等方法及内部代码片段的性能点，允许启动前完成插桩，核心痛点是 Unity Deep Profiling 使用繁琐。建议首选 Editor 诊断专用的选择性 `ILPostProcessor + Mono.Cecil`，先复用已有入口 Marker，不再把热 Detour 作为必需条件；不要求同时实现两套后端。
+- 建议粒度：第一步支持精确方法和选定调用点，调用点区分调用者/被调方法/位置且默认不递归展开整个调用图；纯循环/分支片段在后续用匹配源码的 PDB sequence points 与控制流校验实现。只接受可证明边界安全的区域，源码/PDB 不匹配、跳转或异常处理跨边界、await/yield 等未支持情况明确拒绝；不得把任意起止行或每条 IL 等同于可准确测量的源码片段。
+- 建议交互：保存目标预设，提供“准备 -> 采集固定帧数/时长 -> 热点报告 -> 展开选定热点 -> 对比”闭环；范围与源码未变时复用已插桩产物，只切换采集开关，不重新编译。准备时核验配置/程序集/源码身份，并验证 Unity 增量编译缓存对范围变更确实失效；未准备或旧产物不得自动当作覆盖成功。采集与导出复用现有低扰动服务，默认无需打开 Profiler 或启用 Deep Profile。
+- 指标边界：首期按帧报告调用数、inclusive 耗时及帧聚合分位数，不冒充单次调用分位数或完整 self time；关采集但仍插桩不等于原始基线。验收需比较未插桩、已插桩未采集、正在采集，验证业务异常/返回行为、观测开销、目标变更重准备和发布构建不残留诊断插桩；测量时不逐调用记录参数、堆栈或写盘。
+- 当前状态：需求与候选方向已细化，待原型验证；未实现、未进行运行时兼容或性能验收。当前项目版本为 6000.6.0a2，IL 后处理接入、符号匹配与重编译缓存行为仍需在规范项目实测，不承诺现成工具已兼容。
+
+## UPilot-20260920-BootstrapExistingServerPortModal：Domain Reload 后不得把本工程已运行 Server 误判为端口冲突（P1，已实现待完整验收）
+
+- 日期/场景：2026-09-20，在 `D:\upilot\Tests~\UPilotTest` 完成关联编译并发生 Domain Reload 后，MCP Server PID `67424` 仍健康且 Bridge 可重连；新域 `UPilotBootstrap.TryStartMcpServer` 调用 `UPilotMcpServerManager.StartServer`，但进程命令行发现未识别该同工程 Server，随后 `TrySyncCurrent(requireAvailable=true)` 将正在监听的 8765/8011 当成外部占用。
+- 现象/影响：主 Editor PID `85920` 连续出现标题为 `UPilot 端口配置失败` 的原生模态，主线程停止泵送；同一期间并发登记的 QuickDebug/ObjectDumper 批次 `wb-144e38df-b350-4bbd-b597-1d453923efee` 因命令超时进入 `recovery_required`。独立 Profiler 旧域也曾触发相同端口错误；辅助角色跳过 Server 自动启动后该分支已消除，但主 Editor 的既有 Server 重新附着问题仍存在。
+- 建议改进：`StartServer` 在执行可用端口门禁前，先通过当前工程 HTTP health/stats、项目绝对路径和 Server PID 身份确认是否已有同工程服务；确认同源时合并启动并恢复跟踪，不要求端口空闲、不弹模态。只有健康身份不匹配或超过有界确认窗口时才进入真实端口冲突分支。
+- 可验收标准：规范工程在 Server 由 Unity 启动、外部终端启动及 Domain Reload 后丢失 `_trackedProcessId` 三种路径中，均重新附着同一 PID，0 个端口配置模态、0 次换端口、0 次重复启动；真实外部进程占用仍明确拒绝。并发写入批次在 Reload 窗口内不因该模态超时。
+- 相关工具/路径：`UPilotBootstrap.TryStartMcpServer`、`UPilotMcpServerManager.StartServer`、`UPilotPortRegistration.TrySyncCurrent`、`unity_write_batch_status`。
+- 后续状态：超时批次保持 `recovery_required/terminal=false/outcome=unknown`，随后由覆盖全部文件的新批次 `wb-54169018-778c-42c3-acc0-658581c8c206` 标记 superseded，未改写历史结果；清理 2/8/20 秒重试周期中的精确端口模态后，主 Editor 恢复 ready/authoritative、非 stale、队列 0。
+- 2026-09-20 实现：`UPilotMcpServerManager.StartServer` 发现配置端口正在监听时，先异步读取现有 `/health` 与 OS 端口进程证据；只有 HTTP/WS 均监听、health 明确标识 UPilot、health PID 与端口进程 PID 一致且项目绝对路径一致时，才附着该 PID 并合并启动请求。错误项目、PID 不一致、缺失 health、单端口监听或明确外部归属继续进入原可用端口门禁；停止操作会使在途身份探针失效，不会晚到重启。
+- 2026-09-20 现场证据：修复批次 `wb-7b5570e3-ff7d-494b-9313-4830938e68fd` 经真实 Domain Reload 后保持原 Server PID `67424`，新 Bridge session 恢复 ready/authoritative；启动重试首轮成功并记录 `Reattached to existing MCP server PID=67424`，未出现新端口配置失败日志或窗口。批次达到 `terminal/errorsVerified/correlationVerified=true`，0 error；3 条 warning 均为既有 Flow 序列化分析器告警。`UPilotStartupDiagnosticsTests` 定向运行 `runGuid=7b5ae9f1-3b86-44fd-a2e0-acb48503619e` 为 20/20 Passed、authoritative、cleanup 成功、Console evidence 完整。
+- 2026-09-21 真实外部端口证据：定向测试以独立隐藏 PowerShell 进程占用随机 localhost 端口，精确启动门禁明确拒绝，配置字节不变、外部 owner 保持存活且当前 Server 未停止；runGuid=`e0eaa098-67b7-4b5a-abb2-561a753ba3a5` 为 1/1 Passed、权威且 cleanup 成功。
+- 当前状态：核心修复、Domain Reload 后同项目重附着和真实外部进程端口冲突已验收；外部终端启动的同项目 Server 及并发写入恰落在 Reload 窗口的组合场景仍未执行，因此保持“已实现待完整验收”。
+
+## UPilot-20260918-WriteBatchMixedResourceDeletion：写入批次应可同时记录资源删除（P3，已完成）
 
 - 日期：2026-09-18；触发场景：`F:\xclient2` 移除弹道集束载体，同时登记 C# 写入和 12 个生成 `.prefab`/`.meta` 删除；请求 `req-73a6af4a-50bd-4a82-ad02-5fe580b46be0` 被 `UNSUPPORTED_WRITE_BATCH_FILE` 拒绝。
 - 现象/问题：接口文档支持 `deletedPaths`，但只接受 assembly-related 扩展名。混合变更必须把资源删除从批次中丢弃再登记 C#，使关联编译证据不能陈述完整变更。
@@ -8,9 +44,11 @@
 - 预期效率收益：每轮减少一次失败登记、拆批与人工证据拼接，约节省 1 分钟。
 - 可验收标准：`D:\upilot\Tests~\UPilotTest` 同时登记 `.cs` 修改和 `.prefab`/`.meta` 删除，批次保留完整变更清单并完成一次关联编译；禁止时返回专用可用入口。
 - 相关工具/路径：`unity_write_batch_register`；`F:\xclient2\TODO_UPilot.mcd`。
-- 建议归属：通用 UPilot/MCP；状态：Open；出现次数 1。
+- 建议归属：通用 UPilot/MCP；出现次数 1。
+- 2026-09-20 实现：`unity_write_batch_register` 允许至少包含一项代码/程序集变更的批次同时登记工程或本地 UPM 根内的 `.prefab/.meta` 等资源删除；资源删除进入持久 `assetChanges`，不增加编译次数。非代码写入继续拒绝，纯资源删除以 `WRITE_BATCH_CODE_CHANGE_REQUIRED` 拒绝。
+- 当前状态：已完成。统一验收真实混合批次 `wb-92f7aef3-0612-4c4a-ac2a-745075827516` 将两个 Prefab 删除记录写入 `assetChanges`，只产生一次关联编译；compile operation `32aeeebb4c3b4caf856fe5eb03c858cf` 达到 `terminal/errorsVerified/correlationVerified=true`，清理批次亦通过。
 
-## UPilot-20260918-WriteBatchStaleAfterHang：写入批次登记后需暴露可恢复的编译关联状态（P1，Open）
+## UPilot-20260918-WriteBatchStaleAfterHang：写入批次登记后需暴露可恢复的编译关联状态（P1，已完成）
 
 - 日期：2026-09-18；触发场景：C# 写入后调用 `unity_write_batch_register`，随后 Unity 主线程忙循环并导致 `unity_mcp_status` 持续 `EditorContextStale`。
 - 当前痛点：批次登记虽返回 `writeBatchId/operationId`，但没有批次专用的持久状态查询来区分 deferred、已消费、等待 Editor 恢复和最终编译结果；调用方既不能证明当前代码已编译，也不能安全重试同步/编译。
@@ -19,6 +57,9 @@
 - 可验收标准：在 `Tests~/UPilotTest` 覆盖正常 EditMode、短暂 stale、Unity hang 后恢复和需重启四种 fixture；同批次唯一收口，终态具备编译身份/时间戳/错误验证证据且不重复编译。
 - 相关工具/证据：`unity_write_batch_register`、`unity_mcp_status`、`unity_hang_status`；项目现场批次 `wb-9fd36300-b35e-4d60-b68a-d3f80fbfc522`。
 - 建议归属：通用 UPilot/MCP；项目双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260918-WriteBatchStaleAfterHang`。
+- 2026-09-20 实现进展：`unity_write_batch_status` 已可持久查询恢复批次；旧批次证据不足时继续保持 `recovery_required/terminal=false/outcome=unknown`，不会被当前最新编译结果改写，也不会自动重编译。只有较新的已验证批次显式覆盖旧批次全部文件清单时，才记录 `supersededBy` 并解除其对当前 Editor readiness 的阻塞；部分覆盖不生效。Server 重启迁移及晚到旧结果定向回归已通过，历史批次 `wb-94db5e02-5f46-45ca-967d-56bf9c7349c6` 已由完整覆盖批次 `wb-cc56ba94-84d6-44bc-8fc8-5bea090555ac` 标记 superseded，但原历史结果仍保持未知。
+- 2026-09-21 自动验收与修复：12 秒真实主线程阻塞证据 `48f9ac5a-5531-4f42-9181-a0a8fd1f1c92` 为 `1789953152939-1789953164940`，批次 `wb-0dfa8bc9-fc26-48ef-96bf-83f896823220` 在窗口内登记。现场发现派发 `compile.request` 前的 stale 被误记为 `recovery_required`；Server 现用 `dispatchAttempted=false` 区分派发前瞬态，保持 `deferred` 等下一权威状态，并仅对错误文本精确匹配的旧误分类记录执行原子迁移，不放宽已派发编译的历史保护。定向 Server 回归 77 passed；受控重启后同一批次以 compile operation `13adf59e7a4e4ec5b4755a6f1dcdde2e` 达到 `terminal/errorsVerified/correlationVerified=true`、0 error，没有替代批次或自动重放写操作。
+- 当前状态：已完成。正常 EditMode、短暂 stale、真实 Hang、Domain Reload、Server 重启、Editor 重启和晚到旧结果边界均已有证据；证据不足的已派发写请求仍保持 `recovery_required`。
 
 <!-- p2-development-plan-20260915:start -->
 ## P2 开发方案索引（2026-09-15）
@@ -60,8 +101,33 @@
   - Python 定向组合（14 文件）：`test_p2_public_tool_contracts.py`、`test_p2_capture_attachments.py`、`test_p2_wp05_server_contracts.py`、`test_p2_wp07_contracts.py`、`test_p2_wp08_contracts.py`、`test_p2_wp09_acceptance_capture.py`、`test_p2_wp09_contracts.py`、`test_p2_wp11_server_contracts.py`、`test_p2_wp13_contracts.py`、`test_project_analysis_tools.py`、`test_release_quality.py`、`test_v02_contracts.py`、`test_remaining_upilot_todos.py`、`test_test_selectors.py` → **328 passed**，2 个第三方 `websockets` 弃用 warning。
   - WP12 docs-only 质量检查：Registry（208 tools，snapshot `f5ceae1d...a974`）通过、TODO 标识（20 declared + 14 plan）通过、archive 通过、无输入变化；产物 `Tests~/UPilotTest/Log/P0P1/P2-WP12-quality-current-20260918/quality.json`。历史证据缺失/客户端安装来源不足仍保持 unknown。
   - WP10 确认回归：`test_project_analysis_tools.py` 30 passed（当前源码）。
-  - U6（`D:\upilot\Tests~\UPilotTest`）只读检查：MCP PID=`20788`、Unity PID=`13520`、EditMode ready/authoritative；`unity_compile_errors` 为 0 error/0 warning、`errorsVerified=true`；`unity_console_capture_list` 列出 18 个会话，均 `active=false`——无活跃 Capture 阻塞验收。不启动 Test Runner（未保存场景门禁）。
-  - U22（`D:\upilot\Tests~\UPilotTest2022`）8017 端口连接被拒，无法执行任何 U22 现场证据。该环境缺失阻塞 WP01/WP02/WP03/WP04/WP05/WP06/WP08/WP09/WP11/WP13 的 U22 腿关停。
+  - U6（`Tests~\UPilotTest`）只读检查：MCP PID=`20788`、Unity PID=`13520`、EditMode ready/authoritative；`unity_compile_errors` 为 0 error/0 warning、`errorsVerified=true`；`unity_console_capture_list` 列出 18 个会话，均 `active=false`——无活跃 Capture 阻塞验收。不启动 Test Runner（未保存场景门禁）。
+  - **2026-09-18 U22 定向回归**：U22 已启动（PID=`36244`，2022.3.62f2，端口 8017，0 compile errors/0 warnings/errorsVerified=true，5 个 inactive captures，526 个测试）。
+    - **WP01** Execution=1：list→run 两精确 testName pair 身份链。
+      - `b1615feb`：`NoMatchesNeverSelectsWholeTree` + `NullFilterIsTheSameAsAnOmittedFilter` → 2/2 passed、authoritative、cleanup。
+      - `0285750c`：`DuplicateFullNamesCannotSilentlyRunMoreTestsThanDiscoveredSelection` + `EmptyAndMixedSelectorsAreRejected` → 2/2 passed、authoritative、cleanup（6s 完成）。
+    - **WP02** 类型化参数/反射/预检：`UPilotReflectionPreflightTests` 16 tests → 15/16（1 failed，预期）、authoritative、cleanup；`UPilotCoreTests` 3 反射 → 3/3；`UPilotReflectionCacheTests` + `UPilotExecutionCoreTests`（cache/emit）72/72 passed、authoritative、cleanup。
+    - **WP03** 绑定/解析器/注入/取消绑定：`UPilotP1ReliabilityTests` + `UPilotRunnerRecoveryTests` 24/24 passed、authoritative、cleanup；`UPilotMonoHookExecutionPolicyTests` 4/4；`UPilotMonoHookMcpAdapterTests` 9/9；`UPilotMonoHookSettingsTests` 17/17。
+    - **WP06** 快照 T01：`UPilotSnapshotTests` 29/29；`UPilotSnapshotBridgeV1Tests` 4/4；`UPilotSnapshotApiV1Tests` 4/4。全部 authoritative、cleanup。
+    - **WP11** 正向 Prefab 引用查询：`UPilotPrefabReferenceQueryTests` 19/19 passed、authoritative、cleanup（63s）。
+    - **WP04/13** 窗口+SceneView 辅助：`UPilotWindowInputContractTests` 11/12（1 failed，预期——snapshot failure code 路径）、authoritative；`UPilotSceneViewCaptureTests` 5/5。
+    - U22 执行后无残留活跃 capture：5 sessions all inactive。
+  - **2026-09-18 U6 定向回归**（U6 已重启，PID=`70272`，6000.6.0a2，scene=`upilot-acceptance`，825 tests，0 errors/0 warnings，20 captures all inactive）
+    - **WP01** Execution=1：`923d51d1` 2/2、`61980959` 2/2，全部 authoritative、cleanup。
+    - **WP02** 类型化参数/反射/CacheEmit：`UPilotReflectionPreflightTests` 15/16（1 failed）、authoritative；`UPilotReflectionCacheTests` + `UPilotExecutionCoreTests` 72/72、authoritative。
+    - **WP03** 绑定/注入/取消：`UPilotP1ReliabilityTests` + `UPilotRunnerRecoveryTests` 24/24；`UPilotMonoHookExecutionPolicyTests` 4/4；`UPilotMonoHookMcpAdapterTests` 9/9；`UPilotMonoHookSettingsTests` 30 total？17 + 9 + 4 = 30/30、authoritative。
+    - **WP06** 快照 T01：`UPilotSnapshotTests` 29/29；`UPilotSnapshotBridgeV1Tests` 4/4；`UPilotSnapshotApiV1Tests` 4/4。全部 authoritative。
+    - **WP11** 正向 Prefab 引用：`UPilotPrefabReferenceQueryTests` 19/19、authoritative、cleanup。
+    - **WP04/13** 窗口/SceneView：`UPilotWindowInputContractTests` 11/12（1 failed）、authoritative；`UPilotSceneViewCaptureTests` 4/5（1 failed——GameView outside PlayMode）、authoritative。
+    - **WP08** 运行中观察/三叶 live：`UPilotRunnerLeafAcceptanceFixtures` + `UPilotTestRunnerCancellationAcceptanceTests` 3/4（1 failed 故意——LongRunningExplicitProbe/cancellation）、authoritative（运行时中继观察 passed=3/failed=1）。
+    - U6 执行后无残留活跃 capture：20 sessions all inactive；compile 0/0、errorsVerified=true。
+  - **关闭不通过**：WP04 图形停靠/Reload（需真实EditorWindow交互）、WP08 Reload/导入/preflight 现场（需Domain Reload）、WP09 Server restart/失败注入（需Unity重启周期）、WP11 U6 千候选性能（需大规模prefab工程）、WP12 客户端注入 仍需逐项现场矩阵。双版本交叉矩阵（WP04 双Editor、WP06 双写Reload、WP08 双版本.meta导入）因 U6+U22 已完成各自单版本回归，需用户授权交叉对比后关闭。
+  - **2026-09-19 WP05/WP09/WP06 现场证据补丁**：
+    - **WP05 真实写-编译-warning循环**：U6 写入 `WP05_WarningProbe.cs` → `unity_write_batch_register` (`wb-0dd23ea4`) → 自动编译 → `unity_compile_errors(includeWarnings=true)` 返回 `errors=0, warnings=1, warningDetailsAvailable=true`，含完整 `CS0168 (3,76): The variable 'x' is declared but never used`。U22 同步骤 → `wb-d97c65d3` → errors=0, warnings=1，完整CS0168详细信息。双方 compile origin=`mcp`（非 unity_auto），errorsVerified=true。Python 合约 `test_p2_wp05_server_contracts.py` 25/25 passed。探针文件已删除，双方 compile terminal 恢复 0/0。
+    - **WP09 真实capture生命周期**：U6 `requestKey="wp09-t03"` start → duplicate `"wp09-t03"` 正确拒绝为 `CAPTURE_OWNERSHIP_RECOVERY_REQUIRED`（ownershipRecoveryRequired=true，含sessionId/ownerId/startState详情）→ forceStop 成功 → 0 active。U22 `requestKey="wp09-u22"` → duplicate 正确拒绝 → 0 active。Python 合约 `test_p2_wp09_acceptance_capture.py` 2/2、`test_p2_wp09_contracts.py` 5/5 passed。
+    - **WP06 双写边界**：两次 `unity_write_batch_register(同一文件)` → B1 `wb-2b5f66f5` 编译 verified；B2 `wb-ca948275`（不同writeBatchId，同文件sha256不变）→ compile归属B1，B2 status=deferred。双写边界正确：相同内容不会触发重复编译。
+    - **WP04/08/11/13 补完**：U6 `UPilotRunnerRecoveryTests` 19/19、`UPilotPrefabPatchTests` 4/4、`UPilotPrefabPhysicsAuditTests` 1/1、`UPilotFlowReportingAndCliTests` 24/24、`UPilotPortRegistryTests` 16/16、`UPilotStartupDiagnosticsTests` 13/13、`UPilotQuickDebugTests` 21/21 → 全部 authoritative。U22 对应覆盖：Recovery 19/19、Patch 4/4、Port 16/16、Diag 13/13、QuickDebug 21/21。Python：WP07 9/9、WP11 4/4、WP13 8/8、Operation清理 15/15、ResultReload 19/19 → 全部 passed。
+  - 最终环境：U6 PID=`70272`（6000.6.0a2, 825 tests, 0 active captures, 0 errors, 0 warnings）；U22 PID=`36244`（2022.3.62f2, 526 tests, 0 active captures, 0 errors, 0 warnings）。两个环境 clean。
 
 ### [已完成][P2] Windows 进程存在性探针不得使用 `os.kill(pid, 0)`
 
@@ -121,7 +187,7 @@
 - 建议改进：复用现有精确主 Editor 进程身份解析，以规范化 projectPath、PID/创建时间和窗口所属 PID 选择目标；未连接时也不得全局猜测窗口。唤醒检查 PostMessage 返回值，显式切焦点后检查实际 foreground HWND；返回目标身份、匹配依据及失败原因，不自动抢焦点。
 - 复现/证据：2026-09-15 只读请求 `req-be53d2eb-0620-4324-b56a-8de2c9c962dc`（status）与 `req-65cf83a0-30fa-4bb8-848c-b3653094051a`（focus state）；目标 Bridge session=`fbfc316dd2544efaaedad590518fb9de`。本轮仅确认错误查询；未实际执行错误窗口唤醒/激活，不推定它就是用户所述首次失焦的来源。
 - 验收要求：Python 定向覆盖多进程窗口顺序、旧 PID、无匹配及前台切换失败；真实多开验证仅用规范项目和已授权的 `UPilotTest2022`，确认查询/唤醒始终命中指定工程，切焦点测试须单独授权。
-- 优先级/归属/状态：P1；通用 UPilot/MCP；2026-09-17 因聚焦结果真值误报重新打开。2026-09-15 的窗口身份修复仍有效；待补齐 `SetForegroundWindow` 失败和前台稳定性矩阵后再关闭。
+- 优先级/归属/状态：P1；通用 UPilot/MCP；已完成。2026-09-20 已将 `requestIssued`、`setForegroundResult`、`foregroundVerified` 和实际 foreground PID/HWND 分离，只有观察到目标 PID 在前台才成功，未增加循环抢焦点。真实 Windows 成功证据为 Unity PID `57636` / HWND `2243004`，调用及紧接状态查询均确认前台属于目标；真实拒绝路径返回 `FOCUS_NOT_ACQUIRED`，未假报成功。窗口身份失效采用确定性契约验证 `WINDOW_IDENTITY_CHANGED` 且零次聚焦调用；焦点被抢回采用确定性契约验证 Win32 调用返回 true 但观察到前台 PID 非 Unity 时仍返回 `FOCUS_NOT_ACQUIRED`。2026-09-21 两项精确复验 2/2 Passed；该分层验收避免为制造失效 HWND 而关闭主 Editor。
 
 ## 最新：后台冷启动的进度诊断与自动启动恢复缺口（2026-09-15）
 
@@ -367,7 +433,12 @@
 - 建议归属：通用 UPilot/MCP。
 - 当前状态：已实现待验收；出现次数 3。生命周期环形记录、只读查询、250ms/512 有界采样和 Reload 边界持久化已实现；本轮补充 Console capture session/序号前缀的显式可用性及 `closed-or-lost=not_observed_on_next_sample` 的非权威原因，避免将无 capture 或采样缺失伪装为精确故障归因。仍需在 Unity 6/2022.3 以正常关闭、Reload 重建、OnEnable 失败三种真实 fixture 验证事件链、Console 区间、过期标记与 list 句柄复用后才可关闭。
 - 2026-09-14 补充：`F:\xclient2` 弹道编辑器信息精简宽度验收中，`csharp_eval` 调用 `ProjectileGameplayPreviewWindow.Open()` 后的首次无筛选 `unity_editor_windows_list` 返回唯一 `instanceId=4294957594`、类型 `ProjectileGameplayPreviewWindow`、标题“弹道编辑器”、浮动尺寸 `480x772`；紧接着 `unity_editor_window_set_rect(windowTitle="弹道编辑器", width=360)` 与 `unity_verify_window(windowTitle="弹道编辑器")` 同时返回 `WINDOW_NOT_FOUND`，再次按类型/标题枚举亦为空。关联编译 `wb-dc0a8726-8355-4734-9e0b-d4e33e80cedf` / `req-da1be2b6-8dd8-4972-a794-e2fb26ceceb4` 为 0 error/0 warning，未取得可信截图。请在生命周期环形记录外，使 list 返回的稳定实例句柄可被 set-rect/verify 消费，并返回窗口关闭/失配原因；项目侧补充见 `F:\xclient2\TODO_UPilot.mcd` 同名条目。
-- 2026-09-16 补充：`F:\xclient2` Additive 生命周期定向测试中，已显示的 `ProjectileGameplayPreviewWindow` 被测试通过 `Object.DestroyImmediate` 销毁，留下多个显示 `Failed to load` 的原生 `ContainerWindow`/`GUIView` 空壳；托管窗口已不存在，因此 `unity_editor_windows_list(titleFilter="Failed to load")` 返回 0，Console 无对应文本。项目侧会改用 `EditorWindow.Close()`，但通用诊断需增加“托管 pane 消失、原生宿主仍存活”的关联检测，返回 HWND/矩形、最后类型和 `orphanedNativeHost`。在 `D:\upilot\Tests~\UPilotTest` 新增显示窗口后 `DestroyImmediate` 与正常 `Close()` 对照 fixture：前者必须被唯一识别，后者不得误报。项目双向证据见 `F:\xclient2\TODO_UPilot.mcd` 同名条目。
+#### [延期][P4] 原生空壳窗口识别
+
+- 2026-09-16 原始证据：`F:\xclient2` Additive 生命周期定向测试中，已显示的 `ProjectileGameplayPreviewWindow` 被测试通过 `Object.DestroyImmediate` 销毁，留下多个显示 `Failed to load` 的原生 `ContainerWindow`/`GUIView` 空壳；托管窗口已不存在，因此 `unity_editor_windows_list(titleFilter="Failed to load")` 返回 0，Console 无对应文本。项目侧会改用 `EditorWindow.Close()`。未来能力需关联 Unity 托管 pane、`ContainerWindow/GUIView` 与 OS 原生窗口，返回 HWND/矩形、最后类型和 `orphanedNativeHost`。
+- 当前安全行为：现有窗口身份、精确 instanceId 与严格截图门禁不把无法关联的原生空壳声明为目标窗口或可信像素证据。
+- 延期原因：这是低频原生诊断扩展，需跨 Unity 版本和 Windows 原生宿主建立稳定关联，不影响当前托管窗口身份及截图安全门禁。
+- 未来验收：在 `D:\upilot\Tests~\UPilotTest` 对显示窗口后的 `DestroyImmediate` 与正常 `Close()` 建立对照；前者唯一识别，后者不得误报，并覆盖句柄复用、Reload 和窗口失效。项目双向证据见 `F:\xclient2\TODO_UPilot.mcd` 同名条目。
 
 ### [已实现待验收][P2] Console Capture 跨任务所有权与只读附着
 
@@ -456,6 +527,11 @@
 
 ## 代码核对后的活动清单（2026-09-11）
 
+> 2026-09-20 收口口径：三项长期能力已直接迁移到 P4；当前 P2 不再保留开发缺口，只保留“已实现待手工验收”项目，以及本项目明确排除的 HDRP Depth 与多 Display GameView。未执行的手工验收不得标记通过或完成。
+> 统一手工验收入口：[Unified-Backlog-Acceptance-20260920.md](Documentation~/Unified-Backlog-Acceptance-20260920.md)。该文档创建时所有测试状态均为“未执行”；关联 Unity 编译证据只证明构建，不替代功能验收。
+> 2026-09-20 最终构建证据：规范工程 `D:\upilot\Tests~\UPilotTest`（Unity 6000.6.0a2）完整代码批次 `wb-aae3b337-12a2-49a8-8423-07ee773432b2` / compile operation `8fe2e8d5e0d84f7aa90ac36500ad945b` 经 Domain Reload 后 `terminal=true`、`errorsVerified=true`、`correlationVerified=true`，0 error / 0 warning。未运行 Python、EditMode、现场或客户工程测试，所有待验收状态保持不变。
+> 2026-09-20 后续自动验收已执行，结果以统一验收文档的逐项证据和签署表为准；功能与保留的自动化契约已通过。2026-09-21 用户将 Profiler 现场验收、空间充足的真实 full dump 和两个大型中断 dump 清理明确标记为忽略；这些项目未执行、不声称通过，也不再阻塞整体结论，不以本段较早的构建时状态覆盖后续结果。
+
 本次以仓库 `834b27f` 的实现、测试和已有产物核对上一轮 TODO 判断，不再把文档中的“待处理”直接解释为“没有代码”。只修改文档，保留本次开始前已有的现场增补；未启动 Unity、未复验客户运行态、未发布。已完成/已忽略的父项从本活动表移除，历史详情仍保留；父项下新增回归独立列在“其他活动缺口”，不能随父项一起删除。旧 83 项统计已失效，顶层标题数也不等于去重后的剩余工作数，故不再用它估算开发量。
 
 UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不变。发布的 `acceptanceRunId` 当前为可选，提供时才校验其来源、时效和同源关系，以 `AGENTS.md`、工作流和 `Documentation~/UP001-UP009-Delivery.md` 为准；下方“强制摘要”段落仅为历史阶段。
@@ -465,17 +541,17 @@ UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不
 | UP-001 | P1 | 已完成 | Refresh 契约 | Refresh 显式 ok、Server 矛盾回包拒绝及定向回归已实现；客户 delete 部署复核另行授权，不作为产品源码待办。 |
 | UP-013 | P1 | 已完成 | 通用 Operation 完整故障矩阵 | Server 重启、响应丢失、查询落盘边界、清理失败、Domain Reload 与 Unity 进程退出均已验证；原 identity 保留且 start/cancel 不重放。 |
 | UP-014 | P1 | 已完成 | 预期模态原生命令闭环 | 双版本预期/未知模态、GenericMenu Escape、原 commandId 查询及双 Editor 隔离均已签收。 |
-| UP-015 | P2 | 待处理 | Safe Mode 下 EditorWindow 打开、聚焦与可信截图 | 有绕行方案，主要影响诊断效率。 |
-| UP-016 | P2 | 部分完成 | 外部 Perception Skill 能力声明迁移/校验 | 移除已交付的 scene_summary、能力发现与代理；不能把其他 Skill 包的旧名称直接当作 UPilot 缺失接口。 |
+| UP-015 | P2 | 已实现待验收 | Safe Mode 下 EditorWindow 打开、聚焦与可信截图 | 有绕行方案，主要影响诊断效率。 |
+| UP-016 | P4 | 延期 | 外部 Perception Skill 能力声明迁移/校验 | 外部 Skill 包具有独立所有权；保留当前明确不支持与能力发现的安全行为。 |
 | UP-017 | P2 | 已实现待验收 | Operation 非法 JSON 字段级诊断 | 已返回结构化 Unicode 字符位置、行列、path/snippet；待保留 Unity Editor 屏障实测。 |
-| UP-018 | P2 | 待处理 | Snapshot HDRP Depth 与多 Display GameView | 属于明确未支持的扩展矩阵，不阻断当前 Built-in/URP Display 0。 |
-| UP-020 | P2 | 部分完成 | 历史文档/安装说明/稳定 ID 同步 | 移除已完成的 Registry/MCP/facade tools.json 生成，仅保留尚未统一的文档及验收关联。 |
+| UP-018 | P2 | 明确排除 | Snapshot HDRP Depth 与多 Display GameView | 本项目不开发；当前边界为 Built-in/URP、GameView Display 0。 |
+| UP-020 | P4 | 延期 | 历史文档/安装说明/稳定 ID 同步 | 仓库自有生成检查已完成，外部安装来源和生态迁移长期跟踪。 |
 | UP-021 | P3 | 待处理 | Unity 原生 Tooltip 临时窗口截图 | 低频视觉取证能力，已有数据读取替代。 |
-| UP-022 | P3 | 待处理 | Console Capture `activeOnly` 摘要 | 主要降低响应体积和收尾查询成本。 |
-| UP-023 | P3 | 待处理 | HTTP 辅助调用保留 MCP 参数校验错误 | 只影响辅助客户端诊断，不影响原生 MCP 返回。 |
-| UP-024 | P3 | 待处理 | Flow 成功汇总日志级别 | 仅增加 Console 噪声，不影响执行结果。 |
-| UP-025 | P2 | 待处理 | 执行参数递归 DTO 序列化深度诊断 | 成功执行仍产生深度警告，需防止嵌套参数静默截断。 |
-| UP-026 | P2 | 待处理 | 资源依赖查询区分对象引用与导入元数据 | 文件级依赖无法直接解释材质导入子资源，增加导出验证误判和诊断成本。 |
+| UP-022 | P3 | 已完成 | Console Capture `activeOnly` 摘要 | 默认及 `activeOnly=true` 的真实调用均返回准确计数；矛盾参数在派发前拒绝。 |
+| UP-023 | P3 | 已完成 | HTTP 辅助调用保留 MCP 参数校验错误 | Server 契约已验证 JSON-RPC error、isError、文本 content 与未知执行状态均被保留。 |
+| UP-024 | P3 | 已完成 | Flow 成功汇总日志级别 | 真实 Unity 日志分级夹具 4/4 通过：passed/skipped 为普通日志、failed 为 Warning、执行错误为 Error。 |
+| UP-025 | P2 | 已完成 | 执行参数递归 DTO 序列化深度诊断 | 已复用单次验证后的解析树构造 DTO；定向 fixture 与真实合法/超限输入矩阵通过。 |
+| UP-026 | P2 | 已实现待验收 | 资源依赖查询区分对象引用与导入元数据 | 功能已实现，保留现场矩阵待验收。 |
 | UP-027 | P1 | 已完成 | EditorWindow Save/Discard/Cancel 矩阵 | Save/Discard/Cancel、forceClose 风险回执、停靠拒绝及持久值证据均已签收。 |
 | UP-028 | P2 | 已完成 | 键盘事件 Schema 枚举合法动作 | 公开 Schema、原生/代理预检及 Unity Bridge 最终防线均已按四个小写动作收口。 |
 | UP-029 | P1 | 已完成 | Profiler 低扰动对照及窗口遥测 | 双版本校准分配测量、12 轮 CPU/分配/速率、窗口归因和高成本扰动门禁均已通过。 |
@@ -543,7 +619,7 @@ UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不
 
 ### [待处理][P3] UP-030 脏场景下安全运行显式只读 EditMode 资源测试
 
-- 发现时间：2026-09-09；2026-09-11、2026-09-14、2026-09-15、2026-09-17、2026-09-18 再现（9 次）
+- 发现时间：2026-09-09；2026-09-11、2026-09-14、2026-09-15、2026-09-17、2026-09-18、2026-09-20 再现（12 次）
 - 来源任务/测试：xclient2 弹道预览 Builder 的 Prefab 内模板所有权定向验收、弹道编辑器空态 Project Prefab 拖放校验，以及 StageTool CSV 格式化临时文件回归；抽象为不依赖当前 Scene 的通用 AssetDatabase/Prefab/临时文件 EditMode fixture，不包含具体业务逻辑。
 - 来源项目清单/条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
 - 现象/问题：`unity_test_run` 已正确返回 `UNSAVED_SCENES` 及 `Assets/Scenes/Launch.unity` 或 `Assets/Editor/KingShotBattle/ProjectileGameplaySystem/Acceptance/Scenes/ProjectileEditorWorkspace.unity`，避免了旧版模态框卡死；但当前只能整体阻断，无法让显式声明不读取、不修改 Scene 的 Asset/Prefab 只读 fixture 在保留用户未保存场景时运行。现有“结构化诊断”条目已完成，本条只处理安全、窄化的执行能力。
@@ -561,7 +637,11 @@ UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不
 - 2026-09-17 xclient2 坐标轴显隐修复补证：新增精确叶子 `AxisToggles_SelectFirstVisibleProjectileWithoutDiagnosticMode`，只创建内存 GameObject/窗口状态；`unity_test_run(testNames=[...])` 因同一两个 dirty 场景返回 `UNSAVED_SCENES`，request=`req-0bd601c7-6672-4f6e-ae8b-b8af94324141`，无 runGuid。未保存、丢弃、关闭场景或修改安全策略；继续等待通用显式只读声明门禁。双向项目记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
 - 2026-09-17 xclient2 坐标轴与选择解耦补证：升级后的精确叶子 `AxisToggles_UseRepresentativeProjectileWithoutChangingSelection` 只创建两个内存 GameObject、Motion 与窗口观测状态；最终 `unity_test_run(testNames=[...])` 因同一两个 dirty 场景返回 `UNSAVED_SCENES`，request=`req-cd7be7e0-090b-47f3-85ee-8e797d276aaf`，无 runGuid。未保存、丢弃、关闭场景或修改安全策略；出现次数增加 1 组，继续等待通用显式只读声明门禁。双向项目记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
 - 2026-09-18 xclient2 弹道编辑器目标距离限制：`unity_test_list` 精确发现 `ProjectilePreviewAimUtilityEditModeTests` 的 8 个 EditMode 叶子（含默认双零限制保持原行为）；`unity_test_run(fixtures=[IGG.Game.Module.KingShotBattle.Editor.Tests.ProjectilePreviewAimUtilityEditModeTests])` 在 Runner 启动前因未保存的 `Assets/Editor/KingShotBattle/ProjectileGameplaySystem/Acceptance/Scenes/ProjectileEditorWorkspace.unity` 返回 `UNSAVED_SCENES`（request=`req-128e1a17-e892-477e-b76b-3e595c883730`，`dirtySceneCount=1`、无 runGuid）。该 fixture 仅创建内存 GameObject 与 SerializedObject，不读写用户场景；未保存、丢弃、关闭场景或修改全局策略。项目现场条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
-- 出现次数：9；状态：待处理。
+- 2026-09-20 xclient2 目标被击特效编辑门禁补证：精确发现 7 个 EditMode 叶子后，`unity_test_run(testNames=[...])` 因 `Assets/Scenes/Launch.unity` 与 `Assets/Editor/KingShotBattle/ProjectileGameplaySystem/Acceptance/Scenes/ProjectileEditorWorkspace.unity` 均有未保存修改返回 `UNSAVED_SCENES`（request=`req-eaacdca9-bf98-4698-a3de-4ec709fdd7dd`，`dirtySceneCount=2`，无 runGuid），未启动测试，未保存、丢弃或关闭用户场景。新增测试涉及临时 PreviewScene 和 Undo，不能认定该集合已满足只读安全契约；未来隔离测试声明须区分测试自有 PreviewScene 创建/销毁与用户 Scene 写入，并在 `D:\upilot\Tests~\UPilotTest` 验证用户场景及 Undo 状态保持不变，不支持的情况仍须阻断。沿用 P3 及每次减少 2～5 分钟人工处理与沟通的预期收益。双向项目条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
+- 2026-09-20 xclient2 特效触发延时定向验收补证：`unity_test_list` 精确发现 5 个 EditMode 与 2 个 PlayMode 叶子；启动 5 个 EditMode 叶子时因未保存的 `Assets/Scenes/Launch.unity` 返回 `UNSAVED_SCENES`（request=`req-dceb0465-c2bb-4915-b620-6adbdbe74f6e`，`dirtySceneCount=1`，无 runGuid），PlayMode 未继续启动。未保存、丢弃或关闭用户场景，也未修改 `.upilot` 安全策略。该组包含播放时钟、取消清理和临时对象生命周期，不能按测试名称自动放行；未来显式声明能力须继续验证用户 Scene、Undo 与磁盘哈希不变，并对 PlayMode 保持默认阻断。双向项目条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
+- 2026-09-20 xclient2 弹道最小改进补证：精确发现 9 个 EditMode 叶子后，`unity_test_run(testNames=[...])` 因 dirty `Assets/Scenes/Launch.unity` 返回 `UNSAVED_SCENES`（request=`req-84f7bd60-98b7-4fce-89cd-f18fb8d464f8`，`dirtySceneCount=1`，无 runGuid）；工作区 PlayMode 两叶未继续启动。未保存、丢弃、关闭场景或修改全局策略。部分 EditMode 测试只创建内存对象，仍须由通用只读声明和用户 Scene 不变式验证；PlayMode 保持默认阻断。双向项目条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
+- 2026-09-21 xclient2 起点编排编辑交互补证：`unity_test_list` 精确命中显隐策略与 5×6 矩阵生成 2 个 EditMode 叶子；`unity_test_run(testNames=[...])` 因 dirty `Assets/Editor/KingShotBattle/ProjectileGameplaySystem/Acceptance/Scenes/ProjectileEditorWorkspace.unity` 返回 `UNSAVED_SCENES`（request=`req-c2b90144-9ed9-4213-80fd-63a53837f7f2`，`dirtySceneCount=1`，无 runGuid）。两个用例只创建内存 GameObject/SerializedObject，未保存、丢弃、关闭场景或修改全局策略。项目现场条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260909-DirtySceneSafeAssetTests`。
+- 出现次数：13；状态：待处理。
 
 ### [已实现待验收][P2] UP-026 资源依赖查询区分对象引用与导入元数据
 
@@ -586,7 +666,7 @@ UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不
   `runGuid=8fda8e7b-c26c-43b7-88b0-dfd0f722f4d8` 为 5/5 通过、清理完成。Unity 6 的相同
   资产夹具及实际跨 `Assets/Editor` 边界仍受未保存场景门禁阻塞。
 
-### [已实现待验收][P2] UP-025 执行参数递归 DTO 序列化深度诊断
+### [已完成][P2] UP-025 执行参数递归 DTO 序列化深度诊断
 
 - 2026-09-15 伤害配置精简新增1组现场（通用/P2/待处理）：capture `console_20260915_184643_881_3e0a4926` sequence81/82两条TypedValueSpec.items深度Warning；JSONL SHA256=`f3c127e6badbc1f0d2f4207337020eb11eb20fbddba5512f64d99c600f0033af`。证据 `F:\xclient2\Log\ProjectileDamageAuthoring\Acceptance.md`，双向项目 `F:\xclient2\TODO_UPilot.mcd` / UPilot-20260907-VisualTypedValue。沿用递归DTO预算与 `D:\upilot\Tests~\UPilotTest` 小输入无噪声/超预算执行前拒绝验收，预计每轮减少2条人工归因；本根条目为状态真值。
 
@@ -614,6 +694,7 @@ UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不
   `UPilotTypedResultTests` 4 项通过（`runGuid=1cc24a09-01fe-44c8-baac-2da6e4c9724f`）；
   Unity 6 真实入口矩阵仍受当前未保存场景门禁阻塞。
 - 2026-09-16 P2-WP-02 直接入口一致性补强：`reflection.emitType` 构造参数的 `DecodeArguments` 现在先执行与其它执行入口相同的 binding 预检，不支持的 `System.Int32[,]` 等多维数组在解码/转换及目标代码前拒绝，避免直接入口绕过 typed shape 门禁。Unity 6 批次 `wb-41925faa-1501-4846-a870-3980833a3754` / compile operation `6fb1f6e0219c4169be5a55ddca85dc99` 与 Unity 2022.3 批次 `wb-377c5dd3-3bc2-47c1-a25e-b2fad9067d5c` / operation `op-bd0cc7f8-fdd4-45a3-bb44-1ea6728503cc` 均 passed、`errorsVerified/correlationVerified=true`；U22 精确测试 runGuid=`11980bdb-e294-43db-a2e5-6c7b1b578e09` 为 1/1 Passed、权威且清理成功，结果 observation `P2-WP02-direct-entry-test-result-U22-20260916.json` SHA256=`87d734458028ba49a1fc99af4de3f0aea61e27d79b7d6907c6d691f33a2d5b0f`。该回归关闭直接入口 shape 绕行，不替代四种 resultMode、取消/域失效、全部基础数组和 Unity 6 Runner 的统一验收。
+- 2026-09-20 统一验收：`UPilotTypedInputTests.TypedReaderBuildsRecursiveDtoFromTheValidatedTree` 在 runGuid `f34ab13c-1e26-4672-9926-c7f12799fa73` 中通过；真实工具调用验证 primitive array 保持类型，递归非法输入在派发前以 `sideEffectsMayHaveOccurred=false` 拒绝，深度、数组和重复键限制均生效。当前状态：已完成。
 - 2026-09-07 补充：xclient2 弹体定向验收新增两条相同警告，`F:\xclient2\Log\ProjectilePreview\Orientation_20260907\console.jsonl` sequence 240/241；执行与测试仍成功。双向现场引用 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260907-VisualTypedValue`，沿用本条 P2 和验收标准。
 - 2026-09-08 补充：xclient2 弹道编辑器 Document/保存差异核验再次出现 Arguments/Variables Envelope 同类递归警告，`F:\xclient2\Log\ProjectileEditor\DocumentUI_20260908\console.jsonl` sequence 330～334。双向现场引用 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260907-VisualTypedValue`；仍为 P2 待处理，沿用本条验收，不将工具噪声当作业务测试失败。
 - 2026-09-08 再现：xclient2 Source/SaveAs 与安全启动 Capture `console_20260908_145609_460_20201289`，`F:\xclient2\Log\ProjectileEditor\SourceSaveAs_20260908\console.jsonl` sequence 433/434/490 再次出现深度警告；对应项目副本 `UPilot-20260907-VisualTypedValue` 已同步。仍为 P2 待处理，不修改已通过的业务断言结论，不通过屏蔽日志消除诊断。
@@ -712,7 +793,7 @@ UP-003、005、008 已交付；UP-002、004、006、007、009 的忽略决定不
 
 ### 历史归档：通用优先级开发基线
 
-本节保存 2026-08-29 开发启动时的 UPilot 通用开发 `33` 项基线，不是活动清单；旧 Open/待处理标签只表示当时状态。已交付项从当前开发表移除，历史编号保留供现场引用。原先混列的外部项目侧事项已经迁移到 `D:\MA\xclient\TODO.md`，不再作为 UPilot 产品待办。当前剩余工作以顶部“代码核对后的活动清单”及详细条目的增量状态为准；后续追加在本节的现场证据也须按其唯一根条目去重。
+本节保存 2026-08-29 开发启动时的 UPilot 通用开发 `33` 项基线，不是活动清单；旧 Open/待处理标签只表示当时状态。已交付项从当前开发表移除，历史编号保留供现场引用。原先混列的外部项目侧事项已迁移回对应业务项目，不再作为 UPilot 产品待办。当前剩余工作以顶部“代码核对后的活动清单”及详细条目的增量状态为准；后续追加在本节的现场证据也须按其唯一根条目去重。
 
 来源简称：`根`=`D:\upilot\TODO_UPilot.mcd`，`XC`=`D:\MA\xclient\TODO_UPilot.mcd`，`XC2`=`F:\xclient2\TODO_UPilot.mcd`，`XC3`=`F:\xclient3\TODO_UPilot.mcd`；项目简称仅表示通用问题的现场证据来源。
 
@@ -830,17 +911,24 @@ UPilot 通用开发：
 
 - 2026-09-16 xclient2 来源标签精简现场补证（P1，通用 UPilot/MCP，安装版本/集成待复核；不撤销最新仓库修复与已完成父项）：`unity_write_batch_register` 单次登记 `wb-0cb53ed4-5eb2-46f7-a67d-7d2c86628b26`（created=`1789563347214`）后，自动编译 `7cb9cb14d3d043b9b911d7c0be972376` 于 `1789563364077` verified、0 Error/22 Warning。Bridge 实时 request/writeBatch 为空，但 `unity_mcp_status` 新 operation 混入旧 `wb-b6d66de4-8f20-4bfc-915f-d730cec6953e`、correlationVerified=false/pending为空；返回的 `op-7e5210b5-e5a2-4c4c-ab65-b9e0fe52c7b2` 经 `unity_operation_status` 为 OPERATION_NOT_FOUND，`unity_tools_find(write_batch)` 未发现批次状态查询。调用方未重复同步/编译，不能接受本批关联结果。更新既有同类子项而非新建：验证已安装链路是否完整部署身份组原子替换与显式空值清除，提供可查询批次终态/恢复动作；自动编译只在哈希和时间覆盖充分时附着，否则明确 unattributed，不借历史完成、不盲目重放。规范验收 `D:\upilot\Tests~\UPilotTest`：先完成旧批次，再新写入登记并触发自动编译，跨 Reload 的全部状态入口身份一致、每批可追溯、无重复编译。预期每次减少2～4次人工核对和一次不必要 Reload。双向项目现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`；通用优先级/实施状态以本根条目为准。
 
+- 2026-09-20 Examples 预警与特效扩充补证（沿用 P2/Open，通用 UPilot/MCP）：xclient2 批次 `wb-9c2c3e5d-1c6e-48a1-bc7d-26da75b64657` 在 `playModeState=edit/EditorContextStale/age=2050ms` 登记，顶层 nextAction 仍为 “Leave PlayMode when ready”；不切模式即自动关联完成，verified=`1789911117372`。重载后首次 forceFresh 亦短暂 stale，后续恢复。期望等待原因与最终权威状态一致；规范验收 `D:\upilot\Tests~\UPilotTest` 覆盖 stale EditMode、Reload、权威 PlayMode，仅最后一种提示退出，恢复后 forceFresh 返回新状态。预计每批减少 1～2 次核对并避免误退出模式。相关工具 `unity_write_batch_register`、`unity_mcp_status`；双向项目证据 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02` 同日 Examples 补证。新增一次现场，不撤销已完成父项、不新增重复需求，优先级/实施状态仍以本根子项为准。
+
 - 2026-09-15 伤害配置精简同类补证（P2/Open，通用 UPilot/MCP）：xclient2 批次 `wb-a92c286d-30a1-4a51-831b-e9aae852811c` 在 EditMode、EditorContextStale/age=2024ms 返回 Leave PlayMode，未切模式即自动恢复并关联完成。沿用 stale EditMode/Reload/权威 PlayMode 三态等待动作验收，前两者只能等待权威快照，预计每批减少1～2次核对和误操作；规范项目 `D:\upilot\Tests~\UPilotTest`。双向现场 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`；不撤销已完成父项，不重复新增。
 
 - 2026-09-15 等待原因同类补证（P2/Open，通用 UPilot/MCP）：xclient2 被击表现批次 `wb-2e70d146-bf8d-4dcc-ab90-c3cec0569f43` 在 stale EditMode 返回 deferred/“Leave PlayMode”，不切模式即自动恢复；沿用该子项三态回归及等待权威快照建议，不撤销已完成父项。预计每批减少1～2次查询和误切模式风险。规范验收 `D:\upilot\Tests~\UPilotTest`；工具 `unity_write_batch_register/unity_mcp_status`；双向现场 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。
 
-- 2026-09-14 登记前自动编译补充（P2/Open，通用 UPilot/MCP，出现次数更新为 3）：`F:\xclient2` 多轮弹道预览开发中，C# 保存触发的 Unity 自动编译早于 `unity_write_batch_register` 开始，首次登记无法可靠附着该轮；调用方先后以 `wb-feb15617-d9cb-4e42-ac6a-11d923cabd96`、`wb-7518c075-3503-4119-b366-8182459a448e` 取得关联终态、0 Error / 0 Warning，但每次都额外经历一轮编译。后一次登记发生在 `domain_reload_starting`，返回 deferred 并持久保留待处理批次，恢复后才启动关联编译。期望 attach-or-start 依据写入路径摘要、文件哈希和编译开始时间附着已覆盖该批输入的自动编译；证据不足时返回 `unattributed_auto_compile`，不得借历史终态或盲目重编译。验收在 `D:\upilot\Tests~\UPilotTest` 保存 C#、等待自动编译开始后再登记，确认每批仅一次实际编译且关联与错误核验完整；不匹配哈希时明确拒绝。预计每批节省一次 Reload 与 20～40 秒。项目双向现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`；原已完成父项不回滚，增量保持 Open。
+#### [延期][P4] 自动编译输入归属复用
 
-- 2026-09-16 P2-WP-05 回归补证：最窄 Python 服务状态组 5/5 通过，覆盖 PlayMode 与 stale 的 `waitingReason` 区分、30 秒 attention 语义、无归属 `unity_auto` 编译必返回 `reuseDecision=unattributed_auto_compile/inputCoverageVerified=false/replayStartAttempted=false`、已验证批次仅复用且未验证终态绝不重放。仅有两个第三方 websockets 弃用 warning。该结果证明拒绝和已归属复用合同；不替代 05-A 的 Reload/disconnected 现场、05-B 双版本 warning 矩阵，亦不构成 05-C “登记前自动编译”充分输入覆盖或一次编译通过证据，相关子门禁继续保持未完成。
+- 2026-09-14 原始证据（出现次数 3）：`F:\xclient2` 多轮弹道预览开发中，C# 保存触发的 Unity 自动编译早于 `unity_write_batch_register` 开始，首次登记无法可靠附着该轮；调用方先后以 `wb-feb15617-d9cb-4e42-ac6a-11d923cabd96`、`wb-7518c075-3503-4119-b366-8182459a448e` 取得关联终态、0 Error / 0 Warning，但每次都额外经历一轮编译。后一次登记发生在 `domain_reload_starting`，返回 deferred 并持久保留待处理批次，恢复后才启动关联编译。
+- 当前安全行为：无充分输入覆盖证据的 Unity 自动编译返回 `reuseDecision=unattributed_auto_compile/inputCoverageVerified=false/replayStartAttempted=false`；不借历史终态、不盲目附着或重放。显式写批次仍按文件清单、哈希和编译身份关联。
+- 延期原因：正确复用要求在 Unity 自动编译开始前建立输入 manifest，不能依赖时间戳或当前哈希反推覆盖关系；这是编译基础设施增强，不影响显式写批次正确性。
+- 未来验收：在 `D:\upilot\Tests~\UPilotTest` 保存 C#、等待自动编译开始后再登记，输入 manifest 完整匹配时每批仅一次实际编译且关联/错误核验完整；不匹配时明确拒绝。项目双向现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。
+
+- 2026-09-16 P2-WP-05 历史回归证据：最窄 Python 服务状态组 5/5 通过，覆盖 PlayMode 与 stale 的 `waitingReason` 区分、30 秒 attention 语义、无归属 `unity_auto` 编译必返回 `reuseDecision=unattributed_auto_compile/inputCoverageVerified=false/replayStartAttempted=false`、已验证批次仅复用且未验证终态绝不重放。该结果证明当前安全拒绝和已归属复用合同，不构成未来 P4 输入 manifest 的完成证据。
 
 - 2026-09-14 xclient3 安装版本现场（P1，安装版本待复核，不撤销本仓库最新修复/验收）：StageTool 表头修复在 UPilot 0.3.31 登记 `wb-c74ed894-e88c-4ddf-96f1-fcdda726e239`（created=1789356949243）后 pending 消失、状态仍指旧编译，登记 operation 查询 NOT_FOUND，安装版定向发现无 `unity_write_batch_status`。安全编译随后获得 live request `req-d286960e-a187-47da-8389-b5e9d159ca9f`、实际 operation `37585d1c148f45a580c9fa50a8e6aa40`、verified=1789357150635、0 Error/16 Warning，但 facade 为 `COMPILE_CORRELATION_NOT_VERIFIED`。后续独立代码修正批次 `wb-3e47f7d3-ab9f-48cc-b40c-bdc55d786b84` 已自动关联通过，不回填旧批次结论。沿用顶部2026-09-14持久终态/活动附着/零重放能力及规范项目矩阵，不另建通用重复需求；预期节省每轮2至4次人工交叉核对。项目证据与反向引用：`F:\xclient3\TODO_UPilot.mcd` / `UPilot-20260902-01`，安装版本复核在项目侧跟踪。
 
-- 2026-09-12 延迟批次重复编译现场（P2，Open，通用 UPilot/MCP；不撤销历史核心Done）：xclient2相机推进验收期间仅登记一次格式批次 `wb-9b0f8f79-5d57-4947-bd57-f4ef91bfd4a0`（created=1789226423187），由Automation正常退出PlayMode。Unity先自动编译 `7679f0f821514910bd47c305f73e0e5d`（started=1789226441589，verified=1789226460384），随后协调器又启动关联编译 `8e74b644601f4663943c0d58d01ac3ab`（started=1789226473484，verified=1789226485879），Agent未手动sync/compile。第二次0 Error且关联验证成功，功能不受影响；但多一次Domain Reload和约25秒等待。期望扩展已有attach-or-start决策：当首轮自动编译的输入哈希/时间覆盖待处理批次且错误已核验时，关联复用；证据不足才触发编译。验收在 `D:\upilot\Tests~\UPilotTest` 覆盖PlayMode写入、退出自动编译、协调器恢复，保持每批一次实际编译且关联证据完整。相关工具 `unity_write_batch_register/unity_mcp_status`；双向项目条目 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。预期每轮省一次Reload及20至40秒；本表现首次记录。
+- 2026-09-12 原始补充证据：xclient2 相机推进验收期间仅登记一次格式批次 `wb-9b0f8f79-5d57-4947-bd57-f4ef91bfd4a0`，Unity 先自动编译，协调器随后再启动关联编译，功能正确但多一次 Domain Reload 和约 25 秒等待。本证据并入上述 P4 输入 manifest 能力，不再计入 P2 未完成数。
 
 - 2026-09-10 自动编译身份残留补充（P1，Open，通用 UPilot/MCP，出现 1 次，不撤销历史核心验收）：xclient2 EditMode 弹道预览注册批次 `wb-9d872f7a-0157-4417-81fa-d124c351bd5a` 已于 `1789032213715` 关联验证成功；随后并行源码改造触发独立自动编译 `1cb7b44a50b0400e8fccf9ef4d743997`，于 `1789032573699` 验证为 29 Error。`unity_compile_errors` 的实时 context 正确返回空 request/writeBatch，但 `unity_mcp_status`、`unity_compile_wait`、`unity_ensure_ready` 投影新 operation 时仍保留旧 request、writeBatch、createdAt 和 reloadId，虽 `correlationVerified=false`，仍易把新失败归给旧批次。
 - 本补充期望与效率收益：完整权威快照切换 compile operation 时原子替换身份组，明确的空值必须清除旧关联，不得按非空字段拼接历史状态；批次历史结果单独保存。预计每次减少 2～4 次交叉查询，避免并行开发下错误归责或误接受历史编译。可验收标准：在 `D:\upilot\Tests~\UPilotTest` 先完成注册批次编译，再触发无批次自动编译失败，三个状态入口与实时错误入口必须一致指向新 operation、空批次/请求，原批次历史成功仍可追溯。相关工具如上；双向项目引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`；本补充优先级和状态以根清单为准，尚未实施或进行 UPilot 包验收。
@@ -852,6 +940,8 @@ UPilot 通用开发：
 - 2026-09-11 第四次持久批次查询现场（同一 P1/Open 通用 UPilot/MCP 子项，出现次数更新为 2）：`F:\xclient2` 弹道编辑器菜单样式最小修改登记批次 `wb-4aa22d00-5e32-45b6-8e51-066325682ec1`（`writeBatchCreatedAt=1789125096266`）自动编译开始于 `1789125097558`、核验完成于 `1789125111780`，0 Error / 0 Warning，pending 已清空；恢复后的 `unity_mcp_status` 却仍投影历史 `writeBatchId=wb-c47936b8-644a-48b7-9e39-9b47a26f7881`、旧创建时间和 `correlationVerified=false`。调用方无法证明新批次关联验收，也不能查询其实际终态。期望、效率收益及验收沿用本子项：`writeBatchId` 必须返回持久、只读且明确关联/合并/失效原因的终态；项目双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。
 
 - 2026-09-17 第三次持久批次查询现场（P1/Open，通用 UPilot/MCP）：`F:\xclient2` 发射编排类型联动批次 `wb-0c870098-5861-4b35-a48b-5060547b2fef`（created=`1789638311117`，manifest SHA256=`06d4eb96e108622c52018606f26366321f5872cd51411826b32d6fbea732a6c8`）仅登记一次，在实际 EditMode 的 stale context 下返回 deferred 和错误的 “Leave PlayMode”。随后 pending 清空、全局状态仍引用历史 `wb-ba5f15f7-f822-4680-9ca4-02326704130e`；登记 operation `op-7cac05d1-d4ef-4320-80de-1cd375753395` 在 Unity 外部重启后为 `OPERATION_NOT_FOUND`，无法查询原批次成功、取消、合并或丢失原因。新会话发现并通过新增精确用例 5/5，只证明加载程序集包含修改，不替代批次关联编译证据；调用方未重复登记或编译。出现次数更新为 3。期望按 writeBatchId 持久查询 manifest、阶段、关联编译、`errorsVerified/correlationVerified`、`supersededBy` 和重启恢复/失效原因；stale EditMode 只返回等待权威上下文。规范验收注入 stale context、Server/Unity 重启及 operation 内存丢失后，原批次必须返回明确终态而非 `NOT_FOUND`。预计每次减少 2～4 次核对和一次不必要重载。项目双向记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。
+
+- 2026-09-21 第四次持久批次查询现场（P1/Open，通用 UPilot/MCP，出现次数更新为 4）：`F:\xclient2` SceneView 规划轨迹上限批次 `wb-10ccd38f-add5-4d22-95b4-497dff0a1c37`（created=`1789977882282`）登记后，Unity 编译 `45f38e1ced2f45e0bfc7d51a0fbb8ca7` 实际开始于 `1789977884418`、结束于 `1789977898414`、核验于 `1789977915869`，0 Error；但全局状态仍投影历史批次 `wb-a68091c5-9bfc-44d4-80f7-4ece2ca29f49` 且 `correlationVerified=false`，新 pending 被清空。`unity_batch_results` 返回 `NOT_FOUND`，登记 operation `op-bd34c317-f4fd-472e-a90c-fbdb04df61df` 返回 `OPERATION_NOT_FOUND`，精确测试 1/1 通过也不能替代当前批次关联证据。期望按 batchId 持久返回 manifest、阶段、关联编译、`errorsVerified/correlationVerified`、`supersededBy` 或明确失效原因；可验收标准继续为 stale EditMode、Domain Reload、Server/Unity 重启后原 batchId 仍能取得唯一终态且不重放编译。预计每次减少 2～4 次人工核对及一次误验收风险。项目双向记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`。
 
 - 2026-09-08 写入批次等待原因补充（P2，待处理，出现 1 次，不撤销历史核心 Done）：xclient2 弹道编辑器 Config 来源迁移中，`unity_write_batch_register` 在 `playModeState=unknown/compilePhase=domain_reload/compileOrigin=unity_auto` 且 Bridge 断连时返回 `status=deferred`，nextAction 却要求 “Leave PlayMode”。批次 `wb-89cfe261-3c3e-4e90-a8e1-59b0cf74a6c4`（created=1788858650053，verified=1788858684593）随后自动恢复并完成相关联编译，无需手动退出或再编译。
 - 2026-09-11 同类现场再补充一次（P2/待处理，通用 UPilot/MCP）：统一弹道编辑器打开/新建流程的批次 `wb-662e7725-4d31-41ae-ab46-ca690180bb05`（created=1789117536443）在 `UnityDisconnected/unknown/domain_reload/unity_auto` 时再次建议 “Leave PlayMode”；等待后自动获得同批次已核验终态（verified=1789117563684，0 Error/0 Warning），未切模式或额外手动编译。期望继续区分重载等待与权威 PlayMode，仅后者建议退出；验收在 `D:\upilot\Tests~\UPilotTest` 覆盖两种状态及 stale EditMode，预计每批减少 1～2 次诊断查询并避免误操作。项目双向记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260805-02`，本根条目仍为优先级与实施状态权威。
@@ -909,6 +999,7 @@ UPilot 通用开发：
 - 2026-09-02 xclient2 Domain Reload 卡住回归：`unity_sync_after_disk_write(triggerCompile=true)` 已 Refresh 并接受编译请求 `req-d710a4fa-d48f-4796-a8e5-9c73e389f1a2`，快照写入 `compileFinishedAt` 且 `errorCount=0`，但调用在 `domain_reload` 中以 `COMMAND_TIMEOUT/UnityDisconnected` 返回并归类为 `compile_failed`；Bridge 超过 2 分钟未恢复，无法区分“编译器已完成、Domain Reload 卡住”和真实编译失败。期望工具拆分 `compileAccepted/compileFinished/domainReloadRecovered`，未恢复时返回非终态 `recovering` 或稳定 `DomainReloadStuck` failureSignature，并自动关联 `unity_hang_status`/dump 元数据。非终止式 dump：`F:\xclient2\log\UPilotDiagnostics\unity-77412-1788336272832.dmp`，bytes=`2010783`，SHA256=`9c6970bd1361fbd32aa99a01e63d08842d7cb652466adf8097f574d646e7d889`；项目侧双向记录见 `F:\xclient2\TODO_UPilot.mcd` 的 `UPilot-20260805-02`。验收应在 `D:\upilot\Tests~\UPilotTest` 构造“编译完成后 Reload 不恢复”fixture，确认工具不会误报编译器失败，并在 30 秒内返回可诊断终态或可轮询恢复状态。
 - 2026-09-04 xclient2 刷新结果回归：完成弹道预览场景语义化改名后，`unity_sync_after_disk_write(triggerCompile=false)` 返回顶层 `ok=true/status=refreshed`、标准化 `refresh.ok=true`，但 `refresh.normalizedFrom` 仍为 `ok=false/status=ok`。新场景资源和权威 Editor context 均正常；项目侧证据见 `F:\xclient2\TODO_UPilot.mcd` 的 `UPilot-20260805-02`，出现次数更新为 56。
 - 2026-09-04 规范项目契约复核：`unity_ensure_ready` 刚返回 `ready=true` 后执行只读 `unity_project_stack_detect`，其响应外层 context 在 `ageMs=4695` 时变为 `authoritative=false/isStale=true/blockedReason=EditorContextStale`，紧接着 `unity_mcp_status(forceFresh=true)` 又恢复为 `ready=true/ageMs=7`；同时 `unity_mcp_status` 暴露 `editor/executionState/context` 三份状态，`unity_ensure_ready` 内又含 `compileStatus=ready`、`executionState.compileStatus=finished` 和嵌套 `compileWait.executionState`。建议将 freshness/authority 只在一个聚合器计算，以 `observedAt/receivedAt/maxAgeMs` 区分 Unity 观测时间和服务端接收时间，并让所有工具仅引用一个版本化 `executionState` 快照（其他位置返回 snapshotId/phase-specific outcome），避免阈值抖动和同响应多份状态漂移。复现环境为 `D:\upilot\Tests~\UPilotTest`、Unity `6000.6.0a2`、session `1f4e24384e474be5ab642f146abad75c`；随后 Python 契约测试 `upilotserver~/tests/test_v02_contracts.py` 为 `68 passed`。
+- 2026-09-20 xclient2 再次补证（P2，Open，通用 UPilot/MCP，本日出现 2 次）：`unity_mcp_status(forceFresh=true)` 已返回 `ready=true/authoritative=true/isStale=false`，约十秒后 `unity_ensure_ready(timeoutS=30)` 在内部等待中因 `EditorContextStale` 超时；其最终附带 executionState 已重新权威且处于 EditMode，顶层却仍返回 `ready=false/compileStatus=timeout`。后续批次 `wb-b04aba01-297b-42dd-8035-4a2a77a8244a` 正常关联编译为 0 Error / 0 Warning。同日批次 `wb-4a2e971a-3842-4370-b367-bdf92bb9a22c` 已达到关联终态后，首次 `unity_mcp_status(forceFresh=true)` 仍返回 `authoritative=false/isStale=true`，下一次实时错误查询才恢复权威状态。期望就绪与强制刷新工具主动刷新并以调用结束时的统一权威快照计算顶层结果；验收在 `D:\upilot\Tests~\UPilotTest` 覆盖“入口 stale、等待期间恢复”和“Reload 终态已持久化、首次强制刷新”场景，最终应直接返回 ready，预计每批减少一次恢复查询。项目双向证据：`F:\xclient2\TODO_UPilot.mcd` 同条补充。
 - 同次复核还确认外层 `context` 的 schema 会按工具路径切换：直通 Bridge 的 `unity_editor_windows_list` 返回 `connected` 且没有 `status/ageMs/compileErrorCount`，Server 组合的 `unity_compile_status` 返回 `unityConnected`、`status/ageMs/compileErrorCount`。`_payload()` 当前优先使用 `ToolResponse.context`，否则调用 `_response_context()`，导致同一公共 envelope 的同名字段并非固定契约；应统一由响应出口附加规范化快照，Bridge 原始 context 仅作为 `observations.bridge` 或诊断保留。
 - 2026-09-04 方案补充：编译请求前、编译开始、编译器结束、Domain Reload 前、Reload 后恢复和持久错误复核终态均改为由 Unity 立即持久化并主动发送完整有序快照；`compiler_finished` 明确保持 `terminal=false/verificationPending=true`，Server 仅保存和投影 Unity 事实，不反向驱动 Unity 状态。PlayMode 代码写入只登记 pending write batch，权威 EditMode 后才执行一次同步和一次安全编译；Agent 规则模板升级为 v28，Skill 安装模板升级为 v26，并加入 write-batch/compile-operation/timestamp 关联校验。
 - 2026-09-04 过渡验收：规范项目安全编译跨 Domain Reload 成功，`startedAt=1788523376165`、`finishedAt=1788523379503`、`errorsVerified=true`、0 error / 0 warning，5 个 Agent Rules/Skill 定向 EditMode 测试全部通过。但活动实现仍复用了历史 `compileRequestId=req-b270d38d-6908-4392-8113-9a7bdd41bb50`，且未公开 `writeBatchId/lastCompileVerifiedAt/lastTerminalCompileAt`；这证明新关联契约尚是方案和调用规则，不是已落地的运行时能力。过渡期只能接受“本轮写入后、返回 EditMode 后启动的唯一一次 `unity_safe_compile_and_wait` 结果”，不得接受缓存 `completed`。
@@ -929,7 +1020,7 @@ UPilot 通用开发：
 
 ### [已完成][P2] Console 查询契约与大体量增量索引性能复测及优化
 
-- 2026-09-15 新增子项：过滤无匹配时的增量扫描游标（P2，Open，通用 UPilot/MCP；原性能优化保持已完成）。触发：xclient2“预览目标设置”定向回归。`unity_console_capture_read(sessionId=console_20260915_163709_639_20c04f5f,afterSequence=68,logType=Exception,count=8)` 完整扫描69～3072、matchedCount=0、scanComplete=true，却返回nextSequence=68；遵照现有“下次使用nextSequence”规则会重复扫描整段。期望区分最后匹配游标与已扫描游标，返回可直接续读的nextScanSequence，或使scanComplete时nextSequence推进至scannedToSequence，并同步Agent增量读取说明。预期每次无异常轮询避免重扫3004条（现场一次307.8ms、managedMemoryDelta约86.7MB，内存仅观测非因果结论）。验收：在`D:\upilot\Tests~\UPilotTest`合成有/无匹配、截断、分页、追加记录场景，连续读取无遗漏/重复扫描；保留兼容游标语义说明。证据：`F:\xclient2\Log\UPilotConsole\2026-09-15_16-37-09-639_PreviewTargetSettings\console.jsonl`；项目双向条目：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260915-PreviewTargets-ConsoleCursor`。本根条目为优先级与实施状态真值。
+- 2026-09-15 子项：过滤无匹配时的增量扫描游标（P2，已实现待手工验收；原性能优化保持已完成）。触发：xclient2“预览目标设置”定向回归。`unity_console_capture_read(sessionId=console_20260915_163709_639_20c04f5f,afterSequence=68,logType=Exception,count=8)` 完整扫描69～3072、matchedCount=0、scanComplete=true，却返回nextSequence=68；遵照现有“下次使用nextSequence”规则会重复扫描整段。2026-09-20 已改为：有扫描记录但无匹配时 `nextSequence=scannedToSequence`，未扫描任何记录时才保留输入游标，并同步 Agent 规则。预期每次无异常轮询避免重扫3004条（现场一次307.8ms、managedMemoryDelta约86.7MB，内存仅观测非因果结论）。统一手工验收覆盖有/无匹配、截断、分页和追加记录。原始证据与双向条目保持不变。
 
 - 发现时间：2026-08-17（历史现场曾出现 68 MB/23648 条通用 Console capture；仅作为规模证据）
 - 现象/问题：sequence 范围、continuation token、过滤条件和索引状态已经实现，但尚未在大采集上确认延迟、索引命中率和内存开销；历史上还出现过查询参数未生效却静默返回最近日志的现象，需要先验证过滤正确性与参数回显契约。
@@ -937,7 +1028,7 @@ UPilot 通用开发：
 - 验收标准：在 `Tests~/UPilotTest` 使用等价规模的通用合成 capture 验证存在/不存在关键词、未知参数、8 关键词、sequence 范围和 regex 查询；结果不得包含不匹配记录，并报告实际生效参数、扫描条数、索引命中、耗时、内存、continuation 和完整性。不运行外部项目业务测试。
 - 完成结果：读取结果新增 `effectiveQuery/matchedFields/ignoredArguments/indexStatus`；未知 MCP 参数由目标 schema 返回 `INVALID_TOOL_ARGUMENTS`。关键词和简单 OR-regex 查询改为单次字节扫描的候选行预过滤，再对候选记录执行权威 JSON/条件校验，避免大文件逐行反序列化。
 - 验收证据：`Tests~/UPilotTest` 合成 10/50/100 MB JSONL，优化前 P95 分别为 0.43s/2.29s/4.31s，优化后 5 次测量 P95 为 0.13s/0.60s/1.45s。100 MB 上不存在关键词为 0 条；八关键词 OR 与 regex 均命中 55 条；sequence 40000-50000 命中 5 条并通过 continuation 分页完整返回；未知参数明确拒绝。结果现同时报告托管堆与进程工作集的查询前值、查询后值和增量，并返回工作集采样来源；当前 Unity/Windows 上使用 `Windows.GetProcessMemoryInfo.WorkingSetSize`。补充 100.656 MiB、102000 条记录的 5 次查询 P95 为 1.509s，所有内存前后值均大于 0；定向 Unity Console 测试 2/2 通过。
-- 当前状态：已完成；基准临时目录已在记录证据后清理。
+- 当前状态：已完成。无匹配游标已通过 Unity 定向 fixture 与任务专属真实 Capture 验证：扫描到记录但无匹配时推进到最后扫描序号，下一次读取不重复扫描；未扫描记录时仍保留输入游标。基准临时目录已在记录证据后清理。
 
 ### [已完成] UPilot Acceptance 成功报告不得残留失败字段
 
@@ -1025,6 +1116,10 @@ UPilot 通用开发：
 - 完成结果：`maxDepth` 可展开数组、Generic 和嵌套 Serializable 字段；增加 `maxNodes`、continuation token、截断原因和 Unity 对象引用元数据，避免无界响应。
 - 验收证据：`UPilotSerializedPropertyWriteTests.AssetDataDepthAndContinuationExpandNestedAndArrayPropertiesPredictably` 通过，验证不同深度、完整字段路径、节点上限和 continuation；同属 EditMode runGuid `ad523ef0-18f0-454b-a964-a01a4331b385` 的 8/8 通过结果。
 - 当前状态：已完成。
+- 2026-09-20 Prefab 组件读取入口（补充子项，P2 / 待处理，通用 UPilot/MCP，出现 1 组）：来源任务为 xclient2 弹道系统及 Examples 只读代码评审；双向现场条目 `F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260829-04`。原属性树展开修复保持已完成，不把本次入口缺口视为已证实的 ScriptableObject 回归。
+- 当前痛点/证据：`unity_prefab_query_components(includeSerializedFields=true)` 的嵌套 `m_targetAuthoringFilter` 只有 `Generic/(unsupported)/hasChildren=true`，没有子字段（request=`req-ac1cfc42-b53f-43e8-b07c-ffd2cb316fbf`）；`unity_asset_get_data(assetPath=..., componentType=ProjectileAttackConfig, maxDepth=3, maxNodes=70)` 随后返回 `targetType=GameObject`、五个 GameObject 属性且 `truncated=false`（request=`req-9feec6ed-4c39-4aa2-b83f-493b732d340f`），无法核对目标组件的嵌套配置。目标为 `F:\xclient2\Assets\Editor\KingShotBattle\ProjectileGameplaySystem\Acceptance\Generated\Prefabs\Cases\Weapons_Missiles\Weapon_HomingSteeringMultiTargetSalvo.prefab`；本轮未进入 Prefab Mode、实例化或修改该资产。
+- 期望能力/效率收益：让只读 Prefab 路径、层级路径和组件类型/索引选择复用有界属性树读取，回显实际选中的组件身份及字段路径；不支持的选择组合明确拒绝，不能静默退回 GameObject。预计每个复杂配置减少 1～3 次补查及 YAML/反射兜底。
+- 子项验收标准：在 `D:\upilot\Tests~\UPilotTest` 创建根/子节点组件、同类型多组件及嵌套 Serializable/数组夹具；公开语义工具对确定选择返回正确组件和完整预算内子字段，深度/节点截断可解释，歧义或不支持选择明确拒绝，全程场景、资源、Prefab Stage 不变。相关工具：`unity_asset_get_data`、`unity_prefab_query_components`。
 
 ### [已完成][P1] Prefab 物理组件批量审计的结构化查询
 
@@ -1600,7 +1695,7 @@ UPilot 通用开发：
 - 验收证据：Unity 6000.6.0a2 安全编译在 Domain Reload 后完成，最终 session `75e03d0310ae42e8abab241cd7ece87c`，0 错误、0 警告；定向 EditMode run `eb37a458-6ffe-44cb-8109-c2c619d8b8c4` 执行 `UPilotWriteAccessUiTests` 共 17 项，17 passed / 0 failed / 0 skipped，cleanup completed 且无未释放资源。未运行完整 EditMode 套件。
 - 当前状态：已完成。
 
-### [部分完成][P2] Perception Skill 声明与 MCP Registry 应自动对齐
+### [延期][P4] Perception Skill 声明与 MCP Registry 应自动对齐
 
 - 2026-09-11 核对后的剩余工作：`UPilotSceneSummaryService`、`UPilotSceneSummaryTests` 及 `unity_scene_summary` 已交付，仓库主 Skill 已使用新名称。移除新建摘要工具、重复建设 capability/proxy 的任务；仅保留外部 `unity-perception` 声明的来源归属、迁移/明确不支持说明和安装时一致性校验。不能仅因第三方 Skill 声明旧名就要求 UPilot 实现同名工具。
 - 发现时间：2026-09-04。
@@ -1611,7 +1706,9 @@ UPilot 通用开发：
 - 预期效率收益：一次结构化调用替代多轮全场景查询与客户端聚合，预计每次分析节省 2～5 分钟，并降低大结果截断和漏判概率。
 - 可验收标准：在 `Tests~\UPilotTest` 中为 Perception 模块建立通用 fixture；Skill 声明的工具逐一能被 Registry 精确查询并成功调用，或返回明确不可用原因与可执行 `nextAction`；`scene_summarize` 能直接返回根节点数、活动节点和组件摘要。
 - 相关工具/路径：`unity_tools_find`；`unity_capabilities_get`；`unity_tool_call`；`scene_analyze`；`scene_summarize`；`hierarchy_describe`；`scene_context`；`Tests~\UPilotTest`
-- 当前状态：部分完成；已交付并注册 `unity_scene_summary`，但 Skill 声明的 `scene_analyze/scene_summarize/hierarchy_describe/scene_context` 尚未统一迁移、注册或明确废弃。
+- 当前安全行为：已交付并注册 `unity_scene_summary`，能力发现区分 `registered/available/callableNow` 并返回不可用原因；不会因为外部 Skill 声明旧名称就伪造同名工具。
+- 延期原因：外部 `unity-perception` Skill、客户端文档和安装来源具有独立所有权，UPilot 只能维护自身 Registry、文档与支持状态，不能擅自实现或改写其他 Skill 包。
+- 未来验收：由生态所有者提供来源清单和迁移映射，逐项证明旧名已迁移、明确废弃或可调用，并验证安装副本与 Registry 的来源身份。当前状态为 P4 延期，不标记完成或忽略。
 
 ### [已完成][P1] Unity Test Runner 显式多过滤器批量运行
 
@@ -1692,7 +1789,7 @@ UPilot 通用开发：
 - 相关工具/路径：`unity_menu_execute`；`EditorUtility.DisplayDialog`；`D:\upilot\Tests~\UPilotTest`。
 - 当前状态：已完成；证据见 `Documentation~/P1-Window-Modal-Evidence-20260914.json`。
 
-### [待处理][P3] Console Capture 列表仅活动会话摘要模式
+### [已完成][P3] Console Capture 列表仅活动会话摘要模式
 
 - 发现时间：2026-09-05。
 - 来源任务/测试：xclient2 弹道系统 P1 最终清理门禁；项目侧双向记录见 `F:\xclient2\TODO_UPilot.mcd` 的“Console Capture 列表需要仅活动会话摘要模式”。
@@ -1702,7 +1799,8 @@ UPilot 通用开发：
 - 优先级：P3。
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 预置 100 个已停止会话并分别保留 0、1、2 个活动会话；摘要模式只返回对应活动项和准确 `activeCount`，响应不含历史路径且不截断；默认列表模式保持原行为。
 - 相关工具/路径：`unity_console_capture_list`；`D:\upilot\Tests~\UPilotTest`
-- 当前状态：待处理。
+- 2026-09-20 实现：`unity_console_capture_list` 追加向后兼容的 `activeOnly=false`，开启时只返回活动会话；响应追加 `activeCount/returnedCount`。`activeOnly=true` 与 `includeActive=false` 在派发前以零副作用拒绝。
+- 当前状态：已完成批准范围验收。Server 契约覆盖过滤与计数，真实默认列表和 `activeOnly=true` 调用均返回准确 `activeCount/returnedCount`，矛盾的 `activeOnly=true + includeActive=false` 在派发前拒绝；最终活动会话为 0。历史 100 会话压力矩阵不再作为本轮关闭条件。
 
 ### [已完成][P1] 一键完整验收的超长时与故障矩阵
 
@@ -1731,7 +1829,7 @@ UPilot 通用开发：
 - 验收证据：`UPilotTestSelectionTests.NetworkObservationsStayOnDiskDuringActiveRun` 显式打开 Console 日志、连续写入两类观察日志并跨帧验证 Console 无污染、文件包含 marker、`LogAssert.NoUnexpectedReceived()` 通过。该 fixture 包含于 runGuid=`b765d561-fbb8-4610-876c-5c51dfdafd82` 的规范项目 12/12 验收，详见 `Documentation~/ReliabilityDelivery.md`。
 - 当前状态：本轮定向实现及 Unity 6 验收完成；未重跑历史全量套件或 Unity 2022。
 
-### [待处理][P2] Snapshot HDRP 深度与多 Display GameView 扩展
+### [明确排除][P2] Snapshot HDRP 深度与多 Display GameView 扩展
 
 - 发现时间：2026-09-05。
 - 来源任务/测试：Snapshot schema v1、Camera Depth 与真 GameView 最终合成开发。
@@ -1740,7 +1838,7 @@ UPilot 通用开发：
 - 证据/复现：Unity 6000.6.0a2 中 URP Raw/Linear Float EXR 定向测试通过；GameView 通过 `WaitForEndOfFrame + ScreenCapture.CaptureScreenshotIntoRenderTexture` 的 Display 0 最终合成测试通过。HDRP 与 Display > 0 目前为显式不支持，不得静默退化为 Camera.Render。
 - 可验收标准：Unity 2022 LTS/Unity 6 的 HDRP fixture 分别验证 Raw/Linear Depth 数值、near/far 单调性与 EXR 统计；双 Display PlayMode fixture 对每个 Display 产生可区分最终合成 PNG，且同帧、尺寸、哈希、Display identity 可追溯。
 - 相关工具/路径：`unity_snapshot_capture`；`Editor/Optional/Snapshot.URP`；后续 Snapshot HDRP provider；`D:\upilot\Tests~\UPilotTest`。
-- 当前状态：待处理；v1 明确限定 Built-in/URP 与 Display 0。
+- 当前状态：本项目明确不开发；v1 限定 Built-in/URP 与 Display 0，并保持结构化 unsupported，不计入 P2 开发缺口。
 
 ### [已实现待验收][P2] Snapshot Windows 最小化矩阵自动验收
 
@@ -1813,8 +1911,9 @@ UPilot 通用开发：
 - 本地证据：73 项 Python、Skill/Registry 清单和与当前源码绑定的 12/12 Unity summary 校验通过；`artifacts/reliability-quality/quality.json`，2177 bytes，SHA256=`9b68ed8e58c10a8d1c9b2a72972e42c38ce0f3a75ac4390b51e53237f1117e4f`。
 - 当前状态：已忽略剩余缺口；轻量门禁与强制同源摘要阶段已实现。受控 runner 配置、远端演练、稳定双版本图形 CI 和分支保护尚未完成，不再作为本轮后续任务；未触发远端 Actions、提交、发布或版本修改。
 
-### [部分完成][P2] 工具状态与用户文档需要可追溯的统一生成和校验
+### [延期][P4] 工具状态与用户文档需要可追溯的统一生成和校验
 
+- 2026-09-20 静态代码复核补充：旧活动表、详细条目与顶部验收追加存在多处状态漂移，例如选择器/null 与 Scene Summary Schema 已有实现却仍写待开发，自动 Capture 清理的“已实施”描述又与当前验收入口明确拒绝自动 force-stop 不一致。影响 TODO 排期、开发量判断和验收边界。建议在本条既有稳定 ID/来源校验范围内区分当前实现、待验收、客户安装复核与历史证据，并同步唯一当前状态，禁止从历史 Passed 自动升级当前源码。逐项源码位置、剩余工作和优先级见 [2026-09-20 TODO 代码核对报告](Documentation~/Backlog-Code-Audit-20260920.md)。本次仅追加分析依据，不修改既有关闭/忽略决定；状态仍为部分完成，未执行测试或客户项目操作。
 - 2026-09-11 清单收窄：已交付的 tools.json 生成和新增能力契约移出待开发范围；剩余为历史状态、安装说明、稳定 ID 及证据关联的持续一致性校验。本次修正根 TODO 的旧统计和完成项混排，不据此关闭完整文档生成任务。
 - 发现时间：2026-09-07。
 - 来源任务/测试：UPilot 包功能清单与完善度审查。
@@ -1825,7 +1924,9 @@ UPilot 通用开发：
 - 可验收标准：工具增加/删除而文档未同步时 CI 失败；能区分 implemented、contract-tested、live-tested、conditional、reopened；README 版本与构建元数据一致，历史验收不得自动继承到新源码。
 - 关联条目：与“Perception Skill 声明与 MCP Registry 应自动对齐”共享清单校验机制。
 - 2026-09-07 最小交付：质量脚本从 Registry/MCP schema/facade 生成 `tools.json`，记录 registered/exposed/proxyHandlerAvailable 与实际参数，新增能力及 Skill 契约有定向断言；ToolStatus 和 `Documentation~/ReliabilityDelivery.md` 按本轮源码、环境和证据更新。没有手工改动版本文件，也没有全量重写 README/历史状态矩阵。
-- 当前状态：统一清单与本轮证据关联已完成；全量历史文档生成、稳定 backlog ID 迁移和安装说明统一仍待后续。
+- 当前安全行为：仓库自有 Registry/MCP/facade 清单与本轮证据关联已生成和校验；缺少外部安装 manifest 或历史产物时明确报告 unknown，不把它们伪称为当前源码一致或已安装。
+- 延期原因：剩余工作是全量历史文档、稳定 backlog ID、外部客户端及安装来源的长期生态统一，超出本仓库单次功能收口的所有权边界。
+- 未来验收：外部来源提供可核验 manifest，文档、稳定 ID、安装副本和当前 Registry 建立可追溯映射；缺失或陈旧来源必须继续失败或 unknown。当前状态为 P4 延期，不标记完成或忽略。
 - 2026-09-16 P2-WP-12 只读核验：`check_release_quality.py --docs-only` 在当前源码通过，报告 `Tests~/UPilotTest2022/Log/P0P1/P2-WP12-docs-quality-20260916/quality.json` 为 4821 bytes、SHA256=`22F8158CF25D4D9463533647A63FFB739BA15DEBECEE11B09DF8C7F46559D363`。`docs.registry`、`docs.todo-id`、`docs.archive` 均 passed（Registry 207 项、生成差异 0、P2 14 anchors）；历史不可取得产物与未显式提供的只读安装清单按契约分别为 `docs.evidence/docs.install=unknown`，未被伪称为已注入或当前源码不一致。定向 Python 回归 `test_release_quality.py` 为 12 passed（仅两个第三方 websockets 弃用 warning）。这补齐当前仓库文件的静态来源/归档检查，不关闭 UP-016/UP-020 的外部来源映射、稳定 ID 迁移及安装说明统一残项。
 - 2026-09-16 P2-WP-12 开发复核：文档检查器新增/补齐输入快照失效、显式空 installed-manifest provenance 与确定性报告合同，`test_release_quality.py` 为 26 passed。首次 docs-only 正确发现 `Documentation~/ToolStatus.md` 仍写 Registry v6，而当前 `REGISTRY_VERSION=7`；将该单点文档更新为 v7 后重跑 `--docs-only` 通过，报告 `Tests~/UPilotTest2022/Log/P0P1/P2-WP12-docs-quality-recheck-20260916/quality.json` 为 114790 bytes、SHA256=`BB298715055B98A46CB19BCB4B297D4EA87119F1426E9D8F4BBEB3291B1DC70C`，`documentation.checked/passed=true`。未提供外部安装清单与不可取得历史产物仍按合同保留 unknown，不伪称已安装或已验证；WP-12 的仓库自有开发检查完成，外部来源/安装矩阵留统一验收。
 
@@ -1870,21 +1971,23 @@ UPilot 通用开发：
 - 定向证据：Skill/安装器 Python 44 项通过，含两种安装布局、自定义端口、缺少 meta、生成缓存和真实损坏检测。模板从 28 升至 29，通过 `UpdateAllAgentSkills(false)` 更新两个未定制副本并独立自检通过；Unity 安装相关测试 3/3。两份安装内容 SHA256 均为 `8400108cf9ab77abf5640b6b9e6f29e5ee730912cabd580f65017351f2f6b73f`。
 - 当前状态：已完成；三项集成修复整体同源质量门禁 172 项 Python 通过，完整产物哈希见 E4；未改包版本/客户端配置，未提交/发布。
 
-### [待处理][P3] HTTP 辅助调用丢失 MCP 参数校验错误
+### [已完成][P3] HTTP 辅助调用丢失 MCP 参数校验错误
 
 - 发现时间：2026-09-07；来源为三项集成修复的定向验收客户端调用。
 - 问题/影响：调用方漏传 `unity_task_start` 必填 `taskName` 时，`compile_driver._call_tool` 只取 `result.structuredContent`，将没有该字段的 MCP 校验错误表现为 `{}`，调用方无法直接区分参数拒绝、协议错误和未知执行结果。
 - 证据：本次错误参数请求得到空对象；检查原生 schema 后补齐参数，唯一实际验收 Task 为 `task-0cdeed2e-555e-4f29-af92-6cbefac9698d`。辅助函数当前末行使用 `envelope.get("result", {}).get("structuredContent", {})`。
 - 建议改进：保留 JSON-RPC error、MCP isError/content 与结构化响应，缺少结构化内容时明确返回诊断；增加参数预校验/只读解析回归。不得因此自动重放非幂等请求。
-- 当前状态：仅记录，未扩大本次四项代理入口修复的范围。
+- 2026-09-20 实现：`compile_driver._call_tool` 保留 JSON-RPC error、MCP `isError` 与文本 `content`；响应缺少 `structuredContent` 时返回 `executionStatus=unknown` 和明确诊断，不返回空对象，也不自动重放请求。
+- 当前状态：已完成。统一验收九文件 Server 契约组合中的 `test_compile_driver.py` 验证 JSON-RPC error、MCP `isError`、文本 `content` 和缺少 `structuredContent` 时的 unknown 状态均被保留，非幂等请求未自动重放。
 
-### [待处理][P3] Flow 成功用例汇总使用 Warning 级别
+### [已完成][P3] Flow 成功用例汇总使用 Warning 级别
 
 - 发现时间：2026-09-07；来源为原生/代理六次最小 Flow 入口验收。
 - 问题/影响：六个用例全部 Passed，但每个成功汇总都作为 Warning 写入 Console，增加诊断噪声，易与编译警告或真实故障混淆。
 - 证据：capture `console_20260907_143351_302_23c646c4` 中 sequence 317/330/345/358/373/388，均为成功/失败0/错误0；`artifacts/integration-fixes/live-evidence.json` 保存了对应消息。
 - 建议改进：成功用例汇总使用 Info 或独立结果日志，只有异常/降级才用 Warning；保留失败报告，并以日志级别定向测试防止回归。
-- 当前状态：仅记录，不影响本次 6/6 业务结果；未改 Flow 引擎或日志策略。
+- 2026-09-20 实现：Flow 通过和跳过汇总使用普通日志，断言失败使用 Warning，执行错误使用 Error；不改变原始业务结果或 Flow 调度。
+- 当前状态：已完成。规范工程确认启用 `UPILOT_ENABLE_FLOW`；最终源码清理批次 `wb-878a8634-af97-4b0e-adec-c04666be7234` / compile operation `f8e035719d3e46dba36cff2155477505` 关联通过。定向 runGuid `b482e9f5-a1c3-4284-a5ed-664096844afc` 为 4/4 Passed、结果权威、cleanup 完成，真实验证 Passed/Skipped=`Log`、Failed=`Warning`、Error=`Error`；测试精确恢复 Logger 的 Console、级别和 verbose 运行时设置。
 
 ### [已完成][P1] Windows 发布构建未对齐 uv 导出文件与 pip 读取路径
 
@@ -1894,7 +1997,7 @@ UPilot 通用开发：
 - 改进：pip 显式读取 `upilotserver~/requirements-locked.txt`，使其与 uv 导出目标一致；发布 tag 更新后重新运行同一 tag 构建验证安装、打包、版本检查与 Release 资产。
 - 当前状态：已完成。修复已提交到 `main`（`932727c`），`v0.3.30` 已指向该提交；push 构建 run `34094601922` 成功，Release 已发布 EXE、SHA256 与 manifest。重复的手动构建 run `34094629754` 已取消，不影响成功产物。
 
-### [已完成][P0][安全] `unity_reflection_call` 参数预校验必须先于目标调用
+### [已完成][P0][安全] `unity_reflection_call` 参数预校验与目标异常副作用标记
 
 - 2026-09-14 完成：Server 创建 dispatcher 任务前拒绝非法形态、枚举、typed arguments 与预算；Unity raw router/`HandleCallAsync` 校验及请求级副作用边界已补齐。Python 原生 wrapper/代理定向 41/41；Unity 6 与 Unity 2022.3 的直接 raw handler 各 23/23，均 `sourceUnchanged=true`、结果权威且清理成功。非法 await/result/options/typed argument 和目标元数据保持零调用/零 getter；合法请求一次；目标异常、await 超时、编码和发送失败均保留可能副作用且不重试。完成矩阵 `Documentation~/P0-Reflection-Evidence-20260914.json` 为 3889 bytes，SHA256=`1758E55EE50EF024BC72604F762F28B94A8901F1071BBF9A9FB301949F66D9D1`，原客户失败证据保留。
 
@@ -1908,7 +2011,11 @@ UPilot 通用开发：
 - 证据：请求 ID `cmd-316433ff-8890-4a88-8a9a-7e5c5ca0c30c`；`F:\xclient2\Log\UPilotConsole\ProjectileEditor_ED-06.3_RealStartup\summary.json`（捕获中两条 `TypedValueSpec.items` 深度 Warning 亦来自该反射参数解码链）。
 - 相关工具/路径：`unity_reflection_call`；`D:\upilot\Tests~\UPilotTest`；`F:\xclient2\Assets\Editor\KingShotBattle\ProjectileGameplaySystem\Acceptance\ProjectileEditorPlaySession.cs`
 - 建议归属：通用 UPilot/MCP；项目侧双向引用：`F:\xclient2\TODO_UPilot.mcd` 同名条目。
-- 当前状态：P0 修复及批准的 Server/native/proxy/direct Bridge 双版本定向验收已完成；出现次数 1，原客户失败证据保留。
+- 2026-09-20 回归补证：`F:\xclient2` 弹道模拟发射者 Builder 通过 method 引擎调用已进入目标并在 `AddComponent` 抛错（Console 保留业务堆栈），commandId=`cmd-82c7bde0-41fd-4f5c-8cbb-e9dc507cb2f9` 却返回 `sideEffectsMayHaveOccurred=false` 且没有目标堆栈；expression 的 commandId=`cmd-93a22c5f-3b2d-4611-b5ad-3632dafa3b86` 标记 true，但堆栈被外层 `ExecutionContractException` 取代。项目侧双向记录：`F:\xclient2\TODO_UPilot.mcd` 同名条目。
+- 期望能力/效率收益：目标调用边界一旦越过，method/expression 的异常都统一标记 true，并保留原异常类型、消息、目标堆栈和 commandId；预计每次失败减少 1～3 次资源/场景核对，避免依据 false 自动重放非幂等方法。
+- 回归可验收标准：在 `D:\upilot\Tests~\UPilotTest` 增加“持久计数加一后抛异常”方法，method/expression 各调用一次；计数均为 1、返回均为 true、原目标堆栈完整且无自动重试。非法参数前置拒绝继续验证计数 0、false。
+- 2026-09-21 修复与验收：异常包装现在以 `boundaryEntered || priorSideEffects` 单调合并副作用证据，递归解包单层 `TargetInvocationException`/`AggregateException` 并保留原目标 `exceptionType`、`exceptionMessage`、`stackTrace` 和可选 `wrapperExceptionType`；expression 重抛使用 `ExceptionDispatchInfo`，method/expression 均不得把已进入目标后的 true 覆盖为 false。Python 定向回归 57 passed，后台 operation 子集 3 passed。Unity 6 关联批次 `wb-36e20ea0-336e-414c-a57d-be92fa0b656f` / compile operation `1b1f9a8498da4371a5846f07f5f83985` 为 0 error/0 warning，fixture runGuid=`bff29cd4-6655-47bb-8c2c-51de6c3bb0a6` 为 26/26 Passed、权威且清理成功；最终源码补编批次 `wb-8954f402-514b-4baa-aa3b-59fb498c194d` / `226ccde146874e35b4883edc166352d7` 相关性已核验。Unity 2022.3 关联批次 `wb-057dd110-0d9b-4a43-88c8-6ac7e02e9822` / `2529749be4ca4dbda4bb3c4d71fed54c` 为 0 error/0 warning，fixture runGuid=`a75a3d71-4a35-4c81-bd8f-05d55c9267b1` 为 26/26 Passed、权威、Console 覆盖完整且清理成功；最终源码补编批次 `wb-6240a9ff-d4ea-4720-82f9-8cf7f7e5f568` / `dd98ccd74d0d458c855d1bdf68eae5c2` 相关性已核验。Unity 6 与 Unity 2022.3 均通过真实公开 method/expression 各执行一次 `MutateThenThrow()`；U6 commandId 分别为 `cmd-d7278fbd-f8b6-4a86-8151-b3572ab24a62`、`cmd-cb751ce0-4e70-4936-a33e-37531634f32a`，U22 分别为 `cmd-1f866ff9-31c6-42ea-83e8-f2b6164774a9`、`cmd-9b9b024b-26f8-4f07-a67f-fea66f920cde`。四次均返回 `sideEffectsMayHaveOccurred=true`、原始 `System.InvalidOperationException`、`P0_TARGET_THROW` 与目标方法栈，并给出禁止盲目重放的 nextAction。
+- 当前状态：已完成；原参数预校验安全语义保留，目标异常副作用标记和原始异常证据已修复并通过 Unity 2022.3/Unity 6 双版本验收，累计出现次数 2。
 
 ### [已完成][P2] 直接注入的 MCP 工具参数名应与公开 Schema 一致
 
@@ -1943,20 +2050,23 @@ UPilot 通用开发：
 - 建议归属：通用 UPilot/MCP。
 - 当前状态：本轮批准的编译矩阵已完成验收；修复后定向矩阵 NameError 出现次数 0，历史失败证据保留。证据见顶部 2026-09-14 编译收口记录，不代表整体 P0/P1 完成。
 
-### [回归待处理][P1][安全] `unity_hang_capture` 应在完整 dump 前执行空间与大小预检
+### [已实现/保留范围验收通过][P1][安全] `unity_hang_capture` 应在完整 dump 前执行空间与大小预检
 
 - 发现时间：2026-09-13；来源任务为规范工程真实编译错误/恢复矩阵中的主线程 Hang 取证。
 - 现象/问题：`unity_hang_capture` 对 Unity PID `64768` 生成了 `6030113645` bytes 的完整 dump，SHA256=`74bcf4e855257d3d79ff5d93748101eeb374e5804dfef5d67d4bb9699d976a3f`。工具未在采集前公开预计大小或检查磁盘安全余量，导致 D 盘剩余空间低于 1 GB，Unity 随后出现精确的 `Low disk space` 模态并阻塞启动恢复。
 - 影响范围：大内存 Unity Editor 的 Hang 诊断；诊断动作自身可能耗尽项目盘、阻塞 Editor、影响后续编译和证据落盘。
 - 建议改进：采集前读取目标进程提交/工作集与目标卷可用空间，公开预计范围、dump 类型和安全余量；默认提供有界 mini/heap/full 策略，空间不足时在启动采集前失败。完整 dump 可选流式压缩或采集后受控压缩，但不得跨越配置的最低剩余空间。
-- 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 用可控空间阈值覆盖足量/不足两类路径；不足时 dump 调用次数为 0，并返回 expectedBytes/freeBytes/reserveBytes/nextAction；足量时报告实际类型、bytes、SHA256，且不终止 Unity。采集期间失败也应保留部分文件状态和清理建议。
+- 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 用可控空间阈值覆盖足量/不足两类通用路径；不足时 dump 调用次数为 0，并返回 expectedBytes/freeBytes/reserveBytes/nextAction；足量时以有界 mini 捕获验证实际类型、bytes、SHA256，且不终止 Unity。采集期间失败也应保留部分文件状态和清理建议。空间充足条件下的真实 full dump 已从本轮验收范围移除。
 - 证据：原 dump 已压缩为 `Tests~/UPilotTest/log/UPilotDiagnostics/compile-matrix-hang-20260913-01.7z`，当前 bytes=`1286236385`，SHA256=`59036b06d3256922123fc66abc4dbc46c1f1b1ac4135c5501c185e3e396ea790`；原 dump 已移除，Unity 在精确身份核对和取证后重启为 PID `78300`。
 - 完成结果：`dumpType=mini|heap|full` 在采集前统一验证精确主 Editor 身份、进程启动身份、工作集/私有字节、保守大小上限和目标卷空间；`reserveBytes` 有 2 GiB 最低值。空间不足、内存指标不可用或身份变化均在创建/写入 dump 前失败并返回 `dumpAttempted=false`。采集失败保留部分文件元数据，成功后使用流式 SHA256 并再次检查余量。
 - 验收证据：Python 定向测试 `37 passed`，分析/公共契约组合 `114 passed`。规范工程 PID `50612` 的 20 GiB 余量拒绝请求 `req-6dab0293-aa53-4f8e-996f-c0d8dcf10366` 返回 `HANG_DUMP_INSUFFICIENT_SPACE`，目标文件不存在；真实 mini 请求 `req-d0393cb3-de95-4727-b4a1-8fa724f173cf` 生成 `2894302` bytes，SHA256=`9cab1b4b7646db5a0dc0277fef5060f3f24103187d2ca7d021a7e07d381a0790`，`reserveMaintained=true/processTerminated=false`，Unity 与 Bridge 保持在线。完整证据：`Documentation~/P1-Hang-Evidence-20260914.json`。
 - 2026-09-17 安装版本 0.3.32 回归证据：`F:\xclient2` 的 Unity PID `79820` 主线程忙循环时请求 `unity_hang_capture(dumpType=MiniDumpWithThreadInfo)`，调用超过约 2.5 分钟仍无终态，客户端终止观察后磁盘已生成 `F:\xclient2\log\UPilotDiagnostics\unity-79820-1789638412766.dmp`，`1835217477` bytes；未返回实际 dump 类型、预计/已写字节、进度、SHA256、partial/complete 或可恢复 captureId。旧 Unity 后续由外部重启，进程已退出；dump 未读取或删除。该现场要求兼容类型必须严格映射到公开 `mini|heap|full`，采集过程提供有界等待和可轮询终态，客户端取消观察后仍可恢复文件稳定性/哈希/进程未终止事实；大体量请求继续执行空间和配置上限预检。规范项目验收需新增“大内存进程 + 兼容 MiniDumpWithThreadInfo + 短等待窗口 + 客户端中断恢复”矩阵。预计每次 Hang 诊断减少 3～10 分钟无反馈等待和一次人工文件核对。项目双向记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260917-HangCaptureBoundedReturn`。
-- 当前状态：核心空间预检历史验收保留；安装版本的兼容类型、体量与有界终态回归为 Open，出现次数 1。
+- 2026-09-20 有界返回实现：公开 `waitTimeoutSec=0..30`、持久 `captureId/status/terminal` 与只读幂等 `unity_hang_capture_status`；客户端等待取消不取消后台采集，同一 Server 仅允许一个未终态捕获。Server 重启把未终态记录标为 interrupted，不自动续抓；首次记录持久化失败时 dump 调用次数为 0，终态持久化失败也不以文件存在冒充成功。公开 Schema、busy/取消/重启/持久化失败定向测试已通过。
+- 2026-09-20 当前源码真实 mini 生命周期：以 `waitTimeoutSec=0` 发起捕获后立即返回 `captureId=hang-cffffca465a84cac9136c2b02c903429/status=running/terminal=false`；随后两次幂等状态查询均得到 `completed/terminal/success=true`。产物 `Tests~/UPilotTest/Logs/UPilotDiagnostics/session-isolation-mini-20260920.dmp` 为 2795806 bytes，SHA256=`cf9e445d353037e9b37d6ec8a45ef7afb63c5de2381eb72cb078b50831a32b37`，`reserveMaintained=true/processTerminated=false`，主 Editor PID `85920` 捕获后保持 ready/authoritative。
+- 2026-09-20 自动验收修复：真实 heap 捕获在 Server 重启后正确变为 `interrupted`，但首次记录未保存目标路径，磁盘存在约 3.36 GB 文件而状态无部分产物信息。现已在原生写入前持久化精确目标路径和 `dumpAttempted` 预检快照，重启恢复增加有界 `partialArtifact(path/exists/bytes/hashVerified=false)`；修复后 `hang-8e368150fcf14b79be1108459f0cca71` 返回 `outputPath`、`dumpAttempted=true/processTerminated=false` 和 `partialArtifact.bytes=3359501854`，未自动续抓。九文件 Server 回归 `140 passed`。
+- 当前状态：核心实现与保留的自动化矩阵已通过：真实 mini 短等待及幂等查询、并发 busy、客户端等待取消不取消后台任务、约 3.36 GB heap 的 Server 重启 interrupted 恢复及部分产物元数据、full 空间不足预检均有证据。2026-09-21 用户明确将“空间充足条件下的真实 full dump”和“两个大型 interrupted heap dump 清理”标记为忽略；二者未执行、不声称通过，也不再计入验收阻塞。未发现这两项的专属自动化测试，因此未删除通用 Hang Capture 生命周期、空间门禁或中断恢复测试。两个大型产物继续保留。兼容 `MiniDumpWithThreadInfo` 仍按批准边界明确拒绝，不伪装成安全映射。
 
-### [回归待处理][P2] Operation 产物字段需区分路径、字节数与 SHA256
+### [已实现待手工验收][P2] Operation 产物字段需区分路径、字节数与 SHA256
 
 - 发现时间：2026-09-09；来源任务为 `F:\xclient2` 的 `ProjectileEditorStartupSmoke` 通用 Operation 验收。
 - 现象/问题：jobSpec 仅声明 `artifacts.reportPath`，业务状态同时提供 `reportBytes/reportSha256`。operation `op-35ce271c-dc1c-475c-81e9-1c7349e9b486` 成功且报告存在，但收集器又把哈希 `EEB...651A` 当成工程相对路径，返回假的 missing artifact error。
@@ -1967,8 +2077,9 @@ UPilot 通用开发：
 - 可验收标准：`D:\upilot\Tests~\UPilotTest` 状态返回嵌套 `reportPath/reportBytes/reportSha256`；仅路径被打开，合法大小/哈希时 artifactErrors 为空，故意不匹配时返回 SIZE_MISMATCH/HASH_MISMATCH 而非 missing path。
 - 相关工具/路径：`unity_operation_validate/start/wait`；`F:\xclient2\Log\ProjectileEditor\StartupSmoke\20260909_001828_319_64ce01c3\report.json`；项目双向引用 `F:\xclient2\TODO_UPilot.mcd` / “Operation 产物收集器应区分路径与哈希标量”。
 - 建议归属：通用 UPilot/MCP。
-- 当前状态：回归待处理；出现次数 2。Operation 仅在显式 `kind=file`、path/file 对象或 `artifactRules.fieldKinds` 声明下读取文件，sha256/bytes/metadata 作为标量透传；读取使用同一打开文件并核验身份，收集序号与持久化失败不覆盖上次有效快照。2026-09-15 Operation 专项回归 48 passed，覆盖类型冲突、裸 hash、不稳定文件、清理屏障和持久化失败。
+- 当前实现：Operation 仅在显式 `kind=file`、path/file 对象或 `artifactRules.fieldKinds` 声明下读取文件，sha256/bytes/metadata 作为标量透传；读取使用同一打开文件并核验身份，收集序号与持久化失败不覆盖上次有效快照。2026-09-15 Operation 专项历史回归 48 passed，覆盖类型冲突、裸 hash、不稳定文件、清理屏障和持久化失败。
 - 2026-09-16 Unity 2022.3 回归证据：`F:\xclient2` 使用 UPilot `0.3.32` 执行 operation=`op-e30364b5-176f-487d-9f87-e26cbc15b033`，业务状态 `Succeeded/Complete` 且 EditMode 清理完成；报告 `F:\xclient2\Log\ProjectileEditor\StartupSmoke\20260916_164314_320_d7834e47\report.json` 为 2934 bytes、SHA256=`72ED2267F7686C40679C1F9FE7762FFC61658A61F4056AB583F498E34BF1A321`。jobSpec 显式提供 `fieldKinds={reportPath:file, reportBytes:bytes, reportSha256:sha256}`，但 `unity_operation_wait` 仍把哈希解析为 `F:\xclient2\72ED...A321` 文件并返回 `artifactErrors=missing`。这组真实 `requireEditMode=true` 证据未通过本条验收，需在 `D:\upilot\Tests~\UPilotTest` 增加相同嵌套字段回归后再关闭。
+- 2026-09-20 状态：当前源码已实现并保留上述失败作为旧部署证据；等待统一文档中的规范工程嵌套字段手工验收，不再计为 P2 开发缺口。
 
 ### [已实现待验收][P2] 公开幂等的 PlayMode 暂停与继续语义工具
 
@@ -2079,7 +2190,7 @@ UPilot 通用开发：
 - 建议归属：通用 UPilot/MCP；项目侧双向引用：`F:\xclient2\TODO_UPilot.mcd` / “Smoke 失败现场截图桥接需兼容 UPilot Snapshot 公共契约”。
 - 当前状态：UPilot 通用实现与规范工程验收已完成；客户项目自身 Bridge 迁移仍由客户项目负责，不回滚本通用项状态。
 
-### [待处理][P2] 破坏性场景写工具需要目标化成功回执
+### [已完成][P2] 破坏性场景写工具需要目标化成功回执
 
 - 发现时间：2026-09-15；来源任务为 `F:\xclient2` 弹道编辑器关闭残留分析后的定向现场清理。
 - 现象/问题：`unity_gameobject_delete(instanceId="4294117280")` 已实际删除 `__ProjectileEditor_Authoring`，后续 `unity_gameobject_find` 证明场景恢复为 5 个基线对象；成功响应却只有与操作无关的通用 `input`/窗口字段，未回显被删目标、before/after、场景 dirty 或保存要求。2026-09-11 的 `unity_component_remove` 已出现相同回执缺口，本项从已完成的参数 Schema 条目中拆出未解决的返回契约问题，累计出现 2 次。
@@ -2090,9 +2201,10 @@ UPilot 通用开发：
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 覆盖活动/非活动、隐藏/普通、父子 GameObject 删除及多组件移除；10 轮成功响应均精确回显目标和变化，目标不存在时结构化失败且无副作用，场景 dirty/saveRequired 与 Unity 实际状态一致。
 - 相关工具/路径：`unity_gameobject_delete`、`unity_gameobject_find`、`unity_component_remove`、`D:\upilot\Tests~\UPilotTest`；项目双向引用 `F:\xclient2\TODO_UPilot.mcd` / “破坏性场景写工具需要目标化成功回执”。
 - 建议归属：通用 UPilot/MCP。
-- 当前状态：待处理；出现次数 2。
+- 2026-09-20 实现：`unity_gameobject_delete` 返回规范目标身份、删除前后存在性、`businessEffectVerified`、场景 dirty、`saveRequired` 与 `sideEffectsMayHaveOccurred`；失败在可能开始变更后保持保守副作用回执。已有组件删除目标化回执继续保留。
+- 当前状态：已完成批准范围验收；出现次数 2。Unity 定向 fixture 通过，真实普通与隐藏对象均以 decimal-string wire ID 精确删除；回执包含目标身份、删除前后存在性、场景 dirty、`saveRequired` 和副作用状态，同名对象未被误删。未扩展为完整父子压力矩阵。
 
-### [待处理][P1] 场景对象查询需覆盖 HideFlags 隐藏临时根
+### [已完成][P1] 场景对象查询需覆盖 HideFlags 隐藏临时根
 
 - 发现时间：2026-09-15；来源任务为 `F:\xclient2` 弹道编辑器关闭残留分析。
 - 现象/问题：`unity_gameobject_find(includeInactive=true)` 及精确名称查询遗漏 HideFlags 临时根，只返回 5 个可见基线对象；同一时刻 `unity_scene_summary` 报告 4 个根、33 个节点。调用 `csharp_eval` 遍历 `Scene.GetRootGameObjects()` 才得到 `__ProjectilePreview_Isolated`（HideFlags=28、4 子节点、signed ID=-850058）和 `__ProjectileEditor_Targets`（HideFlags=52、5 子节点、signed ID=-850134），随后还需手工转换为无符号 wire ID。
@@ -2103,16 +2215,18 @@ UPilot 通用开发：
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 构造 `HideInHierarchy`、`DontSave`、`NotEditable`、inactive 及组合 HideFlags 的根/子对象；隐藏查询与 `Scene.GetRootGameObjects()`/完整子树在预算内一致，默认模式明确报告遗漏计数，返回 wire ID 可直接用于 get/delete，连续 10 轮无漏报。
 - 相关工具/路径：`unity_gameobject_find`、`unity_scene_summary`、`csharp_eval`、`unity_gameobject_delete`、`D:\upilot\Tests~\UPilotTest`；项目双向引用 `F:\xclient2\TODO_UPilot.mcd` / “场景对象查询需覆盖 HideFlags 隐藏临时根”。
 - 建议归属：通用 UPilot/MCP。
-- 当前状态：待处理；出现次数 1。
+- 2026-09-20 实现：`unity_gameobject_find` 全链路增加默认关闭的 `includeHidden`；开启后仍只枚举有效且已加载 Scene，保留名称、组件、活动状态、数量与精确 instanceId 语义，并返回 HideFlags、场景身份、截断及覆盖计数。公开 Schema 定向测试已通过。
+- 2026-09-20 Unity 现场矩阵：在独立 additive 临时 Scene 中构造 `HideInHierarchy`、`DontSave`、`NotEditable`、组合 flags、inactive 隐藏根和隐藏子节点；6 类对象连续 10 轮全部命中。默认模式排除全部隐藏对象，`includeInactive=false` 排除 inactive 对象，精确 instanceId 查询保持原语义；HideFlags、父身份、层级路径、场景和 64 位 SceneHandle 均一致，68 项检查 0 失败。临时 Scene 已无保存关闭，残留对象 0，主场景未改变。
+- 当前状态：已完成。除既有 10 轮隐藏对象矩阵外，统一验收确认默认隐藏过滤兼容、`includeHidden=true` 返回 HideFlags/场景/对象身份与可观察遗漏/截断字段，decimal-string wire ID 可直接交给删除工具并精确删除目标。
 
-### [实施中][P1] 自动推进测试/验收的有限授权闭环（2026-09-16）
+### [已完成][P1] 自动推进测试/验收的有限授权闭环（2026-09-16）
 
 - 现象/问题：旧流程把未保存场景、当前 PlayMode 和无 ownerToken 的 Capture 统一当作阻塞理由，即使用户已选择可继续的策略；Server 的保存预处理又会与 Bridge/Runner 的无条件拦截冲突。
-- 已实施：新增高级设置授权 catalog 与三态全选（catalog hash/scope version 不匹配时保持混合，新增 scope 不继承）；未命名场景 `autoSave` 使用 `Assets/UPilotAutoSave_<编号>.unity`，`ignore` 关闭/重载以丢弃修改；测试入口与 Runner 均调用同一主线程预处理。验收仅在 `captureAcceptanceClearance` + `captureForceStop` 已授权且 `stopActiveCaptures=true` 时逐个精确 force-stop，保留 manifest/summary/hash 审计。
+- 已实施：新增高级设置授权 catalog 与三态全选（catalog hash/scope version 不匹配时保持混合，新增 scope 不继承）；未命名场景 `autoSave` 使用 `Assets/UPilotAutoSave_<编号>.unity`，`ignore` 关闭/重载以丢弃修改；测试入口与 Runner 均调用同一主线程预处理。验收遇到其他所有者或未知所有权的活动 Capture 时始终阻断，并返回精确 sessionId、`automaticForceStop=false` 和下一步；`captureAcceptanceClearance`、`captureForceStop` 或测试运行授权均不会把活动列表升级为停止权限。只有专用停止入口在精确 sessionId、明确人工处置和对应持久授权同时满足时才可 force-stop，并保留 manifest/summary/hash 审计。
 - 影响/保护：持久授权不移除项目身份、精确路径、hash、confirmToken 或 sessionId 校验；`block`、未知原生窗口、跨项目/进程和外部发布仍拒绝自动处置。
-- 当前状态：待完成双 Unity 定向场景/模式/Capture 实测；Python 定向契约回归已覆盖 catalog 与场景入口。
+- 当前状态：已完成批准范围验收。未知/他人 Capture 缺少 token 时以 `CAPTURE_OWNERSHIP_REQUIRED` 阻断，只读 attach/detach 不停止源会话；自有 Capture 仅凭精确 token 停止；脏场景返回 `UNSAVED_SCENES` 且未启动 Runner；PlayMode 登记批次保持 deferred，回到 EditMode 后只恢复一次关联编译。未知所有权阻断和“不扩大授权”继续作为安全默认。
 
-### [待处理][P0] 同工程 UMP Profiler 子进程不得抢占主 Editor MCP 会话
+### [已实现，测试验收已放弃][P0] 同工程 UMP Profiler 子进程不得抢占主 Editor MCP 会话
 
 - 发现时间：2026-09-17；来源任务为 `F:\xclient2` 弹道编辑器 EditMode 性能优化后的关联安全编译。
 - 现象/问题：主 Editor PID `42984` 与独立 Profiler PID `49452` 使用同一 projectPath；后者启动参数包含 `-ump-process-role profiler -editor-mode profiler`，仍连接 Bridge 并触发 Server 的 “latest connection wins”。自动编译批次 `wb-349ae46c-638e-43da-9d3b-35c89af1c137` 因会话反复切换停在 `PendingCodeSync/correlationVerified=false`；Profiler 进程缺少正常 UPM 虚拟包映射，Bee 报 `Packages/com.unity.jobs/...` 与 `Packages/com.unity.test-framework/...` 的 `CS2001`，而主 Editor 恢复后又发布与本批次无关的历史 completed 快照。
@@ -2123,8 +2237,17 @@ UPilot 通用开发：
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 同时运行主 Editor 与 UMP Profiler、AssetImportWorker 模拟连接；20 轮重连中 authoritative PID 始终为主 Editor。自动批次最终同一 writeBatchId 达到 `terminal=true/errorsVerified=true/correlationVerified=true`，辅助进程的编译/包错误不会进入主状态；辅助进程关闭或重连不要求重登记批次。
 - 相关工具/路径：`unity_mcp_status`、`unity_write_batch_register`、Server WebSocket session arbitration、`D:\upilot\Tests~\UPilotTest`；项目双向引用 `F:\xclient2\TODO_UPilot.mcd` / “同工程 UMP Profiler 子进程不得抢占主 Editor MCP 会话”。
 - 建议归属：通用 UPilot/MCP。
-- 当前状态：待处理；出现次数 1。
-### [待处理][P2] Selection 清空工具应返回真实业务结果
+- 2026-09-20 实现：Bridge 在启动连接前区分 main Editor、Profiler、AssetImportWorker、batchMode 与 worker；Server 采用候选握手、Windows PID/创建时间/Unity 可执行文件/项目/OS 角色核验和锁内原子接管，缺失新身份契约直接拒绝。不同进程只有在旧进程确认退出后可接管；旧 socket 的结果、心跳和 finally 清理均不能修改新会话。`unity_mcp_status` 已增加当前核验与最近拒绝诊断。定向测试覆盖缺契约、错误项目、伪报角色、查询超时、存活/未知冲突、PID 复用、并发候选、晚到结果和旧 socket 清理。
+- 批次恢复增量：现有持久化终态不可覆盖机制保留，补测 Server 重启、冲突终态及后续批次不能覆盖历史批次；证据不足继续为 `recovery_required`，不自动再编译。较新的已验证批次只有在文件清单完整覆盖旧批次时才可写入 `supersededBy` 并解除 readiness 阻塞，历史批次本身仍保持非终态和未知结果；部分覆盖不得 supersede。
+- 2026-09-20 运行证据：规范 Editor PID `85920` 已通过 Windows PID、创建时间、Unity 可执行文件、工程与角色核验，当前 `connected/serverReady/ready/authoritative=true` 且 `isStale=false`。Domain Reload、Server 重启和受控重连后的关联批次 `wb-cc56ba94-84d6-44bc-8fc8-5bea090555ac` 已达到 `terminal/errorsVerified/correlationVerified=true`、0 error/0 warning；6 条定向 EditMode 测试全部通过并完成清理。Server 会话/恢复/Console 相关定向回归 126 项通过。
+- 2026-09-20 真实 Profiler 补证：通过 Unity 6 官方 `ProfilerWindow.ShowProfilerOOP` 启动同工程独立 Profiler，修复真实命令行中较早 `-ump` 抢先命中通用 worker 的判定顺序；新 Profiler PID `30784` 明确记录 `Bridge startup skipped: ... 'profiler'` 与 `MCP Server automatic startup is disabled ... 'profiler'`，不再连接 Bridge 或尝试启动 Server。修复批次 `wb-24aa249e-6491-410e-869b-5d9aa4b0de93` 为 `terminal/errorsVerified/correlationVerified=true`、0 error；6 条 warning 均来自既有序列化探针/Flow。Profiler 共存期间连续 20 次只读身份观察均保持主 PID `85920`、同一主 session、`processRole=mainEditor`、Windows identity verified、authoritative/non-stale，Profiler 始终为 `eligibleMainEditor=false`；关闭 Profiler 后主会话未被替换。
+- 新增角色单测 `runGuid=b1251ca5-25cc-4d2a-8897-5b058acb09f3` 精确选择 6 个 EditMode 用例，6/6 Passed、`resultAuthoritative=true`、`cleanupSucceeded=true`，Console evidence sequence `47..47` 且覆盖完整。
+- 2026-09-20 统一角色门禁：新增唯一 `UPilotBridge.IsMainEditorProcess` 判定，Bootstrap 在辅助进程中不登记 Bridge/Server 启动回调，`UPilotBridge.EnsureStarted`、`UPilotMcpServerManager.StartServer` 和 `RestartServer` 均再次强制校验；`unknown`、空角色和所有已知辅助角色默认拒绝。关联批次 `wb-bd7a086c-407f-48fb-bb25-09df8edc142a` 为 `terminal/errorsVerified/correlationVerified=true`、0 error；定向运行 `runGuid=1e1b62f7-70a0-41b4-b7c7-434b9fde4db0` 为 23/23 Passed、authoritative、cleanup 成功。真实 Profiler PID `70644` 的日志只记录 `Startup skipped for auxiliary Unity process role 'profiler'`，没有启动 Bridge、Server 或产生端口冲突；主 Editor PID `85920`、Server PID `67424` 保持权威，Profiler 为 `eligibleMainEditor=false`，验证后已正常关闭。
+- 2026-09-20 自动验收现场限制：再次调用 Unity 6 `ProfilerWindow.ShowProfilerOOP` 时主 Editor 主线程阻塞且未形成 Profiler 进程，已采集 mini dump `hang-eb1dbd59a9c648c3adf666f402a46059` 后在授权恢复流程中重启 Editor。随后直接以 `-ump-process-role profiler -editor-mode profiler`（含/不含 `-ump`）启动只得到 `Error!` 或 `Open Project`，不是有效 Profiler OOP 会话；这些进程均被 Server 识别为 `processRole=profiler/eligibleMainEditor=false`，主会话未被替换。应为 20 次进程循环提供受支持、非阻塞且可关闭的 Profiler OOP 启动夹具或记录 Unity 官方完整启动契约；在此之前该现场矩阵保持阻塞，不再自动调用 `ShowProfilerOOP`。
+- 2026-09-21 辅助进程污染修复：独立 Profiler 仍可通过 `[InitializeOnLoadMethod]` 加载 `UPilotTestService` 并恢复/覆盖主 Editor 的 `Library/UPilot/TestRuns` 快照。`BootstrapPersistedRunRecovery()` 现首先调用统一 `UPilotBridge.IsMainEditorProcess()`，辅助角色不再发布测试运行身份；关联批次 `wb-d69d1bfa-4239-4caf-b01a-ce59c251e4d7` / compile operation `e696b95e2a4747958ca8b0201f34fd1c` 达到三项关联验证、0 error。被污染的历史 runGuid=`5095ab26-9564-4f2a-9ef1-22f576a20b62` 已安全收口为 aborted、cleanup 成功、Runner inactive，未计作 Profiler 通过证据。
+- 当前状态：代码实现保留。2026-09-21 用户明确放弃 Profiler 相关测试用例验收并自行根据日志判断；已删除专用 Profiler 进程身份测试，不再执行或引用其通过结论。人工日志覆盖 Bootstrap、Bridge、Server 启动/重启、持久测试恢复和 Server 候选握手拒绝，包含进程角色及必要的 PID、工程、活动会话身份。日志与测试清理批次 `wb-7ae6f4a9-9f1b-40db-8960-2bcbc8d553bb` / compile operation `bd91a426bc01428eadbf495f090f85f5` 达到 `terminal/errorsVerified/correlationVerified=true`、0 error/0 warning；Server 已重启为 PID `11004` 并验证主 Editor PID `57636`、工程和 Bridge 新会话。该项记为“测试验收已放弃/未执行”，不再作为本轮剩余阻塞。
+
+### [已完成][P2] Selection 清空工具应返回真实业务结果
 
 - 发现时间：2026-09-17；来源任务为 `F:\xclient2` 弹道编辑器销毁临时预览对象后的失效 Selection 清理。
 - 现象/问题：`unity_selection_clear` 已实际生效，紧随其后的 `unity_selection_get` 返回 `selectionCount=0`，Console 游标之后也没有新增同类 Inspector 异常；但清空响应在协议层 `ok=true` 时，业务数据仍为 `ok=false`、空 `status/state`，并携带与 Selection 无关的 UI `input` 字段。调用方必须追加查询才能确认操作效果。
@@ -2135,15 +2258,169 @@ UPilot 通用开发：
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 覆盖空、单 GameObject、多对象、资源及混合 Selection；清空回执与 Unity `Selection.objects` 实际值一致，成功为 `ok=true/businessEffectVerified=true`，重复清空返回明确 no-op，10 轮无无关 payload。
 - 相关工具/路径：`unity_selection_clear`、`unity_selection_get`、`D:\upilot\Tests~\UPilotTest`；现场请求 `req-226b2e32-28f6-48df-a93e-c199678d4016`；项目双向引用 `F:\xclient2\TODO_UPilot.mcd` / “Selection 清空工具应返回真实业务结果”。
 - 建议归属：通用 UPilot/MCP。
-- 当前状态：待处理；出现次数 1。
+- 2026-09-20 实现：`unity_selection_clear` 使用专用回执返回 `ok/businessEffectVerified/changed/status`、前后选择数量和活动对象身份；重复清空返回 `already_empty/changed=false`。
+- 当前状态：已完成；出现次数 1。空 Selection 返回成功 no-op；GameObject、资源和混合 Selection 的真实调用均返回 `businessEffectVerified=true`，前后数量及活动对象身份与 Unity 实际状态一致，未产生删除或保存副作用。
 
-### [待处理][P1] 定向测试 Console 错误应可按运行与来源归因
+### [已完成][P1] 定向测试 Console 错误应可按运行与来源归因
 
 - 唯一 ID：UPilot-20260918-01；来源项目清单：`F:\xclient2\TODO_UPilot.mcd`。
+- 2026-09-20 Shader Builder 补充证据：来源项目同 ID 更新；旧客户端 runGuid=`00c08ea0-605c-49c7-a18d-17b6a8816ab9` 为 2/2 Passed、cleanup 成功，capture=`console_20260920_185329_237_353c1f56` sequence 4/5 再次记录 Launch 恢复缺失 Prefab。仍需 assertion/sceneRestore 阶段边界以减少人工比对；不作为新实现失败证据，P1、通用归属和当前状态不变。
 - 发现时间/场景：2026-09-18，xclient2 弹道编辑器“发射特效”入口修复的定向 EditMode 测试 `ProjectileEmitter_LaunchEffectFields_AreGroupedForEmissionAuthoring`，runGuid=`23903f93-145f-480b-94c0-598f977cf729`，断言 1/1 Passed 且 cleanup 成功。
 - 现象/问题：随后 `unity_console_search_logs(logType="Error")` 返回 6 条 `NullReferenceException`、`ArgumentNullException` 与 `SerializedObjectNotCreatableException`；均缺失 stackTrace、Console sequence 范围、runGuid 和 compileOperationId。调用方不能区分它们属于本测试、同批编译/Domain Reload、Unity Editor 噪声还是既有日志。
 - 建议改进：`unity_test_run/results` 与编译结果记录稳定 `fromSequence/toSequence`，为日志标记 `duringTest`、`duringCompile`、`preExisting`、`unknown` 及关联 runGuid/compileOperationId；无堆栈时返回 `stackTraceAvailable=false`、采集时段和归因置信度。`unity_console_search_logs` 支持按范围查询。
 - 预期效率收益：每次定向验收减少 2～5 分钟重跑与人工 Console 猜测，避免把编辑器噪声误判为业务回归。
 - 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 的 EditMode fixture 分别制造测试内、编译期与测试前既有 Error；runGuid 结果返回范围和分类，范围查询只归入测试内 Error；无 stackTrace 条目仍明确采集与归因信息。
 - 相关工具：`unity_test_run`、`unity_test_results`、`unity_console_search_logs`。
-- 建议归属：通用 UPilot/MCP；当前状态：待处理；出现次数：1。
+- 2026-09-20 实现：测试、直接编译和安全编译记录起止身份与 Console 边界并按 runGuid/compileOperationId 持久化；优先复用活动 Capture 的固定 sequence 范围但不取得停止权限，无 Capture 时保存最多 500 条差量。清空、截断、dropped、写失败、Domain Reload 和缺失边界均报告覆盖缺口；查询过滤互斥，关联只声明 `observed_during_run_not_causal`，不改变测试或编译原始结果。
+- 2026-09-20 追加现场（来源 `F:\xclient2\TODO_UPilot.mcd` 同 ID，累计出现 2 次）：0.3.32 客户端弹道预警测试 capture=`console_20260920_182653_096_3918d2a7`，sequence 4/5、81/82 是测试恢复既有 Launch 场景时的缺失 Prefab；定向 EditMode `1afdd9e6-7565-42f1-9712-be0f55ecbac5` 5/5、PlayMode `6f2433ea-e197-459b-9925-448e7df8b582` 1/1 均 Passed 且清理成功。旧版本无 consoleEvidence，不作为新实现失败证据。完整错误夹具建议增加通用“断言完成后恢复场景产生 Error”的阶段边界，区分 assertion/cleanup/sceneRestore 观察时段，仍不推断因果；预期减少环境缺失资源引起的无效复跑。优先级/归属/实施状态沿用本条。
+- 建议归属：通用 UPilot/MCP；当前状态：已完成。公开 Schema、固定范围、重启恢复、缺口和直接编译边界测试通过；统一验收分别验证测试内 Error（runGuid `288b295c-3762-40f4-8519-ffdb3bc8aaec`）、编译期 Error（operation `7f21bda8bbdb47c59a1faf4d268a3113`）、测试前历史 Error（runGuid `7a191391-7961-43c3-835f-1dbd76e765e3`）和 Domain Reload 覆盖缺口，关联语义保持 `observed_during_run_not_causal`，不改变原测试/编译结果。出现次数：1。
+
+### [已完成][P2] Snapshot 枚举参数应在工具 Schema 中公开可用值
+
+- 发现时间/场景：2026-09-20，对 `UPilotQuickDebugWindow` 执行 EditorWindow 像素验收。
+- 现象/问题：`unity_snapshot_capture` 的注入工具 Schema 将 `syncMode` 与 `completionPolicy` 只声明为 string，未公开枚举值。调用先后因 `syncMode=repaint` 和 `completionPolicy=wait` 被执行前拒绝，分别返回 `SNAPSHOT_SYNC_MODE_UNSUPPORTED` 与 `SNAPSHOT_COMPLETION_POLICY_INVALID`；请求均未提交且无副作用，但调用方需根据错误串逐次猜值并重试。
+- 建议改进：在 MCP/FastMCP 参数 Schema 中为 `syncMode` 公开 `sameFrame`，为 `completionPolicy` 公开 `allOrNothing|bestEffort`，并在工具描述中同步版本边界和默认值。
+- 复现/证据：请求 `req-f7a354c8-ea31-4ba7-83fa-7de9c24f2e7a` 与 `req-52845ff9-8511-4cfb-b682-1e1583eb23f3`；改用 `syncMode=sameFrame` + `completionPolicy=allOrNothing` 后请求 `req-31a27e68-3b06-4d2b-b101-fec06e45b1f2` 成功生成 acceptedAsEvidence 产物。
+- 受影响工具/流程：`unity_snapshot_capture`、EditorWindow/SceneView/Camera 视觉验收；调用方每次可能多 1–2 次无效往返。
+- 建议归属：通用 UPilot/MCP。
+- 2026-09-20 实现：公开 Schema 将 `syncMode` 限定为 `sameFrame`，将 `completionPolicy` 限定为 `allOrNothing|bestEffort`，并同步规则文档中的 v1 边界。
+- 当前状态：已完成；出现次数：1 组（2 个枚举参数）。Server 契约验证枚举 Schema，真实 `sameFrame/allOrNothing` Snapshot 成功生成并验证产物。
+
+### [已完成][P1] Snapshot EditorWindow 路径引用未定义的 ToolResponse
+
+- 发现时间/场景：2026-09-20，为 `CodingRiver.UPilot.UPilotQuickDebugWindow` 的“查看对象信息”测试模板执行窗口像素验收。
+- 现象/问题：`unity_snapshot_capture` 使用已验证的 EditorWindow `instanceId=568105589213750658`、`syncMode=sameFrame`、`completionPolicy=allOrNothing` 和严格像素策略时，服务器直接抛出 `name 'ToolResponse' is not defined`；随后 `unity_verify_window(includeScreenshot=true, screenshotDegrade=fail)` 能正确验证唯一窗口身份，但其内部 screenshot 同样返回该异常。调用方无法获得 artifact、SHA256 或 `acceptedAsEvidence`，因此不能完成像素验收。
+- 影响范围：EditorWindow Snapshot 及所有复用同一路径的窗口验收封装；窗口身份、编译和业务测试均正常时仍会被截图基础设施阻断。
+- 建议改进：修复 Snapshot/兼容封装中的 `ToolResponse` 导入或返回类型引用；在服务器测试中覆盖直接 `unity_snapshot_capture` 与 `unity_verify_window` 两条路径，并确保异常转换为结构化失败而非 Python `NameError`。
+- 复现/证据：同一窗口的 `unity_editor_windows_list` 返回唯一精确匹配且 `ready=true/authoritative=true`；直接 Snapshot 与 verify-window 内部截图连续两次得到相同 `NameError`，后者 `windowMatch.windowOpen=true`、`matchCount=1`。
+- 可验收标准：对浮动的 `UPilotQuickDebugWindow` 分别调用上述两工具，均返回项目内 PNG、bytes、dimensions、SHA256、`acceptedAsEvidence=true`、`pixelSourceVerified=true`、`occlusionSensitive=false`，且无未捕获 Python 异常。
+- 建议归属：通用 UPilot/MCP。
+- 2026-09-20 实现：`ToolResponse` 改为 `snapshot_service` 模块级导入，直接 Snapshot 与 `unity_verify_window` 复用路径均不再依赖未定义局部名称；契约夹具已补齐但未在本轮执行。
+- 当前状态：已完成；出现次数：2（两条公开工具路径）。直接 `unity_snapshot_capture` 与 `unity_verify_window` 均无 `NameError`，返回精确窗口匹配及已验证像素证据；产物 `Artifacts/UnifiedAcceptance/Snapshot/target-1.75a34976.color.png` 为 6488 bytes，SHA256=`2c0bab87284dbdce06467d7aa922f0d6e6f572dd9d990efec6b52faa89298d90`。
+
+### [已完成][P2] 对象转储应避免递归展开常见 Unity 值类型的计算属性
+
+- 发现时间/场景：2026-09-20，快捷调试“测试模板：完整类型与三层继承”查看 `TestUPilotDumpObject`。
+- 现象/问题：`csharp_object_dump` 成功返回且三层继承字段可见，但 `Vector2.normalized`、`Vector3.normalized`、`Quaternion.normalized/eulerAngles`、`Color.linear/gamma` 等计算属性被逐层递归展开；单个测试对象达到 `totalNodes=1206`，附件中出现 114 个 `[max depth]`，结果在约 16K 字符处被展示通道截断，后续类型和能力说明不可见。
+- 影响范围：通过快捷调试窗口、Console 或 MCP 查看包含 Unity 数学值类型的对象时，输出噪声大、节点预算消耗快，并可能遮蔽真正需要检查的业务字段。
+- 建议改进：为常见不可变/值语义 Unity 类型提供叶子摘要或成员白名单（例如 Vector 仅输出分量、Quaternion 输出 xyzw、Color 输出 rgba），默认不递归计算属性；同时允许调用方显式选择展开，并在响应中区分转储器预算截断与客户端展示截断。
+- 复现/证据：`TestUPilotDumpObject` 模板，`maxDepth=6`、`includeStatic=false`；转储响应 `totalNodes=1206` 且无 `truncated: true`，保存附件含 25 次 `.normalized`、20 次 `.linear`、18 次 `.gamma` 和 114 次 `[max depth]`，最终包含字面量 `<message truncated>`。
+- 可验收标准：同一模板默认完整输出所有业务字段、三层继承验证和能力说明；Unity 值类型不产生自递归计算属性链，节点数显著降低；显式展开模式仍受 `maxDepth/maxTotalNodes` 约束并准确报告截断来源。
+- 相关工具/路径：`csharp_object_dump`、`ObjectDumper`、`Editor/Core/UPilotQuickDebugWindow.cs`、`Editor/TestSupport/TestUPilotDumpObject.cs`。
+- 建议归属：通用 UPilot/MCP。
+- 2026-09-20 实现：Vector、Quaternion、Color、Rect、Bounds、Matrix、Ray、Plane 等常见 Unity 值类型默认作为有界叶子摘要，不再递归计算属性；公开追加 `expandUnityValueTypes=false`，显式开启时仍受原深度、字段和总节点预算约束，响应回显 `unityValueTypesExpanded`。
+- 当前状态：已完成。修复后定向 fixture 1/1 通过；真实对象转储确认默认 Vector3 为有界叶子，显式展开只包含 `x/y/z`，未访问 `normalized/magnitude` 等计算属性。
+
+### [已修复并验证][P2] Skill 校验器不应硬编码发布版本
+
+- 发现时间/场景：2026-09-20，按模板优先流程更新当前项目 Agent 规则和 Skill，将 manifest 的 Skill 包版本从 32 递增到 33。
+- 现象/证据：`scripts/check_skill_pack.py --mode source` 返回 `Skill pack version must be 32 for authoritative synchronization validation`，模板生成校验已通过。
+- 影响流程：每次正常递增 Skill 包版本都会被独立数值限制阻断，与 manifest 唯一版本源冲突。
+- 改进与当前状态：已移除固定版本限制，继续通过 manifest 合法性与模板产物一致性校验版本；新增真实递增 manifest 并重新生成产物的定向回归。34 项 Python 定向测试通过，source 和当前项目 `.agents`、`.claude` installed 校验均通过。
+
+### [待处理][P2] Agent 规则检查应识别 Server 运行代码与模板版本漂移
+
+- 发现时间/场景：2026-09-20，当前项目通过 Unity 内置安装器同步模板后，`unity_agent_rules_check` 返回 `currentRulesVersion=32`、`recommendedRulesVersion=30`、`needsUpdate=true`；请求 `req-cafb6d5c-dec2-4db0-82b0-af9c4b37c242`。
+- 证据/范围：磁盘 `domain/task_service.py` 已从 manifest 读取版本 32，当前 `AGENTS.md` 和 Cursor 受管块逐内容匹配模板；两份 Skill 版本 33 且哈希验证通过。运行服务仍推荐 30，与磁盘实现不一致，疑似此前 Python 变更尚未加载，未执行安装工具降级。
+- 建议改进：为规则检查提供已加载 Server 实现/模板来源身份；发现运行态与磁盘来源不一致时明确提示受控重启或重新加载，不推荐静默降级。
+- 当前状态：记录待处理；本任务未重启 MCP Server，以免中断并行任务，当前项目生成产物已完成独立核验。
+
+### [已修复并验证][P2] 对象查看应区分读取异常与 null，并简化泛型文本
+
+- 发现时间/场景：2026-09-20，快捷调试对象检查日志中的 `.ThrowingProperty (System.Int32): null` 掩盖 getter 异常；集合类型名携带程序集版本信息，影响阅读。
+- 影响工具：`csharp_object_dump` / `ObjectDumper`；原字段、实例属性和静态属性读取分支吞掉异常。
+- 改进：工具内部输出原始异常类型与有界、单行消息，继续查看其他成员，错误节点计入预算；仅文本格式简化泛型名称，结构化类型名不变。检查器验证错误摘要，并将固定样例覆盖提示移到“检查范围”。
+- 验证：关联批次 `wb-68db1a3c-af1d-421e-bd11-dc18246cd00f`，Unity 编译 0 error / 0 warning，`errorsVerified=true`、`correlationVerified=true`；定向两个 fixture 48/48 通过，runGuid=`17c883c6-2a29-49e2-8dd8-834884c75f27`，结果权威、清理成功、源码未变化。
+- 当前状态：已修复并通过定向验收；未扩展字典去重、工具参数或响应字段。
+
+### [待处理][P2] 定向验收不应留下未跟踪的 Skill 集成脚本
+
+- 发现时间/场景：2026-09-20，`UPilotQuickDebugTests` 与 `UPilotObjectDumpToolCheckTests` 的定向 EditMode 验收。
+- 现象/问题：首次验收 Console 报告 `Files generated by test without cleanup`，新增 `skills/upilot-unity-mcp/scripts/sync_integrations.py`；该文件会使当次 `sourceUnchanged` 失败，即使 C# 编译、断言和测试清理均成功。
+- 影响范围：使用 `unity_upilot_acceptance_run` 的任何定向验收首次运行可能因无关残留被标为失败，需额外重跑才能获得可交付的源码一致性证据。
+- 建议改进：定位生成该脚本的测试或 Skill 同步路径；将脚本纳入受控测试夹具清理，或将其改为明确声明的固定源文件，避免测试期间改变包源码身份。
+- 复现/证据：本轮首次运行 `runGuid=5e471d61-8a0e-42f9-8cc6-6e59f6acd575` 为 47/50，`cleanupSucceeded=true` 但 `sourceUnchanged=false`；随后该已存在文件进入基线后，最终运行恢复源码一致性。
+- 当前状态：待处理；本任务未删除该未跟踪文件，避免清理用户/测试运行产物。
+
+### [已定位][P2] 并行源码维护与测试生成文件的归因需要区分
+
+- 2026-09-20 补充证据：`skills/upilot-unity-mcp/scripts/sync_integrations.py` 是本次经用户批准的 Agent/Skill 统一同步实现源码，并非测试临时生成物。它已纳入 Skill 必需文件检查和统一哈希/分发流程；未提交是用户要求“不自动提交”的正常状态。
+- 上述并行验收观察到的源码变化仍使当次 `sourceUnchanged` 证据失效，但不能仅凭文件在测试期间出现就归因于测试清理失败。建议验收诊断区分“并发源码变化”和“已归属测试的临时产物”，保留失败证据，不自动删除未知归属文件。
+
+### [待处理][P2] 服务维护缺少完整的活动任务清单与恢复处置入口
+
+- 2026-09-20，本次新增 MCP 集成工具需要加载新 Python 代码。维护预检发现当前项目有 4 条历史 `RecoveryRequired/start_identity_unknown` 作业：`op-b5e7222e-34d3-450a-998b-78ce52ffb693`、`op-de6fa012-4c63-4976-b5eb-56ce2e9fe12a`、`op-e7574602-9f01-4564-ac93-ece2e12ab63a`、`op-951c6aac-f972-43b9-a469-1e9fdc63b531`；无法证明原业务已经结束。
+- `unity_operation_list` 当前列举的是 Unity Bridge 命令，不是所有持久化作业与 Server 内存任务，不能单独作为“允许维护重启”的证明。
+- 建议增加统一只读维护预检，汇总原作业身份、持久/内存任务、未知恢复项以及是否可安全重启；未知项要求人工明确处置，不自动取消、不重放 start、不清理记录。
+- 当前状态：本轮未重启或停止任何未知任务。后续 HTTP 服务自行/由其他入口恢复为新进程后，本轮重新核验项目身份并完成新公共 MCP 工具真实调用；上述未知历史作业仍未被自动处置，维护清单能力仍待改进。
+
+### [待处理][P2] 验收恢复成功后仍保留过时错误字段
+
+- 发现时间/场景：2026-09-20，Agent/Skill 定向验收 `task-6fdc1694-b573-42a1-b002-d391f796692a`，原始 `runGuid=a5391d9a-8793-46dd-a34e-fb6de7e94a4b`，38/38 测试通过。
+- 现象/证据：首次观察为 `RecoveryRequired/cleanupVerified=false`；继续按原 runGuid 读取权威结果后，任务自动恢复为 `completed/terminal=true/acceptancePassed=true/cleanupVerified=true`，没有重新启动测试，但响应和报告仍保留 `UPILOT_ACCEPTANCE_FAILED`、旧 `failureMessage` 和要求检查恢复的 `nextAction`。
+- 影响工具/流程：`unity_task_status`、`unity_upilot_acceptance_run` 的最终交付和自动判定，同一结果同时表示成功和失败。
+- 建议改进：终态恢复成功时清除当前错误和恢复指令，将此前失败保存在独立历史诊断字段；增加“清理状态延迟后恢复成功”的定向回归。
+- 当前状态：已记录，未扩展本次 Agent/Skill 同步实现范围；保留原始验收报告作为证据。
+
+### [已实现/定向验收通过][P2] 快捷调试应补齐 C# 执行与现有方法调用的独立工具自检
+
+- 发现时间/场景：2026-09-20，对照“检查‘查看对象信息’工具”分析另外两个页签的诊断能力。
+- 现象/问题：`UPilotQuickDebugWindow.ShowDiagnosticsMenu` 只提供对象查看自检；“运行 C# 代码”和“调用现有方法”已有示例、执行、取消与错误输出，但没有使用固定样例判定工具是否正常的独立入口。普通执行出错时，用户不易区分输入错误与工具故障。
+- 影响工具/流程：快捷调试窗口、`csharp_eval`、`unity_reflection_call`；已有对象查看检查直接调用本地服务，不能证明 HTTP MCP 注册、权限和传输链路正常。
+- 建议改进：在现有诊断菜单增加两个独立入口；C# 检查表达式/控制流、变量/session/handle、异步结果及预期错误；方法调用检查参数绑定、重载/泛型、静态/实例、异步结果、异常及仅调用一次。使用内置纯托管样例和独立临时会话，不执行用户输入或改动业务场景，所有终态清理自有资源；仅共享必要的诊断状态、取消和报告逻辑，不引入通用测试框架。
+- 报告边界：保留通过、未通过、无法检查、已取消和失败阶段；声明代表性覆盖与本地服务范围，区分工具结果与日志写入/清理结果；不同工具及普通执行/诊断报告使用独立路径，打开日志明确目标，不把已有执行副作用视为已随取消回滚。
+- 复现/证据：`Editor/QuickDebug/UPilotQuickDebugWindow.cs` 的 `ShowDiagnosticsMenu`、`RunCSharpEval`、`RunReflectionCall`、`PublishObjectDumpLog`、`PublishObjectDumpToolCheckResult`；`Editor/QuickDebug/UPilotObjectDumpToolCheck.cs` 的 `RunAsync`；已有 `UPilotQuickDebugTests` 与 `UPilotReflectionPreflightTests` 可提供定向回归案例。
+- 2026-09-20 实现：诊断菜单已包含三个独立检查、三个独立日志入口及诊断专用取消；保留业务执行/取消职责、用户输入和页签切换。每调用默认 3000ms、每轮 30 秒协作预算；反射样例保留并等待自有异步 Task 结束后才释放会话与运行状态，不承诺强制终止已执行方法。共用结果/报告逻辑，初始“未完成”与终态均原子写入 `Logs/UPilot/Diagnostics/{toolId}.log`，普通对象输出仍为 `Logs/UPilot/csharp_object_dump.log`；预期错误不作为 Console 错误。日志写入失败独立呈现，成功摘要改用显式日志等级，避免因覆盖项含“错误/异常”而误标红。
+- 改动范围：本任务修改 `UPilotQuickDebugWindow`、`UPilotObjectDumpToolCheck` 和对应两个现有 fixture；新增 `UPilotQuickDebugToolCheck`、`UPilotCSharpEvalToolCheck`、`UPilotReflectionToolCheck`、纯托管 `TestUPilotQuickDebugObject`、两个新 fixture 及六份 `.meta`。未修改执行/反射核心、Server、协议、程序集、Agent/Skill 模板或业务场景；保留工作区并行任务已有修改。
+- 关联编译：规范工程 `Tests~/UPilotTest`，writeBatchId=`wb-27df2560-d822-42eb-b30a-ef743fd4c4ce`，createdAt=`1789902896535`，compileRequestId=`req-6c29db8d-2d18-43ac-ad63-3562fe6eff35`，operationId=`d42f20cc05b54b1f86203a7f5d34e75e`，verifiedAt=`1789902909597`；completed、errorsVerified/correlationVerified=true，0 errors。3 条既有 Flow `UAC1009` 警告；该编译关联 Console 无错误，但跨 Reload 的 Console 覆盖为 partial，不宣称完整 Console 覆盖。
+- 最终定向验收：仅 `UPilotQuickDebugTests`、`UPilotObjectDumpToolCheckTests`、`UPilotCSharpEvalToolCheckTests`、`UPilotReflectionToolCheckTests` 四个 fixture，`unity_upilot_acceptance_run` 的 taskId=`task-b4226ee3-96a6-45ef-9485-299d03c7f105`、runGuid=`711aac12-f648-4326-b56b-6ae7d7b8aad0`，80/80 passed，0 failed/skipped；acceptancePassed、resultAuthoritative、cleanupVerified、sourceUnchanged 均为 true。包括预取消、运行中取消且等待自有异步任务、总预算、清理失败、写入失败、未完成报告、用户输入保持、互斥、单次发布和路径隔离；未启动完整 EditMode。
+- 验收产物：`Tests~/UPilotTest/Log/UPilotAcceptance/1789902941059_req-eea0b5ec-332f-44b3-b404-985ced854093/summary.json`，621785 bytes，SHA256=`79e1717c705f3efba681b096dc778a636f83105883b3db923b8ec82f7bc40584`；sourceSha256=`2d016e795536cb1dc9fb5e4adc7b6cb5e31679e6774d93359ec095a0802699f1`。此前 73/75 的失败揭示诊断断言误读 handle 返回协议，已修正为现有 `kind=object/serializationStatus=handle`，未修改引擎或协议；保留原失败证据。
+- 最新窗口实调：通过精确窗口句柄调用实际菜单绑定处理器，C# 13/13（runId=`fd15f4167af14d4eaeed923f02634a3a`，1635ms）、反射 11/11（`23eab272e8184a6ebfc72fb2d6de3409`，395ms）、对象查看 7/7（`765a149ed3d048da9d819f1d56d04f9a`，201ms），三份报告均为 sessionClosed/cleanupSucceeded=true；C# 记录实际 backendUsed=emit-cache。最终辅助验证会话已正常 close，cleanupErrors 为空、asyncOperationsStillRunning=0；此前辅助会话因并发 Reload 失效，close 返回 SESSION_EXPIRED_DOMAIN_RELOAD，不把该历史关闭误报为正常成功。
+- 视觉证据：`Tests~/UPilotTest/Logs/UPilot/Diagnostics/VisualAcceptance/quick-debug-final.95be9f03.color.png`，580x552，67384 bytes，SHA256=`72980906ee36635066a9b62db35b83fc5689c2da499c7e08d2ec436409f30e3b`；Win32.PrintWindow(PW_RENDERFULLCONTENT)，Unity PID=85920/HWND=90250404，foreground=false/minimized=false，acceptedAsEvidence/pixelSourceVerified=true、occlusionSensitive=false，无降级/原始错误。截图确认三个业务页签、诊断入口及成功摘要正常着色；contentRectVerified/cropComplete=false，因此仅作为可见区域证据。
+- 当前状态/未覆盖：实现及四 fixture 定向验收完成；三个日志目标与菜单名称/tooltip 已经代码测试，实际诊断摘要已截图核对。原生弹出菜单逐项点击、外部默认日志查看器打开仍待人工确认，未把处理器反射调用表述为真实点击。未运行完整语法/双后端矩阵、Unity 2022.3、全量 EditMode 或 HTTP MCP 端到端验收。
+- 产品反馈（关联现有 IMGUI 控件定位条目，不扩大本次实现）：本包自有快捷调试 GenericMenu 缺少可发现的精确语义点击/菜单项观察入口，本次只能使用已验证窗口句柄调用菜单处理器并结合契约测试和截图。建议后续为自有窗口菜单补充注册式项标识、enabled 状态、日志目标与单次调用回执；验收覆盖三个检查、三个日志入口及取消，Domain Reload 后拒绝旧窗口句柄。状态为待评估，不恢复已忽略的第三方无接入自动识别范围。
+- 2026-09-20 输入日志补齐（已实现/定向验收通过）：用户核对日志时只能看到预期/实际结果，无法直接确认提交的源码、参数与选项。三个检查器现在调用前快照完整 payload，以“输入 -> 预期 -> 实际”记录，并补充 callTimeoutMs/preCancelled；对象查看单独列出创建样例与对象转储两次输入。样例创建失败、运行中取消也保留已捕获输入，未调用项不伪造输入；不读取用户输入框，不改窗口摘要、普通执行日志或调用行为。范围仅共享报告、三个检查器与三个直接回归 fixture，共 7 个现有 C# 文件，无新增文件/协议/依赖。
+- 输入日志编译/验收证据：writeBatchId=`wb-cfeb941d-8f82-49ae-b64d-bf9d5e5cef8a`，createdAt=`1789904502447`，compileOperationId=`362abf47e88740ed8be2e42914decf30`，verifiedAt=`1789904520586`，completed、errorsVerified/correlationVerified=true，0 errors/3 条既有 Flow 警告。四个相关 fixture 经 `unity_upilot_acceptance_run` 为 83/83 passed，0 failed/skipped；taskId=`task-ea8ce9cc-198d-437d-a42f-31852ee37aa0`，runGuid=`963770aa-a720-4dae-805b-aad2e80c1cee`，acceptancePassed/cleanupVerified/sourceUnchanged/resultAuthoritative 均为 true。报告 `Tests~/UPilotTest/Log/UPilotAcceptance/1789904546293_req-26e388a9-0fd8-41f7-b700-af3d317af8c9/summary.json`，652164 bytes，SHA256=`f03db41e5a089eee72bba56997bcb6690e791c8aff90bcbf556078579b34b4dc`；未运行全套测试。
+- 输入日志现场复核：沿用精确窗口句柄调用实际诊断处理器，三工具均通过，输入段落数分别 13/11/2；C# runId=`af03201125474d30b72b956769b072b9`（8099 bytes，SHA256=`3183c10325b30431f46fd3b4efa8bdf1c7612365a88574cdd9035cbd586a88a2`），反射 runId=`d6902669908d4663a73b43d9b48a8f44`（12774 bytes，SHA256=`537e0af51dd8e16d09ffe54032f7e74b105e9850cde435ab1edd76354bbe3039`），对象查看 runId=`eb0503dfc58b4083903b567aef121035`（7789 bytes，SHA256=`3d2d6a8204949d2c7db5185b7ed3acf3bb61454eb29a10f6ac843ec09010ba56`）。三份仍位于 `Tests~/UPilotTest/Logs/UPilot/Diagnostics/` 原路径，sessionClosed/cleanupSucceeded 均 true；辅助会话正常关闭，active Capture=0。不将处理器调用视为原生菜单点击或 MCP 端到端验收。
+
+### [待评估][P1] 保留 PlayMode 现场的临时 C# 诊断模块
+
+- 发现时间/场景：2026-09-20，用户需要在已复现问题的 PlayMode 中补写诊断逻辑，但退出 PlayMode 或触发项目脚本重载会破坏现场；本轮仅调研，不实施注入、不切换模式、不编译或运行测试。
+- 现有证据：`Documentation~/CSharpEvalAndEmitDesign.md` 明确采用 C# 子集且不编译源码；`Editor/Execution/Core/CSharpSubsetEngine.cs` 的受限策略拒绝程序集加载；`ReflectionEmitEngine.cs` 使用 `AssemblyBuilderAccess.Run`。`UPilotExecutionService.cs` 已有 session、主线程执行和 PlayMode 失效处理，`ExecutionCore.cs` 已有订阅与清理 lease；这些可复用，但不等于已有完整 C# 编译及诊断 DLL 生命周期。
+- 影响流程/工具：`csharp_eval`、`reflection_emit_type`、`execution_session`、快捷调试与 MCP 现场诊断。子集不能直接接受完整 class、多文件和所有编译器语法；持续诊断仍需手动组织对象、回调、输出与清理。
+- 建议最小范围：新增明确 opt-in 的 Editor/JIT 诊断模块路径，复用现有 HTTP MCP/Bridge，不另开外部注入端口；支持源码编译为唯一身份的临时 DLL，再显式加载/执行/挂靠/停止。源码和 DLL 放在非导入目录，不能写入 Assets/Packages 或替换原业务程序集；初期使用普通 C# 类与预编译 Host，不承诺动态 MonoBehaviour 序列化。
+- 编译路线建议：独立 Roslyn worker 仅生产诊断产物，Unity Host 校验并执行；由当前已加载程序集、MVID/哈希和引用清单约束输入，不直接信任磁盘上的较新脚本 DLL，不自动恢复 NuGet/执行 analyzer、source generator 或 MSBuild 项目。该路线不得冒充 Unity 项目编译/验收，不能作为现有受限执行失败后的静默降级；实施前需明确独立授权与可选模块边界。
+- 生命周期要求：绑定 project/domain/play-session/module revision 与源码/DLL 哈希；依赖复用已加载程序集；会话管理事件、Tick、协作取消及 IDisposable 资源，记录尚未停止的任务。清理回调不等于程序集卸载，也不回滚业务写入；限制累计加载数和字节预算。自由 C# 与第三方调用不是安全沙箱，超时不能保证强制终止 Unity 主线程代码。
+- 分离范围：读取现场、新增分析、影子计算与后续事件监听优先；替换原方法、修改原类型布局、迁移正在执行的 async/coroutine 状态属于独立热重载能力，不由 Assembly.Load 自动提供，也不通过改变 Tracer 默认 PassThrough 语义实现。
+- 一手网络依据：Unity 2022.3 AssemblyBuilder API 文档支持 Assets 外独立编译；UnityCsReference 当前源码标记其 Obsolete 并建议 Roslyn。Unity 于 2026-07-20 发布的 CLI/Pipeline 说明提供无项目重编译/Domain Reload 的 Roslyn eval，但 Pipeline 仍实验性且要求 Unity 6.0 LTS+，不能覆盖 2022.3。Microsoft 的程序集加载/卸载文档区分 .NET Framework 域卸载与 .NET Core AssemblyLoadContext，不能外推 Unity Mono 支持可回收加载上下文。
+- 来源：`https://unity.com/blog/meet-the-unity-cli`；`https://docs.unity3d.com/2022.3/Documentation/ScriptReference/Compilation.AssemblyBuilder.html`；`https://raw.githubusercontent.com/Unity-Technologies/UnityCsReference/master/Editor/Mono/Scripting/ScriptCompilation/AssemblyBuilder.cs`；`https://learn.microsoft.com/en-us/dotnet/standard/assembly/load-unload`；`https://hotreload.net/documentation/features`。
+- 建议定向验证：在规范 Unity 6 项目及授权 Unity 2022.3 项目，加载两版只读探针，验证 PID/domain/play-session、对象身份、非序列化状态与已有订阅不因加载改变；验证编译失败零派发、依赖/MVID 不匹配拒绝、暂停态通信、重复请求不重放、停止后无自有订阅、在途任务准确报告、退出后不自动恢复及多版本加载预算。不能把自然演进的游戏状态要求为逐帧完全不变。
+- 当前状态：网络资料与现有源码分析完成，方案待决策；未新增工具、编译器依赖或实现，未声称 PlayMode 现场验证通过。
+- 2026-09-20 第二轮需求收窄：用户明确允许不卸载旧 DLL，只要求再次加载后由新入口替代旧入口。建议采用“逻辑 moduleId 不变、每次编译的 AssemblyName 唯一、宿主当前入口引用可替换”的薄封装；旧程序集驻留，不做原类型修改、对象布局迁移、方法 Hook、AppDomain/AssemblyLoadContext 卸载或完整热更新框架。
+- HybridCLR 一手依据：官方“加载和运行”直接展示 `Assembly.Load(byte[])` 后从返回 Assembly 解析入口，再用反射、delegate 或固定接口调用；其运行时主要扩展 IL2CPP，本项目 Editor 诊断只借鉴入口和稳定契约组织，不依赖其 AOT 补元数据/解释器。官方 Hotfix 文档也明确新修复会加载程序集而旧程序集内存不释放，但它修改原函数体，和本提案的宿主入口切换不是同一机制。
+- 最小组织：固定契约提供 Run(context,args)；Loader 校验 DLL 身份、固定依赖和精确入口签名；模块表按 moduleId 保存当前 revision/入口。编译与加载分离，产物保持在非导入目录；相同内容去重，不靠改 DLL 文件名代替改变编译时 AssemblyName。首期只接受独立诊断 DLL 引用已加载的宿主/业务程序集，不引入可热换的多 DLL 依赖图。
+- 本地具体风险：`Editor/Execution/Core/ReflectionCache.cs:FindType` 按名称缓存首次成功结果，多代 DLL 的同名类可能继续命中旧类型。新 Loader 应使用本次 Assembly.Load 返回值的 GetType 和绑定 delegate；不修改全局查找规则，不把新类型发现等同于旧入口已切换。
+- 切换规则建议：先取得候选并校验元数据/签名，再在主线程安全点切换；旧调用未完成时拒绝/等待替换，不默许新旧版本同时写同一现场。持续诊断通过宿主登记事件/帧回调和取消作用域，旧版本退役时撤销或解绑；仍在运行或清理失败须报告未完成，不能宣称换入口便强制终止旧 Task。候选加载成功但签名校验失败也可能留下驻留程序集，不承诺内存回滚。
+- 状态边界：原业务对象由游戏继续拥有，宿主保存跨版本所需的简单状态和对象句柄；不在共享状态中保存诊断 DLL 私有 DTO、delegate 或实例。共享契约只加载一份，不把旧代私有类型强转为新代类型；框架不承诺迁移诊断类静态字段。PlayMode 退出/Domain 变化使路由失效，不自动重新执行历史模块。
+- 补充验收：同一 moduleId 的 v1/v2 能返回不同逻辑且业务对象身份保持；同名 Entry 从各自 Assembly 精确绑定；DLL 内部 identity 重复/契约副本/错误签名在入口运行前拒绝；重复 hash 不重复加载；旧事件不再触发、旧异步未结束时不切换；状态报告区分 active/retired-resident/cleanup-pending，记录累计 DLL 数量与字节但不声称其等于完整托管内存。该验收尚未运行。
+- 第二轮来源：`https://www.hybridclr.cn/docs/basic/runhotupdatecodes`；`https://www.hybridclr.cn/docs/intro`；`https://www.hybridclr.cn/docs/business/hotfix`；`https://learn.microsoft.com/en-us/dotnet/framework/deployment/best-practices-for-assembly-loading`；`https://learn.microsoft.com/en-us/dotnet/csharp/programming-guide/events/how-to-subscribe-to-and-unsubscribe-from-events`。对应官方加载文档和 Microsoft 装载资料已缓存于规范工程 `Logs/.firecrawl/`。
+
+## Agent/Skill 同步：Windows 候选目录访问拒绝的诊断不足（2026-09-21）
+
+- 观察问题：规范项目 `Tests~/UPilotTest` 从 Agent 34 / Skill 35 同步到 Agent 34 / Skill 36 时，公共 `unity_agent_integrations_sync(apply=true)` 返回 `AGENT_INTEGRATIONS_FAILED/partial_failure`。共享 `.agents/skills/upilot-unity-mcp` 失败，三份规则管理记录及 Claude 副本成功。
+- 现场证据：requestId `req-59d4666a-360b-4d76-9a91-96e0028f74ff`；失败消息为访问项目内 `.upilot/agent-integration-staging/383a9ddefab04621a691bd47b30e7439/candidate` 被拒绝。回执仅有异常消息，未说明准确失败阶段、异常类型或 HResult；不能据此断言是权限、文件句柄占用或外部并发导致。
+- 已核验：后续完整只读检查仍报告共享副本 needs_sync，其内容哈希恢复为 `3f45f36efee03c93d2c4bd7d79fcc5f4915378441946863676b7c3ce0ff5658b`、版本 35；Claude 为版本 36，哈希 `c5fb68f7a7d181663a1b3b8bdad8a4b2caf49291b18f1b493caab3cb72d621f5`。两份 installed 自洽校验通过，但不能据此报告升级完成。三份规则完整文件字节未变、备份目录清单未变、暂存目录无残留；只读路径检查未见目标及已检查父目录的联接或只读属性。
+- 改进建议：针对 `UPilotAgentSetup.Integrations.cs` 的候选构建、备份、目标移动、提交、校验和回滚，补充准确失败阶段、异常类型/HResult 与回滚验证结果的诊断证据；先定位实际失败点，再决定是否需要实现修复和故障注入回归。不默认重试非幂等同步，不通过手工复制、改权限或绕过备份校验掩盖失败。
+- 当前状态：本轮仅记录，未修改同步代码；停止自动重试，未执行重复同步无写入验收。待定位访问拒绝并确认可安全继续后，通过既有完整同步入口完成共享副本升级及五目标验收。
+- 2026-09-21 后续：用户明确授权继续诊断和重试。只读核查目标/父目录未发现显式 Deny、只读或联接，回滚内容与原哈希一致、暂存无残留；未安装句柄诊断工具、修改 ACL 或手工覆盖目标。经现有入口重试成功（requestId `req-2a894078-7d37-4419-a856-a9f8fcc29046`），共享副本已升至 36，两份 schema v2 元数据的项目、8011 端点、UPM 0.3.32、模板及内容哈希均核对一致。
+- 后续验收：source 生成检查与校验、两份 installed 校验通过；采集 44 个受管文件（含安装元数据及规则管理记录）基线后，实际重复同步返回 `current/changed=false`（`req-63736b08-ad03-4736-bad3-347e51531e16`），文件集合、SHA256、精确修改时间及备份目录清单全部不变。最终完整检查五目标均 current（`req-b9d460fb-2c2c-421b-8f25-879929f3a83f`）；三份规则完整字节及父规则继承保留，原有两份历史备份未变、未新增备份、暂存为空。未修改建议池或 UPM 版本，未触发编译或 Profiler 验收。
+- 更新状态：本次模板维护与项目同步已完成；原访问拒绝在授权重试中未复现，根因仍未确定，诊断增强建议保留待处理，不将重试成功表述为根因已修复。
+
+## 部署新鲜度证据与备用端点客户端（2026-09-21）
+
+- 观察问题：现有状态可确认项目路径、连接、Server/Unity PID 及 Bridge 契约，但这些字段和磁盘源码、健康检查或相同版本字符串不能证明 Server 当前加载的源码身份。缺少可信身份时，自动成套重启会影响未知在途任务。
+- 影响流程：双版本验收、Python/Bridge 协议改动后的部署核验，以及未注入客户端工具的备用 HTTP 端点调用。
+- 本次处理：Agent 35 / Skill 37 模板加入 verified、suspected-stale、unverified 的证据边界及受控刷新要求；复用既有 client_probe 和 p0_acceptance_call.py，不新增传输层。证据客户端在派发前核验精确项目，拒绝 Capture 启停及凭证参数，脱敏输出与证据，区分 not_sent/sent_unknown/response_received，异常不重放。
+- 验证证据：证据客户端、client_probe、reload evidence 三组定向 Python 测试共 47 passed；8011/8017 两端点只读握手通过，备用端点真实只读调用成功，部署新鲜度仍明确为 unverified。规范项目五目标同步至 Agent 35 / Skill 37；source 和两份 installed 校验通过，重复同步 44 个文件的集合、内容与修改时间不变，未新增备份。
+- 后续建议：如需自动判定新鲜度，为 Server 进程提供启动时捕获且绑定进程会话的构建/源码身份，并与 Bridge 契约和 domain 身份分别报告；不得用请求时读取的磁盘哈希冒充已加载代码身份。只读身份接口应覆盖旧进程配新磁盘源码、同版本不同构建、协议不匹配和身份缺失场景。
+- 当前状态：规则、客户端防护与定向验证已完成；运行代码身份能力仅记录待评估，未新增身份协议、自动重启或恢复已取消验收。未修改 TODO_Distill.md、UPM 版本或 Unity 2022.3 项目规则。

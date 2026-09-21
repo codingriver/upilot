@@ -1070,7 +1070,7 @@ namespace CodingRiver.UPilot
             var confirmationCount = CountAgentsWithCustomizedContent();
             ShowNotice(
                 confirmationCount == affectedAgentCount
-                    ? $"检查完成，有 {affectedAgentCount} 个 Agent 的内容需要确认"
+                    ? $"检查完成，有 {affectedAgentCount} 个 Agent 检测到本地修改，更新时将自动备份并同步"
                     : $"检查完成，有 {affectedAgentCount} 个 Agent 需要更新",
                 MessageType.Warning);
         }
@@ -1149,9 +1149,9 @@ namespace CodingRiver.UPilot
                 var status = firstRuleIssue.Value;
                 if (status.State == AgentRuleConfigState.Customized)
                 {
-                    message = $"{status.ClientName} 内容需要确认\n" +
+                    message = $"{status.ClientName} 检测到本地修改\n" +
                               $"检测到 {status.ClientName} 的 UPilot Agent 规则有本地修改。" +
-                              "当前仍可正常使用，更新时可以选择保留或替换。";
+                              "更新时会自动备份并恢复当前模板的 managed block。";
                     return MessageType.Warning;
                 }
 
@@ -1171,8 +1171,8 @@ namespace CodingRiver.UPilot
                 var status = firstSkillIssue.Value;
                 if (status.State == AgentSkillConfigState.Customized)
                 {
-                    message = $"{status.ClientName} Skill 内容需要确认\n" +
-                              "检测到已安装的 UPilot Skill 有本地修改。当前仍可使用，更新时可以选择保留或替换。";
+                    message = $"{status.ClientName} Skill 检测到本地修改\n" +
+                              "更新时会自动备份并按当前 UPilot 模板权威重建。";
                     return MessageType.Warning;
                 }
 
@@ -1589,7 +1589,7 @@ namespace CodingRiver.UPilot
 
         private static string GetRuleStateText(AgentRuleConfigStatus status)
         {
-            if (status.State == AgentRuleConfigState.Customized) return "需要确认";
+            if (status.State == AgentRuleConfigState.Customized) return "本地修改";
             if (status.State == AgentRuleConfigState.UpdateAvailable) return "有新版本";
             return status.StateText;
         }
@@ -1841,32 +1841,10 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                if (status.State == AgentRuleConfigState.Customized)
-                {
-                    var choice = EditorUtility.DisplayDialogComplex(
-                        $"如何处理 {status.ClientName} Agent 规则？",
-                        $"当前内容经过本地修改。更新为 UPilot 最新版本会替换这些修改。",
-                        "更新为最新版本",
-                        "取消",
-                        "保留当前内容");
-                    if (choice != 0)
-                        return;
-                }
-                else if (status.State != AgentRuleConfigState.Missing)
-                {
-                    var confirmed = EditorUtility.DisplayDialog(
-                        $"更新 {status.ClientName} Agent 规则？",
-                        $"将更新为 UPilot 提供的最新内容。",
-                        "更新",
-                        "取消");
-                    if (!confirmed)
-                        return;
-                }
-
                 var result = UPilotAgentSetup.UpdateAgentRules(status.ClientName);
                 Debug.Log($"[UPilot] {status.ClientName} rules:\n{result}");
                 RefreshAgentConfigs(force: true);
-                ShowNotice("Agent 规则已更新");
+                ShowNotice(BuildAgentIntegrationSuccessNotice(result, "Agent 规则已更新"));
             }
             catch (Exception ex)
             {
@@ -1882,38 +1860,10 @@ namespace CodingRiver.UPilot
 
             try
             {
-                var force = status.State == AgentSkillConfigState.Customized ||
-                            status.State == AgentSkillConfigState.Conflict ||
-                            status.State == AgentSkillConfigState.Current;
-                if (status.State == AgentSkillConfigState.Customized ||
-                    status.State == AgentSkillConfigState.Conflict)
-                {
-                    var choice = EditorUtility.DisplayDialogComplex(
-                        $"如何处理 {status.ClientName} Skill？",
-                        status.State == AgentSkillConfigState.Conflict
-                            ? "发现多个同名 UPilot Skill 且内容不同。更新会重新生成 UPilot 管理的 Skill 副本；其它目录中的自定义副本仍需单独处理。"
-                            : "当前 Skill 有本地修改。更新为 UPilot 最新版本会替换这些修改。",
-                        "更新为最新版本",
-                        "取消",
-                        "保留当前内容");
-                    if (choice != 0)
-                        return;
-                }
-                else if (status.State != AgentSkillConfigState.Missing)
-                {
-                    var confirmed = EditorUtility.DisplayDialog(
-                        $"更新 {status.ClientName} Skill？",
-                        "将更新为 UPilot 提供的最新 Skill 内容。",
-                        "更新",
-                        "取消");
-                    if (!confirmed)
-                        return;
-                }
-
-                var result = UPilotAgentSetup.UpdateAgentSkill(status.ClientName, force);
+                var result = UPilotAgentSetup.UpdateAgentSkill(status.ClientName, forceOverwrite: false);
                 Debug.Log($"[UPilot] {status.ClientName} Skill:\n{result}");
                 RefreshAgentConfigs(force: true);
-                ShowNotice("Skill 已更新");
+                ShowNotice(BuildAgentIntegrationSuccessNotice(result, "Skill 已更新"));
             }
             catch (Exception ex)
             {
@@ -1953,9 +1903,7 @@ namespace CodingRiver.UPilot
                     }
                 }
 
-                var overwriteCustomizedSkill = forceAll;
                 var includeMissingEnabled = forceAll;
-                var ordinaryScopeConfirmed = false;
                 if (forceAll)
                 {
                     var confirmed = EditorUtility.DisplayDialog(
@@ -1980,29 +1928,7 @@ namespace CodingRiver.UPilot
                         if (choice == 1)
                             return;
                         includeMissingEnabled = choice == 0;
-                        ordinaryScopeConfirmed = true;
                     }
-                }
-
-                if (!forceAll && hasCustomizedContent)
-                {
-                    var choice = EditorUtility.DisplayDialogComplex(
-                        "如何处理本地修改？",
-                        "检测到 UPilot Agent 规则或 Skill 有本地修改。你可以保留这些修改并处理其他配置，也可以替换为最新版本。",
-                        "更新为最新版本",
-                        "取消",
-                        "保留本地修改");
-                    if (choice == 1)
-                        return;
-                    overwriteCustomizedSkill = choice == 0;
-                }
-                else if (!forceAll && !ordinaryScopeConfirmed && !EditorUtility.DisplayDialog(
-                             "处理 Agent 配置？",
-                             "将处理已启用 Agent 下方标记的连接和内容更新。",
-                             "继续",
-                             "取消"))
-                {
-                    return;
                 }
 
                 var result = "";
@@ -2025,28 +1951,7 @@ namespace CodingRiver.UPilot
                         Debug.LogError($"[UPilot] {clientName} MCP config update failed: {ex}");
                     }
                 }
-                var enabledClientNames = (_agentConfigs ?? Array.Empty<AgentMcpConfigStatus>())
-                    .Where(status => status.IsEnabled)
-                    .Select(status => status.ClientName)
-                    .ToArray();
-                foreach (var clientName in enabledClientNames)
-                    result += UPilotAgentSetup.UpdateAgentRules(clientName) + "\n";
-
-                var updatedSkillPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var clientName in enabledClientNames)
-                {
-                    var skillStatus = FindSkillStatus(clientName);
-                    if (!skillStatus.IsApplicable)
-                        continue;
-                    var skillKey = string.IsNullOrEmpty(skillStatus.ConfigPath)
-                        ? clientName
-                        : skillStatus.ConfigPath;
-                    if (!updatedSkillPaths.Add(skillKey))
-                        continue;
-                    result += UPilotAgentSetup.UpdateAgentSkill(
-                        clientName,
-                        overwriteCustomizedSkill) + "\n";
-                }
+                result += UPilotAgentSetup.UpdateAllAgentRules(forceCodexSkillOverwrite: false) + "\n";
                 Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
@@ -2070,10 +1975,12 @@ namespace CodingRiver.UPilot
                 }
 
                 ShowNotice(
-                    forceAll
+                    result.Contains("Backed up ")
+                        ? BuildAgentIntegrationSuccessNotice(result, "本地修改已自动备份并同步")
+                        : forceAll
                         ? "已重新配置全部已启用 Agent 的 MCP，并更新共享 Skill 和 Agent 规则；请按需刷新工具列表"
-                        : hasCustomizedContent && !overwriteCustomizedSkill
-                        ? "其他配置已处理，本地修改已保留"
+                        : hasCustomizedContent
+                        ? "本地修改已自动备份，Agent 配置已同步"
                         : "Agent 配置已更新");
             }
             catch (Exception ex)
@@ -2081,6 +1988,19 @@ namespace CodingRiver.UPilot
                 ReportMainWindowException("批量更新 Agent 配置失败", ex);
                 ShowExceptionNotice("批量更新 Agent 配置失败", ex);
             }
+        }
+
+        private static string BuildAgentIntegrationSuccessNotice(string result, string fallback)
+        {
+            foreach (var line in (result ?? "").Replace("\r\n", "\n").Split('\n'))
+            {
+                if (!line.StartsWith("Backed up ", StringComparison.Ordinal))
+                    continue;
+                var separator = line.LastIndexOf(" to ", StringComparison.Ordinal);
+                if (separator >= 0 && separator + 4 < line.Length)
+                    return "已备份并同步：" + line.Substring(separator + 4);
+            }
+            return fallback;
         }
 
         private static void DrawColoredButton(string label, Color color, float height, Action action)

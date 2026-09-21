@@ -88,6 +88,7 @@ namespace CodingRiver.UPilot
     {
         public int count = 20;
         public bool includeActive = true;
+        public bool activeOnly;
     }
 
     [Serializable]
@@ -270,6 +271,8 @@ namespace CodingRiver.UPilot
         public bool ok;
         public string action;
         public string error;
+        public int activeCount;
+        public int returnedCount;
         public List<ConsoleCaptureManifest> sessions = new();
     }
 
@@ -856,7 +859,9 @@ namespace CodingRiver.UPilot
                     regex = payload.regex,
                 })
                 : string.Empty;
-            long nextSequence = matches.Count > 0 ? matches.Max(item => item.sequence) : payload.afterSequence;
+            long nextSequence = matches.Count > 0
+                ? matches.Max(item => item.sequence)
+                : (scannedCount > 0 ? scannedTo : payload.afterSequence);
             stopwatch.Stop();
             long managedMemoryAfterBytes = GC.GetTotalMemory(false);
             long processWorkingSetAfterBytes = ReadProcessWorkingSetBytes(out string processWorkingSetSourceAfter);
@@ -1039,11 +1044,18 @@ namespace CodingRiver.UPilot
                     manifests.Add(CloneManifest(s_active.Manifest));
             }
             var sessions = manifests
-                .Where(item => payload.includeActive || !item.active)
+                .Where(item => payload.activeOnly ? item.active : payload.includeActive || !item.active)
                 .OrderByDescending(item => item.startedAtUtcMs)
                 .Take(count)
                 .ToList();
-            return new ConsoleCaptureListResult { ok = true, action = "ListCaptures", sessions = sessions };
+            return new ConsoleCaptureListResult
+            {
+                ok = true,
+                action = "ListCaptures",
+                activeCount = manifests.Count(item => item.active),
+                returnedCount = sessions.Count,
+                sessions = sessions,
+            };
         }
 
         private static ConsoleCaptureCleanupResult CleanupCaptures(ConsoleCaptureCleanupPayload payload)

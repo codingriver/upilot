@@ -297,8 +297,10 @@ KingShotBattle 的 D/F 项目侧已提供可选业务采样器：类型
 | `unity_project_stack_detect` | 是 | 是 | 是 | xclient 联机识别 Unity 包、asmdef、Editor/Runtime 和测试程序集。 |
 | `unity_operation_cancel` | 是 | 待 Unity 联机验收 | 是 | 调用 JobSpec cancelCall；无 cancelCall 时返回 CANCEL_UNSUPPORTED。 |
 | `unity_operation_collect_artifacts` | 是 | Python 通过 | 是 | 报告 tail 受 `maxTailChars` 限制并返回 `tailTruncated/tailOriginalChars`；保留 metadata、sha256。 |
-| `unity_agent_rules_check` | 是 | 是 | 是 | Python 单测覆盖只读检查；返回 recommendedBlock 和 diffSummary，不写文件。 |
-| `unity_agent_rules_install` | 是 | 是 | 是 | Python 单测覆盖 dry-run 与 apply；仅替换 upilot:start/end 受控块，apply=true 需要写权限。 |
+| `unity_agent_rules_check` | 是 | 是 | 是 | 通过 Unity 统一核心仅检查 AGENTS.md；保留 recommendedBlock/diffSummary 字段。 |
+| `unity_agent_rules_install` | 是 | 是 | 是 | 通过 Unity 统一核心仅同步 AGENTS.md；默认预览，apply=true 需要写权限并自动备份/验证。 |
+| `unity_agent_integrations_check` | 是 | 是 | 是 | Bridge `agent.integrations.check`；只读检查全部五个目标，模板源为项目实际 UPM 包。 |
+| `unity_agent_integrations_sync` | 是 | 是 | 是 | Bridge `agent.integrations.sync`；默认预览，写授权后逐目标备份、同步、验证、失败回滚；返回哈希/备份路径/部分失败。 |
 | `unity_compile_errors_get` | 是 | 是 | 是 | 2026-09-07 规范 Unity 6 项目原生/代理结果一致；Registry 直接映射 `compile_errors`，兼容名保留。历史 Unity 2022 结果不作为本次跨版本验收。 |
 
 ### 界面流程自动化

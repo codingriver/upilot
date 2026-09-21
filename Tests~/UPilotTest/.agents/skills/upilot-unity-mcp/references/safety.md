@@ -15,11 +15,39 @@
 5. Retry once only if the operation is idempotent and non-destructive.
 6. Stop when Unity is disconnected, connected to the wrong project, or still stuck after the bounded retry.
 
+## Controlled Deployment Refresh
+
+- Missing runtime/source identity is insufficient evidence to restart anything. First
+  retain the endpoint, exact project, Server/Unity process identities and the evidence
+  supporting a suspected mismatch; use the Deployment Freshness workflow.
+- Before a refresh, inspect current tasks, tests, `unity_operation_list` and
+  `unity_console_capture_list(activeOnly=true)`, including known pending compile/write
+  batches. If work is in flight, ownership is unknown or the state cannot be observed,
+  stop and report the specific blocker. Do not cancel tasks or stop another Capture to
+  make the deployment check pass.
+- Require existing authorization for the exact affected component and a maintenance
+  window that does not interrupt other work. A Server-only change does not authorize
+  restarting Unity. Changed Bridge code uses the correlated Unity compile/reload workflow;
+  do not invent an unconditional "restart both" step or recompile unchanged C#.
+- After refresh, revalidate project identity, connection, changed component identity and
+  a real read-only call. Preserve old task/run/operation IDs for observation. Neither
+  reconnect nor a new PID permits replaying a previously sent start.
+
+## Profiler Out-of-Process Acceptance
+
+- A Unity 6 acceptance attempt using `ProfilerWindow.ShowProfilerOOP` blocked the main Editor without establishing a manageable Profiler process. Treat this as an observed workflow risk, not proof that every Unity version has the same fault.
+- Before automatic OOP launch, require a verified, non-blocking launch fixture that identifies the exact Profiler process and can close it safely. Without that fixture, do not invoke `ShowProfilerOOP` or guess command-line arguments as a retry.
+- Report read-only process/session identity observations separately from actual process start/stop cycles. Observing an unchanged main session does not satisfy a requested cycle count.
+- Do not resume cancelled or abandoned acceptance merely because a TODO or this reference describes it. Without renewed authorization, retain its unexecuted/abandoned result rather than reporting a pass.
+- If an attempted launch blocks the Editor, follow the existing Hang diagnostics: inspect `unity_hang_status`, preserve the exact main-session identity, and collect `unity_hang_capture` when diagnostic evidence is needed. Do not automatically terminate or restart the Editor.
+- These limits concern OOP process-lifecycle acceptance, not ordinary authorized `unity_profiler_capture_start/status/stop` data collection.
+
 ## Compile
 
 - Compile only after code or assembly changes.
 - Register assembly-related disk writes immediately. Do not invoke sync or compile in PlayMode; an authorized write batch resumes automatically only after Unity reports authoritative EditMode.
 - Read structured errors before editing.
+- Compile verification must come from Unity's Roslyn pipeline. External compilers (`csc`, `mcs`, `dotnet build`) differ in defines, asmdef references, and assembly injection — do not treat their results as compile evidence.
 
 ## Configuration CSV
 

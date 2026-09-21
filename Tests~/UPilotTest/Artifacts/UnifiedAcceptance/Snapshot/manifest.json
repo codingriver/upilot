@@ -1,0 +1,242 @@
+{
+    "snapshotSchemaVersion": 1,
+    "persistenceSchemaVersion": 2,
+    "snapshotSequence": 5,
+    "persistenceStatus": "pending",
+    "persistenceError": "",
+    "persistenceRecovered": false,
+    "manifestBytes": 0,
+    "snapshotId": "snapshot-de1b2d19104a452b8caf738165851fb4",
+    "status": "completed",
+    "terminal": true,
+    "success": true,
+    "requestHash": "ebe00692118d2bcf89bfb007c93559495ed2c2d1218de407d8794e4eaae2f2e9",
+    "requestKey": "tool07-floating-direct-20260920",
+    "phase": "completed",
+    "completionPolicy": "allOrNothing",
+    "startedAtUtcMs": 1789916878550,
+    "updatedAtUtcMs": 1789916878781,
+    "endedAtUtcMs": 1789916878781,
+    "cancelRequested": false,
+    "request": {
+        "targets": [
+            {
+                "targetId": "target-1",
+                "kind": "editorWindow",
+                "instanceId": "568105589213708510",
+                "domainGeneration": "1789916702",
+                "hierarchyPath": "",
+                "exactName": "",
+                "cameraName": "",
+                "fullTypeName": "CodingRiver.UPilot.Tests.UPilotGenericMenuWindowFixture",
+                "title": "",
+                "requireContentRect": true,
+                "targetDisplay": 0,
+                "channels": [],
+                "depthPreview": false,
+                "width": 1280,
+                "height": 720
+            }
+        ],
+        "channels": [
+            "color"
+        ],
+        "syncMode": "sameFrame",
+        "completionPolicy": "allOrNothing",
+        "capturePolicy": {
+            "requireVerifiedPixels": true,
+            "allowFallback": false,
+            "allowOcclusionSensitive": false,
+            "allowStaleFrame": false,
+            "maxStaleFrameAgeMs": 0
+        },
+        "outputDirectory": "Artifacts/UnifiedAcceptance/Snapshot",
+        "requestKey": "tool07-floating-direct-20260920"
+    },
+    "environment": {
+        "unityVersion": "6000.6.0a2",
+        "platform": "WindowsEditor",
+        "graphicsApi": "Direct3D12",
+        "colorSpace": "Linear",
+        "renderPipeline": "UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset",
+        "renderPipelineVersion": "0.0.0.0",
+        "editorWindowState": "normal",
+        "editorMinimized": false
+    },
+    "frame": {
+        "frameCount": 0,
+        "fixedTime": 0.0,
+        "playModeState": "edit",
+        "capturedAtUtcMs": 1789916878781
+    },
+    "targets": [
+        {
+            "targetId": "target-1",
+            "kind": "editorWindow",
+            "status": "completed",
+            "success": true,
+            "requested": {
+                "targetId": "target-1",
+                "kind": "editorWindow",
+                "instanceId": "568105589213708510",
+                "domainGeneration": "1789916702",
+                "hierarchyPath": "",
+                "exactName": "",
+                "cameraName": "",
+                "fullTypeName": "CodingRiver.UPilot.Tests.UPilotGenericMenuWindowFixture",
+                "title": "",
+                "requireContentRect": true,
+                "targetDisplay": 0,
+                "channels": [],
+                "depthPreview": false,
+                "width": 1280,
+                "height": 720
+            },
+            "camera": {
+                "instanceId": "",
+                "name": "",
+                "hierarchyPath": "",
+                "scenePath": "",
+                "nearClip": 0.0,
+                "farClip": 0.0,
+                "orthographic": false,
+                "fieldOfView": 0.0,
+                "orthographicSize": 0.0,
+                "aspect": 0.0,
+                "targetDisplay": 0,
+                "usesReversedZBuffer": false,
+                "viewMatrix": [],
+                "projectionMatrix": [],
+                "cameraToWorldMatrix": []
+            },
+            "editorWindow": {
+                "instanceId": "568105589213708510",
+                "domainGeneration": "1789916702",
+                "title": "UPilot GenericMenu Fixture",
+                "fullTypeName": "CodingRiver.UPilot.Tests.UPilotGenericMenuWindowFixture",
+                "focused": true,
+                "x": 960.0,
+                "y": 540.0,
+                "width": 360.0,
+                "height": 220.0,
+                "pixelsPerPoint": 1.0,
+                "contentRectVerified": true,
+                "cropComplete": true,
+                "includesDecorations": false,
+                "geometrySource": "Win32.GetWindowRect+GetClientRect+ClientToScreen",
+                "hostRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 952,
+                    "top": 509,
+                    "right": 1328,
+                    "bottom": 768
+                },
+                "contentRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 960,
+                    "top": 540,
+                    "right": 1320,
+                    "bottom": 760
+                },
+                "cropRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 960,
+                    "top": 540,
+                    "right": 1320,
+                    "bottom": 760
+                },
+                "contentLeft": 960,
+                "contentTop": 540,
+                "contentRight": 1320,
+                "contentBottom": 760,
+                "cropLeft": 960,
+                "cropTop": 540,
+                "cropRight": 1320,
+                "cropBottom": 760
+            },
+            "gameView": {
+                "targetDisplay": 0,
+                "screenWidth": 0,
+                "screenHeight": 0,
+                "playMode": false,
+                "runInBackgroundForced": false
+            },
+            "provenance": {
+                "captureApi": "Win32.PrintWindow(PW_RENDERFULLCONTENT)",
+                "pixelSourceVerified": true,
+                "occlusionSensitive": false,
+                "degraded": false,
+                "degradeReason": "",
+                "originalError": "",
+                "fallbackChain": [],
+                "matchedFullTypeName": "CodingRiver.UPilot.Tests.UPilotGenericMenuWindowFixture",
+                "matchedInstanceId": "568105589213708510",
+                "windowHandle": 84413054,
+                "unityProcessId": 85920,
+                "foreground": false,
+                "repaintRequestedAtUtcMs": 1789916878701,
+                "repaintObservedAtUtcMs": 0,
+                "repaintSequence": 0,
+                "includesSceneGui": false,
+                "includesHandles": false,
+                "pixelsPerPoint": 1.0,
+                "contentRectVerified": true,
+                "cropComplete": true,
+                "includesDecorations": false,
+                "geometrySource": "Win32.GetWindowRect+GetClientRect+ClientToScreen",
+                "hostRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 952,
+                    "top": 509,
+                    "right": 1328,
+                    "bottom": 768
+                },
+                "contentRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 960,
+                    "top": 540,
+                    "right": 1320,
+                    "bottom": 760
+                },
+                "cropRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 960,
+                    "top": 540,
+                    "right": 1320,
+                    "bottom": 760
+                }
+            },
+            "artifactIds": [
+                "artifact-2f27012e3e79442c9c8d4351880bbddb"
+            ]
+        }
+    ],
+    "artifacts": [
+        {
+            "artifactId": "artifact-2f27012e3e79442c9c8d4351880bbddb",
+            "targetId": "target-1",
+            "role": "color",
+            "path": "Artifacts/UnifiedAcceptance/Snapshot/target-1.75a34976.color.png",
+            "mimeType": "image/png",
+            "encoding": "rgba8",
+            "units": "",
+            "bytes": 6488,
+            "width": 360,
+            "height": 220,
+            "sha256": "2c0bab87284dbdce06467d7aa922f0d6e6f572dd9d990efec6b52faa89298d90",
+            "acceptedAsEvidence": true,
+            "statistics": {
+                "pixelCount": 0,
+                "validPixelCount": 0,
+                "validPixelRatio": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+                "mean": 0.0
+            }
+        }
+    ],
+    "failures": [],
+    "outputDirectory": "Artifacts/UnifiedAcceptance/Snapshot",
+    "manifestPath": "Artifacts/UnifiedAcceptance/Snapshot/manifest.json",
+    "manifestSha256": ""
+}

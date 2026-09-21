@@ -436,6 +436,92 @@ def test_auto_resumed_compile_failure_without_persisted_snapshot_requires_recove
     assert stored["terminal"] is False
 
 
+def test_auto_resumed_compile_predispatch_stale_context_waits_for_fresh_editor_state(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.updated_at = 10**15
+    state.editor.play_mode_state = "edit"
+    batch = state.register_write_batch(
+        [str(tmp_path / "Assets" / "A.cs")],
+        created_at=1000,
+        files_sha256="digest",
+        compile_when_edit_mode=True,
+    )
+    service = _ResourceService(tmp_path, state)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def stale_before_dispatch(**_kwargs):
+        return fail(
+            "req-stale",
+            "EDITOR_CONTEXT_NOT_READY",
+            "Unity Editor context is stale.",
+            {"dispatchAttempted": False},
+        )
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(service, "safe_compile_and_wait", stale_before_dispatch, raising=False)
+
+    asyncio.run(service._resume_pending_write_batches())
+
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored is not None
+    assert stored["status"] == "deferred"
+    assert stored["compileOperationId"] == ""
+    assert stored["outcome"] == "unknown"
+    assert stored["terminal"] is False
+
+
+def test_legacy_predispatch_stale_recovery_is_safely_reclassified(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.updated_at = 10**15
+    state.editor.play_mode_state = "edit"
+    batch = state.register_write_batch(
+        [str(tmp_path / "Assets" / "A.cs")],
+        created_at=1000,
+        files_sha256="digest",
+        compile_when_edit_mode=True,
+    )
+    state.mark_write_batch(
+        batch["writeBatchId"],
+        "recovery_required",
+        compile_operation_id="compile-from-earlier-batch",
+        error="Unity Editor context is stale, unknown, or recovering after Domain Reload.",
+    )
+    service = _ResourceService(tmp_path, state)
+    calls = []
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def stale_before_dispatch(**kwargs):
+        calls.append(kwargs)
+        return fail(
+            "req-stale",
+            "EDITOR_CONTEXT_NOT_READY",
+            "Unity Editor context is stale.",
+            {"dispatchAttempted": False},
+        )
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(service, "safe_compile_and_wait", stale_before_dispatch, raising=False)
+
+    asyncio.run(service._resume_pending_write_batches())
+
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert len(calls) == 1
+    assert stored is not None
+    assert stored["status"] == "deferred"
+    assert stored["compileOperationId"] == ""
+    assert stored["error"] == ""
+
+
 def test_auto_resumed_compile_accepts_only_a_persisted_correlated_terminal(tmp_path: Path, monkeypatch) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
@@ -517,6 +603,82 @@ def test_auto_resumed_compile_timeout_requires_recovery_without_replay(tmp_path:
     assert stored["terminal"] is False
     assert state.pending_write_batch_id == batch["writeBatchId"]
     assert state.execution_state()["blockedReason"] == "WriteBatchRecoveryRequired"
+
+
+def test_verified_successor_supersedes_fully_covered_recovery_without_rewriting_history(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    path_a = str(tmp_path / "Assets" / "A.cs")
+    path_b = str(tmp_path / "Assets" / "B.cs")
+    recovery = state.register_write_batch(
+        [path_a, path_b], created_at=1000, files_sha256="old", compile_when_edit_mode=True,
+        changes=[
+            {"path": path_a, "kind": "write", "contentSha256": "old-a"},
+            {"path": path_b, "kind": "write", "contentSha256": "old-b"},
+        ],
+    )
+    state.mark_write_batch(recovery["writeBatchId"], "recovery_required", compile_operation_id="compile-old")
+    successor = state.register_write_batch(
+        [path_a, path_b], created_at=2000, files_sha256="new", compile_when_edit_mode=True,
+        changes=[
+            {"path": path_a, "kind": "write", "contentSha256": "new-a"},
+            {"path": path_b, "kind": "write", "contentSha256": "old-b"},
+        ],
+    )
+    state.mark_write_batch(successor["writeBatchId"], "compiling", compile_operation_id="compile-new")
+    terminal = _snapshot(
+        1, operation_id="compile-new", write_batch_id=successor["writeBatchId"],
+        write_batch_created_at=successor["writeBatchCreatedAt"],
+        observed_at=successor["writeBatchCreatedAt"] + 1000,
+    )
+    assert state.update_editor_execution_state(terminal)
+
+    historical = state.get_write_batch(recovery["writeBatchId"])
+    assert historical["status"] == "recovery_required"
+    assert historical["terminal"] is False
+    assert historical["outcome"] == "unknown"
+    assert historical["supersededBy"] == successor["writeBatchId"]
+    assert state.pending_write_batches() == []
+
+    with sqlite3.connect(state._db_path) as db:
+        db.execute(
+            "UPDATE write_batches SET superseded_by='' WHERE write_batch_id=?",
+            (recovery["writeBatchId"],),
+        )
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    assert restored.pending_write_batch_id == ""
+    assert restored.get_write_batch(recovery["writeBatchId"])["supersededBy"] == successor["writeBatchId"]
+
+
+def test_verified_successor_does_not_supersede_partially_covered_recovery(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    path_a = str(tmp_path / "Assets" / "A.cs")
+    path_b = str(tmp_path / "Assets" / "B.cs")
+    recovery = state.register_write_batch(
+        [path_a, path_b], created_at=1000, files_sha256="old", compile_when_edit_mode=True,
+        changes=[
+            {"path": path_a, "kind": "write", "contentSha256": "old-a"},
+            {"path": path_b, "kind": "write", "contentSha256": "old-b"},
+        ],
+    )
+    state.mark_write_batch(recovery["writeBatchId"], "recovery_required", compile_operation_id="compile-old")
+    successor = state.register_write_batch(
+        [path_a], created_at=2000, files_sha256="new", compile_when_edit_mode=True,
+        changes=[{"path": path_a, "kind": "write", "contentSha256": "new-a"}],
+    )
+    state.mark_write_batch(successor["writeBatchId"], "compiling", compile_operation_id="compile-new")
+    terminal = _snapshot(
+        1, operation_id="compile-new", write_batch_id=successor["writeBatchId"],
+        write_batch_created_at=successor["writeBatchCreatedAt"],
+        observed_at=successor["writeBatchCreatedAt"] + 1000,
+    )
+    assert state.update_editor_execution_state(terminal)
+
+    historical = state.get_write_batch(recovery["writeBatchId"])
+    assert historical["supersededBy"] == ""
+    assert [item["writeBatchId"] for item in state.pending_write_batches()] == [recovery["writeBatchId"]]
 
 
 def test_write_batch_tool_is_registered_write_gated_and_has_public_schema() -> None:

@@ -311,17 +311,22 @@ namespace CodingRiver.UPilot
 
         internal static ExecutionContractException CallError(Exception ex, bool sideEffects)
         {
-            if (ex is TargetInvocationException invocation) ex = invocation.InnerException ?? ex;
-            var contract = ex as ExecutionContractException;
+            var original = UPilotExecutionService.UnwrapInvocationException(ex);
+            var contract = ex as ExecutionContractException ?? original as ExecutionContractException;
             var detail = new Dictionary<string, object>(contract?.Detail ?? new Dictionary<string, object>());
+            UPilotExecutionService.PreserveExceptionEvidence(detail, ex);
+            bool priorSideEffects = detail.TryGetValue("sideEffectsMayHaveOccurred", out var prior)
+                && prior is bool occurred && occurred;
+            sideEffects = sideEffects || priorSideEffects;
             detail["sideEffectsMayHaveOccurred"] = sideEffects;
             if (!detail.ContainsKey("stage"))
-                detail["stage"] = ex is OperationCanceledException ? "cancelled" : sideEffects ? "runtime" : "bind";
+                detail["stage"] = original is OperationCanceledException ? "cancelled" : sideEffects ? "runtime" : "bind";
             detail["nextAction"] = sideEffects
                 ? "Inspect the original request and actual state; do not replay the target."
                 : "Correct the request and call once; the target has not executed.";
             return new ExecutionContractException(contract?.Code ??
-                (ex is OperationCanceledException ? "EXECUTION_CANCELLED" : "REFLECTION_CALL_FAILED"), ex.Message, detail);
+                (original is OperationCanceledException ? "EXECUTION_CANCELLED" : "REFLECTION_CALL_FAILED"),
+                contract?.Message ?? original.Message, detail);
         }
 
         internal async Task<ReflectionCallResultPayload> ExecuteCallAsync(
@@ -365,14 +370,17 @@ namespace CodingRiver.UPilot
                     var genericTypes = (p.genericTypeArguments ?? Array.Empty<string>())
                         .Select(name => ExecutionTypeResolver.Resolve(name) ?? throw new ExecutionContractException("TYPE_NOT_FOUND", "Generic type argument not found: " + name))
                         .ToArray();
-                    _execution.ValidateArgumentBindings(p.argumentsJson, p.sessionId);
-                    var argumentShape = !string.IsNullOrWhiteSpace(p.argumentsJson)
-                        ? JsonUtility.FromJson<ExecutionArgumentsEnvelope>(p.argumentsJson).items
+                    var parsedArguments = !string.IsNullOrWhiteSpace(p.argumentsJson)
+                        ? UPilotExecutionService.ParseArguments(p.argumentsJson)
+                        : null;
+                    _execution.ValidateArgumentBindings(parsedArguments, p.sessionId);
+                    var argumentShape = parsedArguments != null
+                        ? parsedArguments.items
                             .Select(item => new ExecutionValue { Name = item.name, Direction = item.direction }).ToList()
                         : (p.parameters ?? Array.Empty<string>()).Select(_ => new ExecutionValue()).ToList();
                     MethodBinder.ValidateShape(type, p.methodName, isStatic, argumentShape, exactTypes, genericTypes);
-                    var supplied = !string.IsNullOrWhiteSpace(p.argumentsJson)
-                        ? _execution.DecodeArguments(p.argumentsJson, p.sessionId, boundary.Enter)
+                    var supplied = parsedArguments != null
+                        ? _execution.DecodeArguments(parsedArguments, p.sessionId, boundary.Enter)
                         : (p.parameters ?? Array.Empty<string>()).Select(value => new ExecutionValue { Value = value }).ToList();
                     // Binding may convert a user-defined value through IConvertible.
                     if (supplied.Any(value => value.Value != null && !value.Value.GetType().IsPrimitive

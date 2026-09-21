@@ -366,7 +366,7 @@ def test_hang_capture_refusal_never_calls_dump(tmp_path, scenario):
         raise AssertionError("An unverified PID must not enter dump capture.")
 
     service._write_windows_minidump = dump
-    result = asyncio.run(service.hang_capture())
+    result = asyncio.run(service._hang_capture_execute())
     assert not result.ok
     assert result.error.code in {"UNITY_PROCESS_UNKNOWN", "HANG_DUMP_UNSUPPORTED"}
     assert dump_calls == []
@@ -387,7 +387,7 @@ def test_hang_process_query_failure_is_diagnostic_and_never_attempts_dump(tmp_pa
     dump_calls = []
     service._write_windows_minidump = lambda *args: dump_calls.append(args)
 
-    result = asyncio.run(service.hang_capture())
+    result = asyncio.run(service._hang_capture_execute())
 
     assert not result.ok and result.error.code == "UNITY_PROCESS_UNKNOWN"
     assert result.error.detail["reason"] == "process_query_failed"
@@ -475,7 +475,7 @@ def test_hang_capture_rejects_insufficient_space_before_dump(tmp_path):
     dump_calls = []
     service._write_windows_minidump = lambda *args: dump_calls.append(args)
 
-    result = asyncio.run(service.hang_capture(dump_type="full"))
+    result = asyncio.run(service._hang_capture_execute(dump_type="full"))
 
     assert not result.ok
     assert result.error.code == "HANG_DUMP_INSUFFICIENT_SPACE"
@@ -505,7 +505,7 @@ def test_hang_capture_success_reports_preflight_and_streamed_hash(tmp_path):
         return True, 0
 
     service._write_windows_minidump = write_dump
-    result = asyncio.run(service.hang_capture(output_path="Log/UPilotDiagnostics/safe.dmp", dump_type="mini"))
+    result = asyncio.run(service._hang_capture_execute(output_path="Log/UPilotDiagnostics/safe.dmp", dump_type="mini"))
 
     assert result.ok
     assert len(dump_calls) == 1
@@ -526,7 +526,7 @@ def test_hang_capture_invalid_type_has_no_preflight_or_dump(tmp_path):
     service._process_memory_usage = lambda *_: preflight_calls.append(True)
     service._write_windows_minidump = lambda *args: dump_calls.append(args)
 
-    result = asyncio.run(service.hang_capture(dump_type="everything"))
+    result = asyncio.run(service._hang_capture_execute(dump_type="everything"))
 
     assert not result.ok
     assert result.error.code == "HANG_DUMP_TYPE_INVALID"
@@ -548,7 +548,7 @@ def test_hang_capture_failure_preserves_partial_file_metadata(tmp_path):
         return False, 112
 
     service._write_windows_minidump = fail_dump
-    result = asyncio.run(service.hang_capture(dump_type="mini"))
+    result = asyncio.run(service._hang_capture_execute(dump_type="mini"))
 
     assert not result.ok
     assert result.error.code == "HANG_DUMP_FAILED"
@@ -570,7 +570,7 @@ def test_hang_capture_memory_probe_failure_does_not_attempt_dump(tmp_path):
     dump_calls = []
     service._write_windows_minidump = lambda *args: dump_calls.append(args)
 
-    result = asyncio.run(service.hang_capture())
+    result = asyncio.run(service._hang_capture_execute())
 
     assert not result.ok
     assert result.error.code == "HANG_DUMP_PREFLIGHT_FAILED"
@@ -590,7 +590,7 @@ def test_hang_capture_zero_memory_metrics_does_not_attempt_dump(tmp_path):
     dump_calls = []
     service._write_windows_minidump = lambda *args: dump_calls.append(args)
 
-    result = asyncio.run(service.hang_capture())
+    result = asyncio.run(service._hang_capture_execute())
 
     assert not result.ok
     assert result.error.code == "HANG_DUMP_PREFLIGHT_FAILED"
@@ -609,7 +609,7 @@ def test_hang_capture_enforces_minimum_reserve_floor(tmp_path):
     dump_calls = []
     service._write_windows_minidump = lambda *args: dump_calls.append(args)
 
-    result = asyncio.run(service.hang_capture(dump_type="mini", reserve_bytes=0))
+    result = asyncio.run(service._hang_capture_execute(dump_type="mini", reserve_bytes=0))
 
     assert not result.ok
     assert result.error.code == "HANG_DUMP_INSUFFICIENT_SPACE"

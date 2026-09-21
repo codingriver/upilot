@@ -73,7 +73,16 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         path.mkdir(parents=True, exist_ok=True)
 
     build_info = SERVER_ROOT / "src" / "upilot_mcp" / "upilot_build_info.json"
-    agent_rules_template = REPO_ROOT / "skills" / "upilot-unity-mcp" / "AGENTS.md.template"
+    skill_root = REPO_ROOT / "skills" / "upilot-unity-mcp"
+    bundled_templates = [
+        skill_root / "template-manifest.json",
+        skill_root / "AGENTS.md.template",
+        skill_root / "SKILL.md.template",
+        skill_root / "agents" / "openai.yaml.template",
+    ]
+    missing_templates = [str(path) for path in bundled_templates if not path.is_file()]
+    if missing_templates:
+        raise FileNotFoundError("Missing UPilot template resources: " + ", ".join(missing_templates))
     build_info.write_text(
         json.dumps(
             {
@@ -103,8 +112,6 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         str(SERVER_ROOT / "src"),
         "--add-data",
         f"{build_info}{os.pathsep}upilot_mcp",
-        "--add-data",
-        f"{agent_rules_template}{os.pathsep}skills/upilot-unity-mcp",
         "--copy-metadata",
         "mcp",
         "--collect-data",
@@ -117,8 +124,14 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         "mcp.types",
         "--collect-all",
         "websockets",
-        str(SERVER_ROOT / "run_upilot_mcp.py"),
     ]
+    for template in bundled_templates:
+        relative_parent = template.parent.relative_to(skill_root).as_posix()
+        destination = "skills/upilot-unity-mcp"
+        if relative_parent != ".":
+            destination += "/" + relative_parent
+        cmd.extend(["--add-data", f"{template}{os.pathsep}{destination}"])
+    cmd.append(str(SERVER_ROOT / "run_upilot_mcp.py"))
     try:
         print("$ " + " ".join(cmd))
         subprocess.run(cmd, cwd=str(SERVER_ROOT), env=env, check=True)

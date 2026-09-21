@@ -1,0 +1,15 @@
+{
+  "files": [
+    {"path": "package.json", "content": "{\"version\":\"1.2.3\"}\n"},
+    {"path": "skills/upilot-unity-mcp/template-manifest.json", "content": "{\"schemaVersion\":1,\"agentRulesVersion\":33,\"skillPackVersion\":34,\"defaultHttpPort\":8011,\"templates\":{\"agentRules\":\"AGENTS.md.template\",\"skill\":\"SKILL.md.template\",\"openai\":\"agents/openai.yaml.template\"}}\n"},
+    {"path": "skills/upilot-unity-mcp/AGENTS.md.template", "content": "rulesVersion: {{rulesVersion}}\nupilotPackageVersion: {{upilotPackageVersion}}\nprojectPath: {{projectPath}}\ngeneratedAt: {{generatedAt}}\nparent: {{parentAgentRulesPath}}\nendpoint: {{mcpUrl}}\n"},
+    {"path": "skills/upilot-unity-mcp/SKILL.md.template", "content": "---\nname: upilot-unity-mcp\ndescription: fixture\n---\nendpoint: {{mcpUrl}}\nhealth: {{healthUrl}}\n"},
+    {"path": "skills/upilot-unity-mcp/agents/openai.yaml.template", "content": "url: \"{{mcpUrl}}\"\n"},
+    {"path": "skills/upilot-unity-mcp/references/resource.txt", "content": "resource\r\nraw bytes remain unchanged\r\n"}
+  ],
+  "port": 8021,
+  "expectedSkill": "---\nname: upilot-unity-mcp\ndescription: fixture\n---\nendpoint: http://127.0.0.1:8021/mcp\nhealth: http://127.0.0.1:8021/health\n",
+  "expectedOpenai": "url: \"http://127.0.0.1:8021/mcp\"\n",
+  "templateSha256": "b48f0ebeb95c4ed42398e7b3daebb1b0d0a68be76463126bd1f7ba1f3dcf344e",
+  "contentSha256": "9836b061c1d5d1afc8f872eaa45c8efca4078e6a75d90126ae38967f63f7ba3f"
+}

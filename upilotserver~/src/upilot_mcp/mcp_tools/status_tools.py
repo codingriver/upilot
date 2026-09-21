@@ -484,6 +484,7 @@ async def unity_console_tail_logs(
     description=(
         "搜索 Unity 控制台全量日志，支持关键词/正则和日志类型过滤。"
         "默认不返回堆栈并排除 upilot/MCP 自身日志；返回 excludedUPilotCount 说明排除数量。"
+        "可用互斥的 runGuid 或 compileOperationId 查询持久化运行边界；关联仅表示在该运行期间观察到，不表示因果归属。"
     )
 )
 async def unity_console_search_logs(
@@ -498,6 +499,8 @@ async def unity_console_search_logs(
     regex: str = "",
     newestFirst: bool = True,
     maxMessageLength: int = 0,
+    runGuid: str = "",
+    compileOperationId: str = "",
 ):
     _log_tool_call(
         "unity_console_search_logs",
@@ -512,6 +515,8 @@ async def unity_console_search_logs(
             "regex": regex,
             "newestFirst": newestFirst,
             "maxMessageLength": maxMessageLength,
+            "runGuid": runGuid,
+            "compileOperationId": compileOperationId,
         },
     )
     normalized_contains = [contains] if isinstance(contains, str) else contains
@@ -526,6 +531,8 @@ async def unity_console_search_logs(
         regex=regex,
         newest_first=newestFirst,
         max_message_length=maxMessageLength,
+        run_guid=runGuid,
+        compile_operation_id=compileOperationId,
     )
     return _log_tool_result("unity_console_search_logs", _payload(r))
 
@@ -674,13 +681,16 @@ async def unity_console_capture_detach(
     )
     return _log_tool_result("unity_console_capture_detach", _payload(r))
 
-@mcp.tool(description="列出工程默认 Log/UPilotConsole 目录中的近期持久化采集会话。")
-async def unity_console_capture_list(count: int = 20, includeActive: bool = True):
+@mcp.tool(description="列出工程默认 Log/UPilotConsole 目录中的近期持久化采集会话；activeOnly=true 仅返回活动会话，响应包含 activeCount/returnedCount。activeOnly=true 与 includeActive=false 互斥。")
+async def unity_console_capture_list(
+    count: int = 20, includeActive: bool = True, activeOnly: bool = False
+):
     _log_tool_call(
-        "unity_console_capture_list", {"count": count, "includeActive": includeActive}
+        "unity_console_capture_list",
+        {"count": count, "includeActive": includeActive, "activeOnly": activeOnly},
     )
     r = await _get_facade().console_capture_list(
-        count=count, include_active=includeActive
+        count=count, include_active=includeActive, active_only=activeOnly
     )
     return _log_tool_result("unity_console_capture_list", _payload(r))
 

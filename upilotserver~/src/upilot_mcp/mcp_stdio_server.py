@@ -28,7 +28,7 @@ from .tool_facade import McpToolFacade
 from .models import ToolResponse
 from .protocol import new_id
 from .responses import fail, ok
-from .config import CONFIG, refresh_config_if_changed
+from .config import CONFIG, configured_project_root, refresh_config_if_changed
 from .tool_registry import (
     REGISTRY,
     REGISTRY_VERSION,
@@ -506,7 +506,12 @@ async def _lifespan(app: FastMCP):
     global _orchestrator, _facade
     host, port = _resolve_config()
     mcp_label = _resolve_mcp_label()
-    _orchestrator = WsOrchestratorServer(host=host, port=port, mcp_label=mcp_label)
+    _orchestrator = WsOrchestratorServer(
+        host=host,
+        port=port,
+        mcp_label=mcp_label,
+        expected_project_path=str(configured_project_root()),
+    )
     _facade = McpToolFacade(_orchestrator)
     task = asyncio.create_task(
         _orchestrator.start(), name=f"upilot-ws-{host}:{port}"
@@ -1195,7 +1200,10 @@ async def main() -> None:
         global _orchestrator, _facade
         http_host, http_port = _resolve_http_config()
         _orchestrator = WsOrchestratorServer(
-            host=ws_host, port=ws_port, mcp_label=_resolve_mcp_label()
+            host=ws_host,
+            port=ws_port,
+            mcp_label=_resolve_mcp_label(),
+            expected_project_path=str(configured_project_root()),
         )
         _facade = McpToolFacade(_orchestrator)
         ws_task = asyncio.create_task(

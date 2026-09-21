@@ -173,6 +173,7 @@ namespace CodingRiver.UPilot
         private long _lastRefreshMs;
         private bool _restartPending;
         private bool _startInProgress;
+        private int _startAttemptGeneration;
         private int? _trackedProcessId;
         private Process _trackedProcess;
         private EditorApplication.CallbackFunction _restartWaitCallback;
@@ -900,6 +901,16 @@ namespace CodingRiver.UPilot
 
         public void StartServer()
         {
+            var processRole = UPilotBridge.DetermineProcessRole();
+            if (!UPilotBridge.IsMainEditorProcess(processRole))
+            {
+                var reason = $"MCP Server start rejected for auxiliary Unity process role '{processRole}'.";
+                Debug.LogWarning("[UPilotMcpServerManager] " + reason);
+                UPilotStartupDiagnostics.RecordBlockingReason("server_auxiliary_process_role", reason);
+                RecordRestartStartFailure("server_auxiliary_process_role", reason);
+                return;
+            }
+
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);
@@ -924,6 +935,56 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            if (!UPilotPortAllocator.IsPortAvailable(HttpPort) ||
+                !UPilotPortAllocator.IsPortAvailable(WsPort))
+            {
+                _startInProgress = true;
+                var generation = Interlocked.Increment(ref _startAttemptGeneration);
+                _ = AttachOrStartAfterIdentityProbeAsync(generation);
+                return;
+            }
+
+            StartNewServer();
+        }
+
+        private async Task AttachOrStartAfterIdentityProbeAsync(int generation)
+        {
+            McpServerStatus status = default;
+            try
+            {
+                status = await GetFreshStatusAsync();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[UPilotMcpServerManager] Existing server identity probe failed: " + ex.Message);
+            }
+
+            if (generation != Volatile.Read(ref _startAttemptGeneration) || !_startInProgress)
+                return;
+
+            try
+            {
+                if (IsVerifiedExistingProjectService(status, UPilotProjectConfig.ProjectRoot) &&
+                    TryTrackExistingProcess(status.HealthServerProcessId))
+                {
+                    Debug.Log(
+                        $"[UPilotMcpServerManager] Reattached to existing MCP server PID={status.HealthServerProcessId} " +
+                        $"for project {status.HealthProjectPath}; start request merged.");
+                    InvalidateStatusCache();
+                    return;
+                }
+
+                StartNewServer();
+            }
+            finally
+            {
+                if (generation == Volatile.Read(ref _startAttemptGeneration))
+                    _startInProgress = false;
+            }
+        }
+
+        private void StartNewServer()
+        {
             if (!UPilotPortRegistration.TrySyncCurrent(requireAvailable: true))
             {
                 UPilotStartupDiagnostics.RecordBlockingReason(
@@ -972,6 +1033,43 @@ namespace CodingRiver.UPilot
             {
                 _startInProgress = false;
                 InvalidateStatusCache();
+            }
+        }
+
+        internal static bool IsVerifiedExistingProjectService(
+            McpServerStatus status,
+            string expectedProjectPath)
+        {
+            return status.IsRunning &&
+                   status.HttpPortListening &&
+                   status.WsPortListening &&
+                   status.HealthEndpointResponded &&
+                   status.HealthIdentifiesUPilot &&
+                   status.HealthServerProcessId > 0 &&
+                   status.ProcessId == status.HealthServerProcessId &&
+                   status.ProcessOwnership != McpProcessOwnership.Foreign &&
+                   SameProjectPath(status.HealthProjectPath, expectedProjectPath);
+        }
+
+        private bool TryTrackExistingProcess(int processId)
+        {
+            try
+            {
+                var process = Process.GetProcessById(processId);
+                if (process.HasExited)
+                {
+                    process.Dispose();
+                    return false;
+                }
+
+                TrackStartedProcess(process);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning(
+                    $"[UPilotMcpServerManager] Existing MCP server PID={processId} exited or could not be attached: {ex.Message}");
+                return false;
             }
         }
 
@@ -1090,6 +1188,7 @@ namespace CodingRiver.UPilot
 
         private void StopCurrentProjectProcesses()
         {
+            Interlocked.Increment(ref _startAttemptGeneration);
             _startInProgress = false;
             var processes = FindCurrentProjectMcpProcesses();
             if (processes.Count == 0)
@@ -1174,6 +1273,15 @@ namespace CodingRiver.UPilot
 
         public void RestartServer(Action afterStart = null)
         {
+            var processRole = UPilotBridge.DetermineProcessRole();
+            if (!UPilotBridge.IsMainEditorProcess(processRole))
+            {
+                var reason = $"MCP Server restart rejected for auxiliary Unity process role '{processRole}'.";
+                Debug.LogWarning("[UPilotMcpServerManager] " + reason);
+                UPilotStartupDiagnostics.RecordBlockingReason("server_auxiliary_process_role", reason);
+                return;
+            }
+
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);

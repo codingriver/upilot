@@ -81,6 +81,26 @@ def test_move_and_mixed_writes_preserve_complete_manifest_hash(service, tmp_path
     }
 
 
+def test_code_batch_persists_asset_and_meta_deletions_without_extra_compile(service, tmp_path):
+    source = tmp_path / "Feature.cs"
+    source.write_text("class Feature {}", encoding="utf-8")
+    prefab = str(tmp_path / "Generated.prefab")
+    meta = str(tmp_path / "Generated.prefab.meta")
+
+    result = register(service, [str(source)], [prefab, meta])
+
+    assert result.ok and result.data["status"] == "deferred"
+    assert result.data["paths"] == [str(source)]
+    assert result.data["deletedPaths"] == [prefab, meta]
+    assert result.data["assetChanges"] == [
+        {"path": prefab, "kind": "delete", "contentSha256": ""},
+        {"path": meta, "kind": "delete", "contentSha256": ""},
+    ]
+    restored = service.server.state.get_write_batch(result.data["writeBatchId"])
+    assert restored["assetChanges"] == result.data["assetChanges"]
+    assert restored["compileWhenEditMode"] is True
+
+
 def test_last_effective_change_wins_when_delete_is_followed_by_recreate(service, tmp_path):
     path = tmp_path / "A.cs"
     first = register(service, deleted=[str(path)]).data
@@ -108,7 +128,7 @@ def test_invalid_changes_never_register_or_schedule(service, tmp_path, case, cod
     requests = {
         "empty": ([], []), "bad_type": ([], "Gone.cs"), "blank": ([], [" "]),
         "missing_write": (["Gone.cs"], []), "existing_delete": ([], [str(path)]),
-        "overlap": ([str(path)], [str(path)]), "unsupported": ([], ["A.cs.meta"]),
+        "overlap": ([str(path)], [str(path)]), "unsupported": (["A.prefab"], []),
         "outside": ([], [str(tmp_path.parent / "Outside.cs")]),
     }
     paths, deleted = requests[case]

@@ -222,14 +222,22 @@ class ScreenshotDomainService:
         if not TASK_TOOL.get():
             return await self._bounded_snapshot_task("unity_screenshot_scene_view", {
                 "width": width, "height": height, "format": format, "quality": quality,
-            })
+})
         resolved = await self._resolve_snapshot_window("sceneView", type_filter="UnityEditor.SceneView")
         if isinstance(resolved, ToolResponse):
             return resolved
-        return await self._capture_snapshot_screenshot(
-            "sceneView",
-            {"targetId": "scene-view", "kind": "sceneView", "instanceId": str(resolved["instanceId"]), "width": width, "height": height},
-        )
+        target = {
+            "targetId": "scene-view", "kind": "sceneView",
+            "instanceId": str(resolved["instanceId"]), "width": width, "height": height,
+            "requireContentRect": True,
+        }
+        if resolved.get("docked"):
+            target["pixelSource"] = "contentRect"
+            target["_dockedWarning"] = (
+                "SceneView is docked. requireContentRect=true forces capture of "
+                "the content area instead of the floating window container."
+            )
+        return await self._capture_snapshot_screenshot("sceneView", target)
 
     async def screenshot_camera(
         self,
