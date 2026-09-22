@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - MCP server runtime discovery, download, and version info.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -168,6 +168,7 @@ namespace CodingRiver.UPilot
         private UPilotDownloadState _downloadState = new();
         private UPilotPythonEnvironmentState _pythonEnvState = new();
         private string _lastManagedInstallFailurePath = "";
+        internal static bool RepairOwnsFailureDialog { get; set; }
 
         public UPilotDownloadState DownloadState
         {
@@ -543,6 +544,12 @@ namespace CodingRiver.UPilot
                 return true;
 
             var normalizedPackageId = packageId ?? "";
+            if (source == PackageSource.Git)
+            {
+                var separator = normalizedPackageId.LastIndexOf('#');
+                var reference = separator >= 0 ? normalizedPackageId.Substring(separator + 1) : "";
+                return !IsStrictSemver(reference);
+            }
             return normalizedPackageId.IndexOf("#main", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    normalizedPackageId.IndexOf("main-nightly", StringComparison.OrdinalIgnoreCase) >= 0;
         }
@@ -582,7 +589,8 @@ namespace CodingRiver.UPilot
             _ = RunDownloadLatestServerExeAsync(activateOnComplete: true, manifest: null, _downloadCts.Token);
         }
 
-        public async Task<UPilotPreparedServerDownload> PrepareLatestServerExeAsync(UPilotReleaseManifest manifest)
+        public async Task<UPilotPreparedServerDownload> PrepareLatestServerExeAsync(
+            UPilotReleaseManifest manifest, CancellationToken cancellationToken = default)
         {
             if (manifest == null)
                 throw new ArgumentNullException(nameof(manifest));
@@ -602,8 +610,40 @@ namespace CodingRiver.UPilot
                 };
             }
 
-            _downloadCts = new CancellationTokenSource();
+            _downloadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             return await DownloadLatestServerExeAsync(manifest, activateOnComplete: false, _downloadCts.Token);
+        }
+
+        internal async Task PrepareMatchingServerForRepairAsync()
+        {
+            if (GetConfiguredMode() == UPilotServerRuntimeMode.Python)
+            {
+                UPilotMcpServerManager.Instance.PreparePythonEntryForRepair();
+                return;
+            }
+            var configured = UPilotProjectConfig.Current.runtime?.serverExePath ?? "";
+            if (!string.IsNullOrWhiteSpace(configured) &&
+                (!TryGetRuntimeCacheRoot(out var cacheRoot, out _) ||
+                 !UPilotDeploymentDiagnostics.RealPath(configured).StartsWith(
+                     UPilotDeploymentDiagnostics.RealPath(cacheRoot) + "/", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("自定义 Server EXE 不会被自动替换。请明确选择当前包配套的自动管理入口。\n" + configured);
+            var version = UPilotDeploymentDiagnostics.Version;
+            if (!IsStrictSemver(version))
+                throw new InvalidOperationException("无法确定当前包的精确发布版本：" + version);
+            // A version-specific manifest, never releases/latest.
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            using var response = await Http.GetAsync(
+                $"https://github.com/codingriver/upilot/releases/download/v{version}/manifest.json", deadline.Token);
+            response.EnsureSuccessStatusCode();
+            var manifest = ParseManifest(await response.Content.ReadAsStringAsync());
+            if (manifest.UpmVersion != version || manifest.ServerVersion != version ||
+                manifest.Channel != UPilotDeploymentDiagnostics.Channel || manifest.ProtocolVersion != "1")
+                throw new InvalidOperationException($"配套 Server 发布清单不匹配：Bridge={version}/{UPilotDeploymentDiagnostics.Channel}；" +
+                    $"清单 UPM={manifest.UpmVersion}，Server={manifest.ServerVersion}/{manifest.Channel}，协议={manifest.ProtocolVersion}");
+            var prepared = await PrepareLatestServerExeAsync(manifest, deadline.Token);
+            deadline.Token.ThrowIfCancellationRequested();
+            if (!ActivatePreparedStandaloneExe(prepared.TargetPath, prepared.Version, out var error))
+                throw new InvalidOperationException(error);
         }
 
         public bool ActivatePreparedStandaloneExe(
@@ -1402,6 +1442,7 @@ namespace CodingRiver.UPilot
 
         private static void ScheduleDownloadErrorDialog(string message)
         {
+            if (RepairOwnsFailureDialog) return;
             if (_downloadErrorDialogPending)
                 return;
 
@@ -2170,7 +2211,7 @@ namespace CodingRiver.UPilot
                    string.Equals(value, "stable", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool IsStrictSemver(string value)
+        internal static bool IsStrictSemver(string value)
         {
             return !string.IsNullOrWhiteSpace(value) &&
                    Regex.IsMatch(value.Trim(), @"^v?\d+\.\d+\.\d+$");

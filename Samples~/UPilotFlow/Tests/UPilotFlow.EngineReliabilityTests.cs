@@ -17,6 +17,8 @@ namespace CodingRiver.UPilot.Flow
             var cts = new CancellationTokenSource();
             cts.Cancel();
 
+            LogAssert.Expect(UnityEngine.LogType.Error,
+                new System.Text.RegularExpressions.Regex("Cancelled Case.*Error"));
             var runner = new TestRunner();
             Task<TestResult> task = runner.RunAsync(
                 "name: Cancelled Case\nsteps:\n  - action: wait\n    duration: '10ms'\n",
@@ -206,6 +208,8 @@ steps:
                 ExecutionSource = "direct-test",
             };
 
+            LogAssert.Expect(UnityEngine.LogType.Error,
+                new System.Text.RegularExpressions.Regex("Registry Stop.*Error"));
             Task<TestResult> task = new TestRunner().RunAsync(
                 "name: Registry Stop\nsteps:\n  - action: wait\n    duration: '10000ms'\n",
                 "registry-stop.yaml",
@@ -371,6 +375,8 @@ steps:
                 PauseTimeoutPolicy = "auto_abort",
             };
 
+            LogAssert.Expect(UnityEngine.LogType.Error,
+                new System.Text.RegularExpressions.Regex("Timed Failure Pause.*Error"));
             Task<TestResult> task = new TestRunner().RunAsync(
                 "name: Timed Failure Pause\nsteps:\n  - action: assert_text\n    selector: '#status-label'\n    expected: 'This will fail'\n",
                 "timed-failure-pause.yaml",

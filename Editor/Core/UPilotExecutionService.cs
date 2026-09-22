@@ -69,6 +69,34 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable] public sealed class CSharpEvalMessage { public CSharpEvalPayload payload; }
+    [Serializable] public sealed class CSharpValidateMessage { public CSharpValidatePayload payload; }
+    [Serializable]
+    public sealed class CSharpValidationVariablePayload
+    {
+        public string name = "";
+        public string typeName = "";
+    }
+    [Serializable]
+    public sealed class CSharpValidatePayload
+    {
+        public string code = "";
+        public string mode = "auto";
+        public string backend = "interpret";
+        public string[] imports = Array.Empty<string>();
+        public CSharpValidationVariablePayload[] variableTypes = Array.Empty<CSharpValidationVariablePayload>();
+    }
+    [Serializable]
+    public sealed class CSharpValidateResultPayload
+    {
+        public string status = "Valid";
+        public string languageProfile = CSharpSubsetEngine.LanguageProfile;
+        public string modeUsed = "";
+        public string backend = "interpret";
+        public bool syntaxValid = true;
+        public bool backendSupported = true;
+        public bool sideEffectsMayHaveOccurred;
+        public string[] boundaries = Array.Empty<string>();
+    }
     [Serializable]
     public sealed class CSharpEvalPayload
     {
@@ -174,6 +202,9 @@ namespace CodingRiver.UPilot
     {
         public string languageProfile = CSharpSubsetEngine.LanguageProfile;
         public bool interpreterSupported = true;
+        public bool directCompiledBackendSupported = true;
+        public string directCompiledProfile = "statically-bound synchronous core; unsupported nodes fail before execution";
+        public bool directCompiledEmitBodiesSupported = true;
         public bool structuredSourceSpans = true;
         public bool structuredErrorDetails = true;
         public bool legacyJsonErrorDetails = true;
@@ -223,7 +254,7 @@ namespace CodingRiver.UPilot
         public int hardMaxArrayElements = 1000000;
         public int defaultMaxAsyncOperations = 64;
         public int hardMaxAsyncOperations = 256;
-        public string[] tools = { "unity_reflection_call", "csharp_eval", "reflection_emit_type", "execution_session" };
+        public string[] tools = { "unity_reflection_call", "csharp_validate", "csharp_eval", "reflection_emit_type", "execution_session" };
     }
 
     public sealed class UPilotExecutionService
@@ -254,6 +285,7 @@ namespace CodingRiver.UPilot
         public void RegisterCommands()
         {
             _bridge.Router.Register("execution.session", HandleSessionAsync);
+            _bridge.Router.Register("csharp.validate", HandleCSharpValidateAsync);
             _bridge.Router.Register("csharp.eval", HandleCSharpEvalAsync);
             _bridge.Router.Register("reflection.emitType", HandleReflectionEmitAsync);
             _bridge.Router.Register("execution.capabilities", HandleCapabilitiesAsync);
@@ -409,6 +441,70 @@ namespace CodingRiver.UPilot
                 result => _bridge.SendResultAsync(id, "csharp.eval", result, token),
                 error => SendContractErrorAsync(id, "csharp.eval", error, token));
 
+        private async Task HandleCSharpValidateAsync(string id, string json, CancellationToken token)
+        {
+            try
+            {
+                var payload = JsonUtility.FromJson<CSharpValidateMessage>(json)?.payload ?? new CSharpValidatePayload();
+                await _bridge.SendResultAsync(id, "csharp.validate", ValidateCSharpPayload(payload), token);
+            }
+            catch (ExecutionContractException ex)
+            {
+                await SendContractErrorAsync(id, "csharp.validate", ex, token);
+            }
+            catch (Exception ex)
+            {
+                await SendContractErrorAsync(id, "csharp.validate", new ExecutionContractException(
+                    "INTERNAL_ERROR", ex.GetType().FullName + ": " + ex.Message,
+                    new Dictionary<string, object> { { "stage", "bind" }, { "sideEffectsMayHaveOccurred", false } }), token);
+            }
+        }
+
+        internal static CSharpValidateResultPayload ValidateCSharpPayload(CSharpValidatePayload payload)
+        {
+            payload = payload ?? new CSharpValidatePayload();
+            if (string.IsNullOrWhiteSpace(payload.code))
+                throw new ExecutionContractException("CSHARP_PARSE_ERROR", "code is required.");
+            string mode = string.IsNullOrWhiteSpace(payload.mode) ? "auto" : payload.mode.Trim().ToLowerInvariant();
+            string backend = string.IsNullOrWhiteSpace(payload.backend) ? "interpret" : payload.backend.Trim().ToLowerInvariant();
+            if (mode != "auto" && mode != "expression" && mode != "statements")
+                throw new ExecutionContractException("INVALID_EVAL_MODE", "mode must be auto, expression or statements.");
+            if (backend != "interpret" && backend != "emit" && backend != "compiled")
+                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "backend must be interpret, emit or compiled.");
+
+            string[] imports = (payload.imports ?? Array.Empty<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToArray();
+            if (imports.Length == 0) imports = new[] { "System" };
+            var program = CSharpSubsetEngine.Parse(payload.code, mode);
+            if (backend == "emit") program.ValidateSynchronousEmitProfile();
+            if (backend == "compiled")
+            {
+                var variableTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
+                foreach (var variable in payload.variableTypes ?? Array.Empty<CSharpValidationVariablePayload>())
+                {
+                    if (variable == null || string.IsNullOrWhiteSpace(variable.name) || string.IsNullOrWhiteSpace(variable.typeName))
+                        throw new ExecutionContractException("INVALID_PARAMS", "Each variableTypes entry requires name and typeName.");
+                    if (variableTypes.ContainsKey(variable.name))
+                        throw new ExecutionContractException("INVALID_PARAMS", "Duplicate variableTypes entry: " + variable.name);
+                    Type type = ExecutionTypeResolver.Resolve(variable.typeName, imports);
+                    if (type == null) throw new ExecutionContractException("TYPE_NOT_FOUND", "Variable type was not found: " + variable.typeName);
+                    variableTypes[variable.name] = type;
+                }
+                string key = CSharpCompiledBackend.CacheKeyForTypes(payload.code, mode, imports, variableTypes);
+                CSharpCompiledBackend.Compile(key, payload.code, mode,
+                    new CSharpEvaluationContext(imports: imports), variableTypes);
+            }
+
+            return new CSharpValidateResultPayload
+            {
+                modeUsed = program.IsExpressionOnly ? "expression" : "statements",
+                backend = backend,
+                boundaries = backend == "compiled"
+                    ? new[] { "parse", "bind", "lower", "delegate-compile" }
+                    : new[] { "parse", backend == "emit" ? "synchronous-profile" : "syntax" },
+            };
+        }
+
         internal async Task HandleCSharpEvalAsync(string id, string json, CancellationToken token,
             Action<Action> enqueue, Func<CSharpEvalResultPayload, Task> sendResult,
             Func<ExecutionContractException, Task> sendError,
@@ -531,8 +627,8 @@ namespace CodingRiver.UPilot
             payload.resultMode = string.IsNullOrWhiteSpace(payload.resultMode) ? "auto" : payload.resultMode.Trim().ToLowerInvariant();
             if (payload.mode != "auto" && payload.mode != "expression" && payload.mode != "statements")
                 throw new ExecutionContractException("INVALID_EVAL_MODE", "mode must be auto, expression or statements.");
-            if (payload.executionBackend != "auto" && payload.executionBackend != "interpret" && payload.executionBackend != "emit")
-                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret or emit.");
+            if (payload.executionBackend != "auto" && payload.executionBackend != "interpret" && payload.executionBackend != "emit" && payload.executionBackend != "compiled")
+                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret, emit or compiled.");
             if (payload.resultMode != "auto" && payload.resultMode != "inline" && payload.resultMode != "handle" && payload.resultMode != "legacystring")
                 throw new ExecutionContractException("INVALID_RESULT_MODE", "resultMode must be auto, inline, handle or legacyString.");
             if (payload.resultMode == "handle" && string.IsNullOrWhiteSpace(payload.sessionId))
@@ -556,8 +652,8 @@ namespace CodingRiver.UPilot
         private static EvaluationWorkerResult ExecuteEvaluationWorker(CSharpEvalPayload payload, CSharpEvaluationContext context)
         {
             string backend = string.IsNullOrWhiteSpace(payload.executionBackend) ? "auto" : payload.executionBackend.Trim().ToLowerInvariant();
-            if (backend != "auto" && backend != "interpret" && backend != "emit")
-                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret, or emit.");
+            if (backend != "auto" && backend != "interpret" && backend != "emit" && backend != "compiled")
+                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret, emit, or compiled.");
             if (string.Equals(payload.languageProfileMode, "reflection-expression", StringComparison.Ordinal))
             {
                 var expressionProgram = CSharpSubsetEngine.Parse(payload.code, "expression");
@@ -565,6 +661,15 @@ namespace CodingRiver.UPilot
                 return new EvaluationWorkerResult { Result = expressionProgram.Execute(context), BackendUsed = "interpreter" };
             }
             string cacheKey = CSharpEmitBackend.CacheKey(payload.code, payload.mode, context.Imports);
+            if (backend == "compiled")
+            {
+                string compiledKey = CSharpCompiledBackend.CacheKey(payload.code, payload.mode, context.Imports, context.SnapshotVariables());
+                return new EvaluationWorkerResult
+                {
+                    Result = CSharpCompiledBackend.Compile(compiledKey, payload.code, payload.mode, context)(context),
+                    BackendUsed = "compiled",
+                };
+            }
             if (backend == "emit")
                 return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode)(context), BackendUsed = "emit" };
             if (backend == "auto" && CSharpEmitBackend.IsCached(cacheKey))
@@ -585,8 +690,8 @@ namespace CodingRiver.UPilot
             string backend = string.IsNullOrWhiteSpace(payload.executionBackend)
                 ? "auto"
                 : payload.executionBackend.Trim().ToLowerInvariant();
-            if (backend != "auto" && backend != "interpret" && backend != "emit")
-                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret, or emit.");
+            if (backend != "auto" && backend != "interpret" && backend != "emit" && backend != "compiled")
+                throw new ExecutionContractException("INVALID_EXECUTION_BACKEND", "executionBackend must be auto, interpret, emit, or compiled.");
 
             if (string.Equals(payload.languageProfileMode, "reflection-expression", StringComparison.Ordinal))
             {
@@ -600,6 +705,15 @@ namespace CodingRiver.UPilot
             }
 
             string cacheKey = CSharpEmitBackend.CacheKey(payload.code, payload.mode, context.Imports);
+            if (backend == "compiled")
+            {
+                string compiledKey = CSharpCompiledBackend.CacheKey(payload.code, payload.mode, context.Imports, context.SnapshotVariables());
+                return new EvaluationWorkerResult
+                {
+                    Result = CSharpCompiledBackend.Compile(compiledKey, payload.code, payload.mode, context)(context),
+                    BackendUsed = "compiled",
+                };
+            }
             if (backend == "emit")
             {
                 var emitted = CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode);

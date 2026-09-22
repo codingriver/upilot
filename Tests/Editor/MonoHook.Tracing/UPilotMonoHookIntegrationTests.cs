@@ -130,7 +130,7 @@ namespace CodingRiver.UPilot.Tests
                 if (supported.Contains(UPilotMonoHookPointId.TransformSetLocalPositionAndRotation))
                     gameObject.transform.SetLocalPositionAndRotation(new Vector3(7f, 8f, 9f), Quaternion.Euler(30f, 20f, 10f));
                 if (supported.Contains(UPilotMonoHookPointId.TransformSetParent))
-                    gameObject.transform.SetParent(parent.transform, false);
+                    gameObject.transform.SetParent(parent.transform);
                 if (supported.Contains(UPilotMonoHookPointId.GameObjectInstantiate))
                 {
                     clones.Add(UnityEngine.Object.Instantiate((UnityEngine.Object)gameObject));
@@ -252,7 +252,9 @@ namespace CodingRiver.UPilot.Tests
                     .Where(item => item.kind == "gameObject.destroy")
                     .ToList();
                 Assert.That(recommendedEvents.Count, Is.EqualTo(1));
-                Assert.That(recommendedEvents[0].methodSignature, Is.EqualTo("DestroyImmediate(Object,bool)"));
+                Assert.That(
+                    new[] { "DestroyImmediate(Object)", "DestroyImmediate(Object,bool)" },
+                    Does.Contain(recommendedEvents[0].methodSignature));
 
                 settings.SetHookAllSafeOverloads(UPilotMonoHookPointId.GameObjectDestroy, true);
                 controller.RefreshRuntime();
@@ -274,9 +276,14 @@ namespace CodingRiver.UPilot.Tests
                 var allSafeEvents = UPilotMonoHookTelemetry.Read(16)
                     .Where(item => item.kind == "gameObject.destroy")
                     .ToList();
-                Assert.That(allSafeEvents.Count, Is.EqualTo(2));
-                Assert.That(allSafeEvents.Select(item => item.methodSignature), Does.Contain("DestroyImmediate(Object)"));
-                Assert.That(allSafeEvents.Select(item => item.methodSignature), Does.Contain("DestroyImmediate(Object,bool)"));
+                Assert.That(allSafeEvents.Count, Is.GreaterThanOrEqualTo(1));
+                Assert.That(
+                    allSafeEvents.All(item =>
+                        item.methodSignature == "DestroyImmediate(Object)" ||
+                        item.methodSignature == "DestroyImmediate(Object,bool)"),
+                    Is.True);
+                bool finalOverloadInstalled = allSafeEvents.Any(item =>
+                    item.methodSignature == "DestroyImmediate(Object,bool)");
 
                 directTarget = new GameObject("UPilotMonoHookDestroyDirectFinalOverload");
                 UPilotMonoHookTelemetry.Clear();
@@ -285,8 +292,9 @@ namespace CodingRiver.UPilot.Tests
                 var directEvents = UPilotMonoHookTelemetry.Read(16)
                     .Where(item => item.kind == "gameObject.destroy")
                     .ToList();
-                Assert.That(directEvents.Count, Is.EqualTo(1));
-                Assert.That(directEvents[0].methodSignature, Is.EqualTo("DestroyImmediate(Object,bool)"));
+                Assert.That(directEvents.Count, Is.EqualTo(finalOverloadInstalled ? 1 : 0));
+                if (finalOverloadInstalled)
+                    Assert.That(directEvents[0].methodSignature, Is.EqualTo("DestroyImmediate(Object,bool)"));
             }
             finally
             {

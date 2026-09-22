@@ -10,6 +10,36 @@
 
 Do not infer readiness from raw `isPlaying` or `isCompiling` values. Treat `queued`, `compiling`, `compiler_finished`, `domain_reload`, and `verifying` as non-ready compile phases.
 
+## Deployment Freshness
+
+Use this preflight after Server/Bridge/protocol changes or for suspected version mismatch,
+including an authorized Unity 6 / Unity 2022.3 acceptance matrix. It is not a new gate
+for every ordinary Editor operation.
+
+1. For each intended endpoint, record its exact project path and expected package/Server
+   deployment source. Query `unity_mcp_status`; retain Server PID separately from Unity
+   PID, Bridge session/identity-contract version and managed-domain generation.
+2. Record the Server process start time and loaded build/source identity only when
+   available from evidence tied to that exact process. Current
+   `runtimeIdentity.mcpServer` supplies a PID, not loaded-source attestation. Unity's
+   `processCreatedAt`, package acceptance `sourceIdentity` and the files currently on
+   disk are not substitutes for Server identity. For an EXE, compare its selected build,
+   not unrelated Python checkout timestamps.
+3. Classify the evidence as **verified**, **suspected-stale**, or **unverified**. A Server
+   predating relevant source edits is a risk indicator, not conclusive proof. `/health`
+   reachability, equal version strings, matching disk hashes or a later process start
+   alone cannot establish that the intended code was loaded. Missing evidence must remain
+   unverified; do not mislabel this as a network fault or report deployment acceptance.
+4. If refresh is necessary, follow `safety.md`'s Controlled Deployment Refresh procedure.
+   Unknown freshness never triggers an automatic restart. Preserve active task/run/operation
+   identities; report a busy or unobservable endpoint instead of disrupting its work.
+5. After an authorized refresh, recheck the exact project, connection, relevant identities
+   and one real read-only call. Report the evidence actually established; reconnect success
+   alone is not source attestation. Resume observing existing identities, never replay start.
+
+This workflow does not introduce a runtime fingerprint API or require restarting both
+components when only one changed.
+
 ## Compile Fix
 
 1. Read `unity_compile_errors`.
@@ -58,3 +88,42 @@ For a generic project bridge operation, call `unity_operation_validate(jobSpec)`
 ## Multiple Projects
 
 Always verify `paths.unityProjectAbsolute`. Stop if the connected Editor is not the intended project.
+
+Prefer that project's native registered tools. When an authorized second endpoint is not
+injected, use the existing Streamable HTTP clients rather than hand-writing JSON-RPC/SSE.
+Read `client-configs.md` for the read-only `upilot_mcp.client_probe` handshake. A probe's
+success is not proof that tools are injected into another AI client or that deployment is fresh.
+
+For repository acceptance calls, reuse `upilotserver~/scripts/p0_acceptance_call.py` from
+the confirmed source checkout. It supports only the exact repository `Tests~/UPilotTest`
+and `Tests~/UPilotTest2022` roots; project names select these fixed paths, not arbitrary
+same-named directories. Determine each HTTP port from that project's configuration.
+
+Example, from the repository root with the existing Python server environment:
+
+```powershell
+python upilotserver~/scripts/p0_acceptance_call.py --project UPilotTest2022 --port <HTTP_PORT> --tool unity_mcp_status --args '{}' --output alternate-status.json
+```
+
+The script initializes through the MCP SDK, checks the connected absolute project path,
+then proxies the exact tool through `unity_tool_call` and its existing permission gates.
+It neither registers clients nor starts/restarts the Server. Missing source or Python/MCP
+dependencies is a reported prerequisite, not permission to install them automatically.
+
+- Keep `not_sent`, `sent_unknown` and `response_received` distinct. Connection/argument
+  failures do not send the requested tool; a timeout after dispatch leaves execution
+  uncertain. Never automatically replay a write. Poll established task/run/operation IDs
+  through their normal status tools after reconnecting.
+- Stdout contains connection identity, selected status/test evidence and the immutable
+  evidence path/bytes/SHA256, not the complete status payload. Interpret protocol `ok`
+  separately from the business outcome and cleanup fields. Process identity summaries
+  explicitly leave deployment freshness unverified.
+- Evidence files remain under the selected project's `Log/P0P1`; existing files are not
+  overwritten. Credentials are redacted from parameters, results and output. Raw
+  exception text and malformed argument text are omitted, not written to a traceback.
+- Do not supply secrets through `--args`. The one-shot client rejects credential-bearing
+  arguments and known Capture start/stop ownership workflows, including nested
+  task/proxy calls. Use a native client with secure owner-token lifecycle handling for
+  those workflows. This guard is not a sandbox for arbitrary reflection or user code.
+- Use task-local read-only probes for this routing validation; do not start a full test
+  suite merely to check a second endpoint.

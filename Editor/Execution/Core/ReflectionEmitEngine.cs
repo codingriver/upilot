@@ -38,6 +38,7 @@ namespace CodingRiver.UPilot.Execution
         public string backingField = "";
         public string getterBody = "";
         public string setterBody = "";
+        public string bodyBackend = "";
     }
 
     [Serializable]
@@ -48,6 +49,7 @@ namespace CodingRiver.UPilot.Execution
         public string[] baseConstructorParameterTypeNames = Array.Empty<string>();
         public string[] baseArgumentNames = Array.Empty<string>();
         public string body = "";
+        public string bodyBackend = "";
     }
 
     [Serializable]
@@ -63,6 +65,7 @@ namespace CodingRiver.UPilot.Execution
         public string implements = "";
         public string overrides = "";
         public string body = "";
+        public string bodyBackend = "";
         public string callbackHandle = "";
         public bool isolateCallbackExceptions = true;
         public DynamicCallbackPolicySpec callbackPolicy;
@@ -104,6 +107,7 @@ namespace CodingRiver.UPilot.Execution
         public string baseType = "System.Object";
         public string[] interfaces = Array.Empty<string>();
         public bool isSealed = true;
+        public string bodyBackend = "interpret";
         public DynamicFieldSpec[] fields = Array.Empty<DynamicFieldSpec>();
         public DynamicPropertySpec[] properties = Array.Empty<DynamicPropertySpec>();
         public DynamicConstructorSpec[] constructors = Array.Empty<DynamicConstructorSpec>();
@@ -141,6 +145,11 @@ namespace CodingRiver.UPilot.Execution
         public Type ReturnType;
         public string RegistrationKey;
         public string ExceptionMode = "propagate";
+        public string BodyBackend = "interpret";
+        public string SourceCode = "";
+        public Type[] ParameterTypes = Array.Empty<Type>();
+        public bool IsStatic;
+        public Func<CSharpEvaluationContext, CSharpEvaluationResult> CompiledBody;
         public int MaxInvocations = 10000;
         public int MaxReentrancy = 8;
         public int DiagnosticsCapacity = 32;
@@ -159,7 +168,21 @@ namespace CodingRiver.UPilot.Execution
                 ReturnType = ReturnType, RegistrationKey = RegistrationKey,
                 ExceptionMode = ExceptionMode, MaxInvocations = MaxInvocations,
                 MaxReentrancy = MaxReentrancy, DiagnosticsCapacity = DiagnosticsCapacity,
+                BodyBackend = BodyBackend, SourceCode = SourceCode,
+                ParameterTypes = ParameterTypes, IsStatic = IsStatic, CompiledBody = CompiledBody,
             };
+        }
+
+        public void PrepareCompiled(Type declaringType)
+        {
+            if (BodyBackend != "compiled" || CompiledBody != null) return;
+            var variableTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
+            if (!IsStatic) variableTypes["this"] = declaringType;
+            for (int index = 0; index < ParameterNames.Length; index++)
+                variableTypes[ParameterNames[index]] = ParameterTypes[index];
+            string key = CSharpCompiledBackend.CacheKeyForTypes(SourceCode, "statements", new[] { "System" }, variableTypes);
+            CompiledBody = CSharpCompiledBackend.Compile(
+                key, SourceCode, "statements", new CSharpEvaluationContext(imports: new[] { "System" }), variableTypes);
         }
 
         public void Record(string code, Exception exception)
@@ -292,6 +315,7 @@ namespace CodingRiver.UPilot.Execution
                 for (int i = 0; i < registration.ParameterNames.Length; i++)
                     variables[registration.ParameterNames[i]] = arguments != null && i < arguments.Length ? arguments[i] : null;
                 var context = new CSharpEvaluationContext(variables, new[] { "System" }, new ExecutionBudget(3000, 10000, 10000, 1000, 1000, 64), new RestrictedEvalExecutionPolicy());
+                if (registration.CompiledBody != null) return registration.CompiledBody(context).Value;
                 return registration.Program == null ? null : registration.Program.Execute(context).Value;
             }
             catch (Exception error)
@@ -432,10 +456,12 @@ namespace CodingRiver.UPilot.Execution
                 var typeBuilder = _module.DefineType(generatedName, attributes, baseType, interfaceTypes);
                 var fields = DefineFields(typeBuilder, spec.fields);
                 var pendingRegistrations = new List<KeyValuePair<string, DynamicMethodRegistration>>();
-                DefineProperties(typeBuilder, spec.properties, fields, sessionId, specHash, pendingRegistrations);
-                DefineConstructors(typeBuilder, baseType, spec.constructors, fields, sessionId, specHash, pendingRegistrations);
+                string defaultBodyBackend = NormalizeBodyBackend(spec.bodyBackend, "spec.bodyBackend");
+                DefineProperties(typeBuilder, spec.properties, fields, sessionId, specHash, defaultBodyBackend, pendingRegistrations);
+                DefineConstructors(typeBuilder, baseType, spec.constructors, fields, sessionId, specHash, defaultBodyBackend, pendingRegistrations);
                 var implemented = DefineMethods(typeBuilder, spec, sessionId, specHash, callbackResolver, pendingRegistrations);
                 Type created = CreateType(typeBuilder);
+                foreach (var pair in pendingRegistrations) pair.Value.PrepareCompiled(created);
                 foreach (var pair in pendingRegistrations) DynamicMethodDispatcher.Register(pair.Key, pair.Value);
                 string cleanupPrefix = sessionId + ":" + specHash + ":";
                 string[] registrationKeys = pendingRegistrations.Select(pair => pair.Key).ToArray();
@@ -481,6 +507,7 @@ namespace CodingRiver.UPilot.Execution
             IDictionary<string, FieldBuilder> fields,
             string sessionId,
             string specHash,
+            string defaultBodyBackend,
             IList<KeyValuePair<string, DynamicMethodRegistration>> registrations)
         {
             int propertyIndex = 0;
@@ -520,7 +547,8 @@ namespace CodingRiver.UPilot.Execution
                         string key = sessionId + ":" + specHash + ":property:get:" + currentIndex;
                         EmitDispatchCall(il, key, Type.EmptyTypes, type, false);
                         registrations.Add(new KeyValuePair<string, DynamicMethodRegistration>(key,
-                            CreateProgramRegistration(key, sessionId, spec.getterBody, Array.Empty<string>(), type)));
+                            CreateProgramRegistration(key, sessionId, spec.getterBody, Array.Empty<string>(), Type.EmptyTypes, type,
+                                NormalizeBodyBackend(string.IsNullOrWhiteSpace(spec.bodyBackend) ? defaultBodyBackend : spec.bodyBackend, "property.bodyBackend"), false)));
                     }
                     il.Emit(OpCodes.Ret);
                     property.SetGetMethod(getter);
@@ -536,7 +564,8 @@ namespace CodingRiver.UPilot.Execution
                         string key = sessionId + ":" + specHash + ":property:set:" + currentIndex;
                         EmitDispatchCall(il, key, new[] { type }, typeof(void), false);
                         registrations.Add(new KeyValuePair<string, DynamicMethodRegistration>(key,
-                            CreateProgramRegistration(key, sessionId, spec.setterBody, new[] { "value" }, typeof(void))));
+                            CreateProgramRegistration(key, sessionId, spec.setterBody, new[] { "value" }, new[] { type }, typeof(void),
+                                NormalizeBodyBackend(string.IsNullOrWhiteSpace(spec.bodyBackend) ? defaultBodyBackend : spec.bodyBackend, "property.bodyBackend"), false)));
                     }
                     il.Emit(OpCodes.Ret);
                     property.SetSetMethod(setter);
@@ -545,7 +574,8 @@ namespace CodingRiver.UPilot.Execution
         }
 
         private static DynamicMethodRegistration CreateProgramRegistration(
-            string key, string sessionId, string body, string[] parameterNames, Type returnType)
+            string key, string sessionId, string body, string[] parameterNames, Type[] parameterTypes,
+            Type returnType, string bodyBackend, bool isStatic)
         {
             CSharpEmitBackend.ValidateEmitSubset(body);
             return new DynamicMethodRegistration
@@ -554,8 +584,12 @@ namespace CodingRiver.UPilot.Execution
                 RegistrationKey = key,
                 Program = CSharpSubsetEngine.Parse(body, "statements"),
                 ParameterNames = parameterNames ?? Array.Empty<string>(),
+                ParameterTypes = parameterTypes ?? Type.EmptyTypes,
                 ReturnType = returnType,
                 ExceptionMode = "propagate",
+                BodyBackend = bodyBackend,
+                SourceCode = body ?? "",
+                IsStatic = isStatic,
             };
         }
 
@@ -566,6 +600,7 @@ namespace CodingRiver.UPilot.Execution
             IDictionary<string, FieldBuilder> fields,
             string sessionId,
             string specHash,
+            string defaultBodyBackend,
             IList<KeyValuePair<string, DynamicMethodRegistration>> registrations)
         {
             specs = specs ?? Array.Empty<DynamicConstructorSpec>();
@@ -604,7 +639,9 @@ namespace CodingRiver.UPilot.Execution
                     string key = sessionId + ":" + specHash + ":ctor:" + index;
                     EmitDispatchCall(il, key, parameterTypes, typeof(void), false);
                     registrations.Add(new KeyValuePair<string, DynamicMethodRegistration>(key,
-                        CreateProgramRegistration(key, sessionId, spec.body, spec.parameters.Select(p => p.name).ToArray(), typeof(void))));
+                        CreateProgramRegistration(key, sessionId, spec.body, spec.parameters.Select(p => p.name).ToArray(), parameterTypes,
+                            typeof(void), NormalizeBodyBackend(string.IsNullOrWhiteSpace(spec.bodyBackend) ? defaultBodyBackend : spec.bodyBackend,
+                                "constructor.bodyBackend"), false)));
                 }
                 il.Emit(OpCodes.Ret);
             }
@@ -637,6 +674,9 @@ namespace CodingRiver.UPilot.Execution
 
                 Delegate callback = null;
                 CSharpProgram program = null;
+                string bodyBackend = NormalizeBodyBackend(
+                    string.IsNullOrWhiteSpace(spec.bodyBackend) ? typeSpec.bodyBackend : spec.bodyBackend,
+                    "method.bodyBackend");
                 if (!string.IsNullOrWhiteSpace(spec.callbackHandle))
                     callback = ResolveCallback(spec, parameterTypes, returnType, callbackResolver);
                 else if (!string.IsNullOrWhiteSpace(spec.body))
@@ -645,6 +685,7 @@ namespace CodingRiver.UPilot.Execution
                     program = CSharpSubsetEngine.Parse(spec.body, "statements");
                 }
                 DynamicCallbackPolicySpec callbackPolicy = callback == null ? null : NormalizeCallbackPolicy(spec);
+                if (program == null) bodyBackend = "interpret";
                 registrations.Add(new KeyValuePair<string, DynamicMethodRegistration>(key, new DynamicMethodRegistration
                 {
                     SessionId = sessionId,
@@ -652,12 +693,16 @@ namespace CodingRiver.UPilot.Execution
                     Program = program,
                     Callback = callback,
                     ParameterNames = spec.parameters.Select(p => p.name).ToArray(),
+                    ParameterTypes = parameterTypes,
                     IsolateCallbackExceptions = callback != null && (callbackPolicy?.exceptionMode ?? "propagate") == "isolate",
                     ExceptionMode = callbackPolicy?.exceptionMode ?? "propagate",
                     MaxInvocations = callbackPolicy?.maxInvocations ?? 10000,
                     MaxReentrancy = callbackPolicy?.maxReentrancy ?? 8,
                     DiagnosticsCapacity = callbackPolicy?.diagnosticsCapacity ?? 32,
                     ReturnType = returnType,
+                    BodyBackend = bodyBackend,
+                    SourceCode = spec.body ?? "",
+                    IsStatic = spec.isStatic,
                 }));
 
                 MethodInfo contractMethod = ResolveContractMethod(typeSpec, spec, parameterTypes);
@@ -735,6 +780,14 @@ namespace CodingRiver.UPilot.Execution
             policy.maxReentrancy = Math.Max(1, Math.Min(64, policy.maxReentrancy <= 0 ? 8 : policy.maxReentrancy));
             policy.diagnosticsCapacity = Math.Max(1, Math.Min(128, policy.diagnosticsCapacity <= 0 ? 32 : policy.diagnosticsCapacity));
             return policy;
+        }
+
+        private static string NormalizeBodyBackend(string value, string fieldName)
+        {
+            value = string.IsNullOrWhiteSpace(value) ? "interpret" : value.Trim().ToLowerInvariant();
+            if (value != "interpret" && value != "compiled")
+                throw new ExecutionContractException("EMIT_INVALID_SPEC", fieldName + " must be interpret or compiled.");
+            return value;
         }
 
         private static MethodInfo ResolveContractMethod(DynamicTypeSpec typeSpec, DynamicMethodSpec spec, Type[] parameterTypes)

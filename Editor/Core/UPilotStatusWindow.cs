@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -876,7 +876,8 @@ namespace CodingRiver.UPilot
             var suspectedPortConflict = mcpStatus.IsRunning &&
                                         !mcpStatus.ProcessId.HasValue &&
                                         (mcpStatus.HttpPortListening || mcpStatus.WsPortListening);
-            var authenticationFailed = status.IsWsOpen && !status.IsAuthenticated;
+            var authenticationFailed = !string.IsNullOrEmpty(status.AuthenticationError) ||
+                                       (status.IsWsOpen && !status.IsAuthenticated);
             var bridgeDisconnected = status.IsStarted &&
                                      mcpStatus.WsPortListening &&
                                      !status.IsWsOpen;
@@ -902,8 +903,8 @@ namespace CodingRiver.UPilot
                     DrawGuidanceItem(
                         "端口可能被其他进程占用",
                         $"HTTP {manager.HttpPort} 或 WS {manager.WsPort} 已监听，但没有识别到 UPilot MCP 进程。",
-                        "切换空闲端口并重启",
-                        () => RepairPortsAndRestart(bridge, mcpStatus));
+                        "重新启动",
+                        () => UPilotQuickStart.Restart());
                 }
                 else if (partialListeners)
                 {
@@ -920,7 +921,6 @@ namespace CodingRiver.UPilot
                                 return;
                             }
 
-                            UPilotBridge.Instance.Stop();
                             manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
                             ShowToast("MCP 服务正在重启…");
                         });
@@ -931,8 +931,9 @@ namespace CodingRiver.UPilot
                     issueCount++;
                     DrawGuidanceItem(
                         "Unity 认证未完成",
-                        "网络连接已建立，但 MCP 服务与 Unity 尚未完成会话认证。",
-                        "重新连接 Unity",
+                        string.IsNullOrEmpty(status.AuthenticationError)
+                            ? "MCP 服务与 Unity 尚未完成会话认证。" : status.AuthenticationError,
+                        "重新启动",
                         () =>
                         {
                             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
@@ -941,8 +942,8 @@ namespace CodingRiver.UPilot
                                 return;
                             }
 
-                            bridge.Restart();
-                            ShowToast("Unity 桥接器正在重新连接…");
+                            UPilotQuickStart.Restart();
+                            ShowToast("Bridge 与 Server 正在重新启动…");
                         });
                 }
                 else if (bridgeDisconnected)
@@ -951,7 +952,7 @@ namespace CodingRiver.UPilot
                     DrawGuidanceItem(
                         "Unity 桥接器未连接",
                         "MCP 服务正在监听，但 Unity WebSocket 尚未连接。",
-                        "重新连接 Unity",
+                        "重新启动",
                         () =>
                         {
                             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
@@ -960,8 +961,8 @@ namespace CodingRiver.UPilot
                                 return;
                             }
 
-                            bridge.Restart();
-                            ShowToast("Unity 桥接器正在重新连接…");
+                            UPilotQuickStart.Restart();
+                            ShowToast("Bridge 与 Server 正在重新启动…");
                         });
                 }
 
@@ -990,12 +991,7 @@ namespace CodingRiver.UPilot
         private void RepairPythonEntry()
         {
             var manager = UPilotMcpServerManager.Instance;
-            manager.ValidateAndAutoFixPath();
-            if (!manager.IsPythonEntryValid(out _))
-            {
-                manager.ResetPythonEntryPathToDefaultAbsolute();
-                manager.ValidateAndAutoFixPath();
-            }
+            manager.PreparePythonEntryForRepair();
 
             ShowToast(
                 manager.IsPythonEntryValid(out var path)
@@ -1003,49 +999,6 @@ namespace CodingRiver.UPilot
                     : "未能自动找到 Python 入口，请在设置页手动选择。",
                 manager.IsPythonEntryValid(out _) ? MessageType.Info : MessageType.Error,
                 4d);
-        }
-
-        private void RepairPortsAndRestart(UPilotBridge bridge, McpServerStatus mcpStatus)
-        {
-            try { RepairPortsAndRestartCore(bridge, mcpStatus); }
-            catch (Exception ex)
-            {
-                UPilotPortRegistration.Report("高级设置修复端口", ex);
-                ShowExceptionToast("端口修复失败", ex);
-            }
-        }
-
-        private void RepairPortsAndRestartCore(UPilotBridge bridge, McpServerStatus mcpStatus)
-        {
-            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
-            {
-                ShowToast(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
-                return;
-            }
-
-            var manager = UPilotMcpServerManager.Instance;
-            var pair = UPilotPortAllocator.FindAvailablePair(_wsPortInput, _httpPortInput);
-            if (!EditorUtility.DisplayDialog("修改当前工程端口？",
-                    $"将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort} 并重启服务。", "修改并重启", "取消"))
-                return;
-            if (mcpStatus.ProcessId.HasValue)
-                manager.StopServer();
-            bridge.Stop();
-            bridge.SetProjectEndpoints(UPilotBridge.DefaultWsHost, pair.wsPort, pair.httpPort);
-
-            _wsHostInput = UPilotBridge.DefaultWsHost;
-            _wsPortInput = pair.wsPort;
-            _httpPortInput = pair.httpPort;
-            UPilotQuickStart.RewriteExistingAgentConfigs(UPilotAgentSetup.GetMcpConfigStatuses());
-
-            manager.InvalidateStatusCache();
-            EditorApplication.delayCall += () =>
-            {
-                manager.StartServer();
-                bridge.EnsureStarted();
-            };
-            RefreshAgentConfigSnapshot();
-            ShowToast($"已切换到 WS {_wsPortInput} / HTTP {_httpPortInput}，服务正在重启…", MessageType.Info, 4d);
         }
 
         private void DrawOverviewRuntimeSection(BridgeStatus status)

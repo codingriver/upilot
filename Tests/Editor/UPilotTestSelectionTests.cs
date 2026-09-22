@@ -164,6 +164,14 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UnfilteredRunDoesNotRequireASelectionSnapshot()
+        {
+            Assert.That(UPilotTestService.RunSelectionMatches(null, "", ""), Is.True);
+            Assert.That(UPilotTestService.RunSelectionMatches(
+                null, "expected-domain", "expected-snapshot"), Is.False);
+        }
+
+        [Test]
         public void SameFullNameAcrossAssembliesProducesDistinctTestNameCandidates()
         {
             const string sharedName = "CodingRiver.UPilot.SelectionEvidence.SharedFixture.Leaf";

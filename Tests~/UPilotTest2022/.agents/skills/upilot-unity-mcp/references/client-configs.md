@@ -40,6 +40,12 @@ real proxy execution, and exact project identity. `clientToolListInjected` stays
 registration changed, refresh that client's MCP connection/tool list, perform a
 real read-only proxy call there, and verify the returned project before writes.
 
+For an authorized alternate repository project's acceptance calls, follow
+`workflows.md` (Multiple Projects) and reuse the existing bounded evidence client.
+The probe and evidence client do not prove loaded-source freshness; use Deployment
+Freshness after Server/Bridge/protocol changes. Neither route installs dependencies
+or changes MCP registrations automatically.
+
 ## Project Skill discovery
 
 - Codex: `.agents/skills/upilot-unity-mcp`

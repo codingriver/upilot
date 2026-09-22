@@ -432,7 +432,7 @@ namespace CodingRiver.UPilot
                 {
                     var finalPreparation = UPilotSceneService.PrepareForAutomation(p.dirtyScenePolicy);
                     EnsureCleanScenesBeforeRunner(finalPreparation.remainingDirtyScenes, p.dirtyScenePolicy);
-                    if (!SelectionSnapshotMatches(selection, p.expectedSelectionDomain, p.expectedSelectionSnapshotId))
+                    if (!RunSelectionMatches(selection, p.expectedSelectionDomain, p.expectedSelectionSnapshotId))
                         throw new TestSelectionStaleException(
                             "The selection changed before TestRunnerApi.Execute; TestRunnerApi.Execute was not called.", selection);
                     _isRunning = true;
@@ -1157,6 +1157,15 @@ namespace CodingRiver.UPilot
                 return true;
             return string.Equals(expectedSelectionDomain, selection.selectionDomain, StringComparison.Ordinal)
                 && string.Equals(expectedSelectionSnapshotId, selection.selectionSnapshotId, StringComparison.Ordinal);
+        }
+
+        internal static bool RunSelectionMatches(TestListResultPayload selection,
+            string expectedSelectionDomain, string expectedSelectionSnapshotId)
+        {
+            ValidateExpectedSelectionIdentity(expectedSelectionDomain, expectedSelectionSnapshotId);
+            if (selection == null)
+                return !HasExpectedSelectionIdentity(expectedSelectionDomain, expectedSelectionSnapshotId);
+            return SelectionSnapshotMatches(selection, expectedSelectionDomain, expectedSelectionSnapshotId);
         }
 
         private static bool HasExpectedSelectionIdentity(string expectedSelectionDomain,

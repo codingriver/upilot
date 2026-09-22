@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - coordinates service shutdown across UPM package updates.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -28,6 +28,7 @@ namespace CodingRiver.UPilot
         private const string PendingNewServerPathKey = "CodingRiver.UPilot.PackageUpdate.PendingNewServerPath";
         private const string PendingOldServerPathKey = "CodingRiver.UPilot.PackageUpdate.PendingOldServerPath";
         private const string PendingOldServerVersionKey = "CodingRiver.UPilot.PackageUpdate.PendingOldServerVersion";
+        private const string DeploymentRepairPendingKey = "CodingRiver.UPilot.PackageUpdate.DeploymentRepairPending";
 
         private static bool _restartScheduled;
 
@@ -42,6 +43,11 @@ namespace CodingRiver.UPilot
 
         private static void RestoreReleaseOrResetSourceState()
         {
+            if (GetSessionBool(DeploymentRepairPendingKey, false))
+            {
+                RepairPackageDeployment();
+                return;
+            }
             if (UPilotServerRuntimeService.IsSourceUpdateChannel())
             {
                 UPilotUpdateService.ResetSourceChannelState();
@@ -271,7 +277,6 @@ namespace CodingRiver.UPilot
 
             UPilotProjectConfig.Reload();
             UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
-            UPilotBridge.Instance.Stop();
             UPilotMcpServerManager.Instance.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
         }
 
@@ -280,7 +285,19 @@ namespace CodingRiver.UPilot
             try
             {
                 var currentPackage = FindUPilotPackage(args.changedFrom);
-                var targetPackage = FindUPilotPackage(args.changedTo);
+                var removedPackage = FindUPilotPackage(args.removed);
+                var targetPackage = FindUPilotPackage(args.changedTo) ?? FindUPilotPackage(args.added);
+                if (removedPackage != null || (targetPackage != null &&
+                    (currentPackage == null || !ShouldManagePackageUpdate(targetPackage) ||
+                     UPilotServerRuntimeService.IsSourcePackage(currentPackage))))
+                {
+                    SetSessionBool(DeploymentRepairPendingKey, true);
+                    // No business-idle gate. Keep intent across removal and the next installation.
+                    UPilotBridge.Instance.Stop();
+                    if (!UPilotMcpServerManager.Instance.StopServerAndWaitForExit())
+                        Debug.LogError("[UPilot] 包来源切换：旧 Server 未在期限内退出；重装后保留错误并进入统一修复。");
+                    return;
+                }
                 if (currentPackage == null || targetPackage == null)
                     return;
 
@@ -327,9 +344,14 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                var targetPackage = FindUPilotPackage(args.changedTo);
+                var targetPackage = FindUPilotPackage(args.changedTo) ?? FindUPilotPackage(args.added);
                 if (targetPackage == null)
                     return;
+                if (GetSessionBool(DeploymentRepairPendingKey, false))
+                {
+                    EditorApplication.delayCall += RepairPackageDeployment;
+                    return;
+                }
 
                 if (!ShouldManagePackageUpdate(targetPackage))
                 {
@@ -344,6 +366,15 @@ namespace CodingRiver.UPilot
             {
                 ReportLifecycleError("UPilot 包注册完成处理失败", ex);
             }
+        }
+
+        private static void RepairPackageDeployment()
+        {
+            if (!GetSessionBool(DeploymentRepairPendingKey, false) || !UPilotSetupState.IsCompleted) return;
+            EraseSessionBool(DeploymentRepairPendingKey);
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                UPilotUpdateService.ResetSourceChannelState();
+            _ = UPilotQuickStart.AutoRepairAsync(null);
         }
 
         private static bool ShouldHandleExternalPackageManagerConflict()
@@ -458,10 +489,19 @@ namespace CodingRiver.UPilot
             UPilotUpdateService.ClearExternalPackageManagerAbort();
             var manager = UPilotMcpServerManager.Instance;
             manager.ValidateAndAutoFixPath();
-            UPilotBridge.Instance.Stop();
-            manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
-            UPilotUpdateService.SetOperationCompleted("UPilot 包已更新并已恢复服务");
-            Debug.Log($"[UPilot] Package update completed ({targetVersion}); MCP service restart scheduled.");
+            RestoreUpdatedServicesAsync(targetVersion);
+        }
+
+        private static async void RestoreUpdatedServicesAsync(string targetVersion)
+        {
+            UPilotUpdateService.SetOperationPhase(UPilotUpdateOperationPhase.RestartingService,
+                "UPilot 包已更新，正在校验并恢复配套服务", targetVersion);
+            var result = await UPilotQuickStart.AutoRepairAsync(null);
+            if (UPilotQuickStart.LastRepairSucceeded)
+                UPilotUpdateService.SetOperationCompleted("UPilot 包已更新并已恢复服务");
+            else
+                UPilotUpdateService.SetOperationFailed(result);
+            Debug.Log($"[UPilot] Package update ({targetVersion}): {result}");
         }
 
         private static void ReportLifecycleError(string context, Exception ex)
@@ -511,7 +551,6 @@ namespace CodingRiver.UPilot
 
                 UPilotProjectConfig.Reload();
                 UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
-                UPilotBridge.Instance.Stop();
                 UPilotMcpServerManager.Instance.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
             }
         }

@@ -1,0 +1,44 @@
+{
+    "schemaVersion": 1,
+    "rules": [
+        {
+            "relativePath": "AGENTS.md",
+            "normalizedManagedSha256": "f242e2559ea8e630542f21b80bfb28ddd3e5dc642535fc6948ccda142256af16",
+            "templateSha256": "1d8ce9f9394169e18cffbe6059b567065f72386d4cd213a29c6f967e91f8f3b2",
+            "templateVersion": 36,
+            "renderContext": {
+                "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
+                "mcpUrl": "http://127.0.0.1:8017/mcp",
+                "healthUrl": "http://127.0.0.1:8017/health",
+                "upilotPackageVersion": "0.3.32",
+                "parentAgentRulesPath": "../../AGENTS.md"
+            }
+        },
+        {
+            "relativePath": ".cursor/rules/upilot-unity-mcp.mdc",
+            "normalizedManagedSha256": "f242e2559ea8e630542f21b80bfb28ddd3e5dc642535fc6948ccda142256af16",
+            "templateSha256": "1d8ce9f9394169e18cffbe6059b567065f72386d4cd213a29c6f967e91f8f3b2",
+            "templateVersion": 36,
+            "renderContext": {
+                "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
+                "mcpUrl": "http://127.0.0.1:8017/mcp",
+                "healthUrl": "http://127.0.0.1:8017/health",
+                "upilotPackageVersion": "0.3.32",
+                "parentAgentRulesPath": "../../AGENTS.md"
+            }
+        },
+        {
+            "relativePath": "CLAUDE.md",
+            "normalizedManagedSha256": "af5a4067578801769bea0c6727e728ed8f35b075aaa73561a2f5849a658b6674",
+            "templateSha256": "1d8ce9f9394169e18cffbe6059b567065f72386d4cd213a29c6f967e91f8f3b2",
+            "templateVersion": 36,
+            "renderContext": {
+                "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
+                "mcpUrl": "http://127.0.0.1:8017/mcp",
+                "healthUrl": "http://127.0.0.1:8017/health",
+                "upilotPackageVersion": "0.3.32",
+                "parentAgentRulesPath": "../../AGENTS.md"
+            }
+        }
+    ]
+}

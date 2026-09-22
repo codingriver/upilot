@@ -450,6 +450,8 @@ namespace CodingRiver.UPilot.Execution
         private readonly Stmt _root;
         private readonly SourceMap _sourceMap;
         public bool IsExpressionOnly { get; }
+        internal Stmt Root => _root;
+        internal SourceMap SourceMap => _sourceMap;
 
         internal CSharpProgram(Stmt root, bool isExpressionOnly, string source)
         {
@@ -506,6 +508,7 @@ namespace CodingRiver.UPilot.Execution
         {
             if (value is UnresolvedName unresolved)
                 throw new ExecutionContractException("CSHARP_BIND_ERROR", "Type or variable was not found: " + unresolved.Path);
+            if (ReferenceEquals(value, ConditionalAccessNull.Instance)) return null;
             return StaticTypeTarget.Unwrap(value);
         }
 
@@ -515,7 +518,7 @@ namespace CodingRiver.UPilot.Execution
             return Task.Run(() => ExecuteCore(context), context.CancellationToken);
         }
 
-        internal void ValidateSynchronousEmitProfile()
+        public void ValidateSynchronousEmitProfile()
         { AstFeatureInspector.ValidateSynchronousEmit(_root); }
         public void ValidateReflectionExpressionProfile()
         {
@@ -665,16 +668,56 @@ namespace CodingRiver.UPilot.Execution
     internal abstract class Expr : AstNode
     {
         public abstract object Evaluate(CSharpEvaluationContext context);
-        public virtual void Assign(CSharpEvaluationContext context, object value)
+        internal virtual AssignmentReference ResolveAssignmentReference(CSharpEvaluationContext context)
         {
             throw new ExecutionContractException("CSHARP_BIND_ERROR", "Expression is not assignable.");
         }
+        public virtual void Assign(CSharpEvaluationContext context, object value)
+        {
+            ResolveAssignmentReference(context).Set(value);
+        }
+    }
+
+    internal sealed class AssignmentReference
+    {
+        private readonly Func<object> _getter;
+        private readonly Action<object> _setter;
+        public object EventTarget { get; }
+        public EventInfo EventInfo { get; }
+
+        public AssignmentReference(Func<object> getter, Action<object> setter, object eventTarget = null, EventInfo eventInfo = null)
+        {
+            _getter = getter;
+            _setter = setter;
+            EventTarget = eventTarget;
+            EventInfo = eventInfo;
+        }
+
+        public object Get()
+        {
+            if (_getter == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Expression is not readable.");
+            return _getter();
+        }
+
+        public void Set(object value)
+        {
+            if (_setter == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Expression is not assignable.");
+            _setter(value);
+        }
+    }
+
+    internal sealed class ConditionalAccessNull
+    {
+        public static readonly ConditionalAccessNull Instance = new ConditionalAccessNull();
+        private ConditionalAccessNull() { }
     }
 
     internal sealed class BlockStmt : Stmt
     {
         private readonly IReadOnlyList<Stmt> _statements;
         private readonly bool _createsScope;
+        internal IReadOnlyList<Stmt> Statements => _statements;
+        internal bool CreatesScope => _createsScope;
         public BlockStmt(IReadOnlyList<Stmt> statements, bool createsScope = false) { _statements = statements; _createsScope = createsScope; }
         public override object Execute(CSharpEvaluationContext context)
         {
@@ -694,6 +737,7 @@ namespace CodingRiver.UPilot.Execution
     internal sealed class ExpressionStmt : Stmt
     {
         private readonly Expr _expression;
+        internal Expr Expression => _expression;
         public ExpressionStmt(Expr expression) { _expression = expression; }
         public override object Execute(CSharpEvaluationContext context) { Enter(context); return _expression.Evaluate(context); }
     }
@@ -703,6 +747,9 @@ namespace CodingRiver.UPilot.Execution
         private readonly string _name;
         private readonly string _typeName;
         private readonly Expr _initializer;
+        internal string Name => _name;
+        internal string TypeName => _typeName;
+        internal Expr Initializer => _initializer;
         public VariableStmt(string name, string typeName, Expr initializer) { _name = name; _typeName = typeName; _initializer = initializer; }
         public override object Execute(CSharpEvaluationContext context)
         {
@@ -725,6 +772,9 @@ namespace CodingRiver.UPilot.Execution
         private readonly Expr _condition;
         private readonly Stmt _whenTrue;
         private readonly Stmt _whenFalse;
+        internal Expr Condition => _condition;
+        internal Stmt WhenTrue => _whenTrue;
+        internal Stmt WhenFalse => _whenFalse;
         public IfStmt(Expr condition, Stmt whenTrue, Stmt whenFalse) { _condition = condition; _whenTrue = whenTrue; _whenFalse = whenFalse; }
         public override object Execute(CSharpEvaluationContext context)
         {
@@ -739,6 +789,8 @@ namespace CodingRiver.UPilot.Execution
     {
         private readonly Expr _condition;
         private readonly Stmt _body;
+        internal Expr Condition => _condition;
+        internal Stmt Body => _body;
         public WhileStmt(Expr condition, Stmt body) { _condition = condition; _body = body; }
         public override object Execute(CSharpEvaluationContext context)
         {
@@ -761,6 +813,10 @@ namespace CodingRiver.UPilot.Execution
         private readonly Expr _condition;
         private readonly Expr _increment;
         private readonly Stmt _body;
+        internal Stmt Initializer => _initializer;
+        internal Expr Condition => _condition;
+        internal Expr Increment => _increment;
+        internal Stmt Body => _body;
         public ForStmt(Stmt initializer, Expr condition, Expr increment, Stmt body)
         {
             _initializer = initializer; _condition = condition; _increment = increment; _body = body;
@@ -810,6 +866,7 @@ namespace CodingRiver.UPilot.Execution
     internal sealed class ReturnStmt : Stmt
     {
         private readonly Expr _value;
+        internal Expr Value => _value;
         public ReturnStmt(Expr value) { _value = value; }
         public override object Execute(CSharpEvaluationContext context) { Enter(context); throw new ReturnSignal(_value?.Evaluate(context)); }
     }
@@ -817,6 +874,7 @@ namespace CodingRiver.UPilot.Execution
     internal sealed class SignalStmt : Stmt
     {
         private readonly string _kind;
+        internal string Kind => _kind;
         public SignalStmt(string kind) { _kind = kind; }
         public override object Execute(CSharpEvaluationContext context)
         {
@@ -933,6 +991,7 @@ namespace CodingRiver.UPilot.Execution
     internal sealed class LiteralExpr : Expr
     {
         private readonly object _value;
+        internal object Value => _value;
         public LiteralExpr(object value) { _value = value; }
         public override object Evaluate(CSharpEvaluationContext context) { Enter(context); return _value; }
     }
@@ -949,7 +1008,12 @@ namespace CodingRiver.UPilot.Execution
             if (type != null) { context.Policy.EnsureTypeAllowed(type); return new StaticTypeTarget(type); }
             return new UnresolvedName(Name);
         }
-        public override void Assign(CSharpEvaluationContext context, object value) { context.SetVariable(Name, value); }
+        internal override AssignmentReference ResolveAssignmentReference(CSharpEvaluationContext context)
+        {
+            if (!context.TryGetVariable(Name, out _))
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Unknown variable: " + Name);
+            return new AssignmentReference(() => context.GetVariable(Name), value => context.SetVariable(Name, value));
+        }
     }
 
     // A generic type path is syntactic only until a following member/call requires
@@ -977,11 +1041,27 @@ namespace CodingRiver.UPilot.Execution
     {
         public Expr Target { get; }
         public string Name { get; }
-        public MemberExpr(Expr target, string name) { Target = target; Name = name; }
+        public bool IsConditional { get; }
+        public MemberExpr(Expr target, string name, bool isConditional = false)
+        {
+            Target = target;
+            Name = name;
+            IsConditional = isConditional;
+        }
+
+        internal object EvaluateTarget(CSharpEvaluationContext context)
+        {
+            object target = Target.Evaluate(context);
+            if (ReferenceEquals(target, ConditionalAccessNull.Instance)) return target;
+            if (target == null && IsConditional) return ConditionalAccessNull.Instance;
+            return target;
+        }
+
         public override object Evaluate(CSharpEvaluationContext context)
         {
             Enter(context);
-            object target = Target.Evaluate(context);
+            object target = EvaluateTarget(context);
+            if (ReferenceEquals(target, ConditionalAccessNull.Instance)) return target;
             Enter(context);
             if (target is UnresolvedName unresolved)
             {
@@ -1031,45 +1111,54 @@ namespace CodingRiver.UPilot.Execution
             }
             throw new ExecutionContractException("CSHARP_BIND_ERROR", "Member was not found: " + typeTarget.FullName + "." + Name);
         }
-        public override void Assign(CSharpEvaluationContext context, object value)
+        internal override AssignmentReference ResolveAssignmentReference(CSharpEvaluationContext context)
         {
+            if (IsConditional)
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Conditional member access is not assignable.");
             Enter(context);
-            object target = Target.Evaluate(context);
+            object target = EvaluateTarget(context);
             Enter(context);
             bool isStatic = target is StaticTypeTarget;
             Type typeTarget = isStatic ? ((StaticTypeTarget)target).Type : target?.GetType();
             if (typeTarget == null) throw new NullReferenceException("Cannot assign member " + Name + " on null.");
             var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static | BindingFlags.FlattenHierarchy : BindingFlags.Instance);
+            var eventInfo = typeTarget.GetEvent(Name, flags);
+            if (eventInfo != null)
+                return new AssignmentReference(null, null, isStatic ? null : target, eventInfo);
             var property = typeTarget.GetProperty(Name, flags);
             if (property != null)
             {
-                context.Policy.EnsureMemberAllowed(property);
-                context.Invoke(() => { property.SetValue(isStatic ? null : target, RuntimeConvert.ChangeType(value, property.PropertyType), null); return null; });
-                context.SideEffectsMayHaveOccurred = true;
-                return;
+                return new AssignmentReference(
+                    () =>
+                    {
+                        context.Policy.EnsureMemberAllowed(property);
+                        context.Diagnostics.CountGetter();
+                        return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => property.GetValue(isStatic ? null : target, null)));
+                    },
+                    value =>
+                    {
+                        context.Policy.EnsureMemberAllowed(property);
+                        context.Invoke(() => { property.SetValue(isStatic ? null : target, RuntimeConvert.ChangeType(value, property.PropertyType), null); return null; });
+                        context.SideEffectsMayHaveOccurred = true;
+                    });
             }
             var field = typeTarget.GetField(Name, flags);
             if (field != null)
             {
-                context.Policy.EnsureMemberAllowed(field);
-                context.Invoke(() => { field.SetValue(isStatic ? null : target, RuntimeConvert.ChangeType(value, field.FieldType)); return null; });
-                context.SideEffectsMayHaveOccurred = true;
-                return;
+                return new AssignmentReference(
+                    () =>
+                    {
+                        context.Policy.EnsureMemberAllowed(field);
+                        return context.Diagnostics.MeasureInvoke(() => context.Invoke(() => field.GetValue(isStatic ? null : target)));
+                    },
+                    value =>
+                    {
+                        context.Policy.EnsureMemberAllowed(field);
+                        context.Invoke(() => { field.SetValue(isStatic ? null : target, RuntimeConvert.ChangeType(value, field.FieldType)); return null; });
+                        context.SideEffectsMayHaveOccurred = true;
+                    });
             }
             throw new ExecutionContractException("CSHARP_BIND_ERROR", "Assignable member was not found: " + typeTarget.FullName + "." + Name);
-        }
-
-        internal bool TryResolveEvent(CSharpEvaluationContext context, out object target, out EventInfo eventInfo)
-        {
-            target = Target.Evaluate(context);
-            Enter(context);
-            if (target is UnresolvedName unresolved)
-                target = new StaticTypeTarget(ExecutionTypeResolver.Resolve(unresolved.Path, context.Imports));
-            bool isStatic = target is StaticTypeTarget;
-            Type type = isStatic ? ((StaticTypeTarget)target).Type : target?.GetType();
-            var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static | BindingFlags.FlattenHierarchy : BindingFlags.Instance);
-            eventInfo = type?.GetEvent(Name, flags);
-            return eventInfo != null;
         }
     }
 
@@ -1077,11 +1166,14 @@ namespace CodingRiver.UPilot.Execution
     {
         private readonly Expr _target;
         private readonly IReadOnlyList<Expr> _indices;
+        internal Expr Target => _target;
+        internal IReadOnlyList<Expr> Indices => _indices;
         public IndexExpr(Expr target, IReadOnlyList<Expr> indices) { _target = target; _indices = indices ?? Array.Empty<Expr>(); }
         public override object Evaluate(CSharpEvaluationContext context)
         {
             Enter(context);
             object target = _target.Evaluate(context);
+            if (ReferenceEquals(target, ConditionalAccessNull.Instance)) return target;
             object[] indexValues = _indices.Select(index => index.Evaluate(context)).ToArray();
             Enter(context);
             if (target is Array array) return context.Invoke(() => array.GetValue(indexValues.Select(value => Convert.ToInt32(value, CultureInfo.InvariantCulture)).ToArray()));
@@ -1093,24 +1185,48 @@ namespace CodingRiver.UPilot.Execution
             if (property == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Target has no supported indexer.");
             return context.Invoke(() => property.GetValue(target, new[] { RuntimeConvert.ChangeType(index, property.GetIndexParameters()[0].ParameterType) }));
         }
-        public override void Assign(CSharpEvaluationContext context, object value)
+        internal override AssignmentReference ResolveAssignmentReference(CSharpEvaluationContext context)
         {
             Enter(context);
             object target = _target.Evaluate(context);
+            if (ReferenceEquals(target, ConditionalAccessNull.Instance))
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Conditional access is not assignable.");
             object[] indexValues = _indices.Select(index => index.Evaluate(context)).ToArray();
             Enter(context);
-            if (target is Array array) context.Invoke(() => { array.SetValue(RuntimeConvert.ChangeType(value, array.GetType().GetElementType()), indexValues.Select(item => Convert.ToInt32(item, CultureInfo.InvariantCulture)).ToArray()); return null; });
-            else if (indexValues.Length != 1) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Only CLR arrays support multiple indices.");
-            else if (target is IList list) context.Invoke(() => { list[Convert.ToInt32(indexValues[0], CultureInfo.InvariantCulture)] = value; return null; });
-            else if (target is IDictionary dictionary) context.Invoke(() => { dictionary[indexValues[0]] = value; return null; });
-            else
+            if (target is Array array)
             {
-                object index = indexValues[0];
-                var property = target?.GetType().GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
-                if (property == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Target has no supported indexer.");
-                context.Invoke(() => { property.SetValue(target, RuntimeConvert.ChangeType(value, property.PropertyType), new[] { RuntimeConvert.ChangeType(index, property.GetIndexParameters()[0].ParameterType) }); return null; });
+                int[] indices = indexValues.Select(item => Convert.ToInt32(item, CultureInfo.InvariantCulture)).ToArray();
+                return new AssignmentReference(
+                    () => context.Invoke(() => array.GetValue(indices)),
+                    value =>
+                    {
+                        context.Invoke(() => { array.SetValue(RuntimeConvert.ChangeType(value, array.GetType().GetElementType()), indices); return null; });
+                        context.SideEffectsMayHaveOccurred = true;
+                    });
             }
-            context.SideEffectsMayHaveOccurred = true;
+            if (indexValues.Length != 1) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Only CLR arrays support multiple indices.");
+            object index = indexValues[0];
+            if (target is IList list)
+            {
+                int listIndex = Convert.ToInt32(index, CultureInfo.InvariantCulture);
+                return new AssignmentReference(
+                    () => context.Invoke(() => list[listIndex]),
+                    value => { context.Invoke(() => { list[listIndex] = value; return null; }); context.SideEffectsMayHaveOccurred = true; });
+            }
+            if (target is IDictionary dictionary)
+                return new AssignmentReference(
+                    () => context.Invoke(() => dictionary[index]),
+                    value => { context.Invoke(() => { dictionary[index] = value; return null; }); context.SideEffectsMayHaveOccurred = true; });
+            var property = target?.GetType().GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
+            if (property == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Target has no supported indexer.");
+            object convertedIndex = RuntimeConvert.ChangeType(index, property.GetIndexParameters()[0].ParameterType);
+            return new AssignmentReference(
+                () => context.Invoke(() => property.GetValue(target, new[] { convertedIndex })),
+                value =>
+                {
+                    context.Invoke(() => { property.SetValue(target, RuntimeConvert.ChangeType(value, property.PropertyType), new[] { convertedIndex }); return null; });
+                    context.SideEffectsMayHaveOccurred = true;
+                });
         }
     }
 
@@ -1119,27 +1235,43 @@ namespace CodingRiver.UPilot.Execution
         private readonly Expr _target;
         private readonly string _operator;
         private readonly Expr _value;
+        internal Expr Target => _target;
+        internal string Operator => _operator;
+        internal Expr Value => _value;
         public AssignExpr(Expr target, string op, Expr value) { _target = target; _operator = op; _value = value; }
         public override object Evaluate(CSharpEvaluationContext context)
         {
             Enter(context);
+            AssignmentReference reference = _target.ResolveAssignmentReference(context);
+            if (_operator == "??=")
+            {
+                if (reference.EventInfo != null)
+                    throw new ExecutionContractException("CSHARP_BIND_ERROR", "Events do not support ??= assignment.");
+                object current = reference.Get();
+                if (current != null && !ReferenceEquals(current, ConditionalAccessNull.Instance)) return current;
+                object fallback = _value.Evaluate(context);
+                reference.Set(fallback);
+                return fallback;
+            }
+            object previous = _operator == "=" || reference.EventInfo != null ? null : reference.Get();
             object value = _value.Evaluate(context);
-            if ((_operator == "+=" || _operator == "-=") && _target is MemberExpr eventMember &&
-                eventMember.TryResolveEvent(context, out var eventTarget, out var eventInfo))
+            if ((_operator == "+=" || _operator == "-=") && reference.EventInfo != null)
             {
                 if (context.SessionLifetime == null || !context.SessionLifetime.IsPersistent)
                     throw new ExecutionContractException("SESSION_REQUIRED", "Event subscriptions require a persistent execution session.");
                 Delegate handler;
-                try { handler = (Delegate)RuntimeConvert.ChangeType(value, eventInfo.EventHandlerType); }
-                catch (Exception ex) { throw new ExecutionContractException("CSHARP_BIND_ERROR", "Event handler is incompatible with " + eventInfo.Name + ": " + ex.Message); }
-                context.Policy.EnsureMemberAllowed(eventInfo);
-                if (_operator == "+=") context.SessionLifetime.AddEventSubscription(eventTarget, eventInfo, handler);
-                else context.SessionLifetime.RemoveEventSubscription(eventTarget, eventInfo, handler);
+                try { handler = (Delegate)RuntimeConvert.ChangeType(value, reference.EventInfo.EventHandlerType); }
+                catch (Exception ex) { throw new ExecutionContractException("CSHARP_BIND_ERROR", "Event handler is incompatible with " + reference.EventInfo.Name + ": " + ex.Message); }
+                context.Policy.EnsureMemberAllowed(reference.EventInfo);
+                if (_operator == "+=") context.SessionLifetime.AddEventSubscription(reference.EventTarget, reference.EventInfo, handler);
+                else context.SessionLifetime.RemoveEventSubscription(reference.EventTarget, reference.EventInfo, handler);
                 context.SideEffectsMayHaveOccurred = true;
                 return handler;
             }
-            if (_operator != "=") value = BinaryExpr.Apply(_operator.Substring(0, 1), _target.Evaluate(context), value, context);
-            _target.Assign(context, value);
+            if (reference.EventInfo != null)
+                throw new ExecutionContractException("CSHARP_BIND_ERROR", "Events support only += and -= assignment.");
+            if (_operator != "=") value = BinaryExpr.Apply(_operator.Substring(0, 1), previous, value, context);
+            reference.Set(value);
             return value;
         }
     }
@@ -1149,13 +1281,17 @@ namespace CodingRiver.UPilot.Execution
         private readonly Expr _target;
         private readonly int _delta;
         private readonly bool _postfix;
+        internal Expr Target => _target;
+        internal int Delta => _delta;
+        internal bool IsPostfix => _postfix;
         public IncrementExpr(Expr target, int delta, bool postfix) { _target = target; _delta = delta; _postfix = postfix; }
         public override object Evaluate(CSharpEvaluationContext context)
         {
             Enter(context);
-            object previous = _target.Evaluate(context);
+            AssignmentReference reference = _target.ResolveAssignmentReference(context);
+            object previous = reference.Get();
             object next = BinaryExpr.Apply("+", previous, _delta, context);
-            _target.Assign(context, next);
+            reference.Set(next);
             return _postfix ? previous : next;
         }
     }
@@ -1164,6 +1300,8 @@ namespace CodingRiver.UPilot.Execution
     {
         private readonly string _operator;
         private readonly Expr _value;
+        internal string Operator => _operator;
+        internal Expr Value => _value;
         public UnaryExpr(string op, Expr value) { _operator = op; _value = value; }
         public override object Evaluate(CSharpEvaluationContext context)
         {
@@ -1182,6 +1320,9 @@ namespace CodingRiver.UPilot.Execution
         private readonly Expr _left;
         private readonly string _operator;
         private readonly Expr _right;
+        internal Expr Left => _left;
+        internal string Operator => _operator;
+        internal Expr Right => _right;
         public BinaryExpr(Expr left, string op, Expr right) { _left = left; _operator = op; _right = right; }
         public override object Evaluate(CSharpEvaluationContext context)
         {
@@ -1199,6 +1340,8 @@ namespace CodingRiver.UPilot.Execution
 
         public static object Apply(string op, object left, object right, CSharpEvaluationContext context)
         {
+            if (ReferenceEquals(left, ConditionalAccessNull.Instance)) left = null;
+            if (ReferenceEquals(right, ConditionalAccessNull.Instance)) right = null;
             if (op == "+" && (left is string || right is string)) return Convert.ToString(left, CultureInfo.InvariantCulture) + Convert.ToString(right, CultureInfo.InvariantCulture);
             if (op == "==") return EqualsNormalized(left, right);
             if (op == "!=") return !EqualsNormalized(left, right);
@@ -1340,8 +1483,46 @@ namespace CodingRiver.UPilot.Execution
     internal sealed class ConditionalExpr : Expr
     {
         private readonly Expr _condition, _whenTrue, _whenFalse;
+        internal Expr Condition => _condition;
+        internal Expr WhenTrue => _whenTrue;
+        internal Expr WhenFalse => _whenFalse;
         public ConditionalExpr(Expr condition, Expr whenTrue, Expr whenFalse) { _condition = condition; _whenTrue = whenTrue; _whenFalse = whenFalse; }
         public override object Evaluate(CSharpEvaluationContext context) { Enter(context); return RuntimeConvert.ToBool(_condition.Evaluate(context)) ? _whenTrue.Evaluate(context) : _whenFalse.Evaluate(context); }
+    }
+
+    internal sealed class CoalesceExpr : Expr
+    {
+        internal Expr Left { get; }
+        internal Expr Right { get; }
+        public CoalesceExpr(Expr left, Expr right) { Left = left; Right = right; }
+        public override object Evaluate(CSharpEvaluationContext context)
+        {
+            Enter(context);
+            object value = Left.Evaluate(context);
+            return value == null || ReferenceEquals(value, ConditionalAccessNull.Instance) ? Right.Evaluate(context) : value;
+        }
+    }
+
+    internal sealed class TypeIntrinsicExpr : Expr
+    {
+        internal string TypeName { get; }
+        internal string Kind { get; }
+        public TypeIntrinsicExpr(string typeName, string kind) { TypeName = typeName; Kind = kind; }
+        public override object Evaluate(CSharpEvaluationContext context)
+        {
+            Enter(context);
+            Type type = ExecutionTypeResolver.Resolve(TypeName, context.Imports);
+            if (type == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Type was not found: " + TypeName);
+            context.Policy.EnsureTypeAllowed(type);
+            return Kind == "typeof" ? (object)type : (type.IsValueType ? Activator.CreateInstance(type) : null);
+        }
+    }
+
+    internal sealed class NameofExpr : Expr
+    {
+        internal string Name { get; }
+        public NameofExpr(string name) { Name = name ?? ""; }
+        public override object Evaluate(CSharpEvaluationContext context) { Enter(context); return Name; }
     }
 
     internal sealed class CallExpr : Expr
@@ -1349,17 +1530,20 @@ namespace CodingRiver.UPilot.Execution
         private readonly Expr _callee;
         private readonly IReadOnlyList<Expr> _arguments;
         private readonly IReadOnlyList<string> _genericTypeNames;
+        internal Expr Callee => _callee;
+        internal IReadOnlyList<Expr> Arguments => _arguments;
+        internal IReadOnlyList<string> GenericTypeNames => _genericTypeNames;
         public CallExpr(Expr callee, IReadOnlyList<Expr> arguments, IReadOnlyList<string> genericTypeNames = null)
         { _callee = callee; _arguments = arguments; _genericTypeNames = genericTypeNames ?? Array.Empty<string>(); }
         public override object Evaluate(CSharpEvaluationContext context)
         {
             Enter(context);
             context.Budget.CountCall();
-            var values = _arguments.Select(arg => new ExecutionValue { Value = arg.Evaluate(context) }).ToList();
-            Enter(context);
             if (_callee is MemberExpr member)
             {
-                object target = member.Target.Evaluate(context);
+                object target = member.EvaluateTarget(context);
+                if (ReferenceEquals(target, ConditionalAccessNull.Instance)) return target;
+                var values = _arguments.Select(arg => new ExecutionValue { Value = arg.Evaluate(context) }).ToList();
                 Enter(context);
                 if (target is UnresolvedName unresolved)
                 {
@@ -1387,15 +1571,18 @@ namespace CodingRiver.UPilot.Execution
                 catch (TargetInvocationException ex) { return CSharpSubsetEngine.RethrowTargetInvocation(ex); }
             }
             object callable = _callee.Evaluate(context);
+            if (ReferenceEquals(callable, ConditionalAccessNull.Instance)) return callable;
+            var callableValues = _arguments.Select(arg => new ExecutionValue { Value = arg.Evaluate(context) }).ToList();
+            Enter(context);
             if (callable is LambdaValue lambda)
             {
-                object[] arguments = values.Select(value => value.Value).ToArray();
+                object[] arguments = callableValues.Select(value => value.Value).ToArray();
                 return lambda.IsAsync ? (object)lambda.InvokeAsync(context, arguments) : lambda.Invoke(context, arguments);
             }
             if (callable is Delegate del)
             {
                 context.SideEffectsMayHaveOccurred = true;
-                return context.Invoke(() => del.DynamicInvoke(values.Select(value => value.Value).ToArray()));
+                return context.Invoke(() => del.DynamicInvoke(callableValues.Select(value => value.Value).ToArray()));
             }
             throw new ExecutionContractException("CSHARP_BIND_ERROR", "Expression is not callable.");
         }
@@ -1405,6 +1592,8 @@ namespace CodingRiver.UPilot.Execution
     {
         private readonly string _typeName;
         private readonly IReadOnlyList<Expr> _arguments;
+        internal string TypeName => _typeName;
+        internal IReadOnlyList<Expr> Arguments => _arguments;
         public NewExpr(string typeName, IReadOnlyList<Expr> arguments) { _typeName = typeName; _arguments = arguments; }
         public override object Evaluate(CSharpEvaluationContext context)
         {
@@ -1453,6 +1642,11 @@ namespace CodingRiver.UPilot.Execution
         private readonly ArrayInitializerNode _initializer;
         private readonly bool _implicit;
         private readonly int _rank;
+        internal string TypeName => _typeName;
+        internal IReadOnlyList<Expr> Dimensions => _dimensions;
+        internal ArrayInitializerNode Initializer => _initializer;
+        internal bool IsImplicit => _implicit;
+        internal int Rank => _rank;
 
         public ArrayCreationExpr(string typeName, IReadOnlyList<Expr> dimensions, ArrayInitializerNode initializer, bool implicitType, int rank)
         { _typeName = typeName ?? ""; _dimensions = dimensions ?? Array.Empty<Expr>(); _initializer = initializer; _implicit = implicitType; _rank = rank; }
@@ -1604,6 +1798,9 @@ namespace CodingRiver.UPilot.Execution
         private readonly string _typeName;
         private readonly Expr _value;
         private readonly string _kind;
+        internal string TypeName => _typeName;
+        internal Expr Value => _value;
+        internal string Kind => _kind;
         public CastExpr(string typeName, Expr value, string kind) { _typeName = typeName; _value = value; _kind = kind; }
         public override object Evaluate(CSharpEvaluationContext context)
         {
@@ -1750,6 +1947,7 @@ namespace CodingRiver.UPilot.Execution
 
     internal sealed class Tokenizer
     {
+        private const int MaxTokens = 16384;
         private readonly string _source;
         private readonly SourceMap _sourceMap;
         private int _index;
@@ -1761,14 +1959,16 @@ namespace CodingRiver.UPilot.Execution
             {
                 SkipWhitespaceAndComments();
                 if (_index >= _source.Length) break;
+                if (tokens.Count >= MaxTokens)
+                    throw Error("Token limit exceeded (" + MaxTokens.ToString(CultureInfo.InvariantCulture) + ").", _index);
                 char c = _source[_index];
-                if (char.IsLetter(c) || c == '_' || c == '$') { tokens.Add(ReadIdentifier()); continue; }
+                if (char.IsLetter(c) || c == '_') { tokens.Add(ReadIdentifier()); continue; }
                 if (char.IsDigit(c)) { tokens.Add(ReadNumber()); continue; }
                 if (c == '\"' || c == '\'') { tokens.Add(ReadString()); continue; }
                 string three = _index + 2 < _source.Length ? _source.Substring(_index, 3) : "";
                 string two = _index + 1 < _source.Length ? _source.Substring(_index, 2) : "";
-                if (three == "<<=" || three == ">>=") { tokens.Add(Make(TokenKind.Operator, three, 3)); continue; }
-                if (new[] { "=>", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "?." }.Contains(two))
+                if (three == "<<=" || three == ">>=" || three == "??=") { tokens.Add(Make(TokenKind.Operator, three, 3)); continue; }
+                if (new[] { "=>", "==", "!=", "<=", ">=", "&&", "||", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "?.", "??" }.Contains(two))
                 { tokens.Add(Make(TokenKind.Operator, two, 2)); continue; }
                 if ("+-*/%><!~&|^=".IndexOf(c) >= 0) { tokens.Add(Make(TokenKind.Operator, c.ToString(), 1)); continue; }
                 if (".,;()[]{}?:".IndexOf(c) >= 0) { tokens.Add(Make(TokenKind.Symbol, c.ToString(), 1)); continue; }
@@ -1796,31 +1996,120 @@ namespace CodingRiver.UPilot.Execution
         private Token ReadIdentifier()
         {
             int start = _index++;
-            while (_index < _source.Length && (char.IsLetterOrDigit(_source[_index]) || _source[_index] == '_' || _source[_index] == '$')) _index++;
+            while (_index < _source.Length && (char.IsLetterOrDigit(_source[_index]) || _source[_index] == '_')) _index++;
             return new Token { Kind = TokenKind.Identifier, Text = _source.Substring(start, _index - start), Position = start, Length = _index - start };
         }
         private Token ReadNumber()
         {
             int start = _index;
-            while (_index < _source.Length && char.IsDigit(_source[_index])) _index++;
+            int numberBase = 10;
             bool floating = false;
-            if (_index < _source.Length && _source[_index] == '.') { floating = true; _index++; while (_index < _source.Length && char.IsDigit(_source[_index])) _index++; }
-            if (_index < _source.Length && (_source[_index] == 'e' || _source[_index] == 'E'))
-            { floating = true; _index++; if (_index < _source.Length && (_source[_index] == '+' || _source[_index] == '-')) _index++; while (_index < _source.Length && char.IsDigit(_source[_index])) _index++; }
-            while (_index < _source.Length && "fFdDmMlLuU".IndexOf(_source[_index]) >= 0) _index++;
+            if (_index + 1 < _source.Length && _source[_index] == '0' && (_source[_index + 1] == 'x' || _source[_index + 1] == 'X'))
+            {
+                numberBase = 16;
+                _index += 2;
+                ReadDigits(start, value => Uri.IsHexDigit(value));
+            }
+            else if (_index + 1 < _source.Length && _source[_index] == '0' && (_source[_index + 1] == 'b' || _source[_index + 1] == 'B'))
+            {
+                numberBase = 2;
+                _index += 2;
+                ReadDigits(start, value => value == '0' || value == '1');
+            }
+            else
+            {
+                ReadDigits(start, char.IsDigit);
+                if (_index < _source.Length && _source[_index] == '.')
+                {
+                    floating = true;
+                    _index++;
+                    if (_index < _source.Length && (_source[_index] == '_' || char.IsDigit(_source[_index])))
+                        ReadDigits(start, char.IsDigit);
+                }
+                if (_index < _source.Length && (_source[_index] == 'e' || _source[_index] == 'E'))
+                {
+                    floating = true;
+                    _index++;
+                    if (_index < _source.Length && (_source[_index] == '+' || _source[_index] == '-')) _index++;
+                    ReadDigits(start, char.IsDigit);
+                }
+            }
+            int suffixStart = _index;
+            while (_index < _source.Length && char.IsLetter(_source[_index])) _index++;
             string text = _source.Substring(start, _index - start);
-            string raw = text.TrimEnd('f', 'F', 'd', 'D', 'm', 'M', 'l', 'L', 'u', 'U');
-            string suffix = text.Substring(raw.Length).ToLowerInvariant();
+            string raw = _source.Substring(start, suffixStart - start).Replace("_", "");
+            string suffix = _source.Substring(suffixStart, _index - suffixStart).ToLowerInvariant();
             object value;
-            if (suffix.Contains("m")) value = decimal.Parse(raw, CultureInfo.InvariantCulture);
-            else if (suffix.Contains("f")) value = float.Parse(raw, CultureInfo.InvariantCulture);
-            else if (floating || suffix.Contains("d")) value = double.Parse(raw, CultureInfo.InvariantCulture);
-            else if (suffix.Contains("ul") || suffix.Contains("lu")) value = ulong.Parse(raw, CultureInfo.InvariantCulture);
-            else if (suffix.Contains("l")) value = long.Parse(raw, CultureInfo.InvariantCulture);
-            else if (suffix.Contains("u")) value = uint.Parse(raw, CultureInfo.InvariantCulture);
-            else value = int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer) ? (object)integer : long.Parse(raw, CultureInfo.InvariantCulture);
+            try
+            {
+                if (numberBase != 10)
+                {
+                    if (suffix != "" && suffix != "u" && suffix != "l" && suffix != "ul" && suffix != "lu")
+                        throw new FormatException("Invalid integer suffix.");
+                    string digits = raw.Substring(2);
+                    ulong integer = Convert.ToUInt64(digits, numberBase);
+                    value = SelectIntegerLiteral(integer, suffix);
+                }
+                else if (floating || suffix == "f" || suffix == "d" || suffix == "m")
+                {
+                    if (suffix != "" && suffix != "f" && suffix != "d" && suffix != "m")
+                        throw new FormatException("Invalid real suffix.");
+                    if (suffix == "m") value = decimal.Parse(raw, NumberStyles.Float, CultureInfo.InvariantCulture);
+                    else if (suffix == "f") value = float.Parse(raw, NumberStyles.Float, CultureInfo.InvariantCulture);
+                    else value = double.Parse(raw, NumberStyles.Float, CultureInfo.InvariantCulture);
+                }
+                else
+                {
+                    if (suffix != "" && suffix != "u" && suffix != "l" && suffix != "ul" && suffix != "lu")
+                        throw new FormatException("Invalid integer suffix.");
+                    ulong integer = ulong.Parse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture);
+                    value = SelectIntegerLiteral(integer, suffix);
+                }
+            }
+            catch (Exception ex) when (ex is FormatException || ex is OverflowException)
+            {
+                throw Error("Invalid numeric literal '" + text + "': " + ex.Message, start, Math.Max(1, _index - start));
+            }
             return new Token { Kind = TokenKind.Number, Text = text, Value = value, Position = start, Length = _index - start };
         }
+
+        private void ReadDigits(int literalStart, Func<char, bool> isDigit)
+        {
+            bool sawDigit = false;
+            bool lastWasSeparator = false;
+            while (_index < _source.Length && (isDigit(_source[_index]) || _source[_index] == '_'))
+            {
+                if (_source[_index] == '_')
+                {
+                    if (!sawDigit) throw Error("A digit separator must follow a digit.", _index);
+                    lastWasSeparator = true;
+                }
+                else
+                {
+                    sawDigit = true;
+                    lastWasSeparator = false;
+                }
+                _index++;
+            }
+            if (!sawDigit) throw Error("Numeric literal requires at least one digit.", literalStart, Math.Max(1, _index - literalStart));
+            if (lastWasSeparator) throw Error("A numeric literal cannot end with a digit separator.", _index - 1);
+        }
+
+        private static object SelectIntegerLiteral(ulong value, string suffix)
+        {
+            if (suffix == "u") return value <= uint.MaxValue ? (object)(uint)value : value;
+            if (suffix == "l")
+            {
+                if (value > long.MaxValue) throw new OverflowException("The value is too large for Int64.");
+                return (long)value;
+            }
+            if (suffix == "ul" || suffix == "lu") return value;
+            if (value <= int.MaxValue) return (int)value;
+            if (value <= uint.MaxValue) return (uint)value;
+            if (value <= long.MaxValue) return (long)value;
+            return value;
+        }
+
         private Token ReadString()
         {
             int start = _index;
@@ -1829,34 +2118,77 @@ namespace CodingRiver.UPilot.Execution
             while (_index < _source.Length)
             {
                 char c = _source[_index++];
-                if (c == quote) return new Token { Kind = TokenKind.String, Text = _source.Substring(start, _index - start), Value = quote == '\'' ? (object)(chars.Count == 0 ? '\0' : chars[0]) : new string(chars.ToArray()), Position = start, Length = _index - start };
-                if (c == '\\' && _index < _source.Length)
+                if (c == quote)
                 {
-                    char escaped = _source[_index++];
-                    chars.Add(escaped == 'n' ? '\n' : escaped == 'r' ? '\r' : escaped == 't' ? '\t' : escaped);
+                    if (quote == '\'' && chars.Count != 1)
+                        throw Error("A character literal must contain exactly one character.", start, _index - start);
+                    return new Token { Kind = TokenKind.String, Text = _source.Substring(start, _index - start), Value = quote == '\'' ? (object)chars[0] : new string(chars.ToArray()), Position = start, Length = _index - start };
                 }
+                if (c == '\r' || c == '\n') throw Error("Newline in literal.", _index - 1);
+                if (c == '\\') ReadEscape(chars, start);
                 else chars.Add(c);
             }
-            throw Error("Unterminated string literal.", start);
+            throw Error(quote == '\'' ? "Unterminated character literal." : "Unterminated string literal.", start, Math.Max(1, _index - start));
+        }
+
+        private void ReadEscape(ICollection<char> chars, int literalStart)
+        {
+            if (_index >= _source.Length) throw Error("Unterminated escape sequence.", literalStart, Math.Max(1, _index - literalStart));
+            char escaped = _source[_index++];
+            switch (escaped)
+            {
+                case '\'': chars.Add('\''); return;
+                case '"': chars.Add('"'); return;
+                case '\\': chars.Add('\\'); return;
+                case '0': chars.Add('\0'); return;
+                case 'a': chars.Add('\a'); return;
+                case 'b': chars.Add('\b'); return;
+                case 'f': chars.Add('\f'); return;
+                case 'n': chars.Add('\n'); return;
+                case 'r': chars.Add('\r'); return;
+                case 't': chars.Add('\t'); return;
+                case 'v': chars.Add('\v'); return;
+                case 'u': AppendUnicodeEscape(chars, 4, 4); return;
+                case 'U': AppendUnicodeEscape(chars, 8, 8); return;
+                case 'x': AppendUnicodeEscape(chars, 1, 4); return;
+                default: throw Error("Unrecognized escape sequence '\\" + escaped + "'.", _index - 2, 2);
+            }
+        }
+
+        private void AppendUnicodeEscape(ICollection<char> chars, int minDigits, int maxDigits)
+        {
+            int start = _index;
+            int count = 0;
+            while (count < maxDigits && _index < _source.Length && Uri.IsHexDigit(_source[_index])) { _index++; count++; }
+            if (count < minDigits) throw Error("Invalid Unicode escape sequence.", start, Math.Max(1, count));
+            int codePoint;
+            try { codePoint = int.Parse(_source.Substring(start, count), NumberStyles.HexNumber, CultureInfo.InvariantCulture); }
+            catch (Exception ex) when (ex is FormatException || ex is OverflowException)
+            { throw Error("Invalid Unicode escape sequence.", start, Math.Max(1, count)); }
+            if (codePoint > 0x10ffff || codePoint >= 0xd800 && codePoint <= 0xdfff)
+                throw Error("Unicode escape is outside the valid scalar range.", start, count);
+            foreach (char value in char.ConvertFromUtf32(codePoint)) chars.Add(value);
         }
         private Token Make(TokenKind kind, string text, int length) { var token = new Token { Kind = kind, Text = text, Position = _index, Length = length }; _index += length; return token; }
-        private ExecutionContractException Error(string message, int position)
+        private ExecutionContractException Error(string message, int position, int length = 1)
         {
             return new ExecutionContractException("CSHARP_PARSE_ERROR", message, new Dictionary<string, object>
             {
-                { "position", position }, { "sourceSpan", _sourceMap.Resolve(position, 1) }, { "stage", "parse" },
+                { "position", position }, { "sourceSpan", _sourceMap.Resolve(position, length) }, { "stage", "parse" },
             });
         }
     }
 
     internal sealed class Parser
     {
+        private const int MaxParseDepth = 256;
         private readonly List<Token> _tokens;
         private readonly string _mode;
         private readonly string _source;
         private readonly SourceMap _sourceMap;
         private int _position;
         private int _finallyDepth;
+        private int _parseDepth;
         public Parser(string code, string mode)
         {
             if (string.IsNullOrWhiteSpace(code)) throw new ExecutionContractException("CSHARP_PARSE_ERROR", "code is required.");
@@ -1989,21 +2321,26 @@ namespace CodingRiver.UPilot.Execution
             return WithSpan(new VariableStmt(name, typeName, initializer), start);
         }
 
-        private Expr ParseExpression() { return ParseAssignment(); }
+        private Expr ParseExpression() { return WithParseDepth(ParseAssignment); }
         private Expr ParseAssignment()
         {
             int start = Peek().Position;
             if (TryParseLambda(out var lambda)) return WithSpan(lambda, start);
             Expr left = ParseConditional();
-            if (new[] { "=", "+=", "-=", "*=", "/=", "%=" }.Contains(Peek().Text))
+            if (new[] { "=", "+=", "-=", "*=", "/=", "%=", "??=" }.Contains(Peek().Text))
             { string op = Next().Text; return WithSpan(new AssignExpr(left, op, ParseAssignment()), start); }
             return left;
         }
         private Expr ParseConditional()
         {
-            Expr condition = ParseBinary(0);
+            Expr condition = ParseNullCoalescing();
             if (!Match("?")) return condition;
             Expr whenTrue = ParseExpression(); Expect(":"); return new ConditionalExpr(condition, whenTrue, ParseExpression());
+        }
+        private Expr ParseNullCoalescing()
+        {
+            Expr left = ParseBinary(0);
+            return Match("??") ? new CoalesceExpr(left, ParseNullCoalescing()) : left;
         }
         private static readonly string[][] Precedence =
         {
@@ -2023,7 +2360,8 @@ namespace CodingRiver.UPilot.Execution
             }
             return left;
         }
-        private Expr ParseUnary()
+        private Expr ParseUnary() { return WithParseDepth(ParseUnaryCore); }
+        private Expr ParseUnaryCore()
         {
             int start = Peek().Position;
             if (Match("await")) return WithSpan(new AwaitExpr(ParseUnary()), start);
@@ -2040,7 +2378,8 @@ namespace CodingRiver.UPilot.Execution
             Expr expression = ParsePrimary();
             while (true)
             {
-                if (Match(".") || Match("?.")) { expression = WithSpan(new MemberExpr(expression, ExpectIdentifier()), start); continue; }
+                if (Match(".")) { expression = WithSpan(new MemberExpr(expression, ExpectIdentifier()), start); continue; }
+                if (Match("?.")) { expression = WithSpan(new MemberExpr(expression, ExpectIdentifier(), true), start); continue; }
                 if (TryParseGenericTypeArguments(out var genericArguments))
                 {
                     if (Match("(")) expression = WithSpan(new CallExpr(expression, ParseArgumentList(")"), genericArguments), start);
@@ -2067,6 +2406,23 @@ namespace CodingRiver.UPilot.Execution
             if (Match("true")) return WithSpan(new LiteralExpr(true), token.Position);
             if (Match("false")) return WithSpan(new LiteralExpr(false), token.Position);
             if (Match("null")) return WithSpan(new LiteralExpr(null), token.Position);
+            if (Match("typeof") || Match("default"))
+            {
+                string kind = token.Text;
+                Expect("(");
+                string typeName = ParseTypeName();
+                Expect(")");
+                return WithSpan(new TypeIntrinsicExpr(typeName, kind), token.Position);
+            }
+            if (Match("nameof"))
+            {
+                Expect("(");
+                Expr operand = ParseExpression();
+                Expect(")");
+                string name = NameofOperand(operand);
+                if (string.IsNullOrWhiteSpace(name)) throw Error("nameof requires a name or member access expression.");
+                return WithSpan(new NameofExpr(name), token.Position);
+            }
             if (Match("new"))
             {
                 int start = token.Position;
@@ -2111,6 +2467,12 @@ namespace CodingRiver.UPilot.Execution
             if (token.Kind == TokenKind.Identifier) { Next(); return WithSpan(new NameExpr(token.Text), token.Position); }
             throw Error("Expected expression, got '" + token.Text + "'.");
         }
+        private static string NameofOperand(Expr expression)
+        {
+            if (expression is NameExpr name) return name.Name;
+            if (expression is MemberExpr member) return member.Name;
+            return null;
+        }
         private IReadOnlyList<Expr> ParseArgumentList(string terminator)
         {
             var values = new List<Expr>();
@@ -2129,7 +2491,8 @@ namespace CodingRiver.UPilot.Execution
             }
             catch { _position = save; return false; }
         }
-        private string ParseTypeName()
+        private string ParseTypeName() { return WithParseDepth(ParseTypeNameCore); }
+        private string ParseTypeNameCore()
         {
             string name = ExpectIdentifier();
             while (Match(".")) name += "." + ExpectIdentifier();
@@ -2152,6 +2515,30 @@ namespace CodingRiver.UPilot.Execution
                 name += "[" + new string(',', rank - 1) + "]";
             }
             return name;
+        }
+
+        private T WithParseDepth<T>(Func<T> parse)
+        {
+            _parseDepth++;
+            try
+            {
+                if (_parseDepth > MaxParseDepth)
+                {
+                    Token token = Peek();
+                    throw new ExecutionContractException(
+                        "CSHARP_PARSE_DEPTH_EXCEEDED",
+                        "C# subset parse depth exceeded the limit of " + MaxParseDepth.ToString(CultureInfo.InvariantCulture) + ".",
+                        new Dictionary<string, object>
+                        {
+                            { "stage", "parse" },
+                            { "limit", MaxParseDepth },
+                            { "position", token.Position },
+                            { "sourceSpan", _sourceMap.Resolve(token.Position, Math.Max(1, token.Length)) },
+                        });
+                }
+                return parse();
+            }
+            finally { _parseDepth--; }
         }
 
         private bool TryParseLambda(out Expr expression)

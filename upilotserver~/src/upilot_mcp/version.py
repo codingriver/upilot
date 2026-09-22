@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import json
+import sys
+import time
+import uuid
 from importlib import metadata
 from pathlib import Path
 
@@ -36,6 +39,8 @@ def _read_pyproject_version() -> str:
 
 
 def server_version() -> str:
+    if "_RUNTIME_IDENTITY" in globals():
+        return _RUNTIME_IDENTITY["server_version"]
     value = os.getenv("UPILOT_SERVER_VERSION", "").strip()
     if value:
         return value
@@ -52,17 +57,32 @@ def server_version() -> str:
 
 
 def build_commit() -> str:
+    if "_RUNTIME_IDENTITY" in globals():
+        return _RUNTIME_IDENTITY["build_commit"]
     return os.getenv("UPILOT_BUILD_COMMIT", "").strip() or _build_info().get("build_commit", "").strip()
 
 
 def build_channel() -> str:
+    if "_RUNTIME_IDENTITY" in globals():
+        return _RUNTIME_IDENTITY["build_channel"]
     return os.getenv("UPILOT_BUILD_CHANNEL", "").strip() or _build_info().get("build_channel", "").strip() or "source"
 
 
-def version_payload() -> dict[str, str]:
-    return {
-        "server_version": server_version(),
-        "build_commit": build_commit(),
-        "build_channel": build_channel(),
-        "protocol_version": PROTOCOL_VERSION,
-    }
+# Capture once, before serving requests. New files on disk do not describe an
+# already running process (in particular after a UPM remove/add operation).
+_RUNTIME_IDENTITY = {
+    "server_version": server_version(),
+    "build_commit": build_commit(),
+    "build_channel": build_channel(),
+    "protocol_version": PROTOCOL_VERSION,
+    "identity_contract_version": 1,
+    "server_instance_id": uuid.uuid4().hex,
+    "server_started_at_ms": int(time.time() * 1000),
+    "server_entry_path": str(Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve()),
+    "server_module_root": str(Path(__file__).resolve().parent),
+    "server_install_source": os.getenv("UPILOT_INSTALL_SOURCE", "unknown"),
+}
+
+
+def version_payload() -> dict:
+    return dict(_RUNTIME_IDENTITY)

@@ -1911,7 +1911,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void RepairRoutingSwitchesPortsOnlyForConfirmedForeignOwnership()
+        public void RepairRoutingUsesControlledServerRestartForEveryUnhealthyState()
         {
             var disconnectedBridge = new BridgeStatus { IsStarted = true };
             var healthyCurrent = new McpServerStatus
@@ -1930,19 +1930,19 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(
                 UPilotQuickStart.DetermineRepairAction(disconnectedBridge, unknown),
-                Is.EqualTo(UPilotRepairAction.WaitForStatus));
+                Is.EqualTo(UPilotRepairAction.RestartServer));
             Assert.That(
                 UPilotQuickStart.DetermineRepairAction(disconnectedBridge, foreign),
-                Is.EqualTo(UPilotRepairAction.SwitchPorts));
+                Is.EqualTo(UPilotRepairAction.RestartServer));
             Assert.That(
                 UPilotQuickStart.DetermineRepairAction(disconnectedBridge, partial),
                 Is.EqualTo(UPilotRepairAction.RestartServer));
             Assert.That(
                 UPilotQuickStart.DetermineRepairAction(disconnectedBridge, healthyCurrent),
-                Is.EqualTo(UPilotRepairAction.RestartBridge));
+                Is.EqualTo(UPilotRepairAction.RestartServer));
             Assert.That(
                 UPilotQuickStart.DetermineRepairAction(default, default),
-                Is.EqualTo(UPilotRepairAction.StartServices));
+                Is.EqualTo(UPilotRepairAction.RestartServer));
         }
 
         [Test]
@@ -2485,7 +2485,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 typeof(UPilotServerRuntimeService).GetMethod(
                     "PrepareLatestServerExeAsync",
-                    new[] { typeof(UPilotReleaseManifest) }),
+                    new[] { typeof(UPilotReleaseManifest), typeof(CancellationToken) }),
                 Is.Not.Null);
             Assert.That(
                 typeof(UPilotServerRuntimeService).GetMethod(

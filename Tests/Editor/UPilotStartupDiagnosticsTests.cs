@@ -305,7 +305,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void RestartCompletesOnlyAfterExactProcessProjectAndNewBridgeSessionAreVerified()
+        public void RestartCompletesOnlyAfterProcessProjectBridgeAndDeploymentAreVerified()
         {
             var project = Path.Combine(Path.GetTempPath(), "upilot-restart-project");
             var record = UPilotServerRestartDiagnostics.CreateRecordForTests(project, 41, "old-session");
@@ -320,6 +320,8 @@ namespace CodingRiver.UPilot.Tests
             UPilotServerRestartDiagnostics.RecordHealthVerifiedForTests(record, 42, project);
             Assert.That(record.status, Is.EqualTo("running"));
             UPilotServerRestartDiagnostics.RecordBridgeVerifiedForTests(record, "new-session");
+            Assert.That(record.status, Is.EqualTo("running"));
+            UPilotServerRestartDiagnostics.RecordDeploymentVerifiedForTests(record);
 
             Assert.That(record.status, Is.EqualTo("succeeded"));
             Assert.That(record.phase, Is.EqualTo("completed"));

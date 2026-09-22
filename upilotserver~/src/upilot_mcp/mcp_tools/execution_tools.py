@@ -23,6 +23,11 @@ async def _run(name: str, arguments: dict[str, Any], call):
     return _log_tool_result(name, _payload(await call()))
 
 
+async def _run_readonly(name: str, arguments: dict[str, Any], call):
+    _log_tool_call(name, arguments)
+    return _log_tool_result(name, _payload(await call()))
+
+
 @mcp.tool(description="管理执行 session。open 创建持久对象、词法 closure、异步操作、类型和事件订阅生命周期；status 返回活动异步任务、订阅、callback 计数及有界诊断；close 会解绑事件、取消协作式异步操作并使 closure/delegate 失效，最后释放变量和句柄。已开始的项目方法不能强制中断。")
 async def execution_session(
     action: Annotated[str, Field(description="生命周期动作：open、status 或 close。")],
@@ -42,14 +47,14 @@ async def execution_session(
     ))
 
 
-@mcp.tool(description="执行 UPilot 自有 C# 子集 V2。支持 try/catch/finally/throw、引用捕获 closure、block/async lambda、Task/ValueTask await、实用级泛型推断、隐式数组及 rank 1–4 多维数组。逃逸 closure/async delegate 和事件订阅必须使用 persistent session；禁止 async void。\n\n默认 import 命名空间：System、UnityEngine、UnityEditor。\n\n完整预算字段（默认值/硬上限）：timeoutMs(3000/30000)、maxStatements(10000/100000)、maxLoopIterations(10000/100000)、maxCalls(1000/100000)、maxAllocations(1000/100000)、maxRecursion(64/256)、maxResultBytes(1048576/1048576)、maxAwaits(1000/100000)、maxArrayElements(100000/1000000)。\n\n错误恢复结构：error.detail 含 stage（parse/bind/policy/runtime/budget/cancelled）、sourceSpan、candidates、sideEffectsMayHaveOccurred、nextAction、cleanupDiagnostics。取消与预算失败不回滚且不得自动重试。cancel 后 finally 获得 100ms/256-statement 清理预算。\n\nauto 后端缓存 key 为 (SHA-256(code), mode, imports)，变更任一组件即失效。不依赖 Roslyn 或 Unity 编译 API。")
+@mcp.tool(description="执行 UPilot 自有 C# 子集 V2。支持 try/catch/finally/throw、引用捕获 closure、block/async lambda、Task/ValueTask await、实用级泛型推断、??/??=/typeof/nameof/default(T)、隐式数组及 rank 1–4 多维数组。逃逸 closure/async delegate 和事件订阅必须使用 persistent session；禁止 async void。\n\n后端：interpret 执行完整 V2 AST；emit 是兼容 DynamicMethod 入口缓存且仍执行 AST；compiled 将可静态绑定的同步有限子集 lowering 为 Expression Tree delegate，不支持时执行前失败且不回退；auto 保持首次解释/后续 emit-cache 的兼容行为，不自动选择 compiled。\n\n默认 import 命名空间：System、UnityEngine、UnityEditor。\n\n完整预算字段（默认值/硬上限）：timeoutMs(3000/30000)、maxStatements(10000/100000)、maxLoopIterations(10000/100000)、maxCalls(1000/100000)、maxAllocations(1000/100000)、maxRecursion(64/256)、maxResultBytes(1048576/1048576)、maxAwaits(1000/100000)、maxArrayElements(100000/1000000)。\n\n错误恢复结构：error.detail 含 stage（parse/bind/policy/runtime/budget/cancelled）、sourceSpan、candidates、sideEffectsMayHaveOccurred、nextAction、cleanupDiagnostics。取消与预算失败不回滚且不得自动重试。cancel 后 finally 获得 100ms/256-statement 清理预算。\n\nauto 后端缓存 key 为 (SHA-256(code), mode, imports)，变更任一组件即失效。不依赖 Roslyn、DLL 加载或 Unity 编译 API。")
 async def csharp_eval(
     code: Annotated[str, Field(description="要执行的一条表达式或受支持的 C# 子集语句块。")],
     mode: Annotated[str, Field(description="解析模式：auto、expression 或 statements。")] = "auto",
     sessionId: Annotated[str, Field(description="可选 persistent session；跨调用变量、handle、事件订阅或非内联结果需要它。")] = "",
     variables: Annotated[dict[str, Any] | None, Field(description="名称到普通 JSON 或显式 TypedValue 的输入变量映射。")] = None,
     imports: Annotated[list[str] | None, Field(description="允许参与类型解析的命名空间列表；不会加载程序集。")] = None,
-    executionBackend: Annotated[str, Field(description="执行后端：auto、interpret 或 emit；代码开始执行后不会切换后端重放。")] = "auto",
+    executionBackend: Annotated[str, Field(description="执行后端：auto、interpret、emit 或 compiled；compiled 仅接受可静态绑定的同步子集且不静默回退；代码开始执行后不会切换后端重放。")] = "auto",
     limits: Annotated[dict[str, Any] | None, Field(description="可选预算覆盖，例如 timeoutMs、maxStatements、maxLoopIterations、maxCalls、maxAllocations、maxAwaits、maxArrayElements 和 maxResultBytes。")] = None,
     resultMode: Annotated[str, Field(description="结果编码：auto、inline、handle 或 legacyString；handle 结果需要 session。")] = "auto",
 ):
@@ -60,7 +65,21 @@ async def csharp_eval(
     ))
 
 
-@mcp.tool(description="根据结构化 spec 使用 Reflection.Emit 创建 session 绑定的临时 CLR Type。\n\nSpec 完整字段：typeName、visibility(public/internal)、baseType、interfaces、isSealed；fields[name/typeName/visibility(isStatic/isReadonly)]；properties[name/typeName/visibility/hasGetter/hasSetter/backingField/getterBody/setterBody]；constructors[visibility/parameters/baseConstructorParameterTypeNames/baseArgumentNames/body]；methods[name/returnType/parameters/visibility(isStatic/isVirtual/isFinal)/implements/overrides/body/callbackHandle/callbackPolicy]。\n\n同步 body 支持 try/catch/finally、泛型和 rank 1–4 数组，拒绝 lambda/closure/await/async。\n\nCallback policy：exceptionMode(isolate 返回默认值 / propagate 用 ExceptionDispatchInfo 重抛原始异常堆栈)、maxInvocations(默认10000/上限100000)、maxReentrancy(默认8/上限64/ThreadStatic)、diagnosticsCapacity(默认32/上限128)。非 callback 方法始终 propagate。\n\ncachePolicy 仅支持 specHash；未提供 specHash 时自动生成随机 GUID 导致永不命中缓存。cache 跨 session 共享于同一 AppDomain。未提供 constructors 时自动生成公开无参构造器（要求基类也有无参构造）。\n\n仅支持 Editor/JIT，不保存 DLL、不接受 raw IL、不降级到源码编译。REFLECTION_EMIT_UNAVAILABLE 时应改用 unity_reflection_call 或项目现有编译类型。")
+@mcp.tool(description="只读验证 UPilot C# 子集源码，不执行代码。interpret 检查词法/语法；emit 额外检查同步 Emit profile；compiled 额外完成静态绑定、Expression Tree lowering 与 delegate 编译。不会调用 getter、构造器、用户转换或业务方法。")
+async def csharp_validate(
+    code: Annotated[str, Field(description="要验证的一条表达式或 C# 子集语句块。")],
+    mode: Annotated[str, Field(description="解析模式：auto、expression 或 statements。")] = "auto",
+    backend: Annotated[str, Field(description="验证目标：interpret、emit 或 compiled。")] = "interpret",
+    imports: Annotated[list[str] | None, Field(description="参与类型解析的命名空间列表；不会加载程序集。")] = None,
+    variableTypes: Annotated[dict[str, str] | None, Field(description="compiled 验证使用的变量名到 CLR 类型名映射，不传业务对象。")] = None,
+):
+    args = locals().copy()
+    return await _run_readonly("csharp_validate", args, lambda: _get_facade().csharp_validate(
+        code=code, mode=mode, backend=backend, imports=imports, variable_types=variableTypes,
+    ))
+
+
+@mcp.tool(description="根据结构化 spec 使用 Reflection.Emit 创建 session 绑定的临时 CLR Type。\n\nSpec 完整字段：typeName、visibility(public/internal)、baseType、interfaces、isSealed、bodyBackend(interpret/compiled)；fields[name/typeName/visibility(isStatic/isReadonly)]；properties[name/typeName/visibility/hasGetter/hasSetter/backingField/getterBody/setterBody/bodyBackend]；constructors[visibility/parameters/baseConstructorParameterTypeNames/baseArgumentNames/body/bodyBackend]；methods[name/returnType/parameters/visibility(isStatic/isVirtual/isFinal)/implements/overrides/body/bodyBackend/callbackHandle/callbackPolicy]。成员 bodyBackend 覆盖类型默认值。\n\ninterpret body 使用支持 try/catch/finally、泛型和 rank 1–4 数组的同步 V2 profile；compiled body 在类型发布前直接 lowering，边界外节点失败且不回退。两者都拒绝 lambda/closure/await/async。\n\nCallback policy：exceptionMode(isolate 返回默认值 / propagate 用 ExceptionDispatchInfo 重抛原始异常堆栈)、maxInvocations(默认10000/上限100000)、maxReentrancy(默认8/上限64/ThreadStatic)、diagnosticsCapacity(默认32/上限128)。非 callback 方法始终 propagate。\n\ncachePolicy 仅支持 specHash；未提供 specHash 时自动生成随机 GUID 导致永不命中缓存。cache 跨 session 共享于同一 AppDomain。未提供 constructors 时自动生成公开无参构造器（要求基类也有无参构造）。\n\n仅支持 Editor/JIT，不保存/加载 DLL、不接受 raw IL、不替换已有程序集方法、不降级到源码编译。REFLECTION_EMIT_UNAVAILABLE 时应改用 unity_reflection_call 或项目现有编译类型。")
 async def reflection_emit_type(
     sessionId: Annotated[str, Field(description="必填 persistent session ID；type/instance/callback/accessor 生命周期绑定到该 session。")],
     spec: Annotated[dict[str, Any], Field(description="动态类型结构化 spec：typeName、base/interfaces、fields/properties/constructors/methods 及受限同步 body。")],
@@ -104,15 +123,15 @@ async def csharp_object_dump(
     ))
 
 
-for _name in ("execution_session", "csharp_eval", "reflection_emit_type", "csharp_object_dump"):
+for _name in ("execution_session", "csharp_validate", "csharp_eval", "reflection_emit_type", "csharp_object_dump"):
     register_public_tool(
         _name,
         public_handler=globals()[_name],
         facade_method=_name,
         category="execution",
-        destructive=False if _name == "csharp_object_dump" else True,
-        idempotent=True if _name == "csharp_object_dump" else False,
-        requires_write_access=False if _name == "csharp_object_dump" else True,
+        destructive=False if _name in {"csharp_validate", "csharp_object_dump"} else True,
+        idempotent=True if _name in {"csharp_validate", "csharp_object_dump"} else False,
+        requires_write_access=False if _name in {"csharp_validate", "csharp_object_dump"} else True,
         play_mode_policy="allowed",
         feature="core",
         timeout_ms=60000 if _name == "csharp_object_dump" else 35000,

@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -39,6 +39,10 @@ namespace CodingRiver.UPilot
         public int McpServerPort;
         /// <summary>MCP 服务端进程工作区绝对路径（与 Cursor 工程目录一致，由服务端 ack 提供）。</summary>
         public string McpWorkspaceAbsolutePath;
+        public string AuthenticationErrorCode;
+        public string AuthenticationError;
+        public int ServerIdentityContractVersion;
+        public long AuthenticationFailureAtUtcMs;
     }
 
     // ── Log entry ───────────────────────────────────────────────────────────────
@@ -162,7 +166,7 @@ namespace CodingRiver.UPilot
         private static string WsPortPrefsKey => $"upilot.WsPort.{ProjectPathHashSuffix}";
         private static string HttpPortPrefsKey => $"upilot.HttpPort.{ProjectPathHashSuffix}";
         private const int    HeartbeatIntervalMs = 2000;
-        private const int    IdentityContractVersion = 1;
+        internal const int   IdentityContractVersion = 1;
         private const int    MaxLogEntries    = 1000;
         private const int    ExecutionStatePersistenceAttempts = 3;
         private const int    ExecutionStatePersistenceRetryDelayMs = 5;
@@ -229,6 +233,10 @@ namespace CodingRiver.UPilot
         private bool                 _started;
         public bool                  IsStarted => _started;
         private bool                 _isAuthenticated;
+        private string _authenticationErrorCode = "";
+        private string _authenticationError = "";
+        private int _serverIdentityContractVersion;
+        private long _authenticationFailureAtUtcMs;
         private long                 _lastHeartbeatSentAt;
         private string               _processRole = "unknown";
         private string               _activeSceneName = string.Empty;
@@ -401,6 +409,10 @@ namespace CodingRiver.UPilot
             McpServerHost       = string.IsNullOrEmpty(_mcpHostFromServer) ? _wsHost : _mcpHostFromServer,
             McpServerPort       = _mcpPortFromServer > 0 ? _mcpPortFromServer : _wsPort,
             McpWorkspaceAbsolutePath = _mcpWorkspacePathFromServer ?? "",
+            AuthenticationErrorCode = _authenticationErrorCode,
+            AuthenticationError = _authenticationError,
+            ServerIdentityContractVersion = _serverIdentityContractVersion,
+            AuthenticationFailureAtUtcMs = _authenticationFailureAtUtcMs,
         };
 
         public List<BridgeLogEntry> GetLogsCopy()
@@ -1010,11 +1022,16 @@ namespace CodingRiver.UPilot
             // Handle hello result → authenticate
             if (envelope.type == "result" && envelope.name == "session.hello")
             {
+                if (token.IsCancellationRequested || envelope.sessionId != _sessionId) return;
                 var ack = JsonUtility.FromJson<HelloAckMessage>(json);
                 if (ack?.payload != null)
                 {
+                    _serverIdentityContractVersion = ack.payload.identityContractVersion;
                     if (!ack.payload.accepted)
                     {
+                        _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        _authenticationErrorCode = ack.payload.rejectionCode ?? "authentication_rejected";
+                        _authenticationError = "Bridge 认证被拒绝：" + (ack.payload.rejectionReason ?? "Server 未返回原因");
                         UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.auth.rejected", "认证被拒绝",
                             $"sessionId={_sessionId}", "error");
@@ -1024,6 +1041,11 @@ namespace CodingRiver.UPilot
                     if (ack.payload.identityContractVersion != IdentityContractVersion ||
                         string.IsNullOrEmpty(ack.payload.verificationLevel))
                     {
+                        _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        _authenticationErrorCode = "identity_contract_mismatch";
+                        _authenticationError = $"协议不兼容：Bridge 身份契约={IdentityContractVersion}；" +
+                            $"Server 身份契约={(ack.payload.identityContractVersion == 0 ? "未知/未返回" : ack.payload.identityContractVersion.ToString())}；" +
+                            $"verificationLevel={(string.IsNullOrEmpty(ack.payload.verificationLevel) ? "未知/未返回" : ack.payload.verificationLevel)}";
                         UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.auth.contract_mismatch", "身份契约不匹配",
                             $"server={ack.payload.identityContractVersion} bridge={IdentityContractVersion}", "error");
@@ -1037,9 +1059,16 @@ namespace CodingRiver.UPilot
                 }
                 else
                 {
-                    ClearMcpServerDisplayState();
+                    _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    _authenticationErrorCode = "hello_payload_missing";
+                    _authenticationError = "协议不兼容：Server 未返回 session.hello payload。";
+                    try { _ws?.Abort(); } catch { }
+                    return;
                 }
 
+                _authenticationErrorCode = "";
+                _authenticationError = "";
+                _authenticationFailureAtUtcMs = 0;
                 _isAuthenticated = true;
                 UPilotStartupDiagnostics.ObserveBridgeAuthenticated(_sessionId);
                 UPilotOperationTracker.Instance.RecordSystemEvent(

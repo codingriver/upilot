@@ -1,0 +1,12 @@
+{
+    "schemaVersion": 1,
+    "trigger": "agent-rule-sync",
+    "reason": "managed-block-locally-modified-or-unverifiable",
+    "originalTargetPath": "D:\\upilot\\Tests~\\UPilotTest\\.cursor\\rules\\upilot-unity-mcp.mdc",
+    "originalContentSha256": "f418eeb64ed65a3413ea19f3f6eae25268dd95b46eb8b375d43f3736a03e4e3f",
+    "agentRulesVersion": 31,
+    "skillPackVersion": 32,
+    "backedUpAt": "2026-09-20T08:34:32.093Z",
+    "fileCount": 1,
+    "totalBytes": 21240
+}

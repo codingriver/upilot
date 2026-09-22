@@ -654,6 +654,7 @@ namespace CodingRiver.UPilot.Tests
             var suffix = Guid.NewGuid().ToString("N");
             var cameraObject = new GameObject("UPilotSnapshotBuiltInDepthCamera_" + suffix);
             var cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            Material temporaryMaterial = null;
             SnapshotJobPayload job = null;
             try
             {
@@ -664,6 +665,10 @@ namespace CodingRiver.UPilot.Tests
 
                 cube.name = "UPilotSnapshotBuiltInDepthCube_" + suffix;
                 cube.transform.position = new Vector3(0, 0, 3);
+                var surfaceShader = Shader.Find("Standard");
+                Assert.That(surfaceShader, Is.Not.Null);
+                temporaryMaterial = new Material(surfaceShader);
+                cube.GetComponent<Renderer>().sharedMaterial = temporaryMaterial;
                 var camera = ConfigureCamera(cameraObject, Color.black);
                 camera.nearClipPlane = 0.3f;
                 camera.farClipPlane = 20f;
@@ -698,6 +703,7 @@ namespace CodingRiver.UPilot.Tests
                 GraphicsSettings.defaultRenderPipeline = previousDefaultPipeline;
                 UnityEngine.Object.DestroyImmediate(cameraObject);
                 UnityEngine.Object.DestroyImmediate(cube);
+                if (temporaryMaterial != null) UnityEngine.Object.DestroyImmediate(temporaryMaterial);
                 Cleanup(job);
             }
         }

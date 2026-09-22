@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "trigger": "python-install-skill",
+  "reason": "unmanaged-or-locally-modified-skill",
+  "originalTargetPath": "D:\\upilot\\Tests~\\UPilotTest\\.agents\\skills\\upilot-unity-mcp",
+  "originalContentSha256": "0c07ec33b868c5f184c1a76b40729611dd6f605a76059cde03b6996ccdbc4033",
+  "agentRulesVersion": 31,
+  "skillPackVersion": 32,
+  "backedUpAt": "2026-09-20T08:13:35.347630Z",
+  "fileCount": 15,
+  "totalBytes": 121042
+}

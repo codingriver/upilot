@@ -276,8 +276,8 @@ class ExecutionDomainService:
                 raise ValueError("executionBackend and resultMode must be strings.")
             if mode.strip().lower() not in {"auto", "expression", "statements"}:
                 raise ValueError("mode must be auto, expression, or statements.")
-            if execution_backend.strip().lower() not in {"auto", "interpret", "emit"}:
-                raise ValueError("executionBackend must be auto, interpret, or emit.")
+            if execution_backend.strip().lower() not in {"auto", "interpret", "emit", "compiled"}:
+                raise ValueError("executionBackend must be auto, interpret, emit, or compiled.")
             normalized_result_mode = result_mode.strip().lower()
             if normalized_result_mode not in {"auto", "inline", "handle", "legacystring"}:
                 raise ValueError("resultMode must be auto, inline, handle, or legacyString.")
@@ -309,6 +309,47 @@ class ExecutionDomainService:
             "limitsJson": _compact_json(limits or {}),
             "resultMode": normalized_result_mode,
         }, timeout_ms=max(30000, min(35000, int((limits or {}).get("timeoutMs", 3000)) + 5000))))
+
+    async def csharp_validate(
+        self,
+        code: str,
+        mode: str = "auto",
+        backend: str = "interpret",
+        imports: list[str] | None = None,
+        variable_types: dict[str, str] | None = None,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        try:
+            if not isinstance(code, str) or not code.strip():
+                raise ValueError("code must be a nonempty string.")
+            if not isinstance(mode, str) or mode.strip().lower() not in {"auto", "expression", "statements"}:
+                raise ValueError("mode must be auto, expression, or statements.")
+            if not isinstance(backend, str) or backend.strip().lower() not in {"interpret", "emit", "compiled"}:
+                raise ValueError("backend must be interpret, emit, or compiled.")
+            if imports is not None and (not isinstance(imports, list)
+                                        or any(not isinstance(item, str) or not item.strip() for item in imports)):
+                raise ValueError("imports must be an array of nonempty namespace strings.")
+            if variable_types is not None and (not isinstance(variable_types, dict)
+                                               or any(not isinstance(name, str) or not name.strip()
+                                                      or not isinstance(type_name, str) or not type_name.strip()
+                                                      for name, type_name in variable_types.items())):
+                raise ValueError("variableTypes must map nonempty variable names to nonempty CLR type names.")
+        except (TypeError, ValueError, AttributeError) as ex:
+            return fail(request_id, "INVALID_PARAMS", str(ex), {
+                "stage": "policy",
+                "sideEffectsMayHaveOccurred": False,
+                "nextAction": "Correct the validation request; no code was executed.",
+            })
+        return normalize_execution_error(await self.dispatcher.call(request_id, "csharp.validate", {
+            "code": code,
+            "mode": mode.strip().lower(),
+            "backend": backend.strip().lower(),
+            "imports": imports or [],
+            "variableTypes": [
+                {"name": name, "typeName": type_name}
+                for name, type_name in (variable_types or {}).items()
+            ],
+        }))
 
     async def reflection_emit_type(
         self,

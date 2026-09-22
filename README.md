@@ -103,11 +103,11 @@ UPilot 会自动选择可用端口、写入所选 Agent 的 MCP 配置，并同�
 
 ## 受控执行工具
 
-UPilot 提供四个分工明确的执行入口：`unity_reflection_call` 调用一个已加载方法或一条受限表达式；`csharp_eval` 执行有预算的 UPilot C# 子集语句；`reflection_emit_type` 从结构化 spec 创建临时 CLR 类型；`execution_session` 管理跨调用变量、对象、类型和 delegate 句柄。它们不使用 Roslyn、Unity Eval/Compilation API、CodeDom 或 mcs。
+UPilot 提供五个分工明确的执行入口：`unity_reflection_call` 调用一个已加载方法或一条受限表达式；只读 `csharp_validate` 预检语法或后端支持；`csharp_eval` 执行有预算的 UPilot C# 子集语句；`reflection_emit_type` 从结构化 spec 创建临时 CLR 类型；`execution_session` 管理跨调用变量、对象、类型和 delegate 句柄。它们不使用 Roslyn、Unity Eval/Compilation API、CodeDom 或 mcs。
 
-这些工具都可能产生副作用，需要项目写入授权，且不会被安全地自动重试。`csharp_eval` 的 `upilot-csharp-subset-v2` 支持 try/catch/finally/throw、引用语义 closure、typed/block/async lambda、Task/ValueTask await、实用级确定性泛型推断、隐式/交错及 rank 1–4 多维数组，以及由 persistent session 管理的事件和逃逸 delegate；明确禁止 async void。跨调用 closure 使用当前调用预算和取消上下文，独立的外部 delegate 调用由 session token 管理，不会引用已经释放的单次调用资源。取消和超时不会回滚已经发生的状态，基础设施错误不可被用户 catch，finally 使用独立有界清理预算。执行错误通过结构化 `stage/sourceSpan/diagnostics/candidates/cleanupDiagnostics/nextAction` 提供定位和恢复建议。
+`csharp_validate` 只解析/绑定/编译，不执行目标代码、getter 或构造器；其余执行工具可能产生副作用，需要项目写入授权，且不会被安全地自动重试。`csharp_eval` 的 `upilot-csharp-subset-v2` 支持 try/catch/finally/throw、引用语义 closure、typed/block/async lambda、Task/ValueTask await、实用级确定性泛型推断、`??`/`??=`/`typeof`/`nameof`/`default(T)`、隐式/交错及 rank 1–4 多维数组，以及由 persistent session 管理的事件和逃逸 delegate；明确禁止 async void。跨调用 closure 使用当前调用预算和取消上下文，独立的外部 delegate 调用由 session token 管理，不会引用已经释放的单次调用资源。取消和超时不会回滚已经发生的状态，基础设施错误不可被用户 catch，finally 使用独立有界清理预算。执行错误通过结构化 `stage/sourceSpan/diagnostics/candidates/cleanupDiagnostics/nextAction` 提供定位和恢复建议。
 
-Emit callback 可配置次数、重入和 `isolate|propagate` 异常策略，自定义 property accessor 使用同一同步受限 AST；动态 body 可用同步异常、泛型和数组节点，继续拒绝 async/await/closure。相同 spec 的缓存只复用 CLR Type，callback guard、诊断和清理 lease 仍按 session 与实例隔离；动态类型仅支持 Unity Editor/JIT，其程序集使用 `Run`，只能在 Domain Reload 时真正释放。可通过 `unity_capabilities_get.execution` 判断 V2 profile、异步/session 上限和 Emit runtime 是否可用。完整参数与示例见 `skills/upilot-unity-mcp/references/execution-tools.md`。
+`csharp_eval` 的 `emit` 是兼容的 AST `DynamicMethod` 入口缓存；显式 `compiled` 才会把受支持的同步 AST lowering 为 Expression Tree delegate，并在不支持时于执行前失败且不回退。`reflection_emit_type` 创建真实 CLR Type，body 可选 `bodyBackend=interpret|compiled`。Emit callback 可配置次数、重入和 `isolate|propagate` 异常策略；相同 spec 的缓存只复用 CLR Type，callback guard、诊断和清理 lease 仍按 session 与实例隔离。动态类型仅支持 Unity Editor/JIT，其程序集使用 `Run`，只能在 Domain Reload 时真正释放。当前阶段不支持 DLL 动态加载或替换已有程序集方法；完整边界见 `Documentation~/CSharpEvalAndEmitDesign.md` 和 `skills/upilot-unity-mcp/references/execution-tools.md`。
 
 ## 环境要求
 
@@ -704,6 +704,12 @@ python -m pip uninstall upilot-mcp
 ```
 
 `AGENTS.md`、`CLAUDE.md` 等文件可能包含项目自己的规则。清理时只移除 `<!-- upilot:start -->` 与 `<!-- upilot:end -->` 之间的 UPilot 管理块。
+
+## Automation 公共支撑 API
+
+UPilot 提供 Editor-only、业务无关的 Automation 支撑 API：Catalog/Selection 校验、所有权保护的 Console Capture facade、结构化日志策略和不可改写的 JSONL/summary 报告写入。项目仍负责自己的业务生命周期、Case 执行循环、清理与成功判定；这些 API 不构成第二套 Runner 或 Operation。
+
+接口、边界、接入时序和验收证据见 [Automation 公共支撑能力集成方案](Documentation~/Automation-Integration-Plan.md)。
 
 ## UPilot Flow
 

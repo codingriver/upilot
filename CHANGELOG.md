@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add read-only `csharp_validate` preflight and an explicit no-fallback `compiled` backend based on Expression Tree lowering; preserve existing `auto`, `interpret`, and AST-entry `emit` behavior.
+- Harden the V2 lexer/parser with numeric/escape validation, token/depth limits, correct conditional access and single-evaluation assignment semantics, plus `??`, `??=`, `typeof`, `nameof`, and `default(T)`.
+- Extend direct compilation to common synchronous control flow, members, calls, constructors, casts, one-dimensional arrays and indexers; allow Reflection.Emit bodies to opt into it with `bodyBackend=compiled`.
+- Keep DLL/source compilation and arbitrary replacement of precompiled methods outside this phase; document the separate future dynamic-assembly boundary.
+
+- Add an Editor-only, business-neutral Automation support layer with deterministic catalog selection, scoped Console log policy evaluation, owner-scoped Console capture access, and immutable JSONL/summary report artifacts.
+- Add Unity 2022.3 and Unity 6 targeted acceptance coverage for neutral asset-inspection and frame-driven hosts while keeping operation lifecycle and business case execution project-owned.
 - Add Snapshot schema v1 with multi-Camera same-frame color capture, Built-in/URP raw and linear Float EXR depth, optional depth previews, strict SceneView/EditorWindow pixel evidence, and PlayMode Display 0 final-composite GameView capture.
 - Add a unified Snapshot evidence manifest, persisted/cancellable jobs, project-relative hashed artifacts, and managed PNG baselines with pixel-difference ratio, SSIM, diff/heatmap diagnostics, and mandatory dry-run/confirm-token updates.
 - Make every legacy `unity_screenshot_*` tool a Snapshot compatibility wrapper, remove the parallel Unity Bridge screenshot routes, and advance the public tool Registry to v6.

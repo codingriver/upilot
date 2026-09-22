@@ -44,6 +44,11 @@ def test_execution_registry_v6_explicit_tools_are_write_gated_non_idempotent():
         assert descriptor.idempotent is False
         assert descriptor.requires_write_access is True
         assert descriptor.play_mode_policy == "allowed"
+    validate = REGISTRY.resolve("csharp_validate")
+    assert validate is not None
+    assert validate.destructive is False
+    assert validate.idempotent is True
+    assert validate.requires_write_access is False
     assert REGISTRY.resolve("reflection_eval") is None
 
 
@@ -71,6 +76,10 @@ def test_execution_tool_schemas_explain_routes_and_complex_parameters():
     assert "async void" in csharp.description
     for name in ("code", "mode", "sessionId", "variables", "executionBackend", "limits", "resultMode"):
         assert csharp.inputSchema["properties"][name]["description"]
+
+    validate = tools["csharp_validate"]
+    for name in ("code", "mode", "backend", "imports", "variableTypes"):
+        assert validate.inputSchema["properties"][name]["description"]
 
     emit = tools["reflection_emit_type"]
     assert "try/catch/finally" in emit.description
@@ -135,6 +144,28 @@ def test_csharp_eval_dispatches_once_with_normalized_contract():
     assert command == "csharp.eval"
     assert payload["mode"] == "statements"
     assert json.loads(payload["variablesJson"])["items"][0]["name"] == "value"
+
+
+def test_csharp_eval_accepts_explicit_direct_compiled_backend():
+    service = _service()
+    result = asyncio.run(service.csharp_eval("return 1 + 2;", mode="statements", execution_backend="compiled"))
+    assert result.ok
+    assert len(service.dispatcher.calls) == 1
+    assert service.dispatcher.calls[0][1]["executionBackend"] == "compiled"
+
+
+def test_csharp_validate_dispatches_read_only_type_shape_without_values():
+    service = _service()
+    result = asyncio.run(service.csharp_validate(
+        "return value + 1;", mode="statements", backend="compiled",
+        variable_types={"value": "System.Int32"},
+    ))
+    assert result.ok
+    assert len(service.dispatcher.calls) == 1
+    command, payload, _ = service.dispatcher.calls[0]
+    assert command == "csharp.validate"
+    assert payload["backend"] == "compiled"
+    assert payload["variableTypes"] == [{"name": "value", "typeName": "System.Int32"}]
 
 
 def test_csharp_object_dump_forwards_text_and_reflection_options_once():

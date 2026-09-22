@@ -348,7 +348,7 @@ namespace CodingRiver.UPilot
             public double LastFlushTime;
         }
 
-        private sealed class ConsoleCaptureReadPreparation
+        internal sealed class ConsoleCaptureReadPreparation
         {
             public ConsoleCaptureManifest Manifest;
             public string Error;
@@ -397,6 +397,7 @@ namespace CodingRiver.UPilot
             _bridge = bridge;
             EnsureSubscriptions();
             TryRecoverActiveSession();
+            Automation.UPilotConsoleCaptureApiV1.Bind(this);
         }
 
         public void RegisterCommands()
@@ -601,7 +602,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex) { await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"Console Capture 操作失败：{ex.Message}", token, command); }
         }
 
-        private static ConsoleCaptureResult StartCapture(ConsoleCaptureStartPayload payload)
+        internal static ConsoleCaptureResult StartCapture(ConsoleCaptureStartPayload payload)
         {
             TryRecoverActiveSession();
             lock (CaptureLock)
@@ -661,7 +662,7 @@ namespace CodingRiver.UPilot
             return Result(true, "StartCapture", string.Empty, CloneManifest(manifest));
         }
 
-        private static ConsoleCaptureResult GetStatus(string sessionId)
+        internal static ConsoleCaptureResult GetStatus(string sessionId)
         {
             TryRecoverActiveSession();
             lock (CaptureLock)
@@ -676,7 +677,7 @@ namespace CodingRiver.UPilot
                 : Result(false, "GetCaptureStatus", "未找到日志采集会话: " + (sessionId ?? string.Empty), null);
         }
 
-        private static ConsoleCaptureReadPreparation PrepareReadCapture(ConsoleCaptureReadPayload payload)
+        internal static ConsoleCaptureReadPreparation PrepareReadCapture(ConsoleCaptureReadPayload payload)
         {
             TryRecoverActiveSession();
             var manifest = ResolveManifest(payload.sessionId);
@@ -700,7 +701,7 @@ namespace CodingRiver.UPilot
             };
         }
 
-        private static ConsoleCaptureReadResult ReadCaptureFiles(
+        internal static ConsoleCaptureReadResult ReadCaptureFiles(
             ConsoleCaptureManifest manifest,
             ConsoleCaptureReadPayload payload,
             CancellationToken token)
@@ -971,7 +972,7 @@ namespace CodingRiver.UPilot
             return fields.ToArray();
         }
 
-        private static ConsoleCaptureResult StopCapture(string sessionId, string ownerToken, bool forceStop)
+        internal static ConsoleCaptureResult StopCapture(string sessionId, string ownerToken, bool forceStop)
         {
             TryRecoverActiveSession();
             if (forceStop && string.IsNullOrEmpty(sessionId))

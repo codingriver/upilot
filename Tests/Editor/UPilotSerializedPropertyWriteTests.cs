@@ -127,12 +127,14 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void ScriptableObjectWritesAreSavedReimportedAndPersisted()
         {
-            AssetDatabase.CreateFolder("Assets", "UPilotSerializedWriteTests");
+            AssetDatabase.DeleteAsset(TempFolder);
+            Assert.That(AssetDatabase.CreateFolder("Assets", "UPilotSerializedWriteTests"), Is.Not.Empty);
             var asset = ScriptableObject.CreateInstance<SerializedWriteAssetProbe>();
             asset.text = "before";
             asset.count = 1;
             AssetDatabase.CreateAsset(asset, AssetPath);
-            AssetDatabase.SaveAssets();
+            AssetDatabase.SaveAssetIfDirty(asset);
+            Assert.That(asset, Is.Not.Null);
 
             var result = UPilotAssetService.ApplyModifyData(
                 new SerializedObject(asset),

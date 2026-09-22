@@ -8,11 +8,12 @@ Load this reference only when using reflection calls, C# subset evaluation, dyna
 | --- | --- |
 | Call one already-loaded static or instance method | `unity_reflection_call` |
 | Evaluate one bounded expression through the reflection entry point | `unity_reflection_call(expression=...)` |
+| Check syntax or backend support without executing target code | `csharp_validate` |
 | Run locals, exceptions, closures, async lambdas, control flow, or await | `csharp_eval` |
 | Create an actual temporary CLR type or interface adapter | `reflection_emit_type` |
 | Keep variables, instances, types, or callbacks across calls | `execution_session` |
 
-All four routes require write access, can produce side effects, are non-idempotent, and must not be retried automatically. A failure does not imply rollback.
+`csharp_validate` is read-only and idempotent. The execution routes require write access, can produce side effects, are non-idempotent, and must not be retried automatically. A failure does not imply rollback.
 
 ## Typed values
 
@@ -85,11 +86,19 @@ budget fields are rejected instead of silently selecting a default.
 
 ## C# subset
 
+Preflight generated code before execution when the backend boundary is uncertain:
+
+```json
+{"code":"value + 2","mode":"expression","backend":"compiled","variableTypes":[{"name":"value","typeName":"System.Int32"}]}
+```
+
+`backend=interpret` parses only; `emit` also checks the synchronous profile; `compiled` parses, statically binds, lowers and compiles a delegate. Validation does not execute getters, constructors, methods, conversions, or business code.
+
 ```json
 {"code":"var sum = 0; for (var i = 0; i < 10; i++) sum += i; return sum;","mode":"statements","executionBackend":"auto","limits":{"timeoutMs":3000,"maxStatements":10000,"maxLoopIterations":10000}}
 ```
 
-The V2 interpreter supports literals, member/index access, calls, operators, cast/as/is, lexical locals, assignment, blocks, branches, loops, flow control, allowed construction, exceptions, closures, block lambdas, async lambdas, and non-main-thread-blocking await. Explicit generic calls and practical deterministic inference are available, including `Fixture.Identity<int>(3)`. Inference follows base/interface chains, nullable, arrays and `params`; lambda return values alone never infer a type argument. Use explicit generic arguments when `CSHARP_BIND_GENERIC_INFERENCE_FAILED` returns candidates.
+The V2 interpreter supports literals, member/index access, calls, operators, cast/as/is, `??`, `??=`, `typeof`, `nameof`, `default(T)`, lexical locals, assignment, blocks, branches, loops, flow control, allowed construction, exceptions, closures, block lambdas, async lambdas, and non-main-thread-blocking await. Explicit generic calls and practical deterministic inference are available, including `Fixture.Identity<int>(3)`. Inference follows base/interface chains, nullable, arrays and `params`; lambda return values alone never infer a type argument. Use explicit generic arguments when `CSHARP_BIND_GENERIC_INFERENCE_FAILED` returns candidates.
 
 Exceptions support ordered typed/catch-all clauses, catch variables, `throw expression`, rethrow, and `finally` across return/break/continue:
 
@@ -124,7 +133,14 @@ Event subscriptions are session-owned. Keep the same delegate identity for expli
 
 `source.Changed -= handler` unregisters the matching lease. Session close, TTL expiry, and relevant PlayMode invalidation also unsubscribe it.
 
-`auto` interprets the first successful AST and may reuse a verified emitted delegate cache on later identical calls. V2 emit-cache supports the same evaluator AST, including exception/closure/async/array nodes. No backend switch occurs after execution begins.
+Backend selection is explicit and stable:
+
+- `interpret` executes the complete V2 AST.
+- `emit` generates/caches a DynamicMethod entry that still calls the parsed `CSharpProgram`; it avoids repeated parse/entry setup but is not direct C# or per-node IL compilation.
+- `compiled` statically binds and lowers the supported synchronous AST to an Expression Tree delegate. It supports typed locals/inputs, operators, assignment, `if`/`while`/`for`, members, calls, explicit generic calls, constructors, casts, one-dimensional arrays/indexers, `??`, and type intrinsics. Unsupported nodes fail before execution with `CSHARP_COMPILED_UNSUPPORTED_NODE`; there is no interpreter fallback.
+- `auto` preserves compatibility: it interprets the first successful AST and may reuse the old emit-cache on later identical calls. It does not auto-select `compiled`, and no backend switch occurs after execution begins.
+
+Use `compiled` for repeatedly invoked synchronous snippets whose variable types are stable. Use `interpret` for `try/catch/finally`, `foreach`, lambda/closure, await, inferred generics, optional/named/params/ref/out calls, multidimensional arrays, and other full-V2 nodes. Member access and calls in a compiled delegate still pass through the execution context so Unity main-thread scheduling, policy, budgets, diagnostics, and side-effect evidence remain intact.
 
 ## Dynamic types
 
@@ -142,7 +158,7 @@ Callback methods accept a bounded policy:
 {"callbackPolicy":{"exceptionMode":"isolate","maxInvocations":10000,"maxReentrancy":8,"diagnosticsCapacity":32}}
 ```
 
-`execution_session(status)` reports callback invocation/rejection/error counters and bounded recent diagnostics. `isolate` returns the declared type's default value after a callback failure or limit rejection; `propagate` preserves the exception. Bodies use the synchronous V2 profile: try/catch/finally, generics, implicit/typed arrays, and rank 1–4 arrays are allowed; await, async, lambda/closure, raw IL, assembly saving, and source compilation are rejected with `CSHARP_EMIT_UNSUPPORTED_NODE`. Same-domain canonical SHA-256 specs are cached; name conflicts require explicit `hashSuffix`.
+`execution_session(status)` reports callback invocation/rejection/error counters and bounded recent diagnostics. `isolate` returns the declared type's default value after a callback failure or limit rejection; `propagate` preserves the exception. Bodies default to `bodyBackend=interpret` and use the synchronous V2 profile: try/catch/finally, generics, implicit/typed arrays, and rank 1–4 arrays are allowed. Set type- or member-level `bodyBackend=compiled` to require direct lowering before the CLR type is published; it never falls back and follows the finite compiled boundary above. Await, async, lambda/closure, raw IL, assembly saving, DLL loading, arbitrary method replacement, and source compilation are rejected. Same-domain canonical SHA-256 specs are cached; name conflicts require explicit `hashSuffix`.
 
 Spec-hash cache hits reuse only the generated CLR `Type`. Each session and emitted instance receives its own callback registration, guard counters, diagnostics ring, and cleanup lease. Prefer `createInstance=true` to obtain an instance bound to the current session, and never reuse an `instanceHandle` in another session. With `exceptionMode=isolate`, callback exceptions and limit rejections are recorded and return the declared return type's default value. With `exceptionMode=propagate`, the original callback exception type and stack semantics are preserved rather than exposing a reflection wrapper.
 

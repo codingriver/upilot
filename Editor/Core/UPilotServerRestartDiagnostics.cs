@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - MCP server restart persistence and diagnostics.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -26,6 +26,7 @@ namespace CodingRiver.UPilot
         public long oldProcessStopRequestedAtUtcMs;
         public long portsReleasedAtUtcMs;
         public long newProcessStartedAtUtcMs;
+        public long newProcessCreatedAtTicks;
         public long healthVerifiedAtUtcMs;
         public long bridgeVerifiedAtUtcMs;
         public long endedAtUtcMs;
@@ -33,6 +34,9 @@ namespace CodingRiver.UPilot
         public bool healthVerified;
         public bool projectIdentityVerified;
         public bool bridgeVerified;
+        public bool deploymentVerified;
+        public bool readOnlyVerified;
+        public string failurePhase;
         public string healthProjectPath;
         public bool exitObserved;
         public int exitCode;
@@ -93,7 +97,7 @@ namespace CodingRiver.UPilot
             });
         }
 
-        internal static void RecordProcessStarted(string operationId, int processId)
+        internal static void RecordProcessStarted(string operationId, int processId, long createdAtTicks = 0)
         {
             if (processId <= 0) return;
             Update(operationId, record =>
@@ -101,6 +105,7 @@ namespace CodingRiver.UPilot
                 record.phase = "process_started";
                 record.newProcessId = processId;
                 record.newProcessStartedAtUtcMs = UtcNowMs();
+                record.newProcessCreatedAtTicks = createdAtTicks;
             });
         }
 
@@ -206,6 +211,22 @@ namespace CodingRiver.UPilot
             }
         }
 
+        internal static UPilotServerRestartRecord Current
+        {
+            get { lock (Sync) { EnsureLoadedLocked(); return s_record; } }
+        }
+
+        internal static void RecordDeploymentVerified(string operationId)
+        {
+            Update(operationId, record =>
+            {
+                record.deploymentVerified = true;
+                record.readOnlyVerified = true;
+                record.phase = "deployment_verified";
+                TryComplete(record);
+            });
+        }
+
         internal static string ReadServerLogTail(string path)
         {
             try
@@ -243,7 +264,8 @@ namespace CodingRiver.UPilot
 
         private static void TryComplete(UPilotServerRestartRecord record)
         {
-            if (!record.healthVerified || !record.projectIdentityVerified || !record.bridgeVerified)
+            if (!record.healthVerified || !record.projectIdentityVerified || !record.bridgeVerified ||
+                !record.deploymentVerified || !record.readOnlyVerified)
                 return;
             record.status = "succeeded";
             record.phase = "completed";
@@ -262,6 +284,7 @@ namespace CodingRiver.UPilot
             string nextAction)
         {
             record.status = "failed";
+            record.failurePhase = record.phase;
             record.phase = "failed";
             record.errorCode = string.IsNullOrWhiteSpace(errorCode) ? "restart_failed" : errorCode;
             record.error = Bound(error);
@@ -409,6 +432,13 @@ namespace CodingRiver.UPilot
                 return;
             record.bridgeVerified = true;
             record.newBridgeSessionId = bridgeSessionId;
+            TryComplete(record);
+        }
+
+        internal static void RecordDeploymentVerifiedForTests(UPilotServerRestartRecord record)
+        {
+            record.deploymentVerified = true;
+            record.readOnlyVerified = true;
             TryComplete(record);
         }
 

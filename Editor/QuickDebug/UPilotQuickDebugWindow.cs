@@ -364,7 +364,7 @@ namespace CodingRiver.UPilot
                         ParameterLabel("结果模式", "resultMode", "_evalResultMode", "控制结果的编码方式。", "auto：自动选择\ninline：内联返回可序列化值\nhandle：返回 session 对象句柄，必须填 sessionId\nlegacyString：按旧版字符串返回"),
                         _evalResultMode);
                     _evalBackend = EditorGUILayout.TextField(
-                        ParameterLabel("执行后端", "executionBackend", "_evalBackend", "选择 C# 子集的执行后端；开始执行后不会换后端重放。", "auto：自动选择\ninterpret：使用解释器\nemit：使用 DynamicMethod 后端"),
+                        ParameterLabel("执行后端", "executionBackend", "_evalBackend", "选择 C# 子集的执行后端；开始执行后不会换后端重放。", "auto：自动选择\ninterpret：使用解释器\nemit：使用解释器入口缓存\ncompiled：直接编译静态同步子集"),
                         _evalBackend);
                     _evalVariablesJson = EditorGUILayout.TextField(
                         ParameterLabel("输入变量 JSON", "variables", "_evalVariablesJson", "变量名到普通 JSON 值或 TypedValue 的映射。"),

@@ -140,6 +140,33 @@ namespace CodingRiver.UPilot.Tests
         public void Raise(int value) { Changed?.Invoke(value); }
     }
 
+    public sealed class ExecutionAssignmentFixture
+    {
+        public int Value;
+        public ExecutionAssignmentFixture Child;
+        public readonly List<int> Values = new List<int> { 4 };
+        public int Add(int value) { Value += value; return Value; }
+    }
+
+    public static class ExecutionAssignmentFixtureSource
+    {
+        public static ExecutionAssignmentFixture Target;
+        public static int ReceiverCalls;
+        public static int IndexCalls;
+        public static int ArgumentCalls;
+
+        public static ExecutionAssignmentFixture GetTarget() { ReceiverCalls++; return Target; }
+        public static int NextIndex() { IndexCalls++; return 0; }
+        public static int CountArgument(int value) { ArgumentCalls++; return value; }
+        public static void Reset(ExecutionAssignmentFixture target)
+        {
+            Target = target;
+            ReceiverCalls = 0;
+            IndexCalls = 0;
+            ArgumentCalls = 0;
+        }
+    }
+
     public sealed class ExecutionUnityEventFixture : ScriptableObject
     {
         public event Action<int> Changed;
@@ -171,6 +198,8 @@ namespace CodingRiver.UPilot.Tests
             var capabilities = new CodingRiver.UPilot.ExecutionCapabilityPayload();
 
             Assert.That(capabilities.structuredSourceSpans, Is.True);
+            Assert.That(capabilities.directCompiledBackendSupported, Is.True);
+            Assert.That(capabilities.directCompiledEmitBodiesSupported, Is.True);
             Assert.That(capabilities.structuredErrorDetails, Is.True);
             Assert.That(capabilities.legacyJsonErrorDetails, Is.True);
             Assert.That(capabilities.callbackPolicySupported, Is.True);
@@ -918,6 +947,70 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void V2LexerParsesCSharpNumericAndCharacterLiteralsAndRejectsMalformedInput()
+        {
+            Assert.That(CSharpSubsetEngine.Evaluate("0xFF", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo(255));
+            Assert.That(CSharpSubsetEngine.Evaluate("0b1010_0101", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo(165));
+            Assert.That(CSharpSubsetEngine.Evaluate("4_294_967_295u", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo(uint.MaxValue));
+            Assert.That(CSharpSubsetEngine.Evaluate("'\\n'", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo('\n'));
+            Assert.That(CSharpSubsetEngine.Evaluate("'\\u0041'", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo('A'));
+            Assert.That(CSharpSubsetEngine.Evaluate("\"a\\tb\"", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo("a\tb"));
+
+            foreach (string code in new[] { "''", "'ab'", "'\\q'", "\"unterminated", "0x", "1fL", "18446744073709551616" })
+            {
+                var error = Assert.Throws<ExecutionContractException>(() =>
+                    CSharpSubsetEngine.Evaluate(code, "expression", new CSharpEvaluationContext()), code);
+                Assert.That(error.Code, Is.EqualTo("CSHARP_PARSE_ERROR"), code);
+                Assert.That(error.Detail["stage"], Is.EqualTo("parse"), code);
+                Assert.That(error.Detail["sourceSpan"], Is.TypeOf<ExecutionSourceSpan>(), code);
+            }
+
+            string deep = new string('!', 300) + "true";
+            var depth = Assert.Throws<ExecutionContractException>(() =>
+                CSharpSubsetEngine.Evaluate(deep, "expression", new CSharpEvaluationContext()));
+            Assert.That(depth.Code, Is.EqualTo("CSHARP_PARSE_DEPTH_EXCEEDED"));
+            Assert.That(depth.Detail["limit"], Is.EqualTo(256));
+        }
+
+        [Test]
+        public void V2AssignmentTargetsAreEvaluatedOnceAndConditionalAccessShortCircuits()
+        {
+            var target = new ExecutionAssignmentFixture { Value = 2, Child = new ExecutionAssignmentFixture { Value = 7 } };
+            ExecutionAssignmentFixtureSource.Reset(target);
+            var member = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionAssignmentFixtureSource.GetTarget().Value += 3; return 0;",
+                "statements", new CSharpEvaluationContext());
+            Assert.That(member.Value, Is.EqualTo(0));
+            Assert.That(target.Value, Is.EqualTo(5));
+            Assert.That(ExecutionAssignmentFixtureSource.ReceiverCalls, Is.EqualTo(1));
+
+            ExecutionAssignmentFixtureSource.Reset(target);
+            CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionAssignmentFixtureSource.GetTarget().Values[" +
+                "CodingRiver.UPilot.Tests.ExecutionAssignmentFixtureSource.NextIndex()]++; return 0;",
+                "statements", new CSharpEvaluationContext());
+            Assert.That(target.Values[0], Is.EqualTo(5));
+            Assert.That(ExecutionAssignmentFixtureSource.ReceiverCalls, Is.EqualTo(1));
+            Assert.That(ExecutionAssignmentFixtureSource.IndexCalls, Is.EqualTo(1));
+
+            ExecutionAssignmentFixtureSource.Reset(null);
+            var conditionalCall = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionAssignmentFixtureSource.GetTarget()?.Add(" +
+                "CodingRiver.UPilot.Tests.ExecutionAssignmentFixtureSource.CountArgument(9))",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(conditionalCall.Value, Is.Null);
+            Assert.That(ExecutionAssignmentFixtureSource.ReceiverCalls, Is.EqualTo(1));
+            Assert.That(ExecutionAssignmentFixtureSource.ArgumentCalls, Is.EqualTo(0));
+
+            ExecutionAssignmentFixtureSource.Reset(null);
+            var conditionalChain = CSharpSubsetEngine.Evaluate(
+                "CodingRiver.UPilot.Tests.ExecutionAssignmentFixtureSource.GetTarget()?.Child.Value",
+                "expression", new CSharpEvaluationContext());
+            Assert.That(conditionalChain.Value, Is.Null);
+            Assert.That(ExecutionAssignmentFixtureSource.ReceiverCalls, Is.EqualTo(1));
+        }
+
+        [Test]
         public void V2ForAndForeachUseSpecifiedCaptureCells()
         {
             var forCapture = CSharpSubsetEngine.Evaluate(
@@ -1439,6 +1532,135 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void DirectCompiledBackendRunsTypedControlFlowAndRejectsUnsupportedNodesBeforeExecution()
+        {
+            const string code = "var sum = 0; for (var i = 0; i < 10; i++) sum += i; return sum;";
+            var context = new CSharpEvaluationContext();
+            string key = CSharpCompiledBackend.CacheKey(code, "statements", context.Imports, context.SnapshotVariables());
+            var compiled = CSharpCompiledBackend.Compile(key, code, "statements", context);
+            var result = compiled(context);
+            Assert.That(result.Value, Is.EqualTo(45));
+            Assert.That(CSharpCompiledBackend.IsCached(key), Is.True);
+            Assert.That(result.Budget.LoopIterations, Is.EqualTo(10));
+
+            var payload = new CSharpEvalPayload
+            {
+                code = code,
+                mode = "statements",
+                executionBackend = "compiled",
+            };
+            var worker = typeof(UPilotExecutionService).GetMethod("ExecuteEvaluationWorker", BindingFlags.NonPublic | BindingFlags.Static);
+            object completed = worker.Invoke(null, new object[] { payload, new CSharpEvaluationContext() });
+            Assert.That(completed.GetType().GetField("BackendUsed").GetValue(completed), Is.EqualTo("compiled"));
+            Assert.That(((CSharpEvaluationResult)completed.GetType().GetField("Result").GetValue(completed)).Value, Is.EqualTo(45));
+
+            ExecutionReflectionFixture.InvocationCount = 0;
+            const string unsupportedCode = "new int[1, 1]";
+            var unsupportedContext = new CSharpEvaluationContext();
+            string unsupportedKey = CSharpCompiledBackend.CacheKey(
+                unsupportedCode, "expression", unsupportedContext.Imports, unsupportedContext.SnapshotVariables());
+            var unsupported = Assert.Throws<ExecutionContractException>(() =>
+                CSharpCompiledBackend.Compile(unsupportedKey, unsupportedCode, "expression", unsupportedContext));
+            Assert.That(unsupported.Code, Is.EqualTo("CSHARP_COMPILED_UNSUPPORTED_NODE"));
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(0));
+        }
+
+        [Test]
+        public void CSharpValidatePreflightsBackendsWithoutExecutingBusinessCode()
+        {
+            ExecutionThrowingGetterFixture.GetterCallCount = 0;
+            var interpreted = UPilotExecutionService.ValidateCSharpPayload(new CSharpValidatePayload
+            {
+                code = "CodingRiver.UPilot.Tests.ExecutionThrowingGetterFixture.Value",
+                mode = "expression",
+                backend = "interpret",
+            });
+            Assert.That(interpreted.syntaxValid, Is.True);
+            Assert.That(interpreted.backend, Is.EqualTo("interpret"));
+            Assert.That(interpreted.modeUsed, Is.EqualTo("expression"));
+            Assert.That(ExecutionThrowingGetterFixture.GetterCallCount, Is.Zero);
+
+            var compiled = UPilotExecutionService.ValidateCSharpPayload(new CSharpValidatePayload
+            {
+                code = "value + 2",
+                mode = "expression",
+                backend = "compiled",
+                variableTypes = new[]
+                {
+                    new CSharpValidationVariablePayload { name = "value", typeName = "System.Int32" },
+                },
+            });
+            Assert.That(compiled.boundaries, Is.EqualTo(new[] { "parse", "bind", "lower", "delegate-compile" }));
+
+            var unsupported = Assert.Throws<ExecutionContractException>(() =>
+                UPilotExecutionService.ValidateCSharpPayload(new CSharpValidatePayload
+                {
+                    code = "new int[1, 1]",
+                    mode = "expression",
+                    backend = "compiled",
+                    variableTypes = new[]
+                    {
+                        new CSharpValidationVariablePayload { name = "value", typeName = "System.Int32" },
+                    },
+                }));
+            Assert.That(unsupported.Code, Is.EqualTo("CSHARP_COMPILED_UNSUPPORTED_NODE"));
+            Assert.That(ExecutionThrowingGetterFixture.GetterCallCount, Is.Zero);
+        }
+
+        [Test]
+        public void DirectCompiledBackendBindsMembersCallsConstructionArraysAndIndexers()
+        {
+            const string code =
+                "var created = new CodingRiver.UPilot.Tests.ExecutionAssignmentFixture();" +
+                "created.Value = 2;" +
+                "created.Values[0]++;" +
+                "var values = new int[] { 1, 2, 3 };" +
+                "values[1] += 4;" +
+                "return System.Math.Abs(-created.Add(values[1]));";
+            var context = new CSharpEvaluationContext();
+            string key = CSharpCompiledBackend.CacheKey(code, "statements", context.Imports, context.SnapshotVariables());
+            CSharpEvaluationResult result = CSharpCompiledBackend.Compile(key, code, "statements", context)(context);
+
+            Assert.That(result.Value, Is.EqualTo(8));
+            var created = (ExecutionAssignmentFixture)result.Variables["created"];
+            Assert.That(created.Value, Is.EqualTo(8));
+            Assert.That(created.Values[0], Is.EqualTo(5));
+            Assert.That(((int[])result.Variables["values"])[1], Is.EqualTo(6));
+            Assert.That(result.Budget.Calls, Is.EqualTo(2));
+            Assert.That(result.Budget.Allocations, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void NullCoalescingAndTypeIntrinsicsMatchAcrossInterpreterAndCompiledBackends()
+        {
+            Assert.That(CSharpSubsetEngine.Evaluate("default(int)", "expression", new CSharpEvaluationContext()).Value, Is.EqualTo(0));
+            Assert.That(CSharpSubsetEngine.Evaluate("typeof(System.String)", "expression", new CSharpEvaluationContext()).Value,
+                Is.EqualTo(typeof(string)));
+            Assert.That(CSharpSubsetEngine.Evaluate(
+                "nameof(CodingRiver.UPilot.Tests.ExecutionReflectionFixture.InvocationCount)",
+                "expression", new CSharpEvaluationContext()).Value, Is.EqualTo("InvocationCount"));
+
+            const string code =
+                "int? value = 2;" +
+                "var first = value ?? CodingRiver.UPilot.Tests.ExecutionReflectionFixture.CountInvocation();" +
+                "value = null;" +
+                "value ??= CodingRiver.UPilot.Tests.ExecutionReflectionFixture.CountInvocation();" +
+                "return first + value;";
+
+            ExecutionReflectionFixture.InvocationCount = 0;
+            var interpreted = CSharpSubsetEngine.Evaluate(code, "statements", new CSharpEvaluationContext());
+            Assert.That(interpreted.Value, Is.EqualTo(3));
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1));
+
+            ExecutionReflectionFixture.InvocationCount = 0;
+            var context = new CSharpEvaluationContext();
+            string key = CSharpCompiledBackend.CacheKey(code, "statements", context.Imports, context.SnapshotVariables());
+            var compiled = CSharpCompiledBackend.Compile(key, code, "statements", context)(context);
+            Assert.That(compiled.Value, Is.EqualTo(3));
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1));
+        }
+
+        [Test]
         public void ReflectionEmitCreatesInterfaceImplementationAndProperty()
         {
             var engine = new ReflectionEmitEngine();
@@ -1530,6 +1752,55 @@ namespace CodingRiver.UPilot.Tests
             var unsupported = Assert.Throws<ExecutionContractException>(() => engine.Emit(
                 spec, Guid.NewGuid().ToString("N"), "reject", "s.emit.v2.reject", _ => null, _ => { }));
             Assert.That(unsupported.Code, Is.EqualTo("CSHARP_EMIT_UNSUPPORTED_NODE"));
+        }
+
+        [Test]
+        public void ReflectionEmitCanRequireDirectCompiledMethodBodiesWithoutInterpreterFallback()
+        {
+            var engine = new ReflectionEmitEngine();
+            var spec = new DynamicTypeSpec
+            {
+                typeName = "UPilot.Tests.DynamicCompiledBody_" + Guid.NewGuid().ToString("N"),
+                bodyBackend = "compiled",
+                interfaces = new[] { typeof(IExecutionEmitFixture).FullName },
+                methods = new[]
+                {
+                    new DynamicMethodSpec
+                    {
+                        name = "Increment",
+                        returnType = "System.Int32",
+                        parameters = new[] { new DynamicParameterSpec { name = "value", typeName = "System.Int32" } },
+                        implements = typeof(IExecutionEmitFixture).FullName + ".Increment",
+                        body = "var next = value + 1; return next;",
+                    },
+                },
+            };
+            Action cleanup = null;
+            var emitted = engine.Emit(spec, Guid.NewGuid().ToString("N"), "reject", "s.emit.compiled",
+                _ => null, action => cleanup = action);
+            var instance = (IExecutionEmitFixture)Activator.CreateInstance(emitted.Type);
+            Assert.That(instance.Increment(8), Is.EqualTo(9));
+            cleanup?.Invoke();
+
+            ExecutionReflectionFixture.InvocationCount = 0;
+            var unsupported = new DynamicTypeSpec
+            {
+                typeName = "UPilot.Tests.DynamicCompiledUnsupported_" + Guid.NewGuid().ToString("N"),
+                bodyBackend = "compiled",
+                methods = new[]
+                {
+                    new DynamicMethodSpec
+                    {
+                        name = "Run",
+                        returnType = "System.Int32",
+                        body = "var values = new int[1, 1]; return 0;",
+                    },
+                },
+            };
+            var error = Assert.Throws<ExecutionContractException>(() => engine.Emit(
+                unsupported, Guid.NewGuid().ToString("N"), "reject", "s.emit.compiled.unsupported", _ => null, _ => { }));
+            Assert.That(error.Code, Is.EqualTo("CSHARP_COMPILED_UNSUPPORTED_NODE"));
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(0));
         }
 
         [Test]

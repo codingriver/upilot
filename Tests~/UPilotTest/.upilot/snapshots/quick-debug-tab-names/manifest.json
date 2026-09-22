@@ -1,0 +1,242 @@
+{
+    "snapshotSchemaVersion": 1,
+    "persistenceSchemaVersion": 2,
+    "snapshotSequence": 5,
+    "persistenceStatus": "pending",
+    "persistenceError": "",
+    "persistenceRecovered": false,
+    "manifestBytes": 0,
+    "snapshotId": "snapshot-d56d95b9a44b4cf9ab3fff20a9855fc0",
+    "status": "completed",
+    "terminal": true,
+    "success": true,
+    "requestHash": "47180f7b887424aefd7febdd063010896690ce61ec4ddaab8786d15eb3233beb",
+    "requestKey": "quick-debug-tab-names-20260920",
+    "phase": "completed",
+    "completionPolicy": "allOrNothing",
+    "startedAtUtcMs": 1789876479373,
+    "updatedAtUtcMs": 1789876479486,
+    "endedAtUtcMs": 1789876479486,
+    "cancelRequested": false,
+    "request": {
+        "targets": [
+            {
+                "targetId": "target-1",
+                "kind": "EditorWindow",
+                "instanceId": "568105589213755258",
+                "domainGeneration": "",
+                "hierarchyPath": "",
+                "exactName": "",
+                "cameraName": "",
+                "fullTypeName": "CodingRiver.UPilot.UPilotQuickDebugWindow",
+                "title": "UPilot 快捷调试",
+                "requireContentRect": false,
+                "targetDisplay": 0,
+                "channels": [],
+                "depthPreview": false,
+                "width": 580,
+                "height": 552
+            }
+        ],
+        "channels": [
+            "Color"
+        ],
+        "syncMode": "sameFrame",
+        "completionPolicy": "allOrNothing",
+        "capturePolicy": {
+            "requireVerifiedPixels": true,
+            "allowFallback": false,
+            "allowOcclusionSensitive": false,
+            "allowStaleFrame": false,
+            "maxStaleFrameAgeMs": 1000
+        },
+        "outputDirectory": ".upilot/snapshots/quick-debug-tab-names",
+        "requestKey": "quick-debug-tab-names-20260920"
+    },
+    "environment": {
+        "unityVersion": "6000.6.0a2",
+        "platform": "WindowsEditor",
+        "graphicsApi": "Direct3D12",
+        "colorSpace": "Linear",
+        "renderPipeline": "UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset",
+        "renderPipelineVersion": "0.0.0.0",
+        "editorWindowState": "normal",
+        "editorMinimized": false
+    },
+    "frame": {
+        "frameCount": 4,
+        "fixedTime": 0.6799997687339783,
+        "playModeState": "edit",
+        "capturedAtUtcMs": 1789876479486
+    },
+    "targets": [
+        {
+            "targetId": "target-1",
+            "kind": "editorWindow",
+            "status": "completed",
+            "success": true,
+            "requested": {
+                "targetId": "target-1",
+                "kind": "EditorWindow",
+                "instanceId": "568105589213755258",
+                "domainGeneration": "",
+                "hierarchyPath": "",
+                "exactName": "",
+                "cameraName": "",
+                "fullTypeName": "CodingRiver.UPilot.UPilotQuickDebugWindow",
+                "title": "UPilot 快捷调试",
+                "requireContentRect": false,
+                "targetDisplay": 0,
+                "channels": [],
+                "depthPreview": false,
+                "width": 580,
+                "height": 552
+            },
+            "camera": {
+                "instanceId": "",
+                "name": "",
+                "hierarchyPath": "",
+                "scenePath": "",
+                "nearClip": 0.0,
+                "farClip": 0.0,
+                "orthographic": false,
+                "fieldOfView": 0.0,
+                "orthographicSize": 0.0,
+                "aspect": 0.0,
+                "targetDisplay": 0,
+                "usesReversedZBuffer": false,
+                "viewMatrix": [],
+                "projectionMatrix": [],
+                "cameraToWorldMatrix": []
+            },
+            "editorWindow": {
+                "instanceId": "568105589213755258",
+                "domainGeneration": "1789876423",
+                "title": "UPilot 快捷调试",
+                "fullTypeName": "CodingRiver.UPilot.UPilotQuickDebugWindow",
+                "focused": true,
+                "x": 492.0,
+                "y": 137.0,
+                "width": 580.0,
+                "height": 552.0,
+                "pixelsPerPoint": 1.0,
+                "contentRectVerified": false,
+                "cropComplete": false,
+                "includesDecorations": false,
+                "geometrySource": "Win32.GetWindowRect+GetClientRect+ClientToScreen",
+                "hostRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 484,
+                    "top": 106,
+                    "right": 1080,
+                    "bottom": 723
+                },
+                "contentRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 492,
+                    "top": 137,
+                    "right": 1072,
+                    "bottom": 715
+                },
+                "cropRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 492,
+                    "top": 137,
+                    "right": 1072,
+                    "bottom": 689
+                },
+                "contentLeft": 492,
+                "contentTop": 137,
+                "contentRight": 1072,
+                "contentBottom": 715,
+                "cropLeft": 492,
+                "cropTop": 137,
+                "cropRight": 1072,
+                "cropBottom": 689
+            },
+            "gameView": {
+                "targetDisplay": 0,
+                "screenWidth": 0,
+                "screenHeight": 0,
+                "playMode": false,
+                "runInBackgroundForced": false
+            },
+            "provenance": {
+                "captureApi": "Win32.PrintWindow(PW_RENDERFULLCONTENT)",
+                "pixelSourceVerified": true,
+                "occlusionSensitive": false,
+                "degraded": false,
+                "degradeReason": "",
+                "originalError": "",
+                "fallbackChain": [],
+                "matchedFullTypeName": "CodingRiver.UPilot.UPilotQuickDebugWindow",
+                "matchedInstanceId": "568105589213755258",
+                "windowHandle": 5061088,
+                "unityProcessId": 85920,
+                "foreground": true,
+                "repaintRequestedAtUtcMs": 1789876479419,
+                "repaintObservedAtUtcMs": 0,
+                "repaintSequence": 0,
+                "includesSceneGui": false,
+                "includesHandles": false,
+                "pixelsPerPoint": 1.0,
+                "contentRectVerified": false,
+                "cropComplete": false,
+                "includesDecorations": false,
+                "geometrySource": "Win32.GetWindowRect+GetClientRect+ClientToScreen",
+                "hostRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 484,
+                    "top": 106,
+                    "right": 1080,
+                    "bottom": 723
+                },
+                "contentRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 492,
+                    "top": 137,
+                    "right": 1072,
+                    "bottom": 715
+                },
+                "cropRect": {
+                    "coordinateSpace": "screenPixels",
+                    "left": 492,
+                    "top": 137,
+                    "right": 1072,
+                    "bottom": 689
+                }
+            },
+            "artifactIds": [
+                "artifact-139578323eda42f8bed475cd8f2a8f31"
+            ]
+        }
+    ],
+    "artifacts": [
+        {
+            "artifactId": "artifact-139578323eda42f8bed475cd8f2a8f31",
+            "targetId": "target-1",
+            "role": "color",
+            "path": ".upilot/snapshots/quick-debug-tab-names/target-1.75a34976.color.png",
+            "mimeType": "image/png",
+            "encoding": "rgba8",
+            "units": "",
+            "bytes": 23277,
+            "width": 580,
+            "height": 552,
+            "sha256": "351aaea8d6ec01011515c0bb172e364d3385bb2d435be19df9681f05e8ebaeac",
+            "acceptedAsEvidence": true,
+            "statistics": {
+                "pixelCount": 0,
+                "validPixelCount": 0,
+                "validPixelRatio": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+                "mean": 0.0
+            }
+        }
+    ],
+    "failures": [],
+    "outputDirectory": ".upilot/snapshots/quick-debug-tab-names",
+    "manifestPath": ".upilot/snapshots/quick-debug-tab-names/manifest.json",
+    "manifestSha256": ""
+}

@@ -1,10 +1,11 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — simplified main-window state and actions.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -66,6 +67,7 @@ namespace CodingRiver.UPilot
         public bool AnyServiceActive => BridgeActive || McpActive;
     }
 
+    [InitializeOnLoad]
     internal static class UPilotQuickStart
     {
         private const double StartTimeoutSeconds = 15d;
@@ -74,6 +76,100 @@ namespace CodingRiver.UPilot
 
         private static UPilotServiceOperation _operation;
         private static double _operationStartedAt;
+        private static Task<string> _repairTask;
+        private static string _repairPhase = "";
+        private static string _repairCause = "";
+        private static double _nextDiagnosticAt;
+        private static bool _explicitlyStopped;
+        private static Action _afterRepairStart;
+        private static bool _recoveryProbeRunning;
+        private static int _repairGeneration;
+        private static string PendingAttemptKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.PendingAttempt");
+        private static string PendingCauseKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.PendingCause");
+        private static string AutoAttemptKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Attempted");
+        private static string FailureKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Failure");
+        private static string FailureDialogKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Dialog");
+        internal static bool IsRepairing => _repairTask != null && !_repairTask.IsCompleted;
+        internal static bool LastRepairSucceeded { get; private set; }
+        internal static string DiagnosticDetails => UPilotDeploymentDiagnostics.Details;
+
+        static UPilotQuickStart()
+        {
+            if (UPilotBridge.IsMainEditorProcess())
+            {
+                var loadedVersion = UPilotDeploymentDiagnostics.Version;
+                EditorApplication.update += ObserveDeployment;
+                EditorApplication.delayCall += RecoverRepairObservation;
+            }
+        }
+
+        private static void RecoverRepairObservation()
+        {
+            if (IsRepairing) return;
+            var pending = SessionState.GetString(PendingAttemptKey, "");
+            if (string.IsNullOrEmpty(pending)) return;
+            var record = UPilotServerRestartDiagnostics.Current;
+            if (record?.status == "running")
+            {
+                _repairPhase = "重启中：" + record.phase;
+                _repairCause = SessionState.GetString(PendingCauseKey, "");
+                return;
+            }
+            if (record?.status != "succeeded" || record.operationId != pending)
+                ShowRepairFailureOnce(pending, "重载中断了修复准备或验证；没有重放停启。请检查状态后点击“重新启动”。");
+            SessionState.EraseString(PendingAttemptKey);
+        }
+
+        private static void ObserveDeployment()
+        {
+            if (EditorApplication.timeSinceStartup < _nextDiagnosticAt) return;
+            _nextDiagnosticAt = EditorApplication.timeSinceStartup + 2;
+            if (!UPilotSetupState.IsCompleted || !UPilotBootstrap.IsEnabled || _explicitlyStopped) return;
+            try
+            {
+                var server = UPilotMcpServerManager.Instance.GetStatus();
+                var bridge = UPilotBridge.Instance.GetStatus();
+                var issues = UPilotDeploymentDiagnostics.Observe(bridge, server);
+                var record = UPilotServerRestartDiagnostics.Current;
+                if (record?.status == "failed")
+                    ShowRepairFailureOnce(record.operationId, record.failurePhase + "\n" + record.error);
+                if (IsRepairing || record?.status == "running") return;
+                if (issues.Length == 0 && bridge.IsAuthenticated && server.HealthEndpointResponded)
+                {
+                    if (!_recoveryProbeRunning && (EditorPrefs.GetBool(AutoAttemptKey, false) ||
+                        !string.IsNullOrEmpty(EditorPrefs.GetString(FailureKey, ""))))
+                        _ = ConfirmObservedRecoveryAsync(server, bridge.SessionId, _repairGeneration);
+                    return;
+                }
+                if (!bridge.IsStarted || !server.StatusQueryCompleted || issues.Length == 0 ||
+                    EditorPrefs.GetBool(AutoAttemptKey, false)) return;
+                // A fresh explicit mismatch or an exhausted observation window starts one repair.
+                if (!issues.Any(issue => issue.Code == "authentication" || issue.Code == "timeout" ||
+                    issue.Code == "version" || issue.Code == "channel" || issue.Code == "protocol" ||
+                    issue.Code == "entry" || issue.Code == "configured_entry" || issue.Code == "module" || issue.Code == "project" ||
+                    issue.Code == "instance")) return;
+                _ = AutoRepairAsync(null);
+            }
+            catch (Exception ex)
+            {
+                EditorPrefs.SetString(FailureKey, "状态诊断失败：" + ex.Message);
+            }
+        }
+
+        private static async Task ConfirmObservedRecoveryAsync(McpServerStatus server, string sessionId, int generation)
+        {
+            _recoveryProbeRunning = true;
+            try
+            {
+                await UPilotMcpServerManager.Instance.VerifyReadOnlyRoundTripAsync(server, sessionId);
+                if (generation != _repairGeneration || IsRepairing ||
+                    UPilotBridge.Instance.GetStatus().SessionId != sessionId) return;
+                EditorPrefs.DeleteKey(FailureKey);
+                EditorPrefs.DeleteKey(AutoAttemptKey);
+            }
+            catch { /* Observation never hides the original failure or opens another dialog. */ }
+            finally { _recoveryProbeRunning = false; }
+        }
 
         public static UPilotMainSnapshot Evaluate(
             BridgeStatus bridgeStatus,
@@ -89,6 +185,15 @@ namespace CodingRiver.UPilot
                     bridgeStatus.IsStarted,
                     mcpStatus.IsRunning);
             }
+
+            var issues = UPilotDeploymentDiagnostics.Observe(bridgeStatus, mcpStatus);
+            if (IsRepairing || UPilotServerRestartDiagnostics.TryGetActive(out _))
+                return new UPilotMainSnapshot(UPilotMainState.Restarting, "正在重启 UPilot",
+                    _repairPhase + "\n" + _repairCause, bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            var failure = EditorPrefs.GetString(FailureKey, "");
+            if (issues.Length > 0 || !string.IsNullOrEmpty(failure))
+                return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "UPilot 需要修复",
+                    issues.Length > 0 ? issues[0].Message : failure, bridgeStatus.IsStarted, mcpStatus.IsRunning);
 
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&
@@ -118,6 +223,10 @@ namespace CodingRiver.UPilot
             BridgeStatus bridgeStatus,
             McpServerStatus mcpStatus)
         {
+            if (!string.IsNullOrEmpty(bridgeStatus.AuthenticationError) || !string.IsNullOrEmpty(mcpStatus.ErrorMessage))
+                return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "服务状态异常",
+                    bridgeStatus.AuthenticationError + "\n" + mcpStatus.ErrorMessage,
+                    bridgeStatus.IsStarted, mcpStatus.IsRunning);
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&
                              mcpStatus.WsPortListening;
@@ -148,7 +257,7 @@ namespace CodingRiver.UPilot
                 return new UPilotMainSnapshot(
                     UPilotMainState.NeedsRepair,
                     "端口被其他程序占用",
-                    "已确认端口属于其他程序，可以切换到新的空闲端口。",
+                    "已确认端口属于其他程序。修复不会停止该进程，也不会自动修改端口。",
                     bridgeStatus.IsStarted,
                     true);
             }
@@ -157,7 +266,7 @@ namespace CodingRiver.UPilot
                 mcpStatus.ProcessOwnership == McpProcessOwnership.Unknown)
             {
                 return new UPilotMainSnapshot(
-                    UPilotMainState.CheckingStatus,
+                    UPilotMainState.NeedsRepair,
                     "服务身份尚未确认",
                     "端口正在监听，但暂时无法确认所属进程。UPilot 不会自动切换端口。",
                     bridgeStatus.IsStarted,
@@ -235,6 +344,7 @@ namespace CodingRiver.UPilot
 
         public static void Start()
         {
+            _explicitlyStopped = false;
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
@@ -252,21 +362,13 @@ namespace CodingRiver.UPilot
 
         public static void Restart()
         {
-            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
-            {
-                Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
-                return;
-            }
-
-            BeginOperation(UPilotServiceOperation.Restarting);
-            UPilotBridge.Instance.Stop();
-            var manager = UPilotMcpServerManager.Instance;
-            manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
-            manager.InvalidateStatusCache();
+            _ = AutoRepairAsync(null);
         }
 
         public static void Stop()
         {
+            if (IsRepairing) return;
+            _explicitlyStopped = true;
             BeginOperation(UPilotServiceOperation.Stopping);
             UPilotBridge.Instance.Stop();
             var manager = UPilotMcpServerManager.Instance;
@@ -274,83 +376,92 @@ namespace CodingRiver.UPilot
             manager.InvalidateStatusCache();
         }
 
-        public static async Task<string> AutoRepairAsync(AgentMcpConfigStatus[] agentConfigs)
+        public static Task<string> AutoRepairAsync(AgentMcpConfigStatus[] agentConfigs, Action afterStart = null)
         {
-            if (UPilotUpdateService.Instance.IsServiceStartBlocked)
-                return UPilotUpdateService.ServiceStartBlockedMessage;
+            if (afterStart != null) _afterRepairStart += afterStart;
+            if (IsRepairing) return _repairTask;
+            _repairGeneration++;
+            _explicitlyStopped = false;
+            EditorPrefs.SetBool(AutoAttemptKey, true);
+            _repairTask = RepairCoreAsync();
+            return _repairTask;
+        }
 
-            var manager = UPilotMcpServerManager.Instance;
-            var runtime = UPilotServerRuntimeService.Instance;
-            var needsPythonEntry = runtime.GetConfiguredMode() == UPilotServerRuntimeMode.Python;
-            if (!needsPythonEntry && !runtime.IsStandaloneExeConfigured(out _))
-                return "自动管理的 MCP 服务尚未安装，请打开首次向导完成设置。";
-
-            if (needsPythonEntry && !manager.IsPythonEntryValid(out _))
+        private static async Task<string> RepairCoreAsync()
+        {
+            LastRepairSucceeded = false;
+            var attemptId = Guid.NewGuid().ToString("N");
+            SessionState.SetString(PendingAttemptKey, attemptId);
+            _repairCause = EditorPrefs.GetString(FailureKey, "");
+            try
             {
-                manager.ValidateAndAutoFixPath();
-                if (!manager.IsPythonEntryValid(out _))
+                var manager = UPilotMcpServerManager.Instance;
+                _repairPhase = "确认项目、进程与真实来源";
+                var status = await manager.GetFreshStatusAsync();
+                var issues = UPilotDeploymentDiagnostics.Observe(UPilotBridge.Instance.GetStatus(), status);
+                _repairCause = string.Join("\n", issues.Select(issue => issue.Message));
+                SessionState.SetString(PendingCauseKey, _repairCause);
+                if (!string.IsNullOrEmpty(status.ErrorMessage) && !status.IsRunning)
+                    throw new InvalidOperationException(status.ErrorMessage);
+                if (status.IsRunning && status.ProcessOwnership != McpProcessOwnership.CurrentUPilot)
+                    throw new InvalidOperationException("无法安全确定当前项目 Server，未停止任何进程。\n" + status.ProcessOwnershipEvidence);
+                if (!string.IsNullOrWhiteSpace(status.Health?.configured_project_path) &&
+                    !UPilotDeploymentDiagnostics.SamePath(status.Health.configured_project_path, UPilotProjectConfig.ProjectRoot))
+                    throw new InvalidOperationException("Server 返回其他项目身份，拒绝停止该进程。");
+                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
+                    throw new InvalidOperationException(UPilotUpdateService.ServiceStartBlockedMessage);
+                _repairPhase = "准备当前包的配套 Server";
+                UPilotServerRuntimeService.RepairOwnsFailureDialog = true;
+                await UPilotServerRuntimeService.Instance.PrepareMatchingServerForRepairAsync();
+                _repairPhase = "停止旧 Bridge / Server，确认进程退出及端口释放";
+                var previousId = UPilotServerRestartDiagnostics.Current?.operationId;
+                manager.RestartPreparedServer(() => _afterRepairStart?.Invoke());
+                var record = UPilotServerRestartDiagnostics.Current;
+                if (record == null || record.operationId == previousId)
+                    throw new InvalidOperationException("未能建立新的重启操作，请检查进程角色和更新状态。");
+                attemptId = record.operationId;
+                SessionState.SetString(PendingAttemptKey, attemptId);
+                while (UPilotServerRestartDiagnostics.IsActive(attemptId))
                 {
-                    manager.ResetPythonEntryPathToDefaultAbsolute();
-                    manager.ValidateAndAutoFixPath();
+                    _repairPhase = "重启中：" + record.phase;
+                    await Task.Delay(100);
+                    record = UPilotServerRestartDiagnostics.Current;
+                    if (record?.operationId != attemptId)
+                        throw new InvalidOperationException("重启操作身份已改变，停止观察；不会重放操作。");
                 }
-
-                if (!manager.IsPythonEntryValid(out _))
-                    return "未能自动找到服务文件，请打开高级设置检查 Python 入口。";
+                if (record.status != "succeeded")
+                    throw new InvalidOperationException(record.failurePhase + "\n" + record.error + "\n" + record.nextAction);
+                EditorPrefs.DeleteKey(FailureKey);
+                EditorPrefs.DeleteKey(AutoAttemptKey);
+                _repairCause = "";
+                LastRepairSucceeded = true;
+                return "UPilot 已重新启动，配套身份、握手和实际只读调用均已通过。";
             }
-
-            var mcpStatus = await manager.GetFreshStatusAsync();
-            var bridgeStatus = UPilotBridge.Instance.GetStatus();
-            var repairAction = DetermineRepairAction(bridgeStatus, mcpStatus);
-            if (repairAction == UPilotRepairAction.None)
-                return "服务已经恢复，无需修复。";
-
-            if (repairAction == UPilotRepairAction.WaitForStatus)
-                return "服务身份仍在确认，暂不切换端口。请稍候后刷新状态。";
-
-            if (repairAction == UPilotRepairAction.SwitchPorts)
+            catch (Exception ex)
             {
-                BeginOperation(UPilotServiceOperation.Restarting);
-                return SwitchToAvailablePortsAndRestart(agentConfigs)
-                    ? "已切换到空闲端口并重新启动。"
-                    : "未修改工程端口。";
+                var failure = "修复失败，阶段：" + _repairPhase + "\n" + ex.Message;
+                EditorPrefs.SetString(FailureKey, failure);
+                ShowRepairFailureOnce(attemptId, failure);
+                return failure;
             }
-
-            if (repairAction == UPilotRepairAction.RestartServer)
+            finally
             {
-                BeginOperation(UPilotServiceOperation.Restarting);
-                UPilotBridge.Instance.Stop();
-                manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
-                manager.InvalidateStatusCache();
-                return "服务正在重新启动。";
+                UPilotServerRuntimeService.RepairOwnsFailureDialog = false;
+                _afterRepairStart = null;
+                SessionState.EraseString(PendingAttemptKey);
+                SessionState.EraseString(PendingCauseKey);
+                ClearOperation();
             }
+        }
 
-            if (repairAction == UPilotRepairAction.RestartBridge)
-            {
-                BeginOperation(UPilotServiceOperation.Restarting);
-                if (!bridgeStatus.IsStarted)
-                    UPilotBridge.Instance.EnsureStarted();
-                else
-                    UPilotBridge.Instance.Restart();
-                manager.InvalidateStatusCache();
-                return "正在重新连接 Unity Bridge。";
-            }
-
-            BeginOperation(
-                mcpStatus.IsRunning || bridgeStatus.IsStarted
-                    ? UPilotServiceOperation.Restarting
-                    : UPilotServiceOperation.Starting);
-
-            if (!mcpStatus.IsRunning)
-                manager.StartServer();
-
-            if (!bridgeStatus.IsStarted)
-                UPilotBridge.Instance.EnsureStarted();
-            else if (!bridgeStatus.IsAuthenticated)
-                UPilotBridge.Instance.Restart();
-
-            manager.InvalidateStatusCache();
-
-            return "正在重新连接 Unity。";
+        private static void ShowRepairFailureOnce(string attemptId, string failure)
+        {
+            if (EditorPrefs.GetString(FailureDialogKey, "") == attemptId) return;
+            EditorPrefs.SetString(FailureDialogKey, attemptId);
+            EditorPrefs.SetString(FailureKey, failure);
+            EditorPrefs.SetBool(AutoAttemptKey, true);
+            UPilotScrollableDialog.ShowDialog("UPilot 自动修复失败", failure + "\n\n" +
+                DiagnosticDetails + "\n\n请检查上述路径、版本、渠道及进程归属，然后点击“重新启动”。被中断的任务不会自动重放。");
         }
 
         internal static UPilotRepairAction DetermineRepairAction(
@@ -364,18 +475,18 @@ namespace CodingRiver.UPilot
             if (ready)
                 return UPilotRepairAction.None;
             if (mcpStatus.IsRunning && mcpStatus.DiagnosisPending)
-                return UPilotRepairAction.WaitForStatus;
+                return UPilotRepairAction.RestartServer;
             if (mcpStatus.IsRunning &&
                 mcpStatus.ProcessOwnership == McpProcessOwnership.Foreign)
-                return UPilotRepairAction.SwitchPorts;
+                return UPilotRepairAction.RestartServer;
             if (mcpStatus.IsRunning &&
                 mcpStatus.ProcessOwnership == McpProcessOwnership.Unknown)
-                return UPilotRepairAction.WaitForStatus;
+                return UPilotRepairAction.RestartServer;
             if (mcpStatus.IsRunning && !mcpHealthy)
                 return UPilotRepairAction.RestartServer;
             if (mcpHealthy && (!bridgeStatus.IsStarted || !bridgeStatus.IsAuthenticated))
-                return UPilotRepairAction.RestartBridge;
-            return UPilotRepairAction.StartServices;
+                return UPilotRepairAction.RestartServer;
+            return UPilotRepairAction.RestartServer;
         }
 
         private static UPilotMainSnapshot? EvaluateOperation(
@@ -492,36 +603,6 @@ namespace CodingRiver.UPilot
                 return true;
             }
             catch (Exception ex) { UPilotPortRegistration.Report("配置启动端口", ex); return false; }
-        }
-
-        private static bool SwitchToAvailablePortsAndRestart(AgentMcpConfigStatus[] agentConfigs)
-        {
-            try { return SwitchToAvailablePortsAndRestartCore(agentConfigs); }
-            catch (Exception ex) { UPilotPortRegistration.Report("修复端口", ex); return false; }
-        }
-
-        private static bool SwitchToAvailablePortsAndRestartCore(AgentMcpConfigStatus[] agentConfigs)
-        {
-            var bridge = UPilotBridge.Instance;
-            var manager = UPilotMcpServerManager.Instance;
-            var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
-            if (!EditorUtility.DisplayDialog("修改当前工程端口？",
-                    $"当前 WS {bridge.WsPort} / HTTP {bridge.HttpPort} 存在冲突。\n" +
-                    $"将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort}，并更新已配置客户端。",
-                    "修改并重启", "取消"))
-                return false;
-            manager.StopServer();
-            bridge.Stop();
-            bridge.SetProjectEndpoints(UPilotBridge.DefaultWsHost, pair.wsPort, pair.httpPort);
-            manager.InvalidateStatusCache();
-
-            RewriteExistingAgentConfigs(agentConfigs);
-            EditorApplication.delayCall += () =>
-            {
-                manager.StartServer();
-                bridge.EnsureStarted();
-            };
-            return true;
         }
 
         internal static void RewriteExistingAgentConfigs(AgentMcpConfigStatus[] statuses)

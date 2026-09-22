@@ -1,5 +1,82 @@
 # `csharp_eval`、Reflection.Emit 与执行 Session
 
+## 2026-09-22 Eval/Emit-first 方案
+
+本阶段不实现 DLL 动态加载。DLL 编译、依赖解析、版本入口切换、可信来源和卸载策略作为独立后期项目规划；当前实现不使用 Roslyn、CodeDom、外部 `csc/mcs`、`Assembly.Load` 或 Unity 脚本编译，也不承诺 IL2CPP Player。
+
+目标是让 AI 在不退出 PlayMode、不触发 Domain Reload 的前提下完成常见的小范围诊断代码执行、运行时状态修改、现有 API 调用，以及显式动态扩展点的临时类型实现。它不提供对已编译游戏方法的任意替换；“替换”仅限调用方主动持有并更新的 delegate、接口实例、callback 或其他显式入口。
+
+### 三个 Eval 后端
+
+| 后端 | 实际机制 | 冷启动 | 重复调用 | 能力边界 |
+| --- | --- | --- | --- | --- |
+| `interpret` | 解析为 V2 AST 后逐节点解释 | 最低 | 最慢 | 完整 V2：异常、闭包、lambda、async/await、泛型、rank 1-4 数组 |
+| `emit` | `DynamicMethod` 缓存入口调用已解析的 `CSharpProgram` | 中 | 比重复解析更省，但仍解释 AST | 与解释器 AST 相同；名称为兼容保留，不代表逐节点 IL lowering |
+| `compiled` | AST 静态绑定并 lowering 为 `System.Linq.Expressions` delegate | 最高 | 支持范围内最快 | 同步有限子集；不支持则在执行前返回 `CSHARP_COMPILED_UNSUPPORTED_NODE`，绝不回退 |
+
+`auto` 行为保持兼容：首次解释，后续可命中旧 emit-cache；不会自动选择 `compiled`。需要直接编译时必须显式传 `executionBackend=compiled`。不能在没有基准数据时给出固定倍数承诺；通常热循环中的 AST 分派差异最大，而含大量 Unity/用户方法调用的代码仍受主线程调度和反射调用成本主导。
+
+`compiled` 当前支持：
+
+- 字面量、typed/`var` locals、typed input variables、数值提升和转换。
+- 算术、比较、布尔短路、条件表达式、`??`、`??=`、`typeof`、`nameof`、`default(T)`。
+- local/input/member/index assignment 与前后缀增减，目标只求值一次。
+- `if`、`while`、`for`、`break`、`continue`、`return` 和预算/取消检查。
+- 编译期绑定的字段、属性、实例/静态方法、显式泛型方法、构造器、cast/as/is。
+- 一维显式或隐式数组及 CLR 数组/默认 `Item` indexer。
+
+直接编译边界：`try/catch/finally`、`throw`、`foreach`、lambda/closure、delegate 动态调用、`await`、泛型推断、可选/命名/`params`/`ref/out` 参数、多维数组，以及完整 C# 声明仍使用 `interpret`/`emit` 或明确拒绝。成员调用已在编译期选定目标，但运行时仍经 `CSharpEvaluationContext.Invoke` 调度，以保持 Unity 主线程、安全策略、预算和副作用证据。
+
+### 只读预检
+
+`csharp_validate` 是只读、幂等、无需写授权的预检工具：
+
+- `backend=interpret`：词法和语法解析。
+- `backend=emit`：解析并检查同步 Emit profile。
+- `backend=compiled`：解析、静态绑定、lowering 和 delegate 编译；`variableTypes` 为外部变量提供 CLR 类型，不读取实例值。
+
+预检不会执行 getter、setter、构造器、目标方法或用户转换。实际 `csharp_eval`、`reflection_emit_type` 和 `execution_session` 仍是可写、非幂等执行工具。
+
+### Reflection.Emit 方法体
+
+`reflection_emit_type` 仍负责创建真实 CLR Type；这与 `csharp_eval(executionBackend=emit)` 的 AST 入口缓存不是一回事。类型或成员 spec 可设置 `bodyBackend=interpret|compiled`：
+
+- 缺省 `interpret` 保持现有同步 V2 body 兼容性。
+- `compiled` 在类型发布前完成静态绑定和 delegate 编译，不支持的节点使整个 Emit 请求失败，不保留半成品入口，也不回退解释器。
+- 生成的 CLR wrapper 当前仍使用 `object[]` dispatcher 来统一 session、callback、异常和生命周期语义；body 内部可以直接编译，但 wrapper 边界仍有装箱与分派成本。
+- 不公开 raw IL。Reflection.Emit 是 CLR 的类型/IL 生成基础设施，但它不是 C# 编译器：C# 词法、语法、类型推断、重载解析、控制流和 lowering 都必须由 UPilot 或 Roslyn 实现，CLR 不会自动把 C# 源码编译成等价方法。
+
+### 目录与职责
+
+```text
+Editor/
+  Execution/Core/
+    CSharpSubsetEngine.cs       # V2 lexer/parser/AST、解释器和执行语义
+    CSharpEmitBackend.cs        # 兼容 emit-cache：DynamicMethod -> CSharpProgram
+    CSharpCompiledBackend.cs    # 同步有限子集静态绑定、Expression Tree lowering/cache
+    ReflectionEmitEngine.cs     # 结构化 CLR type、bodyBackend、callback/session 分派
+    ExecutionCore.cs            # 预算、类型解析、反射 binder 与共享执行契约
+  Core/UPilotExecutionService.cs # Bridge DTO、validate/eval/session/emit 编排
+  QuickDebug/UPilotQuickDebugWindow.cs # Editor 内手工调试入口
+upilotserver~/
+  src/upilot_mcp/domain/execution_service.py # 参数规范化与 Bridge 调度
+  src/upilot_mcp/mcp_tools/execution_tools.py # MCP schema、只读/写入元数据
+Tests/Editor/UPilotExecutionCoreTests.cs     # lexer/parser/backend/Emit 定向测试
+skills/upilot-unity-mcp/references/execution-tools.md # AI 使用契约
+```
+
+后期 DLL 项目应另建 `Editor/Execution/DynamicAssemblies/` 边界，至少包含编译服务、引用白名单、版本入口注册表、程序集身份/哈希、诊断和 PlayMode 通道；不要把它塞入当前 Eval lexer 或 Reflection.Emit engine。第一版可只追加加载、用逻辑入口指向最新 revision，不承诺卸载；Mono/CLR 中已加载程序集和类型引用通常只能靠 Domain Reload/进程结束释放。
+
+### 推荐优先级与结论
+
+1. P0（本阶段完成）：严格词法/转义/数值解析、解析深度与 token 限制、条件访问和赋值求值一次、`??`/`??=`/type intrinsics、只读验证。
+2. P0（本阶段完成）：显式 `compiled` 后端、无静默 fallback、常用同步成员/调用/构造/数组 lowering、Emit `bodyBackend=compiled`。
+3. P1：按真实失败样本补 `compiled` 的 `try/catch/finally`、`foreach`、`params`/optional 和泛型推断；先基准再优化 typed wrapper。
+4. P2：插值/逐字字符串、对象/集合 initializer 和有限 class-source 前端；只有 AI 请求频率证明价值时才实现。
+5. 后期独立项目：DLL/source compilation channel、revision registry 和明确的项目集成入口。
+
+结论：对 UPilot 的日常 AI 调试，完整 V2 解释器负责覆盖率，`compiled` 负责高频同步小程序，Reflection.Emit 负责“必须有真实 Type”的接口/回调适配，已经形成足够实用的三层能力。继续追求完整 C# 编译器的收益低于维护成本；超出边界的长期逻辑应回到项目正式代码，真正的热更/程序集加载则进入独立 DLL 方案。
+
 ## C# 子集 V2（2026-09-04）
 
 当前 language profile 为 `upilot-csharp-subset-v2`。V2 在不引入 Roslyn、CodeDom、mcs 或 Unity Compilation/Eval API 的前提下增加：
@@ -85,7 +162,7 @@
 }
 ```
 
-`mode` 支持 `expression`、`statements` 和 `auto`。`executionBackend` 支持 `interpret`、`emit` 和 `auto`；`auto` 优先解释执行，仅对已验证且收益明确的 AST 使用 Emit，不按 Unity 版本切换 provider。
+`mode` 支持 `expression`、`statements` 和 `auto`。`executionBackend` 支持 `interpret`、`emit`、`compiled` 和 `auto`；三者的当前语义与边界以本文顶部 2026-09-22 方案为准。
 
 ### V1 语言范围
 
@@ -95,7 +172,7 @@
 - 支持 bounded `try/catch/finally`、throw/rethrow；异常保留原类型、message、有限 stack、source span 和 cleanup diagnostics。
 - `await` 通过共享 `AwaitableAdapter` 实现，不能通过阻塞 Unity 主线程模拟。
 
-V1 不支持 namespace/type 声明、preprocessor、unsafe、pointer、P/Invoke、dynamic、任意 assembly load、文件/进程/网络 API、线程创建和反射绕过。需要动态类时使用 `reflection_emit_type`，不在 `csharp_eval` 中解析 `class` 源码。
+当前子集不支持 namespace/type 声明、preprocessor、unsafe、pointer、P/Invoke、dynamic、任意 assembly load、文件/进程/网络 API、线程创建和反射绕过。需要动态类时使用 `reflection_emit_type`，不在 `csharp_eval` 中解析 `class` 源码。
 
 ### 返回契约
 
@@ -203,7 +280,7 @@ V1 不支持 namespace/type 声明、preprocessor、unsafe、pointer、P/Invoke�
 3. P1：实现 `csharp_eval` parser/AST statement interpreter；这是使用频率最高、兼容性最好的新增能力。
 4. P1：扩展 `unity_reflection_call` 使用 typed arguments、handle、泛型和 `ref/out`。
 5. P1：实现 `reflection_emit_type` 高层 spec；重点服务接口实例、事件 listener 和 callback adapter。
-6. P2：在性能数据证明有收益后，再增加逐 AST 节点 IL lowering 与更完整 lambda/async；V1 已提供直接绑定已验证 AST 的 DynamicMethod 缓存。
+6. P2：直接编译同步子集已经改用 Expression Tree lowering；后续仅在性能数据和真实失败样本证明价值时扩边界，不开发手写 raw IL 前端。
 
 不建议先实现 Emit 再补 binder/session。Emit 生成的类型如果没有统一 handle、参数绑定和生命周期管理，无法稳定地被后续工具调用或被项目回调。
 

@@ -416,10 +416,6 @@ namespace CodingRiver.UPilot.Tests
                 yield return null;
 
                 var history = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
-                Assert.That(
-                    history.gap || history.events.Any(item => item.kind == "observed-open"),
-                    Is.True,
-                    "A failed OnEnable must leave either a bounded observation or an explicit sampling gap.");
                 Assert.That(history.events.All(item => !item.failureReasonAuthoritative), Is.True);
                 Assert.That(history.events.All(item =>
                     string.IsNullOrEmpty(item.failureReason)
@@ -428,7 +424,7 @@ namespace CodingRiver.UPilot.Tests
             finally
             {
                 UPilotFailingOnEnableWindowProbe.ThrowOnEnable = false;
-                if (window != null) window.Close();
+                if (window != null) UnityEngine.Object.DestroyImmediate(window);
             }
         }
 

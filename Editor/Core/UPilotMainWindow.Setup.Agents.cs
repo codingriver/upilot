@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - first setup Agent configuration and completion.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -131,18 +131,10 @@ namespace CodingRiver.UPilot
                     _setupCompletionMessage = "配置已写入，正在启动服务…";
                     var manager = UPilotMcpServerManager.Instance;
                     manager.ValidateAndAutoFixPath();
-                    UPilotBridge.Instance.Stop();
-                    manager.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
-
-                    var expectedVersion = _setupRuntimeChoice == SetupRuntimeChoice.Managed
-                        ? UPilotProjectConfig.Current.runtime?.serverVersion ?? ""
-                        : UPilotServerRuntimeService.UpmVersion;
-                    var runningVersion = await manager.WaitForServerVersionAsync(expectedVersion, 15000);
-                    if (string.IsNullOrWhiteSpace(runningVersion) ||
-                        (!string.IsNullOrWhiteSpace(expectedVersion) &&
-                         UPilotServerRuntimeService.CompareVersions(runningVersion, expectedVersion) < 0))
+                    var repairResult = await UPilotQuickStart.AutoRepairAsync(null);
+                    if (!UPilotQuickStart.LastRepairSucceeded)
                     {
-                        _setupCompletionMessage = "服务未能按预期启动，请检查服务日志后重试。";
+                        _setupCompletionMessage = repairResult;
                         _setupCompletionMessageType = MessageType.Error;
                         return;
                     }

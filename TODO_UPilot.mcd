@@ -1,5 +1,29 @@
 ﻿# UPilot Improvement Backlog
 
+## UPilot-20260921-AutomationSupportLayer：业务无关 Automation 公共支撑层（P1，已完成）
+
+- 日期/触发任务：2026-09-21，分析 `F:\xclient2` KingShotBattle Automation 并提取必要的项目无关能力。
+- 原痛点：项目侧重复维护选择校验、Console 文本分类、通用报告与 Capture 内部反射适配；但把 Case loop 或业务状态机下沉会形成第二套调度器并破坏业务所有权。
+- 已实现能力：`AutomationCatalogV1/AutomationSelectionV1`、`UPilotConsoleCaptureApiV1`、`AutomationLogPolicyV1`、`AutomationReportWriterV1`；全部 Editor-only，复用既有 Operation/Capture/Snapshot，不新增 MCP 工具、依赖或执行框架。
+- 预期效率收益：后续项目只维护业务 lifecycle、Case 与规则值，减少重复日志分页/分类、报告落盘和 Capture 所有权适配；失败证据可统一判定完整性。
+- 优先级：P1；建议归属：通用 UPilot/MCP。
+- 可验收标准及证据：`D:\upilot\Documentation~\Automation-Integration-Plan.md` 第 6/8 节；Unity 6 与 Unity 2022.3 均为 21/21 Passed、关联编译和 cleanup 成功。
+- 相关绝对路径：`D:\upilot\Editor\Automation`、`D:\upilot\Tests\Editor\Automation`。
+- 项目双向引用：`F:\xclient2\TODO_UPilot.mcd` / `KSB-20260921-UPilotAutomationMigration`。
+- 状态：Completed。xclient2 业务迁移不属于本条完成条件，按独立文档延期。
+
+## UPilot-20260921-AcceptanceCompactResponse：验收响应应默认返回紧凑摘要（P2，Open）
+
+- 日期/触发任务：2026-09-21，运行 Automation 公共支撑层的 `unity_upilot_acceptance_run` 定向验收。
+- 当前痛点：成功响应内联完整 source hash inventory，单次响应约 350KB～493KB并在客户端输出中截断，关键的 test total/passed/failed、cleanup 和 artifact 信息需要再次读取 330KB～493KB 的 summary 才能确认。
+- 期望能力：`unity_upilot_acceptance_run` 默认只返回 compile identity、selector match、test terminal counts、cleanup、sourceUnchanged 与 artifact path/bytes/SHA256；完整 source/import hash inventory 只写 artifact。提供显式 `detailLevel=full` 才内联大清单。
+- 预期效率收益：每轮验收减少一次本地 JSON 解析和大量上下文传输，关键结果可直接读取；预计减少 90% 以上成功响应体积并节省 10～30 秒人工/Agent 核对。
+- 优先级：P2；建议归属：通用 UPilot/MCP。
+- 可验收标准：同一 21-test fixture 在默认模式下响应小于 32KB且完整包含终态统计与 artifact hash；artifact 保留完整 inventory；`detailLevel=full` 与 artifact 内容一致。
+- 相关工具/证据：`unity_upilot_acceptance_run`；runGuid `1ad22085-bebd-45c9-9d0e-257cc392f6b8`、`37dfe123-7e30-422c-8c70-03f05d315ec2`；对应 summary 492976/350294 bytes。
+- 项目双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260921-AcceptanceCompactResponse`。
+- 状态：Open；出现次数 2。
+
 ## 2026-09-21 xclient2 现场补充：WriteBatch 关联与 TypeValueBinding（P1/P2，Open）
 
 - 日期/触发场景：2026-09-21，`F:\xclient2` 合并弹道编辑器预警资源生成入口。
@@ -1246,6 +1270,9 @@ UPilot 通用开发：
 
 ### [已完成并入P0] UPilot Test Runner 保存 run GUID 并提供 status/cancel/force-reset 能力
 
+- 2026-09-22 Unity 2022.3 回归（P1/Open，通用 UPilot/MCP）：`F:\xclient2` 弹道接触伤害定向 EditMode runGuid=`aa61b192-02c7-4135-9e1a-4bc70ed92064` 已权威保存 7 个叶子结果（6 passed / 1 failed），但清理持续停在 `cleanup/running`。`unity_test_force_cleanup` 返回 `TEST_RUNNER_BINDING_UNAVAILABLE`，因为当前 `UnityEditor.TestTools.TestRunner.Api.TestRunnerApi` 不存在适配层要求的 `m_testJobDataHolder` static property，且命令明确 `commandSubmitted=false/changed=false`。官方 `TestRunnerApi.IsRunActive()` 已确认 `false`；有界 `csharp_eval` 清理在反射重载绑定阶段失败，未提交状态修改且未重试。期望版本适配层探测真实 Runner 作业与 callback 成员，并将“断言终态”和“资源清理终态”分离；叶子完成后一次自动或显式清理须在 15 秒内得到 `cleanupSucceeded=true`、`unresolvedResources=[]`，重复调用幂等。规范验收在 `D:\upilot\Tests~\UPilotTest` 的 Unity 2022.3 运行一个含失败叶子的 7 项 EditMode 集合，不得访问不存在的 `m_testJobDataHolder`。预计每次节省 1～3 分钟等待、一次无效清理和一次额外 Domain Reload。项目双向现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260823-02`；状态：Open，原“已完成”取消能力需针对该版本回归重新闭环。
+- 2026-09-22 现场恢复验证：在 `TestRunnerApi.IsRunActive()==false` 后，通过当前真实实例的公开泛型 `UnregisterCallbacks<ICallbacks>(callback)` 解除回调，再清除 UPilot 过期 `_activeRunGuid` 并调用 `CleanupActiveRun()`，`F:\xclient2` 的 EditMode runGuid=`2e33f720-c2ab-4934-8620-4581d3f9fd18` 为 7/7 Passed、PlayMode runGuid=`7b2a156a-011b-4c4c-979e-2ecb4a8f8bee` 为 3/3 Passed，均已权威完成且 `cleanupSucceeded=true`、`unresolvedResources=[]`。人工有界恢复已证明版本适配方向，专用 `unity_test_force_cleanup` 尚未实现该探测，因此仍为 P1/Open。
+
 - 2026-09-14 进度诊断增量（P2/Open，通用 UPilot/MCP）：`F:\xclient2` 多轮弹道最终定向 runGuid=`51842931-3e46-45d1-99a9-71304562c1ff` 持续推进并在约 21 秒后 `12/12 passed`、`cleanupSucceeded=true`，但高频/较长 EditMode 用例期间 Editor 状态可能短暂表现为 stale/busy，调用方仍需交叉查询才能区分正常推进与停止泵送。建议测试状态直接返回 `progressAgeMs/editorPumpAgeMs` 和 `running_with_progress/waiting_for_editor/stuck` 分类，仅超过有界阈值才建议 Hang 诊断。验收以持续 30 秒、每秒推进的 fixture 和停止推进 fixture 对照，前者不得误报，后者给稳定 failureSignature/nextAction。预计每轮减少 2～4 次状态查询并避免误取消。项目双向现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260823-02`；原 P1 取消回归与本 P2 增量分别跟踪。
 
 - 2026-09-14 收口：保存 run GUID、status/cancel/force-cleanup/force-reset 与版本化 Runner 适配层均已实现；Unity 6/2022.3 的真实 30 秒 fixture 首次取消、15 秒内清理和重复取消幂等已通过，证据与剩余 Reload 边界统一归入上方 P0 Runner 条目。本条历史缺失 API 描述不再作为独立 P1 待开发项；`progressAgeMs` 分类仍是单独 P2 增量。
@@ -2418,9 +2445,53 @@ UPilot 通用开发：
 
 ## 部署新鲜度证据与备用端点客户端（2026-09-21）
 
+- 2026-09-21 开发更新（本条通用能力唯一跟踪项；P1；通用 UPilot/MCP；状态：已开发，待用户手动验收）：按用户最新决定，以“发现异常或点击修复后直接执行”替代本条历史的“不自动重启/等待空闲交接”。新增必要的部署诊断类，复用 QuickStart、Manager 和重启记录；立即显示版本/渠道/协议/入口/项目异常，整体状态默认 30 秒、错误保留、失败后重新启动、每故障周期一次自动尝试、失败每轮一次弹窗。Server 身份在启动时固定；非 main 严格等版本，仅明确 main 豁免产品版本，仍校验其他身份。修复核对 PID/创建时间/当前项目，确认退出、端口释放、配套启动及只读往返，不换端口、不等待任务、不重放任务、不重启 Unity。独立包 added/removed 和来源切换已接入；普通重载不无条件停服。
+- 开发交付与可验收标准：方案及手动矩阵保存为 `D:\upilot\Documentation~\Status-Diagnosis-Direct-Repair-Plan.md`，覆盖版本/渠道/协议/入口、状态失败与超时、任务运行中直接重启、安全拒绝、重复点击、成功及单次失败弹窗。仅做规范工程编译和 Python 语法编译，不运行自动化测试、验收或业务冒烟；最终编译证据见方案第 9 节，验收保留“待用户手动验收”。预期每次混用部署减少 5～10 分钟人工路径排查。双向引用：`F:\xclient2\TODO_UPilot.mcd` / “本地 UPM 切换后的 Server/Bridge 协议不匹配诊断”；不修改 xclient2 业务桥。
+- 下列现场补证、规则同步和原诊断结论为历史记录；其中旧的“不自动重启”策略及“尚未实施”描述由上述用户授权开发更新替代，身份不明或其他项目进程禁止结束的安全边界保持不变。
+- 2026-09-21 同一现场触发路径补充（不增加出现次数）：用户补充在 Package Manager 先移除旧包、再添加本地新版。当前 `UPilotPackageUpdateLifecycle.OnRegisteringPackages` 仅从 `changedFrom/changedTo` 同时取旧/新包，缺任一即返回；注册完成也仅检查 `changedTo`，未处理独立 added/removed。目标为 Local/Embedded 源码包时 `ShouldManagePackageUpdate` 返回 false，只清理更新状态而不进入 PrepareForPackageUpdate 的停服流程；普通 Bridge Domain Reload 回调不停止外部 Server。因此该操作顺序能够产生旧进程保留、新 Bridge 接入的现场。已确认直接根因为协议混用；未取得当时完整 UPM 事件序列，不将具体回调路径表述为已动态复现。后续应补齐独立移除/重装/切换来源的生命周期诊断与受控进程交接，并验证普通脚本 Domain Reload 不误停 Server、手工入口不被静默覆盖、未知或其他项目进程不被终止。
+- 2026-09-21 xclient2 本地 UPM 切换补证（出现次数：1 组；P1；通用 UPilot/MCP；状态：Open，诊断完成、修复未实施）：`F:\xclient2\Packages\manifest.json` 已改为 `file:D:/upilot`，但监听 HTTP 8013 / Bridge 8767 的进程仍为 PID 26144，启动时间 2026-09-11 10:49:38，命令入口为 `F:/xclient2/Library/PackageCache/io.github.codingriver.upilot@a29a6a42a2/upilotserver~/run_upilot_mcp.py`。用户附件 `C:\Users\coding\.codex\attachments\8d92fe82-3af2-4440-b3f5-d79498372e46\pasted-text.txt` 显示新 Bridge 发送 `identityContractVersion=1`，旧 Server 的 accepted hello 响应缺少 identityContractVersion/verificationLevel，触发 `sys.auth.contract_mismatch server=0 bridge=1` 后 Bridge 主动 Abort 并重复重连。这里 0 是缺失整数的默认值，不是已证明的服务版本号。实时 `unity_mcp_status` 请求 `req-06eac58b-ebd2-427e-9075-30c17fb22ebb` 返回目标项目正确、connected/serverReady=false，缓存 compile verifying 不作为当前编译事实。
+- 本现场的期望能力：将认证拒绝/身份契约不匹配持久投影到 BridgeStatus 和主窗口 NeedsRepair，显示期望/实际或缺失字段及精确项目恢复动作；不得永久退回 CheckingStatus。切换本地 UPM 后区分包来源、配置的 Server 入口及实际运行进程入口；`ValidateAndAutoFixPath` 当前仅以文件存在判断有效，不能据此证明与包匹配。诊断不得自动重启、绕过身份校验或停止其他项目进程。
+- 本现场的效率收益与验收：预计每次混用部署减少 5～10 分钟路径排查和无效等待。在 `D:\upilot\Tests~\UPilotTest` 定向覆盖新 Bridge/旧 hello、相同版本不同来源、旧入口仍存在、正常同源握手及未知进程；协议拒绝后明确 NeedsRepair，不虚报 Ready，不自动杀进程，正常握手恢复后错误可清除。相关代码：`D:\upilot\Editor\Core\UPilotBridge.cs`、`UPilotQuickStart.cs`、`UPilotMcpServerManager.cs`。项目双向引用：`F:\xclient2\TODO_UPilot.mcd` / “本地 UPM 切换后的 Server/Bridge 协议不匹配诊断”。本次未重启服务、修改产品代码或触发编译。
 - 观察问题：现有状态可确认项目路径、连接、Server/Unity PID 及 Bridge 契约，但这些字段和磁盘源码、健康检查或相同版本字符串不能证明 Server 当前加载的源码身份。缺少可信身份时，自动成套重启会影响未知在途任务。
 - 影响流程：双版本验收、Python/Bridge 协议改动后的部署核验，以及未注入客户端工具的备用 HTTP 端点调用。
 - 本次处理：Agent 35 / Skill 37 模板加入 verified、suspected-stale、unverified 的证据边界及受控刷新要求；复用既有 client_probe 和 p0_acceptance_call.py，不新增传输层。证据客户端在派发前核验精确项目，拒绝 Capture 启停及凭证参数，脱敏输出与证据，区分 not_sent/sent_unknown/response_received，异常不重放。
 - 验证证据：证据客户端、client_probe、reload evidence 三组定向 Python 测试共 47 passed；8011/8017 两端点只读握手通过，备用端点真实只读调用成功，部署新鲜度仍明确为 unverified。规范项目五目标同步至 Agent 35 / Skill 37；source 和两份 installed 校验通过，重复同步 44 个文件的集合、内容与修改时间不变，未新增备份。
 - 后续建议：如需自动判定新鲜度，为 Server 进程提供启动时捕获且绑定进程会话的构建/源码身份，并与 Bridge 契约和 domain 身份分别报告；不得用请求时读取的磁盘哈希冒充已加载代码身份。只读身份接口应覆盖旧进程配新磁盘源码、同版本不同构建、协议不匹配和身份缺失场景。
 - 当前状态：规则、客户端防护与定向验证已完成；运行代码身份能力仅记录待评估，未新增身份协议、自动重启或恢复已取消验收。未修改 TODO_Distill.md、UPM 版本或 Unity 2022.3 项目规则。
+## UPilot-20260921-OperationEmptyCaptureArtifact - 空 Capture 不应因缺少 JSONL 误报清理超时
+
+- 日期：2026-09-21。
+- 触发任务/场景：`F:\xclient2` 接入 UPilot Automation；`unity_operation_start` 先创建 Operation-owned Console Capture，项目 preflight 随后因非法 `acceptanceLogProfile` 在 EditMode 立即失败，Capture 内没有任何记录。
+- 当前痛点：Capture 已成功停止，persisted manifest 显示 `active=false`、`finishedAtUtcMs`、summary、零 dropped 和空内容 SHA256 均有效；但空 Capture 未创建 `console.jsonl`。Operation 将其标记为 `artifactsVerified=false/stopped=false`，持续报告 `Missing capture artifact: jsonlPath`，最终把原业务失败覆盖成 `Failed/CleanupTimeout/OperationCleanupTimeout`，额外等待 60 秒并错误保留 `cleanupPending=true`。
+- 期望 UPilot / MCP 能力：Console Capture 在零记录终态也创建合法空 JSONL，或 Operation 依据已验证的零记录 manifest/summary 接受缺失 JSONL；清理终态必须保留原业务 `failureSignature`，Capture artifact 缺口作为独立 cleanup diagnostic，不能覆盖业务首因。
+- 预期效率收益：所有 preflight 立即失败、无日志快速失败和空任务可减少约 60 秒无效等待，避免人工核对已停止 Capture 及错误失败归因。
+- 优先级：P1。
+- 可验收标准：在 `D:\upilot\Tests~\UPilotTest` 启动带 Operation-owned Capture 的 fixture，让 startCall 在写任何 Console 记录前返回 Failed；Operation 在 5 秒内终态，Capture `active=false/stopped=true/artifactsVerified=true`，`cleanupTerminal=true`，保留 fixture failureSignature，JSONL 要么存在且为零字节/零行，要么以结构化 empty-capture 证据合法省略。Server 重启恢复后结论一致。
+- 复现/证据：operationId=`op-d4b03c0f-2bac-402f-8bbc-247f4328a832`；capture session=`console_20260921_211233_330_4fe625c3`；`F:\xclient2\Log\UPilotConsole\2026-09-21_21-12-33-330_KingShotBattle resource.preload\summary.json`；业务首因 `BattleWorkflow.InvalidLogCategory`，最终误报 `OperationCleanupTimeout`。
+- 相关绝对路径或工具名：`unity_operation_start`、`unity_operation_status`、`unity_operation_wait`、`unity_console_capture_stop`、`D:\upilot\upilotserver~\src\upilot_mcp\domain\task_service.py`。
+- 建议归属：通用 UPilot/MCP。
+- 项目双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260921-OperationEmptyCaptureArtifact`。
+- 出现次数：1。
+- 状态：Open。
+
+## UPilot-20260922-OperationListActiveCount - running 过滤结果与 active 计数语义不一致
+
+- 日期：2026-09-22。
+- 触发任务/场景：Eval/Emit Server-only 部署刷新前，使用 `unity_operation_list(limit=50,status="running")` 检查是否存在不可中断的在途工作；规范 Unity 6 与 Unity 2022.3 项目均出现同一结果。
+- 当前痛点：响应同时返回 `active=1` 与 `operations=[]`。若 `active` 包含当前 `operation.list` 查询自身，而 `operations` 又按 running 过滤后排除它，调用方无法区分“没有其他活动工作”与“存在一条未列出的活动工作”，会阻碍或误导受控重启预检。
+- 影响工具/流程：`unity_operation_list`、Deployment Freshness / Controlled Deployment Refresh 维护预检。
+- 建议改进：明确并统一计数口径；推荐增加 `activeMatchingCount`、`activeOtherCount`，或让 `active` 只统计返回集合所采用的同一过滤域，并显式报告查询自身是否被排除。补充空过滤结果、仅查询自身、另有一个运行中命令三种定向回归。
+- 复现/证据：两个授权测试项目中调用 `unity_operation_list(status="running")` 均得到 `active=1,total>0,operations=[]`；同一时间 Capture 为 0、最近测试终态且 Editor ready。本轮未据此取消或重放任何工作。
+- 优先级：P2。
+- 状态：Open。
+
+## UPilot-20260922-AcceptanceCallDeadlineRegression - 完整验收应在客户端截止前返回持久身份
+
+- 日期：2026-09-22。
+- 触发任务/场景：在授权项目 `D:\upilot\Tests~\UPilotTest` 与 `D:\upilot\Tests~\UPilotTest2022` 运行完整 EditMode 验收。
+- 当前痛点：直接调用 `unity_upilot_acceptance_run` 时，Unity Test Runner 在客户端 300 秒或证据客户端 650 秒窗口后仍继续运行，但调用以 `sent_unknown`/timeout 结束，未返回可继续查询的 taskId，也未为该次调用写出 `Log/UPilotAcceptance/.../summary.json`。调用方只能保留随后发现的 runGuid、轮询 `unity_test_results`，再以更长客户端窗口重新执行整套验收才能得到标准报告。
+- 影响工具/流程：`unity_upilot_acceptance_run`、双版本完整回归、发布前验收证据；会增加一次 10 分钟级重复执行，并可能诱发非幂等重试。
+- 建议改进：让公开一键验收入口在短启动窗口内返回持久 `taskId/operationId/runGuid`，后续通过现有 task/operation 状态接口观察；客户端断开后后台必须继续完成 compile/test/cleanup/source gate 并原子写出 summary。同步等待仅作为有界便利层，窗口结束返回 `waitWindowElapsed=true/terminal=false`，不得丢失持久身份。
+- 复现/证据：Unity 6 首次最终运行 runGuid=`4a1acfad-daf2-4c5e-aacf-d0ed8def8a2c`，最终 964 total / 943 passed / 0 failed / 21 skipped、权威且清理成功，但 650 秒调用超时且无对应 acceptance summary；Unity 2022 首次最终运行 runGuid=`fb171430-1bcd-44b2-a8cf-c847079f532a`，最终 682 total / 656 passed / 0 failed / 26 skipped、权威且清理成功，调用在测试中途 `sent_unknown`。延长等待后重新执行才分别得到 SHA256=`083f7f26c78bf698cfc623d07b094263f2339e9ff73f28e758634af19a4cd0f9` 与 `cf54d7da5d4a8844d8a36b72d4290827b46637e9b84e19e1c62afaca58f6e732` 的标准报告。
+- 优先级：P1。
+- 状态：Open；既有“超长时与故障矩阵”历史条目已完成的是任务化基础能力，本条跟踪当前公开一键入口仍未采用该契约的回归。

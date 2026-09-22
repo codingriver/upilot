@@ -1,0 +1,12 @@
+{
+    "schemaVersion": 1,
+    "trigger": "setup",
+    "reason": "managed_block_differs,management_record_differs",
+    "originalTargetPath": "D:\\upilot\\Tests~\\UPilotTest2022\\.cursor/rules/upilot-unity-mcp.mdc",
+    "originalContentSha256": "1f093be756cec5e7f0d4c68dfe238f688287f1d52b77a9fb55369b15634b212a",
+    "agentRulesVersion": 34,
+    "skillPackVersion": 36,
+    "backedUpAt": "2026-09-21T03:18:48Z",
+    "fileCount": 1,
+    "totalBytes": 21248
+}

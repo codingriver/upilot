@@ -1,10 +1,10 @@
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 34
+rulesVersion: 36
 upilotPackageVersion: 0.3.32
 projectPath: D:\upilot\Tests~\UPilotTest2022
-generatedAt: 2026-09-21T03:18:48Z
+generatedAt: 2026-09-22T00:23:50Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -48,14 +48,20 @@ Project-specific business rules outside this controlled UPilot block take preced
 3. Verify `paths.unityProjectAbsolute` matches `D:\upilot\Tests~\UPilotTest2022` (allow equivalent slash normalization).
 4. Stop and report the mismatch if another Unity project is connected.
 
+## Deployment Freshness
+
+- After Server, Bridge or protocol changes, and when diagnosing suspected version mismatch, verify deployment evidence for each intended endpoint before attributing failures to networking or compatibility. A healthy endpoint, matching version string, recent disk files or process timestamps alone do not prove which code is loaded; report verified, suspected-stale or unverified evidence explicitly.
+- Follow the existing Skill's deployment-freshness workflow. Unknown identity is not restart authorization: inspect in-flight tasks, tests, operations and Capture ownership, then refresh only affected components in an authorized maintenance window. Do not cancel other work, automatically restart Unity with the Server, or replay existing operation starts.
+
 ## Capabilities
 
 - Distinguish server registration, client tool-list injection, and a successful real call; they are different states.
 - If a native tool is not visible in the client, call `unity_capabilities_get` or `unity_tools_find` before declaring it unavailable. Treat `registered`, `available`, and `callableNow` as separate states and follow `unavailableReason` / `nextAction`.
 - After enabling an optional feature or changing tool registration, restart or refresh the MCP client tool list.
 - Use the narrowest dedicated semantic tool. `unity_reflection_call` is the single public generic reflection entry point: pass `typeName` + `methodName` for one structured compiled-method call, or pass only `expression` for one bounded C#-like reflection expression. `kind=auto` selects the engine from the mutually exclusive request shape before execution and never retries through the other engine. The target may mutate project or runtime state, so inspect the exact target and arguments and never retry automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery.
-- Use `csharp_eval` for a bounded UPilot C# subset statement program, `reflection_emit_type` for a structured temporary CLR type, and `execution_session` whenever variables, handles, callbacks, event subscriptions, escaping closures/async delegates, or types must persist across calls. Event `+=` and any closure/async delegate that escapes its creating call require a persistent session.
-- Async lambdas may target only `Task`/`Task<T>` delegates; async void, `Action`, and ordinary event-handler conversion are unsupported. Cancellation does not roll back prior effects: inspect actual session state, never retry automatically, and close the session in every success, failure, timeout, or cancellation path. All four execution routes are write-gated and non-idempotent.
+- Use read-only `csharp_validate` before a complex or generated eval/Emit body when syntax, binding, or backend support is uncertain. Use `csharp_eval` for a bounded UPilot C# subset statement program, `reflection_emit_type` for a structured temporary CLR type, and `execution_session` whenever variables, handles, callbacks, event subscriptions, escaping closures/async delegates, or types must persist across calls. Event `+=` and any closure/async delegate that escapes its creating call require a persistent session.
+- Distinguish Eval backends: `interpret` executes the complete V2 AST; `emit` is the compatible DynamicMethod entry cache and still executes that AST; explicit `compiled` lowers a finite synchronous subset to an Expression Tree delegate and never falls back. Reflection.Emit specs may opt into `bodyBackend=compiled`; raw IL, DLL/source compilation, and arbitrary replacement of precompiled methods remain unsupported.
+- Async lambdas may target only `Task`/`Task<T>` delegates; async void, `Action`, and ordinary event-handler conversion are unsupported. Cancellation does not roll back prior effects: inspect actual session state, never retry automatically, and close the session in every success, failure, timeout, or cancellation path. Execution routes are write-gated and non-idempotent; `csharp_validate` is read-only and idempotent.
 - No separate public reflection-expression alias is exposed. Do not turn expression mode into a multi-step C# script.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.

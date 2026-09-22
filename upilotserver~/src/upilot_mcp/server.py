@@ -28,6 +28,7 @@ from .process_identity import (
 )
 from .session_manager import SessionManager
 from .state_store import CompileSnapshot, StateStore
+from .version import version_payload
 
 logger = logging.getLogger("upilot.server")
 wire_logger = logging.getLogger("upilot.wire")
@@ -893,6 +894,7 @@ class WsOrchestratorServer(WsTransport):
                 "unityProjectPath": unity_project_path,
                 "mcpWorkingDirectory": mcp_cwd,
             }
+            hello_payload.update(version_payload())
             if self.mcp_label:
                 hello_payload["mcpLabel"] = self.mcp_label
             await self._send_candidate_ack(candidate, message, hello_payload)

@@ -1,0 +1,12 @@
+{
+    "schemaVersion": 1,
+    "trigger": "setup",
+    "reason": "managed_block_differs,management_record_differs",
+    "originalTargetPath": "D:\\upilot\\Tests~\\UPilotTest2022\\AGENTS.md",
+    "originalContentSha256": "1537f711095d95ce698cbd577ed8635afa95898c415ee5495748c868adbe12e7",
+    "agentRulesVersion": 34,
+    "skillPackVersion": 36,
+    "backedUpAt": "2026-09-21T03:18:48Z",
+    "fileCount": 1,
+    "totalBytes": 21165
+}

@@ -86,8 +86,12 @@ namespace CodingRiver.UPilot.Flow.Examples
                 if (now - _lastClickTime < DoubleClickThreshold)
                 {
                     _doubleClickCount++;
+                    _lastClickTime = 0f;
                 }
-                _lastClickTime = now;
+                else
+                {
+                    _lastClickTime = now;
+                }
                 OnGenerateClicked();
             }
 

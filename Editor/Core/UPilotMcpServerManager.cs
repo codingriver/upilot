@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — MCP Server Process Manager
 // Manages the external UPilot MCP server process independently of Unity.
 // SPDX-License-Identifier: MIT
@@ -59,6 +59,10 @@ namespace CodingRiver.UPilot
         public bool DiagnosisPending;
         public int ConsecutiveIdentityMisses;
         public long IdentityPendingSinceUtcMs;
+        public bool StatusQueryCompleted;
+        public string StatusFailureStage;
+        public long LastSuccessfulStatusAtUtcMs;
+        internal UPilotServerHealth Health;
     }
 
     public sealed class UPilotMcpServerManager
@@ -73,6 +77,8 @@ namespace CodingRiver.UPilot
         private string _pythonEntryPath = DefaultPythonEntry;
         private string _logLevel = DefaultLogLevel;
         private bool _autoStart = true;
+        private bool _pythonEntryManaged = true;
+        private string EntryManagedKey => UPilotPreferences.McpPythonEntryKey + ".Managed";
 
         /// <summary>HTTP port is stored and managed by UPilotBridge (single source of truth).</summary>
         public int HttpPort => UPilotBridge.Instance?.HttpPort ?? 8011;
@@ -90,13 +96,14 @@ namespace CodingRiver.UPilot
         {
             string defaultPath = ResolveDefaultPythonEntry();
             _pythonEntryPath = ToAbsoluteProjectPath(defaultPath).Replace('\\', '/');
+            _pythonEntryManaged = true;
             SavePrefs();
         }
 
         public void SetPythonEntryPath(string path)
         {
-            if (_pythonEntryPath == path) return;
             _pythonEntryPath = path;
+            _pythonEntryManaged = UPilotDeploymentDiagnostics.SamePath(ToAbsoluteProjectPath(path), DefaultPythonEntry);
             SavePrefs();
         }
 
@@ -107,45 +114,19 @@ namespace CodingRiver.UPilot
         /// </summary>
         public void ValidateAndAutoFixPath()
         {
-            Debug.Log($"[UPilotMcpServerManager] ValidateAndAutoFixPath called. Current path: {_pythonEntryPath}");
-            if (string.IsNullOrEmpty(_pythonEntryPath))
-            {
-                Debug.Log("[UPilotMcpServerManager] Current path is null or empty, skipping validation.");
-                return;
-            }
+            if (_pythonEntryManaged)
+                ResetPythonEntryPathToDefaultAbsolute();
+            // Custom entries, including missing ones, require an explicit user edit.
+        }
 
-            string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
-            string fullPath = Path.IsPathRooted(_pythonEntryPath)
-                ? _pythonEntryPath
-                : Path.GetFullPath(Path.Combine(projectRoot, _pythonEntryPath));
-            Debug.Log($"[UPilotMcpServerManager] Resolved fullPath: {fullPath}, exists={File.Exists(fullPath)}");
-
-            // Current path is valid — nothing to do.
-            if (File.Exists(fullPath))
-            {
-                Debug.Log("[UPilotMcpServerManager] Current path is valid, no action needed.");
-                return;
-            }
-
-            // Current path is invalid — try to discover the default.
-            Debug.Log("[UPilotMcpServerManager] Current path is invalid, attempting auto-discovery...");
-            string discovered = ResolveDefaultPythonEntry();
-            string discoveredFull = Path.IsPathRooted(discovered)
-                ? discovered
-                : Path.GetFullPath(Path.Combine(projectRoot, discovered));
-            Debug.Log($"[UPilotMcpServerManager] Discovered path: {discovered}, resolved: {discoveredFull}, exists={File.Exists(discoveredFull)}");
-
-            // Only overwrite if discovery actually found an existing file.
-            if (File.Exists(discoveredFull))
-            {
-                _pythonEntryPath = discovered;
-                SavePrefs();
-                Debug.Log($"[UPilotMcpServerManager] Auto-fixed path to: {discovered}");
-            }
-            else
-            {
-                Debug.LogWarning("[UPilotMcpServerManager] Auto-discovery failed, keeping existing path for manual correction.");
-            }
+        internal void PreparePythonEntryForRepair()
+        {
+            ValidateAndAutoFixPath();
+            if (!IsPythonEntryValid(out var actual))
+                throw new FileNotFoundException("配套 Server 入口不存在：" + actual);
+            if (!UPilotDeploymentDiagnostics.SamePath(actual, UPilotDeploymentDiagnostics.PythonEntry))
+                throw new InvalidOperationException("自定义 Server 入口与当前包不一致，请在高级设置明确修改或重置入口。\n" +
+                    "配置入口：" + actual + "\n当前包入口：" + UPilotDeploymentDiagnostics.PythonEntry);
         }
         public string LogLevel { get => _logLevel; set { if (_logLevel != value) { _logLevel = value; SavePrefs(); } } }
         public bool AutoStartEnabled { get => _autoStart; set { if (_autoStart != value) { _autoStart = value; SavePrefs(); } } }
@@ -153,6 +134,7 @@ namespace CodingRiver.UPilot
         internal void ResetPreferencesToDefaultsInMemory()
         {
             _pythonEntryPath = DefaultPythonEntry;
+            _pythonEntryManaged = true;
             _logLevel = DefaultLogLevel;
             _autoStart = true;
         }
@@ -166,7 +148,7 @@ namespace CodingRiver.UPilot
         private const long RestartProbeIntervalMs = 250;
         private readonly object _statusLock = new();
         private McpServerStatus _cachedStatus;
-        private int _refreshRunning;
+        private Task<McpServerStatus> _statusRefreshTask;
         private int _statusGeneration;
         private int _consecutiveIdentityMisses;
         private long _identityPendingSinceMs;
@@ -176,6 +158,8 @@ namespace CodingRiver.UPilot
         private int _startAttemptGeneration;
         private int? _trackedProcessId;
         private Process _trackedProcess;
+        private long _trackedProcessCreatedAtTicks;
+        private readonly List<Process> _stoppingProcesses = new();
         private EditorApplication.CallbackFunction _restartWaitCallback;
         private EditorApplication.CallbackFunction _restartObserveCallback;
         private Action _afterRestartStarted;
@@ -211,7 +195,9 @@ namespace CodingRiver.UPilot
                 bool identifiesUPilot,
                 bool healthEndpointResponded,
                 int healthServerProcessId,
-                string healthProjectPath)
+                string healthProjectPath,
+                UPilotServerHealth health,
+                string failure)
             {
                 WsCount = wsCount;
                 HttpCount = httpCount;
@@ -231,6 +217,8 @@ namespace CodingRiver.UPilot
                 HealthEndpointResponded = healthEndpointResponded;
                 HealthServerProcessId = healthServerProcessId;
                 HealthProjectPath = healthProjectPath;
+                Health = health;
+                Failure = failure;
             }
 
             public int WsCount { get; }
@@ -251,6 +239,8 @@ namespace CodingRiver.UPilot
             public bool HealthEndpointResponded { get; }
             public int HealthServerProcessId { get; }
             public string HealthProjectPath { get; }
+            public UPilotServerHealth Health { get; }
+            public string Failure { get; }
         }
 
         private readonly struct McpProcessProbe
@@ -277,158 +267,17 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
-                Debug.Log($"[UPilotMcpServerManager] ResolveDefaultPythonEntry: projectRoot={projectRoot}");
-
-                bool TryCandidate(string candidatePath, string source, out string result)
-                {
-                    result = null;
-                    if (string.IsNullOrEmpty(candidatePath)) return false;
-                    if (!File.Exists(candidatePath))
-                    {
-                        Debug.Log($"[UPilotMcpServerManager]   Checking candidate ({source}): {candidatePath}, exists=False");
-                        return false;
-                    }
-                    result = candidatePath.Replace('\\', '/');
-                    Debug.Log($"[UPilotMcpServerManager]   -> FOUND via {source}: {result}");
-                    return true;
-                }
-
-                // 0. Read manifest to locate file: referenced package paths
-                string manifestPath = Path.Combine(projectRoot, "Packages", "manifest.json");
-                if (File.Exists(manifestPath))
-                {
-                    try
-                    {
-                        string manifestJson = File.ReadAllText(manifestPath);
-                        // Robust regex to extract the dependency value
-                        string pattern = "\"" + Regex.Escape(PackageName) + "\"\\s*:\\s*\"([^\"]+)\"";
-                        var match = Regex.Match(manifestJson, pattern, RegexOptions.IgnoreCase);
-                        if (match.Success)
-                        {
-                            string depValue = match.Groups[1].Value;
-                            Debug.Log($"[UPilotMcpServerManager] Manifest dep value: {depValue}");
-
-                            if (depValue.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
-                            {
-                                if (TryResolveManifestFileDependencyRoot(depValue, manifestPath, out string absPath, out bool isArchive))
-                                {
-                                    Debug.Log($"[UPilotMcpServerManager] Resolved file: reference to: {absPath}");
-                                    string currentCandidate = Path.Combine(absPath, "upilotserver~", "run_upilot_mcp.py");
-                                    if (TryCandidate(currentCandidate, "manifest file: ref current server", out string result))
-                                        return result;
-
-                                    string candidate = Path.Combine(absPath, "upilot~", "run_upilot_mcp.py");
-                                    if (TryCandidate(candidate, "manifest file: ref alternate server", out result))
-                                        return result;
-                                }
-                                else if (isArchive)
-                                {
-                                    Debug.LogWarning($"[UPilotMcpServerManager] Tarball installation ({depValue}) is not auto-discoverable. Please extract it or set path manually.");
-                                }
-                            }
-                            else
-                            {
-                                // Registry version like "1.0.0" — will be in PackageCache
-                                Debug.Log($"[UPilotMcpServerManager] Registry/Git version reference: {depValue}, will search PackageCache");
-                            }
-                        }
-                        else
-                        {
-                            Debug.Log($"[UPilotMcpServerManager] Package '{PackageName}' not found in manifest.json");
-                        }
-                    }
-                    catch (Exception manifestEx)
-                    {
-                        Debug.LogWarning($"[UPilotMcpServerManager] Failed to parse manifest.json: {manifestEx.Message}");
-                    }
-                }
-
-                // 1. Search local embedded packages directly under Packages/
-                string packagesDir = Path.Combine(projectRoot, "Packages");
-                Debug.Log($"[UPilotMcpServerManager] Checking Packages dir: {packagesDir}, exists={Directory.Exists(packagesDir)}");
-                if (Directory.Exists(packagesDir))
-                {
-                    foreach (var dir in Directory.GetDirectories(packagesDir))
-                    {
-                        string currentCandidate = Path.Combine(dir, "upilotserver~", "run_upilot_mcp.py");
-                        if (TryCandidate(currentCandidate, "Packages dir scan current server", out string result))
-                            return result;
-
-                        string candidate = Path.Combine(dir, "upilot~", "run_upilot_mcp.py");
-                        if (TryCandidate(candidate, "Packages dir scan", out result))
-                            return result;
-
-                    }
-                }
-
-                // 2. Search package cache (Git URL / registry installs)
-                string cacheDir = Path.Combine(projectRoot, "Library", "PackageCache");
-                Debug.Log($"[UPilotMcpServerManager] Checking PackageCache dir: {cacheDir}, exists={Directory.Exists(cacheDir)}");
-                if (Directory.Exists(cacheDir))
-                {
-                    foreach (var dir in Directory.GetDirectories(cacheDir, "io.github.codingriver.upilot*"))
-                    {
-                        string currentCandidate = Path.Combine(dir, "upilotserver~", "run_upilot_mcp.py");
-                        if (TryCandidate(currentCandidate, "PackageCache top-level current server", out string result))
-                            return result;
-
-                        string candidate = Path.Combine(dir, "upilot~", "run_upilot_mcp.py");
-                        if (TryCandidate(candidate, "PackageCache top-level", out result))
-                            return result;
-                    }
-
-                    // Some Unity versions nest packages in subdirectories
-                    try
-                    {
-                        foreach (var subDir in Directory.GetDirectories(cacheDir))
-                        {
-                            foreach (var dir in Directory.GetDirectories(subDir, "io.github.codingriver.upilot*"))
-                            {
-                                string currentCandidate = Path.Combine(dir, "upilotserver~", "run_upilot_mcp.py");
-                                if (TryCandidate(currentCandidate, "PackageCache nested current server", out string result))
-                                    return result;
-
-                                string candidate = Path.Combine(dir, "upilot~", "run_upilot_mcp.py");
-                                if (TryCandidate(candidate, "PackageCache nested", out result))
-                                    return result;
-                            }
-
-                        }
-                    }
-                    catch { /* ignore nested search errors */ }
-                }
-
-                // 3. Search project root directly (legacy / alternative layout)
-                string rootCurrentCandidate = Path.Combine(projectRoot, "upilotserver~", "run_upilot_mcp.py");
-                if (TryCandidate(rootCurrentCandidate, "project root current server", out string rootResult))
-                    return rootResult;
-
-                string rootCandidate = Path.Combine(projectRoot, "upilot~", "run_upilot_mcp.py");
-                if (TryCandidate(rootCandidate, "project root", out rootResult))
-                    return rootResult;
-
-                // 4. Search parent directories (monorepo fallback)
-                try
-                {
-                    var currentDir = new DirectoryInfo(projectRoot);
-                    for (int i = 0; i < 3 && currentDir.Parent != null; i++)
-                    {
-                        currentDir = currentDir.Parent;
-                        string parentCandidate = Path.Combine(currentDir.FullName, "Packages", "com.upilot", "upilotserver~", "run_upilot_mcp.py");
-                        if (TryCandidate(parentCandidate, $"parent dir (level {i + 1})", out string parentResult))
-                            return parentResult;
-                    }
-                }
-                catch { /* ignore */ }
-
-                Debug.LogWarning("[UPilotMcpServerManager] No valid python entry found, falling back to ./upilotserver~/run_upilot_mcp.py");
+                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
+                if (!string.IsNullOrWhiteSpace(package?.resolvedPath))
+                    return Path.Combine(package.resolvedPath, "upilotserver~", "run_upilot_mcp.py").Replace('\\', '/');
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[UPilotMcpServerManager] ResolveDefaultPythonEntry exception: {ex}");
             }
-            return "./upilotserver~/run_upilot_mcp.py";
+            // Missing package identity is not permission to select an arbitrary cached checkout.
+            return Path.Combine(UPilotProjectConfig.ProjectRoot, "Packages", PackageName,
+                "upilotserver~", "run_upilot_mcp.py").Replace('\\', '/');
         }
 
         private static bool TryResolveManifestFileDependencyRoot(
@@ -509,6 +358,13 @@ namespace CodingRiver.UPilot
         {
 
             _pythonEntryPath = EditorPrefs.GetString(UPilotPreferences.McpPythonEntryKey, DefaultPythonEntry);
+            var absoluteEntry = ToAbsoluteProjectPath(_pythonEntryPath).Replace('\\', '/');
+            var legacyCache = Path.Combine(UPilotProjectConfig.ProjectRoot, "Library", "PackageCache", PackageName + "@").Replace('\\', '/');
+            _pythonEntryManaged = EditorPrefs.GetBool(EntryManagedKey,
+                UPilotDeploymentDiagnostics.SamePath(absoluteEntry, DefaultPythonEntry) ||
+                (absoluteEntry.StartsWith(legacyCache, StringComparison.OrdinalIgnoreCase) &&
+                 absoluteEntry.EndsWith("/upilotserver~/run_upilot_mcp.py", StringComparison.OrdinalIgnoreCase)));
+            if (_pythonEntryManaged) _pythonEntryPath = DefaultPythonEntry;
             _logLevel = EditorPrefs.GetString(UPilotPreferences.McpLogLevelKey, DefaultLogLevel);
             _autoStart = EditorPrefs.GetBool(UPilotPreferences.McpAutoStartKey, true);
             var bridge = UPilotBridge.Instance;
@@ -518,7 +374,7 @@ namespace CodingRiver.UPilot
             // (e.g. old root-level upilot/ was removed), or if the path
             // mistakenly uses the UPM package name as the directory name
             // (e.g. "Packages/io.github.codingriver.upilot/..."), re-discover.
-            if (!string.IsNullOrEmpty(_pythonEntryPath))
+            if (_pythonEntryManaged && !string.IsNullOrEmpty(_pythonEntryPath))
             {
                 string projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
                 string fullPath = Path.IsPathRooted(_pythonEntryPath)
@@ -541,6 +397,7 @@ namespace CodingRiver.UPilot
             EditorPrefs.SetString(UPilotPreferences.McpPythonEntryKey, _pythonEntryPath ?? DefaultPythonEntry);
             EditorPrefs.SetString(UPilotPreferences.McpLogLevelKey, _logLevel ?? DefaultLogLevel);
             EditorPrefs.SetBool(UPilotPreferences.McpAutoStartKey, _autoStart);
+            EditorPrefs.SetBool(EntryManagedKey, _pythonEntryManaged);
         }
 
         // ── Status ──────────────────────────────────────────────────────────
@@ -556,52 +413,47 @@ namespace CodingRiver.UPilot
         public void InvalidateStatusCache()
         {
             Interlocked.Increment(ref _statusGeneration);
-            lock (_statusLock)
-            {
-                _cachedStatus = default;
-                _consecutiveIdentityMisses = 0;
-                _identityPendingSinceMs = 0;
-            }
+            // A cache refresh must not erase an error or restart its deadline.
             _lastRefreshMs = 0;
         }
 
         public async Task<McpServerStatus> GetFreshStatusAsync()
         {
-            while (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
-                await Task.Delay(25);
-
-            var generation = Interlocked.Increment(ref _statusGeneration);
-            var httpPort = HttpPort;
-            var wsPort = WsPort;
-            try
-            {
-                return await Task.Run(() => RefreshStatusAsync(httpPort, wsPort, generation));
-            }
-            finally
-            {
-                Volatile.Write(ref _refreshRunning, 0);
-            }
+            RequestBackgroundStatusRefresh();
+            Task<McpServerStatus> task;
+            lock (_statusLock) task = _statusRefreshTask;
+            return await task;
         }
 
         private void RequestBackgroundStatusRefresh()
         {
-            if (Interlocked.CompareExchange(ref _refreshRunning, 1, 0) != 0)
-                return;
-
-            var generation = Volatile.Read(ref _statusGeneration);
             var httpPort = HttpPort;
             var wsPort = WsPort;
-            _ = Task.Run(async () =>
+            lock (_statusLock)
             {
-                try
+                if (_statusRefreshTask != null && !_statusRefreshTask.IsCompleted) return;
+                var generation = Volatile.Read(ref _statusGeneration);
+                _statusRefreshTask = RunBoundedStatusRefreshAsync(httpPort, wsPort, generation);
+            }
+        }
+
+        private async Task<McpServerStatus> RunBoundedStatusRefreshAsync(int httpPort, int wsPort, int generation)
+        {
+            var work = Task.Run(() => RefreshStatusAsync(httpPort, wsPort, generation));
+            if (await Task.WhenAny(work, Task.Delay(30000)).ConfigureAwait(false) == work)
+                return await work.ConfigureAwait(false);
+            lock (_statusLock)
+            {
+                if (generation == Volatile.Read(ref _statusGeneration))
                 {
-                    await RefreshStatusAsync(httpPort, wsPort, generation);
+                    Interlocked.Increment(ref _statusGeneration);
+                    _cachedStatus.ErrorMessage = "状态获取超时（30 秒）：进程识别、HTTP 查询或状态汇总未完成。";
+                    _cachedStatus.StatusFailureStage = "status_collection";
+                    _cachedStatus.StatusQueryCompleted = true;
+                    _lastRefreshMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
-                finally
-                {
-                    Volatile.Write(ref _refreshRunning, 0);
-                }
-            });
+                return _cachedStatus;
+            }
         }
 
         private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort, int generation)
@@ -642,17 +494,10 @@ namespace CodingRiver.UPilot
                     status.HealthIdentifiesUPilot = stats.IdentifiesUPilot;
                     status.HealthServerProcessId = stats.HealthServerProcessId;
                     status.HealthProjectPath = stats.HealthProjectPath;
-
-                    if (stats.IdentifiesUPilot && status.ProcessOwnership == McpProcessOwnership.Unknown)
-                    {
-                        status.ProcessOwnership = McpProcessOwnership.CurrentUPilot;
-                        status.ProcessOwnershipEvidence = "UPilot 健康检查响应";
-                    }
-                    else if (stats.IdentifiesUPilot && status.ProcessOwnership == McpProcessOwnership.Foreign)
-                    {
-                        status.ProcessOwnership = McpProcessOwnership.Unknown;
-                        status.ProcessOwnershipEvidence = "健康检查与端口进程证据暂不一致";
-                    }
+                    status.Health = stats.Health;
+                    status.StatusFailureStage = stats.Failure;
+                    if (!stats.HealthEndpointResponded)
+                        status.ErrorMessage = "状态获取失败：" + stats.Failure;
                 }
             }
             catch (Exception ex)
@@ -665,8 +510,13 @@ namespace CodingRiver.UPilot
             lock (_statusLock)
             {
                 if (generation != Volatile.Read(ref _statusGeneration))
-                    return status;
+                    return _cachedStatus;
 
+                status.StatusQueryCompleted = true;
+                status.LastSuccessfulStatusAtUtcMs = status.HealthEndpointResponded
+                    ? refreshedAt : _cachedStatus.LastSuccessfulStatusAtUtcMs;
+                if (!string.IsNullOrEmpty(status.ErrorMessage))
+                    status.Health ??= _cachedStatus.Health;
                 UpdateDiagnosisTracking(ref status, refreshedAt);
                 _cachedStatus = status;
                 _lastRefreshMs = refreshedAt;
@@ -720,10 +570,12 @@ namespace CodingRiver.UPilot
             bool healthEndpointResponded = false;
             int healthServerProcessId = 0;
             string healthProjectPath = "";
+            UPilotServerHealth health = null;
+            string failure = "";
             try
             {
                 var url = $"http://127.0.0.1:{httpPort}/stats";
-                var response = await _httpClient.GetAsync(url);
+                using var response = await _httpClient.GetAsync(url);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -760,19 +612,21 @@ namespace CodingRiver.UPilot
             try
             {
                 var url = $"http://127.0.0.1:{httpPort}/health";
-                var response = await _httpClient.GetAsync(url);
+                using var response = await _httpClient.GetAsync(url);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
+                    health = JsonUtility.FromJson<UPilotServerHealth>(json);
+                    if (health == null) throw new InvalidDataException("/health 未返回 JSON 对象");
                     responded = true;
                     healthEndpointResponded = true;
                     identifiesUPilot |= IsUPilotServerPayload(json);
                     healthServerProcessId = ParseIntFromJson(json, "server_pid");
                     healthProjectPath = ParseStringFromJson(json, "project_path");
-                    if (string.IsNullOrEmpty(version)) version = ParseStringFromJson(json, "server_version");
-                    if (string.IsNullOrEmpty(protocol)) protocol = ParseStringFromJson(json, "protocol_version");
-                    if (string.IsNullOrEmpty(commit)) commit = ParseStringFromJson(json, "build_commit");
-                    if (string.IsNullOrEmpty(channel)) channel = ParseStringFromJson(json, "build_channel");
+                    version = health.server_version;
+                    protocol = health.protocol_version;
+                    commit = health.build_commit;
+                    channel = health.build_channel;
 
                     var healthToolCountsKnown = HasJsonProperty(json, "tool_count") ||
                                                 HasJsonProperty(json, "available_tool_count");
@@ -802,9 +656,11 @@ namespace CodingRiver.UPilot
                     if (string.IsNullOrEmpty(toolCategorySummary))
                         toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
                 }
+                else failure = "/health HTTP " + (int)response.StatusCode;
             }
-            catch
+            catch (Exception ex)
             {
+                failure = "/health: " + ex.Message;
             }
 
             return new ServerStatsProbe(
@@ -825,7 +681,9 @@ namespace CodingRiver.UPilot
                 identifiesUPilot,
                 healthEndpointResponded,
                 healthServerProcessId,
-                healthProjectPath);
+                healthProjectPath,
+                health,
+                failure);
         }
 
         internal static bool IsVerifiedStartupHealth(McpServerStatus status)
@@ -868,7 +726,7 @@ namespace CodingRiver.UPilot
                 latestVersion = stats.Version;
                 if (!string.IsNullOrWhiteSpace(latestVersion) &&
                     (string.IsNullOrWhiteSpace(expectedVersion) ||
-                     UPilotServerRuntimeService.CompareVersions(latestVersion, expectedVersion) >= 0))
+                     string.Equals(latestVersion, expectedVersion, StringComparison.Ordinal)))
                 {
                     InvalidateStatusCache();
                     return latestVersion;
@@ -1112,6 +970,8 @@ namespace CodingRiver.UPilot
                 CreateNoWindow = true,
             };
 
+            psi.EnvironmentVariables["UPILOT_BUILD_CHANNEL"] = UPilotDeploymentDiagnostics.Channel;
+            psi.EnvironmentVariables["UPILOT_INSTALL_SOURCE"] = UPilotDeploymentDiagnostics.InstallSource;
             var proc = Process.Start(psi);
             UPilotStartupDiagnostics.RecordServerProcessStarted(proc?.Id ?? 0);
             Debug.Log($"[UPilotMcpServerManager] Started python process PID={proc?.Id} via {pythonExe} for {entryFullPath} (HTTP={HttpPort}, WS={WsPort})");
@@ -1143,6 +1003,7 @@ namespace CodingRiver.UPilot
                 CreateNoWindow = true,
             };
 
+            psi.EnvironmentVariables["UPILOT_INSTALL_SOURCE"] = "ManagedExe";
             var proc = Process.Start(psi);
             UPilotStartupDiagnostics.RecordServerProcessStarted(proc?.Id ?? 0);
             Debug.Log($"[UPilotMcpServerManager] Started standalone server PID={proc?.Id} via {exePath} (HTTP={HttpPort}, WS={WsPort})");
@@ -1190,6 +1051,12 @@ namespace CodingRiver.UPilot
         {
             Interlocked.Increment(ref _startAttemptGeneration);
             _startInProgress = false;
+            var ownership = ProbeMcpProcessOwnership(HttpPort, WsPort);
+            var portsBusy = !UPilotPortAllocator.IsPortAvailable(HttpPort) ||
+                            !UPilotPortAllocator.IsPortAvailable(WsPort);
+            if (portsBusy && ownership.Ownership != McpProcessOwnership.CurrentUPilot)
+                throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知；" +
+                    $"PID={ownership.ProcessId}；{ownership.Evidence}");
             var processes = FindCurrentProjectMcpProcesses();
             if (processes.Count == 0)
             {
@@ -1204,7 +1071,15 @@ namespace CodingRiver.UPilot
                 try
                 {
                     var proc = Process.GetProcessById(process.pid);
+                    var handle = proc.Handle;
+                    if (proc.StartTime.ToUniversalTime().Ticks != process.createdAtTicks ||
+                        !IsCurrentProjectMcpCommandLine(GetProcessCommandLineForDiagnostics(process.pid), HttpPort, WsPort))
+                    {
+                        proc.Dispose();
+                        throw new InvalidOperationException($"Server PID={process.pid} 的创建时间或项目归属已改变。");
+                    }
                     proc.Kill();
+                    _stoppingProcesses.Add(proc);
                     Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={process.pid}");
                 }
                 catch (ArgumentException)
@@ -1213,7 +1088,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[UPilotMcpServerManager] Failed to kill process PID={process.pid}: {ex.Message}");
+                    throw new InvalidOperationException($"停止 Server PID={process.pid} 失败：{ex.Message}", ex);
                 }
             }
 
@@ -1228,7 +1103,7 @@ namespace CodingRiver.UPilot
             var stopwatch = Stopwatch.StartNew();
             while (stopwatch.ElapsedMilliseconds < timeoutMs)
             {
-                if (UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+                if (StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
                     UPilotPortAllocator.IsPortAvailable(WsPort))
                 {
                     InvalidateStatusCache();
@@ -1239,7 +1114,7 @@ namespace CodingRiver.UPilot
             }
 
             InvalidateStatusCache();
-            return UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+            return StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
                    UPilotPortAllocator.IsPortAvailable(WsPort);
         }
 
@@ -1272,6 +1147,11 @@ namespace CodingRiver.UPilot
         }
 
         public void RestartServer(Action afterStart = null)
+        {
+            _ = UPilotQuickStart.AutoRepairAsync(null, afterStart);
+        }
+
+        internal void RestartPreparedServer(Action afterStart = null)
         {
             var processRole = UPilotBridge.DetermineProcessRole();
             if (!UPilotBridge.IsMainEditorProcess(processRole))
@@ -1325,7 +1205,14 @@ namespace CodingRiver.UPilot
             _afterRestartStarted += bridge.EnsureStarted;
             if (afterStart != null)
                 _afterRestartStarted += afterStart;
-            StopCurrentProjectProcesses();
+            try { StopCurrentProjectProcesses(); }
+            catch (Exception ex)
+            {
+                RecordRestartStartFailure("stop_failed", ex.Message);
+                _afterRestartStarted = null;
+                FinishRestartObservation();
+                return;
+            }
             InvalidateStatusCache();
 
             _restartPending = true;
@@ -1338,7 +1225,7 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                var portsAvailable = UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+                var portsAvailable = StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
                                      UPilotPortAllocator.IsPortAvailable(WsPort);
                 if (portsAvailable)
                 {
@@ -1350,7 +1237,8 @@ namespace CodingRiver.UPilot
                     InvalidateStatusCache();
                     UPilotServerRestartDiagnostics.RecordPortsReleased(_restartOperationId);
                     StartServer();
-                    InvokeAfterRestartStarted();
+                    if (IsRestartObservationActive())
+                        InvokeAfterRestartStarted();
                     BeginRestartObservation();
                     return;
                 }
@@ -1427,8 +1315,9 @@ namespace CodingRiver.UPilot
             DisposeTrackedProcess();
             _trackedProcess = process;
             _trackedProcessId = process?.Id;
+            _trackedProcessCreatedAtTicks = process?.StartTime.ToUniversalTime().Ticks ?? 0;
             if (process != null && UPilotServerRestartDiagnostics.IsActive(_restartOperationId))
-                UPilotServerRestartDiagnostics.RecordProcessStarted(_restartOperationId, process.Id);
+                UPilotServerRestartDiagnostics.RecordProcessStarted(_restartOperationId, process.Id, _trackedProcessCreatedAtTicks);
         }
 
         private void RecordRestartStartFailure(string code, string message)
@@ -1470,8 +1359,9 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            _restartVerificationDeadlineUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
-                                                RestartVerificationTimeoutMs;
+            var record = UPilotServerRestartDiagnostics.Current;
+            _restartVerificationDeadlineUtcMs = (record?.newProcessStartedAtUtcMs > 0
+                ? record.newProcessStartedAtUtcMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) + RestartVerificationTimeoutMs;
             _restartNextProbeAtUtcMs = 0;
             if (_restartObserveCallback != null)
                 EditorApplication.update -= _restartObserveCallback;
@@ -1501,7 +1391,12 @@ namespace CodingRiver.UPilot
             try
             {
                 _trackedProcess = Process.GetProcessById(record.newProcessId);
+                if (record.newProcessCreatedAtTicks <= 0 ||
+                    _trackedProcess.StartTime.ToUniversalTime().Ticks != record.newProcessCreatedAtTicks ||
+                    !IsCurrentProjectMcpCommandLine(GetProcessCommandLineForDiagnostics(record.newProcessId), HttpPort, WsPort))
+                    throw new InvalidOperationException("持久化 Server 的创建时间或项目归属无法验证。");
                 _trackedProcessId = record.newProcessId;
+                _trackedProcessCreatedAtTicks = record.newProcessCreatedAtTicks;
             }
             catch (Exception ex)
             {
@@ -1557,6 +1452,14 @@ namespace CodingRiver.UPilot
             }
 
             var bridgeStatus = UPilotBridge.Instance?.GetStatus() ?? default;
+            if (!string.IsNullOrWhiteSpace(bridgeStatus.AuthenticationError) &&
+                bridgeStatus.AuthenticationFailureAtUtcMs >=
+                (UPilotServerRestartDiagnostics.Current?.newProcessStartedAtUtcMs ?? long.MaxValue))
+            {
+                RecordRestartStartFailure("authentication_failed", bridgeStatus.AuthenticationError);
+                FinishRestartObservation();
+                return;
+            }
             if (bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated &&
                 IsNewBridgeSession(_restartOldBridgeSessionId, bridgeStatus.SessionId))
             {
@@ -1595,22 +1498,54 @@ namespace CodingRiver.UPilot
                     return;
                 if (IsVerifiedRestartHealth(status, processId, _restartExpectedProjectPath))
                 {
+                    var bridge = UPilotBridge.Instance.GetStatus();
+                    var issues = UPilotDeploymentDiagnostics.Observe(bridge, status);
+                    if (issues.Any(issue => issue.Code != "authentication" && issue.Code != "timeout"))
+                    {
+                        RecordRestartStartFailure("deployment_mismatch", string.Join("\n", issues.Select(issue => issue.Message)));
+                        return;
+                    }
+                    if (!bridge.IsAuthenticated || !IsNewBridgeSession(_restartOldBridgeSessionId, bridge.SessionId))
+                        return;
+                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId);
+                    if (!string.Equals(operationId, _restartOperationId, StringComparison.Ordinal) ||
+                        !UPilotServerRestartDiagnostics.IsActive(operationId)) return;
                     UPilotServerRestartDiagnostics.RecordHealthVerified(
                         operationId,
                         processId,
                         status.HealthProjectPath);
+                    UPilotServerRestartDiagnostics.RecordDeploymentVerified(operationId);
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[UPilotMcpServerManager] Restart health probe failed: " + ex.Message);
+                if (string.Equals(operationId, _restartOperationId, StringComparison.Ordinal))
+                    RecordRestartStartFailure("restart_validation_failed", ex.Message);
             }
             finally
             {
-                _restartHealthProbeRunning = false;
-                if (!UPilotServerRestartDiagnostics.IsActive(operationId))
-                    FinishRestartObservation();
+                if (string.Equals(operationId, _restartOperationId, StringComparison.Ordinal))
+                {
+                    _restartHealthProbeRunning = false;
+                    if (!UPilotServerRestartDiagnostics.IsActive(operationId))
+                        FinishRestartObservation();
+                }
             }
+        }
+
+        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId)
+        {
+            var nonce = Guid.NewGuid().ToString("N");
+            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(7) };
+            using var response = await client.GetAsync(
+                $"http://127.0.0.1:{HttpPort}/health?probe=bridge&session={Uri.EscapeDataString(bridgeSessionId)}&nonce={nonce}");
+            response.EnsureSuccessStatusCode();
+            var health = JsonUtility.FromJson<UPilotServerHealth>(await response.Content.ReadAsStringAsync());
+            if (health == null || !health.bridge_probe_ok || health.bridge_probe_nonce != nonce ||
+                health.bridge_session_id != bridgeSessionId || health.server_pid != status.ProcessId ||
+                health.server_instance_id != status.Health?.server_instance_id ||
+                !UPilotDeploymentDiagnostics.SamePath(health.configured_project_path, UPilotProjectConfig.ProjectRoot))
+                throw new InvalidOperationException("实际只读调用未通过：" + (health?.bridge_probe_error ?? "实例、项目或会话证据缺失"));
         }
 
         internal static bool IsVerifiedRestartHealth(
@@ -1672,6 +1607,21 @@ namespace CodingRiver.UPilot
             _trackedProcess = null;
         }
 
+        private bool StoppedProcessesExited()
+        {
+            for (var i = _stoppingProcesses.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    if (!_stoppingProcesses[i].HasExited) return false;
+                }
+                catch { return false; }
+                _stoppingProcesses[i].Dispose();
+                _stoppingProcesses.RemoveAt(i);
+            }
+            return true;
+        }
+
         // ── Port & Process Helpers ─────────────────────────────────────────
 
         private static async Task<bool> IsPortListeningAsync(string host, int port, int timeoutMs = 300)
@@ -1713,16 +1663,6 @@ namespace CodingRiver.UPilot
 
         private McpProcessProbe ProbeMcpProcessOwnership(int httpPort, int wsPort)
         {
-            if (IsTrackedProcessAlive() && _trackedProcessId.HasValue)
-            {
-                var trackedPid = _trackedProcessId.Value;
-                return new McpProcessProbe(
-                    McpProcessOwnership.CurrentUPilot,
-                    trackedPid,
-                    GetProcessCommandLineForDiagnostics(trackedPid),
-                    "已跟踪的 UPilot 进程");
-            }
-
             var portsByPid = SafeGetListeningPortsByPid(out var ownerQuerySucceeded);
             if (!ownerQuerySucceeded)
             {
@@ -1758,6 +1698,9 @@ namespace CodingRiver.UPilot
                     null,
                     "监听端口尚未映射到进程");
             }
+            if (candidatePids.Count > 1)
+                return new McpProcessProbe(McpProcessOwnership.Foreign, null, "",
+                    "HTTP 与 Bridge 端口属于不同进程：" + string.Join(", ", candidatePids));
 
             int? firstPid = null;
             string firstCommandLine = null;
@@ -1807,13 +1750,14 @@ namespace CodingRiver.UPilot
         {
             var processes = FindCurrentProjectMcpProcesses();
             if (processes.Count > 0)
-                return processes[0];
+                return (processes[0].pid, processes[0].cmdLine);
             return (null, null);
         }
 
-        private List<(int pid, string cmdLine)> FindCurrentProjectMcpProcesses()
+        private List<(int pid, string cmdLine, long createdAtTicks)> FindCurrentProjectMcpProcesses()
         {
-            var result = new List<(int pid, string cmdLine)>();
+            var deadline = Stopwatch.StartNew();
+            var result = new List<(int pid, string cmdLine, long createdAtTicks)>();
             var candidatePids = new HashSet<int>();
 
             if (_trackedProcessId.HasValue)
@@ -1848,9 +1792,17 @@ namespace CodingRiver.UPilot
 
             foreach (var pid in candidatePids)
             {
-                string cmdLine = GetProcessCommandLineForDiagnostics(pid);
-                if (IsCurrentProjectMcpCommandLine(cmdLine, HttpPort, WsPort))
-                    result.Add((pid, cmdLine));
+                if (deadline.ElapsedMilliseconds >= 8000)
+                    throw new TimeoutException("进程归属识别超过 8 秒，未授权停止未核实的进程。");
+                try
+                {
+                    using var process = Process.GetProcessById(pid);
+                    var createdAt = process.StartTime.ToUniversalTime().Ticks;
+                    string cmdLine = GetProcessCommandLineForDiagnostics(pid);
+                    if (!process.HasExited && IsCurrentProjectMcpCommandLine(cmdLine, HttpPort, WsPort))
+                        result.Add((pid, cmdLine, createdAt));
+                }
+                catch (ArgumentException) { }
             }
 
             return result;
@@ -1879,7 +1831,8 @@ namespace CodingRiver.UPilot
             try
             {
                 using var process = Process.GetProcessById(_trackedProcessId.Value);
-                if (!process.HasExited)
+                if (!process.HasExited && _trackedProcessCreatedAtTicks > 0 &&
+                    process.StartTime.ToUniversalTime().Ticks == _trackedProcessCreatedAtTicks)
                     return true;
             }
             catch
@@ -1968,8 +1921,14 @@ namespace CodingRiver.UPilot
                 using var proc = Process.Start(psi);
                 if (proc == null) return result;
 
-                string output = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit(2000);
+                var stdout = proc.StandardOutput.ReadToEndAsync();
+                var stderr = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(2000) || !stdout.Wait(100))
+                {
+                    try { proc.Kill(); } catch { }
+                    return result;
+                }
+                string output = stdout.Result;
 
                 if (string.IsNullOrWhiteSpace(output))
                     return result;
@@ -2045,8 +2004,14 @@ namespace CodingRiver.UPilot
 
                 using var proc = Process.Start(psi);
                 if (proc == null) return "(读取命令行失败)";
-                string output = proc.StandardOutput.ReadToEnd();
-                proc.WaitForExit(1000);
+                var stdout = proc.StandardOutput.ReadToEndAsync();
+                var stderr = proc.StandardError.ReadToEndAsync();
+                if (!proc.WaitForExit(1000) || !stdout.Wait(100))
+                {
+                    try { proc.Kill(); } catch { }
+                    return "(读取命令行失败)";
+                }
+                string output = stdout.Result;
 
                 if (string.IsNullOrWhiteSpace(output)) return "(空)";
                 var marker = "CommandLine=";

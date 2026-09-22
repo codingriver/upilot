@@ -1,0 +1,36 @@
+# Installation
+
+1. Verify the Unity project root contains `Packages/manifest.json`.
+2. Add `io.github.codingriver.upilot` using an explicit stable release tag. For automated installation, pass the intended tag with `--upm-ref`, or use `--use-local-upm` when validating a local checkout.
+3. If running the MCP Server from Python instead of the packaged executable, install the Python package from `upilotserver~` with `--setup-python`.
+4. Install the shared repository Skill for the intended clients. Codex, Cursor, and OpenCode use `.agents/skills/upilot-unity-mcp`; Claude Code uses `.claude/skills/upilot-unity-mcp`.
+5. Configure one MCP service named `upilot` at `http://127.0.0.1:8011/mcp`.
+6. Open Unity and verify project identity with `unity_mcp_status`.
+
+Automated install:
+
+```bash
+python skills/upilot-unity-mcp/scripts/install_upilot.py \
+  --unity-project <UNITY_PROJECT_ROOT> \
+  --upm-ref <STABLE_RELEASE_TAG>
+```
+
+The installer targets all four supported Agents by default. Limit installation by repeating `--skill-client`, for example `--skill-client opencode` or `--skill-client codex --skill-client cursor --skill-client opencode`. Codex, Cursor, and OpenCode deliberately share the `.agents/skills` copy instead of creating separate managed copies under `.cursor/skills` or `.opencode/skills`.
+
+For a local repository checkout, replace `--upm-ref` with `--use-local-upm`. The installer deliberately has no default UPM version and does not infer one from `package.json`: a remote install must name its tag, branch, or commit explicitly, while the MCP Server may be distributed and versioned independently as an executable.
+
+To write a Codex project registration, add `--write-codex-mcp project`. It writes only an HTTP URL. Use `--http-port` and `--mcp-name` when allocating a distinct endpoint for another Unity project. Never pass the Unity Bridge WebSocket port to a third-party AI client.
+
+The core install keeps optional features disabled. When the user explicitly requests UPilot Flow, read `flow.md` before changing packages or scripting defines.
+
+Do not overwrite an existing skill or MCP registration without checking its current content.
+
+Unity Editor Agent Setup writes `.upilot-install.json` into every Skill directory that it manages. Later package versions may refresh a managed Skill automatically only when the recorded content hash still matches. Legacy, unmanaged, or locally customized Skill directories are preserved unless the user explicitly requests overwrite.
+
+Skill validation is read-only. Run `scripts/check_skill_pack.py` without arguments
+to detect source versus a managed installation, or pass `--mode source|installed`
+and `--root <SKILL_DIRECTORY>` explicitly. Source mode checks Unity `.meta` files
+and repository contracts. Installed mode checks required files, references and
+the recorded content hash without requiring Unity metadata or repository access.
+Unmanaged or changed installations are reported as unverified/failed; the checker
+never repairs files, changes endpoints or rewrites the installation marker.

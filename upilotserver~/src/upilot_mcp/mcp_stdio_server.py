@@ -429,6 +429,35 @@ async def _run_http_server(
         payload.update(tool_summary)
         payload.update(config_status)
         payload.update(version_payload())
+        payload["configured_project_path"] = str(configured_project_root().resolve())
+        payload["bridge_session_id"] = session.session_id if session else ""
+        # Optional bounded round trip through the existing read-only command.
+        # Never route repair verification through cached status or replay a job.
+        if request.query_params.get("probe") == "bridge":
+            expected_session = request.query_params.get("session", "")
+            nonce = request.query_params.get("nonce", "")
+            payload["bridge_probe_ok"] = False
+            payload["bridge_probe_nonce"] = nonce
+            if not connected or not session or session.session_id != expected_session:
+                payload["bridge_probe_error"] = "Bridge session is absent or changed."
+            else:
+                command_id = new_id("repair-probe")
+                pending = _orchestrator.register_pending(command_id)
+                try:
+                    await _orchestrator.send_command(command_id, "editor.state", {})
+                    result = await asyncio.wait_for(pending, timeout=5.0)
+                    payload["bridge_probe_ok"] = (
+                        result.get("type") == "result"
+                        and result.get("name") == "editor.state"
+                        and result.get("sessionId") == expected_session
+                        and _orchestrator.session_manager.active is session
+                    )
+                    if not payload["bridge_probe_ok"]:
+                        payload["bridge_probe_error"] = "Read-only response or session did not match."
+                except (asyncio.TimeoutError, ConnectionError, OSError) as ex:
+                    payload["bridge_probe_error"] = type(ex).__name__ + ": " + str(ex)
+                finally:
+                    _orchestrator.unregister_pending(command_id)
         return JSONResponse(payload)
 
     # Stats endpoint for the upilot status window

@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - simple user-facing entry window.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -36,6 +36,7 @@ namespace CodingRiver.UPilot
         private bool _updateStopFailed;
         private bool _runtimeDetailsExpanded;
         private bool _repairInProgress;
+        private bool _deploymentDetailsExpanded;
         private bool _statusRefreshInProgress;
         private string _expandedAgentClient = "";
         private double _lastUpdateStopAttempt;
@@ -341,6 +342,8 @@ namespace CodingRiver.UPilot
 
         private UPilotMainSnapshot GetDisplaySnapshot()
         {
+            if (_snapshot.State == UPilotMainState.NeedsRepair || _snapshot.State == UPilotMainState.Restarting)
+                return _snapshot;
             var updateStatus = UPilotUpdateService.Instance.GetOperationStatus();
             if (!UPilotServerRuntimeService.IsSourceUpdateChannel() && updateStatus.IsRunning)
             {
@@ -612,7 +615,9 @@ namespace CodingRiver.UPilot
 
         private void DrawStatusActionBar(UPilotMainSnapshot snapshot)
         {
-            var rect = EditorGUILayout.GetControlRect(false, 54f);
+            var messageHeight = Mathf.Max(18f, EditorStyles.wordWrappedLabel.CalcHeight(
+                new GUIContent(snapshot.Message), Mathf.Max(180f, position.width - 52f)));
+            var rect = EditorGUILayout.GetControlRect(false, 38f + messageHeight);
             DrawBandBackground(rect);
 
             const float horizontalPadding = 10f;
@@ -645,16 +650,22 @@ namespace CodingRiver.UPilot
                 rect.x + horizontalPadding,
                 rect.y + 32f,
                 rect.width - horizontalPadding * 2f,
-                18f);
-            EditorGUI.LabelField(messageRect, snapshot.Message, _messageStyle);
+                messageHeight);
+            EditorGUI.LabelField(messageRect, snapshot.Message, EditorStyles.wordWrappedLabel);
+            if (snapshot.State == UPilotMainState.NeedsRepair || snapshot.State == UPilotMainState.Restarting)
+            {
+                _deploymentDetailsExpanded = EditorGUILayout.Foldout(_deploymentDetailsExpanded, "状态诊断详情", true);
+                if (_deploymentDetailsExpanded)
+                    EditorGUILayout.LabelField(UPilotQuickStart.DiagnosticDetails, EditorStyles.wordWrappedLabel);
+            }
         }
 
         private void DrawServiceAction(Rect rect, UPilotMainSnapshot snapshot)
         {
-            if (_repairInProgress)
+            if (_repairInProgress || UPilotQuickStart.IsRepairing)
             {
                 using (new EditorGUI.DisabledScope(true))
-                    GUI.Button(rect, "检查中…");
+                    GUI.Button(rect, "重启中…");
                 return;
             }
 
@@ -684,7 +695,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            var primaryLabel = snapshot.State == UPilotMainState.Ready ? "重启" : "自动修复";
+            var primaryLabel = "重新启动";
             if (GUI.Button(rect, primaryLabel))
             {
                 if (snapshot.State == UPilotMainState.Ready)
@@ -702,12 +713,6 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
-                {
-                    ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
-                    return;
-                }
-
                 _restartRequested = true;
                 UPilotQuickStart.Restart();
                 _stateChangedAt = EditorApplication.timeSinceStartup;
@@ -2061,12 +2066,6 @@ namespace CodingRiver.UPilot
             Repaint();
             try
             {
-                if (UPilotUpdateService.Instance.IsServiceStartBlocked)
-                {
-                    ShowNotice(UPilotUpdateService.ServiceStartBlockedMessage, MessageType.Warning);
-                    return;
-                }
-
                 var message = await UPilotQuickStart.AutoRepairAsync(_agentConfigs);
                 if (this == null)
                     return;
