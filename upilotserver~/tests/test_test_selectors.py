@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -264,11 +265,12 @@ def test_acceptance_forwards_discovery_snapshot_and_preserves_stale_error_withou
     from upilot_mcp.tool_facade import McpToolFacade
 
     target = McpToolFacade.__new__(McpToolFacade)
+    canonical_project = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
 
     async def status(**_kwargs):
         return ok("status", {
             "connected": True, "serverReady": True,
-            "paths": {"unityProjectAbsolute": r"D:\upilot\Tests~\UPilotTest"},
+            "paths": {"unityProjectAbsolute": str(canonical_project)},
             "session": {}, "executionState": {},
         })
 
@@ -322,11 +324,12 @@ def test_acceptance_strict_selector_rejection_never_starts_the_runner(monkeypatc
     from upilot_mcp.tool_facade import McpToolFacade
 
     target = McpToolFacade.__new__(McpToolFacade)
+    canonical_project = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
 
     async def status(**_kwargs):
         return ok("status", {
             "connected": True, "serverReady": True,
-            "paths": {"unityProjectAbsolute": r"D:\upilot\Tests~\UPilotTest"},
+            "paths": {"unityProjectAbsolute": str(canonical_project)},
             "session": {}, "executionState": {},
         })
 

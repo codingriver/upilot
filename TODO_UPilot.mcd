@@ -2656,3 +2656,23 @@ UPilot 通用开发：
 - 复现/证据：静态源码 `Editor/Core/UPilotStatusWindow.cs` 第 32-39、221-258、1698-1765、2057-2076 行与用户提供的四段级联堆栈；当前目标 MCP 路径匹配 `D:\upilot\Tests~\UPilotTest`，但 Bridge 已断开且快照过期，因此本轮未进行实时 Console 复现。
 - 优先级：P1。
 - 状态：Implemented / targeted validation passed（2026-09-23）。已用独立 `_guiSnapshotInitialized` 替代空日志哨兵，并将初始化后的整组 GUI 快照刷新限制为 `EventType.Layout`；新增 4 个 Layout/Repaint/MouseDown 判定回归。关联写入批次 `wb-f3a26afc-2619-47cf-ba0d-ad37a7c5d3de` 编译 0 error（3 条既有 Flow 序列化 warning），定向 EditMode 4/4 passed，runGuid=`c053362f-c6ea-4d28-a954-b86c0231c435`，cleanupSucceeded=true。
+
+## UPilot-20260923-ReleaseContractSelectorTests - 发布质量门因测试夹具写死 Windows 路径而误失败
+
+- 日期：2026-09-23。
+- 触发任务/场景：从 `main`（`e82a958f5c59cc642fafcc48c7962ebc28ac4142`）触发 `v0.3.33` 发布；GitHub Actions run `35832616337` 在 release-quality contracts 阶段失败，未创建标签或下游 EXE 构建。
+- 当前痛点：`tests/test_test_selectors.py` 的两个 `upilot_acceptance_run` 单元测试把规范项目写死为 `D:\upilot\Tests~\UPilotTest`；Linux Actions 会把它解析为仓库外路径，因此在原本欲覆盖的 stale-selection / unmatched-selector 分支前返回 `UPILOT_ACCEPTANCE_PROJECT_MISMATCH`。这使发布质量门无法通过，且掩盖目标行为。
+- 影响工具/流程：`upilot_acceptance_run`、`tests/test_test_selectors.py`、`.github/workflows/prepare-release.yml` 的 pre-release quality gate。
+- 建议改进：从测试文件位置解析仓库根与规范项目路径，使两个测试 fixture 在 Windows/Linux 均满足当前 canonical project identity contract，再断言各自的 `TEST_SELECTION_STALE` 和 `TEST_SELECTOR_UNMATCHED`；保留独立的 project-mismatch 测试，避免弱化身份校验。
+- 复现/证据：Actions 失败日志 artifact `upilot-pre-release-quality-e82a958f5c59cc642fafcc48c7962ebc28ac4142` 的 `contracts.log`：336 passed、2 failed；失败测试为 `test_acceptance_forwards_discovery_snapshot_and_preserves_stale_error_without_runner` 与 `test_acceptance_strict_selector_rejection_never_starts_the_runner`。
+- 状态：Implemented / Python validation passed（2026-09-23）。保留两个有效用例并改为动态解析规范项目路径；`test_test_selectors.py` 47/47 passed，release-quality contracts 338/338 passed。未修改产品身份校验语义，未重试发布。
+
+## UPilot-20260923-ReleaseRegistryValidationAllowlist - Registry 文档门禁未接受现有公开 C# 工具
+
+- 日期：2026-09-23。
+- 触发任务/场景：修复 selector 测试夹具后，本地执行与发布工作流相同的 `check_release_quality.py`；contracts 与 Skill 均通过，但总体门禁仍失败。
+- 当前痛点：`documentation_checks` 的公开工具名称校验仅接受 `unity_*`、`csharp_eval`、`execution_session`、`reflection_emit_type`，未接受 Registry 中现有的 `csharp_object_dump` 与 `csharp_validate`，于是把它们报告为 `docs.registry.invalid`；提示要求更新 `ToolStatus.md`，但文档 Registry 版本已经是 v7，实际失败点是校验 allowlist 与 Registry 演进不同步。
+- 影响工具/流程：`upilotserver~/scripts/check_release_quality.py`、`Documentation~/ToolStatus.md`、`.github/workflows/prepare-release.yml` 的文档门禁。
+- 建议改进：让文档检查从 Registry 的正式命名/类别契约派生合法非 `unity_*` 工具，或同步维护一处权威 allowlist；补充包含 `csharp_object_dump`、`csharp_validate` 的正向回归以及未知 legacy 名称的拒绝回归，并让 `nextAction` 指向真实失败源。
+- 复现/证据：本地 release-quality：contracts 338 passed、Skill validation passed；`docs.registry.actual.invalid=["csharp_object_dump","csharp_validate"]`，`documentedRegistryVersion=7`、`proxyHandlerGaps=[]`。
+- 状态：Open；不属于本轮两个测试夹具的最小修复，未修改。
