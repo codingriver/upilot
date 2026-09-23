@@ -6,10 +6,10 @@ alwaysApply: true
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 40
+rulesVersion: 41
 upilotPackageVersion: 0.3.32
 projectPath: D:\upilot\Tests~\UPilotTest2022
-generatedAt: 2026-09-22T23:30:54Z
+generatedAt: 2026-09-23T05:49:18Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -126,6 +126,8 @@ Project-specific business rules outside this controlled UPilot block take preced
 - UPilot parses only generic fields. Business fields belong in `domain` and are passed through unchanged.
 
 ## Persistent Console Capture
+
+- A Step plan containing `upilot.console_capture_start` owns its Capture through the UPilot executor. Put that Step first and once, explicitly set Operation `consoleCapture.enabled=false`, and do not start or stop another Capture around it. The executor releases Snapshot resources, runs Finally, confirms its Capture stop/files, then applies final Console Policy and freezes reports. Ownership secrets remain private; unresolved release is `RecoveryRequired`.
 
 - For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation and retain its exact `sessionId` and one-time `ownerToken` outside ordinary logs. Call `unity_console_capture_stop` only with that matching token for the task's own session; unknown or another task's capture is not an automatic cleanup target. `forceStop=true` requires an exact session and explicit authorized human disposition.
 - Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`; a filtered no-match result advances to the last scanned record, while a read that scans nothing preserves the input cursor.

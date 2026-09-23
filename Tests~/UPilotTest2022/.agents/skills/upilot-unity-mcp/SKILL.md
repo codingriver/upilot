@@ -87,6 +87,13 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 
 ## Persistent Console Capture
 
+For plans with `upilot.console_capture_start`, use plan ownership instead of the
+manual sequence below: start that Step first and once, set Operation
+`consoleCapture.enabled=false`, and let the executor stop/verify Capture after
+Finally. Use `upilot.capture_snapshot` or the base class's string/JSON evidence
+helpers for run-owned screenshots; projects should not duplicate observers.
+See `references/automation-steps.md`.
+
 Use persistent capture when logs must survive long waits, Console clears, or Agent polling gaps:
 
 1. Call `unity_console_capture_start` before the operation. Keep its exact `sessionId`, returned one-time `ownerToken`, and output directory; never write the token to normal logs or reports.

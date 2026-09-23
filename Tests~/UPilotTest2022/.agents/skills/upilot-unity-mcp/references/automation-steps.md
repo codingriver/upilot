@@ -155,6 +155,8 @@ do not shorten it to a single tool wait window.
 | upilot.enter_play_mode | Empty or scene path | Optional scene first, then await actual PlayMode and domain recovery |
 | upilot.enter_edit_mode | Empty or scene path | Await actual exit, optionally open return scene afterward |
 | upilot.wait_seconds | Nonnegative finite invariant-culture seconds | Nonblocking deadline-based wait |
+| upilot.console_capture_start | Empty | First Normal item, once per run; transfer Capture to executor |
+| upilot.capture_snapshot | Empty or Snapshot options JSON string | Trusted Snapshot, bounded observation/cancel and original file verification |
 
 Specifying a PlayMode scene requires starting in EditMode. Do not implicitly restart
 an existing PlayMode session or overwrite a conflicting playModeStartScene.
@@ -163,11 +165,44 @@ workflow before starting. A successful setter call is not a successful mode tran
 
 ## Evidence
 
-For Console-sensitive acceptance, explicitly enable Operation Console Capture.
+For new self-contained plans, put `upilot.console_capture_start` first and once,
+with empty arguments, and explicitly set Operation `consoleCapture.enabled=false`.
+Do not wrap that plan in another Capture. Its Step Cleanup does not stop the run's
+Capture. UPilot persists private credentials and start/stop intents separately
+from public state; same-process recovery observes exact identity without replay.
+After all Finally items, it stops and verifies manifest/summary/ordered raw segments,
+then reads the final fixed Console interval, evaluates Policy and freezes the report.
+Stop confirmation defaults to 10 seconds, collection to 30 seconds.
+Unknown ownership, changed files or unconfirmed release cannot be reported as success.
+
+The borrowed-Capture path remains supported for other plans without that Step:
+explicitly enable Operation Console Capture.
 The executor borrows the exact sessionId, never its owner token and never its stop right.
 After all Finally steps it freezes the final sequence boundary, waits for disk,
 reads bounded pages over that fixed range, applies project logPolicy and freezes reports.
 Operation stops its Capture only after this terminal boundary.
+
+### Run-Owned Snapshot
+
+`upilot.capture_snapshot` defaults to trusted GameView 1280x720, a three-second
+wait and two-second cancellation grace. Options are a string containing
+`{"capture":{...},"timeoutSeconds":3,"cancelGraceSeconds":2,"required":true}`.
+Omitted fields use defaults; user requestKey/outputDirectory and unverified,
+stale, fallback or occlusion-sensitive pixel policies are rejected.
+Each run/item/evidence key has a durable request intent and original Snapshot ID;
+reload does not start another job. Artifacts must remain in the owned directory
+and match the original size/hash. Resource completion is executor-owned even
+when a business Step never polls it. Failed diagnostics do not replace first error.
+
+For failure-site evidence, ordinary Steps use base helpers
+`BeginSnapshotJson(runId,instanceId,evidenceKey,arguments)`,
+`PollSnapshotJson(runId,instanceId,evidenceKey)` and
+`CancelSnapshotJson(runId,instanceId,evidenceKey)` inside writable callbacks.
+They return Step-result JSON. `SnapshotErrorJson` is readonly and may be used
+from GetError. `required=false` permits a confirmed failed capture to produce a
+warning, but unknown ownership/release still requires recovery. No Snapshot DTO
+or project observer is required. The package owns evidence validity; business
+assertions decide what the image proves.
 
 The default policy blocks Error/Exception/Assert. A nonempty stepPlan.logPolicy requires
 Capture; it cannot be silently bypassed. Without Capture, logs are not accepted as
