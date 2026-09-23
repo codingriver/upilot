@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, registered Automation Step development and stepPlan composition, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
 ---
 
 <!-- Generated from SKILL.md.template. Do not edit SKILL.md directly. -->
@@ -85,6 +85,22 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call it and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.
 - Keep business step implementations, assertions and restoration in project code. For UPilot Automation, read `references/automation-steps.md`: query the UPilot-owned directory, compose approved Skill templates with selected Cases into `jobSpec.stepPlan`, validate the complete list, then use existing Operation tools. Project Steps implement the string-only `IAutomationStep` contract or inherit `AutomationStepBase`; `arguments` is always last and results are JSON. Do not add parallel start/status tools, make the legacy project Bridge mandatory for new Step plans, or drive individual steps from client polling.
 
+## Step Development
+
+For adding, changing or removing a registered Step, read the **Authoring A Step**
+section of `references/automation-steps.md` before editing code. It includes the
+responsibility decision, lifecycle override table, guarded C# example, optional-package
+behavior, registration troubleshooting and targeted acceptance checklist.
+Load the active project's business rules/Skill as well; those define prerequisites,
+arguments, ordering and assertions, not the UPilot framework.
+
+Deliver the stable ID, source/type, argument example, completion/error contract,
+resource restoration strategy, intended plan position and actual validation evidence.
+Update the owning Skill template/selection when an approved Step becomes selectable;
+never restore a removed project Runner, Registry or test menu to make it discoverable.
+For instruction-only tasks, validate and synchronize instructions without creating
+a sample production Step or launching a workflow.
+
 ## Persistent Console Capture
 
 For plans with `upilot.console_capture_start`, use plan ownership instead of the
@@ -144,6 +160,41 @@ an interrupted response is not permission to resend or replay business.
 - Snapshot baselines live under `.upilot/snapshots/baselines`. Update them only through `unity_snapshot_baseline_update` dry-run -> inspect -> explicit approval -> apply with the returned current-state `confirmToken`; never approve automatically. Use `unity_snapshot_baseline_compare` for pixel-difference ratio, SSIM, and diagnostic diff/heatmap artifacts.
 - Use `unity_shader_inspect` / `unity_shader_check_errors` for Shader-specific import, support, dependency, and compiler-message diagnostics.
 
+## Queue Inspection And Cleanup
+
+Use `unity_queue_cleanup()` to inspect the current project without advancing its tasks.
+The Advanced Settings window uses the same read-only snapshot and manual refresh.
+Missing, disconnected or stale data must not be described as an empty queue.
+
+The independent **允许 AI 清理当前项目队列占用** switch defaults to enabled and is
+unaffected by automation select-all. Never change this setting yourself. Disabled
+permission still permits inspection and preview. When enabled, it is standing
+authorization for exact-target cleanup across chat ownership, without a second human
+confirmation; it does not grant arbitrary writes or change the original tools' grants.
+
+1. Preview `unity_queue_cleanup(targetType, targetId, action, reason, dryRun=true)`.
+2. Inspect the exact identity, action and project. Apply the identical request with
+   `dryRun=false`, `confirmToken`, and `expectedProjectPath` from the preview.
+3. Keep original task/run/operation/session IDs. Accepted cancellation is not completion;
+   observe the existing status tools until cleanup is confirmed, or report unconfirmed.
+
+Task/Test support `cancel` and existing `cleanup`; Operation supports `cancel`, including
+associated Steps; Capture supports exact `stop` while retaining artifacts. Step force
+recovery and generic Bridge-command revocation are unsupported. WriteBatch `release`
+only disposes an inactive historical recovery blocker after verified backup. Its
+original result stays unknown; disposition is separate and survives Server restart.
+Never use another compile's success as evidence for that old batch.
+
+Failed backup, possible execution, target changes, permission refusal and unsupported
+adapters leave records intact. Preview tokens expire after 120 seconds and are one-shot.
+Do not replay an uncertain apply or Start. No automatic Unity restart or blanket cleanup.
+This exception permits ownerless Capture disposition only through `unity_queue_cleanup`;
+it does not relax the direct Capture ownership rules.
+
+Critical cancel/stop notices use `[UPilot][QueueCleanup]`. Failed/unconfirmed results
+are Server Error and, when Unity is reachable, real `Debug.LogError`; a disconnected
+Editor cannot immediately display a forwarded error. Never log tokens or full arguments.
+
 ## Focused Reliability
 
 - Use `unity_test_list`, `unity_test_run` and `unity_upilot_acceptance_run` with exact `testNames`, fully qualified `fixtures`, `assemblies` and/or `categories`. `matchMode=union` preserves the default; `intersection` intersects nonempty field groups while values inside each group remain a union. List and execute use the same assembly-isolated selection. Inspect selector counts; do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
@@ -161,7 +212,7 @@ For execution-tool selection and typed values, read `references/execution-tools.
 
 - Installation: read `references/installation.md`.
 - Common flows: read `references/workflows.md`.
-- Registered step plans, built-in Editor steps and evidence ownership: read `references/automation-steps.md`.
+- Adding/changing Steps, lifecycle examples, optional-package isolation, registered plans and evidence ownership: read `references/automation-steps.md`.
 - Tool choice: read `references/tool-routing.md` and `references/tool-boundaries.md`.
 - Client transport/config: read `references/client-configs.md`.
 - Recovery and destructive work: read `references/safety.md`.

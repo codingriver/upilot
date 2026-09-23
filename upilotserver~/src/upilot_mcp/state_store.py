@@ -145,6 +145,8 @@ class StateStore:
                 db.execute("ALTER TABLE write_batches ADD COLUMN warnings_truncated INTEGER NOT NULL DEFAULT 0")
             if "superseded_by" not in write_batch_columns:
                 db.execute("ALTER TABLE write_batches ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
+            if "disposition_json" not in write_batch_columns:
+                db.execute("ALTER TABLE write_batches ADD COLUMN disposition_json TEXT")
             verified_successors = db.execute(
                 "SELECT write_batch_id,created_at,changes_json FROM write_batches WHERE project_path=? "
                 "AND status='verified' AND terminal_snapshot_json IS NOT NULL ORDER BY rowid",
@@ -219,7 +221,7 @@ class StateStore:
             row = db.execute("SELECT snapshot_json FROM project_state WHERE project_path = ?", (resolved,)).fetchone()
             pending = db.execute(
                 "SELECT write_batch_id FROM write_batches WHERE project_path=? "
-                "AND status IN ('pending','deferred','recovery_required') AND superseded_by='' "
+                "AND status IN ('pending','deferred','recovery_required') AND superseded_by='' AND disposition_json IS NULL "
                 "ORDER BY updated_at DESC LIMIT 1",
                 (resolved,),
             ).fetchone()
@@ -532,7 +534,7 @@ class StateStore:
             rows = db.execute(
                 "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json "
                 "FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') "
-                "AND superseded_by='' ORDER BY created_at",
+                "AND superseded_by='' AND disposition_json IS NULL ORDER BY created_at",
                 (self._project_path,),
             ).fetchall()
         return [
@@ -551,7 +553,7 @@ class StateStore:
             return
         with sqlite3.connect(self._db_path) as db:
             db.execute(
-                "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL",
+                "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
                 (status, _now_ms(), compile_operation_id, compile_operation_id, error, self._project_path, write_batch_id),
             )
         if status in ("verified", "failed", "canceled") and self.pending_write_batch_id == write_batch_id:
@@ -565,7 +567,7 @@ class StateStore:
             cursor = db.execute(
                 "UPDATE write_batches SET status='deferred',updated_at=?,compile_operation_id='',error='' "
                 "WHERE project_path=? AND write_batch_id=? AND status='recovery_required' "
-                "AND terminal_snapshot_json IS NULL AND error=?",
+                "AND terminal_snapshot_json IS NULL AND disposition_json IS NULL AND error=?",
                 (_now_ms(), self._project_path, write_batch_id, expected_error),
             )
         return cursor.rowcount == 1
@@ -575,7 +577,7 @@ class StateStore:
             return None
         with sqlite3.connect(self._db_path) as db:
             row = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by "
+                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by,disposition_json "
                 "FROM write_batches WHERE project_path=? AND write_batch_id=?",
                 (self._project_path, write_batch_id),
             ).fetchone()
@@ -619,12 +621,60 @@ class StateStore:
             "outcome": (("passed" if evidence.get("compilePhase") == "completed" else "failed")
                         if correlation else "unknown"),
             "supersededBy": row[16],
+            "disposition": json.loads(row[17]) if row[17] else None,
         }
         result["warningDetailsAvailable"] = details_available
         result["warningsTruncated"] = bool(row[15]) if details_available else False
         if details_available and warnings is not None:
             result["warnings"] = warnings
         return result
+
+    def dispose_write_batch(self, write_batch_id: str, expected: dict, *, reason: str, request_id: str) -> dict:
+        """Back up the exact row before removing only its blocking effect.
+
+        BEGIN IMMEDIATE and a same-row comparison guard concurrent state changes.
+        Original status, compiler evidence, identities and unknown outcome are untouched.
+        The caller must also establish that no execution is still possible.
+        """
+        if self._db_path is None:
+            raise ValueError("QUEUE_STORAGE_UNAVAILABLE")
+        with sqlite3.connect(self._db_path) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN IMMEDIATE")
+            if self.get_write_batch(write_batch_id) != expected:
+                raise ValueError("QUEUE_TARGET_CHANGED")
+            row = db.execute(
+                "SELECT * FROM write_batches WHERE project_path=? AND write_batch_id=?",
+                (self._project_path, write_batch_id)).fetchone()
+            if not row or row["status"] != "recovery_required" or row["disposition_json"] or row["terminal_snapshot_json"]:
+                raise ValueError("QUEUE_DISPOSITION_UNSUPPORTED")
+            root = self._db_path.parent / "queue-backups"
+            root.mkdir(exist_ok=True)
+            if (root.resolve().parent != self._db_path.parent.resolve()
+                    or not root.resolve().is_relative_to(Path(self._project_path).resolve())):
+                raise ValueError("QUEUE_BACKUP_PATH_UNSAFE")
+            path = root / f"{uuid.uuid4().hex}.json"
+            content = json.dumps(dict(row), ensure_ascii=False, sort_keys=True).encode("utf-8")
+            with path.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            digest = hashlib.sha256(content).hexdigest()
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise OSError("QUEUE_BACKUP_VERIFICATION_FAILED")
+            disposition = dict(status="released", originalOutcome=expected["outcome"],
+                               requestId=request_id, reason=reason, disposedAt=_now_ms(),
+                               backupPath=str(path), backupBytes=len(content), backupSha256=digest)
+            db.execute("UPDATE write_batches SET disposition_json=? WHERE project_path=? AND write_batch_id=?",
+                       (json.dumps(disposition, ensure_ascii=False), self._project_path, write_batch_id))
+            next_pending = db.execute(
+                "SELECT write_batch_id FROM write_batches WHERE project_path=? "
+                "AND status IN ('pending','deferred','recovery_required') AND superseded_by='' "
+                "AND disposition_json IS NULL ORDER BY created_at LIMIT 1", (self._project_path,)).fetchone()
+        if self.pending_write_batch_id == write_batch_id:
+            self.pending_write_batch_id = next_pending[0] if next_pending else ""
+            self.compile_deferred_reason = ""
+        return disposition
 
     def persist_write_batch_warnings(
         self,
@@ -665,7 +715,7 @@ class StateStore:
             with sqlite3.connect(self._db_path) as db:
                 cursor = db.execute(
                     "UPDATE write_batches SET warning_details_json=?,warning_details_available=?,warnings_truncated=?,updated_at=? "
-                    "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? AND compile_request_id=?",
+                    "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? AND compile_request_id=? AND disposition_json IS NULL",
                     (
                         raw_warnings, persisted_available, persisted_truncated, _now_ms(),
                         self._project_path, write_batch_id, compile_operation_id, compile_request_id,
@@ -700,7 +750,7 @@ class StateStore:
         with sqlite3.connect(self._db_path) as db:
             cursor = db.execute(
                 "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=? "
-                "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL",
+                "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
                 ("verified" if payload["compilePhase"] == "completed" else "failed",
                  _now_ms(), json.dumps(payload, ensure_ascii=False), self._project_path, batch_id),
             )
@@ -722,7 +772,7 @@ class StateStore:
             return set()
         rows = db.execute(
             "SELECT write_batch_id,changes_json FROM write_batches WHERE project_path=? "
-            "AND status='recovery_required' AND superseded_by='' "
+            "AND status='recovery_required' AND superseded_by='' AND disposition_json IS NULL "
             "AND rowid < (SELECT rowid FROM write_batches WHERE project_path=? AND write_batch_id=?)",
             (self._project_path, self._project_path, successor["writeBatchId"]),
         ).fetchall()
@@ -740,7 +790,7 @@ class StateStore:
                 continue
             db.execute(
                 "UPDATE write_batches SET superseded_by=?,updated_at=? WHERE project_path=? "
-                "AND write_batch_id=? AND status='recovery_required' AND superseded_by=''",
+                "AND write_batch_id=? AND status='recovery_required' AND superseded_by='' AND disposition_json IS NULL",
                 (successor["writeBatchId"], _now_ms(), self._project_path, write_batch_id),
             )
             superseded.add(str(write_batch_id))
@@ -840,6 +890,9 @@ class StateStore:
         self.received_at = _now_ms()
         if "pendingWriteBatchId" in payload:
             incoming_pending = str(payload.get("pendingWriteBatchId") or "")
+            incoming_batch = self.get_write_batch(incoming_pending)
+            if incoming_batch and incoming_batch.get("disposition"):
+                incoming_pending = ""
             if incoming_pending != self.pending_write_batch_id:
                 owned_batch = self.get_write_batch(self.pending_write_batch_id)
                 # Unity does not own the Server's durable write authorization.
@@ -916,7 +969,7 @@ class StateStore:
                 db.execute(
                     "UPDATE write_batches SET compile_request_id=?,updated_at=? "
                     "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? "
-                    "AND compile_request_id='' AND terminal_snapshot_json IS NULL",
+                    "AND compile_request_id='' AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
                     (str(payload["compileRequestId"]), _now_ms(), self._project_path,
                      compile_state.write_batch_id, compile_state.compile_operation_id),
                 )

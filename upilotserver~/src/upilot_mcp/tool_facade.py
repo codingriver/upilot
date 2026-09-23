@@ -15,12 +15,14 @@ from .domain.snapshot_service import SnapshotDomainService
 from .domain.status_service import StatusDomainService
 from .domain.task_service import TaskDomainService
 from .domain.test_service import TestDomainService
+from .domain.queue_service import QueueDomainService
 from .fix_planner import CompileFixPlanner
 from .patch_service import PatchApplyService
 from .server import WsOrchestratorServer
 
 
 class McpToolFacade(
+    QueueDomainService,
     StatusDomainService,
     ProjectAnalysisDomainService,
     CompileDomainService,

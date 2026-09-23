@@ -25,6 +25,173 @@ It does not require UPilot Flow and does not create public automation_start/stat
 - Internal Bridge routes are `automation.steps.catalog/validate/start/state/cancel/artifacts`;
   these are implementation routes, not a second public MCP surface.
 
+## Authoring A Step
+
+### Decide Ownership Before Coding
+
+1. Inspect the current registry and built-ins before adding an ID. A new combination
+   of existing actions normally needs a Skill plan change, not another Step.
+2. Put business actions, readiness barriers, assertions, configuration recovery and
+   business observations in the project's existing Editor Step directory. Reuse its
+   business base/helpers when appropriate; runtime types never reference those adapters.
+3. A package Step must work without importing a host namespace, configuration table,
+   fixed scene, hero/account identity or project log rule. Reuse existing mode, Capture,
+   Snapshot and report services; do not create a second implementation of their lifecycle.
+4. Record the ID/type/file, description, argument grammar and example, static validation,
+   runtime prerequisites, completion conditions, stable error codes, mutations/owners,
+   cancellation/cleanup/recovery, timeout/poll budget and intended Normal/Finally position.
+   Reserve `upilot.*` for package built-ins; use a project namespace for business IDs.
+   This is authoring guidance, not extra mandatory DTO fields or an ID regex.
+
+### Implementation Checklist
+
+- Read `Editor/Automation/AutomationStepAttribute.cs`, `IAutomationStep.cs` and
+  `AutomationStepBase.cs` in the actual installed package source. Use unversioned names.
+  Specify the attribute on each concrete class; inherited attributes do not register.
+  Do not write to a registry or call service Start from a Step.
+- Use one strict parser for Validate and Execute; reject unknown/invalid values according
+  to the documented grammar. Omitted outer arguments become `""`; explicit null and
+  non-string values fail before the Step. Use an existing JSON serializer for structured
+  string arguments and checkpoints, never interpolate user text into JSON.
+- Validate syntax and static plan constraints without opening scenes, acquiring resources,
+  writing files/configuration or requiring a future runtime object. Do not rely on fields
+  assigned by Validate: execution receives a different instance.
+- Execute performs one bounded start; Poll checks actual progress. Do not block/sleep,
+  use async void, subscribe an independent update scheduler, or reissue an accepted action.
+  An asynchronous callback may record completion locally, but saves must occur in a
+  writable main-thread lifecycle callback. Re-read current contextJson each callback.
+
+| Method | Base default | Override when |
+| --- | --- | --- |
+| Validate | Valid | Arguments/static combinations need checks; runId is empty |
+| Execute | Abstract | Always; initiate action or perform a synchronous assertion |
+| Poll | Cached Running/result | Waiting for asynchronous business completion |
+| GetError | Cached message/diagnostic | Human detail needs custom readonly lookup |
+| Cancel | No operation | Owned work must be asked to stop; preserve base evidence behavior |
+| Cleanup | Succeeded | Any resource, subscription or temporary state needs release/verification |
+| Restore | Unsupported | Checkpoints and actual identity can prove safe same-process resumption |
+
+`Fail` plus inherited GetError usually suffices; projects do not need an error DTO.
+Return Running from Cleanup until release is confirmed. It runs after success too:
+state intentionally passed to later items needs explicit run-scoped ownership and a
+Finally restoration Step, not accidental survival of local Cleanup. If overriding a
+project business base's Cancel/Cleanup, inspect and preserve its evidence/cleanup duties.
+Restore must rebuild local observation state and return Restored, not call Execute or
+declare success from a stored runId. Resource-free read-only steps can deliberately
+remain Unsupported if interrupted; document that limitation.
+
+### Minimal Read-only Example
+
+This is an authoring example, not a new built-in or a file to install automatically.
+It checks the active scene at execution time; it does not open it. It owns no resources,
+uses default cleanup, and intentionally does not support reload recovery. Replace the
+example ID and assertion with an approved project requirement before adoption.
+
+```csharp
+#if UNITY_EDITOR && UPILOT
+using System;
+using CodingRiver.UPilot.Automation;
+using UnityEngine.SceneManagement;
+
+namespace Project.Editor.Automation
+{
+    [AutomationStep("example.assert_active_scene",
+        Description = "Check the active scene path without changing it",
+        ArgumentsExample = "Assets/Scenes/Launch.unity",
+        TimeoutSeconds = 10, PollIntervalSeconds = 0.1)]
+    public sealed class AssertActiveSceneStep : AutomationStepBase
+    {
+        private static bool TryParse(string arguments, out string path)
+        {
+            path = arguments;
+            return !string.IsNullOrEmpty(path)
+                && path.StartsWith("Assets/", StringComparison.Ordinal)
+                && path.EndsWith(".unity", StringComparison.Ordinal)
+                && path.IndexOf('\\') < 0
+                && Array.IndexOf(path.Split('/'), "..") < 0;
+        }
+
+        public override string Validate(string runId, string instanceId,
+            string contextJson, string arguments)
+        {
+            return TryParse(arguments, out _)
+                ? ValidationOk()
+                : ValidationError("EXAMPLE_ARGUMENT_INVALID", "Expected an Assets scene path.");
+        }
+
+        public override void Execute(string runId, string instanceId,
+            string contextJson, string arguments)
+        {
+            if (!TryParse(arguments, out var path))
+            {
+                Fail("EXAMPLE_ARGUMENT_INVALID", "Expected an Assets scene path.");
+                return;
+            }
+            var scene = SceneManager.GetActiveScene();
+            if (!scene.IsValid() || !scene.isLoaded || scene.path != path)
+            {
+                Fail("EXAMPLE_SCENE_MISMATCH", "Expected active scene: " + path);
+                return;
+            }
+            Succeed();
+        }
+    }
+}
+#endif
+```
+
+For a waiting Step, leave the result Running after Execute, then in Poll inspect the
+owned request/current business state, call Succeed or Fail only on an observed outcome,
+and return `base.Poll(runId, instanceId, contextJson, arguments)`. Never read future
+business readiness in Validate. A business observation window can use its own timestamp;
+the executor still owns polling, the overall timeout and cancellation.
+
+### Optional Package And Discovery
+
+Guard the entire optional project file with `UNITY_EDITOR && UPILOT`, including usings,
+attribute, base/interface and helpers. Do not add a runtime reverse dependency, new
+asmdef/Provider or reflection compatibility layer just to make the dependency optional.
+UPilot's define manager adds `UPILOT` for the active build target and tracks targets it
+wrote; standard uninstall removes owned recorded defines. A preexisting/manual define
+may not be owned, and direct directory deletion can bypass cleanup. No package plus
+no define excludes the adapter; no package plus a leftover define can fail compilation.
+Inspect and manually remove stale local symbols when necessary, preserving other defines.
+Do not commit local package paths or generated PlayerSettings changes for teammates.
+
+After the correlated Unity compile, query UPilot Catalog, check the exact ID, type,
+metadata and diagnostics, then validate the **whole** proposed plan. A file on disk,
+an attribute text search or a catalog entry with diagnostics is not usable registration.
+If absent, inspect compile evidence, current target defines, Editor assembly inclusion,
+attribute placement, public no-argument constructor, interface and duplicate IDs.
+Do not fix absence by adding another registry, recompiling unchanged code blindly,
+manually constructing a Step, or bypassing preflight. Missing/invalid registrations
+must be repaired before starting any plan.
+
+### Skill Integration And Acceptance
+
+Update the owning business Skill's selection, argument example, prerequisites, ordering,
+effects/compatibility and restoration placement. Discovery only makes a Step selectable;
+it does not automatically include it in default acceptance or prove other Steps compatible.
+Repeated uses have distinct instanceIds. ID removal/rename requires updating current
+templates and callers together; leave historical report identities unchanged.
+
+Check the smallest sufficient set for the changed behavior: invalid/missing arguments
+and registration must execute nothing; valid inputs must retain their exact string;
+check success, meaningful failure codes, cancellation/timeout and verified cleanup.
+Resourceful steps additionally need save-failure-before-effect, wrong/stale identity,
+repeat cleanup and supported/unsupported reload paths. Configuration restoration needs
+actual post-exit values, including nonzero originals and consecutive runs when relevant,
+not just a saved `restored=true`. Distinguish synthetic restore tests from real Domain Reload.
+Require relevant artifact integrity, final mode and no unresolved owned Capture/Snapshot.
+
+Use canonical package tests for generic changes and the authorized project fixed template
+for business changes. No empty-filter full suite or temporary parallel project runner.
+Actually test an isolated no-package project when claiming package-absent compilation;
+macro scans alone do not prove it. Never uninstall a team's active tooling as a casual test.
+Report changed IDs/files, updated templates, compile/run identities, observed outcomes
+and unexecuted coverage. Instructions/examples-only edits use instruction validation and
+synchronization, without compiling the Markdown example or launching business work.
+
 ## String Contract and Checkpoints
 
 Ordinary project Steps reference only the attribute and interface/base class. All

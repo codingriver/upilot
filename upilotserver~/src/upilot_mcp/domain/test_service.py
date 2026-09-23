@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ..queue_audit import audited, observed_test
 
 import asyncio
 import base64
@@ -423,6 +424,7 @@ class TestDomainService:
             return None
         return value
 
+    @observed_test
     async def test_results(self, run_guid: str = "", cursor: str = "", count: int = 100) -> ToolResponse:
         request_id = new_id("req")
         if not isinstance(cursor, str):
@@ -555,6 +557,7 @@ class TestDomainService:
         request_id = new_id("req")
         return await self.dispatcher.call(request_id, "test.status", {})
 
+    @audited("Test", "cancel", "run_guid")
     async def test_cancel(self, run_guid: str = "") -> ToolResponse:
         request_id = new_id("req")
         payload = {"runGuid": run_guid} if run_guid else {}
@@ -562,12 +565,14 @@ class TestDomainService:
             request_id, "test.cancel", payload, timeout_ms=30000
         )
 
+    @audited("Test", "cleanup", "run_guid")
     async def test_force_reset(self) -> ToolResponse:
         request_id = new_id("req")
         return await self.dispatcher.call(
             request_id, "test.force_reset", {}, timeout_ms=30000
         )
 
+    @audited("Test", "cleanup", "run_guid")
     async def test_force_cleanup(self, run_guid: str = "") -> ToolResponse:
         request_id = new_id("req")
         payload = {"runGuid": run_guid} if run_guid else {}

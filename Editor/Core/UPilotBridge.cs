@@ -1163,6 +1163,7 @@ namespace CodingRiver.UPilot
             new Automation.UPilotAutomationStepService(this).RegisterCommands();
             new UPilotAgentIntegrationService(this).RegisterCommands();
             UPilotServiceMaintenance.Register(this);
+            UPilotQueueCleanupLog.Register(this);
 
             _consoleService = new UPilotConsoleService(this);
             _consoleService.RegisterCommands();

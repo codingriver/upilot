@@ -378,6 +378,8 @@ class ResourceDomainService:
                 continue
             batch_id = str(batch["writeBatchId"])
             stored = self.server.state.get_write_batch(batch_id)
+            if stored and stored.get("disposition"):
+                continue
             if stored and stored.get("terminal") and stored.get("correlationVerified"):
                 continue
             self.server.state.mark_write_batch(batch_id, "syncing")

@@ -28,6 +28,7 @@ from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
 from ..test_job_context import TEST_JOB_CONTEXT, TestJobCancelledBeforeStart
 from ..operation_context import OPERATION_ID, TASK_TOOL
+from ..queue_audit import AUDIT, QUEUE_GUARD, audited, observe, safe_text
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -70,6 +71,10 @@ def _serialized_operation(method):
         locks = self.__dict__.setdefault("_operation_locks", {})
         collect_after = False
         async with locks.setdefault(operation_id, asyncio.Lock()):
+            guard = QUEUE_GUARD.get()
+            if guard and method.__name__ == "operation_cancel" and guard[0] == operation_id:
+                if not await self._queue_operation_guard_valid(operation_id, guard[1], guard[2]):
+                    return fail(new_id("req"), "QUEUE_TARGET_CHANGED", "Operation, project or authorization changed while waiting for its cancellation lock.")
             result = await method(self, operation_id, *args, **kwargs)
             state = self._operations.get(operation_id)
             collect_after = bool(state and state.pop("_deferredArtifactCollection", False))
@@ -340,6 +345,7 @@ class TaskDomainService:
     def _save_operation(self, state: dict) -> bool:
         try:
             self.server.state.save_operation(state)
+            observe(self, "Operation", state)
             return True
         except Exception as exc:
             state.update(status="RecoveryRequired", phase="persistence_failed", endedAt=0,
@@ -1257,6 +1263,7 @@ class TaskDomainService:
             await asyncio.sleep(min(interval, max(0.1, deadline - time.monotonic())))
 
     @_serialized_operation
+    @audited("Operation", "cancel", "operation_id")
     async def operation_cancel(self, operation_id: str) -> ToolResponse:
         request_id = new_id("req")
         state = self._operations.get(operation_id)
@@ -1277,6 +1284,9 @@ class TaskDomainService:
         if not isinstance(cancel_call, dict):
             return fail(request_id, "CANCEL_UNSUPPORTED", "This operation has no cancelCall.", self._public_operation_state(state))
         state["cancelIntentSent"] = True
+        if AUDIT.get():
+            state["queueAuditRequest"] = AUDIT.get()[0]
+            state["queueAuditReason"] = safe_text(AUDIT.get()[4])
         state["cancelRequested"] = True
         state["cancelRequestedAt"] = state.get("cancelRequestedAt") or now_ms()
         state["cancelAttemptCount"] = int(state.get("cancelAttemptCount") or 0) + 1
@@ -2010,6 +2020,7 @@ class TaskDomainService:
                 capture["artifactsVerified"] = False
                 capture["stopError"] = str(exc)
 
+    @audited("Capture", "stop", "session_id")
     async def console_capture_stop(self, *, session_id: str, owner_token: str) -> ToolResponse:
         """Stop only a capture whose one-time ownership credential is established."""
         return await self.dispatcher.call(
@@ -2550,6 +2561,7 @@ class TaskDomainService:
         result["elapsedMs"] = max(0, (result["endedAt"] or now_ms()) - result["startedAt"])
         return ok(new_id("req"), result)
 
+    @audited("Task", "cancel", "task_id")
     async def task_cancel(self, task_id: str) -> ToolResponse:
         self._recover_test_jobs()
         state = self._async_tasks.get(task_id)
@@ -2563,6 +2575,9 @@ class TaskDomainService:
             return fail(new_id("req"), "TASK_PROJECT_MISMATCH", "Task belongs to another Unity project.", {"taskId": task_id})
         state["cancelRequested"] = True
         state["status"] = "cancel_requested"
+        if AUDIT.get():
+            state["queueAuditRequest"] = AUDIT.get()[0]
+            state["queueAuditReason"] = safe_text(AUDIT.get()[4])
         state["phase"] = "cancel_requested"
         state["updatedAt"] = now_ms()
         # This is an intent only; the observer marks sent_unknown immediately
@@ -2712,3 +2727,4 @@ class TaskDomainService:
             except Exception as exc:
                 state.update(status="RecoveryRequired", terminal=False, endedAt=0,
                              error={"code": "TEST_TASK_PERSIST_FAILED", "message": str(exc)})
+            observe(self, "Task", state)

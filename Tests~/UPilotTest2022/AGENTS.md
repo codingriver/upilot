@@ -1,10 +1,10 @@
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 41
+rulesVersion: 42
 upilotPackageVersion: 0.3.32
 projectPath: D:\upilot\Tests~\UPilotTest2022
-generatedAt: 2026-09-23T05:49:18Z
+generatedAt: 2026-09-23T05:58:14Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -114,6 +114,15 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Keep business step implementations, assertions and restoration project-owned. UPilot owns the registered Step directory, complete plan validation, sequencing, checkpoints and run state; Skills compose approved fixed templates and selected Cases into `jobSpec.stepPlan` through existing `unity_operation_*`. The project Bridge is not required for this new path; preserve legacy business entry points until explicitly migrated. Read the Skill's `references/automation-steps.md` before composing or implementing a step plan.
 - Step adapters use `[AutomationStep]` plus `IAutomationStep` or `AutomationStepBase`, guarded by `#if UPILOT` when optional. All lifecycle parameters are strings with `arguments` last; JSON results are validated by UPilot. Save checkpoints/shared keys synchronously through the guarded API before related effects; Validate/GetError cannot save. Do not expose Context/result/error/report DTOs to ordinary project Steps or infer success from missing JSON fields.
 - Preflight the entire step list before start. Preserve string arguments verbatim, explicit step/operation identities and Finally cleanup; status queries never advance steps. On reload/reconnect observe or explicitly Restore the same run, never replay Execute. `RecoveryRequired` is not successful cleanup.
+
+## Adding And Changing Automation Steps
+
+- Before authoring a Step, read the Skill's `references/automation-steps.md`, especially its authoring checklist, and inspect the current attribute/interface/base plus a relevant implementation. Reuse built-in steps for scene/mode changes, waiting, Capture and Snapshot. Business actions/assertions/recovery remain in project Editor code; add package steps only for necessary project-independent capabilities.
+- Define a unique stable ID, string argument grammar/example, success/error conditions, prerequisites, side effects, ownership, recovery and timeout budgets before coding. Use an explicit `[AutomationStep]` on a concrete non-generic `IAutomationStep` implementation with a public parameterless constructor; prefer `AutomationStepBase`. Attribute discovery after compilation is registration, not a project registry, menu or manual registration call.
+- Optional project adapters must guard the whole file, including imports and attributes, with `#if UNITY_EDITOR && UPILOT`. Runtime code must not depend on the adapters. Package absence with a leftover define is not safe; do not commit local package paths or generated PlayerSettings defines, or claim no-package compilation from a static scan.
+- Keep constructors/Validate side-effect-free and static-only; share argument parsing with Execute. Execute issues work once and returns promptly; Poll observes it. Do not add independent update loops, sleeps, async-void lifecycles, another scheduler, or automatic retries. Preserve stable errors and explicitly design Cancel/Cleanup/Restore for resources; Cleanup also runs on success, and Restore never replays Execute.
+- Save identities, intent and originals before related effects. Use package checkpoint/evidence helpers, not project Capture credentials, snapshot observers, parallel reports or run-state stores. Update the project Skill's selection and ordering rules explicitly; discovering a new Step does not authorize adding it to every default plan.
+- After code changes, require correlated Unity compilation, then verify exact Catalog ID/type/metadata and complete-plan validation before a targeted run. Cover changed parameter, failure, cancellation, cleanup and recovery behavior; distinguish code inspection, preflight, synthetic tests and real execution. Documentation-only changes require template/Skill synchronization checks, not a new compile or business run.
 
 ## Operation Status Contract
 

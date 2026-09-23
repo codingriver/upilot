@@ -37,6 +37,7 @@ namespace CodingRiver.UPilot
         private string               _guiDiagResultSnapshot = "";
         private bool                 _guiDiagRunningSnapshot;
         private long                 _guiDiagResultAtMsSnapshot;
+        private bool                 _guiSnapshotInitialized;
 
         // ── Log filter ────────────────────────────────────────────────────────
         private bool _showInfo    = true;
@@ -240,7 +241,7 @@ namespace CodingRiver.UPilot
 
             var bridge = UPilotBridge.Instance;
 
-            if (Event.current.type == EventType.Layout || _guiLogsSnapshot.Count == 0)
+            if (ShouldRefreshGuiSnapshot(Event.current.type, _guiSnapshotInitialized))
             {
                 _guiStatusSnapshot       = bridge.GetStatus();
                 _guiMcpStatusSnapshot    = UPilotMcpServerManager.Instance.GetStatus();
@@ -255,6 +256,8 @@ namespace CodingRiver.UPilot
                 {
                     RefreshAgentConfigSnapshot();
                 }
+
+                _guiSnapshotInitialized = true;
             }
 
             UPilotWindowDiagnostics.RecordWindow(position.width, position.height, 0);
@@ -290,6 +293,11 @@ namespace CodingRiver.UPilot
             {
                 EditorGUILayout.EndScrollView();
             }
+        }
+
+        internal static bool ShouldRefreshGuiSnapshot(EventType eventType, bool snapshotInitialized)
+        {
+            return !snapshotInitialized || eventType == EventType.Layout;
         }
 
         private void DrawRuntimeTab(
@@ -1345,6 +1353,15 @@ namespace CodingRiver.UPilot
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
                 EditorGUILayout.LabelField("高级设置 > 自动处置授权", EditorStyles.boldLabel);
+                if (GUILayout.Button("查看当前任务队列")) UPilotQueueWindow.Open();
+                var cleanupAllowed = EditorGUILayout.ToggleLeft("允许 AI 清理当前项目队列占用", config.aiQueueCleanupAllowed);
+                if (cleanupAllowed != config.aiQueueCleanupAllowed)
+                {
+                    config.aiQueueCleanupAllowed = cleanupAllowed;
+                    UPilotProjectConfig.Save(config);
+                }
+                EditorGUILayout.HelpBox("独立持续授权，默认允许。AI 可精确取消或停止当前项目任务，不要求属于当前聊天；不删除日志产物。关闭不影响查看，下面的全选不影响此项。", MessageType.Info);
+                EditorGUILayout.Space(4);
                 bool full = UPilotAutomationAuthorizationCatalog.IsFull(safety);
                 bool any = (safety.automationAuthorizationScopes ?? Array.Empty<string>()).Length > 0;
                 EditorGUI.showMixedValue = any && !full;

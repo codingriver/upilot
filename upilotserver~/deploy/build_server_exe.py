@@ -57,7 +57,38 @@ def ensure_pyinstaller() -> None:
         run([sys.executable, "-m", "pip", "install", "pyinstaller"])
 
 
+def collect_skill_resources(skill_root: Path) -> list[Path]:
+    required = (
+        "template-manifest.json",
+        "AGENTS.md.template",
+        "SKILL.md.template",
+        "SKILL.md",
+        "agents/openai.yaml.template",
+        "agents/openai.yaml",
+        "references/automation-steps.md",
+        "references/installation.md",
+    )
+    missing = [relative for relative in required if not (skill_root / relative).is_file()]
+    if missing:
+        raise FileNotFoundError("Missing UPilot Skill resources: " + ", ".join(missing))
+    return sorted(
+        (
+            path for path in skill_root.rglob("*")
+            if path.is_file()
+            and path.name.lower() != ".upilot-install.json"
+            and not any(
+                part.lower() == "__pycache__"
+                or part.lower().endswith((".meta", ".pyc", ".pyo"))
+                for part in path.relative_to(skill_root).parts
+            )
+        ),
+        key=lambda path: path.relative_to(skill_root).as_posix().lower(),
+    )
+
+
 def build_exe(version: str, channel: str, commit: str) -> Path:
+    skill_root = REPO_ROOT / "skills" / "upilot-unity-mcp"
+    bundled_resources = collect_skill_resources(skill_root)
     ensure_pyinstaller()
     DIST.mkdir(parents=True, exist_ok=True)
     name = f"upilot-mcp-server-{version}-win-x64"
@@ -73,16 +104,6 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         path.mkdir(parents=True, exist_ok=True)
 
     build_info = SERVER_ROOT / "src" / "upilot_mcp" / "upilot_build_info.json"
-    skill_root = REPO_ROOT / "skills" / "upilot-unity-mcp"
-    bundled_templates = [
-        skill_root / "template-manifest.json",
-        skill_root / "AGENTS.md.template",
-        skill_root / "SKILL.md.template",
-        skill_root / "agents" / "openai.yaml.template",
-    ]
-    missing_templates = [str(path) for path in bundled_templates if not path.is_file()]
-    if missing_templates:
-        raise FileNotFoundError("Missing UPilot template resources: " + ", ".join(missing_templates))
     build_info.write_text(
         json.dumps(
             {
@@ -125,12 +146,12 @@ def build_exe(version: str, channel: str, commit: str) -> Path:
         "--collect-all",
         "websockets",
     ]
-    for template in bundled_templates:
-        relative_parent = template.parent.relative_to(skill_root).as_posix()
+    for resource in bundled_resources:
+        relative_parent = resource.parent.relative_to(skill_root).as_posix()
         destination = "skills/upilot-unity-mcp"
         if relative_parent != ".":
             destination += "/" + relative_parent
-        cmd.extend(["--add-data", f"{template}{os.pathsep}{destination}"])
+        cmd.extend(["--add-data", f"{resource}{os.pathsep}{destination}"])
     cmd.append(str(SERVER_ROOT / "run_upilot_mcp.py"))
     try:
         print("$ " + " ".join(cmd))

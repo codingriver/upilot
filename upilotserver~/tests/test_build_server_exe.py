@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -39,7 +40,7 @@ def test_release_manifest_requires_a_matching_sha256(tmp_path: Path, monkeypatch
         build_server_exe.verify_release_manifest(manifest_path)
 
 
-def test_server_exe_build_bundles_manifest_and_all_templates_before_entry_script(
+def test_server_exe_build_bundles_complete_skill_before_entry_script(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -49,11 +50,24 @@ def test_server_exe_build_bundles_manifest_and_all_templates_before_entry_script
         "template-manifest.json",
         "AGENTS.md.template",
         "SKILL.md.template",
+        "SKILL.md",
         "agents/openai.yaml.template",
+        "agents/openai.yaml",
+        "references/automation-steps.md",
+        "references/installation.md",
+        "references/future-guide.md",
+        "scripts/install_upilot.py",
     ):
         path = skill / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative, encoding="utf-8")
+    for relative in (
+        "SKILL.md.meta", ".upilot-install.json",
+        "scripts/__pycache__/cached.pyc", "scripts/cached.pyo",
+    ):
+        path = skill / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not distributed", encoding="utf-8")
     (server / "src" / "upilot_mcp").mkdir(parents=True)
     entry = server / "run_upilot_mcp.py"
     entry.write_text("pass\n", encoding="utf-8")
@@ -82,6 +96,35 @@ def test_server_exe_build_bundles_manifest_and_all_templates_before_entry_script
         "template-manifest.json",
         "AGENTS.md.template",
         "SKILL.md.template",
+        "SKILL.md",
         "agents/openai.yaml.template",
+        "agents/openai.yaml",
+        "references/automation-steps.md",
+        "references/installation.md",
+        "references/future-guide.md",
+        "scripts/install_upilot.py",
     ):
-        assert any(relative in value.replace("\\", "/") for value in add_data)
+        parent = Path(relative).parent.as_posix()
+        destination = "skills/upilot-unity-mcp" + ("/" + parent if parent != "." else "")
+        assert f"{skill / relative}{os.pathsep}{destination}" in add_data
+    assert not any(
+        marker in value for value in add_data
+        for marker in (".meta", ".upilot-install.json", "__pycache__", ".pyo")
+    )
+
+
+@pytest.mark.parametrize("missing", ["AGENTS.md.template", "SKILL.md", "references/automation-steps.md"])
+def test_missing_skill_resource_fails_before_build_side_effects(tmp_path: Path, monkeypatch, missing) -> None:
+    skill = tmp_path / "skills" / "upilot-unity-mcp"
+    for source in build_server_exe.collect_skill_resources(REPO_ROOT / "skills" / "upilot-unity-mcp"):
+        relative = source.relative_to(REPO_ROOT / "skills" / "upilot-unity-mcp")
+        if relative.as_posix() == missing:
+            continue
+        target = skill / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    monkeypatch.setattr(build_server_exe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(build_server_exe, "ensure_pyinstaller",
+                        lambda: pytest.fail("Missing resources must not start build setup"))
+    with pytest.raises(FileNotFoundError, match=missing):
+        build_server_exe.build_exe("1.2.3", "test", "abc")

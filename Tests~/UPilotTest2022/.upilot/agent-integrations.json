@@ -3,9 +3,9 @@
     "rules": [
         {
             "relativePath": "AGENTS.md",
-            "normalizedManagedSha256": "94ca1ef5db10d3bcb5037389f71a9ce7be69af360cc15c7104923a22e3088570",
-            "templateSha256": "ce07ea53c0df04c31069593c4735b05514e7458a1f5a5dd6e7e763661d348dab",
-            "templateVersion": 41,
+            "normalizedManagedSha256": "d767a0e7e6dd53b261a603b6f989272df50646742a1cd9a9d4c4877e38f3113e",
+            "templateSha256": "324cd25727ee587cf495f656762ccd961530991071a9e246af8611d8d04143fd",
+            "templateVersion": 42,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
                 "mcpUrl": "http://127.0.0.1:8017/mcp",
@@ -16,9 +16,9 @@
         },
         {
             "relativePath": ".cursor/rules/upilot-unity-mcp.mdc",
-            "normalizedManagedSha256": "94ca1ef5db10d3bcb5037389f71a9ce7be69af360cc15c7104923a22e3088570",
-            "templateSha256": "ce07ea53c0df04c31069593c4735b05514e7458a1f5a5dd6e7e763661d348dab",
-            "templateVersion": 41,
+            "normalizedManagedSha256": "d767a0e7e6dd53b261a603b6f989272df50646742a1cd9a9d4c4877e38f3113e",
+            "templateSha256": "324cd25727ee587cf495f656762ccd961530991071a9e246af8611d8d04143fd",
+            "templateVersion": 42,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
                 "mcpUrl": "http://127.0.0.1:8017/mcp",
@@ -30,8 +30,8 @@
         {
             "relativePath": "CLAUDE.md",
             "normalizedManagedSha256": "af5a4067578801769bea0c6727e728ed8f35b075aaa73561a2f5849a658b6674",
-            "templateSha256": "ce07ea53c0df04c31069593c4735b05514e7458a1f5a5dd6e7e763661d348dab",
-            "templateVersion": 41,
+            "templateSha256": "324cd25727ee587cf495f656762ccd961530991071a9e246af8611d8d04143fd",
+            "templateVersion": 42,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
                 "mcpUrl": "http://127.0.0.1:8017/mcp",

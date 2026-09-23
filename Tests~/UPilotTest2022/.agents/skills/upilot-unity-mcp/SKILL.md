@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, registered Automation Step development and stepPlan composition, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
 ---
 
 <!-- Generated from SKILL.md.template. Do not edit SKILL.md directly. -->
@@ -85,6 +85,22 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call it and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.
 - Keep business step implementations, assertions and restoration in project code. For UPilot Automation, read `references/automation-steps.md`: query the UPilot-owned directory, compose approved Skill templates with selected Cases into `jobSpec.stepPlan`, validate the complete list, then use existing Operation tools. Project Steps implement the string-only `IAutomationStep` contract or inherit `AutomationStepBase`; `arguments` is always last and results are JSON. Do not add parallel start/status tools, make the legacy project Bridge mandatory for new Step plans, or drive individual steps from client polling.
 
+## Step Development
+
+For adding, changing or removing a registered Step, read the **Authoring A Step**
+section of `references/automation-steps.md` before editing code. It includes the
+responsibility decision, lifecycle override table, guarded C# example, optional-package
+behavior, registration troubleshooting and targeted acceptance checklist.
+Load the active project's business rules/Skill as well; those define prerequisites,
+arguments, ordering and assertions, not the UPilot framework.
+
+Deliver the stable ID, source/type, argument example, completion/error contract,
+resource restoration strategy, intended plan position and actual validation evidence.
+Update the owning Skill template/selection when an approved Step becomes selectable;
+never restore a removed project Runner, Registry or test menu to make it discoverable.
+For instruction-only tasks, validate and synchronize instructions without creating
+a sample production Step or launching a workflow.
+
 ## Persistent Console Capture
 
 For plans with `upilot.console_capture_start`, use plan ownership instead of the
@@ -161,7 +177,7 @@ For execution-tool selection and typed values, read `references/execution-tools.
 
 - Installation: read `references/installation.md`.
 - Common flows: read `references/workflows.md`.
-- Registered step plans, built-in Editor steps and evidence ownership: read `references/automation-steps.md`.
+- Adding/changing Steps, lifecycle examples, optional-package isolation, registered plans and evidence ownership: read `references/automation-steps.md`.
 - Tool choice: read `references/tool-routing.md` and `references/tool-boundaries.md`.
 - Client transport/config: read `references/client-configs.md`.
 - Recovery and destructive work: read `references/safety.md`.

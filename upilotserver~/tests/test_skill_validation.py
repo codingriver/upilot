@@ -84,6 +84,16 @@ def test_installed_failure_is_read_only_and_never_falls_back_to_source(installed
     assert contents(installed) == before
 
 
+def test_step_authoring_guide_is_required_even_with_matching_install_hash(installed, capsys):
+    (installed / "references/automation-steps.md").unlink()
+    mark(installed)
+    before = contents(installed)
+    with pytest.raises(SystemExit):
+        module("check_skill_pack").main(["--mode", "installed", "--root", str(installed)])
+    assert "missing required file: references/automation-steps.md" in capsys.readouterr().err
+    assert contents(installed) == before
+
+
 def test_cache_meta_and_project_specific_ports_are_supported(installed):
     for name in ("SKILL.md", "agents/openai.yaml"):
         path = installed / name

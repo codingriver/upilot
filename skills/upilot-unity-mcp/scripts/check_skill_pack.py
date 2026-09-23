@@ -30,6 +30,7 @@ REQUIRED_FILES = [
     "references/monohook-tracing.md",
     "references/client-configs.md",
     "references/installation.md",
+    "references/automation-steps.md",
     "references/safety.md",
     "references/flow.md",
     "scripts/install_upilot.py",
@@ -45,6 +46,7 @@ REQUIRED_SKILL_REFERENCES = [
     "references/monohook-tracing.md",
     "references/client-configs.md",
     "references/installation.md",
+    "references/automation-steps.md",
     "references/safety.md",
     "references/flow.md",
 ]

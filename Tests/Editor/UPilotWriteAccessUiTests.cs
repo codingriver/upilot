@@ -115,6 +115,20 @@ namespace CodingRiver.UPilot.Tests
                 Is.Not.Null);
         }
 
+        [TestCase(EventType.Layout, true, true)]
+        [TestCase(EventType.Repaint, true, false)]
+        [TestCase(EventType.MouseDown, true, false)]
+        [TestCase(EventType.Repaint, false, true)]
+        public void StatusWindowGuiSnapshotRefreshIsStableAcrossLayoutAndRepaint(
+            EventType eventType,
+            bool snapshotInitialized,
+            bool expected)
+        {
+            Assert.That(
+                UPilotStatusWindow.ShouldRefreshGuiSnapshot(eventType, snapshotInitialized),
+                Is.EqualTo(expected));
+        }
+
         [Test]
         public void MainWindowUsesConcisePortLabelsAndAgentUpdateActions()
         {

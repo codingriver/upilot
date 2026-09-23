@@ -474,6 +474,35 @@ UPilot 的规则 managed block 与固定目标下的 `upilot-unity-mcp` Skill �
 
 ### Skill/规则模板维护
 
+#### 随包分发的源文件
+
+通用 Agent 规则、Skill 和新增 Step 指南均保存在 UPilot 仓库内，不依赖开发者机器上的全局 Skill：
+
+```text
+skills/upilot-unity-mcp/
+|-- AGENTS.md.template             Agent 规则权威源
+|-- SKILL.md.template              Skill 指令权威源
+|-- SKILL.md                       生成的可读 Skill 入口
+|-- template-manifest.json         规则及 Skill 版本
+|-- agents/openai.yaml.template    Skill 元数据权威源
+|-- agents/openai.yaml             生成的元数据
+|-- references/automation-steps.md Step 新增、生命周期、注册与验收指南
+|-- references/installation.md     安装与同步流程
+`-- scripts/                      生成、校验和安装工具
+Documentation~/AgentRules/AGENTS.upilot.md  生成的规则阅读版
+```
+
+UPM/Git 分发保留仓库内整份 `skills/upilot-unity-mcp/`，不是只复制 `SKILL.md`。
+独立 Server EXE 也内嵌该目录的模板、Skill、参考文件和脚本，排除 Unity `.meta`、
+Python 缓存和项目安装标记；这不代表独立 EXE 会自动向项目安装文件。
+项目安装仍以当前 UPM 包的模板为准，通过既有五目标同步流程写入规则和两份 Skill。
+新增 Step 指南纳入 Skill 必需文件检查，缺失时校验失败。
+
+维护只改上述权威源；不把用户目录的安装副本反向覆盖进包，也不复制含本机路径/端口的项目
+`AGENTS.md` 作为默认规则。`ksb-smoke-runner`、关卡/英雄及战场日志规则属于项目业务技能，
+不作为 UPilot 的通用默认分发内容。发布前完成源生成/校验，提交后随正常发布流程交付；
+本地文件修改不等于已发布。
+
 UPilot 的 Agent 规则、Skill 指令和 OpenAI Skill 元数据分别只维护以下源模板：
 
 ```text

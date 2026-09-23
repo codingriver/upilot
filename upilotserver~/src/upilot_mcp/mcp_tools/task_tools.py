@@ -25,6 +25,14 @@ _reject_write_if_unapproved = runtime._reject_write_if_unapproved
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
+@mcp.tool(description="当前项目任务汇总及精确占位清理。默认 dryRun=true 只读；执行需原目标/action/reason、expectedProjectPath 和一次性 confirmToken。仅独立 aiQueueCleanupAllowed 授权，不自动重启、不删除历史证据。")
+async def unity_queue_cleanup(targetType: str = "", targetId: str = "", action: str = "",
+                              reason: str = "", dryRun: bool = True, confirmToken: str = "",
+                              expectedProjectPath: str = ""):
+    r = await _get_facade().queue_cleanup(target_type=targetType, target_id=targetId, action=action,
+        reason=reason, dry_run=dryRun, confirm_token=confirmToken, expected_project_path=expectedProjectPath)
+    return _payload(r)
+
 @mcp.tool(
     description="预检测试环境就绪：检查 Unity 连接 + 编译完成 + 编辑模式。返回 ready=true/false 及各项状态。"
 )
@@ -245,6 +253,7 @@ _DESTRUCTIVE_TOOLS = {
     "unity_agent_integrations_sync",
 }
 _NON_IDEMPOTENT_TOOLS = {
+    "unity_queue_cleanup",
     "unity_operation_start",
     "unity_operation_wait",
     "unity_operation_cancel",
@@ -262,6 +271,7 @@ for _name, _value in list(globals().items()):
         _name,
         public_handler=_value,
         destructive=_name in _DESTRUCTIVE_TOOLS,
+        requires_unity_connection=False if _name == "unity_queue_cleanup" else None,
         requires_write_access=False if _name == "unity_agent_integrations_sync" else None,
         write_access_predicate=(lambda args: bool(args.get("apply", False))) if _name == "unity_agent_integrations_sync" else None,
         write_access_condition="apply=true" if _name == "unity_agent_integrations_sync" else "",

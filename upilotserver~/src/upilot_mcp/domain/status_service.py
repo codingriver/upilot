@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ..queue_audit import audited
 
 import asyncio
 import base64
@@ -2404,6 +2405,7 @@ class StatusDomainService:
                 result.data["nextSequence"] = scanned_to
         return self._sanitize_capture_response(result)
 
+    @audited("Capture", "stop", "session_id")
     async def console_capture_stop(
         self, session_id: str = "", owner_token: str = "", force_stop: bool = False,
     ) -> ToolResponse:

@@ -1,5 +1,26 @@
 ﻿# UPilot Improvement Backlog
 
+## UPilot-20260923-QueueCleanup - 只读任务列表与历史占位处置
+
+- 问题/证据：AI 异常断开遗留 Task/Operation/WriteBatch 占位；历史批次 `wb-c522de2f-1610-4185-bb72-68d87c6fbeac` 无关联终态，不能用其它批次成功替代。
+- 优先级：P1。涉及高级设置、取消/停止、`WriteBatchRecoveryRequired` 恢复。
+- 实施：独立默认开启授权、只读窗口、`unity_queue_cleanup` 精确预览/令牌执行；复用既有适配器，WriteBatch 备份后仅释放阻断，保留 unknown。失败记录 Error/Debug.LogError，不新增调度器、全部清理或聊天归属。
+- 验证：最终关联编译 `wb-457ac844-dffc-40dc-b7e6-f0f0ec0c75a4` 0 errors；Unity 定向 10/10 passed，runGuid=`01dcdc21-7aca-4845-9efa-7eeabd2a4f4d`，cleanupVerified=true。Python 定向 112 passed。规范工程 rules 43 / pack 49 全部五个目标同步及重复同步验证通过；详细证据见 `Documentation~/QueueCleanup.md`。
+- 状态：Implemented / targeted validation passed / deployment pending；旧 Server 未加载新工具且无维护入口，待用户更新 Server 后在线联调。本次未清理当前真实任务。
+
+## UPilot-20260923-StepAuthoringGuide - Step 新增开发规则与 Skill 路由
+
+- 同日分发补充（P2，Implemented/Directed Accepted）：用户要求规则和Skill随UPilot分发。通用权威源已在`D:\upilot\skills\upilot-unity-mcp`，但`upilotserver~/deploy/build_server_exe.py`原只内嵌manifest和三个模板，漏Skill入口及参考指南；现按安装器同类过滤携带完整Skill资源，缺必需资源在构建副作用前失败，排除meta/缓存/安装标记。校验器将automation-steps列为必需文件/引用；README明确源路径与项目业务Skill边界。41项打包清单/Skill定向Python测试通过，含未来参考文件、目录层级、过滤和缺文件零构建；Agent42/Skill48源校验、两工程四份installed、实际重复同步各46文件及备份不变。收益是避免分发漏开发指南或依赖个人用户目录。未实际重建/发布EXE，不宣称发布产物已验；双向项目记录仍为`F:\xclient2\TODO_UPilot.mcd`同ID。
+
+- 日期/触发：2026-09-23，用户要求完善新增Step的Agent规则与Skill；归属通用UPilot/MCP规则及项目接入，P2。
+- 痛点：既有API文档缺少从职责判断到开发、发现、编排及验收的连续清单；业务Skill仍有Step计划查询项目Registry的旧句，容易恢复已删除体系。
+- 改进/实施：包权威Agent/Skill模板增加开发路由，automation-steps参考增加生命周期表、无副作用C#示例、宏隔离、发现排错及风险定向验收；项目Skill与环境清单只补业务选择/排序，不新增执行器。
+- 效率收益：后续新增Step复用同一清单，减少反复定位接口、错误注册和重复搭建测试框架。
+- 验收标准：源码生成及自检通过，两授权项目五目标一致，双安装校验通过，实际重复同步内容/精确时间戳/备份不变；文档维护不启动业务测试。
+- 状态：Implemented；Agent42/Skill47源码及四份安装校验通过，两工程实际重复同步各46个受管文件零变化，外部规则字节保持；不新增Unity编译/业务验收结论。
+- 路径/证据：`D:\upilot\skills\upilot-unity-mcp\references\automation-steps.md`；`D:\upilot\Tests~\UPilotTest\Log\P0P1\step-authoring-r42-repeat-sync.json`；`unity_agent_integrations_check/sync`。
+- 双向项目记录：`F:\xclient2\TODO_UPilot.mcd`同ID；通用优先级及状态以本条为准。
+
 ## UPilot-20260922-StepEvidenceDiagnostics - Step 收尾诊断与业务附件索引
 
 - 2026-09-23接入补验：当前原生Step模板完成入场单项10/10、资源/GM分别两轮19/19；业务前置失败run `5917d526a32e4ff997e9ab88b7cffb16`保留首错，包取得可信失败截图、停止自有Capture并完成Finally后Policy/报告。三次公开产物15/22/15原始哈希一致、最终EditMode/Capture0。项目连续运行的日志恢复定位符缺陷仅在项目辅助修正，不迁入包协议。根条目仍In Progress，新增通用能力Implemented/Directed Accepted，实际无包及扩展实机故障矩阵未完成；双向项目证据见`F:\xclient2\TODO_UPilot.mcd`同名项及KSB迁移条目。
@@ -1342,6 +1363,7 @@ UPilot 通用开发：
 
 - 2026-09-22 Unity 2022.3 回归（P1/Open，通用 UPilot/MCP）：`F:\xclient2` 弹道接触伤害定向 EditMode runGuid=`aa61b192-02c7-4135-9e1a-4bc70ed92064` 已权威保存 7 个叶子结果（6 passed / 1 failed），但清理持续停在 `cleanup/running`。`unity_test_force_cleanup` 返回 `TEST_RUNNER_BINDING_UNAVAILABLE`，因为当前 `UnityEditor.TestTools.TestRunner.Api.TestRunnerApi` 不存在适配层要求的 `m_testJobDataHolder` static property，且命令明确 `commandSubmitted=false/changed=false`。官方 `TestRunnerApi.IsRunActive()` 已确认 `false`；有界 `csharp_eval` 清理在反射重载绑定阶段失败，未提交状态修改且未重试。期望版本适配层探测真实 Runner 作业与 callback 成员，并将“断言终态”和“资源清理终态”分离；叶子完成后一次自动或显式清理须在 15 秒内得到 `cleanupSucceeded=true`、`unresolvedResources=[]`，重复调用幂等。规范验收在 `D:\upilot\Tests~\UPilotTest` 的 Unity 2022.3 运行一个含失败叶子的 7 项 EditMode 集合，不得访问不存在的 `m_testJobDataHolder`。预计每次节省 1～3 分钟等待、一次无效清理和一次额外 Domain Reload。项目双向现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260823-02`；状态：Open，原“已完成”取消能力需针对该版本回归重新闭环。
 - 2026-09-22 现场恢复验证：在 `TestRunnerApi.IsRunActive()==false` 后，通过当前真实实例的公开泛型 `UnregisterCallbacks<ICallbacks>(callback)` 解除回调，再清除 UPilot 过期 `_activeRunGuid` 并调用 `CleanupActiveRun()`，`F:\xclient2` 的 EditMode runGuid=`2e33f720-c2ab-4934-8620-4581d3f9fd18` 为 7/7 Passed、PlayMode runGuid=`7b2a156a-011b-4c4c-979e-2ecb4a8f8bee` 为 3/3 Passed，均已权威完成且 `cleanupSucceeded=true`、`unresolvedResources=[]`。人工有界恢复已证明版本适配方向，专用 `unity_test_force_cleanup` 尚未实现该探测，因此仍为 P1/Open。
+- 2026-09-23 再次复现（P1/Open，通用 UPilot/MCP）：`F:\xclient2` 弹道路径接触 EditMode runGuid=`1cd7fd20-e211-4dc0-a8f9-a8243958307c` 已权威保存 86 项结果（58 Passed / 28 Failed），但仍停在 `cleanup/running`，`unresolvedResources=[test-runner-job,run-guid,test-callback]`。`unity_test_force_cleanup` 与 `unity_test_force_reset` 均在副作用前返回 `TEST_RUNNER_BINDING_UNAVAILABLE`，仍因 Unity 2022 `TestRunnerApi` 不存在 `m_testJobDataHolder`。用户已决定本轮停止自动化验收，未继续反射恢复或补跑；这不改变根条目的修复要求：专用工具应探测真实实例，使用公开泛型 `UnregisterCallbacks<ICallbacks>` 和内部清理入口，在 15 秒内幂等收口为 `cleanupSucceeded=true/unresolvedResources=[]`。预计每次减少 1～3 分钟等待及手工反射恢复；项目双向记录：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260823-02`，累计出现次数 4，状态保持 P1/Open。
 
 - 2026-09-14 进度诊断增量（P2/Open，通用 UPilot/MCP）：`F:\xclient2` 多轮弹道最终定向 runGuid=`51842931-3e46-45d1-99a9-71304562c1ff` 持续推进并在约 21 秒后 `12/12 passed`、`cleanupSucceeded=true`，但高频/较长 EditMode 用例期间 Editor 状态可能短暂表现为 stale/busy，调用方仍需交叉查询才能区分正常推进与停止泵送。建议测试状态直接返回 `progressAgeMs/editorPumpAgeMs` 和 `running_with_progress/waiting_for_editor/stuck` 分类，仅超过有界阈值才建议 Hang 诊断。验收以持续 30 秒、每秒推进的 fixture 和停止推进 fixture 对照，前者不得误报，后者给稳定 failureSignature/nextAction。预计每轮减少 2～4 次状态查询并避免误取消。项目双向现场：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260823-02`；原 P1 取消回归与本 P2 增量分别跟踪。
 
@@ -2633,4 +2655,4 @@ UPilot 通用开发：
 - 建议改进：用独立的 `_hasGuiSnapshot`/事件序列标志表示初始化，仅在 Layout 事件原子更新整组 GUI 快照；不要用合法空集合充当未初始化哨兵。将后台诊断完成结果调度回 Editor 主线程后再提交状态并请求 Repaint，或以锁/不可变结果对象一次性发布 `result/running/timestamp`。补充定向 IMGUI 回归：空日志、诊断任务恰在 Layout/Repaint 间完成、结果区出现/消失，断言 Console 无布局组错误。
 - 复现/证据：静态源码 `Editor/Core/UPilotStatusWindow.cs` 第 32-39、221-258、1698-1765、2057-2076 行与用户提供的四段级联堆栈；当前目标 MCP 路径匹配 `D:\upilot\Tests~\UPilotTest`，但 Bridge 已断开且快照过期，因此本轮未进行实时 Console 复现。
 - 优先级：P1。
-- 状态：Open；本轮仅完成原因分析和待办记录，未修改实现或运行测试。
+- 状态：Implemented / targeted validation passed（2026-09-23）。已用独立 `_guiSnapshotInitialized` 替代空日志哨兵，并将初始化后的整组 GUI 快照刷新限制为 `EventType.Layout`；新增 4 个 Layout/Repaint/MouseDown 判定回归。关联写入批次 `wb-f3a26afc-2619-47cf-ba0d-ad37a7c5d3de` 编译 0 error（3 条既有 Flow 序列化 warning），定向 EditMode 4/4 passed，runGuid=`c053362f-c6ea-4d28-a954-b86c0231c435`，cleanupSucceeded=true。

@@ -373,6 +373,13 @@ async def _run_http_server(
             "stats": str(request.url.replace(path="/stats", query="")),
         })
 
+    async def queue_endpoint(request):
+        from starlette.responses import JSONResponse
+        # Internal Editor read-only view; AI actions remain on the MCP tool.
+        response = await _get_facade().queue_inventory()
+        return JSONResponse({"ok": response.ok, "data": response.data,
+                             "error": response.error.code if response.error else None})
+
     # Friendly endpoint for clients that probe /mcp with a browser-like GET.
     # Actual MCP JSON-RPC requests must still use POST against the same path.
     async def mcp_get_endpoint(request):
@@ -507,6 +514,7 @@ async def _run_http_server(
     wrapped_app.router.routes.append(
         starlette.routing.Route("/stats", endpoint=stats_endpoint)
     )
+    wrapped_app.router.routes.append(starlette.routing.Route("/queue", endpoint=queue_endpoint, methods=["GET"]))
 
     config = Config(
         app=wrapped_app,

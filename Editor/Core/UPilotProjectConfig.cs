@@ -23,6 +23,7 @@ namespace CodingRiver.UPilot
         public UPilotRuntimeConfig runtime = new();
         public UPilotSafetyConfig safety = new();
         public UPilotAiServiceMaintenanceConfig aiServiceMaintenance = new();
+        public bool aiQueueCleanupAllowed = true;
         public UPilotUpdateConfig updates = new();
         public UPilotAgentsConfig agents = new();
     }
@@ -167,14 +168,21 @@ namespace CodingRiver.UPilot
                 return result;
             try
             {
-                var parsed = JsonUtility.FromJson<UPilotProjectConfigData>(File.ReadAllText(ConfigPath));
-                return parsed ?? result;
+                return Parse(File.ReadAllText(ConfigPath));
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[UPilot] Failed to load {ConfigPath}: {ex.Message}");
                 return result;
             }
+        }
+
+        internal static UPilotProjectConfigData Parse(string json)
+        {
+            // Overwrite explicit defaults: legacy missing fields must not become false.
+            var result = new UPilotProjectConfigData();
+            JsonUtility.FromJsonOverwrite(json, result);
+            return result;
         }
 
         public static void Reload()
