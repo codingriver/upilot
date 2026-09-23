@@ -23,6 +23,8 @@ def test_release_allows_optional_evidence_and_non_tag_build_never_uploads_releas
     build = (ROOT / ".github/workflows/build-server-exe.yml").read_text(encoding="utf-8")
     assert "acceptanceRunId:" in prepare and "required: false" in prepare
     assert 'if [[ -n "$UPILOT_ACCEPTANCE_RUN_ID" ]]' in prepare
+    assert "Render version-bound Skill artifacts" in prepare
+    assert "render_skill_pack.py --check" in prepare
     assert "--require-unity-summary --release-tag" not in build
     release_step = build[build.rfind("- name:", 0, build.index("uses: softprops/action-gh-release")):]
     assert "if: startsWith(github.ref, 'refs/tags/')" in release_step
