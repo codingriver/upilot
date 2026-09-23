@@ -2683,4 +2683,4 @@ UPilot 通用开发：
 - 观察问题：v0.3.34 发布准备在 Linux 成功并推送 tag，但 Windows 下游构建 run 35835126750 的 `Gate packaged source` 报 `generated template artifact is stale: SKILL.md`，阻止 EXE 与 Release 资产发布；本机模拟 Windows Git `core.autocrlf=true` checkout 后，生成的 `SKILL.md` 从 29454 字节增加到 29678 字节并含 CRLF。
 - 影响流程：GitHub Actions 发布打包、`check_skill_pack.py --mode source` 的严格逐字节模板校验。
 - 建议改进：为三个版本绑定的生成产物设置 Git LF checkout 属性，并在发布契约测试中验证属性；保留原有严格模板校验。后续在 Windows 真实构建中验证质量门、EXE、Release 资产及版本。
-- 状态：修复与发布验证进行中。
+- 状态：Implemented / v0.3.35 已验证（2026-09-23）。准备流程 run 35839141599、Windows 构建 run 35839190949 均成功；远程 Release 的 EXE、SHA256、manifest 三项资产均为 uploaded，下载的 EXE SHA256 与 manifest 和校验文件一致。
