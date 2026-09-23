@@ -1,0 +1,4 @@
+# Generated template artifacts are checked byte-for-byte on Linux and Windows.
+skills/upilot-unity-mcp/SKILL.md text eol=lf
+skills/upilot-unity-mcp/agents/openai.yaml text eol=lf
+Documentation~/AgentRules/AGENTS.upilot.md text eol=lf

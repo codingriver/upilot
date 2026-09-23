@@ -1,6 +1,7 @@
 """Offline workflow contracts: never dispatch, commit, tag, or publish."""
 from pathlib import Path
 import re
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 PINS = {
@@ -29,3 +30,16 @@ def test_release_allows_optional_evidence_and_non_tag_build_never_uploads_releas
     release_step = build[build.rfind("- name:", 0, build.index("uses: softprops/action-gh-release")):]
     assert "if: startsWith(github.ref, 'refs/tags/')" in release_step
     assert 'cache: "pip"' in build
+
+
+def test_generated_release_artifacts_checkout_with_lf_on_windows():
+    paths = (
+        "skills/upilot-unity-mcp/SKILL.md",
+        "skills/upilot-unity-mcp/agents/openai.yaml",
+        "Documentation~/AgentRules/AGENTS.upilot.md",
+    )
+    result = subprocess.run(
+        ["git", "check-attr", "eol", "--", *paths],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.splitlines() == [f"{path}: eol: lf" for path in paths]
