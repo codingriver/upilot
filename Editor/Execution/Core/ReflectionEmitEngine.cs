@@ -173,7 +173,7 @@ namespace CodingRiver.UPilot.Execution
             };
         }
 
-        public void PrepareCompiled(Type declaringType)
+        public void PrepareCompiled(Type declaringType, ExecutionResourceDiagnostics diagnostics = null)
         {
             if (BodyBackend != "compiled" || CompiledBody != null) return;
             var variableTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
@@ -182,7 +182,7 @@ namespace CodingRiver.UPilot.Execution
                 variableTypes[ParameterNames[index]] = ParameterTypes[index];
             string key = CSharpCompiledBackend.CacheKeyForTypes(SourceCode, "statements", new[] { "System" }, variableTypes);
             CompiledBody = CSharpCompiledBackend.Compile(
-                key, SourceCode, "statements", new CSharpEvaluationContext(imports: new[] { "System" }), variableTypes);
+                key, SourceCode, "statements", new CSharpEvaluationContext(imports: new[] { "System" }), variableTypes, diagnostics);
         }
 
         public void Record(string code, Exception exception)
@@ -355,20 +355,85 @@ namespace CodingRiver.UPilot.Execution
         { return type != null && type != typeof(void) && type.IsValueType ? Activator.CreateInstance(type) : null; }
     }
 
+    [Serializable]
+    public sealed class DynamicTypeResourceSnapshot
+    {
+        public int limit;
+        public int used;
+        public long rejected;
+        public long failedAfterReservation;
+        public int probeTypeCount;
+    }
+
+    internal sealed class DynamicTypeBudget
+    {
+        private readonly object _gate = new object();
+        private readonly int _limit;
+        private int _used;
+        private long _rejected, _failed;
+        internal DynamicTypeBudget(int limit) { _limit = limit; }
+        internal void Reserve(string typeName, ExecutionResourceDiagnostics diagnostics)
+        {
+            lock (_gate)
+            {
+                if (_used < _limit) { _used++; return; }
+                _rejected++;
+                const string next = "Reuse an existing emitted type or use Eval. New type generation requires a user-authorized Domain Reload; never reload or retry automatically.";
+                diagnostics.Add("EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED", "error", "domainTypes", "reject", _limit, _used, next);
+                throw diagnostics.Attach(new ExecutionContractException("EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED",
+                    "The Domain dynamic type generation limit was reached.",
+                    new Dictionary<string, object> { { "stage", "policy" }, { "limit", _limit }, { "used", _used },
+                        { "resource", "domainTypes" }, { "requestedTypeName", typeName }, { "nextAction", next } }));
+            }
+        }
+        internal void Failed(ExecutionResourceDiagnostics diagnostics)
+        {
+            lock (_gate)
+            {
+                _failed++;
+                diagnostics.Add("EMIT_GENERATION_SLOT_CONSUMED", "warning", "domainTypes", "retain", _limit, _used,
+                    "The failed generation consumed a non-reclaimable slot. Inspect the original error; do not retry automatically.");
+            }
+        }
+        internal DynamicTypeResourceSnapshot Snapshot()
+        {
+            lock (_gate) return new DynamicTypeResourceSnapshot
+            { limit = _limit, used = _used, rejected = _rejected, failedAfterReservation = _failed };
+        }
+    }
+
     public sealed class ReflectionEmitEngine
     {
+        private static readonly DynamicTypeBudget DomainBudget = new DynamicTypeBudget(256);
+        private static readonly Lazy<DynamicEmitCapability> CachedCapability =
+            new Lazy<DynamicEmitCapability>(() => new ReflectionEmitEngine().ProbeCore(), true);
+        private static int _probeTypeCount;
+        public static readonly string ResourceGeneration = Guid.NewGuid().ToString("N");
+        public static DynamicEmitCapability DomainCapability => CachedCapability.Value;
+        private readonly DynamicTypeBudget _budget;
         private readonly object _gate = new object();
         private readonly Dictionary<string, DynamicEmitResult> _cacheByHash = new Dictionary<string, DynamicEmitResult>(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _hashByRequestedName = new Dictionary<string, string>(StringComparer.Ordinal);
         private AssemblyBuilder _assembly;
         private ModuleBuilder _module;
 
-        public DynamicEmitCapability Probe()
+        public ReflectionEmitEngine() : this(DomainBudget) { }
+        internal ReflectionEmitEngine(DynamicTypeBudget budget) { _budget = budget; }
+        public DynamicEmitCapability Probe() => DomainCapability;
+        public static DynamicTypeResourceSnapshot ResourceSnapshot()
+        {
+            var snapshot = DomainBudget.Snapshot();
+            snapshot.probeTypeCount = Volatile.Read(ref _probeTypeCount);
+            return snapshot;
+        }
+
+        private DynamicEmitCapability ProbeCore()
         {
             try
             {
                 EnsureModule();
                 string name = "UPilot.Dynamic.Probe_" + Guid.NewGuid().ToString("N");
+                Interlocked.Increment(ref _probeTypeCount);
                 var builder = _module.DefineType(name, TypeAttributes.NotPublic | TypeAttributes.Sealed, typeof(object));
                 builder.DefineDefaultConstructor(MethodAttributes.Public);
                 CreateType(builder);
@@ -398,8 +463,10 @@ namespace CodingRiver.UPilot.Execution
             string nameConflictPolicy,
             string sessionId,
             Func<string, object> callbackResolver,
-            Action<Action> registerCleanup)
+            Action<Action> registerCleanup,
+            ExecutionResourceDiagnostics diagnostics = null)
         {
+            diagnostics = diagnostics ?? new ExecutionResourceDiagnostics();
             if (spec == null || string.IsNullOrWhiteSpace(spec.typeName))
                 throw new ExecutionContractException("EMIT_INVALID_SPEC", "spec.typeName is required.");
             if (string.IsNullOrWhiteSpace(sessionId))
@@ -443,7 +510,6 @@ namespace CodingRiver.UPilot.Execution
                     generatedName = requestedName + "__" + specHash.Substring(0, Math.Min(8, specHash.Length));
                 }
 
-                EnsureModule();
                 Type baseType = ExecutionTypeResolver.Resolve(string.IsNullOrWhiteSpace(spec.baseType) ? "System.Object" : spec.baseType) ?? typeof(object);
                 var interfaceTypes = (spec.interfaces ?? Array.Empty<string>()).Select(name =>
                 {
@@ -453,35 +519,45 @@ namespace CodingRiver.UPilot.Execution
                 }).ToArray();
                 TypeAttributes attributes = spec.visibility == "internal" ? TypeAttributes.NotPublic : TypeAttributes.Public;
                 if (spec.isSealed) attributes |= TypeAttributes.Sealed;
-                var typeBuilder = _module.DefineType(generatedName, attributes, baseType, interfaceTypes);
-                var fields = DefineFields(typeBuilder, spec.fields);
-                var pendingRegistrations = new List<KeyValuePair<string, DynamicMethodRegistration>>();
-                string defaultBodyBackend = NormalizeBodyBackend(spec.bodyBackend, "spec.bodyBackend");
-                DefineProperties(typeBuilder, spec.properties, fields, sessionId, specHash, defaultBodyBackend, pendingRegistrations);
-                DefineConstructors(typeBuilder, baseType, spec.constructors, fields, sessionId, specHash, defaultBodyBackend, pendingRegistrations);
-                var implemented = DefineMethods(typeBuilder, spec, sessionId, specHash, callbackResolver, pendingRegistrations);
-                Type created = CreateType(typeBuilder);
-                foreach (var pair in pendingRegistrations) pair.Value.PrepareCompiled(created);
-                foreach (var pair in pendingRegistrations) DynamicMethodDispatcher.Register(pair.Key, pair.Value);
-                string cleanupPrefix = sessionId + ":" + specHash + ":";
-                string[] registrationKeys = pendingRegistrations.Select(pair => pair.Key).ToArray();
-                registerCleanup?.Invoke(() => DynamicMethodDispatcher.UnregisterSession(sessionId, registrationKeys));
-
-                var result = new DynamicEmitResult
+                _budget.Reserve(requestedName, diagnostics);
+                try
                 {
-                    RequestedTypeName = requestedName,
-                    GeneratedTypeName = created.FullName,
-                    AssemblyName = created.Assembly.GetName().Name,
-                    SpecHash = specHash,
-                    Type = created,
-                    CacheHit = false,
-                    ImplementedMembers = implemented,
-                    Registrations = pendingRegistrations.ToArray(),
-                    RegistrationPrefix = cleanupPrefix,
-                };
-                _cacheByHash[specHash] = result;
-                _hashByRequestedName[requestedName] = specHash;
-                return result;
+                    EnsureModule();
+                    var typeBuilder = _module.DefineType(generatedName, attributes, baseType, interfaceTypes);
+                    var fields = DefineFields(typeBuilder, spec.fields);
+                    var pendingRegistrations = new List<KeyValuePair<string, DynamicMethodRegistration>>();
+                    string defaultBodyBackend = NormalizeBodyBackend(spec.bodyBackend, "spec.bodyBackend");
+                    DefineProperties(typeBuilder, spec.properties, fields, sessionId, specHash, defaultBodyBackend, pendingRegistrations);
+                    DefineConstructors(typeBuilder, baseType, spec.constructors, fields, sessionId, specHash, defaultBodyBackend, pendingRegistrations);
+                    var implemented = DefineMethods(typeBuilder, spec, sessionId, specHash, callbackResolver, pendingRegistrations);
+                    Type created = CreateType(typeBuilder);
+                    foreach (var pair in pendingRegistrations) pair.Value.PrepareCompiled(created, diagnostics);
+                    foreach (var pair in pendingRegistrations) DynamicMethodDispatcher.Register(pair.Key, pair.Value);
+                    string cleanupPrefix = sessionId + ":" + specHash + ":";
+                    string[] registrationKeys = pendingRegistrations.Select(pair => pair.Key).ToArray();
+                    registerCleanup?.Invoke(() => DynamicMethodDispatcher.UnregisterSession(sessionId, registrationKeys));
+
+                    var result = new DynamicEmitResult
+                    {
+                        RequestedTypeName = requestedName,
+                        GeneratedTypeName = created.FullName,
+                        AssemblyName = created.Assembly.GetName().Name,
+                        SpecHash = specHash,
+                        Type = created,
+                        CacheHit = false,
+                        ImplementedMembers = implemented,
+                        Registrations = pendingRegistrations.ToArray(),
+                        RegistrationPrefix = cleanupPrefix,
+                    };
+                    _cacheByHash[specHash] = result;
+                    _hashByRequestedName[requestedName] = specHash;
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    _budget.Failed(diagnostics);
+                    throw diagnostics.Attach(ex);
+                }
             }
         }
 

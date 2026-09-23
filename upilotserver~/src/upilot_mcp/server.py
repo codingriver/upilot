@@ -445,6 +445,19 @@ class WsOrchestratorServer(WsTransport):
             if not rec:
                 logger.warning("No CommandRecord for resend cmd=%s", cmd_id[:16])
                 continue
+            if rec.name == "service.restart":
+                future = self._pending.pop(cmd_id, None)
+                if future is not None and not future.done():
+                    future.set_result({
+                        "id": cmd_id, "type": "error", "name": "connection_lost",
+                        "payload": {
+                            "code": "SERVICE_RESTART_RECOVERY_REQUIRED",
+                            "message": "Service maintenance is never replayed after reload; inspect its persisted identity.",
+                            "detail": {"maintenanceId": rec.payload.get("maintenanceId", ""),
+                                       "nextAction": "Query unity_mcp_status.aiServiceMaintenance."},
+                        },
+                    })
+                continue
             try:
                 await self.send_command(cmd_id, rec.name, rec.payload)
             except Exception as ex:

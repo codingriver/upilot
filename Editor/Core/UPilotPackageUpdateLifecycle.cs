@@ -287,6 +287,12 @@ namespace CodingRiver.UPilot
                 var currentPackage = FindUPilotPackage(args.changedFrom);
                 var removedPackage = FindUPilotPackage(args.removed);
                 var targetPackage = FindUPilotPackage(args.changedTo) ?? FindUPilotPackage(args.added);
+                if (UPilotScriptingDefineManager.ShouldRemoveForPackageRegistration(
+                        removedPackage != null,
+                        targetPackage != null))
+                {
+                    UPilotScriptingDefineManager.RemoveOwnedDefines();
+                }
                 if (removedPackage != null || (targetPackage != null &&
                     (currentPackage == null || !ShouldManagePackageUpdate(targetPackage) ||
                      UPilotServerRuntimeService.IsSourcePackage(currentPackage))))
@@ -347,6 +353,7 @@ namespace CodingRiver.UPilot
                 var targetPackage = FindUPilotPackage(args.changedTo) ?? FindUPilotPackage(args.added);
                 if (targetPackage == null)
                     return;
+                UPilotScriptingDefineManager.EnsureForActiveBuildTarget();
                 if (GetSessionBool(DeploymentRepairPendingKey, false))
                 {
                     EditorApplication.delayCall += RepairPackageDeployment;

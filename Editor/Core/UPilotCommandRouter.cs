@@ -87,6 +87,10 @@ namespace CodingRiver.UPilot
             return new List<CommandDescriptor>(_descriptors.Values);
         }
 
+        internal static CommandDescriptor AutomationStepDescriptor(string route, string action) =>
+            new(route, category: "automation", idempotent: action != "start" && action != "cancel",
+                destructive: action == "start" || action == "cancel", playModePolicy: "allowed");
+
         private static OperationLogEntry GetEntryForContext(string commandId)
         {
             var entries = UPilotOperationTracker.Instance.GetEntriesCopy();

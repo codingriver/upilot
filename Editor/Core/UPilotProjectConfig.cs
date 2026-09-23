@@ -22,6 +22,7 @@ namespace CodingRiver.UPilot
         public UPilotFeaturesConfig features = new();
         public UPilotRuntimeConfig runtime = new();
         public UPilotSafetyConfig safety = new();
+        public UPilotAiServiceMaintenanceConfig aiServiceMaintenance = new();
         public UPilotUpdateConfig updates = new();
         public UPilotAgentsConfig agents = new();
     }
@@ -60,6 +61,15 @@ namespace CodingRiver.UPilot
         public string pythonPath = "";
         public string serverExePath = "";
         public string serverVersion = "";
+    }
+
+    [Serializable]
+    public sealed class UPilotAiServiceMaintenanceConfig
+    {
+        public bool approved;
+        public string approvedAtUtc = "";
+        public string projectPath = "";
+        public int restartTimeoutSeconds = 120;
     }
 
     [Serializable]

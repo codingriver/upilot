@@ -16,15 +16,15 @@ namespace CodingRiver.UPilot.Execution
     /// </summary>
     public static class CSharpEmitBackend
     {
-        private sealed class Entry
+        internal sealed class Entry
         {
             public CSharpProgram Program;
             public Func<CSharpEvaluationContext, CSharpEvaluationResult> Delegate;
             public Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>> AsyncDelegate;
         }
 
-        private static readonly object Gate = new object();
-        private static readonly Dictionary<string, Entry> Entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+        private static readonly ExecutionProgramCache<Entry> Entries = new ExecutionProgramCache<Entry>(256, "emitCache");
+        public static ExecutionCacheSnapshot Snapshot() => Entries.Snapshot();
 
         public static string CacheKey(string code, string mode, IEnumerable<string> imports)
         {
@@ -36,20 +36,24 @@ namespace CodingRiver.UPilot.Execution
 
         public static bool IsCached(string key)
         {
-            lock (Gate) return !string.IsNullOrWhiteSpace(key) && Entries.ContainsKey(key);
+            return !string.IsNullOrWhiteSpace(key) && Entries.Contains(key);
         }
 
         public static Func<CSharpEvaluationContext, CSharpEvaluationResult> Compile(
             string key,
             string code,
-            string mode)
+            string mode,
+            ExecutionResourceDiagnostics diagnostics = null)
+            => CompileCached(Entries, key, code, mode, diagnostics);
+
+        internal static Func<CSharpEvaluationContext, CSharpEvaluationResult> CompileCached(
+            ExecutionProgramCache<Entry> cache, string key, string code, string mode, ExecutionResourceDiagnostics diagnostics = null)
         {
             if (string.IsNullOrWhiteSpace(key))
                 throw new ExecutionContractException("CSHARP_EMIT_INVALID_CACHE_KEY", "Emit cache key is required.");
-            lock (Gate)
+            RequireSupported();
+            return cache.GetOrCreate(key, entry => entry.Delegate != null, cached =>
             {
-                Entries.TryGetValue(key, out var cached);
-                if (cached?.Delegate != null) return cached.Delegate;
                 var program = cached?.Program ?? CSharpSubsetEngine.Parse(code, mode);
                 try
                 {
@@ -66,27 +70,30 @@ namespace CodingRiver.UPilot.Execution
                     il.Emit(OpCodes.Ret);
                     var compiled = (Func<CSharpEvaluationContext, CSharpEvaluationResult>)dynamic.CreateDelegate(
                         typeof(Func<CSharpEvaluationContext, CSharpEvaluationResult>), program);
-                    if (cached == null) Entries[key] = new Entry { Program = program, Delegate = compiled };
-                    else cached.Delegate = compiled;
-                    return compiled;
+                    return new Entry { Program = program, Delegate = compiled, AsyncDelegate = cached?.AsyncDelegate };
                 }
                 catch (Exception ex)
                 {
                     throw new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", ex.GetType().FullName + ": " + ex.Message);
                 }
-            }
+            }, diagnostics).Delegate;
         }
 
         public static Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>> CompileAsync(
             string key,
             string code,
-            string mode)
+            string mode,
+            ExecutionResourceDiagnostics diagnostics = null)
+            => CompileAsyncCached(Entries, key, code, mode, diagnostics);
+
+        internal static Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>> CompileAsyncCached(
+            ExecutionProgramCache<Entry> cache, string key, string code, string mode, ExecutionResourceDiagnostics diagnostics = null)
         {
             if (string.IsNullOrWhiteSpace(key))
                 throw new ExecutionContractException("CSHARP_EMIT_INVALID_CACHE_KEY", "Emit cache key is required.");
-            lock (Gate)
+            RequireSupported();
+            return cache.GetOrCreate(key, entry => entry.AsyncDelegate != null, cached =>
             {
-                if (Entries.TryGetValue(key, out var cached) && cached.AsyncDelegate != null) return cached.AsyncDelegate;
                 var program = cached?.Program ?? CSharpSubsetEngine.Parse(code, mode);
                 try
                 {
@@ -103,15 +110,21 @@ namespace CodingRiver.UPilot.Execution
                     il.Emit(OpCodes.Ret);
                     var compiled = (Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>>)dynamic.CreateDelegate(
                         typeof(Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>>), program);
-                    if (cached == null) Entries[key] = new Entry { Program = program, AsyncDelegate = compiled };
-                    else cached.AsyncDelegate = compiled;
-                    return compiled;
+                    return new Entry { Program = program, AsyncDelegate = compiled, Delegate = cached?.Delegate };
                 }
                 catch (Exception ex)
                 {
                     throw new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", ex.GetType().FullName + ": " + ex.Message);
                 }
-            }
+            }, diagnostics).AsyncDelegate;
+        }
+
+        public static void RequireSupported() => RequireSupported(ReflectionEmitEngine.DomainCapability);
+
+        internal static void RequireSupported(DynamicEmitCapability capability)
+        {
+            if (!capability.Supported)
+                throw new ExecutionContractException("REFLECTION_EMIT_UNAVAILABLE", capability.Error);
         }
 
         internal static void ValidateEmitSubset(string code)

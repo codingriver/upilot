@@ -32,7 +32,9 @@ for every ordinary Editor operation.
    unverified; do not mislabel this as a network fault or report deployment acceptance.
 4. If refresh is necessary, follow `safety.md`'s Controlled Deployment Refresh procedure.
    Unknown freshness never triggers an automatic restart. Preserve active task/run/operation
-   identities; report a busy or unobservable endpoint instead of disrupting its work.
+   identities; report a busy or unobservable endpoint instead of disrupting its work unless
+   the independent AI Service Maintenance grant explicitly covers `unity_service_restart`.
+   That route may interrupt in-flight work but never cancels or replays it.
 5. After an authorized refresh, recheck the exact project, connection, relevant identities
    and one real read-only call. Report the evidence actually established; reconnect success
    alone is not source attestation. Resume observing existing identities, never replay start.

@@ -54,6 +54,7 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - Use read-only `csharp_validate` to preflight generated code or an explicit backend without executing target code. Use `csharp_eval` for a bounded expression or multi-statement C# subset program. `interpret` is the complete V2 interpreter, `emit` is the compatible AST-entry cache, and `compiled` is the finite synchronous direct backend with no fallback. Use `reflection_emit_type` only when an actual temporary CLR type/interface implementation is required; its bodies may opt into `bodyBackend=compiled`. Open `execution_session` before any result must survive the call, and always close it. Execution tools are write-gated, non-idempotent, and never automatically retried; `csharp_validate` is read-only and idempotent. Read `references/execution-tools.md` for schemas, examples, limits, and recovery.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
+- Check `resourceDiagnostics` even on successful Eval/Emit/validation responses; on failure read `error.detail.resourceDiagnostics`. Eviction or post-success warmup warnings never require replay. Fixed caches hold 256 emit keys and 128 compiled keys; Domain type generation allows 256 attempts, including failures after reservation. Capacity refusals are errors, not silent eviction of CLR types. Session close/reconnect does not restore type quota; do not reload automatically. Inspect `resourceDiagnosticsDroppedCount` and read `execution.resources` through capabilities for live totals.
 
 ## Writes And Validation
 
@@ -82,9 +83,16 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 ## Project Workflows
 
 - When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call it and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.
-- Keep business orchestration in project code. MCP should start, poll, diagnose, capture logs, and collect artifacts.
+- Keep business step implementations, assertions and restoration in project code. For UPilot Automation, read `references/automation-steps.md`: query the UPilot-owned directory, compose approved Skill templates with selected Cases into `jobSpec.stepPlan`, validate the complete list, then use existing Operation tools. Project Steps implement the string-only `IAutomationStep` contract or inherit `AutomationStepBase`; `arguments` is always last and results are JSON. Do not add parallel start/status tools, make the legacy project Bridge mandatory for new Step plans, or drive individual steps from client polling.
 
 ## Persistent Console Capture
+
+For plans with `upilot.console_capture_start`, use plan ownership instead of the
+manual sequence below: start that Step first and once, set Operation
+`consoleCapture.enabled=false`, and let the executor stop/verify Capture after
+Finally. Use `upilot.capture_snapshot` or the base class's string/JSON evidence
+helpers for run-owned screenshots; projects should not duplicate observers.
+See `references/automation-steps.md`.
 
 Use persistent capture when logs must survive long waits, Console clears, or Agent polling gaps:
 
@@ -107,6 +115,12 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 - Supply `expectedValues` when known and verify target values plus the reported non-target byte preservation after apply.
 
 ## Hang Diagnostics
+
+For AI-requested Bridge/Server restarts, first read `references/safety.md` (AI Service Maintenance).
+Use `unity_service_restart` only with the independent UI grant reported in
+`aiServiceMaintenance`. It applies to all versions/install sources, but only in EditMode.
+Never self-enable the grant or edit its timeout. The default total deadline is 120 seconds;
+an interrupted response is not permission to resend or replay business.
 
 - If Unity stops pumping commands, call `unity_hang_status` before retrying or restarting it.
 - On Windows, use `unity_hang_capture` before restart when a dump is needed. It accepts `dumpType=mini|heap|full`, verifies the exact main Editor identity, estimates dump size, and preserves at least the effective `reserveBytes` (minimum 2 GiB). An insufficient-space preflight must report `dumpAttempted=false`; after capture, confirm the path, bytes, SHA256, `reserveMaintained=true`, and `processTerminated=false`.
@@ -147,6 +161,7 @@ For execution-tool selection and typed values, read `references/execution-tools.
 
 - Installation: read `references/installation.md`.
 - Common flows: read `references/workflows.md`.
+- Registered step plans, built-in Editor steps and evidence ownership: read `references/automation-steps.md`.
 - Tool choice: read `references/tool-routing.md` and `references/tool-boundaries.md`.
 - Client transport/config: read `references/client-configs.md`.
 - Recovery and destructive work: read `references/safety.md`.

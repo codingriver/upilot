@@ -1,5 +1,91 @@
 # `csharp_eval`、Reflection.Emit 与执行 Session
 
+## 2026-09-22 边界修正、固定容量与请求级通知
+
+本轮保持 Eval/Emit-first 能力范围，不新增源码语法、DLL、类型卸载、热替换入口或设置界面。
+
+- Eval `emit` 预检使用完整 V2 AST 和缓存的运行时探测，允许 lambda/closure/await；动态类型方法体继续使用同步限制。`interpret` 只解析，预检成功不等于运行时绑定成功。
+- 两类 program cache 使用同一小型内部 LRU 实现，emit 为 256 个源码键，compiled 为 128 个编译键；compiled 预检与执行共用缓存。同步/异步 emit 同键只占一槽，查询不会改变 LRU，失败编译不淘汰旧项，在途 delegate 不失效。
+- Domain 共享 256 次用户类型生成配额，开始不可逆生成阶段后失败不退还；缓存命中不占新配额。探针最多生成一个独立类型。Session 在解码参数和生成前预留 type/instance 容量，成功存储消费预留，失败释放未消费部分。
+- 关闭 Session、重建 Engine、重连 Server、无 Reload 的模式切换不能恢复 Domain 配额。不自动退出 PlayMode、Reload、强制 GC 或重放用户调用。
+- Session/类型超限返回错误；LRU 淘汰与 auto 成功后的预热失败返回 warning，保留成功结果。诊断随当前请求返回，不以全局计数差值推算。
+
+### 返回契约
+
+成功的 `csharp_eval`、`csharp_validate`、`reflection_emit_type` 增加 `resourceDiagnostics` 和 `resourceDiagnosticsDroppedCount`。失败时同字段位于 `error.detail`，原始错误码及副作用证据保留；不改变现有 `diagnostics` 类型。每项包含 `code/severity/resource/action/count/limit/used/nextAction`，按 code/resource 聚合，最多 16 项。
+
+```json
+{
+  "status": "Succeeded",
+  "resourceDiagnostics": [{
+    "code": "EVAL_CACHE_EVICTED", "severity": "warning",
+    "resource": "compiledCache", "action": "evict",
+    "count": 1, "limit": 128, "used": 128,
+    "nextAction": "No retry is needed for a successful request."
+  }],
+  "resourceDiagnosticsDroppedCount": 0
+}
+```
+
+稳定代码：`EVAL_CACHE_EVICTED`、`EVAL_CACHE_WARMUP_FAILED` 是成功警告；`EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED`、`SESSION_LIMIT_EXCEEDED` 是拒绝错误；`EMIT_GENERATION_SLOT_CONSUMED` 解释失败后的资源消耗，不替换首因。已有淘汰通知在后续业务失败时仍保留。
+
+`unity_capabilities_get.execution.resources` 每次返回实时快照：独立 Domain `generation`、两个缓存的 `capacity/count/hits/misses/evictions`，以及 `domainTypes.limit/used/rejected/failedAfterReservation/probeTypeCount`。这些是条目/尝试次数限制，不是进程内存硬上限。
+
+### 改动范围与验证
+
+- `ExecutionCore.cs`：请求诊断、program LRU、Session 容量预留；两个 Backend 接入共享 LRU。
+- `ReflectionEmitEngine.cs`：Domain 预算、一次探测及 compiled body 诊断传递。
+- `CSharpSubsetEngine.cs`：求值上下文显式携带请求诊断；`UPilotExecutionService.cs` 和协议 DTO 负责成功/失败响应及实时统计。
+- Python execution service 保留嵌套资源诊断，MCP 描述及既有 Skill 同步真实能力边界。
+- `UPilotExecutionResourceTests.cs` 使用独立小容量缓存/预算，覆盖预检、LRU、并发隔离、错误首因、探针、预留、构造失败；不耗尽生产配额。Unity 6/2022.3 仅运行定向验收。
+
+注意：共享 Binder 支持 named/ref/out 不等于 Eval 源码支持这些参数语法；当前应使用结构化 `unity_reflection_call`。
+
+### 本轮交付证据
+
+2026-09-22 最终定向验收：两个项目各运行 `UPilotExecutionResourceTests` 的 14 项及 5 项现有直接回归，共 19/19；均 `cleanupVerified=true`、`testIdentityVerified=true`、`sourceUnchanged=true`。不是完整 EditMode 回归。
+
+| 项目 | 编译请求 / 写批次 | 测试 runGuid |
+| --- | --- | --- |
+| Unity 6000.6.0a2 / `Tests~/UPilotTest` | `req-bb300696-dc75-433c-9997-6b2e1fd6a1ff` / `wb-2df3c5d1-6ee5-4114-84fb-5fff345e1736` | `207e8c0a-3ee2-4d5a-841e-487e89f0868f` |
+| Unity 2022.3.62f2 / `Tests~/UPilotTest2022` | `req-349218e6-254e-47ff-b1df-e106a50afe69` / `wb-7e3c5b5e-7a7d-470a-8dc8-1e9b4e45bfcf` | `700a6d73-1b5b-48d5-87e8-6ea73ff664cb` |
+
+两批均为 `verified/passed`、`correlationVerified=true`、`errorsVerified=true`，编译 0 error / 0 warning。Unity 6 的 `lastCompileVerifiedAt=1790056399874 >= writeBatchCreatedAt=1790056380770`；2022.3 为 `1790056395569 >= 1790056380825`。关联结果保存在各项目 `Log/P0P1/eval-resources-early-check-result.json`，不能用后续无批次身份的自动编译快照替代。
+
+- Unity 6 报告：`Tests~/UPilotTest/Log/UPilotAcceptance/1790056453807_req-3367a774-2f8f-4c5b-8c3d-29c2faab7397/summary.json`，485717 bytes，SHA256 `9e0e22c1d7449b7f2dfcd27454639e46dc4f0dd856412e82a717e4a2861dfaad`。
+- Unity 2022.3 报告：`Tests~/UPilotTest2022/Log/UPilotAcceptance/1790056453725_req-5f1b37a0-b67b-495f-a52e-674e50a7ac7a/summary.json`，335553 bytes，SHA256 `cf531f60c3fafa093cbb26142214c0505e5ae158ea870d56409a575e16e496c0`。
+- Python：`test_execution_tools.py` + `test_p2_public_tool_contracts.py`，55 passed；另有 2 条既有 websockets 弃用警告。
+- Agent Rules 37 / Skill Pack 39：source render/check、source 校验、规范项目两个 installed 校验通过；五目标重复同步与最终 check 均为 `current`。重复同步的 44 个受管文件内容/时间戳不变，规则块外字节保留，没有新增备份。不修改发布版本。
+- Server 刷新后，8011/8017 的在线 `csharp_eval`、`csharp_validate`、`reflection_emit_type` 描述均包含新资源契约；实际预检和拒绝调用通过。Server PID 为 69860/54220，Unity PID 57636/48124 未变。此为实际行为及描述验证，不是完整已加载 Python 源码哈希证明；现有客户端的 `deploymentFreshness=unverified` 标记仍如实保留。
+
+真实 Session 拒绝样例（省略不相关字段）：空 Session 的 `maxHandles=1` 无法满足创建 type + instance 的两个槽位，拒绝发生在解码/生成之前。
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "SESSION_LIMIT_EXCEEDED",
+    "message": "Cannot store/reserve 2 handle(s) and 1 type(s): session capacity was exceeded for sessionHandles",
+    "detail": {
+      "sideEffectsMayHaveOccurred": false,
+      "resourceDiagnostics": [{
+        "code": "SESSION_LIMIT_EXCEEDED", "severity": "error",
+        "resource": "sessionHandles", "action": "reject",
+        "count": 1, "limit": 1, "used": 0,
+        "nextAction": "Inspect session capacity and partial state. Use a session with enough free handles/types, or explicitly open a new session with sufficient limits. Closing a session invalidates its handles; do not replay automatically."
+      }],
+      "resourceDiagnosticsDroppedCount": 0
+    }
+  }
+}
+```
+
+该请求证据位于 `Tests~/UPilotTest/Log/P0P1/eval-resources-delivery-refusal.json`（11759 bytes，SHA256 `9d998a203940f19df2b4f27ecdfe9d14049024a401fdf8879a54c9f8378f6b1f`）；自建 Session 已关闭，无遗留 handle 或 cleanup error。前述成功 warning JSON 是契约示例，由独立小容量缓存测试和 Python MCP `isError=false` 契约验证，没有为采样填满生产缓存。
+
+真实 `execution.resources` 快照：`generation=bba2213e0aa846518e0b1248cff3606a`；emit `count=4/capacity=256/hits=1/misses=4/evictions=0`，compiled `count=3/capacity=128/hits=0/misses=5/evictions=0`；Domain `used=3/limit=256/rejected=0/failedAfterReservation=1/probeTypeCount=1`。来源为规范项目 `Log/P0P1/eval-resources-delivery-capabilities.json`，统计是该采样时刻而非交付后的恒定值。
+
+未覆盖：完整 EditMode、长时间性能/内存基准、真实不支持 Emit 的运行时和生产配额耗尽；不支持能力用内部注入值验证。Console 查询还包含非本轮选择用例的 Flow/window-probe 错误记录，未清空或宣称整个 Console 无错误。测试通过结论限于上述权威 runGuid 和关联编译。本节为测试完成后的文档追加，不属于报告的源码快照；未再修改代码。
+
 ## 2026-09-22 Eval/Emit-first 方案
 
 本阶段不实现 DLL 动态加载。DLL 编译、依赖解析、版本入口切换、可信来源和卸载策略作为独立后期项目规划；当前实现不使用 Roslyn、CodeDom、外部 `csc/mcs`、`Assembly.Load` 或 Unity 脚本编译，也不承诺 IL2CPP Player。
@@ -32,7 +118,7 @@
 `csharp_validate` 是只读、幂等、无需写授权的预检工具：
 
 - `backend=interpret`：词法和语法解析。
-- `backend=emit`：解析并检查同步 Emit profile。
+- `backend=emit`：解析完整 V2 Eval AST，并检查缓存的运行时能力；不套用动态类型方法体的同步限制。
 - `backend=compiled`：解析、静态绑定、lowering 和 delegate 编译；`variableTypes` 为外部变量提供 CLR 类型，不读取实例值。
 
 预检不会执行 getter、setter、构造器、目标方法或用户转换。实际 `csharp_eval`、`reflection_emit_type` 和 `execution_session` 仍是可写、非幂等执行工具。

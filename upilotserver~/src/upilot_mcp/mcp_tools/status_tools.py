@@ -57,6 +57,32 @@ async def unity_capabilities_get(forceFresh: bool = False):
     r = await _get_facade().capabilities_get(force_fresh=forceFresh)
     return _log_tool_result("unity_capabilities_get", _payload(r))
 
+@mcp.tool(description=(
+    "请求重启当前项目 Bridge 或 Server，需 Unity 设置中的独立 AI 服务维护授权。"
+    "仅权威 EditMode；允许中断在途任务，但不重启 Unity、不编译、不安装更新、不重放业务。"
+    "server 同时重建 Bridge。默认总时限 120 秒，仅 UI 可配置；accepted 不是完成。"
+    "从 unity_mcp_status.aiServiceMaintenance 取得 expected 身份；首次 expectedMaintenanceId 为空。"
+    "断线或超时后查询原 maintenanceId，不自动重试。"
+))
+async def unity_service_restart(
+    maintenanceId: Annotated[str, Field(pattern=r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")],
+    target: Literal["bridge", "server"],
+    reason: Annotated[str, Field(min_length=1, max_length=512)],
+    expectedProjectPath: str,
+    expectedServerProcessId: Annotated[int, Field(strict=True, gt=0)],
+    expectedBridgeSessionId: str,
+    expectedMaintenanceId: str = "",
+):
+    args = dict(maintenanceId=maintenanceId, target=target, reason=reason,
+                expectedProjectPath=expectedProjectPath, expectedServerProcessId=expectedServerProcessId,
+                expectedBridgeSessionId=expectedBridgeSessionId, expectedMaintenanceId=expectedMaintenanceId)
+    _log_tool_call("unity_service_restart", args)
+    result = await _get_facade().service_restart(
+        maintenance_id=maintenanceId, target=target, reason=reason,
+        expected_project_path=expectedProjectPath, expected_server_process_id=expectedServerProcessId,
+        expected_bridge_session_id=expectedBridgeSessionId, expected_maintenance_id=expectedMaintenanceId)
+    return _log_tool_result("unity_service_restart", _payload(result))
+
 @mcp.tool(description="按名称、类别和可用状态搜索 UPilot MCP 工具，避免读取完整 tools/list。")
 async def unity_tools_find(
     query: str = "",
@@ -826,3 +852,11 @@ for _name, _value in list(globals().items()):
         play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
         feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
     )
+
+# This destructive operation has its own human grant, not safety.writeAccessApproved.
+register_public_tool(
+    "unity_service_restart", public_handler=unity_service_restart,
+    destructive=True, idempotent=False, requires_write_access=False,
+    write_access_predicate=lambda _: False, required_editor_mode="edit", play_mode_policy="blocked",
+    capability_requirements=("aiServiceMaintenance",),
+)

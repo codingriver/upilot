@@ -2,7 +2,7 @@
 
 # UPilot Unity MCP
 
-rulesVersion: 36
+rulesVersion: 41
 upilotPackageVersion: 0.3.32
 projectPath: <UNITY_PROJECT_ROOT>
 generatedAt: (documentation profile)
@@ -53,6 +53,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - After Server, Bridge or protocol changes, and when diagnosing suspected version mismatch, verify deployment evidence for each intended endpoint before attributing failures to networking or compatibility. A healthy endpoint, matching version string, recent disk files or process timestamps alone do not prove which code is loaded; report verified, suspected-stale or unverified evidence explicitly.
 - Follow the existing Skill's deployment-freshness workflow. Unknown identity is not restart authorization: inspect in-flight tasks, tests, operations and Capture ownership, then refresh only affected components in an authorized maintenance window. Do not cancel other work, automatically restart Unity with the Server, or replay existing operation starts.
+- For AI-requested Bridge/Server maintenance, use `unity_service_restart` only with effective `aiServiceMaintenance` approval from this project's Unity settings. This independent grant applies to every package version/source, only in stable EditMode, and permits interruption of in-flight tasks through this tool; automation select-all, `hangRestart`, and project write access do not grant it. Never self-enable it or change its timeout through files, reflection, or UI automation. Read the Skill recovery reference before use: the default total deadline is 120 seconds (UI range 30-600), `accepted` is not completion, and disconnect/timeout requires observing the original maintenance identity, never replaying a restart or business call. The grant does not authorize exiting PlayMode, compiling, installing updates, restarting Unity, or stopping another Capture.
 
 ## Capabilities
 
@@ -62,6 +63,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Use the narrowest dedicated semantic tool. `unity_reflection_call` is the single public generic reflection entry point: pass `typeName` + `methodName` for one structured compiled-method call, or pass only `expression` for one bounded C#-like reflection expression. `kind=auto` selects the engine from the mutually exclusive request shape before execution and never retries through the other engine. The target may mutate project or runtime state, so inspect the exact target and arguments and never retry automatically. Use `unity_type_exists`, `unity_reflection_find`, or a dedicated semantic tool for safe read-only discovery.
 - Use read-only `csharp_validate` before a complex or generated eval/Emit body when syntax, binding, or backend support is uncertain. Use `csharp_eval` for a bounded UPilot C# subset statement program, `reflection_emit_type` for a structured temporary CLR type, and `execution_session` whenever variables, handles, callbacks, event subscriptions, escaping closures/async delegates, or types must persist across calls. Event `+=` and any closure/async delegate that escapes its creating call require a persistent session.
 - Distinguish Eval backends: `interpret` executes the complete V2 AST; `emit` is the compatible DynamicMethod entry cache and still executes that AST; explicit `compiled` lowers a finite synchronous subset to an Expression Tree delegate and never falls back. Reflection.Emit specs may opt into `bodyBackend=compiled`; raw IL, DLL/source compilation, and arbitrary replacement of precompiled methods remain unsupported.
+- Inspect request-local `resourceDiagnostics` on execution/validation success and `error.detail.resourceDiagnostics` on failure, including `resourceDiagnosticsDroppedCount`. `EVAL_CACHE_EVICTED` and `EVAL_CACHE_WARMUP_FAILED` are warnings, not failed execution: retain the result and do not replay it. Domain type generation is capped at 256 attempts; `EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED` and `SESSION_LIMIT_EXCEEDED` reject work, while `EMIT_GENERATION_SLOT_CONSUMED` explains a failed attempt without replacing its original error. Closing a session or reconnecting does not reclaim generated types; never trigger Domain Reload automatically to regain quota. Read live `unity_capabilities_get.execution.resources` for capacity and counters, not as a substitute for request diagnostics.
 - Async lambdas may target only `Task`/`Task<T>` delegates; async void, `Action`, and ordinary event-handler conversion are unsupported. Cancellation does not roll back prior effects: inspect actual session state, never retry automatically, and close the session in every success, failure, timeout, or cancellation path. Execution routes are write-gated and non-idempotent; `csharp_validate` is read-only and idempotent.
 - No separate public reflection-expression alias is exposed. Do not turn expression mode into a multi-step C# script.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
@@ -110,7 +112,9 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Report only meaningful changes: status, phase, error, `failureSignature`, suspected-stuck, or important artifacts.
 - Use `detailLevel=summary` for routine status/wait polling. Request `standard` or `full` only for bounded diagnosis, and set `maxTailChars` instead of returning unbounded domain/log/report text.
 - Use project-provided bridge entry points when they exist. Do not rebuild business workflows with shell commands, temporary scripts, menu calls, or UI automation.
-- Keep business orchestration in project code. UPilot should start, poll, diagnose, capture logs, and collect artifacts.
+- Keep business step implementations, assertions and restoration project-owned. UPilot owns the registered Step directory, complete plan validation, sequencing, checkpoints and run state; Skills compose approved fixed templates and selected Cases into `jobSpec.stepPlan` through existing `unity_operation_*`. The project Bridge is not required for this new path; preserve legacy business entry points until explicitly migrated. Read the Skill's `references/automation-steps.md` before composing or implementing a step plan.
+- Step adapters use `[AutomationStep]` plus `IAutomationStep` or `AutomationStepBase`, guarded by `#if UPILOT` when optional. All lifecycle parameters are strings with `arguments` last; JSON results are validated by UPilot. Save checkpoints/shared keys synchronously through the guarded API before related effects; Validate/GetError cannot save. Do not expose Context/result/error/report DTOs to ordinary project Steps or infer success from missing JSON fields.
+- Preflight the entire step list before start. Preserve string arguments verbatim, explicit step/operation identities and Finally cleanup; status queries never advance steps. On reload/reconnect observe or explicitly Restore the same run, never replay Execute. `RecoveryRequired` is not successful cleanup.
 
 ## Operation Status Contract
 
@@ -118,6 +122,8 @@ Project-specific business rules outside this controlled UPilot block take preced
 - UPilot parses only generic fields. Business fields belong in `domain` and are passed through unchanged.
 
 ## Persistent Console Capture
+
+- A Step plan containing `upilot.console_capture_start` owns its Capture through the UPilot executor. Put that Step first and once, explicitly set Operation `consoleCapture.enabled=false`, and do not start or stop another Capture around it. The executor releases Snapshot resources, runs Finally, confirms its Capture stop/files, then applies final Console Policy and freezes reports. Ownership secrets remain private; unresolved release is `RecoveryRequired`.
 
 - For long-running or audit-sensitive operations, call `unity_console_capture_start` before the operation and retain its exact `sessionId` and one-time `ownerToken` outside ordinary logs. Call `unity_console_capture_stop` only with that matching token for the task's own session; unknown or another task's capture is not an automatic cleanup target. `forceStop=true` requires an exact session and explicit authorized human disposition.
 - Never repeatedly scan a complete large capture. Pass each `unity_console_capture_read` result's `nextSequence` as the next call's `afterSequence`; a filtered no-match result advances to the last scanned record, while a read that scans nothing preserves the input cursor.

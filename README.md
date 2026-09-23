@@ -44,6 +44,8 @@ https://github.com/codingriver/upilot.git#main
 
 点击 **Add**，等待 Unity 完成包导入和脚本编译。
 
+安装完成后，UPilot 会为当前构建目标在 PlayerSettings 的 Scripting Define Symbols 中追加公共宏 `UPILOT`。项目内仅供 UPilot 使用的 Editor/测试代码可以用 `#if UPILOT` 隔离；切换构建目标时，新目标会自动补充该宏。通过 Unity Package Manager 正常卸载时，UPilot 会删除自己写入过的 `UPILOT`，并保留其他宏及其顺序。直接删除包目录或手工删除 manifest 引用时，包代码无法执行卸载清理，需要在 PlayerSettings 中手动移除残留的 `UPILOT`。
+
 ![在 Package Manager 中输入 UPilot Git URL](Documentation~/images/upilot-package-manager-git-url.png)
 
 *输入 UPilot Git URL 后点击右侧 Add。*
@@ -707,7 +709,27 @@ python -m pip uninstall upilot-mcp
 
 ## Automation 公共支撑 API
 
-UPilot 提供 Editor-only、业务无关的 Automation 支撑 API：Catalog/Selection 校验、所有权保护的 Console Capture facade、结构化日志策略和不可改写的 JSONL/summary 报告写入。项目仍负责自己的业务生命周期、Case 执行循环、清理与成功判定；这些 API 不构成第二套 Runner 或 Operation。
+UPilot 提供 Editor-only、业务无关的 Automation API：`AutomationCatalog` / `AutomationSelection`、`UPilotConsoleCaptureApi`、`AutomationLogPolicy`、`AutomationReportWriter` 和顺序 Step 执行器。所有 Automation 类型、方法和脚本名称不带版本后缀；JSON 的 `version/apiVersion` 与历史数据契约保留。
+
+步骤显式使用 `[AutomationStep("id")]` 并实现 `IAutomationStep`，推荐继承 `AutomationStepBase`。七个生命周期方法只接收字符串，统一为 `runId, instanceId, contextJson, arguments`；`GetError` 在最后一个 `arguments` 前增加 `errorCode`。校验、轮询、错误、清理和恢复返回严格校验的 JSON，项目无需引用 Context、Result、Status 或 Error DTO。
+
+UPilot 在程序集加载后维护同一注册快照，持有全量预检、执行状态及持久化；Skill 查询 Catalog、选择固定流程模板与 Case 后提交 `jobSpec.stepPlan`，继续使用 `unity_operation_*`。业务 Step 只实现业务动作与恢复，不再维护另一个执行器。状态查询不推进步骤；域恢复只调用 Restore，不重放 Execute。检查点与共享值通过基类或服务的 `SaveCheckpoint/SaveSharedValue` 在可写生命周期回调中同步持久化，`arguments` 始终原样传递。
+
+域初始化尚未完成时，Step 查询返回 `STEP_SERVICE_INITIALIZING`，Operation 继续只读观察原 run。初始化完成后仍找不到身份才返回 `STEP_RUN_IDENTITY_MISMATCH`；Editor 重启则保留 `STEP_EDITOR_RESTARTED/RecoveryRequired`。查询不会触发 Initialize、Restore 或 Execute，也不会自动解除已有恢复门禁。
+
+业务附件通过基类或服务的 `RegisterArtifact(runId, instanceId, kind, path)` 在当前可写生命周期回调中登记。文件必须已完成且位于工程内；框架保存身份、大小和 SHA256，收尾再次校验并放入统一 `attachments` 索引。Finally 可在前序清理失败后登记恢复证据，但不能因此消除 `RecoveryRequired`；项目不需要引用报告 DTO。
+
+Console 收尾摘要保留至多10条阻断样本、精确序号/步骤/规则及截断标记，完整分类写入不可变的 `console-policy.json` 哈希产物。状态中的 `domain.logSummary` 不读取文件或推进执行；Policy 失败不覆盖此前业务首错。更新 Server 后须验证公开 Operation 附件收集，不能以磁盘源码或 Bridge 编译通过代替部署验证。
+
+新报告从同一冻结 summary 导出 `report.txt` 和 `timing.csv`，先写导出文件，再由 `summary.json` 提交整组产物；数据字段 `exportVersion=1`，旧报告不补写。时序区分执行与 Cleanup，未开始项不伪造耗时。Finalizing 域恢复沿用持久报告快照及完成时间，重新校验附件哈希；文件缺失或变化保留首错并要求恢复，不重放步骤或修复冻结文件。业务指标仍是项目附件，报告提交不代表 Operation-owned Capture 已停止。导出与冻结恢复已有规范工程定向证据，当前覆盖和未执行矩阵见集成方案。
+
+重开报告以单次读取的原始 summary 字节作为校验基线，兼容历史 UTF-8 BOM，不重写文件。打开后删除、改写或仅增删 BOM 都会阻止发布产物和重复完成；不能通过文本重新编码或忽略 BOM 放宽不可变证据检查。相关回归已在规范工程定向通过。
+
+通过既有 `unity_operation_*` 的 `jobSpec.stepPlan` 提交列表，执行前检查完整注册与参数，执行器统一负责轮询、超时、取消、Finally、域恢复和证据收尾。内置`upilot.open_scene/enter_play_mode/enter_edit_mode/wait_seconds/console_capture_start/capture_snapshot`六个业务无关步骤；项目只负责业务Step、断言和恢复，固定组合由Skill维护。项目可选适配使用`#if UNITY_EDITOR && UPILOT`，不新增运行时依赖或平行MCP start/status工具。
+
+计划自有Capture必须第一项且只启动一次，Operation明确`consoleCapture.enabled=false`，禁止双重所有权。启动Step清理不提前停采；全部Finally之后包确认停止及原始文件，再处理最终日志区间、Policy和报告。私有凭据不进入公开状态，未知身份或未确认释放保持RecoveryRequired。其它不含Capture Step的计划仍可借用Operation Capture。
+
+截图Step及基类字符串接口`BeginSnapshotJson/PollSnapshotJson/CancelSnapshotJson/SnapshotErrorJson`共用包内生命周期。默认可信GameView1280x720、3秒等待、2秒取消确认；保存启动意图后再调用Snapshot，域恢复不重放。验真绑定原文件大小/哈希及run目录，即使项目未轮询，执行器也确认资源完成后才推进。业务只决定取证时机和画面能否证明断言。
 
 接口、边界、接入时序和验收证据见 [Automation 公共支撑能力集成方案](Documentation~/Automation-Integration-Plan.md)。
 

@@ -267,6 +267,83 @@ def test_execution_error_normalizes_legacy_json_details_to_objects():
     assert normalized.error.detail["executionDiagnostics"]["getterCallCount"] == 1
 
 
+def test_resource_warnings_preserve_success_and_dispatch_once():
+    notice = {
+        "code": "EVAL_CACHE_EVICTED", "severity": "warning", "resource": "compiledCache",
+        "action": "evict", "count": 1, "limit": 128, "used": 128, "nextAction": "No retry is needed.",
+    }
+
+    class WarningDispatcher(_Dispatcher):
+        async def call(self, request_id, command, payload, timeout_ms=30000):
+            self.calls.append((command, payload, timeout_ms))
+            return ok(request_id, {
+                "status": "Valid" if command == "csharp.validate" else "Succeeded",
+                "result": "42", "resourceDiagnostics": [notice], "resourceDiagnosticsDroppedCount": 0,
+            })
+
+    for route in ("eval", "validate", "emit"):
+        service = _service()
+        service.dispatcher = WarningDispatcher()
+        call = (service.csharp_eval("return 42;") if route == "eval" else
+                service.csharp_validate("return 42;", backend="compiled") if route == "validate" else
+                service.reflection_emit_type("s.domain", {"typeName": "Example"}))
+        result = asyncio.run(call)
+        assert result.ok
+        assert result.data["resourceDiagnostics"] == [notice]
+        assert result.data["resourceDiagnosticsDroppedCount"] == 0
+        assert len(service.dispatcher.calls) == 1
+
+
+def test_resource_errors_keep_original_failure_and_nested_evidence():
+    notice = {
+        "code": "EMIT_GENERATION_SLOT_CONSUMED", "severity": "warning", "resource": "domainTypes",
+        "action": "retain", "count": 1, "limit": 256, "used": 3, "nextAction": "Inspect the original error.",
+    }
+    detail = {
+        "resourceDiagnostics": [notice], "resourceDiagnosticsDroppedCount": 2,
+        "sideEffectsMayHaveOccurred": True, "nextAction": "Do not retry automatically.",
+        "resource": "domainTypes", "limit": 256, "used": 3, "requestedTypeName": "Example",
+    }
+    response = fail("req", "EMIT_INVALID_SPEC", "original", {"detail": detail})
+    normalized = normalize_execution_error(response)
+    assert not normalized.ok and normalized.error.code == "EMIT_INVALID_SPEC"
+    assert normalized.error.message == "original"
+    for key, value in detail.items():
+        assert normalized.error.detail[key] == value
+
+    class RejectedDispatcher(_Dispatcher):
+        async def call(self, request_id, command, payload, timeout_ms=30000):
+            self.calls.append((command, payload, timeout_ms))
+            return fail(request_id, "EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED", "full", detail)
+
+    service = _service()
+    service.dispatcher = RejectedDispatcher()
+    result = asyncio.run(service.reflection_emit_type("s.domain", {"typeName": "Example"}))
+    assert not result.ok
+    assert result.error.code == "EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED"
+    assert result.error.detail["resourceDiagnostics"] == [notice]
+    assert len(service.dispatcher.calls) == 1
+
+
+def test_mcp_success_warning_does_not_set_is_error_or_retry(monkeypatch):
+    calls = []
+
+    class Facade:
+        async def csharp_eval(self, **kwargs):
+            calls.append(kwargs)
+            return ok("req", {"status": "Succeeded", "result": "42", "resourceDiagnostics": [{
+                "code": "EVAL_CACHE_WARMUP_FAILED", "severity": "warning", "resource": "emitCache",
+                "action": "skip", "count": 1, "limit": 256, "used": 0, "nextAction": "Keep the result.",
+            }], "resourceDiagnosticsDroppedCount": 0})
+
+    monkeypatch.setattr(execution_tools, "_get_facade", lambda: Facade())
+    monkeypatch.setattr(execution_tools, "_reject_write_if_unapproved", lambda _name: None)
+    result = asyncio.run(execution_tools.csharp_eval("return 42;"))
+    assert result.isError is False
+    assert len(calls) == 1
+    assert "EVAL_CACHE_WARMUP_FAILED" in str(result)
+
+
 def _reflection_service():
     service = ReflectionDomainService()
     service.dispatcher = _Dispatcher()

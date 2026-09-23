@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..config import CONFIG, diagnose_client_configs, refresh_config_if_changed
 from ..automation_authorization import authorization_status
+from ..service_maintenance import read_summary as read_maintenance_summary, same_path as maintenance_same_path
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
 from ..models import ToolResponse
@@ -352,6 +353,7 @@ class StatusDomainService:
                 ),
                 "startup": self._read_startup_summary(startup_root, process_identity),
                 "serverRestart": self._read_server_restart_summary(startup_root, session),
+                "aiServiceMaintenance": read_maintenance_summary(startup_root, session),
                 "timeouts": self.dispatcher.timeout_policy_snapshot(),
                 "mcp": {
                     "label": self.server.mcp_label,
@@ -426,6 +428,7 @@ class StatusDomainService:
                 "tools": tools,
                 "capabilities": data.get("capabilities", {}),
                 "execution": execution_capabilities,
+                "aiServiceMaintenance": data.get("aiServiceMaintenance", {}),
                 "session": data.get("session", {}),
                 "paths": data.get("paths", {}),
             },
@@ -498,11 +501,27 @@ class StatusDomainService:
             write_access_approved=CONFIG.write_access_approved,
         )
         for item in items:
+            if item.get("name") == "unity_service_restart":
+                maintenance = read_maintenance_summary(self._status_project_root(), self.server.session_manager.active)
+                if maintenance["unavailableReason"]:
+                    item.update(callableNow=False, unavailableReason=maintenance["unavailableReason"],
+                                nextAction=maintenance["nextAction"])
+                elif maintenance["latest"] and maintenance["latest"].get("status") in {"accepted", "running"}:
+                    item.update(callableNow=False, unavailableReason="SERVICE_RESTART_BUSY",
+                                nextAction="Observe the active maintenance; do not start another one.")
+                else:
+                    state = self.server.state.execution_state()
+                    if not state.get("ready") or not state.get("authoritative") or state.get("isStale", True) or state.get("playModeState") != "edit":
+                        item.update(callableNow=False, unavailableReason="SERVICE_RESTART_EDITOR_NOT_READY",
+                                    nextAction="Wait for stable authoritative EditMode; do not automatically change mode.")
             method = getattr(self, str(item.get("facade_method") or ""), None)
             if method is not None:
                 item["proxyArguments"] = proxy_argument_schema(
                     method, str(item.get("name") or "")
                 )
+        availability_key = availability.lower().replace("_", "")
+        if availability_key in {"callable", "callablenow"}:
+            items = [item for item in items if item.get("callableNow")]
         return items
 
     def _last_command_succeeded(self, command_name: str) -> bool | None:
@@ -514,6 +533,53 @@ class StatusDomainService:
 
     async def client_config_diagnose(self) -> ToolResponse:
         return ok(new_id("req"), diagnose_client_configs())
+
+    async def service_restart(
+        self, maintenance_id: str, target: str, reason: str, expected_project_path: str,
+        expected_server_process_id: int, expected_bridge_session_id: str, expected_maintenance_id: str = "",
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        from uuid import UUID
+        try:
+            if str(UUID(maintenance_id)) != maintenance_id.lower():
+                raise ValueError("maintenanceId must use UUID hyphen notation.")
+            if target not in {"bridge", "server"} or not reason.strip() or len(reason) > 512:
+                raise ValueError("Supply bridge/server and a nonempty reason of at most 512 characters.")
+            if type(expected_server_process_id) is not int or expected_server_process_id <= 0 or not expected_bridge_session_id:
+                raise ValueError("Exact Server and Bridge identities are required.")
+        except (ValueError, AttributeError, TypeError) as ex:
+            return fail(request_id, "INVALID_TOOL_ARGUMENTS", str(ex))
+        root = self._status_project_root()
+        summary = read_maintenance_summary(root, self.server.session_manager.active)
+        latest = summary["latest"]
+        if latest and latest["maintenanceId"] == maintenance_id:
+            if (latest.get("target") != target or latest.get("reason") != reason or
+                    latest.get("expectedMaintenanceId", "") != expected_maintenance_id or
+                    latest.get("oldServerProcessId") != expected_server_process_id or
+                    latest.get("oldBridgeSessionId") != expected_bridge_session_id or
+                    not maintenance_same_path(latest.get("projectPath"), expected_project_path)):
+                return fail(request_id, "SERVICE_RESTART_REQUEST_CONFLICT", "Maintenance ID was reused with different arguments.")
+            return ok(request_id, latest)
+        if summary["unavailableReason"]:
+            return fail(request_id, summary["unavailableReason"], summary.get("configError") or summary["nextAction"], summary)
+        if latest and latest.get("status") in {"accepted", "running"}:
+            return fail(request_id, "SERVICE_RESTART_BUSY", "Another maintenance is active.", {"maintenanceId": latest["maintenanceId"]})
+        if (not maintenance_same_path(expected_project_path, root) or
+                expected_server_process_id != os.getpid() or
+                expected_bridge_session_id != summary["expectedBridgeSessionId"] or
+                expected_maintenance_id != summary["expectedMaintenanceId"]):
+            return fail(request_id, "SERVICE_RESTART_IDENTITY_CHANGED", "Project, component or maintenance identity changed; inspect status.")
+        state_response = await self.editor_state()
+        state = state_response.data or {}
+        if (not state_response.ok or not state.get("ready") or not state.get("authoritative") or
+                state.get("isStale", True) or state.get("playModeState") != "edit"):
+            return fail(request_id, "SERVICE_RESTART_EDITOR_NOT_READY", "Stable authoritative EditMode is required; no mode change was requested.")
+        # Independent authorization is rechecked by Unity immediately before any stop/start.
+        return await self.dispatcher.call(request_id, "service.restart", {
+            "maintenanceId": maintenance_id, "target": target, "reason": reason,
+            "expectedProjectPath": expected_project_path, "expectedServerProcessId": expected_server_process_id,
+            "expectedBridgeSessionId": expected_bridge_session_id, "expectedMaintenanceId": expected_maintenance_id,
+        })
 
     def _status_project_root(self) -> Path | None:
         session = self.server.session_manager.active

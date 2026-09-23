@@ -231,6 +231,13 @@ namespace CodingRiver.UPilot
         public string[] candidates = Array.Empty<string>();
         public CSharpExecutionDiagnosticsPayload executionDiagnostics;
         public string[] cleanupDiagnostics = Array.Empty<string>();
+        public CodingRiver.UPilot.Execution.ExecutionResourceDiagnostic[] resourceDiagnostics =
+            Array.Empty<CodingRiver.UPilot.Execution.ExecutionResourceDiagnostic>();
+        public int resourceDiagnosticsDroppedCount;
+        public string resource;
+        public int limit;
+        public int used;
+        public string requestedTypeName;
         public TestListResultPayload selection;
         public string exceptionType;
         public string exceptionMessage;

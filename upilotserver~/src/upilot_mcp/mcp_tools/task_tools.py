@@ -116,10 +116,14 @@ async def unity_operation_get(commandId: str):
 
 @mcp.tool(
     description=(
-        "启动一个通用长作业编排。jobSpec 包含 displayName、startCall、statusCall、cancelCall、"
+        "启动一个通用长作业编排。可用 jobSpec.stepPlan={version:1,steps:[{instanceId,stepId,arguments,phase}]}，"
+        "arguments 只能是字符串，phase 为 Normal/Finally；与 startCall/statusCall/cancelCall 互斥。"
+        "全列表发现及参数预检通过后才创建 Capture 并启动；Unity 推进步骤，状态查询不推进 Case。"
+        "也支持既有 jobSpec displayName、startCall、statusCall、cancelCall、"
         "timeoutSec、pollIntervalSec、terminalStatusMapping、artifactRules、consoleCapture、retryPolicy。"
         "statusCall/cancelCall 参数可使用 ${start.field}、${status.field}、${operation.operationId} 精确占位符。"
-        "UPilot 只调用并轮询项目暴露入口，不解析业务 domain 字段。"
+        "stepPlan 由 UPilot 注册目录预检并由 Unity 执行器推进；项目 Step 使用字符串生命周期契约，arguments 始终最后。"
+        "既有调用组继续调用项目入口；两种形式均不解析业务 domain 字段。"
     )
 )
 async def unity_operation_start(jobSpec: dict):
@@ -127,7 +131,7 @@ async def unity_operation_start(jobSpec: dict):
     r = await _get_facade().operation_start(job_spec=jobSpec)
     return _log_tool_result("unity_operation_start", _payload(r))
 
-@mcp.tool(description="只读预校验通用长作业 jobSpec；检查调用类型、已注册工具或反射入口、参数容器、占位符、终态映射、超时和产物规则，不启动业务。")
+@mcp.tool(description="只读预校验通用长作业 jobSpec。stepPlan 由 Unity 检查全部 Step 注册、接口、字符串参数和 Finally 顺序；不创建 Capture、不执行步骤。既有调用组检查保持兼容。")
 async def unity_operation_validate(jobSpec: dict, inspectReflection: bool = True):
     _log_tool_call("unity_operation_validate", {"jobSpec": jobSpec, "inspectReflection": inspectReflection})
     r = await _get_facade().operation_validate(job_spec=jobSpec, inspect_reflection=inspectReflection)

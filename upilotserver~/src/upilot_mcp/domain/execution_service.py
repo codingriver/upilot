@@ -219,7 +219,9 @@ def normalize_execution_error(response: ToolResponse) -> ToolResponse:
         if fallback is not None:
             nested[structured] = fallback
     if nested is not detail:
-        for key in ("sourceSpan", "lastCompletedSpan", "diagnostics", "candidates", "executionDiagnostics"):
+        for key in ("sourceSpan", "lastCompletedSpan", "diagnostics", "candidates", "executionDiagnostics",
+                    "resourceDiagnostics", "resourceDiagnosticsDroppedCount",
+                    "resource", "limit", "used", "requestedTypeName", "nextAction", "sideEffectsMayHaveOccurred"):
             if key in nested:
                 detail[key] = nested[key]
     return response

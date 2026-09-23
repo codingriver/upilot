@@ -316,6 +316,8 @@ namespace CodingRiver.UPilot
                 DrawUnsavedScenePolicySection();
                 EditorGUILayout.Space(6);
                 DrawAutomationAuthorizationSection();
+                EditorGUILayout.Space(8);
+                DrawAiServiceMaintenanceSection();
                 EditorGUILayout.Space(6);
                 DrawSharedEndpointSection(bridge, status);
                 EditorGUILayout.Space(6);
@@ -1285,6 +1287,53 @@ namespace CodingRiver.UPilot
                         "发现未保存场景时阻止测试或验收，并返回场景列表供确认。这是默认且推荐的保护策略。",
                         MessageType.Info);
                 }
+            }
+        }
+
+        private void DrawAiServiceMaintenanceSection()
+        {
+            var config = UPilotProjectConfig.Current;
+            var settings = config.aiServiceMaintenance ??= new UPilotAiServiceMaintenanceConfig();
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("AI 服务维护", EditorStyles.boldLabel);
+                var authorized = settings.approved &&
+                    ServiceMaintenanceJournal.SamePath(settings.projectPath, UPilotProjectConfig.ProjectRoot);
+                var selected = EditorGUILayout.ToggleLeft("允许 AI 重启 UPilot 服务", authorized);
+                if (selected != authorized)
+                {
+                    settings.approved = selected;
+                    settings.projectPath = UPilotProjectConfig.ProjectRoot;
+                    settings.approvedAtUtc = selected ? DateTimeOffset.UtcNow.ToString("O") : "";
+                    UPilotProjectConfig.Save(config);
+                }
+                EditorGUI.BeginChangeCheck();
+                var timeout = EditorGUILayout.DelayedIntField("维护超时（秒）", settings.restartTimeoutSeconds);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    if (timeout >= 30 && timeout <= 600)
+                    {
+                        settings.restartTimeoutSeconds = timeout;
+                        UPilotProjectConfig.Save(config);
+                    }
+                    else ShowToast("维护超时必须为 30～600 秒，不会自动截断");
+                }
+                EditorGUILayout.HelpBox("仅 EditMode。允许 AI 重启当前项目的 Bridge/Server，可能中断正在运行的工具和任务，不会自动重新执行。此授权独立于自动处置授权。", MessageType.Warning);
+                try
+                {
+                    UPilotServiceMaintenance.ReadSettings();
+                    var record = UPilotServiceMaintenance.Current;
+                    if (record != null)
+                    {
+                        EditorGUILayout.LabelField("最近维护", record.maintenanceId, EditorStyles.miniLabel);
+                        EditorGUILayout.LabelField("状态", record.status + " / " + record.phase);
+                        if (!string.IsNullOrEmpty(record.error))
+                            EditorGUILayout.HelpBox(record.errorCode + ": " + record.error, MessageType.Warning);
+                    }
+                    if (!string.IsNullOrEmpty(UPilotServiceMaintenance.StorageError))
+                        EditorGUILayout.HelpBox(UPilotServiceMaintenance.StorageError, MessageType.Error);
+                }
+                catch (Exception ex) { EditorGUILayout.HelpBox(ex.Message, MessageType.Error); }
             }
         }
 

@@ -200,6 +200,7 @@ namespace CodingRiver.UPilot.Execution
 
         public ExecutionBudget Budget { get; }
         public CSharpExecutionDiagnostics Diagnostics { get; }
+        public ExecutionResourceDiagnostics ResourceDiagnostics { get; }
         public IExecutionPolicy Policy { get; }
         public IReadOnlyList<string> Imports { get; }
         public bool SideEffectsMayHaveOccurred { get => _state.SideEffects; internal set => _state.SideEffects = value; }
@@ -217,7 +218,8 @@ namespace CodingRiver.UPilot.Execution
             IExecutionPolicy policy = null,
             Func<Func<object>, object> invocationScheduler = null,
             CancellationToken cancellationToken = default(CancellationToken),
-            IExecutionSessionLifetime sessionLifetime = null)
+            IExecutionSessionLifetime sessionLifetime = null,
+            ExecutionResourceDiagnostics resourceDiagnostics = null)
         {
             if (sessionLifetime is ExecutionSession persistent)
                 _scope = persistent.GetOrCreateExecutionScope(variables);
@@ -229,6 +231,7 @@ namespace CodingRiver.UPilot.Execution
             Imports = (imports ?? new[] { "System" }).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToArray();
             Budget = budget ?? new ExecutionBudget();
             Diagnostics = new CSharpExecutionDiagnostics();
+            ResourceDiagnostics = resourceDiagnostics ?? new ExecutionResourceDiagnostics();
             Policy = policy ?? new RestrictedEvalExecutionPolicy();
             _invocationScheduler = invocationScheduler;
             _cancellationToken = cancellationToken.CanBeCanceled ? cancellationToken : (sessionLifetime?.CancellationToken ?? cancellationToken);
@@ -243,6 +246,7 @@ namespace CodingRiver.UPilot.Execution
             Imports = parent.Imports;
             Budget = parent.Budget;
             Diagnostics = parent.Diagnostics;
+            ResourceDiagnostics = parent.ResourceDiagnostics;
             Policy = parent.Policy;
             _invocationScheduler = parent._invocationScheduler;
             _cancellationToken = parent._cancellationToken;

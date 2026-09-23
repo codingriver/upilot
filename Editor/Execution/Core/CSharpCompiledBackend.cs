@@ -16,13 +16,13 @@ namespace CodingRiver.UPilot.Execution
     /// </summary>
     public static class CSharpCompiledBackend
     {
-        private sealed class Entry
+        internal sealed class Entry
         {
             public Func<CSharpEvaluationContext, CSharpEvaluationResult> Delegate;
         }
 
-        private static readonly object Gate = new object();
-        private static readonly Dictionary<string, Entry> Entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+        private static readonly ExecutionProgramCache<Entry> Entries = new ExecutionProgramCache<Entry>(128, "compiledCache");
+        public static ExecutionCacheSnapshot Snapshot() => Entries.Snapshot();
 
         public static string CacheKey(string code, string mode, IEnumerable<string> imports, IDictionary<string, object> variables)
         {
@@ -45,18 +45,22 @@ namespace CodingRiver.UPilot.Execution
 
         public static bool IsCached(string key)
         {
-            lock (Gate) return !string.IsNullOrWhiteSpace(key) && Entries.ContainsKey(key);
+            return !string.IsNullOrWhiteSpace(key) && Entries.Contains(key);
         }
 
         public static Func<CSharpEvaluationContext, CSharpEvaluationResult> Compile(
             string key, string code, string mode, CSharpEvaluationContext preparationContext,
-            IDictionary<string, Type> declaredVariableTypes = null)
+            IDictionary<string, Type> declaredVariableTypes = null, ExecutionResourceDiagnostics diagnostics = null)
+            => CompileCached(Entries, key, code, mode, preparationContext, declaredVariableTypes, diagnostics);
+
+        internal static Func<CSharpEvaluationContext, CSharpEvaluationResult> CompileCached(
+            ExecutionProgramCache<Entry> cache, string key, string code, string mode, CSharpEvaluationContext preparationContext,
+            IDictionary<string, Type> declaredVariableTypes = null, ExecutionResourceDiagnostics diagnostics = null)
         {
             if (string.IsNullOrWhiteSpace(key))
                 throw new ExecutionContractException("CSHARP_COMPILED_INVALID_CACHE_KEY", "Compiled cache key is required.");
-            lock (Gate)
+            return cache.GetOrCreate(key, entry => true, cached =>
             {
-                if (Entries.TryGetValue(key, out var cached)) return cached.Delegate;
                 var program = CSharpSubsetEngine.Parse(code, mode);
                 program.ValidateSynchronousEmitProfile();
                 IDictionary<string, Type> variableTypes = declaredVariableTypes;
@@ -66,9 +70,8 @@ namespace CodingRiver.UPilot.Execution
                 var raw = new Lowerer(program, preparationContext?.Imports ?? new[] { "System" }, variableTypes,
                     preparationContext?.Policy ?? new RestrictedEvalExecutionPolicy()).Compile();
                 Func<CSharpEvaluationContext, CSharpEvaluationResult> compiled = context => Execute(raw, program, context);
-                Entries[key] = new Entry { Delegate = compiled };
-                return compiled;
-            }
+                return new Entry { Delegate = compiled };
+            }, diagnostics).Delegate;
         }
 
         private static CSharpEvaluationResult Execute(

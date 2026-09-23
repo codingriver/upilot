@@ -91,6 +91,7 @@ namespace CodingRiver.UPilot
         private static string FailureDialogKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Dialog");
         internal static bool IsRepairing => _repairTask != null && !_repairTask.IsCompleted;
         internal static bool LastRepairSucceeded { get; private set; }
+        internal static void SuppressAutomaticRepairForMaintenance() => EditorPrefs.SetBool(AutoAttemptKey, true);
         internal static string DiagnosticDetails => UPilotDeploymentDiagnostics.Details;
 
         static UPilotQuickStart()
@@ -122,6 +123,7 @@ namespace CodingRiver.UPilot
 
         private static void ObserveDeployment()
         {
+            if (UPilotServiceMaintenance.IsActive) return;
             if (EditorApplication.timeSinceStartup < _nextDiagnosticAt) return;
             _nextDiagnosticAt = EditorApplication.timeSinceStartup + 2;
             if (!UPilotSetupState.IsCompleted || !UPilotBootstrap.IsEnabled || _explicitlyStopped) return;
@@ -344,6 +346,7 @@ namespace CodingRiver.UPilot
 
         public static void Start()
         {
+            if (UPilotServiceMaintenance.IsActive) return;
             _explicitlyStopped = false;
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
@@ -367,6 +370,7 @@ namespace CodingRiver.UPilot
 
         public static void Stop()
         {
+            if (UPilotServiceMaintenance.IsActive) return;
             if (IsRepairing) return;
             _explicitlyStopped = true;
             BeginOperation(UPilotServiceOperation.Stopping);
@@ -378,6 +382,8 @@ namespace CodingRiver.UPilot
 
         public static Task<string> AutoRepairAsync(AgentMcpConfigStatus[] agentConfigs, Action afterStart = null)
         {
+            if (UPilotServiceMaintenance.IsActive)
+                return Task.FromResult("AI service maintenance is active: " + UPilotServiceMaintenance.Current.maintenanceId);
             if (afterStart != null) _afterRepairStart += afterStart;
             if (IsRepairing) return _repairTask;
             _repairGeneration++;

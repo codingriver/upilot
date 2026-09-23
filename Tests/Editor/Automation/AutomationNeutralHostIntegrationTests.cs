@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.IO;
 using System.Linq;
@@ -29,14 +29,14 @@ namespace CodingRiver.UPilot.Tests.Automation
         [Test]
         public void AssetInspectionHostOwnsItsExecutionAndUsesOnlySupportModules()
         {
-            AutomationCatalogDescriptorV1 catalog = Catalog("inspect.manifest", "inspect.package");
-            AutomationSelectionResultV1 selection = AutomationSelectionV1.Analyze(catalog, new AutomationSelectionRequestV1
+            AutomationCatalogDescriptor catalog = Catalog("inspect.manifest", "inspect.package");
+            AutomationSelectionResult selection = AutomationSelection.Analyze(catalog, new AutomationSelectionRequest
             {
                 caseIds = new[] { "inspect.manifest", "inspect.package" },
             });
             Assert.That(selection.ok, Is.True);
 
-            AutomationReportWriterV1 report = AutomationReportWriterV1.Create(new AutomationReportCreateRequestV1
+            AutomationReportWriter report = AutomationReportWriter.Create(new AutomationReportCreateRequest
             {
                 outputDirectory = _reportDirectory,
                 runId = "asset-inspection-host",
@@ -44,30 +44,31 @@ namespace CodingRiver.UPilot.Tests.Automation
             string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
             foreach (string caseId in selection.selectedCaseIds)
             {
-                report.Append(new AutomationReportEventV1 { eventType = "case.started", caseId = caseId });
+                report.Append(new AutomationReportEvent { eventType = "case.started", caseId = caseId });
                 string target = caseId == "inspect.manifest"
                     ? Path.Combine(projectRoot, "Packages", "manifest.json")
                     : Path.Combine(projectRoot, "Packages", "packages-lock.json");
                 Assert.That(File.Exists(target), Is.True, target);
-                report.Append(new AutomationReportEventV1 { eventType = "case.finished", caseId = caseId, outcome = "Passed" });
+                report.Append(new AutomationReportEvent { eventType = "case.finished", caseId = caseId, outcome = "Passed" });
             }
 
-            AutomationLogPolicyResultV1 logs = AutomationLogPolicyV1.Evaluate(Array.Empty<ConsoleCaptureRecord>(), null, null);
-            report.Complete(new AutomationReportSummaryV1
+            AutomationLogPolicyResult logs = AutomationLogPolicy.Evaluate(Array.Empty<ConsoleCaptureRecord>(), null, null);
+            report.Complete(new AutomationReportSummary
             {
                 outcome = logs.passed ? "Passed" : "Failed",
-                logSummary = new AutomationReportLogSummaryV1 { evidenceComplete = logs.evidenceComplete },
-                cases = selection.selectedCaseIds.Select(id => new AutomationReportCaseV1 { id = id, outcome = "Passed" }).ToArray(),
+                logSummary = new AutomationReportLogSummary { evidenceComplete = logs.evidenceComplete },
+                cases = selection.selectedCaseIds.Select(id => new AutomationReportCase { id = id, outcome = "Passed" }).ToArray(),
             });
-            Assert.That(report.GetArtifacts().Length, Is.EqualTo(2));
+            Assert.That(report.GetArtifacts().Select(a => a.kind),
+                Is.EquivalentTo(new[] { "events", "summary", "report", "timing" }));
         }
 
         [UnityTest]
         public IEnumerator FrameDrivenCounterHostOwnsItsLoop()
         {
-            AutomationSelectionResultV1 selection = AutomationSelectionV1.Analyze(
+            AutomationSelectionResult selection = AutomationSelection.Analyze(
                 Catalog("counter.frames"),
-                new AutomationSelectionRequestV1 { caseIds = new[] { "counter.frames" } });
+                new AutomationSelectionRequest { caseIds = new[] { "counter.frames" } });
             Assert.That(selection.ok, Is.True);
 
             int counter = 0;
@@ -81,10 +82,10 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(selection.selectedCaseIds, Is.EqualTo(new[] { "counter.frames" }));
         }
 
-        private static AutomationCatalogDescriptorV1 Catalog(params string[] ids) => new()
+        private static AutomationCatalogDescriptor Catalog(params string[] ids) => new()
         {
-            cases = ids.Select(id => new AutomationCaseDescriptorV1 { id = id }).ToArray(),
-            suites = Array.Empty<AutomationSuiteDescriptorV1>(),
+            cases = ids.Select(id => new AutomationCaseDescriptor { id = id }).ToArray(),
+            suites = Array.Empty<AutomationSuiteDescriptor>(),
         };
     }
 }

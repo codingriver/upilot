@@ -1,6 +1,31 @@
 # Changelog
 
+## Unreleased Automation Consolidation
+
+- Add run-owned `upilot.console_capture_start` and `upilot.capture_snapshot` Steps,
+  reusing the existing Capture/Snapshot engines without new MCP start/status tools.
+- Require explicit Operation Capture disablement for plan-owned Capture; stop and
+  verify raw evidence after Finally, before Policy and report finalization.
+- Persist private ownership and evidence identities before effects; verify original
+  files and owned paths, preserve first error and continue safe Finally work when
+  Snapshot observation or Capture recovery fails. Unconfirmed release remains
+  RecoveryRequired. Add string-only Snapshot helpers and targeted regression tests.
+
 ## Unreleased
+
+- Export deterministic `report.txt` and `timing.csv` from the frozen Automation summary, with separate execution/cleanup timing and immutable hashed attachments. Persist final report intent across same-process reload, reverify frozen evidence before commit, and preserve legacy reports without backfilling exports. Canonical targeted report/recovery acceptance passes 50/50; project end-to-end acceptance remains separate.
+- Preserve original summary bytes, including historical UTF-8 BOMs, when reopening reports. Reject deleted or changed committed summaries, including later BOM changes, without repairing files or relaxing immutable evidence checks.
+- Identify captured Console evidence by its session identity when exporting reports, so JsonUtility's materialized empty objects remain explicitly "Not captured; not validated" across reopening and frozen recovery.
+- Register immutable project attachments through callback-scoped `RegisterArtifact(runId, instanceId, kind, path)`; persist item ownership, reject escaped/missing/conflicting files, and recheck hashes at report freeze. Existing Operation collection expands explicitly typed attachment arrays without scanning directories or introducing another tool.
+- Publish bounded Step Console policy samples with exact Capture ranges and rule/item attribution, plus an immutable hashed `console-policy.json` containing full classifications. Preserve first-error precedence and allow Finally release evidence after earlier cleanup failure.
+- Unify Automation API names without version suffixes, including Catalog/Selection, Capture, Policy, Report, Step and Evidence; retain serialized version fields, enum values and script GUIDs. Existing source consumers must migrate names in the same update; no legacy alias layer is added.
+- Replace Step Context/DTO callback dependencies with string-only `IAutomationStep` and JSON results; keep `arguments` last on every callback. Add strict result validation, one registration snapshot, callback-scoped durable checkpoints and per-key shared writes.
+- Add the Editor-only Step contract, optional base class and attribute registry; preflight complete string-argument plans before execution, with structured contract/registration/parameter diagnostics.
+- Integrate `jobSpec.stepPlan` into existing Operation tools without a second public scheduler; persist single-run sequencing, execution intent, polling, cancellation, deadlines, Finally cleanup and explicit same-process Domain Reload recovery without replay.
+- Distinguish deferred Step service initialization from a missing or mismatched run. Operation can continue read-only observation of the same Step identity during initialization; actual identity mismatch and Editor-restart recovery remain blocked without replaying start.
+- Add built-in scene/open/play/edit/wait steps and shared fixed-range Console evidence collection; retain Operation Capture ownership, project-defined log policy, immutable reports and unresolved-resource recovery gates.
+
+- Add the public Editor compile contract `UPILOT`: installation and build-target changes append it idempotently to PlayerSettings, while normal Package Manager removal deletes only symbols written by UPilot and package replacement keeps the define stable.
 
 - Add read-only `csharp_validate` preflight and an explicit no-fallback `compiled` backend based on Expression Tree lowering; preserve existing `auto`, `interpret`, and AST-entry `emit` behavior.
 - Harden the V2 lexer/parser with numeric/escape validation, token/depth limits, correct conditional access and single-evaluation assignment semantics, plus `??`, `??=`, `typeof`, `nameof`, and `default(T)`.

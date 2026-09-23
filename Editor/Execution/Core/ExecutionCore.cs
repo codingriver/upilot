@@ -7,6 +7,8 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("UPilot.Editor.Tests")]
+
 namespace CodingRiver.UPilot.Execution
 {
     [Serializable]
@@ -36,6 +38,159 @@ namespace CodingRiver.UPilot.Execution
         {
             Code = string.IsNullOrWhiteSpace(code) ? "EXECUTION_ERROR" : code;
             Detail = detail ?? new Dictionary<string, object>();
+        }
+    }
+
+    [Serializable]
+    public sealed class ExecutionResourceDiagnostic
+    {
+        public string code;
+        public string severity;
+        public string resource;
+        public string action;
+        public int count;
+        public int limit;
+        public int used;
+        public string nextAction;
+    }
+
+    public sealed class ExecutionResourceDiagnostics
+    {
+        private readonly object _gate = new object();
+        private readonly List<ExecutionResourceDiagnostic> _items = new List<ExecutionResourceDiagnostic>();
+        private int _dropped;
+        public int DroppedCount { get { lock (_gate) return _dropped; } }
+
+        public void Add(string code, string severity, string resource, string action, int limit, int used, string nextAction)
+        {
+            lock (_gate)
+            {
+                var item = _items.FirstOrDefault(value => value.code == code && value.resource == resource);
+                if (item == null)
+                {
+                    if (_items.Count >= 16) { _dropped++; return; }
+                    item = new ExecutionResourceDiagnostic { code = code, severity = severity, resource = resource };
+                    _items.Add(item);
+                }
+                item.action = action;
+                item.count++;
+                item.limit = limit;
+                item.used = used;
+                item.nextAction = nextAction;
+            }
+        }
+
+        public ExecutionResourceDiagnostic[] Snapshot()
+        {
+            lock (_gate) return _items.Select(item => new ExecutionResourceDiagnostic
+            {
+                code = item.code, severity = item.severity, resource = item.resource, action = item.action,
+                count = item.count, limit = item.limit, used = item.used, nextAction = item.nextAction,
+            }).ToArray();
+        }
+
+        public ExecutionContractException Attach(Exception exception)
+        {
+            var contract = exception as ExecutionContractException;
+            var detail = new Dictionary<string, object>(contract?.Detail ?? new Dictionary<string, object>());
+            var items = Snapshot().ToList();
+            int dropped = DroppedCount;
+            if (detail.TryGetValue("resourceDiagnostics", out var prior) && prior is ExecutionResourceDiagnostic[] previous)
+                foreach (var item in previous)
+                    if (!items.Any(value => value.code == item.code && value.resource == item.resource))
+                    {
+                        if (items.Count < 16) items.Add(item);
+                        else dropped++;
+                    }
+            if (detail.TryGetValue("resourceDiagnosticsDroppedCount", out var oldDropped) && oldDropped is int count)
+                dropped = Math.Max(dropped, count);
+            detail["resourceDiagnostics"] = items.ToArray();
+            detail["resourceDiagnosticsDroppedCount"] = dropped;
+            if (contract == null)
+            {
+                detail["exceptionType"] = exception.GetType().FullName;
+                detail["exceptionMessage"] = exception.Message;
+                detail["stackTrace"] = exception.StackTrace ?? "";
+            }
+            return new ExecutionContractException(contract?.Code ?? "EXECUTION_RUNTIME_ERROR", exception.Message, detail);
+        }
+    }
+
+    [Serializable]
+    public sealed class ExecutionCacheSnapshot
+    {
+        public int capacity;
+        public int count;
+        public long hits;
+        public long misses;
+        public long evictions;
+    }
+
+    // Only the two program backends use this cache. Factories never execute user code.
+    internal sealed class ExecutionProgramCache<T> where T : class
+    {
+        private sealed class Entry
+        {
+            public T Value;
+            public LinkedListNode<string> Node;
+        }
+        private readonly object _gate = new object();
+        private readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
+        private readonly LinkedList<string> _lru = new LinkedList<string>();
+        private readonly int _capacity;
+        private readonly string _resource;
+        private long _hits, _misses, _evictions;
+
+        internal ExecutionProgramCache(int capacity, string resource)
+        {
+            if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
+            _capacity = capacity;
+            _resource = resource;
+        }
+
+        internal bool Contains(string key)
+        { lock (_gate) return key != null && _entries.ContainsKey(key); }
+
+        internal T GetOrCreate(string key, Func<T, bool> ready, Func<T, T> factory, ExecutionResourceDiagnostics diagnostics)
+        {
+            lock (_gate)
+            {
+                _entries.TryGetValue(key, out var entry);
+                if (entry != null && ready(entry.Value))
+                {
+                    _hits++;
+                    _lru.Remove(entry.Node);
+                    _lru.AddLast(entry.Node);
+                    return entry.Value;
+                }
+                _misses++;
+                T value = factory(entry?.Value);
+                if (entry != null)
+                {
+                    entry.Value = value;
+                    _lru.Remove(entry.Node);
+                    _lru.AddLast(entry.Node);
+                }
+                else
+                {
+                    if (_entries.Count == _capacity)
+                    {
+                        _entries.Remove(_lru.First.Value);
+                        _lru.RemoveFirst();
+                        _evictions++;
+                        diagnostics?.Add("EVAL_CACHE_EVICTED", "warning", _resource, "evict", _capacity, _capacity,
+                            "No retry is needed for a successful request. An older cache entry was evicted; existing delegates remain valid.");
+                    }
+                    _entries.Add(key, new Entry { Value = value, Node = _lru.AddLast(key) });
+                }
+                return value;
+            }
+        }
+
+        internal ExecutionCacheSnapshot Snapshot()
+        {
+            lock (_gate) return new ExecutionCacheSnapshot
+            { capacity = _capacity, count = _entries.Count, hits = _hits, misses = _misses, evictions = _evictions };
         }
     }
 
@@ -744,6 +899,8 @@ namespace CodingRiver.UPilot.Execution
         private readonly CancellationTokenSource _cancellation = new CancellationTokenSource();
         private readonly List<string> _recentAsyncDiagnostics = new List<string>();
         private int _dynamicTypeCount;
+        private int _reservedHandles;
+        private int _reservedDynamicTypes;
         private int _callbackCount;
         private int _activeAsyncOperations;
         private int _completedAsyncOperations;
@@ -801,13 +958,8 @@ namespace CodingRiver.UPilot.Execution
         {
             EnsureOpen();
             kind = string.IsNullOrWhiteSpace(kind) ? "object" : kind.Trim();
-            if (_handles.Count >= _maxHandles)
-                throw new ExecutionContractException("SESSION_LIMIT_EXCEEDED", "Session handle capacity was exceeded.");
-            if (kind == "type" && ++_dynamicTypeCount > _maxDynamicTypes)
-            {
-                _dynamicTypeCount--;
-                throw new ExecutionContractException("SESSION_LIMIT_EXCEEDED", "Session dynamic type capacity was exceeded.");
-            }
+            EnsureStorageCapacity(1, kind == "type" ? 1 : 0);
+            if (kind == "type") _dynamicTypeCount++;
             if ((kind == "delegate" || kind == "callback") && ++_callbackCount > _maxCallbacks)
             {
                 _callbackCount--;
@@ -817,6 +969,57 @@ namespace CodingRiver.UPilot.Execution
             _handles[handle] = new HandleEntry { Kind = kind, Value = value };
             Touch();
             return handle;
+        }
+
+        private void EnsureStorageCapacity(int handles, int types, ExecutionResourceDiagnostics diagnostics = null)
+        {
+            EnsureOpen();
+            string resource = _handles.Count + _reservedHandles + handles > _maxHandles ? "sessionHandles" :
+                _dynamicTypeCount + _reservedDynamicTypes + types > _maxDynamicTypes ? "sessionTypes" : null;
+            if (resource == null) return;
+            int limit = resource == "sessionHandles" ? _maxHandles : _maxDynamicTypes;
+            int used = resource == "sessionHandles" ? _handles.Count + _reservedHandles : _dynamicTypeCount + _reservedDynamicTypes;
+            var notice = diagnostics ?? new ExecutionResourceDiagnostics();
+            const string next = "Inspect session capacity and partial state. Use a session with enough free handles/types, or explicitly open a new session with sufficient limits. Closing a session invalidates its handles; do not replay automatically.";
+            notice.Add("SESSION_LIMIT_EXCEEDED", "error", resource, "reject", limit, used, next);
+            throw notice.Attach(new ExecutionContractException("SESSION_LIMIT_EXCEEDED",
+                "Cannot store/reserve " + handles + " handle(s) and " + types + " type(s): session capacity was exceeded for " + resource,
+                new Dictionary<string, object> { { "stage", "policy" }, { "resource", resource }, { "limit", limit },
+                    { "used", used }, { "nextAction", next } }));
+        }
+
+        public EmitCapacityReservation ReserveEmitCapacity(bool createInstance, ExecutionResourceDiagnostics diagnostics = null)
+        {
+            int handles = createInstance ? 2 : 1;
+            EnsureStorageCapacity(handles, 1, diagnostics);
+            _reservedHandles += handles;
+            _reservedDynamicTypes++;
+            return new EmitCapacityReservation(this, handles);
+        }
+
+        public sealed class EmitCapacityReservation : IDisposable
+        {
+            private ExecutionSession _session;
+            private int _handles;
+            private int _types = 1;
+            internal EmitCapacityReservation(ExecutionSession session, int handles) { _session = session; _handles = handles; }
+            public string Store(string kind, object value)
+            {
+                if (_session == null || _handles == 0 || (kind == "type" && _types == 0))
+                    throw new InvalidOperationException("Emit capacity reservation is unavailable.");
+                _session._reservedHandles--;
+                _handles--;
+                if (kind == "type") { _session._reservedDynamicTypes--; _types--; }
+                return _session.Store(kind, value);
+            }
+            public void Dispose()
+            {
+                if (_session == null) return;
+                _session._reservedHandles -= _handles;
+                _session._reservedDynamicTypes -= _types;
+                _handles = _types = 0;
+                _session = null;
+            }
         }
 
         public object Resolve(string handle, string expectedKind = "")

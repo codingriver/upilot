@@ -2,6 +2,23 @@
 
 Load this reference only when using reflection calls, C# subset evaluation, dynamic types, or persistent handles.
 
+## Tool and backend hierarchy
+
+`unity_reflection_call`, `csharp_eval`, and `reflection_emit_type` are peer MCP execution
+tools: call an existing method or evaluate one bounded reflection expression, execute
+a temporary C# subset program, or create a temporary CLR type from a structured spec.
+Shared execution infrastructure does not make one public tool a backend of another.
+
+Within `csharp_eval`, `interpret`, `emit`, and `compiled` are execution backends;
+`auto` is a selection strategy, not a fourth implementation. Eval's `emit` backend
+caches a DynamicMethod entry that still executes the AST; it does not invoke
+`reflection_emit_type` or create a user-defined CLR type. Dynamic type method bodies
+instead select `bodyBackend=interpret|compiled` and retain their synchronous limits.
+
+`csharp_validate` provides preflight checks and `execution_session` manages state and
+lifecycle across calls. They support the execution tools rather than adding Eval
+backends. Choose the public tool first, then its supported mode or backend.
+
 ## Choose the tool
 
 | Need | Tool |
@@ -92,7 +109,7 @@ Preflight generated code before execution when the backend boundary is uncertain
 {"code":"value + 2","mode":"expression","backend":"compiled","variableTypes":[{"name":"value","typeName":"System.Int32"}]}
 ```
 
-`backend=interpret` parses only; `emit` also checks the synchronous profile; `compiled` parses, statically binds, lowers and compiles a delegate. Validation does not execute getters, constructors, methods, conversions, or business code.
+`backend=interpret` parses only; `emit` accepts the same full V2 Eval AST (including lambda/closure/await) and checks cached runtime capability; `compiled` parses, statically binds, lowers and compiles a delegate. Validation does not execute getters, constructors, methods, conversions, or business code. Success is not proof of runtime binding or successful execution. The synchronous profile remains specific to dynamic type bodies.
 
 ```json
 {"code":"var sum = 0; for (var i = 0; i < 10; i++) sum += i; return sum;","mode":"statements","executionBackend":"auto","limits":{"timeoutMs":3000,"maxStatements":10000,"maxLoopIterations":10000}}
@@ -140,7 +157,25 @@ Backend selection is explicit and stable:
 - `compiled` statically binds and lowers the supported synchronous AST to an Expression Tree delegate. It supports typed locals/inputs, operators, assignment, `if`/`while`/`for`, members, calls, explicit generic calls, constructors, casts, one-dimensional arrays/indexers, `??`, and type intrinsics. Unsupported nodes fail before execution with `CSHARP_COMPILED_UNSUPPORTED_NODE`; there is no interpreter fallback.
 - `auto` preserves compatibility: it interprets the first successful AST and may reuse the old emit-cache on later identical calls. It does not auto-select `compiled`, and no backend switch occurs after execution begins.
 
-Use `compiled` for repeatedly invoked synchronous snippets whose variable types are stable. Use `interpret` for `try/catch/finally`, `foreach`, lambda/closure, await, inferred generics, optional/named/params/ref/out calls, multidimensional arrays, and other full-V2 nodes. Member access and calls in a compiled delegate still pass through the execution context so Unity main-thread scheduling, policy, budgets, diagnostics, and side-effect evidence remain intact.
+Use `compiled` for repeatedly invoked synchronous snippets whose variable types are stable. Use `interpret` for `try/catch/finally`, `foreach`, lambda/closure, await, inferred generics, supported optional/params method calls, multidimensional arrays, and other full-V2 nodes. Named/ref/out source arguments are not supported by the Eval parser: use structured `unity_reflection_call` arguments instead. Member access and calls in a compiled delegate still pass through the execution context so Unity main-thread scheduling, policy, budgets, diagnostics, and side-effect evidence remain intact.
+
+## Capacity and request diagnostics
+
+The fixed LRU limits are 256 emit source keys and 128 compiled keys. Sync/async emit delegates share a slot. Compiled validation uses the same bounded cache as execution. Eviction removes cache references only; it does not invalidate retained delegates, close sessions, or guarantee immediate memory collection.
+
+Dynamic type generation has a shared AppDomain quota of 256 attempts. Once a generation slot is reserved for the irreversible generation phase it is not refunded on failure. Cached types remain reusable at the limit, subject to session capacity. The capability probe creates at most one separate type per Domain. Session close, Engine recreation, Server reconnect, and PlayMode transitions without Domain Reload do not reset the quota. Never force a Reload automatically.
+
+Read the response's `resourceDiagnostics` on success and `error.detail.resourceDiagnostics` on failure. Entries contain `code`, `severity`, `resource`, `action`, `count`, `limit`, `used`, and `nextAction`. They are request-local, aggregated by code/resource, and bounded to 16 entries; `resourceDiagnosticsDroppedCount` reports omitted entries. Existing `diagnostics` fields keep their original types.
+
+| Code | Meaning and action |
+| --- | --- |
+| `EVAL_CACHE_EVICTED` | Warning: an older program was evicted. Keep a successful result; no replay is needed. |
+| `EVAL_CACHE_WARMUP_FAILED` | Warning: auto execution succeeded but cache warmup failed. Keep the result; do not replay execution. |
+| `EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED` | Error: new generation was refused. Reuse an existing type or Eval; a future Reload requires user authorization. |
+| `SESSION_LIMIT_EXCEEDED` | Error: session handle/type capacity was refused before generation. Inspect the named resource and session state. |
+| `EMIT_GENERATION_SLOT_CONSUMED` | Supplemental warning on failure: the slot cannot be reclaimed; the primary error is still authoritative. |
+
+`unity_capabilities_get.execution.resources` returns live `generation`, `emitCache`/`compiledCache` (`capacity/count/hits/misses/evictions`), and `domainTypes` (`limit/used/rejected/failedAfterReservation/probeTypeCount`). These are entry/attempt limits, not process memory limits. Global totals do not replace request-local evidence. A later business failure retains any eviction notices; failure never implies rollback.
 
 ## Dynamic types
 

@@ -1678,7 +1678,7 @@ namespace CodingRiver.UPilot
             return matches[0];
         }
 
-        private static void ValidateRequest(SnapshotCapturePayload request)
+        internal static void ValidateRequest(SnapshotCapturePayload request)
         {
             if (request == null)
                 throw new SnapshotRequestException("SNAPSHOT_REQUEST_REQUIRED", "Snapshot request is required.");

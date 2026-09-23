@@ -96,6 +96,8 @@ namespace CodingRiver.UPilot
         public bool backendSupported = true;
         public bool sideEffectsMayHaveOccurred;
         public string[] boundaries = Array.Empty<string>();
+        public ExecutionResourceDiagnostic[] resourceDiagnostics = Array.Empty<ExecutionResourceDiagnostic>();
+        public int resourceDiagnosticsDroppedCount;
     }
     [Serializable]
     public sealed class CSharpEvalPayload
@@ -167,6 +169,8 @@ namespace CodingRiver.UPilot
         public ExecutionBudgetResultPayload budget;
         public CSharpExecutionDiagnosticsPayload executionDiagnostics;
         public string[] diagnostics = Array.Empty<string>();
+        public ExecutionResourceDiagnostic[] resourceDiagnostics = Array.Empty<ExecutionResourceDiagnostic>();
+        public int resourceDiagnosticsDroppedCount;
     }
 
     [Serializable] public sealed class ReflectionEmitMessage { public ReflectionEmitPayload payload; }
@@ -195,11 +199,23 @@ namespace CodingRiver.UPilot
         public bool cacheHit;
         public string[] implementedMembers = Array.Empty<string>();
         public string lifecycle = "session handles; type memory releases on Domain Reload";
+        public ExecutionResourceDiagnostic[] resourceDiagnostics = Array.Empty<ExecutionResourceDiagnostic>();
+        public int resourceDiagnosticsDroppedCount;
+    }
+
+    [Serializable]
+    public sealed class ExecutionResourcesPayload
+    {
+        public string generation;
+        public ExecutionCacheSnapshot emitCache;
+        public ExecutionCacheSnapshot compiledCache;
+        public DynamicTypeResourceSnapshot domainTypes;
     }
 
     [Serializable]
     public sealed class ExecutionCapabilityPayload
     {
+        public ExecutionResourcesPayload resources;
         public string languageProfile = CSharpSubsetEngine.LanguageProfile;
         public bool interpreterSupported = true;
         public bool directCompiledBackendSupported = true;
@@ -302,8 +318,17 @@ namespace CodingRiver.UPilot
 
         private async Task HandleCapabilitiesAsync(string id, string json, CancellationToken token)
         {
+            Capabilities.resources = GetResourceSnapshot();
             await _bridge.SendResultAsync(id, "execution.capabilities", Capabilities, token);
         }
+
+        internal static ExecutionResourcesPayload GetResourceSnapshot() => new ExecutionResourcesPayload
+        {
+            generation = ReflectionEmitEngine.ResourceGeneration,
+            emitCache = CSharpEmitBackend.Snapshot(),
+            compiledCache = CSharpCompiledBackend.Snapshot(),
+            domainTypes = ReflectionEmitEngine.ResourceSnapshot(),
+        };
 
         private Task HandleObjectDumpAsync(string id, string json, CancellationToken token) =>
             HandleObjectDumpAsync(id, json, token, action => _bridge.EnqueueTracked(id, action),
@@ -462,6 +487,19 @@ namespace CodingRiver.UPilot
 
         internal static CSharpValidateResultPayload ValidateCSharpPayload(CSharpValidatePayload payload)
         {
+            var resources = new ExecutionResourceDiagnostics();
+            try { return ValidateCSharpPayloadCore(payload, resources); }
+            catch (Exception ex)
+            {
+                var error = resources.Attach(ex);
+                error.Detail["sideEffectsMayHaveOccurred"] = false;
+                throw error;
+            }
+        }
+
+        private static CSharpValidateResultPayload ValidateCSharpPayloadCore(
+            CSharpValidatePayload payload, ExecutionResourceDiagnostics resources)
+        {
             payload = payload ?? new CSharpValidatePayload();
             if (string.IsNullOrWhiteSpace(payload.code))
                 throw new ExecutionContractException("CSHARP_PARSE_ERROR", "code is required.");
@@ -476,7 +514,7 @@ namespace CodingRiver.UPilot
                 .Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToArray();
             if (imports.Length == 0) imports = new[] { "System" };
             var program = CSharpSubsetEngine.Parse(payload.code, mode);
-            if (backend == "emit") program.ValidateSynchronousEmitProfile();
+            if (backend == "emit") CSharpEmitBackend.RequireSupported();
             if (backend == "compiled")
             {
                 var variableTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
@@ -492,16 +530,18 @@ namespace CodingRiver.UPilot
                 }
                 string key = CSharpCompiledBackend.CacheKeyForTypes(payload.code, mode, imports, variableTypes);
                 CSharpCompiledBackend.Compile(key, payload.code, mode,
-                    new CSharpEvaluationContext(imports: imports), variableTypes);
+                    new CSharpEvaluationContext(imports: imports), variableTypes, resources);
             }
 
             return new CSharpValidateResultPayload
             {
                 modeUsed = program.IsExpressionOnly ? "expression" : "statements",
                 backend = backend,
+                resourceDiagnostics = resources.Snapshot(),
+                resourceDiagnosticsDroppedCount = resources.DroppedCount,
                 boundaries = backend == "compiled"
                     ? new[] { "parse", "bind", "lower", "delegate-compile" }
-                    : new[] { "parse", backend == "emit" ? "synchronous-profile" : "syntax" },
+                    : new[] { "parse", backend == "emit" ? "runtime-capability" : "syntax" },
             };
         }
 
@@ -511,24 +551,25 @@ namespace CodingRiver.UPilot
             Func<Func<object>, object> invocationScheduler = null)
         {
             var boundary = new UPilotReflectionService.CallExecutionBoundary();
+            var resources = new ExecutionResourceDiagnostics();
             CSharpEvalPayload payload = null;
             try
             {
                 payload = JsonUtility.FromJson<CSharpEvalMessage>(json)?.payload ?? new CSharpEvalPayload();
                 ValidateEvaluationPayload(payload);
-                var result = await ExecuteEvaluationAsync(id, payload, token, enqueue, boundary, invocationScheduler);
+                var result = await ExecuteEvaluationAsync(id, payload, token, enqueue, boundary, invocationScheduler, resources);
                 await sendResult(result);
             }
             catch (Exception ex)
             {
-                await sendError(WrapEvaluationException(ex, null, payload?.sessionId, boundary));
+                await sendError(resources.Attach(WrapEvaluationException(ex, null, payload?.sessionId, boundary)));
             }
         }
 
         private Task<CSharpEvalResultPayload> ExecuteEvaluationAsync(string id, CSharpEvalPayload payload,
             CancellationToken token, Action<Action> enqueue,
             UPilotReflectionService.CallExecutionBoundary boundary,
-            Func<Func<object>, object> invocationScheduler)
+            Func<Func<object>, object> invocationScheduler, ExecutionResourceDiagnostics resources)
         {
             var tcs = new TaskCompletionSource<CSharpEvalResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             enqueue(() =>
@@ -558,7 +599,7 @@ namespace CodingRiver.UPilot
                         new RestrictedEvalExecutionPolicy(),
                         invocationScheduler ?? (action => InvokeOnMainThread(id, action, session?.CancellationToken ?? linkedCancellation.Token)),
                         linkedCancellation.Token,
-                        session);
+                        session, resources);
 
                     Task.Run(() => ExecuteEvaluationWorkerAsync(payload, context), linkedCancellation.Token).ContinueWith(workerTask =>
                     {
@@ -590,6 +631,8 @@ namespace CodingRiver.UPilot
                                     budget = ToBudget(completed.Result.Budget),
                                     executionDiagnostics = ToExecutionDiagnostics(completed.Result.Diagnostics),
                                     diagnostics = completed.Result.Diagnostics.CompletedBoundaries,
+                                    resourceDiagnostics = resources.Snapshot(),
+                                    resourceDiagnosticsDroppedCount = resources.DroppedCount,
                                 });
                             }
                             catch (Exception ex)
@@ -641,6 +684,8 @@ namespace CodingRiver.UPilot
                 payload.languageProfileMode == "reflection-expression" ? "expression" : payload.mode);
             if (payload.languageProfileMode == "reflection-expression")
                 program.ValidateReflectionExpressionProfile();
+            if (payload.executionBackend == "emit")
+                CSharpEmitBackend.RequireSupported();
         }
 
         private sealed class EvaluationWorkerResult
@@ -666,19 +711,18 @@ namespace CodingRiver.UPilot
                 string compiledKey = CSharpCompiledBackend.CacheKey(payload.code, payload.mode, context.Imports, context.SnapshotVariables());
                 return new EvaluationWorkerResult
                 {
-                    Result = CSharpCompiledBackend.Compile(compiledKey, payload.code, payload.mode, context)(context),
+                    Result = CSharpCompiledBackend.Compile(compiledKey, payload.code, payload.mode, context, diagnostics: context.ResourceDiagnostics)(context),
                     BackendUsed = "compiled",
                 };
             }
             if (backend == "emit")
-                return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode)(context), BackendUsed = "emit" };
+                return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics)(context), BackendUsed = "emit" };
             if (backend == "auto" && CSharpEmitBackend.IsCached(cacheKey))
-                return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode)(context), BackendUsed = "emit-cache" };
+                return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics)(context), BackendUsed = "emit-cache" };
             var result = CSharpSubsetEngine.Evaluate(payload.code, payload.mode, context);
             if (backend == "auto")
             {
-                try { CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode); }
-                catch (ExecutionContractException) { /* first successful run remains authoritative */ }
+                WarmEmitCache(() => CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics), context.ResourceDiagnostics);
             }
             return new EvaluationWorkerResult { Result = result, BackendUsed = "interpreter" };
         }
@@ -710,13 +754,13 @@ namespace CodingRiver.UPilot
                 string compiledKey = CSharpCompiledBackend.CacheKey(payload.code, payload.mode, context.Imports, context.SnapshotVariables());
                 return new EvaluationWorkerResult
                 {
-                    Result = CSharpCompiledBackend.Compile(compiledKey, payload.code, payload.mode, context)(context),
+                    Result = CSharpCompiledBackend.Compile(compiledKey, payload.code, payload.mode, context, diagnostics: context.ResourceDiagnostics)(context),
                     BackendUsed = "compiled",
                 };
             }
             if (backend == "emit")
             {
-                var emitted = CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode);
+                var emitted = CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics);
                 return new EvaluationWorkerResult
                 {
                     Result = await emitted(context).ConfigureAwait(false),
@@ -726,7 +770,7 @@ namespace CodingRiver.UPilot
 
             if (backend == "auto" && CSharpEmitBackend.IsCached(cacheKey))
             {
-                var cached = CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode);
+                var cached = CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics);
                 return new EvaluationWorkerResult
                 {
                     Result = await cached(context).ConfigureAwait(false),
@@ -737,10 +781,20 @@ namespace CodingRiver.UPilot
             var result = await CSharpSubsetEngine.EvaluateAsync(payload.code, payload.mode, context).ConfigureAwait(false);
             if (backend == "auto")
             {
-                try { CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode); }
-                catch (ExecutionContractException) { /* the completed interpreter result remains authoritative */ }
+                WarmEmitCache(() => CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics), context.ResourceDiagnostics);
             }
             return new EvaluationWorkerResult { Result = result, BackendUsed = "interpreter" };
+        }
+
+        internal static void WarmEmitCache(Action warm, ExecutionResourceDiagnostics resources)
+        {
+            try { warm(); }
+            catch (ExecutionContractException ex)
+            {
+                var state = CSharpEmitBackend.Snapshot();
+                resources.Add("EVAL_CACHE_WARMUP_FAILED", "warning", "emitCache", "skip", state.capacity, state.count,
+                    "Execution already succeeded. Keep the result and do not retry this request; only cache warmup failed: " + ex.Code);
+            }
         }
 
         private object InvokeOnMainThread(string commandId, Func<object> action, CancellationToken token)
@@ -792,9 +846,10 @@ namespace CodingRiver.UPilot
             detail["sessionId"] = sessionId ?? "";
             if (context != null)
                 detail["executionDiagnostics"] = ToExecutionDiagnostics(context.Diagnostics);
-            detail["nextAction"] = sideEffects
-                ? "Inspect the original request and actual state; do not replay the target."
-                : "Correct the request and call once; the target has not executed.";
+            if (!detail.ContainsKey("nextAction"))
+                detail["nextAction"] = sideEffects
+                    ? "Inspect the original request and actual state; do not replay the target."
+                    : "Correct the request and call once; the target has not executed.";
             return contract != null
                 ? new ExecutionContractException(contract.Code, contract.Message, detail)
                 : new ExecutionContractException("CSHARP_RUNTIME_ERROR", ex.GetType().FullName + ": " + ex.Message, detail);
@@ -812,13 +867,22 @@ namespace CodingRiver.UPilot
             var tcs = new TaskCompletionSource<ReflectionEmitResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
-                try
+                try { tcs.SetResult(EmitType(payload)); }
+                catch (Exception ex) { tcs.SetException(ex); }
+            });
+            await SendTaskResult(id, "reflection.emitType", tcs.Task, token);
+        }
+
+        internal ReflectionEmitResultPayload EmitType(ReflectionEmitPayload payload)
+        {
+            var resources = new ExecutionResourceDiagnostics();
+            var boundary = new UPilotReflectionService.CallExecutionBoundary();
+            try
+            {
+                var session = _sessions.Get(payload.sessionId);
+                using (var capacity = session.ReserveEmitCapacity(payload.createInstance, resources))
                 {
-                    var session = _sessions.Get(payload.sessionId);
-                    // Constructor values are part of the request validation boundary.
-                    // Decode them before emitting so a malformed typed value cannot
-                    // leave a new dynamic type behind after the request is rejected.
-                    var constructorArguments = DecodeArguments(payload.constructorArgumentsJson, payload.sessionId)
+                    var constructorArguments = DecodeArguments(payload.constructorArgumentsJson, payload.sessionId, boundary.Enter)
                         .Select(value => value.Value).ToArray();
                     var spec = JsonUtility.FromJson<DynamicTypeSpec>(payload.specJson);
                     var emitted = _emit.Emit(
@@ -827,16 +891,17 @@ namespace CodingRiver.UPilot
                         payload.nameConflictPolicy,
                         payload.sessionId,
                         handle => session.Resolve(handle),
-                        session.RegisterCleanup);
-                    string typeHandle = session.Store("type", emitted.Type);
+                        session.RegisterCleanup, resources);
+                    string typeHandle = capacity.Store("type", emitted.Type);
                     string instanceHandle = "";
                     if (payload.createInstance)
                     {
+                        boundary.Enter();
                         object instance = Activator.CreateInstance(emitted.Type, constructorArguments);
                         DynamicMethodDispatcher.BindInstance(instance, payload.sessionId);
-                        instanceHandle = session.Store("object", instance);
+                        instanceHandle = capacity.Store("object", instance);
                     }
-                    tcs.SetResult(new ReflectionEmitResultPayload
+                    return new ReflectionEmitResultPayload
                     {
                         requestedTypeName = emitted.RequestedTypeName,
                         generatedTypeName = emitted.GeneratedTypeName,
@@ -846,11 +911,15 @@ namespace CodingRiver.UPilot
                         instanceHandle = instanceHandle,
                         cacheHit = emitted.CacheHit,
                         implementedMembers = emitted.ImplementedMembers,
-                    });
+                        resourceDiagnostics = resources.Snapshot(),
+                        resourceDiagnosticsDroppedCount = resources.DroppedCount,
+                    };
                 }
-                catch (Exception ex) { tcs.SetException(ex); }
-            });
-            await SendTaskResult(id, "reflection.emitType", tcs.Task, token);
+            }
+            catch (Exception ex)
+            {
+                throw resources.Attach(WrapEvaluationException(ex, null, payload.sessionId, boundary));
+            }
         }
 
         internal static void ValidateArgumentStructure(string json)
@@ -1684,7 +1753,7 @@ namespace CodingRiver.UPilot
                 commandId = id,
                 commandName = command,
                 stage = stage,
-                nextAction = nextAction,
+                nextAction = DetailString(detail, "nextAction", nextAction),
                 sideEffectsMayHaveOccurred = sideEffects,
                 sessionId = sessionId ?? "",
                 sourceSpanJson = sourceSpan,
@@ -1696,6 +1765,14 @@ namespace CodingRiver.UPilot
                 candidates = candidateItems,
                 executionDiagnostics = executionDiagnostics,
                 cleanupDiagnostics = cleanupDiagnostics,
+                resourceDiagnostics = detail.TryGetValue("resourceDiagnostics", out var resourceItems)
+                    && resourceItems is ExecutionResourceDiagnostic[] items ? items : Array.Empty<ExecutionResourceDiagnostic>(),
+                resourceDiagnosticsDroppedCount = detail.TryGetValue("resourceDiagnosticsDroppedCount", out var dropped)
+                    && dropped is int droppedCount ? droppedCount : 0,
+                resource = DetailString(detail, "resource", ""),
+                limit = detail.TryGetValue("limit", out var limitValue) && limitValue is int limit ? limit : 0,
+                used = detail.TryGetValue("used", out var usedValue) && usedValue is int used ? used : 0,
+                requestedTypeName = DetailString(detail, "requestedTypeName", ""),
                 exceptionType = DetailString(detail, "exceptionType", ex.GetType().FullName),
                 exceptionMessage = DetailString(detail, "exceptionMessage", ex.Message),
                 wrapperExceptionType = DetailString(detail, "wrapperExceptionType", ""),

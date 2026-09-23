@@ -649,12 +649,58 @@ class TaskDomainService:
                 "valid": False, "errors": [{"path": "jobSpec", "code": "type", "message": "Expected an object."}]
             })
 
+        job_spec = copy.deepcopy(job_spec)
         normalized = dict(job_spec)
+        step_plan = job_spec.get("stepPlan")
+        has_step_plan = "stepPlan" in job_spec
+        step_budget = 0.0
+        if has_step_plan:
+            if any(field in job_spec for field in ("startCall", "statusCall", "cancelCall")):
+                errors.append({"path": "stepPlan", "code": "STEP_PLAN_CALLS_CONFLICT",
+                               "message": "stepPlan and handwritten calls are mutually exclusive."})
+            if not isinstance(step_plan, dict):
+                errors.append({"path": "stepPlan", "code": "STEP_PLAN_INVALID", "message": "Expected a version 1 plan object."})
+            else:
+                capture = job_spec.get("consoleCapture")
+                items = step_plan.get("steps")
+                plan_capture = isinstance(items, list) and any(
+                    isinstance(item, dict) and item.get("stepId") == "upilot.console_capture_start" for item in items)
+                operation_capture = isinstance(capture, dict) and capture.get("enabled") is True
+                if plan_capture and (not isinstance(capture, dict) or capture.get("enabled") is not False):
+                    errors.append({"path": "consoleCapture.enabled", "code": "STEP_CAPTURE_OWNERSHIP_CONFLICT",
+                                   "message": "Plan-owned Capture requires consoleCapture.enabled=false."})
+                if step_plan.get("logPolicy") and not operation_capture and not plan_capture:
+                    errors.append({"path": "consoleCapture.enabled", "code": "STEP_CAPTURE_REQUIRED",
+                                   "message": "A step logPolicy requires one plan-owned or Operation-owned Capture."})
+                # Unity owns discovery and per-step argument validation. Never create Capture here.
+                try:
+                    plan_json = json.dumps(step_plan, ensure_ascii=False, allow_nan=False)
+                except (TypeError, ValueError):
+                    return fail(request_id, "INVALID_JOB_SPEC", "stepPlan must contain finite JSON data.", {
+                        "valid": False, "errors": errors + [{"path": "stepPlan", "code": "STEP_PLAN_INVALID",
+                                                          "message": "Non-finite or non-JSON values are unsupported."}]
+                    })
+                response = await self.dispatcher.call(request_id, "automation.steps.validate",
+                                                      {"planJson": plan_json})
+                data = response.data if isinstance(response.data, dict) else {}
+                if not response.ok:
+                    errors.append({"path": "stepPlan", "code": response.error.code if response.error else "STEP_VALIDATION_FAILED",
+                                   "message": response.error.message if response.error else "Step validation failed."})
+                elif data.get("ok") is not True:
+                    errors.extend({"path": f"stepPlan.steps[{item.get('index', -1)}]",
+                                   "code": item.get("code", "STEP_PLAN_INVALID"), "message": item.get("message", "")}
+                                  for item in data.get("diagnostics", []) if item.get("severity", "error") == "error")
+                    if not errors:
+                        errors.append({"path": "stepPlan", "code": "STEP_PLAN_INVALID", "message": "Plan validation failed."})
+                else:
+                    step_budget = float(data.get("budgetSeconds") or 0)
+                    if not math.isfinite(step_budget) or step_budget <= 0:
+                        errors.append({"path": "stepPlan", "code": "STEP_BUDGET_INVALID", "message": "Bridge returned no valid plan budget."})
         if not isinstance(job_spec.get("failOnUnexpectedPlayModeExit", False), bool):
             errors.append({"path": "failOnUnexpectedPlayModeExit", "code": "type", "message": "Expected a boolean."})
         normalized["displayName"] = str(job_spec.get("displayName") or "Unity operation")
-        normalized["timeoutSec"] = float(job_spec.get("timeoutSec") or 300)
-        normalized["pollIntervalSec"] = float(job_spec.get("pollIntervalSec") or 3)
+        normalized["timeoutSec"] = job_spec.get("timeoutSec", max(300, step_budget))
+        normalized["pollIntervalSec"] = job_spec.get("pollIntervalSec", 3)
         cleanup = job_spec.get("cleanup", {})
         if not isinstance(cleanup, dict):
             errors.append({"path": "cleanup", "code": "type", "message": "Expected an object."})
@@ -673,12 +719,17 @@ class TaskDomainService:
                     "After business terminal, cleanup verifies authoritative "
                     "EditMode readiness before declaring editorTerminal=true."
                 )
-        if normalized["timeoutSec"] <= 0:
-            errors.append({"path": "timeoutSec", "code": "range", "message": "timeoutSec must be greater than zero."})
-        if normalized["pollIntervalSec"] <= 0:
-            errors.append({"path": "pollIntervalSec", "code": "range", "message": "pollIntervalSec must be greater than zero."})
+        for field in ("timeoutSec", "pollIntervalSec"):
+            value = normalized[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                errors.append({"path": field, "code": "range", "message": "Expected a finite positive number."})
+            elif field == "timeoutSec" and has_step_plan and value < step_budget:
+                errors.append({"path": field, "code": "STEP_BUDGET_TOO_SMALL",
+                               "message": f"Operation timeout must cover the plan, cleanup and evidence budget ({step_budget} seconds)."})
 
         for field, required in (("startCall", True), ("statusCall", True), ("cancelCall", False)):
+            if has_step_plan:
+                continue
             call = job_spec.get(field)
             if call is None and not required:
                 continue
@@ -795,6 +846,20 @@ class TaskDomainService:
             detail = validation.error.detail if validation.error else {}
             return fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", detail)
         job_spec = dict((validation.data or {}).get("normalizedJobSpec") or job_spec or {})
+        if "stepPlan" in job_spec:
+            # Materialize only after validation. JSON text is opaque to placeholder expansion.
+            job_spec["startCall"] = {"kind": "bridge", "route": "automation.steps.start", "payload": {
+                "planJson": json.dumps(job_spec["stepPlan"], ensure_ascii=False, allow_nan=False),
+                "operationId": "${operation.operationId}",
+            }}
+            for field, route in (("statusCall", "state"), ("cancelCall", "cancel")):
+                job_spec[field] = {"kind": "bridge", "route": "automation.steps." + route, "payload": {
+                    "operationId": "${operation.operationId}", "runId": "${start.runId}",
+                }}
+            job_spec["terminalStatusMapping"] = {
+                "success": ["Succeeded", "SucceededWithWarnings"],
+                "failure": ["Failed"], "canceled": ["Canceled"], "timeout": ["TimedOut"],
+            }
         start_call = job_spec["startCall"]
 
         operation_id = new_id("op")
@@ -891,6 +956,8 @@ class TaskDomainService:
                 self._save_operation(state)
                 return fail(request_id, "OPERATION_CAPTURE_START_FAILED", state["error"], self._public_operation_state(state))
 
+        if "stepPlan" in job_spec:
+            start_call["payload"]["captureSessionId"] = state["consoleCapture"].get("sessionId", "")
         state["startIntentSent"] = True
         state["startAttemptCount"] = int(state.get("startAttemptCount") or 0) + 1
         if not self._save_operation(state):
@@ -1022,7 +1089,15 @@ class TaskDomainService:
         self._accumulate_timing(state, result)
         state["lastStatusAt"] = now_ms()
         if not result.ok:
-            if result.error and result.error.code in {"COMMAND_TIMEOUT", "UNITY_NOT_CONNECTED", "DISCONNECTED", "EDITOR_BUSY"}:
+            step_initializing = (
+                result.error is not None
+                and result.error.code == "STEP_SERVICE_INITIALIZING"
+                and status_call.get("kind") == "bridge"
+                and status_call.get("route") == "automation.steps.state"
+            )
+            if result.error and (step_initializing or result.error.code in {
+                "COMMAND_TIMEOUT", "UNITY_NOT_CONNECTED", "DISCONNECTED", "EDITOR_BUSY"
+            }):
                 state.update(phase="Recovering", lastObservationError=result.error.message)
                 return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
             state["status"] = "RecoveryRequired"
@@ -1345,6 +1420,28 @@ class TaskDomainService:
         for field in rules.get("fromStatusFields") or []:
             if field in status_data:
                 source_artifacts.setdefault(str(field), status_data.get(field))
+        # Step attachments are explicit file declarations, not a directory to scan.
+        # A compatibility Bridge can expose the same explicitly typed file list.
+        attachment_values = source_artifacts.get("attachments")
+        declares_files = isinstance(attachment_values, list) and bool(attachment_values) and all(
+            isinstance(value, dict) and value.get("kind") == "file" for value in attachment_values
+        )
+        if "attachments" in source_artifacts and (isinstance(state["jobSpec"].get("stepPlan"), dict) or declares_files):
+            attachments = source_artifacts.pop("attachments")
+            if not isinstance(attachments, list):
+                errors.append({"artifact": "attachments", "error": "ARTIFACT_ATTACHMENTS_INVALID"})
+                artifacts["attachments"] = {"kind": "metadata", "value": attachments, "error": "ARTIFACT_ATTACHMENTS_INVALID"}
+            else:
+                for index, attachment in enumerate(attachments):
+                    name = f"attachments[{index}]"
+                    if name in source_artifacts:
+                        errors.append({"artifact": name, "error": "ARTIFACT_NAME_CONFLICT"})
+                        continue
+                    if not isinstance(attachment, dict) or attachment.get("kind") != "file":
+                        errors.append({"artifact": name, "error": "ARTIFACT_ATTACHMENT_INVALID"})
+                        artifacts[name] = {"kind": "metadata", "value": attachment, "error": "ARTIFACT_ATTACHMENT_INVALID"}
+                        continue
+                    source_artifacts[name] = attachment
         tail_lines = int(rules.get("readReportTailLines") or 0)
 
         for name, raw_value in source_artifacts.items():
@@ -1396,6 +1493,10 @@ class TaskDomainService:
                 errors.append({"artifact": name, "path": str(path), "error": "ARTIFACT_PATH_OUTSIDE_PROJECT"})
                 continue
             item = {"kind": "file", "path": str(path), "exists": path.exists()}
+            if isinstance(raw_value, dict):
+                for identity_field in ("instanceId", "artifactKind"):
+                    if isinstance(raw_value.get(identity_field), str):
+                        item[identity_field] = raw_value[identity_field]
             if path.exists() and path.is_file():
                 try:
                     evidence, read_error = _read_stable_artifact(path)

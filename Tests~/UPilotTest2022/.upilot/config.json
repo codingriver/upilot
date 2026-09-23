@@ -43,6 +43,12 @@
         "automationAuthorizationScopeVersion": 1,
         "automationAuthorizationApprovedAtUtc": "2026-09-18T15:32:23.2889927+00:00"
     },
+    "aiServiceMaintenance": {
+        "approved": true,
+        "approvedAtUtc": "2026-09-22T09:18:15.9583388+00:00",
+        "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
+        "restartTimeoutSeconds": 120
+    },
     "updates": {
         "manifestUrl": "",
         "channel": "auto"

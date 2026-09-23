@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -397,7 +397,7 @@ namespace CodingRiver.UPilot
             _bridge = bridge;
             EnsureSubscriptions();
             TryRecoverActiveSession();
-            Automation.UPilotConsoleCaptureApiV1.Bind(this);
+            Automation.UPilotConsoleCaptureApi.Bind(this);
         }
 
         public void RegisterCommands()

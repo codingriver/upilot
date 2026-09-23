@@ -23,7 +23,8 @@
 - Before a refresh, inspect current tasks, tests, `unity_operation_list` and
   `unity_console_capture_list(activeOnly=true)`, including known pending compile/write
   batches. If work is in flight, ownership is unknown or the state cannot be observed,
-  stop and report the specific blocker. Do not cancel tasks or stop another Capture to
+  stop and report the specific blocker, except for the independently approved
+  `unity_service_restart` route described below. Do not cancel tasks or stop another Capture to
   make the deployment check pass.
 - Require existing authorization for the exact affected component and a maintenance
   window that does not interrupt other work. A Server-only change does not authorize
@@ -32,6 +33,49 @@
 - After refresh, revalidate project identity, connection, changed component identity and
   a real read-only call. Preserve old task/run/operation IDs for observation. Neither
   reconnect nor a new PID permits replaying a previously sent start.
+
+## AI Service Maintenance
+
+- The Unity settings section **AI Service Maintenance** contains an independent human
+  grant and an integer restart timeout (30-600 seconds, default 120). It applies to all
+  package versions and installation sources. Automatic-disposition select-all,
+  `hangRestart`, and project write permission neither grant nor revoke it.
+- Read `unity_mcp_status.aiServiceMaintenance` (also returned by capabilities). Require
+  `effectiveApproved=true`, valid configuration, stable authoritative EditMode and exact
+  project/component identity. Never use files, reflection, or UI automation to grant
+  yourself approval or increase the timeout. Project relocation requires renewed approval;
+  package upgrades and source/path changes alone do not.
+- Call `unity_service_restart` with a fresh UUID `maintenanceId`, `target=bridge|server`,
+  a short `reason`, and the reported `expectedProjectPath`, `expectedServerProcessId`,
+  `expectedBridgeSessionId`, and `expectedMaintenanceId` (empty only with no prior record).
+  The last field is a compare-and-set guard, not an instruction to resume the prior restart.
+- `bridge` leaves the Server process intact. `server` restarts the current configured
+  Server and re-establishes the Bridge; inspect `affectedComponents`. Neither route exits
+  PlayMode, restarts Unity, compiles C#, builds/downloads/installs a Server, or changes its
+  runtime mode. Changed Bridge C# still needs the correlated compilation workflow.
+- This grant explicitly permits interruption of current-project in-flight work; no idle
+  wait is required. Preserve known task/run/operation identities. The affected command list
+  is bounded and `affectedWorkComplete=false`: it is not proof that all business work was
+  enumerated, stopped or recovered. Never stop another Capture or replay business.
+- `accepted` is not success. Keep the request identity and query `aiServiceMaintenance.latest`
+  after reconnect. The journal is `Library/UPilot/service-maintenance.json`; Unity settings
+  can display failures when the Server cannot answer. A mismatched/missing record requires
+  recovery investigation, not an automatic resend. Same-ID duplicate observation does not
+  execute a second restart; it is not permission to retry a non-idempotent tool.
+- The one deadline begins at durable acceptance and includes all restart phases. Changing
+  settings, phase, session or polling does not extend it. `SERVICE_RESTART_TIMEOUT` with
+  `status=timed_out` preserves prior effects and does not kill the replacement process.
+  Late recovery is current health, not a rewrite of the original timeout as success.
+- `deadline_exceeded_unconfirmed` means the Server sees an overdue journal without a
+  Unity-confirmed terminal result, for example when the Editor is not pumping. HTTP/tool
+  timeout is also distinct from maintenance timeout. Inspect identity and hang diagnostics;
+  never automatically restart Unity or replay the request.
+- Success requires the expected component identities, project, handshake and a real
+  read-only round trip. Refresh the AI client's tool list separately after MCP changes.
+  A new Server PID does not prove arbitrary edited source was loaded; an EXE restart runs
+  the deployed EXE, not changes in a Python checkout.
+- A Server predating this tool needs an initial human-controlled refresh. Do not bypass
+  a missing maintenance endpoint or failed authorization with reflection or shell commands.
 
 ## Profiler Out-of-Process Acceptance
 

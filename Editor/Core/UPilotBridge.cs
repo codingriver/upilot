@@ -431,6 +431,8 @@ namespace CodingRiver.UPilot
 
         public void Restart()
         {
+            if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting)
+                return;
             UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.bridge.restart", "Bridge重启", "手动触发重启");
             Stop();
@@ -1158,7 +1160,9 @@ namespace CodingRiver.UPilot
 
         private void RegisterModuleServices()
         {
+            new Automation.UPilotAutomationStepService(this).RegisterCommands();
             new UPilotAgentIntegrationService(this).RegisterCommands();
+            UPilotServiceMaintenance.Register(this);
 
             _consoleService = new UPilotConsoleService(this);
             _consoleService.RegisterCommands();

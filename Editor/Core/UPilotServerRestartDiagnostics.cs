@@ -23,6 +23,7 @@ namespace CodingRiver.UPilot
         public string oldBridgeSessionId;
         public string newBridgeSessionId;
         public long requestedAtUtcMs;
+        public long maintenanceDeadlineUtcMs;
         public long oldProcessStopRequestedAtUtcMs;
         public long portsReleasedAtUtcMs;
         public long newProcessStartedAtUtcMs;
@@ -61,7 +62,8 @@ namespace CodingRiver.UPilot
         internal static UPilotServerRestartRecord Begin(
             string projectPath,
             int oldProcessId,
-            string oldBridgeSessionId)
+            string oldBridgeSessionId,
+            long maintenanceDeadlineUtcMs = 0)
         {
             var now = UtcNowMs();
             var record = new UPilotServerRestartRecord
@@ -71,6 +73,7 @@ namespace CodingRiver.UPilot
                 oldProcessId = Math.Max(0, oldProcessId),
                 oldBridgeSessionId = oldBridgeSessionId ?? "",
                 requestedAtUtcMs = now,
+                maintenanceDeadlineUtcMs = maintenanceDeadlineUtcMs,
                 oldProcessStopRequestedAtUtcMs = now,
                 updatedAtUtcMs = now,
                 nextAction = "Wait for the replacement MCP Server and Bridge session to be verified.",
@@ -264,6 +267,12 @@ namespace CodingRiver.UPilot
 
         private static void TryComplete(UPilotServerRestartRecord record)
         {
+            if (record.maintenanceDeadlineUtcMs > 0 && UtcNowMs() >= record.maintenanceDeadlineUtcMs)
+            {
+                FailRecord(record, "SERVICE_RESTART_TIMEOUT", "Maintenance deadline elapsed.", "", "",
+                    "Inspect the original maintenance; do not replay start.");
+                return;
+            }
             if (!record.healthVerified || !record.projectIdentityVerified || !record.bridgeVerified ||
                 !record.deploymentVerified || !record.readOnlyVerified)
                 return;

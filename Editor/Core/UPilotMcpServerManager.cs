@@ -167,6 +167,8 @@ namespace CodingRiver.UPilot
         private string _restartOldBridgeSessionId = "";
         private string _restartExpectedProjectPath = "";
         private long _restartVerificationDeadlineUtcMs;
+        private long _restartMaintenanceDeadlineUtcMs;
+        internal bool IsServiceTransitionActive => _restartPending || _startInProgress || IsRestartObservationActive();
         private long _restartNextProbeAtUtcMs;
         private bool _restartHealthProbeRunning;
 
@@ -417,11 +419,17 @@ namespace CodingRiver.UPilot
             _lastRefreshMs = 0;
         }
 
-        public async Task<McpServerStatus> GetFreshStatusAsync()
+        public async Task<McpServerStatus> GetFreshStatusAsync(long deadlineUtcMs = 0)
         {
             RequestBackgroundStatusRefresh();
             Task<McpServerStatus> task;
             lock (_statusLock) task = _statusRefreshTask;
+            if (deadlineUtcMs > 0)
+            {
+                var remaining = deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (remaining <= 0 || await Task.WhenAny(task, Task.Delay((int)Math.Min(remaining, 30000))) != task)
+                    throw new TimeoutException("Maintenance status probe exceeded its remaining budget.");
+            }
             return await task;
         }
 
@@ -759,6 +767,8 @@ namespace CodingRiver.UPilot
 
         public void StartServer()
         {
+            if (UPilotServiceMaintenance.IsActive && _restartMaintenanceDeadlineUtcMs <= 0 &&
+                !UPilotServiceMaintenance.IsExecuting) return;
             var processRole = UPilotBridge.DetermineProcessRole();
             if (!UPilotBridge.IsMainEditorProcess(processRole))
             {
@@ -972,6 +982,7 @@ namespace CodingRiver.UPilot
 
             psi.EnvironmentVariables["UPILOT_BUILD_CHANNEL"] = UPilotDeploymentDiagnostics.Channel;
             psi.EnvironmentVariables["UPILOT_INSTALL_SOURCE"] = UPilotDeploymentDiagnostics.InstallSource;
+            if (_restartMaintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
             var proc = Process.Start(psi);
             UPilotStartupDiagnostics.RecordServerProcessStarted(proc?.Id ?? 0);
             Debug.Log($"[UPilotMcpServerManager] Started python process PID={proc?.Id} via {pythonExe} for {entryFullPath} (HTTP={HttpPort}, WS={WsPort})");
@@ -1004,6 +1015,7 @@ namespace CodingRiver.UPilot
             };
 
             psi.EnvironmentVariables["UPILOT_INSTALL_SOURCE"] = "ManagedExe";
+            if (_restartMaintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
             var proc = Process.Start(psi);
             UPilotStartupDiagnostics.RecordServerProcessStarted(proc?.Id ?? 0);
             Debug.Log($"[UPilotMcpServerManager] Started standalone server PID={proc?.Id} via {exePath} (HTTP={HttpPort}, WS={WsPort})");
@@ -1043,11 +1055,12 @@ namespace CodingRiver.UPilot
 
         public void StopServer()
         {
+            if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
             CancelPendingRestart(recordCancellation: true);
             StopCurrentProjectProcesses();
         }
 
-        private void StopCurrentProjectProcesses()
+        private void StopCurrentProjectProcesses(int expectedProcessId = 0)
         {
             Interlocked.Increment(ref _startAttemptGeneration);
             _startInProgress = false;
@@ -1058,6 +1071,8 @@ namespace CodingRiver.UPilot
                 throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知；" +
                     $"PID={ownership.ProcessId}；{ownership.Evidence}");
             var processes = FindCurrentProjectMcpProcesses();
+            if (expectedProcessId > 0 && (processes.Count != 1 || processes[0].pid != expectedProcessId))
+                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Expected Server process changed before stop.");
             if (processes.Count == 0)
             {
                 _trackedProcessId = null;
@@ -1078,6 +1093,7 @@ namespace CodingRiver.UPilot
                         proc.Dispose();
                         throw new InvalidOperationException($"Server PID={process.pid} 的创建时间或项目归属已改变。");
                     }
+                    if (expectedProcessId > 0) UPilotServiceMaintenance.RequireContinuation();
                     proc.Kill();
                     _stoppingProcesses.Add(proc);
                     Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={process.pid}");
@@ -1088,6 +1104,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
+                    if (ex is ServiceMaintenanceException) throw;
                     throw new InvalidOperationException($"停止 Server PID={process.pid} 失败：{ex.Message}", ex);
                 }
             }
@@ -1151,8 +1168,11 @@ namespace CodingRiver.UPilot
             _ = UPilotQuickStart.AutoRepairAsync(null, afterStart);
         }
 
-        internal void RestartPreparedServer(Action afterStart = null)
+        internal void RestartPreparedServer(Action afterStart = null, long maintenanceDeadlineUtcMs = 0, int expectedProcessId = 0)
         {
+            if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
+            if (maintenanceDeadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= maintenanceDeadlineUtcMs)
+                throw new ServiceMaintenanceException("SERVICE_RESTART_TIMEOUT", "Maintenance expired before stopping services.");
             var processRole = UPilotBridge.DetermineProcessRole();
             if (!UPilotBridge.IsMainEditorProcess(processRole))
             {
@@ -1182,11 +1202,13 @@ namespace CodingRiver.UPilot
             var oldBridgeSessionId = bridgeStatus.SessionId ?? "";
             var bridgeWasStarted = bridgeStatus.IsStarted;
             var oldProcessId = ResolveCurrentProjectProcessId();
+            if (expectedProcessId > 0 && oldProcessId != expectedProcessId)
+                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Server changed before restart.");
             var projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
             UPilotServerRestartRecord restart;
             try
             {
-                restart = UPilotServerRestartDiagnostics.Begin(projectRoot, oldProcessId, oldBridgeSessionId);
+                restart = UPilotServerRestartDiagnostics.Begin(projectRoot, oldProcessId, oldBridgeSessionId, maintenanceDeadlineUtcMs);
             }
             catch (Exception ex)
             {
@@ -1197,18 +1219,26 @@ namespace CodingRiver.UPilot
             _restartOldBridgeSessionId = oldBridgeSessionId;
             _restartExpectedProjectPath = restart.projectPath;
             _restartVerificationDeadlineUtcMs = 0;
+            _restartMaintenanceDeadlineUtcMs = maintenanceDeadlineUtcMs;
             _restartNextProbeAtUtcMs = 0;
             _restartHealthProbeRunning = false;
 
             if (bridgeWasStarted)
+            {
+                if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
                 bridge.Stop();
-            _afterRestartStarted += bridge.EnsureStarted;
+            }
+            _afterRestartStarted += () =>
+            {
+                if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
+                bridge.EnsureStarted();
+            };
             if (afterStart != null)
                 _afterRestartStarted += afterStart;
-            try { StopCurrentProjectProcesses(); }
+            try { StopCurrentProjectProcesses(expectedProcessId); }
             catch (Exception ex)
             {
-                RecordRestartStartFailure("stop_failed", ex.Message);
+                RecordRestartStartFailure((ex as ServiceMaintenanceException)?.Code ?? "stop_failed", ex.Message);
                 _afterRestartStarted = null;
                 FinishRestartObservation();
                 return;
@@ -1219,6 +1249,12 @@ namespace CodingRiver.UPilot
             var deadline = EditorApplication.timeSinceStartup + 4d;
             _restartWaitCallback = () =>
             {
+                if (_restartMaintenanceDeadlineUtcMs > 0 &&
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartMaintenanceDeadlineUtcMs)
+                {
+                    EndMaintenanceObservation(_restartOperationId);
+                    return;
+                }
                 if (!_restartPending)
                 {
                     CancelPendingRestart(recordCancellation: false);
@@ -1229,6 +1265,16 @@ namespace CodingRiver.UPilot
                                      UPilotPortAllocator.IsPortAvailable(WsPort);
                 if (portsAvailable)
                 {
+                    if (_restartMaintenanceDeadlineUtcMs > 0)
+                    {
+                        try { UPilotServiceMaintenance.RequireContinuation(); }
+                        catch (ServiceMaintenanceException ex)
+                        {
+                            RecordRestartStartFailure(ex.Code, ex.Message);
+                            CancelPendingRestart(recordCancellation: false);
+                            return;
+                        }
+                    }
                     var callback = _restartWaitCallback;
                     if (callback != null)
                         EditorApplication.update -= callback;
@@ -1243,7 +1289,7 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                if (EditorApplication.timeSinceStartup < deadline)
+                if (_restartMaintenanceDeadlineUtcMs > 0 || EditorApplication.timeSinceStartup < deadline)
                     return;
 
                 var timedOutCallback = _restartWaitCallback;
@@ -1306,6 +1352,8 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                if (_restartMaintenanceDeadlineUtcMs > 0)
+                    RecordRestartStartFailure((ex as ServiceMaintenanceException)?.Code ?? "SERVICE_RESTART_FAILED", ex.Message);
                 Debug.LogError("[UPilotMcpServerManager] Restart callback failed: " + ex);
             }
         }
@@ -1360,8 +1408,11 @@ namespace CodingRiver.UPilot
             }
 
             var record = UPilotServerRestartDiagnostics.Current;
-            _restartVerificationDeadlineUtcMs = (record?.newProcessStartedAtUtcMs > 0
-                ? record.newProcessStartedAtUtcMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) + RestartVerificationTimeoutMs;
+            _restartMaintenanceDeadlineUtcMs = record?.maintenanceDeadlineUtcMs ?? 0;
+            _restartVerificationDeadlineUtcMs = _restartMaintenanceDeadlineUtcMs > 0
+                ? _restartMaintenanceDeadlineUtcMs
+                : (record?.newProcessStartedAtUtcMs > 0
+                    ? record.newProcessStartedAtUtcMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) + RestartVerificationTimeoutMs;
             _restartNextProbeAtUtcMs = 0;
             if (_restartObserveCallback != null)
                 EditorApplication.update -= _restartObserveCallback;
@@ -1471,8 +1522,8 @@ namespace CodingRiver.UPilot
             {
                 UPilotServerRestartDiagnostics.RecordFailure(
                     operationId,
-                    "restart_verification_timeout",
-                    "The replacement MCP Server did not satisfy process, project, health, and new Bridge session verification within 20 seconds.",
+                    _restartMaintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout",
+                    "The replacement MCP Server did not satisfy process, project, health, and Bridge verification before its deadline.",
                     UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
                     "log/mcp-server.log",
                     "Inspect health, exact projectPath, and Bridge session diagnostics before requesting one new restart.");
@@ -1492,7 +1543,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                var status = await GetFreshStatusAsync();
+                var status = await GetFreshStatusAsync(_restartMaintenanceDeadlineUtcMs);
                 if (!string.Equals(operationId, _restartOperationId, StringComparison.Ordinal) ||
                     !UPilotServerRestartDiagnostics.IsActive(operationId))
                     return;
@@ -1507,7 +1558,7 @@ namespace CodingRiver.UPilot
                     }
                     if (!bridge.IsAuthenticated || !IsNewBridgeSession(_restartOldBridgeSessionId, bridge.SessionId))
                         return;
-                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId);
+                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, _restartMaintenanceDeadlineUtcMs);
                     if (!string.Equals(operationId, _restartOperationId, StringComparison.Ordinal) ||
                         !UPilotServerRestartDiagnostics.IsActive(operationId)) return;
                     UPilotServerRestartDiagnostics.RecordHealthVerified(
@@ -1520,7 +1571,11 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 if (string.Equals(operationId, _restartOperationId, StringComparison.Ordinal))
-                    RecordRestartStartFailure("restart_validation_failed", ex.Message);
+                {
+                    // Network/probe timeouts may recover within the one maintenance budget.
+                    if (_restartMaintenanceDeadlineUtcMs <= 0 || ex is InvalidOperationException)
+                        RecordRestartStartFailure("restart_validation_failed", ex.Message);
+                }
             }
             finally
             {
@@ -1533,10 +1588,12 @@ namespace CodingRiver.UPilot
             }
         }
 
-        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId)
+        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId, long deadlineUtcMs = 0)
         {
             var nonce = Guid.NewGuid().ToString("N");
-            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(7) };
+            var remaining = deadlineUtcMs <= 0 ? 7000 : Math.Min(7000, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            if (remaining <= 0) throw new TimeoutException("Maintenance deadline elapsed.");
+            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMilliseconds(remaining) };
             using var response = await client.GetAsync(
                 $"http://127.0.0.1:{HttpPort}/health?probe=bridge&session={Uri.EscapeDataString(bridgeSessionId)}&nonce={nonce}");
             response.EnsureSuccessStatusCode();
@@ -1590,12 +1647,27 @@ namespace CodingRiver.UPilot
             ClearRestartObservationState();
         }
 
+        internal void EndMaintenanceObservation(string restartId)
+        {
+            if (string.IsNullOrEmpty(restartId) || restartId != _restartOperationId ||
+                _restartMaintenanceDeadlineUtcMs <= 0) return;
+            if (_restartWaitCallback != null) EditorApplication.update -= _restartWaitCallback;
+            _restartWaitCallback = null;
+            _restartPending = false;
+            _afterRestartStarted = null;
+            UPilotServerRestartDiagnostics.RecordFailure(restartId, "SERVICE_RESTART_TIMEOUT",
+                "Maintenance observation ended; no further stop/start was scheduled.", "", "",
+                "Inspect current service identity and original maintenance diagnostics.");
+            FinishRestartObservation();
+        }
+
         private void ClearRestartObservationState()
         {
             _restartOperationId = "";
             _restartOldBridgeSessionId = "";
             _restartExpectedProjectPath = "";
             _restartVerificationDeadlineUtcMs = 0;
+            _restartMaintenanceDeadlineUtcMs = 0;
             _restartNextProbeAtUtcMs = 0;
             _restartHealthProbeRunning = false;
         }
