@@ -9,33 +9,34 @@ namespace CodingRiver.UPilot
     internal sealed class UPilotTestRunnerAdapter
     {
         private static readonly Dictionary<Type, UPilotTestRunnerAdapter> Cache = new Dictionary<Type, UPilotTestRunnerAdapter>();
-        private readonly PropertyInfo _holder;
-        private readonly MethodInfo _getRunner;
-        private readonly PropertyInfo _runsProperty;
-        private readonly FieldInfo _runsField;
-        internal readonly MethodInfo Cancel;
-        internal readonly MethodInfo Unregister;
+        private readonly Type _api;
         internal readonly string Identity;
 
         private UPilotTestRunnerAdapter(Type api)
         {
+            _api = api;
             Identity = api.Assembly.FullName;
-            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-            _holder = api.GetProperty("m_testJobDataHolder", flags)
-                ?? throw BindingFailure(api, "m_testJobDataHolder static property");
-            if (_holder.GetMethod == null || !_holder.GetMethod.IsStatic || _holder.GetIndexParameters().Length != 0)
-                throw BindingFailure(api, "readable m_testJobDataHolder static property");
-            _getRunner = _holder.PropertyType.GetMethod("GetRunner", new[] { typeof(string) })
-                ?? throw BindingFailure(api, "GetRunner(string)", _holder.PropertyType);
-            Cancel = UPilotTestService.ResolveCancelMethod(api);
-            Unregister = api.GetMethods(BindingFlags.Public | BindingFlags.Static)
-                .SingleOrDefault(method => method.Name == "UnregisterTestCallback" && method.IsGenericMethodDefinition
-                    && method.GetParameters().Length == 1)
-                ?? throw BindingFailure(api, "UnregisterTestCallback<T>(T)");
-            // TestRuns is on the concrete holder, not its interface.
-            var holderType = api.Assembly.GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobDataHolder");
-            _runsField = holderType?.GetField("TestRuns", BindingFlags.Public | BindingFlags.Instance);
-            _runsProperty = holderType?.GetProperty("TestRuns", BindingFlags.Public | BindingFlags.Instance);
+        }
+
+        internal MethodInfo Cancel => UPilotTestService.ResolveCancelMethod(_api);
+
+        internal MethodInfo Unregister
+        {
+            get
+            {
+                var methods = _api.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
+                    | BindingFlags.Static | BindingFlags.Instance);
+                var method = methods.FirstOrDefault(candidate => candidate.Name == "UnregisterTestCallback"
+                    && candidate.IsPublic && candidate.IsStatic && candidate.IsGenericMethodDefinition
+                    && candidate.GetGenericArguments().Length == 1 && candidate.GetParameters().Length == 1
+                    && candidate.GetParameters()[0].ParameterType == candidate.GetGenericArguments()[0]);
+                if (method != null) return method;
+                return methods.FirstOrDefault(candidate => candidate.Name == "UnregisterCallbacks"
+                    && candidate.IsPublic && !candidate.IsStatic && candidate.IsGenericMethodDefinition
+                    && candidate.GetGenericArguments().Length == 1 && candidate.GetParameters().Length == 1
+                    && candidate.GetParameters()[0].ParameterType == candidate.GetGenericArguments()[0])
+                    ?? throw BindingFailure(_api, "UnregisterTestCallback<T>(T) or UnregisterCallbacks<T>(T)");
+            }
         }
 
         internal static UPilotTestRunnerAdapter Get(Type api)
@@ -73,22 +74,44 @@ namespace CodingRiver.UPilot
             try
             {
                 if (string.IsNullOrWhiteSpace(runGuid)) throw new InvalidOperationException("Missing runGuid.");
-                var holder = _holder.GetValue(null);
+                const BindingFlags staticFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+                const BindingFlags instanceFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var holderProperty = _api.GetProperty("m_testJobDataHolder", staticFlags);
+                object holder = holderProperty != null && holderProperty.GetMethod != null
+                    && holderProperty.GetMethod.IsStatic && holderProperty.GetIndexParameters().Length == 0
+                    ? holderProperty.GetValue(null) : null;
+                if (holder == null)
+                {
+                    var holderType = _api.Assembly.GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobDataHolder")
+                        ?? throw BindingFailure(_api, "TestJobDataHolder type");
+                    var singleton = holderType.GetProperty("instance", staticFlags);
+                    holder = singleton != null && singleton.GetIndexParameters().Length == 0
+                        ? singleton.GetValue(null) : holderType.GetField("instance", staticFlags)?.GetValue(null);
+                }
                 if (holder == null) throw new InvalidOperationException("UTF holder is not initialized.");
-                runner = _getRunner.Invoke(holder, new object[] { runGuid });
-                if (runner != null) return "active";
-                var runs = (_runsField?.GetValue(holder) ?? _runsProperty?.GetValue(holder)) as IEnumerable;
+                var getRunner = holder.GetType().GetMethod("GetRunner", instanceFlags, null,
+                    new[] { typeof(string) }, null);
+                if (getRunner != null)
+                {
+                    runner = getRunner.Invoke(holder, new object[] { runGuid });
+                    if (runner != null) return "active";
+                }
+                var runs = (holder.GetType().GetField("TestRuns", instanceFlags)?.GetValue(holder)
+                    ?? holder.GetType().GetProperty("TestRuns", instanceFlags)?.GetValue(holder)) as IEnumerable;
                 if (runs == null) throw new InvalidOperationException("Serialized UTF run inventory is unavailable.");
                 foreach (var run in runs)
                 {
-                    if (run == null) continue;
-                    var guidField = run.GetType().GetField("guid")
+                    if (run == null) throw new InvalidOperationException("Serialized UTF run inventory contains a null record.");
+                    var guidField = run.GetType().GetField("guid", instanceFlags)
                         ?? throw new MissingFieldException(run.GetType().FullName, "guid");
                     var guid = guidField.GetValue(run) as string;
                     if (string.IsNullOrWhiteSpace(guid))
                         throw new InvalidOperationException("A serialized UTF run has no verified string guid.");
                     if (guid == runGuid)
                     {
+                        var runningField = run.GetType().GetField("isRunning", instanceFlags);
+                        if (runningField?.FieldType == typeof(bool) && (bool)runningField.GetValue(run))
+                            return "active";
                         diagnostic += ": serialized job is awaiting Runner restoration.";
                         return "unknown";
                     }

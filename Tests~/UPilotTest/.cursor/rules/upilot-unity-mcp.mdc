@@ -6,10 +6,10 @@ alwaysApply: true
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 43
-upilotPackageVersion: 0.3.32
+rulesVersion: 44
+upilotPackageVersion: 0.3.35
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-09-23T06:27:50Z
+generatedAt: 2026-09-23T09:19:11Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -185,7 +185,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - Preserve the `runGuid` returned by `unity_test_run`; after PlayMode Domain Reload or MCP reconnect, query `unity_test_results(runGuid=...)` instead of treating a new in-memory service as authoritative.
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
-- For UPilot repository/package acceptance in `./Tests~/UPilotTest`, call `unity_upilot_acceptance_run` and preserve its `summary.json` path, bytes, and SHA256. Treat `status=no_tests` as a distinct terminal result, not a failed synthetic test and not a passing run when tests are required.
+- For UPilot repository/package acceptance in `./Tests~/UPilotTest`, call `unity_upilot_acceptance_run`, retain its durable `taskId`, and poll `unity_task_status` for the final report. Submission `ok=true` is not acceptance success; preserve the final `summary.json` path, bytes, and SHA256. `preflightOnly=true` remains synchronous and creates no Task. Treat `status=no_tests` as a distinct terminal result, not a failed synthetic test and not a passing run when tests are required.
 - For Shader failures, use `unity_shader_inspect` and `unity_shader_check_errors` before broad Console searches or manual reimports.
 - For EditorWindow acceptance, prefer `unity_verify_window` and use `windowMatch` as the target-window truth. Treat legacy `windowDiagnostics` as UPilot window/layout diagnostics, not proof that a third-party window is absent.
 - For SceneView pixel acceptance, require an exact `UnityEditor.SceneView` match plus `includesSceneGui=true`, `includesHandles=true`, `pixelSourceVerified=true`, and `occlusionSensitive=false`; report repaint sequence/timestamps.

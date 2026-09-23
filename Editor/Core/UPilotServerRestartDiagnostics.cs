@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - MCP server restart persistence and diagnostics.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -38,6 +38,27 @@ namespace CodingRiver.UPilot
         public bool deploymentVerified;
         public bool readOnlyVerified;
         public string failurePhase;
+        // JsonUtility cannot serialize Nullable<T>. Presence flags distinguish old records
+        // (unobserved) from a measured zero or false result.
+        public bool hasIdentityProbe;
+        public long identityProbeElapsedMs;
+        public long candidateCollectionMs;
+        public long portQueryMs;
+        public long commandLineQueryMs;
+        public int candidateCount;
+        public int verifiedCount;
+        public bool hasCommandLineQueryExitCode;
+        public int commandLineQueryExitCode;
+        public string commandLineQueryFailure;
+        public bool bridgeStopAttempted;
+        public bool hasBridgeStopConfirmation;
+        public bool bridgeStopConfirmed;
+        public bool bridgeRestoreAttempted;
+        public string bridgeRestoreResult;
+        public string bridgeRestoreError;
+        public bool serverStopAttempted;
+        public bool hasOldServerExitConfirmation;
+        public bool oldServerExitConfirmed;
         public string healthProjectPath;
         public bool exitObserved;
         public int exitCode;
@@ -89,6 +110,65 @@ namespace CodingRiver.UPilot
                 }
             }
             return record;
+        }
+
+        internal static void RecordOldProcessId(string operationId, int processId)
+        {
+            Update(operationId, record => record.oldProcessId = processId);
+        }
+
+        internal static void RecordPhase(string operationId, string phase)
+        {
+            Update(operationId, record => record.phase = phase);
+        }
+
+        internal static void RecordIdentityProbe(string operationId, long elapsedMs,
+            long candidateCollectionMs, long portQueryMs, long commandLineQueryMs,
+            int candidateCount, int verifiedCount, int? queryExitCode, string queryFailure)
+        {
+            Update(operationId, record =>
+            {
+                record.hasIdentityProbe = true;
+                record.identityProbeElapsedMs = elapsedMs;
+                record.candidateCollectionMs = candidateCollectionMs;
+                record.portQueryMs = portQueryMs;
+                record.commandLineQueryMs = commandLineQueryMs;
+                record.candidateCount = candidateCount;
+                record.verifiedCount = verifiedCount;
+                record.hasCommandLineQueryExitCode = queryExitCode.HasValue;
+                record.commandLineQueryExitCode = queryExitCode.GetValueOrDefault();
+                record.commandLineQueryFailure = Bound(queryFailure);
+            });
+        }
+
+        internal static void RecordStopProgress(string operationId, bool? bridgeAttempted = null,
+            bool? bridgeConfirmed = null, bool? serverAttempted = null, bool? exitConfirmed = null)
+        {
+            Update(operationId, record =>
+            {
+                if (bridgeAttempted == true) record.bridgeStopAttempted = true;
+                if (bridgeConfirmed.HasValue)
+                {
+                    record.hasBridgeStopConfirmation = true;
+                    record.bridgeStopConfirmed = bridgeConfirmed.Value;
+                }
+                if (serverAttempted == true) record.serverStopAttempted = true;
+                if (exitConfirmed.HasValue)
+                {
+                    record.hasOldServerExitConfirmation = true;
+                    record.oldServerExitConfirmed = exitConfirmed.Value;
+                }
+            });
+        }
+
+        internal static void RecordBridgeRestore(string operationId, bool attempted, string result, string error)
+        {
+            Update(operationId, record =>
+            {
+                record.bridgeRestoreAttempted = attempted;
+                record.bridgeRestoreResult = result;
+                record.bridgeRestoreError = Bound(error);
+            });
         }
 
         internal static void RecordPortsReleased(string operationId)

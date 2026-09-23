@@ -160,10 +160,45 @@ an interrupted response is not permission to resend or replay business.
 - Snapshot baselines live under `.upilot/snapshots/baselines`. Update them only through `unity_snapshot_baseline_update` dry-run -> inspect -> explicit approval -> apply with the returned current-state `confirmToken`; never approve automatically. Use `unity_snapshot_baseline_compare` for pixel-difference ratio, SSIM, and diagnostic diff/heatmap artifacts.
 - Use `unity_shader_inspect` / `unity_shader_check_errors` for Shader-specific import, support, dependency, and compiler-message diagnostics.
 
+## Queue Inspection And Cleanup
+
+Use `unity_queue_cleanup()` to inspect the current project without advancing its tasks.
+The Advanced Settings window uses the same read-only snapshot and manual refresh.
+Missing, disconnected or stale data must not be described as an empty queue.
+
+The independent **允许 AI 清理当前项目队列占用** switch defaults to enabled and is
+unaffected by automation select-all. Never change this setting yourself. Disabled
+permission still permits inspection and preview. When enabled, it is standing
+authorization for exact-target cleanup across chat ownership, without a second human
+confirmation; it does not grant arbitrary writes or change the original tools' grants.
+
+1. Preview `unity_queue_cleanup(targetType, targetId, action, reason, dryRun=true)`.
+2. Inspect the exact identity, action and project. Apply the identical request with
+   `dryRun=false`, `confirmToken`, and `expectedProjectPath` from the preview.
+3. Keep original task/run/operation/session IDs. Accepted cancellation is not completion;
+   observe the existing status tools until cleanup is confirmed, or report unconfirmed.
+
+Task/Test support `cancel` and existing `cleanup`; Operation supports `cancel`, including
+associated Steps; Capture supports exact `stop` while retaining artifacts. Step force
+recovery and generic Bridge-command revocation are unsupported. WriteBatch `release`
+only disposes an inactive historical recovery blocker after verified backup. Its
+original result stays unknown; disposition is separate and survives Server restart.
+Never use another compile's success as evidence for that old batch.
+
+Failed backup, possible execution, target changes, permission refusal and unsupported
+adapters leave records intact. Preview tokens expire after 120 seconds and are one-shot.
+Do not replay an uncertain apply or Start. No automatic Unity restart or blanket cleanup.
+This exception permits ownerless Capture disposition only through `unity_queue_cleanup`;
+it does not relax the direct Capture ownership rules.
+
+Critical cancel/stop notices use `[UPilot][QueueCleanup]`. Failed/unconfirmed results
+are Server Error and, when Unity is reachable, real `Debug.LogError`; a disconnected
+Editor cannot immediately display a forwarded error. Never log tokens or full arguments.
+
 ## Focused Reliability
 
 - Use `unity_test_list`, `unity_test_run` and `unity_upilot_acceptance_run` with exact `testNames`, fully qualified `fixtures`, `assemblies` and/or `categories`. `matchMode=union` preserves the default; `intersection` intersects nonempty field groups while values inside each group remain a union. List and execute use the same assembly-isolated selection. Inspect selector counts; do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
-- Start long package acceptance through `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})`. Keep taskId and runGuid. Tests/package acceptance and generic `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Generic operations persist start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
+- `unity_upilot_acceptance_run` (except `preflightOnly=true`) immediately returns a durable queued Task with `taskId` and no fabricated `runGuid`. Poll `unity_task_status(taskId=...)` for the final acceptance report and summary artifact; `ok=true` on submission is not acceptance success. `preflightOnly=true` remains synchronous and creates no Task. The older `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})` route uses the same single Task execution path. Tests/package acceptance and generic `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Generic operations persist start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
 - `unity_task_cancel` requests underlying test cancellation. It is not terminal until authoritative cleanup succeeds. Unsupported generic-task cancellation leaves both work and observation running.
 - A recovered test task observes its established runGuid and never replays start. `RecoveryRequired` means the outcome or cleanup is unproven, not success or cancellation. Inspect original evidence before any new run.
 - Acceptance requires a matching authoritative run, successful cleanup, verified compile evidence and unchanged checked source. Already verified compilation covering the current C# input timestamps is reused without a second compile.

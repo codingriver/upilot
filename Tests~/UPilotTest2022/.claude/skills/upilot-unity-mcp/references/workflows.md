@@ -82,9 +82,9 @@ For a generic project bridge operation, call `unity_operation_validate(jobSpec)`
 
 ## UPilot Package Acceptance
 
-1. In the canonical `./Tests~/UPilotTest` project call `unity_upilot_acceptance_run`.
-2. Let it verify project identity, stop active Console captures, run one safe compile, discover and run EditMode tests, and recheck compile/Console errors.
-3. Preserve the returned `Log/UPilotAcceptance/<timestamp>/summary.json` metadata and SHA256.
+1. In the canonical `./Tests~/UPilotTest` project call `unity_upilot_acceptance_run` and retain the immediately returned `taskId`; `preflightOnly=true` remains a synchronous, read-only preflight.
+2. Poll that Task with `unity_task_status` until terminal. Submission `ok=true` means queued, not accepted; the background Task verifies project identity, checks captures, compiles, discovers/runs tests, and checks compile/Console errors.
+3. Preserve the final Task's `Log/UPilotAcceptance/<timestamp>/summary.json` metadata and SHA256.
 4. Do not start a persistent capture around this workflow because ConsoleCaptureService self-tests require no live capture.
 
 ## Multiple Projects

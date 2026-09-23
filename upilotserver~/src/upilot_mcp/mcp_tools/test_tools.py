@@ -82,7 +82,7 @@ async def unity_test_list(
     r = await _get_facade().test_list(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures, assemblies=assemblies, categories=categories, match_mode=matchMode, require_all_selectors_match=requireAllSelectorsMatch)
     return _log_tool_result("unity_test_list", _payload(r))
 
-@mcp.tool(description="一键执行 UPilot 包标准验收：校验规范项目、停止活动 Console capture、安全编译、测试发现与运行、错误检查并写入带 hash 的 JSON 报告。")
+@mcp.tool(description="提交持久 UPilot 包验收 Task，立即返回 taskId/queued；轮询 unity_task_status 查询测试、清理和带 hash 的 summary。preflightOnly=true 只同步预检，不创建 Task。")
 async def unity_upilot_acceptance_run(
     testMode: str = "EditMode", testFilter: str | None = None, timeoutSec: float = 900,
     stopActiveCaptures: bool = True, requireTests: bool = True, writeArtifact: bool = True,

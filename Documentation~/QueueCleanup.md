@@ -9,6 +9,11 @@
 窗口打开加载、手动刷新，不推进任务，无逐项或全部清理按钮。
 Server `/queue` 与工具无目标预览复用同一汇总，不新增调度器或任务数据库。
 展示未完成/阻断的 Task、Test、Operation、WriteBatch、关联 Step、Capture 和已知命令。
+`unity_operation_list` 只列 Bridge 命令 tracker，旧 `active/total` 是全局口径；
+`activeMatchingCount`、`activeOtherCount`、`matchedCount` 和 `returnedCount` 分别说明过滤后活动数、
+其它活动数、截断前匹配数及实际返回数，`queryExcluded` 是被排除的本次查询命令数。
+它不等同于全部持久 Operation；维护判断使用 `unity_queue_cleanup()` 清单。
+清单中的 Bridge 命令只含 Server 已知记录，未枚举 Bridge 队列时明确标为 incomplete。
 断连、过期、缺失和未知明确显示，不能当作空队列。Step 保留原始 instanceId、runId 和
 Operation 关联；来源为既有持久记录，明确标记实时状态未验证，不执行 Restore。
 
@@ -36,7 +41,7 @@ Operation 关联；来源为既有持久记录，明确标记实时状态未验�
 | Task / Test | `cancel`、`cleanup`，复用原始 runGuid 和既有流程 |
 | Operation | `cancel`，复用已登记 cancelCall 与清理，包括关联 Step |
 | Capture | `stop`，精确 sessionId，保留日志产物 |
-| WriteBatch | `release`，仅历史 recovery_required，排除仍有执行动作 |
+| WriteBatch | `release`，历史 recovery_required 或无自动编译授权/无派发身份的 deferred，排除仍有执行动作 |
 | Step、普通命令、无适配器 Task | 明确不支持，不删记录冒充停止 |
 
 ## WriteBatch 保真处置

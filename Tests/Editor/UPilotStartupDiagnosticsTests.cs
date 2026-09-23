@@ -305,6 +305,126 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void BatchProcessQueryParsesWindowsRecordsWithoutSplittingCommandLines()
+        {
+            var output = "\r\r\nCommandLine=python \"C:/中文 路径/run_upilot_mcp.py\" --log-file=\"D:/a=b/项目/mcp-server.log\" --port=8767\r\r\nProcessId=41\r\r\n\r\r\nCommandLine=\r\r\nProcessId=42\r\r\n";
+            var commands = UPilotMcpServerManager.ParseCandidateCommandLines(output, new[] { 41, 42 });
+            Assert.That(commands[41], Does.Contain("a=b/项目"));
+            Assert.That(commands[41], Does.Contain("--port=8767"));
+            Assert.That(commands[42], Is.Empty);
+            Assert.Throws<FormatException>(() => UPilotMcpServerManager.ParseCandidateCommandLines(
+                "CommandLine=x\nProcessId=41\n\nCommandLine=y\nProcessId=41", new[] { 41 }));
+            Assert.Throws<FormatException>(() => UPilotMcpServerManager.ParseCandidateCommandLines(
+                "CommandLine=x\nUnknown=z\nProcessId=41", new[] { 41 }));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ParseCandidateCommandLines(
+                new string('x', 1024 * 1024 + 1), new[] { 41 }));
+        }
+
+        [Test]
+        public void CandidateSelectionQueriesOnceAndRejectsChangedIdentityOrMissingEvidence()
+        {
+            const int http = 8012, ws = 8766;
+            var log = Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
+            var same = "python \"C:/中文 目录/run_upilot_mcp.py\" --http-port=8012 --port=8766 --log-file \"" + log + "\"";
+            var other = same.Replace("8012", "8013");
+            var before = new System.Collections.Generic.Dictionary<int, long> { [41] = 100, [42] = 200, [43] = 300 };
+            var commands = new System.Collections.Generic.Dictionary<int, string> { [41] = same, [42] = other, [43] = same };
+            var count = 0;
+            var selected = UPilotMcpServerManager.ResolveVerifiedCandidates(before,
+                ids => { count++; Assert.That(ids, Is.EquivalentTo(new[] { 41, 42, 43 })); return commands; },
+                pid => before[pid], http, ws, () => false, out var verified);
+            Assert.That(count, Is.EqualTo(1));
+            Assert.That(verified, Is.EqualTo(3));
+            Assert.That(selected.ConvertAll(x => x.pid), Is.EquivalentTo(new[] { 41, 43 }));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ResolveVerifiedCandidates(before,
+                ids => commands, pid => pid == 41 ? 999 : before[pid], http, ws, () => false, out _));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ResolveVerifiedCandidates(before,
+                ids => new System.Collections.Generic.Dictionary<int, string> { [41] = same },
+                pid => before[pid], http, ws, () => false, out _));
+            Assert.Throws<TimeoutException>(() => UPilotMcpServerManager.ResolveVerifiedCandidates(before,
+                ids => commands, pid => before[pid], http, ws, () => true, out _));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ResolveVerifiedCandidates(before,
+                ids => throw new InvalidOperationException("WMIC failed"), pid => before[pid],
+                http, ws, () => false, out _));
+        }
+
+        [Test]
+        public void PreflightFailureDoesNotStopBridgeOrServer()
+        {
+            var bridgeStops = 0;
+            var serverStops = 0;
+            var restores = 0;
+            Assert.Throws<TimeoutException>(() => UPilotMcpServerManager.RunVerifiedStopSequence(
+                () => throw new TimeoutException("probe budget exhausted"), true,
+                () => bridgeStops++, _ => serverStops++, () => true, () => restores++));
+            Assert.That(bridgeStops, Is.Zero);
+            Assert.That(serverStops, Is.Zero);
+            Assert.That(restores, Is.Zero);
+        }
+
+        [Test]
+        public void BridgeStopFailureRestoresOnlyVerifiedOriginalOnceAndRetainsFailure()
+        {
+            var calls = new System.Collections.Generic.List<string>();
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.RunVerifiedStopSequence(
+                () => calls.Add("prepare"), true, () => calls.Add("bridge"),
+                onAttempt => { calls.Add("server_before_attempt"); throw new InvalidOperationException("stop failed"); },
+                () => { calls.Add("verify"); return true; }, () => calls.Add("restore")));
+            Assert.That(calls, Is.EqualTo(new[] { "prepare", "bridge", "server_before_attempt", "verify", "restore" }));
+            calls.Clear();
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.RunVerifiedStopSequence(
+                () => calls.Add("prepare"), true, () => calls.Add("bridge"),
+                _ => throw new InvalidOperationException("stop failed"),
+                () => false, () => calls.Add("restore")));
+            Assert.That(calls, Is.EqualTo(new[] { "prepare", "bridge" }));
+        }
+
+        [Test]
+        public void UncertainServerStopAndExpiredMaintenanceNeverReplayOrRestore()
+        {
+            var calls = new System.Collections.Generic.List<string>();
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.RunVerifiedStopSequence(
+                () => calls.Add("prepare"), true, () => calls.Add("bridge"),
+                onAttempt => { onAttempt(); calls.Add("kill_attempted"); throw new InvalidOperationException("exit unknown"); },
+                () => { calls.Add("verify"); return true; }, () => calls.Add("restore")));
+            Assert.That(calls, Is.EqualTo(new[] { "prepare", "bridge", "kill_attempted" }));
+            calls.Clear();
+            Assert.Throws<TimeoutException>(() => UPilotMcpServerManager.RunVerifiedStopSequence(
+                () => throw new TimeoutException("maintenance expired"), true, () => calls.Add("bridge"),
+                _ => calls.Add("server"), () => true, () => calls.Add("restore")));
+            Assert.That(calls, Is.Empty);
+        }
+
+        [Test]
+        public void RestartRecordsPreserveUnobservedFieldsAcrossOldJsonAndFailedState()
+        {
+            var path = Path.Combine(Path.GetTempPath(), "upilot-restart-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                File.WriteAllText(path, "{\"operationId\":\"old\",\"status\":\"failed\"}");
+                Assert.That(UPilotServerRestartDiagnostics.TryLoadRecordForTests(path, out var old, out var error), Is.True, error);
+                Assert.That(old.hasIdentityProbe, Is.False);
+                Assert.That(old.bridgeStopAttempted, Is.False);
+                Assert.That(old.hasBridgeStopConfirmation, Is.False);
+                Assert.That(old.hasOldServerExitConfirmation, Is.False);
+                old.hasIdentityProbe = true;
+                old.candidateCount = 3;
+                old.bridgeStopAttempted = true;
+                old.hasBridgeStopConfirmation = true;
+                old.bridgeStopConfirmed = false;
+                old.hasOldServerExitConfirmation = true;
+                old.oldServerExitConfirmed = false;
+                Assert.That(UPilotServerRestartDiagnostics.TryWriteRecordForTests(old, path, out error), Is.True, error);
+                Assert.That(UPilotServerRestartDiagnostics.TryLoadRecordForTests(path, out var restored, out error), Is.True, error);
+                Assert.That(restored.hasIdentityProbe && restored.candidateCount == 3 && restored.bridgeStopAttempted, Is.True);
+                Assert.That(restored.hasBridgeStopConfirmation && !restored.bridgeStopConfirmed, Is.True);
+                Assert.That(restored.hasOldServerExitConfirmation && !restored.oldServerExitConfirmed, Is.True);
+                Assert.That(restored.status, Is.EqualTo("failed"));
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        }
+
+        [Test]
         public void RestartCompletesOnlyAfterProcessProjectBridgeAndDeploymentAreVerified()
         {
             var project = Path.Combine(Path.GetTempPath(), "upilot-restart-project");

@@ -1842,9 +1842,12 @@ namespace CodingRiver.UPilot
                         .FirstOrDefault(type => type.FullName == "UnityEditor.TestTools.TestRunner.Api.ICallbacks");
                     if (unregister == null || callbacksType == null)
                         throw new MissingMethodException("UnregisterTestCallback<T>(T) is unavailable.");
+                    if (!unregister.IsStatic && api == null)
+                        throw new InvalidOperationException("Instance callback registration owner is unavailable; no replacement API was created.");
                     var invoker = CallbackUnregisterInvokerForTests;
                     if (invoker != null) invoker(unregister, callbacksType, callback);
-                    else unregister.MakeGenericMethod(callbacksType).Invoke(null, new[] { callback });
+                    else unregister.MakeGenericMethod(callbacksType).Invoke(unregister.IsStatic ? null : api,
+                        new[] { callback });
                     _activeCallback = null;
                 }
                 catch (Exception ex)

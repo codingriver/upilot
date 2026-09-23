@@ -47,10 +47,10 @@ def item(kind, identity, value, action="", unsupported=""):
 
 
 class QueueDomainService:
-    def _queue_project(self):
+    def _queue_project(self, *, allow_disconnected=False):
         session = self.server.session_manager.active
         project = self.server.state.project_path
-        if not session or not same_path(session.project_path, project):
+        if not project or (not session and not allow_disconnected) or (session and not same_path(session.project_path, project)):
             raise ValueError("QUEUE_PROJECT_MISMATCH")
         return project
 
@@ -60,13 +60,21 @@ class QueueDomainService:
         test_ids = set()
         store = self.server.state
         try:
-            project = self._queue_project()
+            project = self._queue_project(allow_disconnected=True)
         except ValueError as ex:
             return fail(request, str(ex), "Cannot verify the current project; queue is unknown.")
         execution = store.execution_state()
         connected = self.server.is_ready()
+        session = self.server.session_manager.active
+        observed_at = int(time.time() * 1000)
+        source_status = {"persisted": "present", "serverMemory": "present",
+                         "bridgeCommands": "unknown",
+                         "editor": "present" if connected and execution.get("authoritative") and not execution.get("isStale") else "unknown"}
         if not connected:
             issues.append("UNITY_NOT_CONNECTED")
+        else:
+            # Server command records do not enumerate the Bridge main-thread queue.
+            issues.append("BRIDGE_QUEUE_NOT_FULLY_ENUMERATED")
         if execution.get("isStale") or not execution.get("authoritative"):
             issues.append("EDITOR_STATE_STALE_OR_UNKNOWN")
         try:
@@ -94,9 +102,13 @@ class QueueDomainService:
                     if value and not value.get("terminal") and not value.get("disposition") and not value.get("supersededBy"):
                         batches[identity] = value
             for identity, value in batches.items():
-                historical = value["status"] == "recovery_required"
-                entries.append(item("WriteBatch", identity, value, "release" if historical else "",
-                                    "" if historical else "Batch may still execute; cancellation is unsupported."))
+                value = store.get_write_batch(identity) or value
+                releasable = (value["status"] == "recovery_required" and not value.get("terminalSnapshot")
+                    and value.get("storedStatus") in {"recovery_required", "verified"}) or (
+                    value["status"] == "deferred" and not value["compileWhenEditMode"]
+                    and not value.get("compileOperationId") and not value.get("compileRequestId"))
+                entries.append(item("WriteBatch", identity, value, "release" if releasable else "",
+                                    "" if releasable else "Batch may still execute; cancellation is unsupported."))
             for command in store.commands.values():
                 if command.status in {"pending", "sent", "running"} and command.name != "queue.cleanup.log":
                     entries.append(item("Command", command.command_id, dict(displayName=command.name,
@@ -123,6 +135,7 @@ class QueueDomainService:
                         entry.update(operationId=step.get("operationId", ""), runId=step.get("runId", ""), source="persisted")
                         entries.append(entry)
         except Exception:
+            source_status["persisted"] = "unknown"
             issues.append("PERSISTED_QUEUE_DATA_INCOMPLETE")
         if connected:
             try:
@@ -153,8 +166,6 @@ class QueueDomainService:
                             entries.append(item("Capture", value.get("sessionId", ""), {**value, "status": "active"}, "stop"))
             except Exception:
                 issues.append("CAPTURE_STATE_UNCONFIRMED")
-        if execution.get("mainThreadQueueDepth", 0) > 0:
-            issues.append("BRIDGE_QUEUE_NOT_FULLY_ENUMERATED")
         if not same_path(project, self.server.state.project_path):
             return fail(request, "QUEUE_PROJECT_MISMATCH", "Project changed during observation.")
         connected = self.server.is_ready()
@@ -167,9 +178,21 @@ class QueueDomainService:
         if len(entries) > 500:
             entries = entries[:500]
             issues.append("QUEUE_ITEMS_TRUNCATED")
-        return ok(request, dict(projectPath=project, observedAt=int(time.time() * 1000),
+        if "QUEUE_ITEMS_TRUNCATED" in issues:
+            source_status["serverMemory"] = "unknown"
+        editor_identity = dict(status="present" if session and session.identity_verified and source_status["editor"] == "present" else "unknown",
+                               source="bridge_session" if session else "cached_execution_state",
+                               processId=getattr(session, "process_id", 0) if session else 0,
+                               processCreatedAt=getattr(session, "process_created_at", 0) if session else 0,
+                               processRole=getattr(session, "process_role", "") if session else "",
+                               sessionId=getattr(session, "session_id", "") if session else "",
+                               cacheAgeMs=execution.get("ageMs"),
+                               queryResult="verified" if session and session.identity_verified else "unverified")
+        return ok(request, dict(projectPath=project, observedAt=observed_at,
                                 connected=connected, complete=not issues, isStale=bool(latest.get("isStale")),
-                                issues=issues, items=entries, authorization=dict(zip(("allowed", "reason"), authorization(project)))))
+                                issues=issues, sources=source_status, editorIdentity=editor_identity,
+                                maintenanceRisk="unknown" if issues else "no_known_blocker",
+                                items=entries, authorization=dict(zip(("allowed", "reason"), authorization(project)))))
 
     async def _queue_target(self, kind, target):
         store = self.server.state
@@ -226,7 +249,10 @@ class QueueDomainService:
         if any(c.status in {"pending", "sent"} and c.name in {"compile.request", "asset.refresh"}
                for c in state.commands.values()):
             return False
-        return (value.get("status") == "recovery_required" and not value.get("terminalSnapshot")
+        manual = (value.get("status") == "deferred" and value.get("compileWhenEditMode") is False
+                  and not value.get("compileOperationId") and not value.get("compileRequestId"))
+        return ((value.get("status") == "recovery_required" or manual)
+                and not value.get("terminalSnapshot")
                 and value.get("outcome") == "unknown" and not value.get("supersededBy")
                 and ex.get("lastMainThreadPumpAt", 0) > value.get("updatedAt", 0))
 
@@ -260,6 +286,8 @@ class QueueDomainService:
             value = await self._queue_target(target_type, target_id)
             if value is None:
                 return await reject("QUEUE_TARGET_NOT_FOUND", "Exact target not found in this project.")
+            if target_type == "WriteBatch" and not self._queue_release_safe(value):
+                return await reject("QUEUE_EXECUTION_NOT_EXCLUDED", "Cannot exclude pending execution; original evidence retained.")
             signature = fingerprint([project, target_type, target_id, action, reason, value])
             previews = self.__dict__.setdefault("_queue_previews", {})
             now = time.monotonic()

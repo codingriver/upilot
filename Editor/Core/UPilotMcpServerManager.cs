@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — MCP Server Process Manager
 // Manages the external UPilot MCP server process independently of Unity.
 // SPDX-License-Identifier: MIT
@@ -61,6 +61,8 @@ namespace CodingRiver.UPilot
         public long IdentityPendingSinceUtcMs;
         public bool StatusQueryCompleted;
         public string StatusFailureStage;
+        public int StatusGeneration;
+        public string StatusCancellationReason;
         public long LastSuccessfulStatusAtUtcMs;
         internal UPilotServerHealth Health;
     }
@@ -457,6 +459,8 @@ namespace CodingRiver.UPilot
                     Interlocked.Increment(ref _statusGeneration);
                     _cachedStatus.ErrorMessage = "状态获取超时（30 秒）：进程识别、HTTP 查询或状态汇总未完成。";
                     _cachedStatus.StatusFailureStage = "status_collection";
+                    _cachedStatus.StatusGeneration = generation;
+                    _cachedStatus.StatusCancellationReason = "timeout";
                     _cachedStatus.StatusQueryCompleted = true;
                     _lastRefreshMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
@@ -467,6 +471,8 @@ namespace CodingRiver.UPilot
         private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort, int generation)
         {
             var status = new McpServerStatus();
+            status.StatusGeneration = generation;
+            var stage = "port_probe";
             try
             {
                 var httpTask = IsPortListeningAsync("127.0.0.1", httpPort);
@@ -477,12 +483,14 @@ namespace CodingRiver.UPilot
 
                 if (status.IsRunning)
                 {
+                    stage = "process_identity";
                     var process = ProbeMcpProcessOwnership(httpPort, wsPort);
                     status.ProcessOwnership = process.Ownership;
                     status.ProcessId = process.ProcessId;
                     status.ProcessCommandLine = process.CommandLine;
                     status.ProcessOwnershipEvidence = process.Evidence;
 
+                    stage = "health_query";
                     var stats = await FetchServerStatsAsync(httpPort);
                     status.WsClientCount = stats.WsCount;
                     status.HttpClientCount = stats.HttpCount;
@@ -511,7 +519,11 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 status.ErrorMessage = ex.Message;
-                Debug.LogError($"[UPilotMcpServerManager] Status refresh failed: {ex.Message}");
+                status.StatusFailureStage = stage;
+                if (generation == Volatile.Read(ref _statusGeneration))
+                    Debug.LogError($"[UPilotMcpServerManager] Status refresh failed at {stage} (generation {generation}): {ex.Message}");
+                else
+                    Debug.LogWarning($"[UPilotMcpServerManager] Superseded status refresh interrupted at {stage} (generation {generation}): {ex.Message}");
             }
 
             var refreshedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -1060,55 +1072,100 @@ namespace CodingRiver.UPilot
             StopCurrentProjectProcesses();
         }
 
+        private sealed class PreparedProcessStop : IDisposable
+        {
+            internal readonly List<(Process process, int pid, long createdAtTicks, string commandLine)> Processes = new();
+            internal readonly HashSet<int> Transferred = new();
+            internal void Add(Process process, string commandLine) =>
+                Processes.Add((process, process.Id, process.StartTime.ToUniversalTime().Ticks, commandLine));
+            public void Dispose()
+            {
+                foreach (var entry in Processes)
+                    if (!Transferred.Contains(entry.pid)) entry.process.Dispose();
+                Processes.Clear();
+            }
+        }
+
+        private PreparedProcessStop PrepareCurrentProjectStop(int expectedProcessId = 0)
+        {
+            var prepared = new PreparedProcessStop();
+            try
+            {
+                var processes = FindCurrentProjectMcpProcesses(out var portsByPid, out var portQuerySucceeded, stopTargetsOnly: true);
+                if (!portQuerySucceeded)
+                    throw new InvalidOperationException("无法安全停止 Server：监听端口归属查询失败。");
+                var owners = portsByPid.Where(entry => entry.Value.Contains(HttpPort) || entry.Value.Contains(WsPort))
+                    .Select(entry => entry.Key).Distinct().ToArray();
+                if (owners.Length > 1 || owners.Any(pid => !processes.Any(process => process.pid == pid)) ||
+                    (owners.Length == 0 && (!UPilotPortAllocator.IsPortAvailable(HttpPort) ||
+                                            !UPilotPortAllocator.IsPortAvailable(WsPort))))
+                    throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知。");
+                if (expectedProcessId > 0 && (processes.Count != 1 || processes[0].pid != expectedProcessId))
+                    throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Expected Server process changed before stop.");
+                foreach (var entry in processes)
+                {
+                    var process = Process.GetProcessById(entry.pid);
+                    try
+                    {
+                        // Retain a handle to the verified process so a reused PID cannot be terminated.
+                        var handle = process.Handle;
+                        if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != entry.createdAtTicks)
+                            throw new InvalidOperationException("Server process identity changed while preparing stop.");
+                        prepared.Add(process, entry.cmdLine);
+                    }
+                    catch { process.Dispose(); throw; }
+                }
+                return prepared;
+            }
+            catch { prepared.Dispose(); throw; }
+        }
+
         private void StopCurrentProjectProcesses(int expectedProcessId = 0)
+        {
+            using var prepared = PrepareCurrentProjectStop(expectedProcessId);
+            StopPreparedProcesses(prepared, expectedProcessId);
+        }
+
+        private void StopPreparedProcesses(PreparedProcessStop prepared, int expectedProcessId, Action onStopAttempt = null)
         {
             Interlocked.Increment(ref _startAttemptGeneration);
             _startInProgress = false;
-            var ownership = ProbeMcpProcessOwnership(HttpPort, WsPort);
-            var portsBusy = !UPilotPortAllocator.IsPortAvailable(HttpPort) ||
-                            !UPilotPortAllocator.IsPortAvailable(WsPort);
-            if (portsBusy && ownership.Ownership != McpProcessOwnership.CurrentUPilot)
-                throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知；" +
-                    $"PID={ownership.ProcessId}；{ownership.Evidence}");
-            var processes = FindCurrentProjectMcpProcesses();
-            if (expectedProcessId > 0 && (processes.Count != 1 || processes[0].pid != expectedProcessId))
+            if (expectedProcessId > 0 && (prepared.Processes.Count != 1 || prepared.Processes[0].pid != expectedProcessId))
                 throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Expected Server process changed before stop.");
-            if (processes.Count == 0)
+            // Check every handle before causing any termination. No PID-only lookup is used here.
+            foreach (var entry in prepared.Processes)
             {
-                _trackedProcessId = null;
-                DisposeTrackedProcess();
-                Debug.LogWarning("[UPilotMcpServerManager] No MCP server process found for the current project ports.");
-                return;
+                if (entry.process.HasExited || entry.process.Id != entry.pid ||
+                    entry.process.StartTime.ToUniversalTime().Ticks != entry.createdAtTicks ||
+                    !IsCurrentProjectMcpCommandLine(entry.commandLine, HttpPort, WsPort))
+                    throw new InvalidOperationException("Server process identity changed before stop.");
             }
-
-            foreach (var process in processes)
+            var currentPorts = SafeGetListeningPortsByPid(out var portQuerySucceeded);
+            if (!portQuerySucceeded)
+                throw new InvalidOperationException("Server port ownership became unknown before stop.");
+            var owners = currentPorts.Where(item => item.Value.Contains(HttpPort) || item.Value.Contains(WsPort))
+                .Select(item => item.Key).Distinct().ToArray();
+            if (owners.Any(pid => !prepared.Processes.Any(entry => entry.pid == pid)))
+                throw new InvalidOperationException("Server ports changed owner before stop.");
+            foreach (var entry in prepared.Processes)
             {
+                if (expectedProcessId > 0) UPilotServiceMaintenance.RequireContinuation();
+                onStopAttempt?.Invoke();
+                if (_restartOperationId.Length > 0 && UPilotServerRestartDiagnostics.IsActive(_restartOperationId))
+                    UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, serverAttempted: true);
                 try
                 {
-                    var proc = Process.GetProcessById(process.pid);
-                    var handle = proc.Handle;
-                    if (proc.StartTime.ToUniversalTime().Ticks != process.createdAtTicks ||
-                        !IsCurrentProjectMcpCommandLine(GetProcessCommandLineForDiagnostics(process.pid), HttpPort, WsPort))
-                    {
-                        proc.Dispose();
-                        throw new InvalidOperationException($"Server PID={process.pid} 的创建时间或项目归属已改变。");
-                    }
-                    if (expectedProcessId > 0) UPilotServiceMaintenance.RequireContinuation();
-                    proc.Kill();
-                    _stoppingProcesses.Add(proc);
-                    Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={process.pid}");
+                    entry.process.Kill();
+                    _stoppingProcesses.Add(entry.process);
+                    prepared.Transferred.Add(entry.pid);
+                    UnityEngine.Debug.Log($"[UPilotMcpServerManager] Killed MCP server process PID={entry.pid}");
                 }
-                catch (ArgumentException)
+                catch (InvalidOperationException)
                 {
-                    // The process exited between discovery and termination.
-                }
-                catch (Exception ex)
-                {
-                    if (ex is ServiceMaintenanceException) throw;
-                    throw new InvalidOperationException($"停止 Server PID={process.pid} 失败：{ex.Message}", ex);
+                    // Exited after the preflight; the handle identifies the old process, not a replacement.
+                    if (!entry.process.HasExited) throw;
                 }
             }
-
             _trackedProcessId = null;
             DisposeTrackedProcess();
             InvalidateStatusCache();
@@ -1163,6 +1220,24 @@ namespace CodingRiver.UPilot
             return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
+        private bool GetHealthForRecovery(int oldPid, string expectedProjectPath, long deadlineUtcMs)
+        {
+            var remaining = deadlineUtcMs > 0
+                ? Math.Min(1500, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) : 1500;
+            if (remaining <= 0) return false;
+            // HTTP runs off the Editor synchronization context; no callback is allowed to restart the Server.
+            var json = Task.Run(async () =>
+            {
+                using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMilliseconds(remaining) };
+                using var response = await client.GetAsync($"http://127.0.0.1:{HttpPort}/health").ConfigureAwait(false);
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            }).GetAwaiter().GetResult();
+            return ParseIntFromJson(json, "server_pid") == oldPid &&
+                   SameProjectPath(ParseStringFromJson(json, "project_path"), expectedProjectPath) &&
+                   IsUPilotServerPayload(json);
+        }
+
         public void RestartServer(Action afterStart = null)
         {
             _ = UPilotQuickStart.AutoRepairAsync(null, afterStart);
@@ -1201,7 +1276,8 @@ namespace CodingRiver.UPilot
             var bridgeStatus = bridge?.GetStatus() ?? default;
             var oldBridgeSessionId = bridgeStatus.SessionId ?? "";
             var bridgeWasStarted = bridgeStatus.IsStarted;
-            var oldProcessId = ResolveCurrentProjectProcessId();
+            var oldProcessId = expectedProcessId > 0 ? expectedProcessId :
+                (IsTrackedProcessAlive() && _trackedProcessId.HasValue ? _trackedProcessId.Value : 0);
             if (expectedProcessId > 0 && oldProcessId != expectedProcessId)
                 throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Server changed before restart.");
             var projectRoot = Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
@@ -1223,19 +1299,50 @@ namespace CodingRiver.UPilot
             _restartNextProbeAtUtcMs = 0;
             _restartHealthProbeRunning = false;
 
-            if (bridgeWasStarted)
+            PreparedProcessStop prepared = null;
+            try
             {
-                if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
-                bridge.Stop();
+                RunVerifiedStopSequence(() =>
+                {
+                    UPilotServerRestartDiagnostics.RecordPhase(_restartOperationId, "identity_probe");
+                    prepared = PrepareCurrentProjectStop(expectedProcessId);
+                    if (oldProcessId == 0 && prepared.Processes.Count == 1)
+                    {
+                        oldProcessId = prepared.Processes[0].pid;
+                        UPilotServerRestartDiagnostics.RecordOldProcessId(_restartOperationId, oldProcessId);
+                    }
+                    if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
+                    UPilotServerRestartDiagnostics.RecordPhase(_restartOperationId, "stopping_old_services");
+                }, bridgeWasStarted, () =>
+                {
+                    UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, bridgeAttempted: true);
+                    bridge.Stop();
+                    UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId,
+                        bridgeConfirmed: !bridge.GetStatus().IsStarted);
+                }, onAttempt => StopPreparedProcesses(prepared, expectedProcessId, () =>
+                {
+                    onAttempt();
+                    UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, serverAttempted: true);
+                }), () =>
+                {
+                    if (oldProcessId <= 0) return false;
+                    var ownership = ProbeMcpProcessOwnership(HttpPort, WsPort);
+                    var health = GetHealthForRecovery(oldProcessId, _restartExpectedProjectPath, maintenanceDeadlineUtcMs);
+                    using var original = Process.GetProcessById(oldProcessId);
+                    return ownership.Ownership == McpProcessOwnership.CurrentUPilot &&
+                        ownership.ProcessId == oldProcessId && health &&
+                        prepared.Processes.Any(entry => entry.pid == oldProcessId &&
+                            !original.HasExited && original.StartTime.ToUniversalTime().Ticks == entry.createdAtTicks);
+                }, () => bridge.EnsureStarted(), (attempted, result, error) =>
+                    UPilotServerRestartDiagnostics.RecordBridgeRestore(_restartOperationId, attempted, result, error));
+                UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, exitConfirmed: StoppedProcessesExited());
+                _afterRestartStarted += () =>
+                {
+                    if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
+                    bridge.EnsureStarted();
+                };
+                if (afterStart != null) _afterRestartStarted += afterStart;
             }
-            _afterRestartStarted += () =>
-            {
-                if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
-                bridge.EnsureStarted();
-            };
-            if (afterStart != null)
-                _afterRestartStarted += afterStart;
-            try { StopCurrentProjectProcesses(expectedProcessId); }
             catch (Exception ex)
             {
                 RecordRestartStartFailure((ex as ServiceMaintenanceException)?.Code ?? "stop_failed", ex.Message);
@@ -1243,6 +1350,7 @@ namespace CodingRiver.UPilot
                 FinishRestartObservation();
                 return;
             }
+            finally { prepared?.Dispose(); }
             InvalidateStatusCache();
 
             _restartPending = true;
@@ -1281,6 +1389,7 @@ namespace CodingRiver.UPilot
                     _restartWaitCallback = null;
                     _restartPending = false;
                     InvalidateStatusCache();
+                    UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, exitConfirmed: true);
                     UPilotServerRestartDiagnostics.RecordPortsReleased(_restartOperationId);
                     StartServer();
                     if (IsRestartObservationActive())
@@ -1312,6 +1421,55 @@ namespace CodingRiver.UPilot
                 Debug.LogError("[UPilotMcpServerManager] " + message);
             };
             EditorApplication.update += _restartWaitCallback;
+        }
+
+        // This seam exercises the exact preflight/stop/recovery ordering without killing test processes.
+        internal static void RunVerifiedStopSequence(Action prepare, bool bridgeWasStarted,
+            Action stopBridge, Action<Action> stopServer, Func<bool> originalServerSafe, Action restoreBridge,
+            Action<bool, string, string> onBridgeRestore = null)
+        {
+            var bridgeAttempted = false;
+            var serverAttempted = false;
+            try
+            {
+                prepare();
+                if (bridgeWasStarted)
+                {
+                    bridgeAttempted = true;
+                    stopBridge();
+                }
+                stopServer(() => serverAttempted = true);
+            }
+            catch
+            {
+                if (bridgeAttempted && !serverAttempted)
+                {
+                    var restoreAttempted = false;
+                    var restoreResult = "original_server_unverified";
+                    var restoreError = "";
+                    try
+                    {
+                        if (originalServerSafe())
+                        {
+                            restoreAttempted = true;
+                            restoreBridge();
+                            restoreResult = "requested_unverified";
+                        }
+                    }
+                    catch (Exception recoveryError)
+                    {
+                        restoreResult = "failed";
+                        restoreError = recoveryError.Message;
+                        UnityEngine.Debug.LogWarning("[UPilotMcpServerManager] Bridge recovery unconfirmed: " + recoveryError.Message);
+                    }
+                    try { onBridgeRestore?.Invoke(restoreAttempted, restoreResult, restoreError); }
+                    catch (Exception diagnosticError)
+                    {
+                        UnityEngine.Debug.LogWarning("[UPilotMcpServerManager] Bridge recovery diagnostic failed: " + diagnosticError.Message);
+                    }
+                }
+                throw;
+            }
         }
 
         private void CancelPendingRestart(bool recordCancellation)
@@ -1826,58 +1984,208 @@ namespace CodingRiver.UPilot
             return (null, null);
         }
 
-        private List<(int pid, string cmdLine, long createdAtTicks)> FindCurrentProjectMcpProcesses()
+        private List<(int pid, string cmdLine, long createdAtTicks)> FindCurrentProjectMcpProcesses() =>
+            FindCurrentProjectMcpProcesses(out _, out _);
+
+        private List<(int pid, string cmdLine, long createdAtTicks)> FindCurrentProjectMcpProcesses(
+            out Dictionary<int, List<int>> portsByPid, out bool portQuerySucceeded, bool stopTargetsOnly = false)
         {
-            var deadline = Stopwatch.StartNew();
-            var result = new List<(int pid, string cmdLine, long createdAtTicks)>();
+            var remainingMaintenanceMs = _restartMaintenanceDeadlineUtcMs > 0
+                ? _restartMaintenanceDeadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                : 8000;
+            if (remainingMaintenanceMs <= 0) throw new TimeoutException("Maintenance deadline elapsed before process identity query.");
+            var probeBudgetMs = (int)Math.Min(8000, remainingMaintenanceMs);
+            const int maxCandidates = 128;
+            var timer = Stopwatch.StartNew();
+            portsByPid = new Dictionary<int, List<int>>();
+            portQuerySucceeded = false;
             var candidatePids = new HashSet<int>();
-
-            if (_trackedProcessId.HasValue)
-                candidatePids.Add(_trackedProcessId.Value);
-
-            var portsByPid = SafeGetListeningPortsByPid(out _);
-            foreach (var entry in portsByPid)
+            long portQueryMs = 0;
+            long candidateMs = 0;
+            int verified = 0;
+            int? queryExitCode = null;
+            long queryMs = 0;
+            string queryFailure = "";
+            try
             {
-                if (entry.Value.Contains(HttpPort) || entry.Value.Contains(WsPort))
-                    candidatePids.Add(entry.Key);
-            }
-
-            AddProcessIdsByName(candidatePids, "python");
-            AddProcessIdsByName(candidatePids, "python3");
-            AddProcessIdsByName(candidatePids, "py");
-
-            foreach (var process in Process.GetProcesses())
-            {
-                try
+                portsByPid = SafeGetListeningPortsByPid(out portQuerySucceeded);
+                portQueryMs = timer.ElapsedMilliseconds;
+                if (_trackedProcessId.HasValue) candidatePids.Add(_trackedProcessId.Value);
+                foreach (var entry in portsByPid)
+                    if (entry.Value.Contains(HttpPort) || entry.Value.Contains(WsPort)) candidatePids.Add(entry.Key);
+                if (!stopTargetsOnly)
                 {
-                    if (process.ProcessName.IndexOf("upilot", StringComparison.OrdinalIgnoreCase) >= 0)
-                        candidatePids.Add(process.Id);
+                    AddProcessIdsByName(candidatePids, "python");
+                    AddProcessIdsByName(candidatePids, "python3");
+                    AddProcessIdsByName(candidatePids, "py");
+                    foreach (var process in Process.GetProcesses())
+                    {
+                        try
+                        {
+                            if (process.ProcessName.IndexOf("upilot", StringComparison.OrdinalIgnoreCase) >= 0)
+                                candidatePids.Add(process.Id);
+                        }
+                        catch { }
+                        finally { process.Dispose(); }
+                    }
                 }
-                catch
-                {
-                }
-                finally
-                {
-                    process.Dispose();
-                }
-            }
-
-            foreach (var pid in candidatePids)
-            {
-                if (deadline.ElapsedMilliseconds >= 8000)
+                candidateMs = timer.ElapsedMilliseconds - portQueryMs;
+                if (!portQuerySucceeded) throw new InvalidOperationException("监听端口归属查询失败。");
+                if (candidatePids.Count > maxCandidates)
+                    throw new InvalidOperationException("进程归属候选数超过安全上限。");
+                if (timer.ElapsedMilliseconds >= probeBudgetMs)
                     throw new TimeoutException("进程归属识别超过 8 秒，未授权停止未核实的进程。");
-                try
+                var result = new List<(int pid, string cmdLine, long createdAtTicks)>();
+                if (candidatePids.Count == 0) return result;
+                var before = new Dictionary<int, long>();
+                foreach (var pid in candidatePids)
+                {
+                    if (timer.ElapsedMilliseconds >= probeBudgetMs)
+                        throw new TimeoutException("进程归属识别超过 8 秒，未授权停止未核实的进程。");
+                    try { using var process = Process.GetProcessById(pid); before[pid] = process.StartTime.ToUniversalTime().Ticks; }
+                    catch (ArgumentException) { /* An already exited candidate cannot be stopped. */ }
+                }
+                if (before.Count == 0) return result;
+                var selected = ResolveVerifiedCandidates(before, ids =>
+                {
+                    var queryStart = timer.ElapsedMilliseconds;
+                    try { return QueryCandidateCommandLines(ids, timer, probeBudgetMs, out queryExitCode); }
+                    finally { queryMs = timer.ElapsedMilliseconds - queryStart; }
+                }, pid =>
                 {
                     using var process = Process.GetProcessById(pid);
-                    var createdAt = process.StartTime.ToUniversalTime().Ticks;
-                    string cmdLine = GetProcessCommandLineForDiagnostics(pid);
-                    if (!process.HasExited && IsCurrentProjectMcpCommandLine(cmdLine, HttpPort, WsPort))
-                        result.Add((pid, cmdLine, createdAt));
-                }
-                catch (ArgumentException) { }
+                    if (process.HasExited) throw new InvalidOperationException("候选进程已退出。");
+                    return process.StartTime.ToUniversalTime().Ticks;
+                }, HttpPort, WsPort, () => timer.ElapsedMilliseconds >= probeBudgetMs, out verified);
+                result.AddRange(selected);
+                return result;
             }
+            catch (Exception ex) { queryFailure = ex is TimeoutException ? "timeout" : ex.GetType().Name; throw; }
+            finally
+            {
+                if (UPilotServerRestartDiagnostics.IsActive(_restartOperationId))
+                    UPilotServerRestartDiagnostics.RecordIdentityProbe(_restartOperationId, timer.ElapsedMilliseconds,
+                        candidateMs, portQueryMs, queryMs, candidatePids.Count, verified, queryExitCode, queryFailure);
+            }
+        }
 
-            return result;
+        // The query and process clock are injectable only inside this bounded internal seam.
+        // No test path invokes Kill, netstat, wmic, or Bridge.Stop.
+        internal static List<(int pid, string cmdLine, long createdAtTicks)> ResolveVerifiedCandidates(
+            Dictionary<int, long> before, Func<IEnumerable<int>, Dictionary<int, string>> query,
+            Func<int, long> createdAtTicks, int httpPort, int wsPort,
+            Func<bool> budgetExpired, out int verified)
+        {
+            verified = 0;
+            var commands = query(before.Keys);
+            var selected = new List<(int pid, string cmdLine, long createdAtTicks)>();
+            foreach (var entry in before)
+            {
+                if (budgetExpired()) throw new TimeoutException("进程归属识别超过 8 秒，未授权停止未核实的进程。");
+                if (!commands.TryGetValue(entry.Key, out var cmdLine) || !IsUsableCommandLine(cmdLine))
+                    throw new InvalidOperationException("候选进程命令行缺失或不可读，停止操作未获授权。");
+                long after;
+                try { after = createdAtTicks(entry.Key); }
+                catch (ArgumentException) { throw new InvalidOperationException("候选进程身份在核验期间发生变化。"); }
+                if (after != entry.Value)
+                    throw new InvalidOperationException("候选进程身份在核验期间发生变化。");
+                verified++;
+                if (IsCurrentProjectMcpCommandLine(cmdLine, httpPort, wsPort))
+                    selected.Add((entry.Key, cmdLine, entry.Value));
+            }
+            return selected;
+        }
+
+        private const int MaxCandidateQueryOutputChars = 1024 * 1024;
+
+        internal static Dictionary<int, string> ParseCandidateCommandLines(string output, ICollection<int> requested)
+        {
+            if (output == null || output.Length > MaxCandidateQueryOutputChars)
+                throw new InvalidOperationException("进程命令行批量查询输出缺失或超过安全上限。");
+            var found = new Dictionary<int, string>();
+            string commandLine = null;
+            int? pid = null;
+            void Finish()
+            {
+                if (pid.HasValue)
+                {
+                    if (!requested.Contains(pid.Value) || commandLine == null || found.ContainsKey(pid.Value))
+                        throw new FormatException("进程命令行批量查询返回无效记录。");
+                    found.Add(pid.Value, commandLine);
+                }
+                else if (commandLine != null) throw new FormatException("进程命令行记录缺少 PID。");
+                pid = null;
+                commandLine = null;
+            }
+            foreach (var line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                if (string.IsNullOrWhiteSpace(line)) { Finish(); continue; }
+                var index = line.IndexOf('=');
+                if (index <= 0) throw new FormatException("进程命令行批量查询格式无效。");
+                var key = line.Substring(0, index).Trim().TrimStart('\ufeff');
+                var value = line.Substring(index + 1).Trim();
+                if (key.Equals("ProcessId", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (pid.HasValue || !int.TryParse(value, out var parsed) || parsed <= 0)
+                        throw new FormatException("进程 PID 字段无效。");
+                    pid = parsed;
+                }
+                else if (key.Equals("CommandLine", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (commandLine != null) throw new FormatException("进程命令行字段重复。");
+                    commandLine = value;
+                }
+                else throw new FormatException("进程命令行批量查询存在未知字段。");
+            }
+            Finish();
+            return found;
+        }
+
+        private static Dictionary<int, string> QueryCandidateCommandLines(IEnumerable<int> pids,
+            Stopwatch timer, int budgetMs, out int? exitCode)
+        {
+            exitCode = null;
+#if UNITY_EDITOR_WIN
+            var ids = pids.OrderBy(id => id).ToArray();
+            var filter = string.Join(" or ", ids.Select(id => "ProcessId=" + id));
+            var psi = new ProcessStartInfo
+            {
+                FileName = "wmic",
+                Arguments = "process where \"(" + filter + ")\" get ProcessId,CommandLine /format:list",
+                RedirectStandardOutput = true,
+                RedirectStandardError = false,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var process = Process.Start(psi) ?? throw new InvalidOperationException("无法启动进程命令行查询。");
+            try
+            {
+                var output = new StringBuilder();
+                var buffer = new char[2048];
+                while (true)
+                {
+                    var remaining = budgetMs - (int)timer.ElapsedMilliseconds;
+                    if (remaining <= 0) throw new TimeoutException("进程归属识别超过 8 秒，未授权停止未核实的进程。");
+                    var read = process.StandardOutput.ReadAsync(buffer, 0, buffer.Length);
+                    if (!read.Wait(remaining)) throw new TimeoutException("进程命令行批量查询超时。");
+                    if (read.Result == 0) break;
+                    output.Append(buffer, 0, read.Result);
+                    if (output.Length > MaxCandidateQueryOutputChars) throw new InvalidOperationException("进程命令行批量查询输出超过安全上限。");
+                }
+                var waitMs = budgetMs - (int)timer.ElapsedMilliseconds;
+                if (waitMs <= 0 || !process.WaitForExit(waitMs)) throw new TimeoutException("进程命令行批量查询超时。");
+                exitCode = process.ExitCode;
+                if (exitCode != 0) throw new InvalidOperationException("进程命令行批量查询失败，退出码=" + exitCode);
+                return ParseCandidateCommandLines(output.ToString(), ids);
+            }
+            catch
+            {
+                if (!process.HasExited) { try { process.Kill(); } catch { } }
+                throw;
+            }
+#else
+            throw new PlatformNotSupportedException("当前平台未实现进程归属批量查询。");
+#endif
         }
 
         private static void AddProcessIdsByName(HashSet<int> target, string processName)

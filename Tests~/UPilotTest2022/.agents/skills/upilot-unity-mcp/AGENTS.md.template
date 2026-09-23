@@ -101,6 +101,15 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Respect `Unsupported` diagnostics. Do not use Native, InternalCall, injected, reflection-eval, or other lower-level hook fallbacks.
 - Keep high-frequency tracing, stack capture, and Console output bounded, then restore the original configuration after temporary diagnostics.
 
+## Current Queue And AI Cleanup
+
+- Advanced Settings provides a read-only current-queue window and an independent `aiQueueCleanupAllowed` grant, enabled by default (including legacy missing fields). Automation select-all neither grants nor revokes it. Never change this grant through files, reflection, or UI automation.
+- Use `unity_queue_cleanup()` for a read-only Task/Operation/WriteBatch/Step/Capture inventory. Disconnected, stale, incomplete, or unsupported data is not an empty queue; viewing remains available when cleanup permission is disabled.
+- For a blocked exact target, preview with `targetType`, original `targetId`, `action` and a short non-sensitive `reason`. With the independent grant enabled, apply the same request with `dryRun=false`, the preview's `confirmToken` and `expectedProjectPath`. This standing grant requires neither chat ownership nor another human confirmation, but applies only to this finite tool, not arbitrary writes or the permission semantics of original business tools.
+- Supported actions reuse established test/Task cancellation or cleanup, Operation cancellation (including its Steps), and exact Capture stop without deleting artifacts. A Step has no independent force recovery; unsupported commands retain their records. Historical WriteBatch `release` requires verified backup and proof that execution is no longer possible; its original unknown result is never converted into successful compilation or cancellation.
+- A cleanup request accepted is not a stopped task. Retain original identities and observe existing status tools; never replay Start, restart Unity, clean unrelated targets, or use cleanup automatically as an acceptance prerequisite. A changed/expired token requires a fresh preview; uncertain dispatch requires observation, not an automatic resend.
+- Cancellation/stop logs use `[UPilot][QueueCleanup]`; failure or unconfirmed outcome is Error-level (Unity `Debug.LogError` when reachable). Do not print ownership/confirmation tokens. Logging failure does not change the action result or authorize replay.
+
 ## Long Operations
 
 - Before starting a hand-authored generic operation, call `unity_operation_validate(jobSpec)` and fix its structured field errors; validation must not start PlayMode or business work.
@@ -170,7 +179,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - Preserve the `runGuid` returned by `unity_test_run`; after PlayMode Domain Reload or MCP reconnect, query `unity_test_results(runGuid=...)` instead of treating a new in-memory service as authoritative.
 - During polling, use incremental status, log, and report APIs instead of repeatedly reading complete outputs.
-- For UPilot repository/package acceptance in `./Tests~/UPilotTest`, call `unity_upilot_acceptance_run` and preserve its `summary.json` path, bytes, and SHA256. Treat `status=no_tests` as a distinct terminal result, not a failed synthetic test and not a passing run when tests are required.
+- For UPilot repository/package acceptance in `./Tests~/UPilotTest`, call `unity_upilot_acceptance_run`, retain its durable `taskId`, and poll `unity_task_status` for the final report. Submission `ok=true` is not acceptance success; preserve the final `summary.json` path, bytes, and SHA256. `preflightOnly=true` remains synchronous and creates no Task. Treat `status=no_tests` as a distinct terminal result, not a failed synthetic test and not a passing run when tests are required.
 - For Shader failures, use `unity_shader_inspect` and `unity_shader_check_errors` before broad Console searches or manual reimports.
 - For EditorWindow acceptance, prefer `unity_verify_window` and use `windowMatch` as the target-window truth. Treat legacy `windowDiagnostics` as UPilot window/layout diagnostics, not proof that a third-party window is absent.
 - For SceneView pixel acceptance, require an exact `UnityEditor.SceneView` match plus `includesSceneGui=true`, `includesHandles=true`, `pixelSourceVerified=true`, and `occlusionSensitive=false`; report repaint sequence/timestamps.

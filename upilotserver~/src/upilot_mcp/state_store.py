@@ -532,25 +532,20 @@ class StateStore:
             return []
         with sqlite3.connect(self._db_path) as db:
             rows = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json "
-                "FROM write_batches WHERE project_path=? AND status IN ('pending','deferred','recovery_required') "
+                "SELECT write_batch_id FROM write_batches WHERE project_path=? "
+                "AND status IN ('pending','deferred','recovery_required','verified') "
                 "AND superseded_by='' AND disposition_json IS NULL ORDER BY created_at",
                 (self._project_path,),
             ).fetchall()
-        return [
-            {
-                "writeBatchId": row[0], "operationId": row[1], "writeBatchCreatedAt": row[2],
-                "updatedAt": row[3], "status": row[4], "compileWhenEditMode": bool(row[5]),
-                "paths": json.loads(row[6]), "filesSha256": row[7],
-                "compileOperationId": row[8], "error": row[9],
-                **self._write_batch_change_fields(row[10]),
-            }
-            for row in rows
-        ]
+        batches = (self.get_write_batch(row[0]) for row in rows)
+        return [batch for batch in batches if batch and batch.get("storedStatus") != "verified" and batch["status"] in
+                {"pending", "deferred", "recovery_required"} and not batch.get("disposition")]
 
     def mark_write_batch(self, write_batch_id: str, status: str, *, compile_operation_id: str = "", error: str = "") -> None:
         if self._db_path is None or not write_batch_id:
             return
+        if status == "verified":
+            raise ValueError("Verified write batches require a correlated persisted terminal snapshot.")
         with sqlite3.connect(self._db_path) as db:
             db.execute(
                 "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
@@ -583,14 +578,26 @@ class StateStore:
             ).fetchone()
         if row is None:
             return None
-        evidence = json.loads(row[11]) if row[11] else None
+        try:
+            evidence = json.loads(row[11]) if row[11] else None
+            if not isinstance(evidence, dict):
+                evidence = None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            evidence = None
+        try:
+            verified_at = int(evidence.get("lastCompileVerifiedAt") or 0) if evidence else 0
+        except (TypeError, ValueError, OverflowError):
+            verified_at = 0
         correlation = bool(
             evidence and evidence.get("errorsVerified") is True and evidence.get("terminal") is True
+            and evidence.get("compilePhase") in {"completed", "failed"}
+            and (row[4] == "verified" and evidence.get("compilePhase") == "completed"
+                 or row[4] == "failed" and evidence.get("compilePhase") == "failed")
             and evidence.get("writeBatchId") == row[0]
             and evidence.get("compileOperationId") == row[8] and row[8]
             and (not row[12] or evidence.get("compileRequestId") == row[12])
             and evidence.get("writeBatchCreatedAt") == row[2]
-            and int(evidence.get("lastCompileVerifiedAt") or 0) >= row[2] > 0
+            and verified_at >= row[2] > 0
         )
         details_available = bool(row[14])
         warnings: list[dict[str, Any]] | None = None
@@ -606,22 +613,35 @@ class StateStore:
         elif details_available:
             # A corrupt/incomplete row is unknown, never an asserted empty list.
             details_available = False
+        stored_status = row[4]
+        status = "recovery_required" if (stored_status == "verified" or row[11]) and not correlation else stored_status
+        try:
+            paths = json.loads(row[6])
+            if not isinstance(paths, list):
+                paths = []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            paths = []
+        try:
+            disposition = json.loads(row[17]) if row[17] else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            disposition = {"status": "unknown", "error": "Stored disposition is unreadable."}
         result = {
             "writeBatchId": row[0], "operationId": row[1], "writeBatchCreatedAt": row[2],
-            "updatedAt": row[3], "status": row[4], "compileWhenEditMode": bool(row[5]),
-            "paths": json.loads(row[6]), "filesSha256": row[7],
+            "updatedAt": row[3], "status": status, "storedStatus": stored_status,
+            "evidenceAvailable": evidence is not None, "compileWhenEditMode": bool(row[5]),
+            "paths": paths, "filesSha256": row[7],
             "compileOperationId": row[8], "error": row[9],
             **self._write_batch_change_fields(row[10]),
             "terminalSnapshot": evidence,
-            "terminal": (correlation or row[4] in {"failed", "canceled"}),
-            "errorsVerified": bool(evidence and evidence.get("errorsVerified")),
+            "terminal": (correlation or status in {"failed", "canceled"}),
+            "errorsVerified": correlation,
             "correlationVerified": correlation,
             "compileRequestId": row[12] or (evidence or {}).get("compileRequestId", ""),
             "lastCompileVerifiedAt": (evidence or {}).get("lastCompileVerifiedAt", 0),
             "outcome": (("passed" if evidence.get("compilePhase") == "completed" else "failed")
                         if correlation else "unknown"),
             "supersededBy": row[16],
-            "disposition": json.loads(row[17]) if row[17] else None,
+            "disposition": disposition,
         }
         result["warningDetailsAvailable"] = details_available
         result["warningsTruncated"] = bool(row[15]) if details_available else False
@@ -646,7 +666,10 @@ class StateStore:
             row = db.execute(
                 "SELECT * FROM write_batches WHERE project_path=? AND write_batch_id=?",
                 (self._project_path, write_batch_id)).fetchone()
-            if not row or row["status"] != "recovery_required" or row["disposition_json"] or row["terminal_snapshot_json"]:
+            historical = row and row["status"] in {"recovery_required", "verified"}
+            manual = (row and row["status"] == "deferred" and not row["compile_when_edit_mode"]
+                      and not row["compile_operation_id"] and not row["compile_request_id"])
+            if not row or not (historical or manual) or row["disposition_json"] or row["terminal_snapshot_json"]:
                 raise ValueError("QUEUE_DISPOSITION_UNSUPPORTED")
             root = self._db_path.parent / "queue-backups"
             root.mkdir(exist_ok=True)
@@ -729,7 +752,7 @@ class StateStore:
     def _persist_batch_evidence(self, payload: dict[str, Any]) -> None:
         batch_id = str(payload.get("writeBatchId") or "")
         batch = self.get_write_batch(batch_id)
-        if not batch or batch.get("terminalSnapshot") is not None:
+        if not batch or batch.get("storedStatus") in {"verified", "failed", "canceled"} or batch.get("evidenceAvailable") or batch.get("terminalSnapshot") is not None:
             return
         operation_id = str(payload.get("compileOperationId") or "")
         if not (
@@ -823,13 +846,10 @@ class StateStore:
 
     def _update_write_batch_terminal(self, write_batch_id: str, status: str, compile_operation_id: str) -> None:
         current = self.get_write_batch(write_batch_id)
-        if (
-            current is not None
-            and str(current.get("status") or "") == status
-            and str(current.get("compileOperationId") or "") == compile_operation_id
-        ):
+        # Terminal state and its correlated snapshot must be persisted together.
+        # A live compiler callback is not evidence of a durable batch result.
+        if current and current.get("correlationVerified") and current.get("compileOperationId") == compile_operation_id:
             return
-        self.mark_write_batch(write_batch_id, status, compile_operation_id=compile_operation_id)
 
     def _persist_execution_snapshot(self, payload: dict[str, Any]) -> bool:
         if self._db_path is None or not self._project_path:
@@ -1006,14 +1026,12 @@ class StateStore:
             and request_matches
             and compile_state.last_compile_verified_at >= compile_state.write_batch_created_at > 0
         )
+        persisted_batch = self.get_write_batch(compile_state.write_batch_id)
+        self.correlation_verified = bool(self.correlation_verified and persisted_batch
+                                         and persisted_batch.get("correlationVerified"))
         if self.correlation_verified:
             self.pending_write_batch_id = ""
             self.compile_deferred_reason = ""
-            self._update_write_batch_terminal(
-                compile_state.write_batch_id,
-                "verified" if compile_state.phase == "completed" else "failed",
-                compile_state.compile_operation_id,
-            )
         self.accepted_snapshot_count += 0 if restored else 1
         if not restored and not self._persist_execution_snapshot(payload):
             self.editor.authoritative = False

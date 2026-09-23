@@ -25,6 +25,8 @@ namespace CodingRiver.UPilot
         public string relativePath, path, kind, status = "current", beforeSha256 = "", expectedSha256 = "",
             afterSha256 = "", backupPath = "", recoveryPath = "", error = "", currentBlock = "", recommendedBlock = "";
         public bool needsUpdate, needsBackup, hasUpilotBlock;
+        public string phase = "inspection", exceptionType = "", rollbackVerification = "not_needed";
+        public int exceptionHResult;
         public List<string> reasons = new List<string>();
     }
 
@@ -236,6 +238,7 @@ namespace CodingRiver.UPilot
                         var stateWritten = false;
                         try
                         {
+                            item.phase = "candidate_build";
                             if (item.kind == "rule") File.WriteAllBytes(stage, candidate);
                             else
                             {
@@ -247,11 +250,13 @@ namespace CodingRiver.UPilot
                                 }
                             }
                             VerifyIntegrationCandidate(stage, item, skillMetadata);
+                            item.phase = "backup";
                             testCheckpoint?.Invoke("beforeBackup", item.path);
                             if (item.needsBackup)
                                 item.backupPath = BackupIntegrationTargetAt(projectRoot, item.path, trigger,
                                     string.Join(",", item.reasons), report);
                             testCheckpoint?.Invoke("beforeCommit", item.path);
+                            item.phase = "move_commit";
                             ValidateIntegrationPath(projectRoot, item.path);
                             ValidateIntegrationTree(item.path);
                             if (ExactIntegrationHash(item.path) != guardHash)
@@ -264,6 +269,7 @@ namespace CodingRiver.UPilot
                                 committed = true;
                             }
                             testCheckpoint?.Invoke("afterCommit", item.path);
+                            item.phase = "verification";
                             VerifyIntegrationCandidate(item.path, item, skillMetadata);
                             if (nextRecord != null)
                             {
@@ -280,10 +286,12 @@ namespace CodingRiver.UPilot
                             }
                             item.afterSha256 = item.expectedSha256;
                             item.status = item.needsBackup ? "backed_up_and_synced" : "synced";
+                            item.phase = "complete";
                             report.changed = true;
                         }
                         catch
                         {
+                            item.phase = "rollback";
                             if (committed)
                             {
                                 ValidateIntegrationPath(projectRoot, item.path);
@@ -297,6 +305,10 @@ namespace CodingRiver.UPilot
                                 else File.WriteAllBytes(statePath, oldState);
                             }
                             records = JsonUtility.FromJson<IntegrationRecords>(oldRecordsJson);
+                            item.rollbackVerification = ExactIntegrationHash(item.path) == guardHash &&
+                                (oldState == null ? !File.Exists(statePath) :
+                                    File.Exists(statePath) && File.ReadAllBytes(statePath).SequenceEqual(oldState))
+                                ? "verified" : "failed";
                             // Keep recovery material if recovery itself throws.
                             throw;
                         }
@@ -314,6 +326,8 @@ namespace CodingRiver.UPilot
                     catch (Exception ex)
                     {
                         item.status = "failed"; item.error = ex.Message; report.ok = false;
+                        item.exceptionType = ex.GetType().FullName;
+                        item.exceptionHResult = ex.HResult;
                     }
                 }
                 report.status = !report.ok ? "partial_failure" : report.changed ? "synced" :

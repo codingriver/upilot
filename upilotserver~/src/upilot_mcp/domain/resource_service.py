@@ -135,6 +135,8 @@ class ResourceDomainService:
             reason = "none"
         elif str(batch.get("status") or "") == "recovery_required":
             reason = "recovery_required"
+        elif str(batch.get("status") or "") == "deferred" and batch.get("compileWhenEditMode") is False:
+            reason = "manual_action_required"
         elif execution.get("unityConnected") is False:
             reason = "disconnected"
         elif phase in {"domain_reload", "verifying"}:
@@ -157,6 +159,7 @@ class ResourceDomainService:
             "stale": "Wait for the same authorized batch to receive a fresh authoritative Editor snapshot.",
             "recovery_required": "Observe the original compile identity; do not trigger a replacement compile for this batch.",
             "compile_in_progress": "Continue observing the current compile; do not submit a second compile.",
+            "manual_action_required": "No automatic compile is authorized; continue the existing manual sync/compile workflow or explicitly release this exact batch.",
         }
         return {
             "waitingReason": reason,
@@ -382,16 +385,20 @@ class ResourceDomainService:
                 continue
             if stored and stored.get("terminal") and stored.get("correlationVerified"):
                 continue
-            self.server.state.mark_write_batch(batch_id, "syncing")
-            self.server.state.mark_write_batch(batch_id, "compiling")
-            result = await self.safe_compile_and_wait(
-                timeout_s=600,
-                poll_interval_s=1.0,
-                prefer_events=True,
-                post_compile_delay_s=1.0,
-                write_batch_id=batch_id,
-                write_batch_created_at=int(batch["writeBatchCreatedAt"]),
-            )
+            if batch_id in getattr(self, "_write_batch_safe_waits", ()):
+                continue
+            self._write_batch_active_id = batch_id
+            try:
+                result = await self.safe_compile_and_wait(
+                    timeout_s=600,
+                    poll_interval_s=1.0,
+                    prefer_events=True,
+                    post_compile_delay_s=1.0,
+                    write_batch_id=batch_id,
+                    write_batch_created_at=int(batch["writeBatchCreatedAt"]),
+                )
+            finally:
+                self._write_batch_active_id = ""
             compile_operation_id = str(self.server.state.compile.compile_operation_id or "")
             result_data = result.data or {}
             phase = str(result_data.get("phase") or result_data.get("status") or "").lower()

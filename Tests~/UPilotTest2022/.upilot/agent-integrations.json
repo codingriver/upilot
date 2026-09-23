@@ -3,40 +3,40 @@
     "rules": [
         {
             "relativePath": "AGENTS.md",
-            "normalizedManagedSha256": "d767a0e7e6dd53b261a603b6f989272df50646742a1cd9a9d4c4877e38f3113e",
-            "templateSha256": "324cd25727ee587cf495f656762ccd961530991071a9e246af8611d8d04143fd",
-            "templateVersion": 42,
+            "normalizedManagedSha256": "c84c374eff98a7727901e70249c8aa818c070aebe540ef2e8c0d9b1d49ae640d",
+            "templateSha256": "16e87b21725b7429aab1cb3fd50299121b81381bca7e04c013777477d4afb06d",
+            "templateVersion": 44,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
                 "mcpUrl": "http://127.0.0.1:8017/mcp",
                 "healthUrl": "http://127.0.0.1:8017/health",
-                "upilotPackageVersion": "0.3.32",
+                "upilotPackageVersion": "0.3.35",
                 "parentAgentRulesPath": "../../AGENTS.md"
             }
         },
         {
             "relativePath": ".cursor/rules/upilot-unity-mcp.mdc",
-            "normalizedManagedSha256": "d767a0e7e6dd53b261a603b6f989272df50646742a1cd9a9d4c4877e38f3113e",
-            "templateSha256": "324cd25727ee587cf495f656762ccd961530991071a9e246af8611d8d04143fd",
-            "templateVersion": 42,
+            "normalizedManagedSha256": "c84c374eff98a7727901e70249c8aa818c070aebe540ef2e8c0d9b1d49ae640d",
+            "templateSha256": "16e87b21725b7429aab1cb3fd50299121b81381bca7e04c013777477d4afb06d",
+            "templateVersion": 44,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
                 "mcpUrl": "http://127.0.0.1:8017/mcp",
                 "healthUrl": "http://127.0.0.1:8017/health",
-                "upilotPackageVersion": "0.3.32",
+                "upilotPackageVersion": "0.3.35",
                 "parentAgentRulesPath": "../../AGENTS.md"
             }
         },
         {
             "relativePath": "CLAUDE.md",
             "normalizedManagedSha256": "af5a4067578801769bea0c6727e728ed8f35b075aaa73561a2f5849a658b6674",
-            "templateSha256": "324cd25727ee587cf495f656762ccd961530991071a9e246af8611d8d04143fd",
-            "templateVersion": 42,
+            "templateSha256": "16e87b21725b7429aab1cb3fd50299121b81381bca7e04c013777477d4afb06d",
+            "templateVersion": 44,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
                 "mcpUrl": "http://127.0.0.1:8017/mcp",
                 "healthUrl": "http://127.0.0.1:8017/health",
-                "upilotPackageVersion": "0.3.32",
+                "upilotPackageVersion": "0.3.35",
                 "parentAgentRulesPath": "../../AGENTS.md"
             }
         }

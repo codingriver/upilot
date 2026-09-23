@@ -987,8 +987,22 @@ class CompileDomainService:
             "writeBatchId": write_batch_id,
             "writeBatchCreatedAt": write_batch_created_at,
         }
+        in_flight_batches = getattr(self, "_write_batch_safe_waits", None)
+        if in_flight_batches is None:
+            in_flight_batches = self._write_batch_safe_waits = set()
+        if write_batch_id:
+            if write_batch_id in in_flight_batches:
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "The original batch is already being dispatched or observed.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe the original write batch; do not dispatch another compile."})
+            in_flight_batches.add(write_batch_id)
         try:
             console_evidence = await begin_console_evidence(self.dispatcher, self.server.state)
+        except asyncio.CancelledError:
+            if write_batch_id:
+                in_flight_batches.discard(write_batch_id)
+            raise
         except Exception as exc:
             console_evidence = {
                 "source": "unavailable", "coverage": "unavailable",
@@ -1007,6 +1021,9 @@ class CompileDomainService:
                  "errorsVerified": False, "correlationVerified": False,
                  "nextAction": "Observe the original compile or write batch; do not trigger another compile."},
             )
+        finally:
+            if write_batch_id:
+                in_flight_batches.discard(write_batch_id)
         try:
             console_evidence = await finish_console_evidence(self.dispatcher, self.server.state, console_evidence)
         except Exception as exc:
@@ -1051,7 +1068,15 @@ class CompileDomainService:
 
         workflow_started = time.monotonic()
 
-        if write_batch_id and not attach_compile_request_id:
+        if write_batch_id:
+            resume_task = getattr(self, "_write_batch_resume_task", None)
+            if (not attach_compile_request_id
+                    and getattr(self, "_write_batch_active_id", "") == write_batch_id
+                    and resume_task is not asyncio.current_task()):
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "The original batch is already being dispatched or observed.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe unity_write_batch_status for the original batch."})
             get_write_batch = getattr(self.server.state, "get_write_batch", None)
             stored_batch = get_write_batch(write_batch_id) if callable(get_write_batch) else None
             if stored_batch is None:
@@ -1080,6 +1105,24 @@ class CompileDomainService:
                 )
             write_batch_created_at = stored_created_at
             identity["writeBatchCreatedAt"] = stored_created_at
+            recorded_request = str(stored_batch.get("compileRequestId") or "")
+            recorded_operation = str(stored_batch.get("compileOperationId") or "")
+            if attach_compile_request_id and not recorded_operation:
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "The batch has no persisted compile operation to attach to.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe the original batch; do not attach another operation."})
+            if attach_compile_request_id and not recorded_request:
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "The batch has no persisted compile request to attach to.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe the original batch; do not attach another request."})
+            if attach_compile_request_id and recorded_request and attach_compile_request_id != recorded_request:
+                return fail(request_id, "COMPILE_OPERATION_MISMATCH", "The requested compile identity differs from the persisted batch.", identity)
+            if compile_operation_id and recorded_operation and compile_operation_id != recorded_operation:
+                return fail(request_id, "COMPILE_OPERATION_MISMATCH", "The requested compile identity differs from the persisted batch.", identity)
+            attach_compile_request_id = recorded_request or attach_compile_request_id
+            compile_operation_id = recorded_operation or compile_operation_id
             terminal_snapshot = stored_batch.get("terminalSnapshot")
             if stored_batch.get("correlationVerified") and isinstance(terminal_snapshot, dict):
                 outcome = str(stored_batch.get("outcome") or "unknown")
@@ -1102,6 +1145,11 @@ class CompileDomainService:
                     },
                     context=terminal_snapshot,
                 )
+            if stored_batch.get("disposition") or stored_batch.get("compileWhenEditMode") is not True:
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "This batch has no authorization for an automatic compile.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe or release the original batch through its existing manual workflow."})
             if str(stored_batch.get("status") or "") in {
                 "verified", "failed", "canceled", "recovery_required"
             }:
@@ -1119,6 +1167,11 @@ class CompileDomainService:
                         "nextAction": "Query unity_write_batch_status for the original batch; do not trigger a replacement compile.",
                     },
                 )
+            if str(stored_batch.get("status") or "") in {"syncing", "compiling"} and not attach_compile_request_id:
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "The batch has a dispatch intent but no confirmed request identity.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe the original batch; do not start another compile."})
 
         def active_session_id() -> str:
             manager = getattr(self.server, "session_manager", None)
@@ -1143,7 +1196,7 @@ class CompileDomainService:
         ):
             initial_session_id = str(compile_state.initial_session_id)
         if attach_compile_request_id:
-            if compile_operation_id and compile_state.compile_operation_id != compile_operation_id:
+            if compile_operation_id and compile_state.compile_operation_id != compile_operation_id and not write_batch_id:
                 return fail(
                     request_id,
                     "COMPILE_OPERATION_MISMATCH",
@@ -1161,6 +1214,13 @@ class CompileDomainService:
                 },
             )
         elif observed_active_compile:
+            if write_batch_id and (compile_state.write_batch_id != write_batch_id
+                                   or not compile_state.compile_request_id
+                                   or compile_state.write_batch_created_at < write_batch_created_at):
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            "An active compile is not proven to cover this batch.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe the active compile and original batch; do not substitute its result."})
             attached_to_existing = True
             compile_r = ok(
                 request_id,
@@ -1172,7 +1232,16 @@ class CompileDomainService:
             )
         else:
             state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
+            if not state_r.ok:
+                return state_r
             if state_r.ok and state_r.data and bool(state_r.data.get("isCompiling", False)):
+                if write_batch_id and (self.server.state.compile.write_batch_id != write_batch_id
+                                       or not self.server.state.compile.compile_request_id
+                                       or not self.server.state.compile.compile_operation_id
+                                       or self.server.state.compile.write_batch_created_at < write_batch_created_at):
+                    return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                                "A concurrent compile has no verified batch identity.",
+                                {**identity, "dispatchAttempted": False})
                 attached_to_existing = True
                 compile_r = ok(
                     request_id,
@@ -1199,6 +1268,15 @@ class CompileDomainService:
                 if not compile_r.ok and compile_r.error and compile_r.error.code == "EDITOR_BUSY":
                     verify_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
                     if verify_r.ok and verify_r.data and bool(verify_r.data.get("isCompiling", False)):
+                        current = self.server.state.compile
+                        if write_batch_id and (current.write_batch_id != write_batch_id
+                                               or not current.compile_request_id
+                                               or not current.compile_operation_id
+                                               or current.write_batch_created_at < write_batch_created_at):
+                            return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                                        "A concurrent compile has no verified batch identity.",
+                                        {**identity, "dispatchAttempted": False,
+                                         "nextAction": "Observe the original batch and active compile; do not substitute its result."})
                         attached_to_existing = True
                         compile_r = ok(
                             request_id,
@@ -1228,10 +1306,29 @@ class CompileDomainService:
         # Keep the attached identity before waiting; another batch can become current.
         # Step 2: Wait for compile idle
         wait_r = await self.compile_wait(
-            timeout_s=timeout_s,
+            timeout_s=max(0.1, timeout_s - (time.monotonic() - workflow_started)),
             poll_interval_s=poll_interval_s,
             prefer_events=prefer_events,
         )
+        if write_batch_id:
+            persisted_batch = self.server.state.get_write_batch(write_batch_id)
+            snapshot = persisted_batch.get("terminalSnapshot") if persisted_batch else None
+            if (persisted_batch and persisted_batch.get("correlationVerified")
+                    and isinstance(snapshot, dict)
+                    and persisted_batch.get("compileRequestId") == compile_request_id
+                    and persisted_batch.get("compileOperationId") == expected_compile_operation_id):
+                outcome = persisted_batch["outcome"]
+                return ok(request_id, {**snapshot,
+                    "status": "success" if outcome == "passed" else "failed",
+                    "phase": snapshot["compilePhase"], "terminal": True,
+                    "errorsVerified": True, "correlationVerified": True,
+                    "compileRequestId": compile_request_id,
+                    "compileOperationId": expected_compile_operation_id,
+                    "writeBatchId": write_batch_id,
+                    "writeBatchCreatedAt": write_batch_created_at,
+                    "errorTotal": snapshot.get("errorCount", 0),
+                    "attachedToExistingCompile": attached_to_existing,
+                    "reusedVerifiedBatch": True}, context=snapshot)
 
         # A just-finished compilation can briefly expose the pre-reload
         # hasCompileErrors value.  The safe workflow must still perform its
@@ -1273,7 +1370,7 @@ class CompileDomainService:
             else (wait_r.error.detail if wait_r.error else {})
         )
         remaining_after_wait = max(0.0, timeout_s - (time.monotonic() - workflow_started))
-        actual_delay = min(post_compile_delay_s, max(0.5, remaining_after_wait * 0.1))
+        actual_delay = min(post_compile_delay_s, remaining_after_wait * 0.1)
         if actual_delay > 0:
             await asyncio.sleep(actual_delay)
 
@@ -1297,7 +1394,9 @@ class CompileDomainService:
                 )
 
         if wait_interrupted_by_reload:
-            remaining_wait = max(0.1, timeout_s - (time.monotonic() - workflow_started))
+            remaining_wait = max(0.0, timeout_s - (time.monotonic() - workflow_started))
+            if remaining_wait <= 0:
+                return fail(request_id, "COMPILE_TIMEOUT", "Compilation observation exhausted its original deadline.", identity)
             wait_r = await self.compile_wait(
                 timeout_s=remaining_wait,
                 poll_interval_s=poll_interval_s,
@@ -1312,6 +1411,23 @@ class CompileDomainService:
             )
 
         # Step 5: Double-verify compile errors (reads from disk on Unity side)
+        persisted_batch = self.server.state.get_write_batch(write_batch_id) if write_batch_id else None
+        if persisted_batch and persisted_batch.get("correlationVerified"):
+            snapshot = persisted_batch["terminalSnapshot"]
+            if (persisted_batch.get("compileRequestId") != compile_request_id
+                    or persisted_batch.get("compileOperationId") != expected_compile_operation_id):
+                return fail(request_id, "COMPILE_OPERATION_MISMATCH",
+                            "Persisted terminal belongs to another compile identity.", identity)
+            outcome = persisted_batch["outcome"]
+            return ok(request_id, {**snapshot,
+                "status": "success" if outcome == "passed" else "failed",
+                "phase": snapshot["compilePhase"], "terminal": True, "errorsVerified": True,
+                "correlationVerified": True, "compileRequestId": compile_request_id,
+                "compileOperationId": expected_compile_operation_id,
+                "writeBatchId": write_batch_id, "writeBatchCreatedAt": write_batch_created_at,
+                "errorTotal": snapshot.get("errorCount", 0),
+                "attachedToExistingCompile": attached_to_existing,
+                "reusedVerifiedBatch": True}, context=snapshot)
         errors_r = await self.compile_errors(compile_request_id)
         if not errors_r.ok:
             return fail(
@@ -1330,6 +1446,8 @@ class CompileDomainService:
         correlation_verified = bool(
             write_batch_id
             and terminal_execution.get("writeBatchId") == write_batch_id
+            and compile_request_id
+            and terminal_execution.get("compileRequestId") == compile_request_id
             and terminal_execution.get("compileOperationId") == expected_compile_operation_id
             and expected_compile_operation_id
             and terminal_execution.get("terminal")

@@ -438,25 +438,43 @@ class WsOrchestratorServer(WsTransport):
             raise ConnectionError("Editor session changed before command dispatch")
         await websocket.send(raw)
 
+    @staticmethod
+    def _reload_query_can_replay(name: str, payload: dict[str, Any]) -> bool:
+        if name in {"resource.editorState", "test.status", "compile.errors.get"}:
+            return True
+        return name == "test.results" and bool(str(payload.get("runGuid") or "").strip())
+
     async def _resend_pending_commands(self) -> None:
-        """After domain reload, Unity lost in-flight commands — send again with same ids."""
+        """Resume only explicitly safe queries after an authenticated domain reload."""
         for cmd_id in list(self._pending.keys()):
             rec = self.state.commands.get(cmd_id)
-            if not rec:
-                logger.warning("No CommandRecord for resend cmd=%s", cmd_id[:16])
+            future = self._pending.get(cmd_id)
+            if future is None:
                 continue
-            if rec.name == "service.restart":
-                future = self._pending.pop(cmd_id, None)
-                if future is not None and not future.done():
-                    future.set_result({
-                        "id": cmd_id, "type": "error", "name": "connection_lost",
-                        "payload": {
-                            "code": "SERVICE_RESTART_RECOVERY_REQUIRED",
-                            "message": "Service maintenance is never replayed after reload; inspect its persisted identity.",
-                            "detail": {"maintenanceId": rec.payload.get("maintenanceId", ""),
-                                       "nextAction": "Query unity_mcp_status.aiServiceMaintenance."},
-                        },
-                    })
+            if future.done():
+                self._pending.pop(cmd_id, None)
+                continue
+            if rec is None or not self._reload_query_can_replay(rec.name, rec.payload):
+                self._pending.pop(cmd_id, None)
+                maintenance = rec is not None and rec.name == "service.restart"
+                error = {
+                    "code": "SERVICE_RESTART_RECOVERY_REQUIRED" if maintenance else "COMMAND_RECOVERY_REQUIRED",
+                    "message": ("Service maintenance is never replayed after reload; inspect its persisted identity."
+                                if maintenance else "Command outcome is unknown after domain reload; do not replay it."),
+                    "detail": ({"maintenanceId": rec.payload.get("maintenanceId", ""),
+                                "nextAction": "Query unity_mcp_status.aiServiceMaintenance."}
+                               if maintenance else {
+                                   "commandId": cmd_id, "commandName": rec.name if rec else "unknown",
+                                   "outcome": "unknown", "replayAttempted": False,
+                                   "nextAction": "Observe the original operation or task identity; do not retry its start.",
+                               }),
+                }
+                if rec is None:
+                    logger.warning("Missing CommandRecord during reload recovery cmd=%s", cmd_id[:16])
+                future.set_result({"id": cmd_id, "type": "error", "name": "connection_lost",
+                                   "payload": error})
+                if rec is not None:
+                    self.state.mark_failed(cmd_id, error)
                 continue
             try:
                 await self.send_command(cmd_id, rec.name, rec.payload)

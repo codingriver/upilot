@@ -74,6 +74,11 @@ namespace CodingRiver.UPilot
         public int total;
         public int failed;
         public int stuck;
+        public int activeMatchingCount;
+        public int activeOtherCount;
+        public int matchedCount;
+        public int returnedCount;
+        public int queryExcluded;
         public List<OperationPayload> operations = new();
     }
 
@@ -116,18 +121,31 @@ namespace CodingRiver.UPilot
         {
             var request = JsonUtility.FromJson<OperationListMessage>(json)?.payload ?? new OperationListRequest();
             var entries = UPilotOperationTracker.Instance.GetEntriesCopy();
+            var globalActive = entries.Count(entry => !entry.CompletedAt.HasValue);
+            var globalTotal = entries.Count;
+            var globalFailed = entries.Count(entry => entry.Phase == "failed");
+            var globalStuck = entries.Count(entry => entry.IsStuck);
+            var excluded = entries.RemoveAll(entry => string.Equals(entry.CommandId, id, StringComparison.Ordinal));
+            var active = entries.Count(entry => !entry.CompletedAt.HasValue);
             var status = (request.status ?? string.Empty).Trim();
             if (!string.IsNullOrEmpty(status))
                 entries = entries.Where(entry => string.Equals(entry.Phase, status, StringComparison.OrdinalIgnoreCase)).ToList();
 
             var limit = Math.Max(1, Math.Min(request.limit, 200));
+            var returned = entries.Skip(Math.Max(0, entries.Count - limit)).Select(ToPayload).ToList();
+            var activeMatching = entries.Count(entry => !entry.CompletedAt.HasValue);
             var payload = new OperationListPayload
             {
-                active = UPilotOperationTracker.Instance.ActiveCount,
-                total = UPilotOperationTracker.Instance.TotalCount,
-                failed = UPilotOperationTracker.Instance.FailedCount,
-                stuck = UPilotOperationTracker.Instance.StuckCount,
-                operations = entries.Skip(Math.Max(0, entries.Count - limit)).Select(ToPayload).ToList(),
+                active = globalActive,
+                total = globalTotal,
+                failed = globalFailed,
+                stuck = globalStuck,
+                activeMatchingCount = activeMatching,
+                activeOtherCount = active - activeMatching,
+                matchedCount = entries.Count,
+                returnedCount = returned.Count,
+                queryExcluded = excluded,
+                operations = returned,
             };
             await _bridge.SendResultAsync(id, "operation.list", payload, token);
         }

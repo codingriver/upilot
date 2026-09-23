@@ -1,5 +1,15 @@
 ﻿# UPilot Improvement Backlog
 
+## UPilot-20260923-P0P1P2-Reliability-Closure - 可靠性收口实施记录
+
+- 范围：P0 静态核对命令恢复白名单及原身份；P1 Server 停止候选扫描/状态 generation/总预算与 WriteBatch 原批次附着；P2 验收终态清错、摘要、只读清单与 Operation 计数、Agent/同步阶段诊断、源码变化保守归因及 Registry 正式工具名。
+- 状态：代码已实现；命令 Reload 零重放及上一轮五项行为仍待定向验证。本轮未新增或运行自动化测试、完整验收、故障注入、外部工程业务验证；无发布、服务/Unity 重启或队列处置。
+- 证据边界：磁盘变更不代表部署已加载；实际部署身份未核验时标记 unverified。C# 仅以规范工程原 WriteBatch 关联的 Unity errorsVerified 终态作为编译证据；取不到则标记编译未验证。
+- 编译证据：规范工程 `D:\upilot\Tests~\UPilotTest`，WriteBatch `wb-dd0fdbf6-08b2-47fc-8b6f-f329e0980933`，创建时间 1790159235957，compileOperationId `43ce1c93dfd540fe8560ed39f956fd17`，compileRequestId `req-768f6bec-a92e-4aed-a1d1-610033890e99`，验证时间 1790159255913；terminal=true、errorsVerified=true、correlationVerified=true、0 errors、3 warnings。C# 编译已验证，Server 新代码部署未核验，运行行为未验证。
+- 补改与编译：收紧并发 `EDITOR_BUSY` 的 WriteBatch 附着身份；持久重启记录增加停止前失败的 Bridge 恢复请求/失败诊断（请求成功不冒充恢复已确认）。后续 C# 批次 `wb-0a03d6aa-a26d-4bea-b820-bb7aac04b7da`，创建时间 1790159626348，compileOperationId `6a0c64f2d34246d9ae2bc947f95cacce`，compileRequestId `req-33e153d3-21a4-4c9e-86f3-4343ea1369ab`，验证时间 1790159642402；verified/passed、terminal=true、errorsVerified=true、correlationVerified=true。无自动化测试或运行行为验收。
+- 后续人工验证（本轮不执行）：Reload 零重放、慢进程查询/PID 复用、并发编译附着、验收恢复后的首错与产物、摘要/full 对照、清单缺失来源、Agent 同步回滚和模板来源漂移。
+- 保留后续：临时完整 C# 诊断、方法性能插桩、CSV 插入及 P3；历史已实现条目的运行验证不因本轮静态检查而标记通过。
+
 ## UPilot-20260923-QueueCleanup - 只读任务列表与历史占位处置
 
 - 问题/证据：AI 异常断开遗留 Task/Operation/WriteBatch 占位；历史批次 `wb-c522de2f-1610-4185-bb72-68d87c6fbeac` 无关联终态，不能用其它批次成功替代。
@@ -2684,3 +2694,22 @@ UPilot 通用开发：
 - 影响流程：GitHub Actions 发布打包、`check_skill_pack.py --mode source` 的严格逐字节模板校验。
 - 建议改进：为三个版本绑定的生成产物设置 Git LF checkout 属性，并在发布契约测试中验证属性；保留原有严格模板校验。后续在 Windows 真实构建中验证质量门、EXE、Release 资产及版本。
 - 状态：Implemented / v0.3.35 已验证（2026-09-23）。准备流程 run 35839141599、Windows 构建 run 35839190949 均成功；远程 Release 的 EXE、SHA256、manifest 三项资产均为 uploaded，下载的 EXE SHA256 与 manifest 和校验文件一致。
+
+## UPilot-20260923-ReliabilityFive - 命令恢复、Runner、WriteBatch、Capture 与验收持久身份
+
+- 范围/状态：2026-09-23 按五项可靠性方案完成代码实现与静态检查；以下各项均为“已实现，待定向行为验证”，没有运行测试、完整验收或外部项目验证。Server/Bridge 是否加载了本轮新实现尚未确认，不把磁盘修改等同部署生效。
+- 命令重发（P0）：原 Reload 会重发有副作用的 pending 命令，可能重复执行。`server.py` 现仅重发内部只读查询白名单，其他命令返回原 commandId 的 `COMMAND_RECOVERY_REQUIRED/outcome=unknown`，维护重启保留专用诊断。待覆盖同工程 Reload、迟到响应与零重放；不宣称 exactly-once。
+- Runner 清理（P1）：UTF 版本缺少取消或静态回调注销方法时，旧的整体反射绑定会阻断正常收尾。`UPilotTestRunnerAdapter.cs` / `UPilotTestService.cs` 独立绑定探测、取消和原 API 的回调注销；身份不明维持 unknown。待在旧版 UTF 验证自然完成、取消缺能力及回调释放。
+- WriteBatch 一致性（P1）：历史 verified 缺终态证据和手动 deferred 会导致展示/恢复判断分歧。`state_store.py`、`resource_service.py`、`queue_service.py` 统一持久关联判定，暴露 storedStatus/evidenceAvailable，将手动批次标为 manual_action_required 并仅在确认无执行时允许精确备份释放。待覆盖缺证据历史行、恢复及释放竞争；释放不改变原编译结果。
+- 空 Capture（P1；关联 `UPilot-20260921-OperationEmptyCaptureArtifact`）：零日志不生成 JSONL 会使验真超时并掩盖业务首错。`UPilotConsoleCaptureService.cs` 创建真实空文件，`task_service.py` 分开停止/产物验真并单独保存清理错误。待覆盖真实空文件、历史缺失文件和重启后原业务失败身份。
+- 验收持久身份（P1；关联 `UPilot-20260922-AcceptanceCallDeadlineRegression`）：客户端截止早于同步验收返回，调用方可能重复执行。公开 `unity_upilot_acceptance_run` 完整模式先落盘 queued Task，再在后台运行原流程；预检仍同步；报告原子写入且任务路径重新核验工程与写权限。权威 Skill 模板及说明已同步至规范工程；待覆盖客户端断连、Server 重启、runGuid 恢复及产物身份。旧 Task 启动入口继续有效。
+- 编译记录：规范 Unity 工程第一批 `wb-62562ac2-6453-4e35-a5fb-511602affb34` 的关联终态为 verified/errorsVerified=true，验证时间 `1790155377783` 晚于创建时间 `1790155364195`；随后 Runner 反射边界修补批次 `wb-196b220b-7387-43ee-95e1-8369397364c9` 也达到 verified/correlationVerified=true/errorsVerified=true/outcome=passed，编译操作 `ec1b5d8bbcf64e6aa09ff829dbc084d4`，验证时间 `1790155463241` 晚于创建时间 `1790155451454`，结构化编译错误数为 0。均未运行测试。
+
+## 2026-09-23：Server 重启进程归属全量串行扫描触发固定 8 秒超时
+- 状态：已定位失败机制，待修复；本轮仅只读诊断，未重启、停止进程或修改实现。
+- 观察：xclient2 的 release/Git v0.3.35（UPM hash afa3a300cef9ce9b404aadffcadde95ad0050ed4）在停止旧 Bridge/Server 阶段失败。Library/UPilot/server-restart.json 中 operationId=restart-b59141441ebd431fba5dd51367aaf86d，failurePhase=intent_persisted，errorCode=stop_failed，2026-09-23 17:23:02.322 至 17:23:12.040（UTC+8），oldProcessId=24496、newProcessId=0、portsReleasedAtUtcMs=0。
+- 证据：UPilotMcpServerManager.FindCurrentProjectMcpProcesses（1829 行）收集 tracked/监听端口 PID 后，继续加入所有 python/python3/py 及名称含 upilot 的进程，逐 PID 经 GetProcessCommandLineForDiagnostics（2062 行）启动 wmic（单次等待 1 秒），累计 8 秒抛异常；候选收集也计入同一时钟。StopCurrentProjectProcesses 必须等整个扫描返回才会停止已核实进程。RestartPreparedServer（1228 行）先 bridge.Stop，失败后未在此 catch 直接恢复旧 Bridge。
+- 实测：8013/8767 均由 24496 监听；父 PID=113524 为该项目 Unity；命令行入口、绝对 log-file 路径及端口均匹配，/health 报告 release/Git/0.3.35、相同实例 ed157aba6bc546f4897e029c96f7cb82。目前 connected/serverReady=true，原 Server 未退出。当前 6 个候选的 wmic 查询各约 363–557ms、netstat 44ms，未复现当时 8 秒超时；当时逐阶段/逐 PID 耗时没有持久化，无法断言是 WMI、全进程枚举或资源竞争的哪一步耗时。编译快照显示 17:22:59.149–17:23:39.409 与失败窗口重叠，仅为并发背景，不是因果证明。
+- 建议：保留精确项目/端口/创建时间归属门禁；优化串行全候选扫描（一次有界批量查询或精确目标核验与重复/遗留进程核查分开），不让已判定无关进程消耗当前项目停止预算；记录候选数、各阶段/PID 耗时、失败原因与残余预算；将进程核验放在停止 Bridge 前，或对停止 Server 前失败设计明确的旧 Bridge 恢复与状态报告。不要简单放宽授权、盲目加超时或杀全部 Python。
+- 后续验证：在仓库 canonical UPilotTest 定向覆盖多项目候选、慢/不可读命令行、识别成功后其它候选超时、PID 重用及停止前失败恢复；未经请求不在业务项目运行测试或重启。
+- 2026-09-23 修复与验收：`UPilotMcpServerManager` 将候选 PID 命令行归属查询改为一次有界 `wmic /format:list`，核验完成并留存句柄后才停止 Bridge；诊断增加核验阶段与查询/停止证据及旧记录 presence 兼容。最终代码在标准工程 `D:\upilot\Tests~\UPilotTest` 的编译批次 `wb-ae352373-bab2-4085-8d4a-a84a8614cd72` 和 Unity 2022.3 工程 `D:\upilot\Tests~\UPilotTest2022` 的编译批次 `wb-26245156-2e85-46aa-bbae-18f127364121` 均关联验证通过、编译错误 0；各按精确名称选择 `UPilotStartupDiagnosticsTests` 11 例及 `UPilotServiceMaintenanceTests` 2 例，运行 `b581e6c3-c60e-4039-aafc-743ddfbf1261`、`3ecd9bda-8b56-402a-8b3d-9567a9f91813` 均 13/13 通过并确认清理。未执行真实多进程服务重启、全量 EditMode 或 xclient2 更新/重启；后续维护窗口仍需用真实多项目候选与端口释放验证，不将模拟用例等同真实停止验证。

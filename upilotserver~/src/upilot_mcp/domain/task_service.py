@@ -19,13 +19,13 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from ..config import CONFIG, diagnose_client_configs
+from ..config import CONFIG, diagnose_client_configs, refresh_config_if_changed
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
 from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
-from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
+from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool, _normalize_proxy_arguments
 from ..test_job_context import TEST_JOB_CONTEXT, TestJobCancelledBeforeStart
 from ..operation_context import OPERATION_ID, TASK_TOOL
 from ..queue_audit import AUDIT, QUEUE_GUARD, audited, observe, safe_text
@@ -602,6 +602,18 @@ class TaskDomainService:
                         "The Unity Bridge must support agent.integrations schema v1; no file-write fallback is used.")
         if not data.get("ok"):
             return fail(request_id, "AGENT_INTEGRATIONS_FAILED", data.get("error") or data.get("status"), data)
+        session = self.server.session_manager.active
+        data["sourceIdentity"] = {
+            "authority": "unity_installed_upm",
+            "templateSource": data.get("templateSource") or "",
+            "templateSha256": data.get("templateSha256") or "",
+            "agentRulesVersion": data.get("agentRulesVersion"),
+            "skillPackVersion": data.get("skillPackVersion"),
+            "bridgeSessionId": session.session_id if session else "",
+            "bridgeIdentityVerified": bool(session and session.identity_verified),
+            "serverProcessId": os.getpid(),
+            "loadedTemplateEvidence": "unverified",
+        }
         return response
 
     async def agent_integrations_check(self) -> ToolResponse:
@@ -1928,12 +1940,13 @@ class TaskDomainService:
             except Exception as exc:
                 state["cleanupBusinessError"] = str(exc)
         capture = state.get("consoleCapture") or {}
-        if not capture.get("stopped"):
+        if not capture.get("stopped") or not capture.get("artifactsVerified"):
             try:
                 await asyncio.wait_for(self._stop_owned_operation_capture(state), timeout=5)
             except Exception as exc:
                 capture["stopError"] = str(exc)
-        capture_done = not capture.get("sessionId") or capture.get("stopped") is True
+        capture_done = not capture.get("sessionId") or (
+            capture.get("stopped") is True and capture.get("artifactsVerified") is True)
         resources_done = capture_done and not state.get("businessCleanupPending", False)
         state["cleanupTerminal"] = resources_done
         if resources_done:
@@ -1975,48 +1988,57 @@ class TaskDomainService:
         elif now_ms() >= state["cleanupDeadlineAt"]:
             if require_edit and not editor_done:
                 state["editorVerification"] = "failed"
-            state.update(status="Failed", phase="CleanupTimeout", endedAt=now_ms(),
-                         failureSignature="OperationCleanupTimeout",
-                         error="Business ended but cleanup is unverified; inspect capture and Editor state before starting another operation.")
+            state["cleanupFailureSignature"] = "OperationCleanupTimeout"
+            state["cleanupError"] = "Business ended but cleanup is unverified; inspect capture and Editor state before starting another operation."
+            business = state.get("businessResult") or {}
+            if str(business.get("status") or "").lower() in {"failed", "timeout", "cancelled", "canceled", "recoveryrequired"}:
+                state.update(business)
+            else:
+                state.update(status="Failed", phase="CleanupTimeout",
+                             failureSignature="OperationCleanupTimeout", error=state["cleanupError"])
+            state["endedAt"] = now_ms()
         state["updatedAt"] = now_ms()
 
     async def _stop_owned_operation_capture(self, state: dict) -> None:
         capture = state.get("consoleCapture") or {}
         session_id = capture.get("sessionId")
-        if not session_id or capture.get("stopped"):
+        if not session_id or (capture.get("stopped") and capture.get("artifactsVerified")):
             return
         owner_token = str(capture.get("ownerToken") or "")
-        if not owner_token:
+        if not owner_token and not capture.get("stopped"):
             state.update(status="RecoveryRequired", phase="capture_owner_token_unknown", cleanupPending=True,
                          nextAction="The operation capture ownership token is unavailable; do not stop or adopt the session automatically.")
             return
-        result = await self.console_capture_stop(session_id=session_id, owner_token=owner_token)
-        capture["stop"] = self._tool_response_summary(result)
-        if result.ok and isinstance(result.data, dict):
-            session_data = result.data.get("session") if isinstance(result.data.get("session"), dict) else result.data
-            session_data = self._redact_operation_secrets(session_data)
-            capture["session"] = session_data
-            for key in ("jsonlPath", "summaryPath", "manifestPath", "sha256", "recordCount", "droppedCount", "fileBytes"):
-                if key in session_data:
-                    capture[key] = session_data[key]
+        if not capture.get("stopped"):
+            result = await self.console_capture_stop(session_id=session_id, owner_token=owner_token)
+            capture["stop"] = self._tool_response_summary(result)
+            if result.ok and isinstance(result.data, dict):
+                session_data = result.data.get("session") if isinstance(result.data.get("session"), dict) else result.data
+                session_data = self._redact_operation_secrets(session_data)
+                capture["session"] = session_data
+                for key in ("jsonlPath", "summaryPath", "manifestPath", "sha256", "recordCount", "droppedCount", "fileBytes"):
+                    if key in session_data:
+                        capture[key] = session_data[key]
+            stop_confirmed = bool(
+                result.ok and (capture.get("session") or {}).get("sessionId") == session_id
+                and (capture.get("session") or {}).get("active") is False
+                and (capture.get("session") or {}).get("finishedAtUtcMs")
+                and (capture.get("session") or {}).get("sha256")
+                and (capture.get("session") or {}).get("summaryPath")
+                and (capture.get("session") or {}).get("fileBytes") is not None
+            )
+            capture["stopped"] = stop_confirmed
+        else:
+            stop_confirmed = True
         session_data = capture.get("session") or {}
-        capture["stopped"] = False
         capture["artifactsVerified"] = False
-        stop_confirmed = bool(
-            result.ok and session_data.get("sessionId") == session_id
-            and session_data.get("active") is False
-            and session_data.get("finishedAtUtcMs")
-            and session_data.get("sha256") and session_data.get("summaryPath")
-            and session_data.get("fileBytes") is not None
-        )
         if stop_confirmed:
             try:
                 root = self._project_root().resolve()
                 await asyncio.to_thread(_verify_capture_artifacts, root, session_data)
                 capture["artifactsVerified"] = True
-                capture["stopped"] = True
+                capture.pop("stopError", None)
             except (OSError, ValueError) as exc:
-                capture["stopped"] = False
                 capture["artifactsVerified"] = False
                 capture["stopError"] = str(exc)
 
@@ -2114,6 +2136,8 @@ class TaskDomainService:
             "editorEndedAt": state.get("editorEndedAt", 0),
             "cleanupDeadlineAt": state.get("cleanupDeadlineAt", 0),
             "businessResult": state.get("businessResult", {}),
+            "cleanupError": state.get("cleanupError"),
+            "cleanupFailureSignature": state.get("cleanupFailureSignature"),
             "playModeTransition": state.get("playModeTransition", {}),
             "cleanupEditorEvidence": state.get("cleanupEditorEvidence", {}),
             "startedAt": state.get("startedAt"),
@@ -2469,14 +2493,47 @@ class TaskDomainService:
         self._recover_test_jobs()
         descriptor = REGISTRY.resolve(tool_name)
         is_test_job = descriptor is not None and descriptor.facade_method in {"test_run", "upilot_acceptance_run"}
+        is_acceptance = is_test_job and descriptor.facade_method == "upilot_acceptance_run"
         if is_test_job:
             if retry_count != 0:
                 return fail(request_id, "TEST_TASK_RETRY_UNSAFE", "Tests and acceptance require retryCount=0; an uncertain start must never be replayed.")
-            if not 1 <= timeout_s <= 7200:
+            if isinstance(timeout_s, bool) or not isinstance(timeout_s, (float, int)) or not math.isfinite(timeout_s) or not 1 <= timeout_s <= 7200:
                 return fail(request_id, "TEST_TASK_TIMEOUT_INVALID", "Use timeoutS=1..7200.")
             store = self.server.state
             if store._db_path is None or not store._project_path:
                 return fail(request_id, "TEST_TASK_PROJECT_UNKNOWN", "Connect the intended Unity project before starting a persistent test task.")
+            if is_acceptance:
+                refresh_config_if_changed()
+                if not CONFIG.write_access_approved:
+                    return fail(request_id, "WRITE_ACCESS_NOT_APPROVED", "UPilot package acceptance requires approved project write access.")
+                if not isinstance(tool_args, dict):
+                    return fail(request_id, "INVALID_TOOL_ARGUMENTS", "Acceptance toolArgs must be an object.")
+                normalized, argument_error = _normalize_proxy_arguments(self.upilot_acceptance_run, tool_args, tool_name)
+                if argument_error:
+                    return fail(request_id, "INVALID_TOOL_ARGUMENTS", "Invalid acceptance arguments.", argument_error)
+                try:
+                    self._test_selector_payload(
+                        normalized.get("test_filter"), normalized.get("test_names"),
+                        normalized.get("fixtures"), normalized.get("assemblies"), normalized.get("categories"),
+                        normalized.get("match_mode", "union"), normalized.get("require_all_selectors_match", True),
+                    )
+                    self._expected_selection_identity(
+                        normalized.get("expected_selection_domain", ""),
+                        normalized.get("expected_selection_snapshot_id", ""),
+                    )
+                except ValueError as exc:
+                    return fail(request_id, "TEST_SELECTORS_INVALID", str(exc))
+                budget = normalized.get("timeout_sec", 900)
+                if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not math.isfinite(budget) or not 1 <= budget <= 7200:
+                    return fail(request_id, "TEST_TASK_TIMEOUT_INVALID", "Use timeoutSec=1..7200.")
+                if normalized.get("preflight_only"):
+                    return fail(request_id, "TEST_TASK_PREFLIGHT_ONLY", "Run preflightOnly directly; it does not create a Task.")
+                root = Path(__file__).resolve().parents[4]
+                allowed = {(root / "Tests~" / name).resolve() for name in ("UPilotTest", "UPilotTest2022")}
+                if Path(store._project_path).resolve() not in allowed:
+                    return fail(request_id, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project is not a supported repository acceptance project.")
+                timeout_s = min(timeout_s, budget)
+                tool_args = normalized
             if any(
                 value.get("durable") and value.get("projectPath") == store._project_path
                 and value.get("status") in {"queued", "running", "cancel_requested", "RecoveryRequired"}
@@ -2599,13 +2656,25 @@ class TaskDomainService:
     def _public_task_state(state: dict, detail_level: str = "summary") -> dict:
         if not state.get("durable") or detail_level == "full":
             return state.copy()
-        result = {key: value for key, value in state.items() if key not in {"acceptanceReport", "toolArgs", "result", "error", "cancelResponse"}}
+        result = {key: value for key, value in state.items() if key not in {"acceptanceReport", "toolArgs", "result", "error", "cancelResponse", "recoveryDiagnostics"}}
         report = state.get("acceptanceReport") or {}
         if report:
             result["result"] = {"result": {key: report[key] for key in (
-                "acceptancePassed", "runGuid", "cleanupVerified", "testIdentityVerified", "sourceIdentity",
-                "sourceUnchanged", "failureCode", "failureMessage", "artifact",
+                "acceptancePassed", "runGuid", "cleanupVerified", "testIdentityVerified",
+                "sourceUnchanged", "failureCode", "failureMessage", "artifact", "deadlineAt",
             ) if key in report}}
+            summary = result["result"]["result"]
+            for key in ("failureMessage",):
+                if key in summary:
+                    summary[key] = str(summary[key])[:500]
+            for key in ("artifact",):
+                if isinstance(summary.get(key), dict):
+                    summary[key] = {field: summary[key][field] for field in ("path", "bytes", "sha256") if field in summary[key]}
+            summary["selectors"] = {key: (len(report[key]) if isinstance(report.get(key), list) else bool(report.get(key)))
+                                    for key in ("testFilter", "testNames", "fixtures", "assemblies", "categories")}
+            compile_step = report.get("steps", {}).get("compile", {})
+            compile_data = compile_step.get("data", {}) if isinstance(compile_step, dict) else {}
+            summary["compile"] = {key: compile_data[key] for key in ("compileOperationId", "compileRequestId", "writeBatchId", "errorsVerified") if key in compile_data}
             test_data = report.get("steps", {}).get("testStatus", {}).get("data", {})
         else:
             test_data = (state.get("result") or {}).get("result") or {}
@@ -2613,6 +2682,12 @@ class TaskDomainService:
         error = state.get("error")
         if error:
             result["error"] = {"code": error.get("code"), "message": error.get("message", "")[:2000]}
+        diagnostics = state.get("recoveryDiagnostics") or []
+        if diagnostics:
+            result["recoveryDiagnostics"] = [{"code": str(item.get("code") or "")[:120],
+                                               "message": str(item.get("message") or "")[:500]}
+                                              for item in diagnostics[-8:]]
+            result["recoveryDiagnosticsTruncated"] = len(diagnostics) > 8
         return result
 
     def _resume_test_observer(self, state: dict) -> None:
@@ -2670,7 +2745,10 @@ class TaskDomainService:
                 else:
                     result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
             else:
-                result = await self._dispatch_tool(state["toolName"], state["toolArgs"])
+                if state["toolName"] == "unity_upilot_acceptance_run":
+                    result = await self._execute_upilot_acceptance_run(**state["toolArgs"])
+                else:
+                    result = await self._dispatch_tool(state["toolName"], state["toolArgs"])
                 if state.get("runGuid") and not state.get("acceptanceReport"):
                     result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
 
@@ -2701,6 +2779,14 @@ class TaskDomainService:
                 state.update(status="RecoveryRequired", terminal=False)
             if result.error:
                 state["error"] = {"code": result.error.code, "message": result.error.message, "detail": result.error.detail}
+            elif state["status"] == "completed" and report.get("acceptancePassed"):
+                old_error = state.get("error") or {}
+                if old_error:
+                    history = state.setdefault("recoveryDiagnostics", [])
+                    history.append({"code": str(old_error.get("code") or "")[:120], "message": str(old_error.get("message") or "")[:500]})
+                    state["recoveryDiagnostics"] = history[-8:]
+                state.pop("error", None)
+                state.pop("nextAction", None)
             if state["status"] == "RecoveryRequired":
                 state["nextAction"] = "Inspect the original runGuid and persisted TestRuns evidence; do not replay start."
         except TestJobCancelledBeforeStart:

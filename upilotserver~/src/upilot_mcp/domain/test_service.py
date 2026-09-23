@@ -615,7 +615,33 @@ class TestDomainService:
         expected_selection_snapshot_id: str = "",
         preflight_only: bool = False,
     ) -> ToolResponse:
-        """Run package acceptance only in explicitly supported repository test projects."""
+        """Return a durable task identity before starting package acceptance."""
+        args = dict(test_mode=test_mode, test_filter=test_filter, timeout_sec=timeout_sec,
+                    stop_active_captures=stop_active_captures, require_tests=require_tests,
+                    write_artifact=write_artifact, test_names=test_names, fixtures=fixtures,
+                    assemblies=assemblies, categories=categories, match_mode=match_mode,
+                    require_all_selectors_match=require_all_selectors_match,
+                    expected_selection_domain=expected_selection_domain,
+                    expected_selection_snapshot_id=expected_selection_snapshot_id,
+                    preflight_only=preflight_only)
+        if preflight_only:
+            return await self._execute_upilot_acceptance_run(**args)
+        return await self.task_start(
+            task_name="UPilot package acceptance", tool_name="unity_upilot_acceptance_run",
+            tool_args=args, timeout_s=timeout_sec, retry_count=0,
+        )
+
+    async def _execute_upilot_acceptance_run(
+        self,
+        test_mode: str = "EditMode", test_filter: str | None = None, timeout_sec: float = 900,
+        stop_active_captures: bool = True, require_tests: bool = True, write_artifact: bool = True,
+        test_names: list[str] | None = None, fixtures: list[str] | None = None,
+        assemblies: list[str] | None = None, categories: list[str] | None = None,
+        match_mode: str = "union", require_all_selectors_match: bool = True,
+        expected_selection_domain: str = "", expected_selection_snapshot_id: str = "",
+        preflight_only: bool = False,
+    ) -> ToolResponse:
+        """Execute the original acceptance flow under its persisted Task context."""
         request_id = new_id("req")
         started_at = now_ms()
         repository_root = Path(__file__).resolve().parents[4]
@@ -646,10 +672,10 @@ class TestDomainService:
             "writeArtifact": write_artifact,
             "requireTests": require_tests,
             "preflightOnly": preflight_only,
-            "deadlineAt": started_at + int(max(10, timeout_sec) * 1000),
+            "deadlineAt": started_at + int(timeout_sec * 1000),
+            "taskId": context[0]["taskId"] if (context := TEST_JOB_CONTEXT.get()) else "",
             "sourceIdentity": source_identity(expected_project.parents[1]),
         }
-        context = TEST_JOB_CONTEXT.get()
         if context:
             report["deadlineAt"] = min(report["deadlineAt"], context[0]["deadlineAt"])
 
@@ -698,6 +724,13 @@ class TestDomainService:
         if project_key not in accepted_projects:
             report["actualProject"] = str(actual_project)
             return await finish(False, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project is not a supported repository acceptance project.")
+        if context and os.path.normcase(str(Path(context[0]["projectPath"]).resolve())) != project_key:
+            return await finish(False, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project changed since the Task was queued.")
+        if not preflight_only:
+            from ..config import CONFIG, refresh_config_if_changed
+            refresh_config_if_changed()
+            if not CONFIG.write_access_approved:
+                return await finish(False, "WRITE_ACCESS_NOT_APPROVED", "Project write access was revoked before acceptance execution.")
         expected_project = actual_project
         report["expectedProject"] = str(expected_project)
         report["acceptanceProject"] = accepted_projects[project_key]
@@ -777,7 +810,7 @@ class TestDomainService:
                 latestImportInputMtime=latest_import_input_mtime,
                 blockingReasons=blocking_reasons,
                 runnerStartAttempted=False,
-                artifactWritten=bool(write_artifact),
+                artifactWritten=False,
             )
             return await finish(False, "UPILOT_ACCEPTANCE_PREFLIGHT_ONLY", "Preflight completed without starting compilation, capture cleanup, or TestRunner.")
 
@@ -908,22 +941,48 @@ class TestDomainService:
 
     @staticmethod
     def _finish_acceptance_report(report: dict, passed: bool, code: str = "", message: str = "") -> ToolResponse:
+        if passed:
+            if report.get("failureCode") or report.get("failureMessage"):
+                history = report.setdefault("recoveryDiagnostics", [])
+                history.append({"code": str(report.get("failureCode") or "")[:120],
+                                "message": str(report.get("failureMessage") or "")[:500]})
+                report["recoveryDiagnostics"] = history[-8:]
+            report.pop("failureCode", None)
+            report.pop("failureMessage", None)
+            report.pop("nextAction", None)
         report["acceptancePassed"] = bool(passed)
         report["endedAt"] = now_ms()
         report["elapsedMs"] = report["endedAt"] - report["startedAt"]
         if code:
             report["failureCode"], report["failureMessage"] = code, message
         if report.get("writeArtifact"):
-            report["artifactWritten"] = True
-            artifact_dir = Path(report["expectedProject"]) / "Log" / "UPilotAcceptance" / (str(report["startedAt"]) + "_" + report["requestId"])
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            artifact_path = artifact_dir / "summary.json"
-            report.pop("artifact", None)
-            content = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-            temporary_path = artifact_path.with_suffix(".json.tmp")
-            temporary_path.write_bytes(content)
-            os.replace(temporary_path, artifact_path)
-            report["artifact"] = {"path": str(artifact_path), "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            temporary_path = None
+            try:
+                artifact_dir = Path(report["expectedProject"]) / "Log" / "UPilotAcceptance" / (str(report["startedAt"]) + "_" + report["requestId"])
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                artifact_path = artifact_dir / "summary.json"
+                report.pop("artifact", None)
+                report["artifactWritten"] = True
+                content = json.dumps(report, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+                temporary_path = artifact_path.with_suffix(".json.tmp")
+                temporary_path.write_bytes(content)
+                os.replace(temporary_path, artifact_path)
+                report["artifact"] = {"path": str(artifact_path), "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            except (OSError, ValueError, TypeError) as exc:
+                report["artifactWritten"] = False
+                report.pop("artifact", None)
+                report["artifactError"] = str(exc)
+                if not code:
+                    code, message = "UPILOT_ACCEPTANCE_ARTIFACT_FAILED", "Acceptance summary could not be written."
+                    report["failureCode"], report["failureMessage"] = code, message
+                passed = False
+                report["acceptancePassed"] = False
+            finally:
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         else:
             report["artifactWritten"] = False
         checkpoint("finalized", acceptanceReport=report)
@@ -1013,6 +1072,13 @@ class TestDomainService:
             report.get("importInputsBefore") if isinstance(report.get("importInputsBefore"), dict) else {},
             report["importInputsAfter"],
         )
+        # Change detection does not establish who wrote the changed files.
+        for changed in report["importInputChanges"]["changed"]:
+            changed["attribution"] = "unknown/concurrent-unattributed"
+        report["sourceChanges"] = {
+            "changed": report["sourceIdentityAfter"] != report["sourceIdentity"],
+            "attribution": "unknown/concurrent-unattributed" if report["sourceIdentityAfter"] != report["sourceIdentity"] else "none",
+        }
         report["importInputsUnchanged"] = report["importInputChanges"]["changeCount"] == 0
         report["sourceUnchanged"] = (
             report["sourceIdentityAfter"] == report["sourceIdentity"]

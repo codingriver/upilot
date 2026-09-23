@@ -41,6 +41,9 @@ _TOOL_STATUS = Path("Documentation~") / "ToolStatus.md"
 _RULES_SOURCE = Path("upilotserver~") / "src" / "upilot_mcp" / "domain" / "task_service.py"
 _TEMPLATE_MANIFEST = Path("skills") / "upilot-unity-mcp" / "template-manifest.json"
 _REGISTRY_SOURCE = Path("upilotserver~") / "src" / "upilot_mcp" / "tool_registry.py"
+_FORMAL_NON_UNITY_TOOLS = frozenset({
+    "csharp_eval", "csharp_object_dump", "csharp_validate", "execution_session", "reflection_emit_type",
+})
 
 
 def _sha256(data: bytes) -> str:
@@ -357,7 +360,7 @@ def documentation_checks(
             invalid = [
                 name for name in names
                 if not isinstance(name, str)
-                or not (re.fullmatch(r"unity_[a-z0-9_]+", name) or name in {"csharp_eval", "execution_session", "reflection_emit_type"})
+                or not (re.fullmatch(r"unity_[a-z0-9_]+", name) or name in _FORMAL_NON_UNITY_TOOLS)
             ]
             generated = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             registry_version = _current_registry_version(repo)
@@ -374,7 +377,8 @@ def documentation_checks(
                         "invalid": invalid,
                         "proxyHandlerGaps": inventory.get("proxyHandlerGaps", []),
                     },
-                    next_action="Update the current Registry status documentation to the generated Registry version, then rerun the documentation check.",
+                    next_action=("Review the formal tool names in check_release_quality.py and tool_registry.py; "
+                                 "update ToolStatus.md only when its documented Registry version differs."),
                 ))
             else:
                 checks.append(_documentation_result(

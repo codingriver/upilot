@@ -650,7 +650,21 @@ namespace CodingRiver.UPilot
                 startedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             };
 
-            WriteManifest(manifest);
+            if (File.Exists(manifest.manifestPath) || File.Exists(manifest.summaryPath))
+                return Result(false, "StartCapture", "日志目录已包含采集会话产物", null);
+            // A session with no Console records still owns a verifiable JSONL artifact.
+            try
+            {
+                using (new FileStream(manifest.jsonlPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) { }
+                try { WriteManifest(manifest); }
+                catch
+                {
+                    File.Delete(manifest.jsonlPath);
+                    throw;
+                }
+            }
+            catch (IOException ex) { return Result(false, "StartCapture", ex.Message, null); }
+            catch (UnauthorizedAccessException ex) { return Result(false, "StartCapture", ex.Message, null); }
             lock (CaptureLock)
             {
                 s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
