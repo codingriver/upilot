@@ -408,8 +408,9 @@ def test_documentation_checks_reports_missing_and_malformed_artifacts_without_cr
 def test_docs_only_mode_skips_contract_commands_and_docs_strict_escalates_unknown(tmp_path, monkeypatch):
     module = gate()
     root = _write_wp12_repository(tmp_path / "repo")
+    (root / "Documentation~" / "P2-Development-Plan-20260915.md").unlink()
     monkeypatch.setattr(module, "REPO", root)
-    monkeypatch.setattr(module, "tool_inventory", _inventory)
+    monkeypatch.setattr(module, "tool_inventory", lambda: {"proxyHandlerGaps": [], "tools": [{"name": "legacy tool"}]})
 
     output = tmp_path / "report"
     assert module.main(["--docs-only", "--output", str(output)]) == 0
@@ -417,6 +418,13 @@ def test_docs_only_mode_skips_contract_commands_and_docs_strict_escalates_unknow
     assert report["testScope"] == []
     assert report["steps"] == []
     assert report["documentation"]["passed"] is True
+    assert {item["checkId"] for item in report["documentation"]["checks"]} == {
+        "docs.archive", "docs.evidence", "docs.install",
+    }
+    assert module.main([
+        "--docs-only", "--enable-docs-registry", "--enable-docs-todo-id",
+        "--output", str(tmp_path / "optional"),
+    ]) == 1
     assert module.main(["--docs-only", "--docs-strict", "--output", str(tmp_path / "strict")]) == 1
 
 

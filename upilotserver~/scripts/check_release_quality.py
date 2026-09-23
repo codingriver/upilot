@@ -331,6 +331,8 @@ def documentation_checks(
     *,
     installed_manifests: list[Path] | None = None,
     inventory_factory=None,
+    include_registry: bool = True,
+    include_todo_id: bool = True,
 ) -> dict:
     """Run bounded, read-only WP-12 checks over repository-owned documentation.
 
@@ -347,69 +349,71 @@ def documentation_checks(
     before = _snapshot_paths(repo, manifests)
     checks = []
 
-    try:
-        inventory = inventory_factory() if inventory_factory else tool_inventory()
-        tools = inventory.get("tools", [])
-        names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
-        invalid = [
-            name for name in names
-            if not isinstance(name, str)
-            or not (re.fullmatch(r"unity_[a-z0-9_]+", name) or name in {"csharp_eval", "execution_session", "reflection_emit_type"})
-        ]
-        generated = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        registry_version = _current_registry_version(repo)
-        tool_status_path = repo / _TOOL_STATUS
-        tool_status_text = tool_status_path.read_text(encoding="utf-8")
-        documented_versions = re.findall(r"(?i)Registry\s+v(\d+)", tool_status_text)
-        current_status_version = documented_versions[0] if documented_versions else ""
-        if invalid or len(names) != len(set(names)) or inventory.get("proxyHandlerGaps") or not registry_version or current_status_version != registry_version:
+    if include_registry:
+        try:
+            inventory = inventory_factory() if inventory_factory else tool_inventory()
+            tools = inventory.get("tools", [])
+            names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
+            invalid = [
+                name for name in names
+                if not isinstance(name, str)
+                or not (re.fullmatch(r"unity_[a-z0-9_]+", name) or name in {"csharp_eval", "execution_session", "reflection_emit_type"})
+            ]
+            generated = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            registry_version = _current_registry_version(repo)
+            tool_status_path = repo / _TOOL_STATUS
+            tool_status_text = tool_status_path.read_text(encoding="utf-8")
+            documented_versions = re.findall(r"(?i)Registry\s+v(\d+)", tool_status_text)
+            current_status_version = documented_versions[0] if documented_versions else ""
+            if invalid or len(names) != len(set(names)) or inventory.get("proxyHandlerGaps") or not registry_version or current_status_version != registry_version:
+                checks.append(_documentation_result(
+                    "docs.registry", "failed", severity="error", source_path=_TOOL_STATUS.as_posix(),
+                    expected={"registryVersion": registry_version, "uniqueRegisteredPublicTools": True, "proxyHandlers": "complete"},
+                    actual={
+                        "documentedRegistryVersion": current_status_version or None,
+                        "invalid": invalid,
+                        "proxyHandlerGaps": inventory.get("proxyHandlerGaps", []),
+                    },
+                    next_action="Update the current Registry status documentation to the generated Registry version, then rerun the documentation check.",
+                ))
+            else:
+                checks.append(_documentation_result(
+                    "docs.registry", "passed", source_path=_REGISTRY_SOURCE.as_posix(), expected="deterministic Registry snapshot",
+                    actual={"registeredCount": len(names), "snapshotSha256": _sha256(generated)}, generatedDiffCount=0,
+                ))
+        except Exception as exc:
             checks.append(_documentation_result(
-                "docs.registry", "failed", severity="error", source_path=_TOOL_STATUS.as_posix(),
-                expected={"registryVersion": registry_version, "uniqueRegisteredPublicTools": True, "proxyHandlers": "complete"},
-                actual={
-                    "documentedRegistryVersion": current_status_version or None,
-                    "invalid": invalid,
-                    "proxyHandlerGaps": inventory.get("proxyHandlerGaps", []),
-                },
-                next_action="Update the current Registry status documentation to the generated Registry version, then rerun the documentation check.",
+                "docs.registry", "failed", severity="error", source_path=_REGISTRY_SOURCE.as_posix(),
+                expected="readable Registry snapshot", actual=type(exc).__name__, next_action=str(exc),
             ))
-        else:
-            checks.append(_documentation_result(
-                "docs.registry", "passed", source_path=_REGISTRY_SOURCE.as_posix(), expected="deterministic Registry snapshot",
-                actual={"registeredCount": len(names), "snapshotSha256": _sha256(generated)}, generatedDiffCount=0,
-            ))
-    except Exception as exc:
-        checks.append(_documentation_result(
-            "docs.registry", "failed", severity="error", source_path=_REGISTRY_SOURCE.as_posix(),
-            expected="readable Registry snapshot", actual=type(exc).__name__, next_action=str(exc),
-        ))
 
-    todo_path = repo / _ROOT_TODO
-    plan_path = repo / _P2_PLAN
-    try:
-        todo_text = todo_path.read_text(encoding="utf-8")
-        plan_text = plan_path.read_text(encoding="utf-8")
-        declared = _root_authoritative_ids(todo_text)
-        duplicates = sorted({item for item in declared if declared.count(item) > 1})
-        link_errors = _markdown_link_errors(repo, plan_path, plan_text)
-        authority = "当前开发与验收状态仍以 [根 TODO]" in plan_text
-        if duplicates or link_errors or not authority:
+    if include_todo_id:
+        todo_path = repo / _ROOT_TODO
+        plan_path = repo / _P2_PLAN
+        try:
+            todo_text = todo_path.read_text(encoding="utf-8")
+            plan_text = plan_path.read_text(encoding="utf-8")
+            declared = _root_authoritative_ids(todo_text)
+            duplicates = sorted({item for item in declared if declared.count(item) > 1})
+            link_errors = _markdown_link_errors(repo, plan_path, plan_text)
+            authority = "当前开发与验收状态仍以 [根 TODO]" in plan_text
+            if duplicates or link_errors or not authority:
+                checks.append(_documentation_result(
+                    "docs.todo-id", "failed", severity="error", source_path=_ROOT_TODO,
+                    expected="root TODO is sole current-status authority with resolvable local links",
+                    actual={"duplicateStableIds": duplicates, "linkErrors": link_errors, "authorityStatement": authority},
+                    next_action="Keep current status in TODO_UPilot.mcd and repair the reported stable ID or local link.",
+                ))
+            else:
+                checks.append(_documentation_result(
+                    "docs.todo-id", "passed", source_path=_ROOT_TODO, expected="unique declared TODO IDs",
+                    actual={"declaredStableIdCount": len(declared), "planAnchors": len(re.findall(r'<a id="P2-WP-\d{2}"></a>', plan_text))},
+                ))
+        except OSError as exc:
             checks.append(_documentation_result(
                 "docs.todo-id", "failed", severity="error", source_path=_ROOT_TODO,
-                expected="root TODO is sole current-status authority with resolvable local links",
-                actual={"duplicateStableIds": duplicates, "linkErrors": link_errors, "authorityStatement": authority},
-                next_action="Keep current status in TODO_UPilot.mcd and repair the reported stable ID or local link.",
+                expected="readable root TODO and P2 plan", actual=type(exc).__name__, next_action=str(exc),
             ))
-        else:
-            checks.append(_documentation_result(
-                "docs.todo-id", "passed", source_path=_ROOT_TODO, expected="unique declared TODO IDs",
-                actual={"declaredStableIdCount": len(declared), "planAnchors": len(re.findall(r'<a id="P2-WP-\d{2}"></a>', plan_text))},
-            ))
-    except OSError as exc:
-        checks.append(_documentation_result(
-            "docs.todo-id", "failed", severity="error", source_path=_ROOT_TODO,
-            expected="readable root TODO and P2 plan", actual=type(exc).__name__, next_action=str(exc),
-        ))
 
     archive_path = repo / _ARCHIVE
     try:
@@ -706,6 +710,10 @@ def main(argv=None) -> int:
     documentation_mode = parser.add_mutually_exclusive_group()
     documentation_mode.add_argument("--docs-only", action="store_true", help="Run only read-only documentation checks.")
     documentation_mode.add_argument("--skip-docs", action="store_true", help="Skip read-only documentation checks.")
+    parser.add_argument("--enable-docs-registry", action="store_true",
+                        help="Enable the optional tool Registry documentation check.")
+    parser.add_argument("--enable-docs-todo-id", action="store_true",
+                        help="Enable the optional TODO ID and development-plan link check.")
     parser.add_argument("--installed-manifest", action="append", type=Path, default=[],
                         help="Explicit read-only installed Skill/rules manifest; may be provided more than once.")
     parser.add_argument("--docs-strict", action="store_true",
@@ -749,6 +757,8 @@ def main(argv=None) -> int:
             REPO,
             installed_manifests=[path.resolve() for path in args.installed_manifest],
             inventory_factory=get_inventory,
+            include_registry=args.enable_docs_registry,
+            include_todo_id=args.enable_docs_todo_id,
         )
         documentation["checked"] = True
         documentation["strict"] = args.docs_strict
