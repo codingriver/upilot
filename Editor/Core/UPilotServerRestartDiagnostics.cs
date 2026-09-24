@@ -5,17 +5,48 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using UnityEngine;
+using UnityEditor;
 
 namespace CodingRiver.UPilot
 {
     [Serializable]
+    internal sealed class UPilotRestartGate
+    {
+        public string key;
+        public string state;
+        public long startedAtUtcMs;
+        public long endedAtUtcMs;
+        public string evidenceCode;
+        public string evidence;
+    }
+
+    [Serializable]
+    internal sealed class UPilotRestartHistory
+    {
+        public UPilotServerRestartRecord[] records = Array.Empty<UPilotServerRestartRecord>();
+    }
+
+    [Serializable]
     internal sealed class UPilotServerRestartRecord
     {
-        public int schemaVersion = 1;
+        public int schemaVersion = 2;
         public string operationId;
         public string projectPath;
+        public string bridgeVersion;
+        public string bridgeChannel;
+        public string bridgeInstallSource;
+        public bool bridgeIsMain;
+        public string packageRoot;
+        public string expectedEntry;
+        public string serverVersion;
+        public string serverChannel;
+        public string serverInstallSource;
+        public string actualEntry;
+        public string actualModule;
+        public int healthProcessId;
         public string status = "running";
         public string phase = "intent_persisted";
         public int oldProcessId;
@@ -30,6 +61,30 @@ namespace CodingRiver.UPilot
         public long newProcessCreatedAtTicks;
         public long healthVerifiedAtUtcMs;
         public long bridgeVerifiedAtUtcMs;
+        public long deploymentVerifiedAtUtcMs;
+        public long readOnlyVerifiedAtUtcMs;
+        public long statusProbeStartedAtUtcMs;
+        public long statusProbeEndedAtUtcMs;
+        public int statusProbeCount;
+        public string statusProbeOutcome;
+        public string statusProbeFailureStage;
+        public string statusProbeCancellationReason;
+        public string statusProbeError;
+        public long lastBridgeConnectedAtUtcMs;
+        public long lastBridgeAuthenticatedAtUtcMs;
+        public long lastBridgeDisconnectedAtUtcMs;
+        public string lastBridgeCloseCode;
+        public string lastBridgeCloseReason;
+        public long lastBridgeOversizeAtUtcMs;
+        public string lastBridgeOversizeSource;
+        public int lastBridgeOversizeActualBytes;
+        public int lastBridgeOversizeLimitBytes;
+        public int bridgeOversizeCount;
+        public long recoveredAtUtcMs;
+        public int recoveryProcessId;
+        public string recoveryBridgeSessionId;
+        public bool recoveryReadOnlyVerified;
+        public UPilotRestartGate[] gateDiagnostics = Array.Empty<UPilotRestartGate>();
         public long endedAtUtcMs;
         public long updatedAtUtcMs;
         public bool healthVerified;
@@ -80,6 +135,39 @@ namespace CodingRiver.UPilot
             Directory.GetParent(Application.dataPath)?.FullName ?? ".",
             "Library", "UPilot", "server-restart.json");
 
+        internal static string HistoryPath => Path.Combine(
+            Directory.GetParent(Application.dataPath)?.FullName ?? ".",
+            "Library", "UPilot", "server-restart-history.json");
+
+        internal static UPilotServerRestartRecord[] ReadHistory(out string warning) => ReadHistoryAt(HistoryPath, out warning);
+
+        internal static UPilotServerRestartRecord[] ReadHistoryAt(string path, out string warning)
+        {
+            warning = "";
+            if (!File.Exists(path)) return Array.Empty<UPilotServerRestartRecord>();
+            try
+            {
+                var json = File.ReadAllText(path, Encoding.UTF8);
+                if (!json.Contains("\"records\"")) throw new InvalidDataException("Restart history has no records field.");
+                var history = JsonUtility.FromJson<UPilotRestartHistory>(json);
+                if (history?.records == null || history.records.Any(r => r == null || string.IsNullOrEmpty(r.operationId)))
+                    throw new InvalidDataException("Invalid restart history records.");
+                return history.records;
+            }
+            catch (Exception ex)
+            {
+                warning = "历史诊断读取失败，原文件已保留：" + ex.Message;
+                try
+                {
+                    var backup = path + ".corrupt";
+                    if (File.Exists(path) && !File.Exists(backup)) File.Copy(path, backup);
+                    if (File.Exists(backup)) warning += "；损坏文件备份：" + backup;
+                }
+                catch (Exception backupError) { warning += "；备份失败：" + backupError.Message; }
+                return Array.Empty<UPilotServerRestartRecord>();
+            }
+        }
+
         internal static UPilotServerRestartRecord Begin(
             string projectPath,
             int oldProcessId,
@@ -91,6 +179,12 @@ namespace CodingRiver.UPilot
             {
                 operationId = "restart-" + Guid.NewGuid().ToString("N"),
                 projectPath = NormalizePath(projectPath),
+                bridgeVersion = UPilotDeploymentDiagnostics.Version,
+                bridgeChannel = UPilotDeploymentDiagnostics.Channel,
+                bridgeInstallSource = UPilotDeploymentDiagnostics.InstallSource,
+                bridgeIsMain = UPilotDeploymentDiagnostics.IsMain,
+                packageRoot = UPilotDeploymentDiagnostics.PackageRoot,
+                expectedEntry = UPilotDeploymentDiagnostics.PythonEntry,
                 oldProcessId = Math.Max(0, oldProcessId),
                 oldBridgeSessionId = oldBridgeSessionId ?? "",
                 requestedAtUtcMs = now,
@@ -112,6 +206,129 @@ namespace CodingRiver.UPilot
             return record;
         }
 
+        internal static void MarkGate(string operationId, string key, string state, string evidenceCode = "", string evidence = "")
+        {
+            Update(operationId, record => MarkGateCore(record, key, state, evidenceCode, evidence));
+        }
+
+        private static void MarkGateCore(UPilotServerRestartRecord record, string key, string state,
+            string evidenceCode = "", string evidence = "")
+        {
+            var gates = record.gateDiagnostics ?? Array.Empty<UPilotRestartGate>();
+            var gate = gates.FirstOrDefault(g => g.key == key);
+            if (gate == null)
+            {
+                gate = new UPilotRestartGate { key = key, startedAtUtcMs = UtcNowMs() };
+                record.gateDiagnostics = gates.Concat(new[] { gate }).OrderBy(g => Array.IndexOf(GateKeys, g.key)).ToArray();
+            }
+            gate.state = state;
+            if (state == "running") gate.endedAtUtcMs = 0;
+            if (state == "passed" || state == "failed" || state == "canceled") gate.endedAtUtcMs = UtcNowMs();
+            gate.evidenceCode = Bound(evidenceCode);
+            gate.evidence = Bound(evidence);
+        }
+
+        internal static void BeginStatusProbe(string operationId)
+        {
+            Update(operationId, record =>
+            {
+                record.statusProbeCount++;
+                record.statusProbeStartedAtUtcMs = UtcNowMs();
+                record.statusProbeEndedAtUtcMs = 0;
+                record.statusProbeOutcome = "running";
+                MarkGateCore(record, "health", "running");
+            });
+        }
+
+        internal static void EndStatusProbe(string operationId, string outcome, string stage, string cancellation, string error)
+        {
+            Update(operationId, record =>
+            {
+                record.statusProbeEndedAtUtcMs = UtcNowMs();
+                record.statusProbeOutcome = outcome ?? "unknown";
+                record.statusProbeFailureStage = Bound(stage);
+                record.statusProbeCancellationReason = Bound(cancellation);
+                record.statusProbeError = Bound(error);
+                if (outcome == "success") MarkGateCore(record, "health", "passed", "health_ok");
+                else if (outcome == "process_identity_mismatch" || outcome == "project_identity_mismatch")
+                {
+                    MarkGateCore(record, "health", "passed", "health_ok");
+                    MarkGateCore(record, "identity", "failed", outcome, error);
+                }
+                else if (outcome == "lifecycle_canceled") MarkGateCore(record, "health", "canceled", outcome, error);
+                else MarkGateCore(record, "health", "failed", outcome, error);
+            });
+        }
+
+        internal static void RecordBridgeSnapshot(string operationId, BridgeStatus status)
+        {
+            Update(operationId, record =>
+            {
+                record.lastBridgeConnectedAtUtcMs = status.LastConnectedAtUtcMs;
+                record.lastBridgeAuthenticatedAtUtcMs = status.LastAuthenticatedAtUtcMs;
+                record.lastBridgeDisconnectedAtUtcMs = status.LastDisconnectedAtUtcMs;
+                if (status.LastDisconnectedAtUtcMs >= record.requestedAtUtcMs &&
+                    !string.IsNullOrEmpty(status.LastCloseCode))
+                {
+                    record.lastBridgeCloseCode = Bound(status.LastCloseCode);
+                    record.lastBridgeCloseReason = Bound(status.LastCloseReason);
+                }
+                if (status.LastOversizeAtUtcMs >= record.requestedAtUtcMs &&
+                    status.LastOversizeAtUtcMs > record.lastBridgeOversizeAtUtcMs)
+                {
+                    record.lastBridgeOversizeAtUtcMs = status.LastOversizeAtUtcMs;
+                    record.lastBridgeOversizeSource = Bound(status.LastOversizeSource);
+                    record.lastBridgeOversizeActualBytes = status.LastOversizeActualBytes;
+                    record.lastBridgeOversizeLimitBytes = status.LastOversizeLimitBytes;
+                }
+                record.bridgeOversizeCount = Math.Max(record.bridgeOversizeCount, status.OversizeCount);
+            });
+        }
+
+        internal static void RecordServerBridgeDiagnostics(string operationId, UPilotServerHealth health)
+        {
+            if (health?.bridge_diagnostics == null) return;
+            Update(operationId, record =>
+            {
+                var bridge = health.bridge_diagnostics;
+                record.lastBridgeConnectedAtUtcMs = Math.Max(record.lastBridgeConnectedAtUtcMs, bridge.connected_at_ms);
+                record.lastBridgeAuthenticatedAtUtcMs = Math.Max(record.lastBridgeAuthenticatedAtUtcMs, bridge.authenticated_at_ms);
+                record.lastBridgeDisconnectedAtUtcMs = Math.Max(record.lastBridgeDisconnectedAtUtcMs, bridge.disconnected_at_ms);
+                if (bridge.disconnected_at_ms >= record.requestedAtUtcMs &&
+                    !string.IsNullOrEmpty(bridge.last_close_code))
+                {
+                    record.lastBridgeCloseCode = Bound(bridge.last_close_code);
+                    record.lastBridgeCloseReason = Bound(bridge.last_close_reason);
+                }
+                if (bridge.oversize_at_ms >= record.requestedAtUtcMs &&
+                    bridge.oversize_at_ms > record.lastBridgeOversizeAtUtcMs)
+                {
+                    record.lastBridgeOversizeAtUtcMs = bridge.oversize_at_ms;
+                    record.lastBridgeOversizeSource = Bound(bridge.oversize_source);
+                    record.lastBridgeOversizeActualBytes = bridge.oversize_actual_bytes;
+                    record.lastBridgeOversizeLimitBytes = bridge.oversize_limit_bytes;
+                }
+                record.bridgeOversizeCount = Math.Max(record.bridgeOversizeCount, bridge.oversize_count);
+                if (bridge.last_close_code == "1009" && bridge.oversize_at_ms >= record.requestedAtUtcMs)
+                    record.lastBridgeCloseCode = "1009";
+            });
+        }
+
+        internal static void RecordDeploymentIdentity(string operationId, UPilotServerHealth health)
+        {
+            if (health == null) return;
+            Update(operationId, record =>
+            {
+                record.serverVersion = Bound(health.server_version);
+                record.serverChannel = Bound(health.build_channel);
+                record.serverInstallSource = Bound(health.server_install_source);
+                record.actualEntry = Bound(health.server_entry_path);
+                record.actualModule = Bound(health.server_module_root);
+                record.healthProcessId = health.server_pid;
+                record.healthProjectPath = NormalizePath(health.configured_project_path);
+            });
+        }
+
         internal static void RecordOldProcessId(string operationId, int processId)
         {
             Update(operationId, record => record.oldProcessId = processId);
@@ -129,6 +346,7 @@ namespace CodingRiver.UPilot
             Update(operationId, record =>
             {
                 record.hasIdentityProbe = true;
+
                 record.identityProbeElapsedMs = elapsedMs;
                 record.candidateCollectionMs = candidateCollectionMs;
                 record.portQueryMs = portQueryMs;
@@ -138,6 +356,9 @@ namespace CodingRiver.UPilot
                 record.hasCommandLineQueryExitCode = queryExitCode.HasValue;
                 record.commandLineQueryExitCode = queryExitCode.GetValueOrDefault();
                 record.commandLineQueryFailure = Bound(queryFailure);
+                if (queryFailure == "timeout")
+                    MarkGateCore(record, "old_identity", "failed", "process_identity_timeout",
+                        $"候选 {candidateCount}，确认 {verifiedCount}；归属识别 {UPilotRestartDiagnosticView.Duration(1, elapsedMs + 1)}；未停止未核实的进程");
             });
         }
 
@@ -149,12 +370,18 @@ namespace CodingRiver.UPilot
                 if (bridgeAttempted == true) record.bridgeStopAttempted = true;
                 if (bridgeConfirmed.HasValue)
                 {
+                    MarkGateCore(record, "bridge_stop", bridgeConfirmed.Value ? "passed" : "failed");
                     record.hasBridgeStopConfirmation = true;
                     record.bridgeStopConfirmed = bridgeConfirmed.Value;
                 }
                 if (serverAttempted == true) record.serverStopAttempted = true;
                 if (exitConfirmed.HasValue)
                 {
+                    MarkGateCore(record, "old_exit", exitConfirmed.Value ? "passed" : "failed",
+                        exitConfirmed.Value && record.oldProcessId <= 0 && !record.serverStopAttempted
+                            ? "no_old_process" : exitConfirmed.Value ? "exit_verified" : "exit_unconfirmed",
+                        exitConfirmed.Value && record.oldProcessId <= 0 && !record.serverStopAttempted
+                            ? "未发现旧进程，无需停止" : exitConfirmed.Value ? "已确认旧 Server 退出" : "旧 Server 退出未确认");
                     record.hasOldServerExitConfirmation = true;
                     record.oldServerExitConfirmed = exitConfirmed.Value;
                 }
@@ -177,6 +404,7 @@ namespace CodingRiver.UPilot
             {
                 record.phase = "ports_released";
                 record.portsReleasedAtUtcMs = UtcNowMs();
+                MarkGateCore(record, "ports", "passed");
             });
         }
 
@@ -189,6 +417,7 @@ namespace CodingRiver.UPilot
                 record.newProcessId = processId;
                 record.newProcessStartedAtUtcMs = UtcNowMs();
                 record.newProcessCreatedAtTicks = createdAtTicks;
+                MarkGateCore(record, "new_process", "passed", "process_started", $"PID {processId}");
             });
         }
 
@@ -202,8 +431,12 @@ namespace CodingRiver.UPilot
                 if (record.newProcessId != processId) return;
                 record.healthVerified = true;
                 record.projectIdentityVerified = SamePath(record.projectPath, healthProjectPath);
-                record.healthProjectPath = NormalizePath(healthProjectPath);
+                if (string.IsNullOrWhiteSpace(record.healthProjectPath))
+                    record.healthProjectPath = NormalizePath(healthProjectPath);
                 record.healthVerifiedAtUtcMs = UtcNowMs();
+                MarkGateCore(record, "health", "passed");
+                MarkGateCore(record, "identity", record.projectIdentityVerified ? "passed" : "failed",
+                    record.projectIdentityVerified ? "project_matched" : "project_mismatch", record.healthProjectPath);
                 record.phase = record.bridgeVerified ? "verified" : "health_verified";
                 TryComplete(record);
             });
@@ -219,6 +452,7 @@ namespace CodingRiver.UPilot
                 record.bridgeVerified = true;
                 record.newBridgeSessionId = bridgeSessionId;
                 record.bridgeVerifiedAtUtcMs = UtcNowMs();
+                MarkGateCore(record, "bridge_session", "passed", "session_replaced", bridgeSessionId);
                 record.phase = record.healthVerified && record.projectIdentityVerified
                     ? "verified"
                     : "bridge_verified";
@@ -264,6 +498,7 @@ namespace CodingRiver.UPilot
         {
             Update(operationId, record =>
             {
+                MarkGateCore(record, FirstUnpassedGate(record), "canceled", "lifecycle_canceled", reason);
                 record.status = "canceled";
                 record.phase = "canceled";
                 record.errorCode = "restart_canceled";
@@ -304,8 +539,21 @@ namespace CodingRiver.UPilot
             Update(operationId, record =>
             {
                 record.deploymentVerified = true;
-                record.readOnlyVerified = true;
+                record.deploymentVerifiedAtUtcMs = UtcNowMs();
+                MarkGateCore(record, "deployment", "passed");
                 record.phase = "deployment_verified";
+                TryComplete(record);
+            });
+        }
+
+        internal static void RecordReadOnlyVerified(string operationId)
+        {
+            Update(operationId, record =>
+            {
+                record.readOnlyVerified = true;
+                record.readOnlyVerifiedAtUtcMs = UtcNowMs();
+                MarkGateCore(record, "readonly", "passed");
+                record.phase = "read_only_verified";
                 TryComplete(record);
             });
         }
@@ -372,6 +620,11 @@ namespace CodingRiver.UPilot
             string diagnosticSource,
             string nextAction)
         {
+            var failedGate = FirstUnpassedGate(record);
+            // A terminal verification deadline must not erase a more precise probe/round-trip failure.
+            if (!(record.gateDiagnostics ?? Array.Empty<UPilotRestartGate>())
+                .Any(g => g.key == failedGate && g.state == "failed" && !string.IsNullOrEmpty(g.evidenceCode)))
+                MarkGateCore(record, failedGate, "failed", errorCode, error);
             record.status = "failed";
             record.failurePhase = record.phase;
             record.phase = "failed";
@@ -383,6 +636,40 @@ namespace CodingRiver.UPilot
             record.endedAtUtcMs = UtcNowMs();
         }
 
+        internal static readonly string[] GateKeys = { "old_identity", "bridge_stop", "old_exit", "ports",
+            "new_process", "health", "identity", "bridge_session", "deployment", "readonly" };
+
+        internal static string FirstUnpassedGate(UPilotServerRestartRecord record) =>
+            GateKeys.FirstOrDefault(key => !(record.gateDiagnostics ?? Array.Empty<UPilotRestartGate>())
+                .Any(g => g.key == key && g.state == "passed")) ?? "readonly";
+
+        internal static void ObserveRecovery(string operationId, int processId, string sessionId,
+            string projectPath, bool healthVerified, bool deploymentVerified, bool readOnlyVerified)
+        {
+            lock (Sync)
+            {
+                EnsureLoadedLocked();
+                var r = s_record;
+                if (r == null || r.operationId != operationId ||
+                    !IsEligibleRecovery(r, processId, sessionId, projectPath,
+                        healthVerified, deploymentVerified, readOnlyVerified)) return;
+                r.recoveredAtUtcMs = UtcNowMs();
+                r.recoveryProcessId = processId;
+                r.recoveryBridgeSessionId = sessionId;
+                r.recoveryReadOnlyVerified = true;
+                r.updatedAtUtcMs = r.recoveredAtUtcMs;
+                PersistLocked();
+            }
+        }
+
+        internal static bool IsEligibleRecovery(UPilotServerRestartRecord r, int processId,
+            string sessionId, string projectPath, bool healthVerified, bool deploymentVerified, bool readOnlyVerified) =>
+            r != null && r.status == "failed" && r.recoveredAtUtcMs == 0 &&
+            (r.errorCode == "restart_verification_timeout" || r.errorCode == "SERVICE_RESTART_TIMEOUT") &&
+            r.newProcessId > 0 && r.newProcessId == processId &&
+            !string.IsNullOrEmpty(r.newBridgeSessionId) && r.newBridgeSessionId == sessionId &&
+            SamePath(r.projectPath, projectPath) && healthVerified && deploymentVerified && readOnlyVerified;
+
         private static void EnsureLoadedLocked()
         {
             if (s_record != null) return;
@@ -393,10 +680,44 @@ namespace CodingRiver.UPilot
         {
             if (s_record == null) return;
             if (!TryWriteRecord(s_record, RecordPath, out var error))
+            {
                 Logger.LogWarning("SERVER", "MCP Server restart record could not be persisted: " + error);
+                return;
+            }
+            if (s_record.status == "running") return;
+            if (!TryArchive(s_record, HistoryPath, out error))
+                Logger.LogWarning("SERVER", "MCP Server restart history could not be persisted: " + error);
+        }
+
+        internal static bool TryArchive(UPilotServerRestartRecord record, string path, out string error)
+        {
+            var history = ReadHistoryAt(path, out error);
+            if (!string.IsNullOrEmpty(error))
+            {
+                // Preserve the original and a stable copy; never silently replace corrupt evidence.
+                try
+                {
+                    var backup = path + ".corrupt";
+                    if (File.Exists(path) && !File.Exists(backup)) File.Copy(path, backup);
+                    error += File.Exists(backup) ? "；备份：" + backup : "";
+                }
+                catch (Exception ex) { error += "；备份失败：" + ex.Message; }
+                return false;
+            }
+            var updated = new UPilotRestartHistory
+            {
+                records = history.Where(r => r.operationId != record.operationId).Append(record)
+                    .OrderByDescending(r => r.requestedAtUtcMs).Take(10).ToArray()
+            };
+            return TryWriteJson(JsonUtility.ToJson(updated, true), path, out error);
         }
 
         private static bool TryWriteRecord(UPilotServerRestartRecord record, string path, out string error)
+        {
+            return TryWriteJson(JsonUtility.ToJson(record, true), path, out error);
+        }
+
+        private static bool TryWriteJson(string json, string path, out string error)
         {
             var temporary = "";
             try
@@ -404,7 +725,7 @@ namespace CodingRiver.UPilot
                 var directory = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
                 temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                File.WriteAllText(temporary, JsonUtility.ToJson(record, true), Utf8NoBom);
+                File.WriteAllText(temporary, json, Utf8NoBom);
                 if (File.Exists(path)) File.Replace(temporary, path, null);
                 else File.Move(temporary, path);
                 error = "";
@@ -435,7 +756,9 @@ namespace CodingRiver.UPilot
             try
             {
                 if (!File.Exists(path)) return false;
-                record = JsonUtility.FromJson<UPilotServerRestartRecord>(File.ReadAllText(path, Encoding.UTF8));
+                var json = File.ReadAllText(path, Encoding.UTF8);
+                record = JsonUtility.FromJson<UPilotServerRestartRecord>(json);
+                if (record != null && !json.Contains("\"schemaVersion\"")) record.schemaVersion = 1;
                 if (record == null || string.IsNullOrWhiteSpace(record.operationId))
                 {
                     record = null;
@@ -527,6 +850,11 @@ namespace CodingRiver.UPilot
         internal static void RecordDeploymentVerifiedForTests(UPilotServerRestartRecord record)
         {
             record.deploymentVerified = true;
+            TryComplete(record);
+        }
+
+        internal static void RecordReadOnlyVerifiedForTests(UPilotServerRestartRecord record)
+        {
             record.readOnlyVerified = true;
             TryComplete(record);
         }
@@ -543,4 +871,283 @@ namespace CodingRiver.UPilot
 
         internal static string BoundForTests(string value) => Bound(value);
     }
+    // One formatter is shared by the main window, advanced diagnostics, and failure dialog.
+    internal static class UPilotRestartDiagnosticView
+    {
+        private static readonly string[] Labels = { "旧进程归属确认", "旧 Bridge 停止确认", "旧 Server 退出确认",
+            "端口释放确认", "新 Server 进程启动", "/health 成功响应", "PID 与项目身份验证",
+            "新 Bridge 会话验证", "部署版本、渠道、入口验证", "实际只读往返验证" };
+
+        internal static string Time(long utcMs, bool copied = false, TimeZoneInfo zone = null)
+        {
+            if (utcMs <= 0) return "未知";
+            zone ??= TimeZoneInfo.Local;
+            var time = TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeMilliseconds(utcMs), zone);
+            return time.ToString(copied ? "yyyy-MM-dd HH:mm:ss zzz" : "yyyy-MM-dd HH:mm:ss",
+                System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        internal static string Duration(long start, long end)
+        {
+            if (start <= 0 || end < start) return "未知";
+            var seconds = (end - start) / 1000d;
+            if (seconds < 1) return "<1 秒";
+            return seconds.ToString(seconds == Math.Floor(seconds) ? "0" : "0.0",
+                System.Globalization.CultureInfo.InvariantCulture) + " 秒";
+        }
+
+        internal static string ZoneLabel(TimeZoneInfo zone = null)
+        {
+            var offset = (zone ?? TimeZoneInfo.Local).GetUtcOffset(DateTime.Now);
+            return "时间：本机时区 UTC" + (offset < TimeSpan.Zero ? "-" : "+") +
+                offset.Duration().ToString(@"hh\:mm");
+        }
+
+        internal static string Result(UPilotServerRestartRecord record) => record == null ? "无重启记录" :
+            record.recoveredAtUtcMs > 0 ? "失败（随后恢复）" : record.status switch
+            {
+                "succeeded" => "成功", "failed" => "失败", "canceled" => "已取消", _ => "进行中"
+            };
+
+        // Schema 1 has no gate timeline. Adapt only explicit positive observations.
+        internal static UPilotRestartGate LegacyGate(UPilotServerRestartRecord r, string key)
+        {
+            if (r == null || r.schemaVersion >= 2) return null;
+            bool observed;
+            long at = 0;
+            switch (key)
+            {
+                case "bridge_stop": observed = r.hasBridgeStopConfirmation && r.bridgeStopConfirmed; break;
+                case "old_exit": observed = r.hasOldServerExitConfirmation && r.oldServerExitConfirmed; break;
+                case "ports": observed = r.portsReleasedAtUtcMs > 0; at = r.portsReleasedAtUtcMs; break;
+                case "new_process": observed = r.newProcessId > 0 && r.newProcessStartedAtUtcMs > 0;
+                    at = r.newProcessStartedAtUtcMs; break;
+                case "health": observed = r.healthVerified; at = r.healthVerifiedAtUtcMs; break;
+                case "identity": observed = r.projectIdentityVerified; break;
+                case "bridge_session": observed = r.bridgeVerified; at = r.bridgeVerifiedAtUtcMs; break;
+                default: observed = false; break;
+            }
+            return observed ? new UPilotRestartGate { key = key, state = "passed", endedAtUtcMs = at,
+                evidenceCode = "legacy_explicit", evidence = "旧版记录的明确通过证据，开始/耗时未知" } : null;
+        }
+
+        private static UPilotRestartGate DisplayGate(UPilotServerRestartRecord r, string key) =>
+            Array.Find(r.gateDiagnostics ?? Array.Empty<UPilotRestartGate>(), g => g.key == key) ?? LegacyGate(r, key);
+
+        internal static string GateState(UPilotRestartGate gate) => gate?.state switch
+        {
+            "passed" => "✓ 通过", "failed" => "✗ 失败", "running" => "… 检查中",
+            "canceled" => "— 取消", "pending" => "· 未开始", _ => "? 未知"
+        };
+
+        internal static string FirstPending(UPilotServerRestartRecord record) =>
+            record == null || record.schemaVersion < 2 ? "未知" :
+                record.status == "succeeded" ? "无" :
+                Label(UPilotServerRestartDiagnostics.FirstUnpassedGate(record));
+
+        internal static string LastPassed(UPilotServerRestartRecord record)
+        {
+            if (record == null) return "未知";
+            for (var i = UPilotServerRestartDiagnostics.GateKeys.Length - 1; i >= 0; i--)
+                if (DisplayGate(record, UPilotServerRestartDiagnostics.GateKeys[i])?.state == "passed")
+                    return Labels[i];
+            return "无";
+        }
+
+        internal static string Label(string key)
+        {
+            var index = Array.IndexOf(UPilotServerRestartDiagnostics.GateKeys, key);
+            return index >= 0 ? Labels[index] : "未知";
+        }
+
+        internal static string FailureCategory(UPilotServerRestartRecord r)
+        {
+            if (r == null || r.status == "succeeded") return "无";
+            var failed = (r.gateDiagnostics ?? Array.Empty<UPilotRestartGate>())
+                .FirstOrDefault(g => g.key == "readonly" && g.state == "failed" &&
+                    (g.evidenceCode == "readonly_timeout" || g.evidenceCode == "readonly_mismatch"));
+            if (failed != null) return failed.evidenceCode;
+            var bridgeFailed = (r.gateDiagnostics ?? Array.Empty<UPilotRestartGate>())
+                .FirstOrDefault(g => g.key == "bridge_session" && g.state == "failed" &&
+                    (g.evidenceCode == "bridge_unavailable" || g.evidenceCode == "bridge_session_mismatch"));
+            if (bridgeFailed != null) return bridgeFailed.evidenceCode;
+            if ((string.IsNullOrEmpty(r.errorCode) || r.errorCode == "restart_verification_timeout" ||
+                r.errorCode == "SERVICE_RESTART_TIMEOUT") &&
+                r.lastBridgeCloseCode == "1009") return "websocket_close_1009";
+            if ((string.IsNullOrEmpty(r.errorCode) || r.errorCode == "restart_verification_timeout" ||
+                r.errorCode == "SERVICE_RESTART_TIMEOUT") &&
+                r.lastBridgeOversizeActualBytes > 0) return "payload_oversize";
+            if (!string.IsNullOrEmpty(r.statusProbeOutcome) &&
+                r.statusProbeOutcome != "success" && r.statusProbeOutcome != "running")
+                return r.statusProbeOutcome;
+            return string.IsNullOrEmpty(r.errorCode) ? "unknown" : r.errorCode;
+        }
+
+        internal static string NextAction(UPilotServerRestartRecord r)
+        {
+            if (r == null) return "检查当前 Server 状态。";
+            if (r.recoveredAtUtcMs > 0) return "服务随后恢复；原中断任务不会自动重放。";
+            var category = FailureCategory(r);
+            if (r.status == "succeeded") return "无需操作。";
+            if (category == "lifecycle_canceled") return "等待 Editor 生命周期操作结束，然后重新检查状态。";
+            if (r.errorCode == "process_identity_timeout") return "核对候选 PID 和命令行，不要强制结束未核实进程。";
+            if (r.errorCode == "deployment_mismatch") return "检查版本、渠道、入口与模块来源。";
+            if (category == "project_identity_mismatch" || r.errorCode == "project_identity_mismatch") return "连接正确的项目端点，核对期望与实际项目完整路径。";
+            if (category == "bridge_unavailable" || category == "bridge_session_mismatch")
+                return "检查 Bridge 认证、会话 ID 和断开诊断；已连接不等于完成只读验证。";
+            if (r.errorCode == "port_release_timeout") return "核对端口和已确认归属的 PID；不要结束未核实进程。";
+            if (category == "websocket_close_1009" || category == "payload_oversize")
+                return "Bridge 消息超限；缩小结果或修复分片，不要盲目重复重启。";
+            var firstFailed = (r.gateDiagnostics ?? Array.Empty<UPilotRestartGate>())
+                .FirstOrDefault(g => g.key == "readonly" && g.state == "failed");
+            if (category == "readonly_timeout" || category == "readonly_mismatch" ||
+                firstFailed?.evidenceCode == "readonly_timeout" || firstFailed?.evidenceCode == "readonly_mismatch")
+                return "Bridge 会话已连接，但真实只读往返未通过；检查 Bridge 与 Server 日志。";
+            if (category == "request_timeout" || r.statusProbeOutcome == "request_timeout") return "检查第一个未通过验证门及 Server 日志。";
+            return string.IsNullOrWhiteSpace(r.nextAction) ? "检查 Server 日志与第一个未通过的验证门。" : r.nextAction;
+        }
+
+        private static string BytesOrUnknown(int bytes) => bytes > 0
+            ? bytes.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " 字节" : "未知";
+
+        internal static string Summary(UPilotServerRestartRecord r, bool copied = false)
+        {
+            if (r == null) return "无服务重启记录";
+            var sb = new StringBuilder();
+            sb.AppendLine(ZoneLabel());
+            sb.AppendLine("结果：" + Result(r) + "  阶段：" + (r.failurePhase ?? r.phase));
+            sb.AppendLine("操作：" + r.operationId);
+            sb.AppendLine("请求：" + Time(r.requestedAtUtcMs, copied) + (r.status == "failed" ? "  失败时间：" : "  结束：") + Time(r.endedAtUtcMs, copied) +
+                "  耗时：" + Duration(r.requestedAtUtcMs, r.endedAtUtcMs));
+            sb.AppendLine("最后更新：" + Time(r.updatedAtUtcMs, copied));
+            if (r.recoveredAtUtcMs > 0) sb.AppendLine("随后恢复：" + Time(r.recoveredAtUtcMs, copied) +
+                "  恢复耗时：" + Duration(r.endedAtUtcMs, r.recoveredAtUtcMs));
+            sb.AppendLine("最后通过：" + LastPassed(r) + "  首个未通过：" + FirstPending(r));
+            sb.AppendLine("分类：" + FailureCategory(r));
+            if (r.lastBridgeCloseCode == "1009" || r.lastBridgeOversizeActualBytes > 0)
+                sb.AppendLine("Bridge 消息超过限制：close code " + (r.lastBridgeCloseCode ?? "未知") +
+                    "；实际 " + BytesOrUnknown(r.lastBridgeOversizeActualBytes) +
+                    "；当时上限 " + BytesOrUnknown(r.lastBridgeOversizeLimitBytes) +
+                    "；来源 " + (r.lastBridgeOversizeSource ?? "未知"));
+            sb.AppendLine("原始错误：" + (r.error ?? "无"));
+            sb.AppendLine("下一步：" + NextAction(r));
+            if (r.schemaVersion < 2) sb.AppendLine("旧版记录：部分验证时间或证据不可用。未按阶段推测验证结果。");
+            return sb.ToString();
+        }
+
+        internal static string Gates(UPilotServerRestartRecord r, bool copied = false)
+        {
+            if (r == null) return "";
+            var sb = new StringBuilder("验证门（状态 | 项目 | 发生时间 | 耗时 | 证据）\n");
+            foreach (var key in UPilotServerRestartDiagnostics.GateKeys)
+            {
+                var gate = DisplayGate(r, key);
+                sb.AppendLine((gate == null && r.schemaVersion >= 2 ? "· 未开始" : GateState(gate)) + " | " + Label(key) + " | " +
+                    Time(gate?.endedAtUtcMs > 0 ? gate.endedAtUtcMs : gate?.startedAtUtcMs ?? 0, copied) +
+                    " | " + Duration(gate?.startedAtUtcMs ?? 0, gate?.endedAtUtcMs ?? 0) +
+                    " | 开始 " + Time(gate?.startedAtUtcMs ?? 0, copied) +
+                    "；结束 " + Time(gate?.endedAtUtcMs ?? 0, copied) +
+                    "；" + (gate?.evidenceCode ?? "") + " " + (gate?.evidence ?? ""));
+            }
+            return sb.ToString();
+        }
+
+        internal static void DrawGateTable(UPilotServerRestartRecord r, bool detailed = false)
+        {
+            if (r == null) return;
+            EditorGUILayout.LabelField("验证门", EditorStyles.boldLabel);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label("状态", EditorStyles.miniBoldLabel, GUILayout.Width(65));
+                GUILayout.Label("检查项", EditorStyles.miniBoldLabel, GUILayout.Width(138));
+                GUILayout.Label("发生时间", EditorStyles.miniBoldLabel, GUILayout.Width(135));
+                GUILayout.Label("耗时", EditorStyles.miniBoldLabel, GUILayout.Width(55));
+                GUILayout.Label("证据或原因", EditorStyles.miniBoldLabel);
+            }
+            foreach (var key in UPilotServerRestartDiagnostics.GateKeys)
+            {
+                var gate = DisplayGate(r, key);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.Label(gate == null && r.schemaVersion >= 2 ? "· 未开始" : GateState(gate),
+                        EditorStyles.miniLabel, GUILayout.Width(65));
+                    GUILayout.Label(Label(key), EditorStyles.miniLabel, GUILayout.Width(138));
+                    GUILayout.Label(Time(gate?.endedAtUtcMs > 0 ? gate.endedAtUtcMs : gate?.startedAtUtcMs ?? 0),
+                        EditorStyles.miniLabel, GUILayout.Width(135));
+                    GUILayout.Label(Duration(gate?.startedAtUtcMs ?? 0, gate?.endedAtUtcMs ?? 0),
+                        EditorStyles.miniLabel, GUILayout.Width(55));
+                    GUILayout.Label((detailed ? "开始 " + Time(gate?.startedAtUtcMs ?? 0) +
+                        "；结束 " + Time(gate?.endedAtUtcMs ?? 0) + "；" : "") +
+                        (gate?.evidenceCode ?? "") + " " + (gate?.evidence ?? ""),
+                        EditorStyles.wordWrappedMiniLabel);
+                }
+            }
+        }
+
+        internal static string Identity(UPilotServerRestartRecord r)
+        {
+            if (r == null) return "";
+            var sb = new StringBuilder("身份（项目 | 期望值 | 实际值 | 判断）\n");
+            void Row(string name, string expected, string actual, string verdict)
+            {
+                sb.AppendLine(name + " | " + (string.IsNullOrWhiteSpace(expected) ? "未知" : expected) + " | " +
+                    (string.IsNullOrWhiteSpace(actual) ? "未知" : actual) + " | " + verdict);
+            }
+            var checkedIdentity = r.gateDiagnostics?.Any(g => g.key == "identity" && g.state == "passed") == true ||
+                (r.schemaVersion < 2 && r.projectIdentityVerified);
+            var checkedDeployment = r.gateDiagnostics?.Any(g => g.key == "deployment" && g.state == "passed") == true;
+            Row("项目路径", r.projectPath, r.healthProjectPath, checkedIdentity ? "通过" : "未知/未通过");
+            Row("Bridge 版本", r.bridgeVersion, r.bridgeVersion, "重启请求时本地记录");
+            Row("Bridge 渠道", r.bridgeChannel, r.bridgeChannel, "重启请求时本地记录");
+            Row("Bridge 安装方式", r.bridgeInstallSource, r.bridgeInstallSource, "重启请求时本地记录");
+            Row("Server 版本", r.bridgeVersion, r.serverVersion, checkedDeployment ? "通过" : "未知/未通过");
+            Row("Server 渠道", r.bridgeChannel, r.serverChannel, checkedDeployment ? "通过" : "未知/未通过");
+            Row("Server 安装来源", r.bridgeInstallSource, r.serverInstallSource, checkedDeployment ? "通过" : "未知/未通过");
+            Row("当前包路径", r.packageRoot, r.packageRoot, "重启请求时本地记录");
+            Row("入口", r.expectedEntry, r.actualEntry, checkedDeployment ? "通过" : "未知/未通过");
+            Row("模块", string.IsNullOrWhiteSpace(r.packageRoot) ? null :
+                Path.Combine(r.packageRoot, "upilotserver~", "src", "upilot_mcp"),
+                r.actualModule, checkedDeployment ? "通过" : "未知/未通过");
+            Row("main", r.bridgeIsMain.ToString(), r.bridgeIsMain.ToString(), "重启请求时本地记录");
+            Row("PID", r.newProcessId > 0 ? r.newProcessId.ToString() : "未知",
+                r.healthProcessId > 0 ? r.healthProcessId.ToString() : "未知",
+                checkedIdentity ? "通过" : "未知/未通过");
+            Row("重启 operation ID", r.operationId, r.operationId, "记录身份");
+            Row("Bridge session ID", r.oldBridgeSessionId, r.newBridgeSessionId, r.bridgeVerified ? "新会话" : "未知");
+            return sb.ToString();
+        }
+
+        internal static string Full(UPilotServerRestartRecord r, bool copied = false)
+        {
+            if (r == null) return "无服务重启记录";
+            return Summary(r, copied) + "\n" + Gates(r, copied) + "\n" + Identity(r) + Details(r, copied);
+        }
+
+        internal static string Details(UPilotServerRestartRecord r, bool copied = false)
+        {
+            if (r == null) return "";
+            return "\nstatus probe：" + r.statusProbeCount + " 次；结果=" + (r.statusProbeOutcome ?? "未知") +
+                "；阶段=" + (r.statusProbeFailureStage ?? "未知") + "；取消=" + (r.statusProbeCancellationReason ?? "无") +
+                "\n最后 probe：" + Time(r.statusProbeStartedAtUtcMs, copied) + " → " +
+                Time(r.statusProbeEndedAtUtcMs, copied) + "（" + Duration(r.statusProbeStartedAtUtcMs, r.statusProbeEndedAtUtcMs) + "）" +
+                "\nprobe 错误：" + (r.statusProbeError ?? "") +
+                "\n归属识别：" + (r.hasIdentityProbe ? Duration(1, r.identityProbeElapsedMs + 1) : "未知") + "；候选=" + r.candidateCount +
+                "；确认=" + r.verifiedCount + "；候选收集=" +
+                (r.hasIdentityProbe ? Duration(1, r.candidateCollectionMs + 1) : "未知") + "；端口查询=" +
+                (r.hasIdentityProbe ? Duration(1, r.portQueryMs + 1) : "未知") +
+                "；命令行查询=" + (r.hasIdentityProbe ? Duration(1, r.commandLineQueryMs + 1) : "未知") +
+                "\nBridge：连接=" + Time(r.lastBridgeConnectedAtUtcMs, copied) +
+                "；认证=" + Time(r.lastBridgeAuthenticatedAtUtcMs, copied) +
+                "；断开=" + Time(r.lastBridgeDisconnectedAtUtcMs, copied) +
+                "；close=" + (r.lastBridgeCloseCode ?? "未知") + " " + (r.lastBridgeCloseReason ?? "") +
+                "\n超大消息：" + Time(r.lastBridgeOversizeAtUtcMs, copied) + "；来源=" + (r.lastBridgeOversizeSource ?? "未知") +
+                "；实际=" + BytesOrUnknown(r.lastBridgeOversizeActualBytes) + "；上限=" + BytesOrUnknown(r.lastBridgeOversizeLimitBytes) +
+                "；次数=" + r.bridgeOversizeCount +
+                "\n恢复身份：PID " + (r.recoveredAtUtcMs > 0 ? r.recoveryProcessId.ToString() : "未知") +
+                "；Bridge session=" + (r.recoveryBridgeSessionId ?? "未知") +
+                "；只读验证=" + (r.recoveryReadOnlyVerified ? "通过" : "未知") +
+                "\n原始错误：" + (r.error ?? "无") + "\n";
+        }
+    }
+
 }

@@ -96,6 +96,11 @@ class WsOrchestratorServer(WsTransport):
         self._active_ws_connections: set[WebSocketServerProtocol] = set()
         self._promotion_lock = asyncio.Lock()
         self._latest_session_rejection: dict[str, Any] = {}
+        self._last_bridge_connected_at_ms = 0
+        self._last_bridge_authenticated_at_ms = 0
+        self._last_bridge_disconnected_at_ms = 0
+        self._last_bridge_close_code = ""
+        self._last_bridge_close_reason = ""
 
     @staticmethod
     def _resolve_expected_project_path(configured: str) -> str:
@@ -692,12 +697,14 @@ class WsOrchestratorServer(WsTransport):
             message.payload["verificationLevel"] = str(probe.get("verificationLevel") or "")
             message.payload["identityVerified"] = bool(probe.get("identityVerified"))
             self.session_manager.on_hello(message.session_id, message.payload)
+            self._last_bridge_authenticated_at_ms = now_ms()
             if previous is not None and previous is not websocket:
                 asyncio.create_task(self._close_websocket(previous, reason="replaced by verified reconnect"))
         return True, probe
 
     async def _handle(self, websocket: WebSocketServerProtocol) -> None:
         self._active_ws_connections.add(websocket)
+        self._last_bridge_connected_at_ms = now_ms()
         remote = websocket.remote_address
         logger.info("Unity client connected from %s (total ws=%d)", remote, len(self._active_ws_connections))
         auth_box: list[str | None] = [None]
@@ -723,9 +730,10 @@ class WsOrchestratorServer(WsTransport):
                 if close_code == 1009:
                     logger.error("Bridge frame exceeded 4 MiB session=%s at=%s commandId=unknown limitBytes=%s",
                                  auth_box[0] or "unknown", now_ms(), _MAX_BRIDGE_MESSAGE_BYTES)
+                    self._oversize_count = getattr(self, "_oversize_count", 0) + 1
                     self._oversize_observations = (getattr(self, "_oversize_observations", []) + [
                         {"sessionId": auth_box[0], "sourceEvent": "unknown", "observedAt": now_ms(),
-                         "limitBytes": _MAX_BRIDGE_MESSAGE_BYTES, "commandId": "unknown"}])[-8:]
+                         "limitBytes": _MAX_BRIDGE_MESSAGE_BYTES, "commandId": "unknown", "closeCode": 1009}])[-8:]
                 if self._shutting_down:
                     logger.debug("WebSocket closed during shutdown from %s: %s", remote, ex)
                 else:
@@ -755,6 +763,10 @@ class WsOrchestratorServer(WsTransport):
             if not owns_active_session:
                 logger.info("[%s] Candidate/stale socket closed without changing active Editor state", sid_log[:12])
                 return
+            self._last_bridge_disconnected_at_ms = now_ms()
+            close_code = getattr(websocket, "close_code", None)
+            self._last_bridge_close_code = str(close_code) if close_code is not None else ""
+            self._last_bridge_close_reason = str(getattr(websocket, "close_reason", "") or "")[:256]
             self._ws = None
             self.session_manager.disconnect(auth_session_id)
             if self.state.compile.status in ("queued", "accepted", "compiling", "verifying"):
@@ -1001,9 +1013,11 @@ class WsOrchestratorServer(WsTransport):
                 logger.error("Bridge event lost due to size session=%s source=%s bytes=%s limit=%s",
                              message.session_id, message.payload.get("sourceEvent"),
                              message.payload.get("actualBytes"), message.payload.get("limitBytes"))
+                self._oversize_count = getattr(self, "_oversize_count", 0) + 1
                 self._oversize_observations = (getattr(self, "_oversize_observations", []) + [
                     {"sessionId": message.session_id, "sourceEvent": message.payload.get("sourceEvent"),
-                     "observedAt": now_ms(), "limitBytes": message.payload.get("limitBytes"),
+                     "observedAt": now_ms(), "actualBytes": message.payload.get("actualBytes"),
+                     "limitBytes": message.payload.get("limitBytes"),
                      "commandId": "unknown"}])[-8:]
                 return
             logger.debug(

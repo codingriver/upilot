@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — simplified main-window state and actions.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -466,8 +466,16 @@ namespace CodingRiver.UPilot
             EditorPrefs.SetString(FailureDialogKey, attemptId);
             EditorPrefs.SetString(FailureKey, failure);
             EditorPrefs.SetBool(AutoAttemptKey, true);
+            var record = UPilotServerRestartDiagnostics.Current;
+            var diagnosis = record != null && record.operationId == attemptId
+                ? UPilotRestartDiagnosticView.Full(record)
+                : "失败时间：" + UPilotRestartDiagnosticView.Time(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) +
+                  "\n尝试 ID：" + attemptId + "（尚无对应重启 operation ID）" +
+                  "\n最后通过的验证门：未知；首个未通过的验证门：未知；status probe：未采集" +
+                  "\n重启诊断记录与此次尝试不匹配；请打开高级设置核对 operation ID。";
             UPilotScrollableDialog.ShowDialog("UPilot 自动修复失败", failure + "\n\n" +
-                DiagnosticDetails + "\n\n请检查上述路径、版本、渠道及进程归属，然后点击“重新启动”。被中断的任务不会自动重放。");
+                diagnosis +
+                "\n被中断的任务不会自动重放。请确认当前身份和维护授权后，再显式点击‘重新启动’。");
         }
 
         internal static UPilotRepairAction DetermineRepairAction(

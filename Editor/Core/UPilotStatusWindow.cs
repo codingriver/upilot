@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -68,6 +68,7 @@ namespace CodingRiver.UPilot
         private bool _showProcessSettings;
         private bool _showAgentOtherActions;
         private bool _showDiagnosticDetails;
+        private int _selectedRestartHistory = -1;
         private double _lastAgentConfigRefresh;
 
         // ── Styles (lazy-init on main thread) ─────────────────────────────────
@@ -560,7 +561,7 @@ namespace CodingRiver.UPilot
                 // Header line: time + description + elapsed/status
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    var timeStr = entry.ReceivedAt.ToString("HH:mm:ss.fff");
+                    var timeStr = UPilotRestartDiagnosticView.Time(new DateTimeOffset(entry.ReceivedAt).ToUnixTimeMilliseconds());
                     string statusIcon;
                     if (isError) statusIcon = "✗";
                     else if (isStuck) statusIcon = "⚠";
@@ -605,7 +606,7 @@ namespace CodingRiver.UPilot
 
                 foreach (var step in steps)
                 {
-                    var stepTime = step.Time.ToString("HH:mm:ss.fff");
+                    var stepTime = UPilotRestartDiagnosticView.Time(new DateTimeOffset(step.Time).ToUnixTimeMilliseconds());
                     var stepText = step.Detail != null
                         ? $"  ├ {stepTime}  {step.Step} | {step.Detail}"
                         : $"  ├ {stepTime}  {step.Step}";
@@ -646,12 +647,12 @@ namespace CodingRiver.UPilot
         private static string BuildLogEntryDisplayText(BridgeLogEntry entry)
         {
             if (!entry.IsWireStructured)
-                return $"[{entry.Time:yyyy-MM-dd HH:mm:ss.fff}] {entry.Message}";
+                return "[" + UPilotRestartDiagnosticView.Time(new DateTimeOffset(entry.Time).ToUnixTimeMilliseconds()) + "] " + entry.Message;
 
             var tag = entry.WireDirection == "TX" ? "[send]" : "[recv]";
             var ts = entry.WireEnvelopeUnixMs > 0
-                ? DateTimeOffset.FromUnixTimeMilliseconds(entry.WireEnvelopeUnixMs).LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss.fff")
-                : entry.Time.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                ? UPilotRestartDiagnosticView.Time(entry.WireEnvelopeUnixMs)
+                : UPilotRestartDiagnosticView.Time(new DateTimeOffset(entry.Time).ToUnixTimeMilliseconds());
             var line1 =
                 $"{tag}  {ts}  |  sessionId={entry.WireSessionId}  |  name={entry.WireName}  |  type={entry.WireType}  |  id={entry.WireId}";
 
@@ -1712,6 +1713,55 @@ namespace CodingRiver.UPilot
 
         // ── Diagnostics ───────────────────────────────────────────────────────
 
+        private void DrawRestartDiagnostics()
+        {
+            EditorGUILayout.LabelField("服务诊断 · " + UPilotRestartDiagnosticView.ZoneLabel(), EditorStyles.boldLabel);
+            var current = UPilotServerRestartDiagnostics.Current;
+            EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Summary(current), EditorStyles.wordWrappedLabel);
+            UPilotRestartDiagnosticView.DrawGateTable(current, true);
+            EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Identity(current), EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Details(current), EditorStyles.wordWrappedLabel);
+            var serverLog = Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("复制当前诊断", GUILayout.Width(105)))
+                    GUIUtility.systemCopyBuffer = UPilotRestartDiagnosticView.Full(current, true);
+                using (new EditorGUI.DisabledScope(!File.Exists(serverLog)))
+                    if (GUILayout.Button("打开 Server 日志", GUILayout.Width(116))) EditorUtility.RevealInFinder(serverLog);
+                var unityLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Unity", "Editor", "Editor.log");
+                using (new EditorGUI.DisabledScope(!File.Exists(unityLog)))
+                    if (GUILayout.Button("打开 Unity 日志", GUILayout.Width(110))) EditorUtility.RevealInFinder(unityLog);
+            }
+            if (!File.Exists(serverLog)) EditorGUILayout.LabelField("Server 日志不可用：文件不存在。", EditorStyles.miniLabel);
+            var unityLogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Unity", "Editor", "Editor.log");
+            if (!File.Exists(unityLogPath)) EditorGUILayout.LabelField("Unity 日志不可用：文件不存在。", EditorStyles.miniLabel);
+            var history = UPilotServerRestartDiagnostics.ReadHistory(out var warning);
+            if (!string.IsNullOrEmpty(warning)) EditorGUILayout.HelpBox(warning, MessageType.Warning);
+            EditorGUILayout.LabelField("最近重启历史（最多 10 条）", EditorStyles.miniBoldLabel);
+            for (var i = 0; i < history.Length; i++)
+            {
+                var entry = history[i];
+                var text = UPilotRestartDiagnosticView.Result(entry) + " | " +
+                    UPilotRestartDiagnosticView.Time(entry.requestedAtUtcMs) + " | " +
+                    UPilotRestartDiagnosticView.Time(entry.endedAtUtcMs) + " | " +
+                    UPilotRestartDiagnosticView.Duration(entry.requestedAtUtcMs, entry.endedAtUtcMs) + " | " +
+                    entry.projectPath + " | PID " + entry.newProcessId + " | " +
+                    entry.newBridgeSessionId + " | " + entry.errorCode;
+                if (GUILayout.Button(text, EditorStyles.miniButton)) _selectedRestartHistory = i;
+            }
+            if (_selectedRestartHistory >= 0 && _selectedRestartHistory < history.Length)
+            {
+                var selected = history[_selectedRestartHistory];
+                EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Summary(selected), EditorStyles.wordWrappedLabel);
+                UPilotRestartDiagnosticView.DrawGateTable(selected, true);
+                EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Identity(selected) + UPilotRestartDiagnosticView.Details(selected), EditorStyles.wordWrappedLabel);
+                if (GUILayout.Button("复制选中历史", GUILayout.Width(105)))
+                    GUIUtility.systemCopyBuffer = UPilotRestartDiagnosticView.Full(selected, true);
+            }
+        }
+
         private void DrawDiagnosticsSection(
             UPilotBridge bridge,
             BridgeStatus status,
@@ -1723,6 +1773,8 @@ namespace CodingRiver.UPilot
             using (new EditorGUILayout.VerticalScope(_styleBox))
             {
                 EditorGUILayout.LabelField("诊断", EditorStyles.boldLabel);
+                DrawRestartDiagnostics();
+                EditorGUILayout.Space(8);
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     using (new EditorGUI.DisabledScope(diagRunning))
@@ -2052,9 +2104,8 @@ namespace CodingRiver.UPilot
         private void DrawDiagLines(string diagResult, long diagResultAtMs)
         {
             var lines = diagResult.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
-            var ts = diagResultAtMs > 0
-                ? DateTimeOffset.FromUnixTimeMilliseconds(diagResultAtMs).LocalDateTime
-                : DateTime.Now;
+            var ts = UPilotRestartDiagnosticView.Time(diagResultAtMs > 0
+                ? diagResultAtMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             foreach (var raw in lines)
             {
                 var line = raw ?? string.Empty;
@@ -2067,7 +2118,7 @@ namespace CodingRiver.UPilot
                         : _styleWarn;
                 var style = new GUIStyle(baseStyle) { wordWrap = true };
 
-                EditorGUILayout.LabelField($"[{ts:HH:mm:ss.fff}] {line}", style);
+                EditorGUILayout.LabelField($"[{ts}] {line}", style);
             }
         }
 

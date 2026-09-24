@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - simple user-facing entry window.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -656,7 +656,12 @@ namespace CodingRiver.UPilot
             {
                 _deploymentDetailsExpanded = EditorGUILayout.Foldout(_deploymentDetailsExpanded, "状态诊断详情", true);
                 if (_deploymentDetailsExpanded)
-                    EditorGUILayout.LabelField(UPilotQuickStart.DiagnosticDetails, EditorStyles.wordWrappedLabel);
+                {
+                    var record = UPilotServerRestartDiagnostics.Current;
+                    EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Summary(record), EditorStyles.wordWrappedLabel);
+                    UPilotRestartDiagnosticView.DrawGateTable(record);
+                    EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Identity(record), EditorStyles.wordWrappedLabel);
+                }
             }
         }
 

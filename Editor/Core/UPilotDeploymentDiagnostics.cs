@@ -31,6 +31,22 @@ namespace CodingRiver.UPilot
         public bool bridge_probe_ok;
         public string bridge_probe_nonce;
         public string bridge_probe_error;
+        public UPilotBridgeHealthDiagnostic bridge_diagnostics;
+    }
+
+    [Serializable]
+    internal sealed class UPilotBridgeHealthDiagnostic
+    {
+        public long connected_at_ms;
+        public long authenticated_at_ms;
+        public long disconnected_at_ms;
+        public string last_close_reason;
+        public int oversize_count;
+        public long oversize_at_ms;
+        public string oversize_source;
+        public int oversize_actual_bytes;
+        public int oversize_limit_bytes;
+        public string last_close_code;
     }
 
     internal sealed class UPilotDeploymentIssue
@@ -181,7 +197,7 @@ namespace CodingRiver.UPilot
                 $"实际入口：{Text(health?.server_entry_path)}\n实际模块：{Text(health?.server_module_root)}\n" +
                 $"期望项目：{UPilotProjectConfig.ProjectRoot}\n实际项目：{Text(health?.configured_project_path)}\n" +
                 $"PID：{server.ProcessId?.ToString() ?? "未知"}；实例：{Text(health?.server_instance_id)}\n" +
-                $"最后成功状态：{(server.LastSuccessfulStatusAtUtcMs > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(server.LastSuccessfulStatusAtUtcMs).ToString("O") : "未知")}\n" +
+                $"最后成功状态：{(server.LastSuccessfulStatusAtUtcMs > 0 ? UPilotRestartDiagnosticView.Time(server.LastSuccessfulStatusAtUtcMs) : "未知")}\n" +
                 string.Join("\n", Issues.Values.Select(issue => issue.Code + "： " + issue.Message));
             return Issues.Values.ToArray();
         }

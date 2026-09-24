@@ -44,6 +44,16 @@ namespace CodingRiver.UPilot
         public string AuthenticationError;
         public int ServerIdentityContractVersion;
         public long AuthenticationFailureAtUtcMs;
+        public long LastConnectedAtUtcMs;
+        public long LastAuthenticatedAtUtcMs;
+        public long LastDisconnectedAtUtcMs;
+        public string LastCloseCode;
+        public string LastCloseReason;
+        public long LastOversizeAtUtcMs;
+        public string LastOversizeSource;
+        public int LastOversizeActualBytes;
+        public int LastOversizeLimitBytes;
+        public int OversizeCount;
     }
 
     // ── Log entry ───────────────────────────────────────────────────────────────
@@ -241,6 +251,15 @@ namespace CodingRiver.UPilot
         private string _authenticationError = "";
         private int _serverIdentityContractVersion;
         private long _authenticationFailureAtUtcMs;
+        private long _lastConnectedAtUtcMs;
+        private long _lastAuthenticatedAtUtcMs;
+        private long _lastDisconnectedAtUtcMs;
+        private string _lastCloseCode = "";
+        private string _lastCloseReason = "";
+        private long _lastOversizeAtUtcMs;
+        private string _lastOversizeSource = "";
+        private int _lastOversizeActualBytes;
+        private int _oversizeCount;
         private long                 _lastHeartbeatSentAt;
         private string               _processRole = "unknown";
         private string               _activeSceneName = string.Empty;
@@ -417,6 +436,16 @@ namespace CodingRiver.UPilot
             AuthenticationError = _authenticationError,
             ServerIdentityContractVersion = _serverIdentityContractVersion,
             AuthenticationFailureAtUtcMs = _authenticationFailureAtUtcMs,
+            LastConnectedAtUtcMs = _lastConnectedAtUtcMs,
+            LastAuthenticatedAtUtcMs = _lastAuthenticatedAtUtcMs,
+            LastDisconnectedAtUtcMs = _lastDisconnectedAtUtcMs,
+            LastCloseCode = _lastCloseCode,
+            LastCloseReason = _lastCloseReason,
+            LastOversizeAtUtcMs = _lastOversizeAtUtcMs,
+            LastOversizeSource = _lastOversizeSource,
+            LastOversizeActualBytes = _lastOversizeActualBytes,
+            LastOversizeLimitBytes = MaxBridgeResponseBytes,
+            OversizeCount = _oversizeCount,
         };
 
         public List<BridgeLogEntry> GetLogsCopy()
@@ -751,6 +780,7 @@ namespace CodingRiver.UPilot
                         throw new Exception($"连接超时 ({ConnectTimeoutMs / 1000}s)");
                     }
 
+                    _lastConnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     if (_connectFailureStreak > 0)
                     {
                         Logger.Log("NETWORK", $"WS 重连成功（曾失败 {_connectFailureStreak} 次）");
@@ -779,6 +809,7 @@ namespace CodingRiver.UPilot
                     tracker.RecordSystemEvent("sys.ws.disconnected", "WS连接断开",
                         $"原因={disconnectReason} endpoint={serverUrl} wsState={_ws?.State}", "disconnected");
 
+                    _lastDisconnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     _isAuthenticated = false;
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -1058,6 +1089,9 @@ namespace CodingRiver.UPilot
                     {
                         var closeStatus = result.CloseStatus?.ToString() ?? "Unknown";
                         var closeDesc = result.CloseStatusDescription ?? "";
+                        _lastCloseCode = result.CloseStatus.HasValue ? ((int)result.CloseStatus.Value).ToString() : "unknown";
+                        _lastCloseReason = closeDesc.Length > 256 ? closeDesc.Substring(0, 256) : closeDesc;
+                        _lastDisconnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                         UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.ws.close.received", "收到服务端关闭帧",
                             $"CloseStatus={closeStatus} Description={closeDesc}",
@@ -1141,6 +1175,7 @@ namespace CodingRiver.UPilot
                 _authenticationError = "";
                 _authenticationFailureAtUtcMs = 0;
                 _isAuthenticated = true;
+                _lastAuthenticatedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 UPilotStartupDiagnostics.ObserveBridgeAuthenticated(_sessionId);
                 UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.auth.success", "认证成功",
@@ -1821,6 +1856,14 @@ namespace CodingRiver.UPilot
         // ──────────────────────────────── Send helpers ────────────────────────────────
 
         private const int MaxBridgeResponseBytes = 4 * 1024 * 1024;
+
+        private void RecordOversize(string source, int actualBytes)
+        {
+            _lastOversizeAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _lastOversizeSource = source?.Length > 128 ? source.Substring(0, 128) : source ?? "";
+            _lastOversizeActualBytes = actualBytes;
+            System.Threading.Interlocked.Increment(ref _oversizeCount);
+        }
         private static int ResponseBytes(string value) => Encoding.UTF8.GetByteCount(value);
 
         private async Task SendBoundedErrorAsync(string id, string commandName, string code,
@@ -1878,6 +1921,7 @@ namespace CodingRiver.UPilot
             var size = ResponseBytes(json);
             if (size > MaxBridgeResponseBytes)
             {
+                RecordOversize("tool result", size);
                 UPilotOperationTracker.Instance.GetContext(id)?.Fail("BRIDGE_RESPONSE_TOO_LARGE", "Result exceeds Bridge message limit.");
                 await SendBoundedErrorAsync(id, name, "BRIDGE_RESPONSE_TOO_LARGE",
                     "Result exceeds Bridge message limit; outcome unknown.", size, token);
@@ -1901,6 +1945,7 @@ namespace CodingRiver.UPilot
             var size = ResponseBytes(json);
             if (size > MaxBridgeResponseBytes)
             {
+                RecordOversize(name, size);
                 var diagnostic = new EventMessage<BridgeOversizeEventPayload>
                 {
                     id = id, name = "bridge.payload_oversize", sessionId = _sessionId,

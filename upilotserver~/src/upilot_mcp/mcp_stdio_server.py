@@ -439,14 +439,35 @@ async def _run_http_server(
         payload.update(version_payload())
         payload["configured_project_path"] = str(configured_project_root().resolve())
         payload["bridge_session_id"] = session.session_id if session else ""
+        # Bounded transport evidence; never return the underlying event history.
+        oversize = getattr(_orchestrator, "_oversize_observations", []) if _orchestrator else []
+        latest = oversize[-1] if oversize else {}
+        payload["bridge_diagnostics"] = {
+            "connected_at_ms": getattr(_orchestrator, "_last_bridge_connected_at_ms", 0) if _orchestrator else 0,
+            "authenticated_at_ms": getattr(_orchestrator, "_last_bridge_authenticated_at_ms", 0) if _orchestrator else 0,
+            "disconnected_at_ms": getattr(_orchestrator, "_last_bridge_disconnected_at_ms", 0) if _orchestrator else 0,
+            "last_close_reason": str(getattr(_orchestrator, "_last_bridge_close_reason", "") or "")[:256],
+            "oversize_count": getattr(_orchestrator, "_oversize_count", len(oversize)) if _orchestrator else 0,
+            "oversize_at_ms": int(latest.get("observedAt") or 0),
+            "oversize_source": str(latest.get("sourceEvent") or "")[:128],
+            "oversize_actual_bytes": int(latest.get("actualBytes") or 0),
+            "oversize_limit_bytes": int(latest.get("limitBytes") or 0),
+            "last_close_code": (
+                str(getattr(_orchestrator, "_last_bridge_close_code", "") or "")[:16]
+                if _orchestrator and getattr(_orchestrator, "_last_bridge_disconnected_at_ms", 0) >= int(latest.get("observedAt") or 0)
+                else "1009" if latest.get("closeCode") == 1009 else ""
+            ),
+        }
         # Optional bounded round trip through the existing read-only command.
         # Never route repair verification through cached status or replay a job.
         if request.query_params.get("probe") == "bridge":
             expected_session = request.query_params.get("session", "")
-            nonce = request.query_params.get("nonce", "")
+            nonce = request.query_params.get("nonce", "")[:64]
             payload["bridge_probe_ok"] = False
             payload["bridge_probe_nonce"] = nonce
-            if not connected or not session or session.session_id != expected_session:
+            if len(expected_session) > 128 or len(nonce) != 32:
+                payload["bridge_probe_error"] = "Invalid bounded read-only probe identity."
+            elif not connected or not session or session.session_id != expected_session:
                 payload["bridge_probe_error"] = "Bridge session is absent or changed."
             else:
                 command_id = new_id("repair-probe")
@@ -463,7 +484,7 @@ async def _run_http_server(
                     if not payload["bridge_probe_ok"]:
                         payload["bridge_probe_error"] = "Read-only response or session did not match."
                 except (asyncio.TimeoutError, ConnectionError, OSError) as ex:
-                    payload["bridge_probe_error"] = type(ex).__name__ + ": " + str(ex)
+                    payload["bridge_probe_error"] = (type(ex).__name__ + ": " + str(ex))[:256]
                 finally:
                     _orchestrator.unregister_pending(command_id)
         return JSONResponse(payload)

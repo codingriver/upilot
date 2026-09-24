@@ -1057,6 +1057,10 @@ class StatusDomainService:
             and record.get("healthVerified") is True
             and record.get("projectIdentityVerified") is True
             and record.get("bridgeVerified") is True
+            and (int(record.get("schemaVersion") or 1) < 2 or (
+                record.get("deploymentVerified") is True
+                and record.get("readOnlyVerified") is True
+            ))
         )
         current = bool(project_matches and process_matches)
         if not operation_id:
@@ -1096,6 +1100,8 @@ class StatusDomainService:
                 "healthVerified": record.get("healthVerified") is True,
                 "projectIdentityVerified": record.get("projectIdentityVerified") is True,
                 "bridgeVerified": record.get("bridgeVerified") is True,
+                "deploymentVerified": record.get("deploymentVerified") is True,
+                "readOnlyVerified": record.get("readOnlyVerified") is True,
                 "healthProjectPath": str(record.get("healthProjectPath") or ""),
             },
             "timing": {
@@ -1105,8 +1111,49 @@ class StatusDomainService:
                 "newProcessStartedAtUtcMs": int(record.get("newProcessStartedAtUtcMs") or 0),
                 "healthVerifiedAtUtcMs": int(record.get("healthVerifiedAtUtcMs") or 0),
                 "bridgeVerifiedAtUtcMs": int(record.get("bridgeVerifiedAtUtcMs") or 0),
+                "deploymentVerifiedAtUtcMs": int(record.get("deploymentVerifiedAtUtcMs") or 0),
+                "readOnlyVerifiedAtUtcMs": int(record.get("readOnlyVerifiedAtUtcMs") or 0),
                 "endedAtUtcMs": int(record.get("endedAtUtcMs") or 0),
                 "updatedAtUtcMs": int(record.get("updatedAtUtcMs") or 0),
+            },
+            "gateDiagnostics": [
+                {
+                    "key": str(gate.get("key") or "")[:64],
+                    "state": str(gate.get("state") or "")[:32],
+                    "startedAtUtcMs": int(gate.get("startedAtUtcMs") or 0),
+                    "endedAtUtcMs": int(gate.get("endedAtUtcMs") or 0),
+                    "evidenceCode": str(gate.get("evidenceCode") or "")[:128],
+                    "evidence": str(gate.get("evidence") or "")[:512],
+                }
+                for gate in (record.get("gateDiagnostics") or [])[:10]
+                if isinstance(gate, dict)
+            ] if isinstance(record.get("gateDiagnostics"), list) else [],
+            "statusProbe": {
+                "count": int(record.get("statusProbeCount") or 0),
+                "startedAtUtcMs": int(record.get("statusProbeStartedAtUtcMs") or 0),
+                "endedAtUtcMs": int(record.get("statusProbeEndedAtUtcMs") or 0),
+                "outcome": str(record.get("statusProbeOutcome") or "")[:64],
+                "failureStage": str(record.get("statusProbeFailureStage") or "")[:128],
+                "cancellationReason": str(record.get("statusProbeCancellationReason") or "")[:128],
+                "error": str(record.get("statusProbeError") or "")[:512],
+            },
+            "bridgeDiagnostics": {
+                "connectedAtUtcMs": int(record.get("lastBridgeConnectedAtUtcMs") or 0),
+                "authenticatedAtUtcMs": int(record.get("lastBridgeAuthenticatedAtUtcMs") or 0),
+                "disconnectedAtUtcMs": int(record.get("lastBridgeDisconnectedAtUtcMs") or 0),
+                "closeCode": str(record.get("lastBridgeCloseCode") or "")[:32],
+                "closeReason": str(record.get("lastBridgeCloseReason") or "")[:256],
+                "oversizeAtUtcMs": int(record.get("lastBridgeOversizeAtUtcMs") or 0),
+                "oversizeSource": str(record.get("lastBridgeOversizeSource") or "")[:128],
+                "oversizeActualBytes": int(record.get("lastBridgeOversizeActualBytes") or 0),
+                "oversizeLimitBytes": int(record.get("lastBridgeOversizeLimitBytes") or 0),
+                "oversizeCount": int(record.get("bridgeOversizeCount") or 0),
+            },
+            "recovery": {
+                "recoveredAtUtcMs": int(record.get("recoveredAtUtcMs") or 0),
+                "processId": int(record.get("recoveryProcessId") or 0),
+                "bridgeSessionId": str(record.get("recoveryBridgeSessionId") or "")[:128],
+                "readOnlyVerified": record.get("recoveryReadOnlyVerified") is True,
             },
             "processExit": {
                 "observed": record.get("exitObserved") is True,
