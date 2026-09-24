@@ -29,7 +29,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 ## UPilot Package Acceptance
 
-- When validating UPilot repository/package changes, use `./Tests~/UPilotTest` under the UPilot repository as the default and canonical Unity project for compile and EditMode acceptance.
+- When validating UPilot repository/package changes, use `./Tests~/UPilotTest` under the UPilot repository as the default and canonical Unity project for compile and EditMode acceptance. An alternate acceptance project requires existing explicit project-business-rule authorization and explicit selection by the current task; follow the exact-target Connection branch below, without expanding any acceptance allowlist.
 - Do not treat external client projects such as `D:\MA\xclient` or `F:\xclient2` as default UPilot validation targets.
 - Use external client projects only when explicitly requested for project-side/business smoke validation or investigation.
 - If this rule block is installed inside another Unity project, use that project for its own business workflows, but return to `./Tests~/UPilotTest` before claiming UPilot package compile/EditMode acceptance.
@@ -44,8 +44,8 @@ Project-specific business rules outside this controlled UPilot block take preced
 - When multiple Unity projects run concurrently, allocate a unique HTTP/WebSocket port pair per project internally, give each client registration a distinct name, and expose only that project's HTTP `/mcp` endpoint to the AI tool.
 1. Call `unity_mcp_status`.
 2. Require `connected: true` and `serverReady: true`.
-3. Verify `paths.unityProjectAbsolute` matches `{{projectPath}}` (allow equivalent slash normalization).
-4. Stop and report the mismatch if another Unity project is connected.
+3. By default, verify `paths.unityProjectAbsolute` matches `{{projectPath}}` (allow equivalent slash normalization). Only when existing project business rules explicitly authorize an alternate project and the current task explicitly selects it, first establish its full absolute path and dedicated HTTP endpoint, then verify the returned path against that exact intended path before any target tool call. A matching basename is never authorization; do not broaden an acceptance allowlist or infer a target from the endpoint response.
+4. Stop and report a mismatch or unknown identity; if an alternate target has not been explicitly selected, retain the default. Never automatically switch projects to make a connection pass.
 
 ## Deployment Freshness
 

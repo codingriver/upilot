@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using UnityEngine;
 
 namespace CodingRiver.UPilot.Automation
@@ -92,6 +93,12 @@ namespace CodingRiver.UPilot.Automation
         }
         internal static AutomationReportArtifact[] VerifyStopped(ConsoleCaptureManifest manifest,
             Action<AutomationReportArtifact[]> register = null)
+            => VerifyStoppedFiles(manifest, JsonUtility.ToJson(manifest),
+                AutomationReportWriter.GetArtifactMetadata, register, CancellationToken.None);
+
+        internal static AutomationReportArtifact[] VerifyStoppedFiles(ConsoleCaptureManifest manifest,
+            string expectedJson, Func<string, string, AutomationReportArtifact> metadata,
+            Action<AutomationReportArtifact[]> register, CancellationToken cancellationToken)
         {
             if (manifest == null || manifest.active || manifest.finishedAtUtcMs <= 0
                 || string.IsNullOrEmpty(manifest.sessionId) || string.IsNullOrEmpty(manifest.sha256)
@@ -103,11 +110,12 @@ namespace CodingRiver.UPilot.Automation
             {
                 AutomationReportArtifact Hold(string kind, string path)
                 {
-                    var metadata = AutomationReportWriter.GetArtifactMetadata(kind, path);
-                    handles.Add(new FileStream(metadata.path, FileMode.Open, FileAccess.Read, FileShare.Read));
-                    metadata = AutomationReportWriter.GetArtifactMetadata(kind, path);
-                    files.Add(metadata);
-                    return metadata;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var artifact = metadata(kind, path);
+                    handles.Add(new FileStream(artifact.path, FileMode.Open, FileAccess.Read, FileShare.Read));
+                    artifact = metadata(kind, path);
+                    files.Add(artifact);
+                    return artifact;
                 }
                 foreach (var path in new[] { manifest.manifestPath, manifest.summaryPath })
                 {
@@ -116,7 +124,7 @@ namespace CodingRiver.UPilot.Automation
                     foreach (var key in new[] { "sessionId", "active", "finishedAtUtcMs", "nextSequence",
                         "sha256", "fileBytes", "segmentCount", "ownerId", "requestKey" })
                     {
-                        var expected = AutomationStepJsonCodec.ParseObject(JsonUtility.ToJson(manifest)).Element(key);
+                        var expected = AutomationStepJsonCodec.ParseObject(expectedJson).Element(key);
                         var actual = root.Element(key);
                         if (actual == null || expected == null || actual.Value != expected.Value
                             || (string)actual.Attribute("type") != (string)expected.Attribute("type"))
@@ -135,11 +143,15 @@ namespace CodingRiver.UPilot.Automation
                 byte[] buffer = new byte[65536];
                 foreach (var path in paths)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     Hold("consoleCapture.segment", path);
                     var stream = handles[handles.Count - 1];
                     int read;
                     while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
-                    { sha.TransformBlock(buffer, 0, read, null, 0); bytes += read; }
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        sha.TransformBlock(buffer, 0, read, null, 0); bytes += read;
+                    }
                 }
                 sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
                 string digest = string.Concat(sha.Hash.Select(b => b.ToString("x2")));

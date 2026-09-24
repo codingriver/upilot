@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
+import websockets
+from websockets.exceptions import ConnectionClosed
+
 from upilot_mcp.server import WsOrchestratorServer
 
 
@@ -64,3 +67,57 @@ def test_close_websocket_force_aborts_without_graceful_wait() -> None:
     assert websocket.failed is True
     assert websocket.transport.aborted is True
     assert websocket.transport.socket.closed is True
+
+
+def test_bridge_accepts_result_frame_larger_than_websocket_default() -> None:
+    async def exercise() -> None:
+        server = WsOrchestratorServer(port=0)
+
+        async def receive_frame(websocket) -> None:
+            payload = await websocket.recv()
+            await websocket.send(str(len(payload)))
+
+        server._handle = receive_frame
+        serving = asyncio.create_task(server.start())
+        try:
+            await server.wait_until_listening(timeout_s=5)
+            port = server._server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as websocket:
+                payload = "x" * 1_316_191
+                await websocket.send(payload)
+                assert await websocket.recv() == str(len(payload))
+        finally:
+            server.stop()
+            await serving
+
+    asyncio.run(exercise())
+
+
+def test_bridge_rejects_frame_larger_than_four_megabytes_without_business_retry() -> None:
+    async def exercise() -> None:
+        server = WsOrchestratorServer(port=0)
+        received = []
+
+        async def receive_frame(websocket) -> None:
+            try:
+                received.append(await websocket.recv())
+            except ConnectionClosed:
+                pass
+
+        server._handle = receive_frame
+        serving = asyncio.create_task(server.start())
+        try:
+            await server.wait_until_listening(timeout_s=5)
+            port = server._server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}", max_size=None) as websocket:
+                await websocket.send("x" * (4 * 1024 * 1024 + 1))
+                try:
+                    await websocket.recv()
+                except ConnectionClosed:
+                    pass
+            assert received == []
+        finally:
+            server.stop()
+            await serving
+
+    asyncio.run(exercise())

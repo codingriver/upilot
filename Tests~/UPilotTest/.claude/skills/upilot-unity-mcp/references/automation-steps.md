@@ -234,7 +234,7 @@ public interface IAutomationStep
   unknown states fail closed, never through a deserializer default.
 - `SaveCheckpoint(runId,instanceId,checkpointJson)` replaces the item's JSON object.
   `SaveSharedValue(runId,instanceId,key,valueJson)` replaces only one shared key;
-  use a project namespace such as `ksb.logging`. Values may be any legal JSON.
+  use a project namespace such as `project.logging`. Values may be any legal JSON.
   Both methods are base helpers and public service methods for direct interface implementations.
 - Saving requires the active run/item and a writable lifecycle callback on the Editor
   main thread. Validate/GetError and escaping asynchronous callbacks cannot save.

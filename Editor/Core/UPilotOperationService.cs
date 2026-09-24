@@ -83,6 +83,28 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public sealed class BridgeQueueCommand
+    {
+        public string commandId;
+        public string commandName;
+    }
+
+    [Serializable]
+    public sealed class BridgeQueueSnapshot
+    {
+        public long observedAt;
+        public bool complete;
+        public bool truncated;
+        public int activeCount;
+        public int queuedCount;
+        public int executingCount;
+        public int untrackedCount;
+        public string executingCommandId;
+        public List<BridgeQueueCommand> activeCommands = new();
+        public List<BridgeQueueCommand> queuedCommands = new();
+    }
+
+    [Serializable]
     public sealed class CommandCapabilityPayload
     {
         public string name;
@@ -113,9 +135,14 @@ namespace CodingRiver.UPilot
         public void RegisterCommands()
         {
             _bridge.Router.Register("operation.list", HandleListAsync);
+            _bridge.Router.Register(new CommandDescriptor("queue.snapshot", category: "maintenance", idempotent: true,
+                destructive: false, playModePolicy: "allowed"), HandleQueueSnapshotAsync);
             _bridge.Router.Register("operation.get", HandleGetAsync);
             _bridge.Router.Register("capabilities.list", HandleCapabilitiesAsync);
         }
+
+        private Task HandleQueueSnapshotAsync(string id, string json, CancellationToken token) =>
+            _bridge.SendResultAsync(id, "queue.snapshot", _bridge.ObserveQueue(id), token);
 
         private async Task HandleListAsync(string id, string json, CancellationToken token)
         {

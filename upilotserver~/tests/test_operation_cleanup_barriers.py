@@ -2,6 +2,8 @@ import asyncio
 import hashlib
 import json
 
+import pytest
+
 from upilot_mcp.responses import ok, fail
 from test_operation_runner_and_agent_rules import _OperationService
 
@@ -148,12 +150,14 @@ def test_capture_stop_requires_actual_matching_artifacts(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [{"status": "Succeeded"}])
         content = b'{"message":"test"}\n'
-        (tmp_path / "console.jsonl").write_bytes(content)
+        (tmp_path / "console.jsonl").write_bytes(b"x" * len(content))
         session = dict(sessionId="capture", active=False, finishedAtUtcMs=1,
                        jsonlPath="console.jsonl", summaryPath="summary.json",
-                       fileBytes=len(content), sha256="wrong", segmentCount=1)
+                       fileBytes=len(content), sha256=hashlib.sha256(content).hexdigest(), segmentCount=1)
         (tmp_path / "summary.json").write_text(json.dumps(session))
+        stops = []
         async def stop(**_):
+            stops.append(1)
             return ok("stop", {"session": session})
         service.console_capture_stop = stop
         start = await service.operation_start(spec())
@@ -161,13 +165,28 @@ def test_capture_stop_requires_actual_matching_artifacts(tmp_path):
         state["consoleCapture"] = {"sessionId": "capture", "ownerToken": "owner"}
         first = await service.operation_status(start.data["operationId"])
         assert not first.data["terminal"]
+        assert state["consoleCapture"]["stopped"] is True
         assert state["consoleCapture"]["artifactsVerified"] is False
-        session["sha256"] = hashlib.sha256(content).hexdigest()
-        (tmp_path / "summary.json").write_text(json.dumps(session))
+        (tmp_path / "console.jsonl").write_bytes(content)
         last = await service.operation_status(start.data["operationId"])
         assert last.data["terminal"]
         assert state["consoleCapture"]["artifactsVerified"] is True
+        assert len(stops) == 1
     asyncio.run(run())
+
+
+def test_zero_byte_capture_is_verified_only_when_real_file_exists(tmp_path):
+    from upilot_mcp.domain.task_service import _verify_capture_artifacts
+    content = b""
+    session = dict(sessionId="empty-capture", active=False, finishedAtUtcMs=1,
+                   jsonlPath="console.jsonl", summaryPath="summary.json",
+                   fileBytes=0, recordCount=0, segmentCount=1,
+                   sha256=hashlib.sha256(content).hexdigest())
+    (tmp_path / "summary.json").write_text(json.dumps(session))
+    with pytest.raises(ValueError, match="Missing capture artifact"):
+        _verify_capture_artifacts(tmp_path, session)
+    (tmp_path / "console.jsonl").write_bytes(content)
+    _verify_capture_artifacts(tmp_path, session)
 
 
 def test_cancel_terminal_latches_business_result_before_project_cleanup(tmp_path):
@@ -234,13 +253,13 @@ def test_capture_is_not_marked_stopped_when_artifact_verification_is_canceled(tm
         state = {"consoleCapture": {"sessionId": "capture", "ownerToken": "owner"}}
         stopping = asyncio.create_task(service._stop_owned_operation_capture(state))
         await entered.wait()
-        assert state["consoleCapture"]["stopped"] is False
+        assert state["consoleCapture"]["stopped"] is True
         stopping.cancel()
         try:
             await stopping
         except asyncio.CancelledError:
             pass
-        assert state["consoleCapture"]["stopped"] is False
+        assert state["consoleCapture"]["stopped"] is True
         assert state["consoleCapture"]["artifactsVerified"] is False
     asyncio.run(run())
 

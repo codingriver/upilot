@@ -780,6 +780,34 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        [UnityTest]
+        public IEnumerator EditorWindowHistoryReusesUnchangedWindowState()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
+            var instanceId = UPilotEntityIds.ToWireId(window).ToString();
+            var knownField = typeof(UPilotWindowHistory).GetField("Known", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(knownField, Is.Not.Null);
+            try
+            {
+                window.titleContent = new GUIContent(UPilotSafeWindowProbe.Title);
+                window.position = new Rect(100, 100, 320, 240);
+                window.ShowUtility();
+                yield return null;
+                UPilotWindowHistory.SampleForTests();
+                var known = (IDictionary)knownField.GetValue(null);
+                Assert.That(known.Contains(instanceId), Is.True);
+                var first = known[instanceId];
+
+                UPilotWindowHistory.SampleForTests();
+                Assert.That(known[instanceId], Is.SameAs(first));
+            }
+            finally
+            {
+                if (window != null)
+                    window.Close();
+            }
+        }
+
         [Test]
         public void EditorWindowHistoryMarksRestoredDomainBoundaryAsGap()
         {

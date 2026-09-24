@@ -15,6 +15,11 @@ namespace CodingRiver.UPilot.Tests
     public class UPilotRunnerRecoveryTests
     {
         private sealed class MissingApi { }
+        private class InheritedSingletonBase
+        {
+            public static object instance { get; } = new object();
+        }
+        private sealed class InheritedSingletonHolder : InheritedSingletonBase { }
         private sealed class ThrowingHolder
         {
             public object GetRunner(string runGuid) { return null; }
@@ -73,10 +78,64 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void MissingBindingCannotReportInactive()
         {
-            var error = Assert.Throws<MissingMemberException>(() => UPilotTestRunnerAdapter.Get(typeof(MissingApi)));
-            Assert.That(error.Message, Does.Contain("TEST_RUNNER_BINDING_UNAVAILABLE"));
-            Assert.That(error.Message, Does.Contain(typeof(MissingApi).Assembly.FullName));
-            Assert.That(error.Message, Does.Contain("candidates="));
+            var adapter = UPilotTestRunnerAdapter.Get(typeof(MissingApi));
+            var state = adapter.Probe(Guid.NewGuid().ToString(), out var runner, out var diagnostic);
+            Assert.That(state, Is.EqualTo("unknown"));
+            Assert.That(runner, Is.Null);
+            Assert.That(diagnostic, Does.Contain("TEST_RUNNER_BINDING_UNAVAILABLE"));
+            Assert.That(diagnostic, Does.Contain(typeof(MissingApi).Assembly.FullName));
+            Assert.That(diagnostic, Does.Contain("candidates="));
+        }
+
+        [Test]
+        public void StaticSingletonPropertyCanBeResolvedFromBaseType()
+        {
+            var property = UPilotTestRunnerAdapter.FindStaticProperty(typeof(InheritedSingletonHolder), "instance");
+            Assert.That(property, Is.Not.Null);
+            Assert.That(property.DeclaringType, Is.EqualTo(typeof(InheritedSingletonBase)));
+            Assert.That(property.GetValue(null), Is.SameAs(InheritedSingletonBase.instance));
+        }
+
+        [Test]
+        public void MissingBindingDiagnosticIsCachedAcrossProbes()
+        {
+            var adapter = UPilotTestRunnerAdapter.Get(typeof(MissingApi));
+            adapter.Probe("first", out _, out var first);
+            adapter.Probe("second", out _, out var second);
+            Assert.That(second, Is.SameAs(first));
+        }
+
+        [Test]
+        public void RepeatedUnchangedCleanupProbeBacksOffWithoutPersistingAgain()
+        {
+            var snapshot = new TestRunResultPayload
+            {
+                runGuid = "unchanged-cleanup",
+                status = "cleanup",
+                phase = "cleanup",
+                isRunning = true,
+                cleanupPending = true,
+                runnerState = "active",
+            };
+            var service = DetachedService(snapshot);
+            SetField(service, "_activeRunGuid", snapshot.runGuid);
+            SetField(service, "_cleanupProbeDelayMs", 100L);
+            SetField(service, "_nextCleanupProbeAt", 0L);
+            service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(MissingApi));
+            int saves = 0;
+            service.SnapshotSaverForTests = (_, __, ___) => saves++;
+            var cleanup = typeof(UPilotTestService).GetMethod("CleanupActiveRun", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            cleanup.Invoke(service, null);
+            Assert.That(saves, Is.EqualTo(1));
+            Assert.That(snapshot.runnerState, Is.EqualTo("unknown"));
+            Assert.That(snapshot.unresolvedResources, Does.Contain("test-runner-job"));
+            Assert.That((long)GetField(service, "_cleanupProbeDelayMs"), Is.EqualTo(100));
+
+            SetField(service, "_nextCleanupProbeAt", 0L);
+            cleanup.Invoke(service, null);
+            Assert.That(saves, Is.EqualTo(1));
+            Assert.That((long)GetField(service, "_cleanupProbeDelayMs"), Is.EqualTo(200));
         }
 
         [Test]

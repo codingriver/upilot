@@ -21,15 +21,17 @@ def normalize_version(raw: str) -> str:
 
 
 def _replace_pyproject_version(text: str, version: str) -> str:
-    updated, count = re.subn(
-        r'(?m)^version\s*=\s*["\'][^"\']+["\']\s*$',
-        f'version = "{version}"',
-        text,
-        count=1,
-    )
-    if count != 1:
+    project = re.search(r'(?m)^\[project\]\s*$', text)
+    if project is None:
+        raise ValueError("Could not find [project] in upilotserver~/pyproject.toml")
+    end = re.search(r'(?m)^\[', text[project.end():])
+    section_end = project.end() + end.start() if end else len(text)
+    section = text[project.end():section_end]
+    pattern = r'(?m)^(version\s*=\s*["\'])[^"\'\r\n]+(["\'])'
+    if len(list(re.finditer(pattern, section))) != 1:
         raise ValueError("Could not find a single project version in upilotserver~/pyproject.toml")
-    return updated
+    section = re.sub(pattern, lambda m: m.group(1) + version + m.group(2), section)
+    return text[:project.end()] + section + text[section_end:]
 
 
 def sync_release_version(repo_root: Path, raw_version: str, *, check: bool = False) -> list[str]:
@@ -37,23 +39,29 @@ def sync_release_version(repo_root: Path, raw_version: str, *, check: bool = Fal
     package_path = repo_root / "package.json"
     pyproject_path = repo_root / "upilotserver~" / "pyproject.toml"
 
-    package_data = json.loads(package_path.read_text(encoding="utf-8"))
+    package_text = package_path.read_bytes().decode("utf-8")
+    package_data = json.loads(package_text)
+    if not isinstance(package_data, dict) or not isinstance(package_data.get("version"), str):
+        raise ValueError("Missing package.json version")
     old_package_version = str(package_data.get("version") or "")
-    package_data["version"] = version
-    package_text = json.dumps(package_data, indent=2, ensure_ascii=False) + "\n"
+    matches = list(re.finditer(r'(?m)^(\s*"version"\s*:\s*")[^"\r\n]+(")', package_text))
+    if len(matches) != 1:
+        raise ValueError("Could not locate a unique package.json version field")
+    match = matches[0]
+    package_updated = package_text[:match.start()] + match.group(1) + version + match.group(2) + package_text[match.end():]
+    updated_package = json.loads(package_updated)
+    if {**updated_package, "version": old_package_version} != package_data:
+        raise ValueError("package.json version replacement changed another field")
 
-    pyproject_text = pyproject_path.read_text(encoding="utf-8")
-    old_pyproject_version_match = re.search(
-        r'(?m)^version\s*=\s*["\']([^"\']+)["\']\s*$',
-        pyproject_text,
-    )
+    pyproject_text = pyproject_path.read_bytes().decode("utf-8")
+    old_pyproject_version_match = re.search(r'(?m)^version\s*=\s*["\']([^"\']+)["\']', pyproject_text)
     old_pyproject_version = old_pyproject_version_match.group(1) if old_pyproject_version_match else ""
-    pyproject_text = _replace_pyproject_version(pyproject_text, version)
+    pyproject_updated = _replace_pyproject_version(pyproject_text, version)
 
     changes = []
     if old_package_version != version:
         changes.append(f"package.json: {old_package_version} -> {version}")
-    if old_pyproject_version != version:
+    if pyproject_updated != pyproject_text:
         changes.append(f"upilotserver~/pyproject.toml: {old_pyproject_version} -> {version}")
 
     if check:
@@ -61,8 +69,10 @@ def sync_release_version(repo_root: Path, raw_version: str, *, check: bool = Fal
             raise RuntimeError("Release versions are not synchronized:\n" + "\n".join(changes))
         return []
 
-    package_path.write_text(package_text, encoding="utf-8", newline="\n")
-    pyproject_path.write_text(pyproject_text, encoding="utf-8", newline="\n")
+    if package_updated != package_text:
+        package_path.write_bytes(package_updated.encode("utf-8"))
+    if pyproject_updated != pyproject_text:
+        pyproject_path.write_bytes(pyproject_updated.encode("utf-8"))
     return changes
 
 

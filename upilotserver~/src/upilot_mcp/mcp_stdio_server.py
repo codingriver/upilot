@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -1158,6 +1159,121 @@ from .mcp_tools import monohook_tools as _monohook_tools
 _original_mcp_list_tools = mcp.list_tools
 _original_tool_manager_call_tool = mcp._tool_manager.call_tool
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
+_MCP_TOOL_LOG_FILES = {
+    "csharp_eval": "csharp_eval.log",
+    "unity_reflection_call": "unity_reflection_call.log",
+    "csharp_object_dump": "csharp_object_dump.log",
+}
+_MCP_TOOL_LOG_MAX_BYTES = 10 * 1024 * 1024
+_MCP_TOOL_LOG_LOCK = threading.Lock()
+
+
+def _mcp_tool_log_project_root() -> Path | None:
+    if _facade is None:
+        return None
+
+    server = _facade.server
+    session = getattr(getattr(server, "session_manager", None), "active", None)
+    project_path = str(getattr(session, "project_path", "") or "").strip()
+    if not project_path:
+        state = getattr(server, "state", None)
+        project_path = str(getattr(state, "project_path", "") or "").strip()
+    if not project_path:
+        return None
+    return Path(project_path).expanduser().resolve()
+
+
+def _mcp_tool_log_json_default(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json", by_alias=True)
+        except Exception:
+            pass
+    return str(value)
+
+
+def _bounded_mcp_tool_log_line(record: dict[str, Any]) -> bytes:
+    line = (json.dumps(
+        record,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=_mcp_tool_log_json_default,
+    ) + "\n").encode("utf-8")
+    if len(line) <= _MCP_TOOL_LOG_MAX_BYTES:
+        return line
+
+    serialized = line.decode("utf-8", errors="replace")
+    preview_budget = min(4 * 1024 * 1024, max(0, _MCP_TOOL_LOG_MAX_BYTES // 3))
+    preview_bytes = serialized.encode("utf-8")[:preview_budget]
+    preview = preview_bytes.decode("utf-8", errors="ignore") + "[TRUNCATED]"
+    truncated_record = {
+        "time": record.get("time", ""),
+        "tool": record.get("tool", ""),
+        "truncated": True,
+        "originalBytes": len(line),
+        "preview": preview,
+    }
+    truncated_line = (json.dumps(
+        truncated_record,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n").encode("utf-8")
+    if len(truncated_line) <= _MCP_TOOL_LOG_MAX_BYTES:
+        return truncated_line
+
+    # Keep the hard file-size limit even when tests or future configuration use
+    # an unusually small maximum.
+    minimal = {
+        "time": record.get("time", ""),
+        "tool": record.get("tool", ""),
+        "truncated": True,
+        "originalBytes": len(line),
+        "preview": "[TRUNCATED]",
+    }
+    return (json.dumps(minimal, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _write_mcp_tool_call_log(
+    tool_name: str,
+    parameters: dict[str, Any],
+    *,
+    result: Any = None,
+    error: BaseException | None = None,
+) -> None:
+    file_name = _MCP_TOOL_LOG_FILES.get(tool_name)
+    if not file_name:
+        return
+
+    try:
+        project_root = _mcp_tool_log_project_root()
+        if project_root is None:
+            logger.warning("Skipping MCP tool call log for %s: project path unavailable", tool_name)
+            return
+
+        record: dict[str, Any] = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "tool": tool_name,
+            "parameters": parameters,
+        }
+        if error is None:
+            record["result"] = result
+        else:
+            record["error"] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+
+        line = _bounded_mcp_tool_log_line(record)
+        log_path = project_root / "Logs" / "UPilot" / "McpCalls" / file_name
+        with _MCP_TOOL_LOG_LOCK:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            current_size = log_path.stat().st_size if log_path.exists() else 0
+            mode = "wb" if current_size + len(line) > _MCP_TOOL_LOG_MAX_BYTES else "ab"
+            with log_path.open(mode) as stream:
+                stream.write(line)
+    except Exception as ex:
+        logger.warning("Failed to write MCP tool call log for %s: %s", tool_name, ex)
 
 
 async def _call_tool_with_strict_arguments(
@@ -1166,16 +1282,26 @@ async def _call_tool_with_strict_arguments(
     context=None,
     convert_result: bool = False,
 ):
-    tool = mcp._tool_manager.get_tool(name)
-    if tool is not None:
-        arguments, argument_error = normalize_public_mcp_arguments(
-            name, arguments or {}, tool.parameters
+    original_arguments = dict(arguments or {})
+    try:
+        tool = mcp._tool_manager.get_tool(name)
+        if tool is not None:
+            arguments, argument_error = normalize_public_mcp_arguments(
+                name, arguments or {}, tool.parameters
+            )
+            if argument_error:
+                raise ValueError(json.dumps(argument_error, ensure_ascii=False))
+        result = await _original_tool_manager_call_tool(
+            name, arguments, context=context, convert_result=convert_result
         )
-        if argument_error:
-            raise ValueError(json.dumps(argument_error, ensure_ascii=False))
-    return await _original_tool_manager_call_tool(
-        name, arguments, context=context, convert_result=convert_result
-    )
+    except asyncio.CancelledError as ex:
+        _write_mcp_tool_call_log(name, original_arguments, error=ex)
+        raise
+    except Exception as ex:
+        _write_mcp_tool_call_log(name, original_arguments, error=ex)
+        raise
+    _write_mcp_tool_call_log(name, original_arguments, result=result)
+    return result
 
 
 mcp._tool_manager.call_tool = _call_tool_with_strict_arguments

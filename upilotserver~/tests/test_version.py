@@ -6,11 +6,13 @@ from upilot_mcp import version
 
 
 def _clear_version_environment(monkeypatch) -> None:
+    monkeypatch.delitem(version.__dict__, "_RUNTIME_IDENTITY", raising=False)
     monkeypatch.delenv("UPILOT_SERVER_VERSION", raising=False)
     monkeypatch.setattr(version, "_build_info", lambda: {})
 
 
 def test_server_version_prefers_environment_override(monkeypatch) -> None:
+    monkeypatch.delitem(version.__dict__, "_RUNTIME_IDENTITY", raising=False)
     monkeypatch.setenv("UPILOT_SERVER_VERSION", "0.3.3-override")
     monkeypatch.setattr(version, "_build_info", lambda: {"server_version": "0.3.3-build"})
     monkeypatch.setattr(version, "_read_pyproject_version", lambda: "0.3.3-source")
@@ -24,6 +26,12 @@ def test_server_version_prefers_build_info_over_source(monkeypatch) -> None:
     monkeypatch.setattr(version, "_read_pyproject_version", lambda: "0.3.3-source")
 
     assert version.server_version() == "0.3.3-build"
+
+
+def test_server_version_freezes_process_identity(monkeypatch) -> None:
+    recorded = version.server_version()
+    monkeypatch.setenv("UPILOT_SERVER_VERSION", "not-the-running-version")
+    assert version.server_version() == recorded
 
 
 def test_server_version_prefers_current_source_over_installed_distribution(monkeypatch) -> None:

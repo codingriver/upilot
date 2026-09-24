@@ -3,10 +3,16 @@ from pathlib import Path
 
 import pytest
 
+from upilot_mcp.config import CONFIG
 from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.responses import ok
 from upilot_mcp.tool_registry import REGISTRY
 from upilot_mcp.mcp_tools import test_tools  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _acceptance_write_grant(monkeypatch):
+    monkeypatch.setattr(CONFIG, "write_access_approved", True)
 
 
 class Dispatcher:
@@ -306,7 +312,7 @@ def test_acceptance_forwards_discovery_snapshot_and_preserves_stale_error_withou
     monkeypatch.setattr(target, "test_list", listed)
     monkeypatch.setattr(target, "test_run", run)
 
-    result = asyncio.run(target.upilot_acceptance_run(
+    result = asyncio.run(target._execute_upilot_acceptance_run(
         fixtures=["Demo.Fixture"], write_artifact=False,
     ))
     assert not result.ok and result.error.code == "TEST_SELECTION_STALE"
@@ -358,7 +364,7 @@ def test_acceptance_strict_selector_rejection_never_starts_the_runner(monkeypatc
     monkeypatch.setattr(target, "test_list", listed)
     monkeypatch.setattr(target, "test_run", forbidden_run)
 
-    result = asyncio.run(target.upilot_acceptance_run(
+    result = asyncio.run(target._execute_upilot_acceptance_run(
         fixtures=["Missing"], write_artifact=False,
     ))
 

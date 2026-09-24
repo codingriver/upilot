@@ -2,6 +2,9 @@
 using System.Collections;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using CodingRiver.UPilot.Automation;
 using NUnit.Framework;
@@ -58,6 +61,69 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(result.ok, Is.False);
             Assert.That(result.error, Does.Contain("CONSOLE_CAPTURE_OWNER_TOKEN_REQUIRED"));
             Assert.That(UPilotConsoleCaptureApi.GetBoundary().ok, Is.False);
+        }
+
+        [UnityTest]
+        public IEnumerator VerifyStoppedRequiresRealEmptyArtifactAndDetectsTampering()
+        {
+            ConsoleCaptureResult started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            _sessionId = started.session.sessionId;
+            var stopped = UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken);
+            Assert.That(stopped.ok, Is.True, stopped.error);
+            var verify = UPilotConsoleCaptureApi.VerifyStoppedAsync(_sessionId);
+            while (!verify.IsCompleted) yield return null;
+            var result = verify.GetAwaiter().GetResult();
+            Assert.That(result.ok && result.stopped && result.artifactsVerified, Is.True, result.errorMessage);
+            Assert.That(result.fileBytes, Is.GreaterThanOrEqualTo(0));
+            Assert.That(File.Exists(stopped.session.jsonlPath), Is.True);
+
+            File.AppendAllText(stopped.session.jsonlPath, "tampered");
+            verify = UPilotConsoleCaptureApi.VerifyStoppedAsync(_sessionId);
+            while (!verify.IsCompleted) yield return null;
+            result = verify.GetAwaiter().GetResult();
+            Assert.That(result.ok && result.stopped && !result.artifactsVerified, Is.True);
+            _sessionId = null;
+        }
+
+        [Test]
+        public void VerifyStoppedNeverAdoptsAnUnknownSession()
+        {
+            var result = UPilotConsoleCaptureApi.VerifyStoppedAsync("missing-session").GetAwaiter().GetResult();
+            Assert.That(result.stopped || result.artifactsVerified, Is.False);
+        }
+
+        [Test]
+        public void BridgeMessageLimitUsesFinalUtf8Bytes()
+        {
+            var method = typeof(UPilotBridge).GetMethod("ResponseBytes", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            int limit = 4 * 1024 * 1024;
+            foreach (int delta in new[] { -1, 0, 1 })
+            {
+                string message = new string('x', limit + delta);
+                Assert.That((int)method.Invoke(null, new object[] { message }), Is.EqualTo(limit + delta));
+            }
+            Assert.That((int)method.Invoke(null, new object[] { "中文" }),
+                Is.EqualTo(Encoding.UTF8.GetByteCount("中文")));
+        }
+
+        [Test]
+        public void LifecycleCancellationNeverHidesNetworkFailureOrOrdinaryInvalidation()
+        {
+            var method = typeof(UPilotMcpServerManager).GetMethod("IsExpectedStatusInterruption",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            bool Expected(Exception ex, CancellationToken token, string reason) =>
+                (bool)method.Invoke(null, new object[] { ex, token, reason });
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "domain_reload"), Is.True);
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "editor_exit"), Is.True);
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "explicit_stop"), Is.True);
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, ""), Is.False);
+            Assert.That(Expected(new IOException("network"), cancelled.Token, "domain_reload"), Is.False);
+            Assert.That(Expected(new OperationCanceledException(), CancellationToken.None, "domain_reload"), Is.False);
         }
 
         [Test]

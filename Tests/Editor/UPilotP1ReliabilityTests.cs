@@ -8,8 +8,21 @@ namespace CodingRiver.UPilot.Tests
     public class UPilotP1ReliabilityTests
     {
         private string _directory;
-        [SetUp] public void SetUp() => _directory = Path.Combine(Path.GetTempPath(), "UPilot-P1-" + Guid.NewGuid().ToString("N"));
-        [TearDown] public void TearDown() { if (Directory.Exists(_directory)) Directory.Delete(_directory, true); }
+        [SetUp]
+        public void SetUp()
+        {
+            _directory = Path.Combine(Path.GetTempPath(), "UPilot-P1-" + Guid.NewGuid().ToString("N"));
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = null;
+            UPilotTestRunStore.BeforeActivePointerClearForTests = null;
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = null;
+            UPilotTestRunStore.BeforeActivePointerClearForTests = null;
+            if (Directory.Exists(_directory)) Directory.Delete(_directory, true);
+        }
 
         [Test]
         public void SnapshotSequenceRejectsOlderWriterAndProtectsOtherActiveRun()
@@ -25,6 +38,42 @@ namespace CodingRiver.UPilot.Tests
             UPilotTestRunStore.Save(_directory, first, false, true);
             Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo("second"));
             Assert.That(Directory.GetFiles(_directory, "*.tmp"), Is.Empty);
+        }
+
+        [Test]
+        public void HeaderScanIgnoresFieldNamesInsideNestedStringValues()
+        {
+            var snapshot = new TestRunResultPayload
+            {
+                runGuid = "header-scan",
+                status = "running",
+                events = new System.Collections.Generic.List<TestRunEventPayload>
+                {
+                    new TestRunEventPayload
+                    {
+                        kind = "\"snapshotSequence\": 9999, \"endedAt\": 9999",
+                    },
+                },
+            };
+            UPilotTestRunStore.Save(_directory, snapshot, true, false);
+
+            Assert.DoesNotThrow(() => UPilotTestRunStore.Save(_directory, snapshot, true, false));
+            Assert.That(snapshot.snapshotSequence, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void UnchangedPointersAreNotRewrittenOnRepeatedSave()
+        {
+            var snapshot = new TestRunResultPayload { runGuid = "stable-pointers", status = "running" };
+            UPilotTestRunStore.Save(_directory, snapshot, true, false);
+            var replaced = new System.Collections.Generic.List<string>();
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = path => replaced.Add(Path.GetFileName(path));
+
+            UPilotTestRunStore.Save(_directory, snapshot, true, false);
+
+            Assert.That(replaced, Is.EqualTo(new[] { "stable-pointers.json" }));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "last-run.txt")), Is.EqualTo(snapshot.runGuid));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(snapshot.runGuid));
         }
 
         [Test]
@@ -67,6 +116,7 @@ namespace CodingRiver.UPilot.Tests
             UPilotTestRunStore.Save(_directory, snapshot, true, false);
             snapshot.endedAt = 100;
             snapshot.status = "completed";
+            UPilotTestRunStore.AtomicWrite(Path.Combine(_directory, "last-run.txt"), "another-run");
             using (var locked = new FileStream(Path.Combine(_directory, "last-run.txt"),
                 FileMode.Open, FileAccess.Read, FileShare.Read))
                 Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, snapshot, false, true));

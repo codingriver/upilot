@@ -260,12 +260,16 @@ def test_inflight_batch_request_survives_restart_and_rejects_conflicting_termina
 
 
 def test_historical_verified_without_snapshot_does_not_prove_pass(tmp_path):
+    import sqlite3
     store = StateStore()
     store.configure_project(str(tmp_path))
     batch = store.register_write_batch(["A.cs"], created_at=1, files_sha256="a", compile_when_edit_mode=True)
-    store.mark_write_batch(batch["writeBatchId"], "verified", compile_operation_id="legacy")
+    with sqlite3.connect(store._db_path) as db:
+        db.execute("UPDATE write_batches SET status='verified',compile_operation_id='legacy' "
+                   "WHERE write_batch_id=?", (batch["writeBatchId"],))
     result = store.get_write_batch(batch["writeBatchId"])
-    assert result["status"] == "verified"
+    assert result["status"] == "recovery_required" and result["storedStatus"] == "verified"
+    assert result["evidenceAvailable"] is False
     assert result["outcome"] == "unknown"
     assert not result["terminal"] and not result["correlationVerified"]
 
@@ -625,9 +629,16 @@ def test_safe_compile_failure_preserves_identity_without_second_start(tmp_path, 
     store.configure_project(str(tmp_path))
     batch = store.register_write_batch(["A.cs"], created_at=100, files_sha256="a", compile_when_edit_mode=True)
     store.mark_write_batch(batch["writeBatchId"], "compiling", compile_operation_id="compile-a")
-    store.update_editor_execution_state(_snapshot(1, phase="failed", operation_id="compile-a",
-                                                 write_batch_id=batch["writeBatchId"],
-                                                 write_batch_created_at=100, observed_at=200))
+    running = _snapshot(1, phase="compiling", terminal=False, errors_verified=False,
+                        operation_id="compile-a", write_batch_id=batch["writeBatchId"],
+                        write_batch_created_at=100, observed_at=150)
+    running["compileRequestId"] = "compile-request"
+    store.update_editor_execution_state(running)
+    terminal = _snapshot(2, phase="failed", operation_id="compile-a",
+                         write_batch_id=batch["writeBatchId"],
+                         write_batch_created_at=100, observed_at=200)
+    terminal["compileRequestId"] = "compile-request"
+    store.update_editor_execution_state(terminal)
     store.compile.compile_request_id = "compile-request"
     service = CompileDomainService()
     service.server = SimpleNamespace(state=store, is_ready=lambda: True,
@@ -642,12 +653,11 @@ def test_safe_compile_failure_preserves_identity_without_second_start(tmp_path, 
     result = asyncio.run(service.safe_compile_and_wait(
         attach_compile_request_id="compile-request", compile_operation_id="compile-a",
         write_batch_id=batch["writeBatchId"], write_batch_created_at=100, post_compile_delay_s=0))
-    if query_failure:
-        assert not result.ok and result.error.code == "COMPILE_ERRORS_NOT_VERIFIED"
-    else:
-        assert result.ok and result.data["status"] == "failed"
-        assert result.data["correlationVerified"] is True
-        assert result.data["compileOperationId"] == "compile-a"
+    # A persisted correlated terminal snapshot is authoritative even when a later
+    # independent errors query would fail; safe wait must not replay compilation.
+    assert result.ok and result.data["status"] == "failed"
+    assert result.data["correlationVerified"] is True
+    assert result.data["compileOperationId"] == "compile-a"
 
 
 def test_safe_compile_reuses_persisted_verified_batch_without_second_start(tmp_path):
@@ -734,9 +744,14 @@ def test_safe_compile_does_not_replay_unverified_terminal_batch(tmp_path):
 def test_safe_compile_uses_original_terminal_identity(tmp_path, outcome):
     store = StateStore()
     store.configure_project(str(tmp_path))
-    store.update_editor_execution_state(_snapshot(
-        1, operation_id="compile-a", write_batch_id="batch-a",
-        write_batch_created_at=100, observed_at=200))
+    batch = store.register_write_batch(["A.cs"], created_at=100, files_sha256="a", compile_when_edit_mode=True)
+    batch_id = batch["writeBatchId"]
+    store.mark_write_batch(batch_id, "compiling", compile_operation_id="compile-a")
+    running = _snapshot(1, phase="compiling", terminal=False, errors_verified=False,
+                        operation_id="compile-a", write_batch_id=batch_id,
+                        write_batch_created_at=100, observed_at=150)
+    running["compileRequestId"] = "request-a"
+    store.update_editor_execution_state(running)
     store.compile.compile_request_id = "request-a"
     service = CompileDomainService()
     service.server = SimpleNamespace(state=store, is_ready=lambda: True)
@@ -748,8 +763,12 @@ def test_safe_compile_uses_original_terminal_identity(tmp_path, outcome):
             store.update_editor_execution_state(_snapshot(
                 2, operation_id="compile-b", write_batch_id="batch-b",
                 write_batch_created_at=200, observed_at=300))
-        if outcome == "unverified":
-            store.compile.errors_verified = False
+        else:
+            terminal = _snapshot(2, operation_id="compile-a", write_batch_id=batch_id,
+                                 write_batch_created_at=100, observed_at=200,
+                                 errors_verified=outcome != "unverified")
+            terminal["compileRequestId"] = "request-a"
+            store.update_editor_execution_state(terminal)
         return ok("wait", {"status": "completed"})
 
     async def errors(_request_id):
@@ -759,11 +778,11 @@ def test_safe_compile_uses_original_terminal_identity(tmp_path, outcome):
     service.compile_errors = errors
     result = asyncio.run(service.safe_compile_and_wait(
         attach_compile_request_id="request-a", compile_operation_id="compile-a",
-        write_batch_id="batch-a", write_batch_created_at=100, post_compile_delay_s=0))
+        write_batch_id=batch_id, write_batch_created_at=100, post_compile_delay_s=0))
     assert result.ok == (outcome == "success")
     detail = result.data if result.ok else result.error.detail
     assert detail["compileOperationId"] == "compile-a"
-    assert detail["writeBatchId"] == "batch-a"
+    assert detail["writeBatchId"] == batch_id
     if outcome == "exception":
         assert result.error.code == "COMPILE_WORKFLOW_EXCEPTION"
         assert detail["compileRequestId"] == "request-a"

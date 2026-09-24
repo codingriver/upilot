@@ -555,7 +555,7 @@ async def unity_script_read(scriptPath: str):
     return _log_tool_result("unity_script_read", _payload(r))
 
 @mcp.tool(
-    description="在 Unity 项目中创建新的 C# 脚本文件。写磁盘操作：scriptPath 应位于 Assets 下并以 .cs 结尾；创建/更新完本轮文件后调用 unity_sync_after_disk_write，再编译等待。"
+    description="在 Unity 项目中创建新的 C# 脚本文件。写磁盘操作：scriptPath 应位于 Assets 下并以 .cs 结尾；整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
 )
 async def unity_script_create(scriptPath: str, content: str = ""):
     _log_tool_call(
@@ -565,7 +565,7 @@ async def unity_script_create(scriptPath: str, content: str = ""):
     return _log_tool_result("unity_script_create", _payload(r))
 
 @mcp.tool(
-    description="更新 Unity 项目中已有 C# 脚本文件。会覆盖文件内容；调用前读取或确认目标文件，完成本轮所有脚本写入后调用 unity_sync_after_disk_write，再用 compile_wait/safe_compile 验证。"
+    description="更新 Unity 项目中已有 C# 脚本文件。会覆盖文件内容；调用前读取或确认目标文件。整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
 )
 async def unity_script_update(scriptPath: str, content: str):
     _log_tool_call(
@@ -575,7 +575,7 @@ async def unity_script_update(scriptPath: str, content: str):
     return _log_tool_result("unity_script_update", _payload(r))
 
 @mcp.tool(
-    description="删除 Unity 项目中指定路径的 C# 脚本文件。破坏性磁盘操作：调用前确认路径和影响；删除后调用 unity_sync_after_disk_write 并检查编译错误。"
+    description="删除 Unity 项目中指定路径的 C# 脚本文件。破坏性磁盘操作：调用前确认路径和影响。整批完成后登记一次 unity_write_batch_register(paths, compileWhenEditMode=true, deletedPaths=已删除路径)；paths 只放仍存在的代码文件，仅删除代码时 paths=[]。用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
 )
 async def unity_script_delete(scriptPath: str):
     _log_tool_call("unity_script_delete", {"scriptPath": scriptPath})

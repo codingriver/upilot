@@ -198,6 +198,11 @@ namespace CodingRiver.UPilot
         public string callbackDomain;
         public string[] selectedLeafIdentities;
         public List<TestResultItemPayload> results = new List<TestResultItemPayload>();
+
+        internal TestRunResultPayload ShallowCopyForPersistence()
+        {
+            return (TestRunResultPayload)MemberwiseClone();
+        }
     }
 
     [Serializable]
@@ -248,11 +253,15 @@ namespace CodingRiver.UPilot
         private Type _cancelApiType;
         private MethodInfo _cancelMethod;
         private static readonly string CallbackDomain = Guid.NewGuid().ToString("N");
+        private const long InitialCleanupProbeDelayMs = 100;
+        private const long MaximumCleanupProbeDelayMs = 2000;
         private long _nextCleanupProbeAt;
+        private long _cleanupProbeDelayMs = InitialCleanupProbeDelayMs;
         private volatile bool _editorCleanupPending;
         internal Func<Type, UPilotTestRunnerAdapter> RunnerAdapterResolverForTests;
         internal Action<MethodInfo, Type, object> CallbackUnregisterInvokerForTests;
         internal Action<UnityEngine.Object> ApiDestroyerForTests;
+        internal Action<TestRunResultPayload, bool, bool> SnapshotSaverForTests;
 
         private static string PersistenceDirectory => Path.GetFullPath(
             Path.Combine(Application.dataPath, "..", "Library", "UPilot", "TestRuns"));
@@ -1732,16 +1741,26 @@ namespace CodingRiver.UPilot
         private void CleanupActiveRun()
         {
             if (_lastResults == null) return;
-            if (NowMs() < _nextCleanupProbeAt) return;
-            _nextCleanupProbeAt = NowMs() + 100;
+            long now = NowMs();
+            if (now < _nextCleanupProbeAt) return;
             // A failed result write must be repaired before releasing its callback/API.
             if (!string.IsNullOrWhiteSpace(_lastResults.persistenceError))
             {
                 PersistSnapshot();
-                if (!string.IsNullOrWhiteSpace(_lastResults.persistenceError)) return;
+                if (!string.IsNullOrWhiteSpace(_lastResults.persistenceError))
+                {
+                    ScheduleNextCleanupProbe(now, stateChanged: false);
+                    return;
+                }
             }
             if (!string.IsNullOrWhiteSpace(_activeRunGuid))
             {
+                string previousRunnerState = _lastResults.runnerState;
+                string previousDiagnostic = _lastResults.recoveryDiagnostic;
+                bool previousEditorCleanupPending = _editorCleanupPending;
+                bool previousCleanupPending = _lastResults.cleanupPending;
+                bool previousCleanupSucceeded = _lastResults.cleanupSucceeded;
+
                 var runnerState = ProbeFrameworkRun(out _);
                 bool editorClean = !string.Equals(_lastResults.testMode, "PlayMode", StringComparison.OrdinalIgnoreCase)
                     || (!EditorApplication.isPlaying && !EditorApplication.isPlayingOrWillChangePlaymode
@@ -1751,8 +1770,16 @@ namespace CodingRiver.UPilot
                 {
                     _lastResults.cleanupPending = true;
                     _lastResults.cleanupSucceeded = false;
-                    RefreshUnresolvedResources();
-                    PersistSnapshot();
+                    bool resourcesChanged = !UnresolvedResourcesMatchCurrentState();
+                    if (resourcesChanged) RefreshUnresolvedResources();
+                    bool stateChanged = !string.Equals(previousRunnerState, _lastResults.runnerState, StringComparison.Ordinal)
+                        || !string.Equals(previousDiagnostic, _lastResults.recoveryDiagnostic, StringComparison.Ordinal)
+                        || previousEditorCleanupPending != _editorCleanupPending
+                        || previousCleanupPending != _lastResults.cleanupPending
+                        || previousCleanupSucceeded != _lastResults.cleanupSucceeded
+                        || resourcesChanged;
+                    if (stateChanged) PersistSnapshot();
+                    ScheduleNextCleanupProbe(now, stateChanged);
                     return;
                 }
             }
@@ -1824,8 +1851,18 @@ namespace CodingRiver.UPilot
             if (_cleanupScheduled)
                 return;
             _cleanupScheduled = true;
+            _cleanupProbeDelayMs = InitialCleanupProbeDelayMs;
+            _nextCleanupProbeAt = 0;
             EditorApplication.delayCall += CleanupActiveRun;
             EditorApplication.update += CleanupActiveRunFromUpdate;
+        }
+
+        private void ScheduleNextCleanupProbe(long now, bool stateChanged)
+        {
+            _cleanupProbeDelayMs = stateChanged
+                ? InitialCleanupProbeDelayMs
+                : Math.Min(MaximumCleanupProbeDelayMs, Math.Max(InitialCleanupProbeDelayMs, _cleanupProbeDelayMs * 2));
+            _nextCleanupProbeAt = now + _cleanupProbeDelayMs;
         }
 
         internal bool ReleaseOwnedRunnerResources()
@@ -1981,6 +2018,50 @@ namespace CodingRiver.UPilot
             _lastResults.resultAuthoritative = true;
             PersistSnapshot();
             ScheduleCleanup();
+        }
+
+        private bool UnresolvedResourcesMatchCurrentState()
+        {
+            if (_lastResults == null || _lastResults.unresolvedResources == null)
+                return false;
+            int index = 0;
+            if (_isRunning && _lastResults.runnerState != "inactive"
+                && !NextResourceMatches(_lastResults.unresolvedResources, ref index, "test-runner-job"))
+                return false;
+            if (!string.IsNullOrWhiteSpace(_activeRunGuid)
+                && !NextRunGuidResourceMatches(_lastResults.unresolvedResources, ref index, _activeRunGuid))
+                return false;
+            if (_activeApi != null
+                && !NextResourceMatches(_lastResults.unresolvedResources, ref index, "test-runner-api"))
+                return false;
+            if (_activeCallback != null
+                && !NextResourceMatches(_lastResults.unresolvedResources, ref index, "test-callback"))
+                return false;
+            if (_editorCleanupPending
+                && !NextResourceMatches(_lastResults.unresolvedResources, ref index, "editor-playmode"))
+                return false;
+            return index == _lastResults.unresolvedResources.Count;
+        }
+
+        private static bool NextResourceMatches(List<string> resources, ref int index, string expected)
+        {
+            if (index >= resources.Count || !string.Equals(resources[index], expected, StringComparison.Ordinal))
+                return false;
+            index++;
+            return true;
+        }
+
+        private static bool NextRunGuidResourceMatches(List<string> resources, ref int index, string runGuid)
+        {
+            if (index >= resources.Count) return false;
+            const string prefix = "run-guid:";
+            string value = resources[index];
+            if (value == null || value.Length != prefix.Length + runGuid.Length
+                || !value.StartsWith(prefix, StringComparison.Ordinal)
+                || string.Compare(value, prefix.Length, runGuid, 0, runGuid.Length, StringComparison.Ordinal) != 0)
+                return false;
+            index++;
+            return true;
         }
 
         private void RefreshUnresolvedResources()
@@ -2203,8 +2284,10 @@ namespace CodingRiver.UPilot
             _lastResults.runGuid = runGuid;
             try
             {
-                UPilotTestRunStore.Save(PersistenceDirectory, _lastResults,
-                    _isRunning || IsNonTerminal(_lastResults.status), clearActivePointer);
+                bool active = _isRunning || IsNonTerminal(_lastResults.status);
+                var saver = SnapshotSaverForTests;
+                if (saver != null) saver(_lastResults, active, clearActivePointer);
+                else UPilotTestRunStore.Save(PersistenceDirectory, _lastResults, active, clearActivePointer);
             }
             catch (Exception ex)
             {

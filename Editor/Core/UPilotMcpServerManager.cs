@@ -151,6 +151,9 @@ namespace CodingRiver.UPilot
         private readonly object _statusLock = new();
         private McpServerStatus _cachedStatus;
         private Task<McpServerStatus> _statusRefreshTask;
+        private CancellationTokenSource _statusRefreshCancellation;
+        private string _statusInterruptReason = "";
+        private int _statusInterruptedGeneration = -1;
         private int _statusGeneration;
         private int _consecutiveIdentityMisses;
         private long _identityPendingSinceMs;
@@ -347,6 +350,8 @@ namespace CodingRiver.UPilot
         private UPilotMcpServerManager()
         {
             LoadPrefs();
+            AssemblyReloadEvents.beforeAssemblyReload += () => InvalidateStatusCache("domain_reload");
+            EditorApplication.quitting += () => InvalidateStatusCache("editor_exit");
             try
             {
                 if (!AssetDatabase.IsAssetImportWorkerProcess())
@@ -414,11 +419,17 @@ namespace CodingRiver.UPilot
             lock (_statusLock) { return _cachedStatus; }
         }
 
-        public void InvalidateStatusCache()
+        public void InvalidateStatusCache(string lifecycleReason = "")
         {
-            Interlocked.Increment(ref _statusGeneration);
-            // A cache refresh must not erase an error or restart its deadline.
-            _lastRefreshMs = 0;
+            lock (_statusLock)
+            {
+                int interrupted = Interlocked.Increment(ref _statusGeneration) - 1;
+                _statusInterruptReason = lifecycleReason;
+                _statusInterruptedGeneration = interrupted;
+                if (!string.IsNullOrEmpty(lifecycleReason)) _statusRefreshCancellation?.Cancel();
+                // A cache refresh must not erase an error or restart its deadline.
+                _lastRefreshMs = 0;
+            }
         }
 
         public async Task<McpServerStatus> GetFreshStatusAsync(long deadlineUtcMs = 0)
@@ -443,17 +454,31 @@ namespace CodingRiver.UPilot
             {
                 if (_statusRefreshTask != null && !_statusRefreshTask.IsCompleted) return;
                 var generation = Volatile.Read(ref _statusGeneration);
-                _statusRefreshTask = RunBoundedStatusRefreshAsync(httpPort, wsPort, generation);
+                var cancellation = new CancellationTokenSource();
+                _statusRefreshCancellation = cancellation;
+                _statusRefreshTask = RunBoundedStatusRefreshAsync(httpPort, wsPort, generation, cancellation);
             }
         }
 
-        private async Task<McpServerStatus> RunBoundedStatusRefreshAsync(int httpPort, int wsPort, int generation)
+        private async Task<McpServerStatus> RunBoundedStatusRefreshAsync(int httpPort, int wsPort, int generation,
+            CancellationTokenSource cancellation)
         {
-            var work = Task.Run(() => RefreshStatusAsync(httpPort, wsPort, generation));
+            var work = Task.Run(() => RefreshStatusAsync(httpPort, wsPort, generation, cancellation.Token));
+            _ = work.ContinueWith(_ =>
+            {
+                lock (_statusLock)
+                {
+                    if (ReferenceEquals(_statusRefreshCancellation, cancellation))
+                        _statusRefreshCancellation = null;
+                }
+                cancellation.Dispose();
+            }, TaskScheduler.Default);
             if (await Task.WhenAny(work, Task.Delay(30000)).ConfigureAwait(false) == work)
                 return await work.ConfigureAwait(false);
             lock (_statusLock)
             {
+                if (ReferenceEquals(_statusRefreshCancellation, cancellation))
+                    cancellation.Cancel();
                 if (generation == Volatile.Read(ref _statusGeneration))
                 {
                     Interlocked.Increment(ref _statusGeneration);
@@ -468,7 +493,8 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort, int generation)
+        private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort, int generation,
+            CancellationToken token)
         {
             var status = new McpServerStatus();
             status.StatusGeneration = generation;
@@ -477,8 +503,10 @@ namespace CodingRiver.UPilot
             {
                 var httpTask = IsPortListeningAsync("127.0.0.1", httpPort);
                 var wsTask = IsPortListeningAsync("127.0.0.1", wsPort);
+                token.ThrowIfCancellationRequested();
                 status.HttpPortListening = await httpTask;
                 status.WsPortListening = await wsTask;
+                token.ThrowIfCancellationRequested();
                 status.IsRunning = status.HttpPortListening || status.WsPortListening;
 
                 if (status.IsRunning)
@@ -491,7 +519,7 @@ namespace CodingRiver.UPilot
                     status.ProcessOwnershipEvidence = process.Evidence;
 
                     stage = "health_query";
-                    var stats = await FetchServerStatsAsync(httpPort);
+                    var stats = await FetchServerStatsAsync(httpPort, token);
                     status.WsClientCount = stats.WsCount;
                     status.HttpClientCount = stats.HttpCount;
                     status.ServerVersion = stats.Version;
@@ -518,12 +546,16 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                status.ErrorMessage = ex.Message;
+                string reason;
+                lock (_statusLock) reason = _statusInterruptedGeneration == generation ? _statusInterruptReason : "";
+                bool expected = IsExpectedStatusInterruption(ex, token, reason);
+                status.ErrorMessage = ex.GetType().Name + ": " + ex.Message;
                 status.StatusFailureStage = stage;
-                if (generation == Volatile.Read(ref _statusGeneration))
-                    Debug.LogError($"[UPilotMcpServerManager] Status refresh failed at {stage} (generation {generation}): {ex.Message}");
+                status.StatusCancellationReason = expected ? reason : ex is OperationCanceledException ? "timeout" : "";
+                if (expected)
+                    Debug.LogWarning($"[UPilotMcpServerManager] Expected {reason} status interruption at {stage} (generation {generation}).");
                 else
-                    Debug.LogWarning($"[UPilotMcpServerManager] Superseded status refresh interrupted at {stage} (generation {generation}): {ex.Message}");
+                    Debug.LogError($"[UPilotMcpServerManager] Status refresh failed at {stage} (generation {generation}): {ex}");
             }
 
             var refreshedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -544,6 +576,10 @@ namespace CodingRiver.UPilot
 
             return status;
         }
+
+        internal static bool IsExpectedStatusInterruption(Exception ex, CancellationToken token, string reason) =>
+            ex is OperationCanceledException && token.IsCancellationRequested
+            && (reason == "domain_reload" || reason == "editor_exit" || reason == "explicit_stop");
 
         private void UpdateDiagnosisTracking(ref McpServerStatus status, long nowMs)
         {
@@ -570,7 +606,7 @@ namespace CodingRiver.UPilot
                 nowMs - _identityPendingSinceMs < IdentityGraceMs;
         }
 
-        private async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort)
+        private async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort, CancellationToken token = default)
         {
             int wsCount = 0;
             int httpCount = 0;
@@ -595,7 +631,7 @@ namespace CodingRiver.UPilot
             try
             {
                 var url = $"http://127.0.0.1:{httpPort}/stats";
-                using var response = await _httpClient.GetAsync(url);
+                using var response = await _httpClient.GetAsync(url, token);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -625,14 +661,19 @@ namespace CodingRiver.UPilot
                     toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
                 }
             }
-            catch
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failure = "/stats: " + ex.GetType().Name + ": " + ex.Message;
             }
 
             try
             {
                 var url = $"http://127.0.0.1:{httpPort}/health";
-                using var response = await _httpClient.GetAsync(url);
+                using var response = await _httpClient.GetAsync(url, token);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -678,9 +719,13 @@ namespace CodingRiver.UPilot
                 }
                 else failure = "/health HTTP " + (int)response.StatusCode;
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                failure = "/health: " + ex.Message;
+                failure = (failure.Length > 0 ? failure + "; " : "") + "/health: " + ex.GetType().Name + ": " + ex.Message;
             }
 
             return new ServerStatsProbe(
@@ -1122,6 +1167,7 @@ namespace CodingRiver.UPilot
 
         private void StopCurrentProjectProcesses(int expectedProcessId = 0)
         {
+            InvalidateStatusCache("explicit_stop");
             using var prepared = PrepareCurrentProjectStop(expectedProcessId);
             StopPreparedProcesses(prepared, expectedProcessId);
         }

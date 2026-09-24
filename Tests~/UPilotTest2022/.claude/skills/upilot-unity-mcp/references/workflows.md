@@ -87,6 +87,48 @@ For a generic project bridge operation, call `unity_operation_validate(jobSpec)`
 3. Preserve the final Task's `Log/UPilotAcceptance/<timestamp>/summary.json` metadata and SHA256.
 4. Do not start a persistent capture around this workflow because ConsoleCaptureService self-tests require no live capture.
 
+### Observe By Original Identity
+
+| Identity retained at dispatch | Observe using | Never substitute |
+|---|---|---|
+| `writeBatchId` | `unity_write_batch_status(writeBatchId)` for the original persisted terminal state and linked compile evidence | Latest execution snapshot or a new compile |
+| Compile `operationId` | Compile wait/status for that operation | A second compile request |
+| Generic `operationId` | `unity_operation_status` / `unity_operation_wait` | Another operation start |
+| `taskId` | `unity_task_status` / `unity_task_wait` (`detailLevel=full` for full report) | Another acceptance or test start |
+| `runGuid` | `unity_test_results(runGuid=...)` | A test run without that GUID |
+
+The public acceptance call queues a durable Task; its immediate `ok=true` only confirms
+receipt. Default Operation and acceptance Task `summary` objects are capped at 16 KiB
+UTF-8 (excluding MCP framing); `summaryVersion`, `responseBytes`, collection totals,
+and `truncatedFields` describe omissions. Request `detailLevel=full` for the persisted
+report or collected evidence. `includeRawState=true` with `summary` omits raw state.
+
+`unity_queue_cleanup()` is a read-only inventory, not authorization to restart or
+clean anything. It covers persisted and Server-memory work, a bounded Bridge queue
+snapshot, Capture observation and OS Editor identity; inspect each source's result,
+age, `complete` and truncation. A Bridge history list, ended known tasks, or zero
+Capture sessions cannot prove the whole queue idle. Unknown, stale, disconnected,
+truncated and Reload-affected sources remain `incomplete` even when listed items are
+empty. For cleanup use the existing independent grant and exact-target preview flow.
+
+Public C# Capture owners can call `UPilotConsoleCaptureApi.VerifyStoppedAsync(sessionId)`:
+`ok` means observation completed; only `stopped && artifactsVerified` establishes
+this observation's cleanup evidence. It never stops a Capture, and a missing file is
+not repaired. For `BRIDGE_RESPONSE_TOO_LARGE`, keep the original command or operation
+identity and observe its state; `outcome=unknown` is not permission to replay a
+business start. An oversize event or connection close 1009 marks its source incomplete.
+
+In PowerShell, select known fields explicitly before serializing; `ConvertTo-Json
+-Depth` controls nesting, not response size:
+
+```powershell
+$task = $response.data
+$task | Select-Object taskId, runGuid, status, deadlineAt, error,
+    @{Name='testTotal';Expression={$_.tests.total}}, truncatedFields |
+    ConvertTo-Json -Depth 5
+$first = @($response.data.items) | Select-Object -First 8 id, type, status
+```
+
 ## Multiple Projects
 
 Always verify `paths.unityProjectAbsolute`. Stop if the connected Editor is not the intended project.

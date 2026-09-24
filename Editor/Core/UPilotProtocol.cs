@@ -183,6 +183,14 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public class BridgeOversizeEventPayload
+    {
+        public string sourceEvent;
+        public long actualBytes;
+        public long limitBytes;
+    }
+
+    [Serializable]
     public class SourceSpanPayload
     {
         public int start;
@@ -208,6 +216,11 @@ namespace CodingRiver.UPilot
     {
         public string commandId;
         public string commandName;
+        public long actualBytes;
+        public long limitBytes;
+        public string outcome;
+        public bool replayAttempted;
+        public bool responseTruncated;
         public bool commandSubmitted;
         public bool stateObserved;
         public bool changed;

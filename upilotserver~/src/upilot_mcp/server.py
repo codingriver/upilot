@@ -35,6 +35,7 @@ wire_logger = logging.getLogger("upilot.wire")
 
 IDENTITY_CONTRACT_VERSION = 1
 _CANDIDATE_HANDSHAKE_TIMEOUT_S = 10.0
+_MAX_BRIDGE_MESSAGE_BYTES = 4 * 1024 * 1024
 
 
 def _short_session_id(session_id: str | None) -> str:
@@ -191,7 +192,9 @@ class WsOrchestratorServer(WsTransport):
     async def start(self) -> None:
         self._stop_event.clear()
         self._listening_event.clear()
-        self._server = await websockets.serve(self._handle, self.host, self.port)
+        self._server = await websockets.serve(
+            self._handle, self.host, self.port, max_size=_MAX_BRIDGE_MESSAGE_BYTES,
+        )
         self._listening_event.set()
         logger.info("WebSocket server listening on %s:%s", self.host, self.port)
         try:
@@ -717,6 +720,12 @@ class WsOrchestratorServer(WsTransport):
                         heartbeat_task = asyncio.create_task(self._heartbeat_loop(websocket, auth_box[0]))
             except (ConnectionClosed, ConnectionResetError, OSError) as ex:
                 close_code = getattr(ex, "code", None)
+                if close_code == 1009:
+                    logger.error("Bridge frame exceeded 4 MiB session=%s at=%s commandId=unknown limitBytes=%s",
+                                 auth_box[0] or "unknown", now_ms(), _MAX_BRIDGE_MESSAGE_BYTES)
+                    self._oversize_observations = (getattr(self, "_oversize_observations", []) + [
+                        {"sessionId": auth_box[0], "sourceEvent": "unknown", "observedAt": now_ms(),
+                         "limitBytes": _MAX_BRIDGE_MESSAGE_BYTES, "commandId": "unknown"}])[-8:]
                 if self._shutting_down:
                     logger.debug("WebSocket closed during shutdown from %s: %s", remote, ex)
                 else:
@@ -988,6 +997,15 @@ class WsOrchestratorServer(WsTransport):
             return
 
         if message.type == "event":
+            if message.name == "bridge.payload_oversize":
+                logger.error("Bridge event lost due to size session=%s source=%s bytes=%s limit=%s",
+                             message.session_id, message.payload.get("sourceEvent"),
+                             message.payload.get("actualBytes"), message.payload.get("limitBytes"))
+                self._oversize_observations = (getattr(self, "_oversize_observations", []) + [
+                    {"sessionId": message.session_id, "sourceEvent": message.payload.get("sourceEvent"),
+                     "observedAt": now_ms(), "limitBytes": message.payload.get("limitBytes"),
+                     "commandId": "unknown"}])[-8:]
+                return
             logger.debug(
                 "[%s] <<< EVENT %s  payload=%s",
                 message.session_id[:12] if message.session_id else "?",

@@ -390,7 +390,7 @@ public interface IAutomationStep
 
 | 回调 | JSON 返回 |
 | --- | --- |
-| Validate | `{"ok":true}`；失败 `{"ok":false,"diagnostics":[{"code":"KSB_ARGUMENT_INVALID","message":"参数说明"}]}` |
+| Validate | `{"ok":true}`；失败 `{"ok":false,"diagnostics":[{"code":"PROJECT_ARGUMENT_INVALID","message":"参数说明"}]}` |
 | Poll | `{"status":"Running"}`；成功 Succeeded/SucceededWithWarnings；Skipped 需显式许可；Failed/Canceled 必须附非空 errorCode |
 | GetError | `{"message":"可读说明","diagnostic":"可选诊断"}`，不得改写冻结错误码 |
 | Cleanup | 与 Poll 格式相同，仅 Running/Succeeded/SucceededWithWarnings/Failed |
@@ -405,7 +405,7 @@ void SaveCheckpoint(string runId, string instanceId, string checkpointJson);
 void SaveSharedValue(string runId, string instanceId, string key, string valueJson);
 ```
 
-服务公开以上 static 方法，基类提供同签名转发。checkpoint 必须为 JSON 对象；共享值可以是任意合法 JSON，按 `ksb.logging` 等命名空间键替换，保留其它键。只有当前 run/item 的可写生命周期主线程回调可以保存，Validate/GetError/逃逸异步回调禁止写。持久化成功才返回，原配置必须先保存再修改；本地快照和返回 JSON 不自动写回。
+服务公开以上 static 方法，基类提供同签名转发。checkpoint 必须为 JSON 对象；共享值可以是任意合法 JSON，按 `project.logging` 等命名空间键替换，保留其它键。只有当前 run/item 的可写生命周期主线程回调可以保存，Validate/GetError/逃逸异步回调禁止写。持久化成功才返回，原配置必须先保存再修改；本地快照和返回 JSON 不自动写回。
 
 ### 10.3 门面与执行顺序
 

@@ -18,6 +18,8 @@ from upilot_mcp.state_store import StateStore
 class _Session:
     def __init__(self, project_path: Path) -> None:
         self.project_path = str(project_path)
+        self.session_id = "fixture-session"
+        self.identity_verified = True
 
 
 class _SessionManager:

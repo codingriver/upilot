@@ -35,6 +35,9 @@ def test_close_defaults_to_user_protocol_and_forwards_exact_identity():
 
 def test_close_forwards_optional_domain_generation():
     service = Service()
+    async def windows_list():
+        return ok("req-list", {"windows": [{"instanceId": "123", "domainGeneration": "44"}]})
+    service.editor_windows_list = windows_list
     result = asyncio.run(service.editor_window_close(instance_id="123", domain_generation="44"))
 
     assert result.ok

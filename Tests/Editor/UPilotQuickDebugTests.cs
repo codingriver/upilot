@@ -1253,6 +1253,112 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void QuickDebugEvalMenusExposeCanonicalChoicesAndDefaults()
+        {
+            Assert.That(ReadStaticWindowField<string[]>("EvalModeValues"),
+                Is.EqualTo(new[] { "auto", "expression", "statements" }));
+            Assert.That(ReadStaticWindowField<string[]>("EvalBackendValues"),
+                Is.EqualTo(new[] { "auto", "interpret", "emit", "compiled" }));
+            Assert.That(ReadStaticWindowField<string[]>("EvalResultModeValues"),
+                Is.EqualTo(new[] { "auto", "inline", "handle", "legacyString" }));
+
+            var window = ScriptableObject.CreateInstance<UPilotQuickDebugWindow>();
+            try
+            {
+                Assert.That(ReadWindowField<string>(window, "_evalMode"), Is.EqualTo("auto"));
+                Assert.That(ReadWindowField<string>(window, "_evalBackend"), Is.EqualTo("auto"));
+                Assert.That(ReadWindowField<string>(window, "_evalResultMode"), Is.EqualTo("inline"));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [Test]
+        public void QuickDebugEvalPayloadPreservesSelectedStrategyValues()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotQuickDebugWindow>();
+            try
+            {
+                WriteWindowField(window, "_evalCode", "return 42;");
+                WriteWindowField(window, "_evalMode", "statements");
+                WriteWindowField(window, "_evalBackend", "compiled");
+                WriteWindowField(window, "_evalResultMode", "legacyString");
+
+                var createPayload = typeof(UPilotQuickDebugWindow).GetMethod(
+                    "CreateEvalPayload", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(createPayload, Is.Not.Null);
+                var payload = (CSharpEvalPayload)createPayload.Invoke(window, null);
+
+                Assert.That(payload.code, Is.EqualTo("return 42;"));
+                Assert.That(payload.mode, Is.EqualTo("statements"));
+                Assert.That(payload.executionBackend, Is.EqualTo("compiled"));
+                Assert.That(payload.resultMode, Is.EqualTo("legacyString"));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [Test]
+        public void QuickDebugHandleResultRequiresSessionBeforeExecution()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotQuickDebugWindow>();
+            try
+            {
+                WriteWindowField(window, "_evalCode", "new object()");
+                WriteWindowField(window, "_evalResultMode", "handle");
+                WriteWindowField(window, "_evalSessionId", "");
+
+                var canRun = typeof(UPilotQuickDebugWindow).GetMethod(
+                    "CanRunCSharpEval", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(canRun, Is.Not.Null);
+                Assert.That((bool)canRun.Invoke(window, null), Is.False);
+
+                WriteWindowField(window, "_evalSessionId", "s.domain.id");
+                Assert.That((bool)canRun.Invoke(window, null), Is.True);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [Test]
+        public void QuickDebugEvalExamplesResetToSupportedStrategyValues()
+        {
+            var fillExample = typeof(UPilotQuickDebugWindow).GetMethod(
+                "FillEvalExample", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(fillExample, Is.Not.Null);
+            var window = ScriptableObject.CreateInstance<UPilotQuickDebugWindow>();
+            try
+            {
+                foreach (var key in new[] { "expression", "list-dict", "gameobject", "async", "try-catch", "closure", "session-vars", "foreach-array" })
+                {
+                    WriteWindowField(window, "_evalMode", "invalid");
+                    WriteWindowField(window, "_evalBackend", "invalid");
+                    WriteWindowField(window, "_evalResultMode", "invalid");
+                    fillExample.Invoke(window, new object[] { key });
+
+                    Assert.That(ReadWindowField<string>(window, "_evalMode"), Is.EqualTo("auto"), key);
+                    Assert.That(ReadStaticWindowField<string[]>("EvalBackendValues"),
+                        Does.Contain(ReadWindowField<string>(window, "_evalBackend")), key);
+                    Assert.That(ReadStaticWindowField<string[]>("EvalResultModeValues"),
+                        Does.Contain(ReadWindowField<string>(window, "_evalResultMode")), key);
+                    Assert.That(ReadWindowField<string>(window, "_evalResultMode") == "handle" &&
+                                string.IsNullOrWhiteSpace(ReadWindowField<string>(window, "_evalSessionId")),
+                        Is.False, key);
+                }
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [Test]
         public void QuickDebugTabsUseTaskOrientedTitlesAndExplainUsageAndFeatures()
         {
             var method = typeof(UPilotQuickDebugWindow).GetMethod(
@@ -1568,6 +1674,13 @@ namespace CodingRiver.UPilot.Tests
             var field = typeof(UPilotQuickDebugWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.That(field, Is.Not.Null, "Expected window field: " + name);
             return (T)field.GetValue(window);
+        }
+
+        private static T ReadStaticWindowField<T>(string name)
+        {
+            var field = typeof(UPilotQuickDebugWindow).GetField(name, BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null, "Expected static window field: " + name);
+            return (T)field.GetValue(null);
         }
 
         private static void WriteWindowField<T>(UPilotQuickDebugWindow window, string name, T value)

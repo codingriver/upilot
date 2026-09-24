@@ -138,13 +138,57 @@ def _check(checks, check_id):
     return next(item for item in checks["checks"] if item["checkId"] == check_id)
 
 
+def _legacy_checks(root, **kwargs):
+    """Exercise the formerly default optional checks only when explicitly enabled."""
+    return gate().documentation_checks(root, include_registry=True, include_todo_id=True, **kwargs)
+
+
+def test_default_optional_docs_do_not_read_disabled_inputs(tmp_path):
+    root = _write_wp12_repository(tmp_path)
+    (root / "Documentation~" / "P2-Development-Plan-20260915.md").unlink()
+    (root / "Documentation~" / "ToolStatus.md").unlink()
+    result = gate().documentation_checks(root, inventory_factory=lambda: pytest.fail("registry read"))
+    for name in ("docs.registry", "docs.todo-id"):
+        check = _check(result, name)
+        assert check["status"] == "skipped" and check["severity"] == "info"
+        assert check["reason"] == "DISABLED_BY_DEFAULT"
+    assert "Documentation~/P2-Development-Plan-20260915.md" not in result["inputSnapshot"]
+    assert "Documentation~/ToolStatus.md" not in result["inputSnapshot"]
+    assert not result["errorCheckIds"]
+
+
+def test_explicit_evidence_is_never_silently_skipped(tmp_path, monkeypatch):
+    module = gate()
+    root = _write_wp12_repository(tmp_path)
+    monkeypatch.setattr(module, "REPO", root)
+    monkeypatch.setattr(module, "source_identity", lambda *_: {"sourceCommit": "a" * 40})
+    monkeypatch.setenv("UPILOT_ACCEPTANCE_RUN_ID", "123")
+    from upilot_mcp import release_evidence
+    monkeypatch.setattr(release_evidence, "tag_acceptance_run", lambda *_: "123")
+    calls = []
+    monkeypatch.setattr(module, "verify_release_evidence", lambda *args: calls.append(args) or
+                        {"checked": True, "passed": True})
+    assert module.main(["--docs-only", "--output", str(tmp_path / "evidence"), "--release-tag", "v1.2.3"]) == 0
+    assert calls == [(root, "123", "v1.2.3")]
+    monkeypatch.setattr(release_evidence, "tag_acceptance_run", lambda *_: "456")
+    monkeypatch.setattr(module, "verify_release_evidence", lambda *_: (_ for _ in ()).throw(ValueError("conflict")))
+    assert module.main(["--docs-only", "--output", str(tmp_path / "bad"), "--release-tag", "v1.2.3"]) == 1
+    bad = json.loads((tmp_path / "bad" / "quality.json").read_text(encoding="utf-8"))
+    assert bad["unity"]["checked"] is True and bad["unity"]["passed"] is False
+    monkeypatch.delenv("UPILOT_ACCEPTANCE_RUN_ID")
+    monkeypatch.setattr(release_evidence, "tag_acceptance_run", lambda *_: "")
+    calls.clear()
+    assert module.main(["--docs-only", "--output", str(tmp_path / "none"), "--release-tag", "v1.2.3"]) == 0
+    assert not calls
+
+
 def test_documentation_checks_keep_historical_source_identity_separate_from_head(tmp_path):
     root = _write_wp12_repository(tmp_path)
     (root / "Documentation~" / "FixtureEvidence.json").write_text(json.dumps({
         "sourceIdentity": {"files": [{"path": "upilotserver~/src/upilot_mcp/tool_registry.py", "bytes": 1, "sha256": "0" * 64}]},
     }), encoding="utf-8")
 
-    checks = gate().documentation_checks(root, inventory_factory=_inventory)
+    checks = _legacy_checks(root, inventory_factory=_inventory)
 
     assert checks["errorCheckIds"] == []
     assert _check(checks, "docs.evidence")["status"] == "passed"
@@ -152,8 +196,8 @@ def test_documentation_checks_keep_historical_source_identity_separate_from_head
 
 
 def test_documentation_checks_registry_snapshot_is_stable_across_two_repositories(tmp_path):
-    first = gate().documentation_checks(_write_wp12_repository(tmp_path / "first"), inventory_factory=_inventory)
-    second = gate().documentation_checks(_write_wp12_repository(tmp_path / "second"), inventory_factory=_inventory)
+    first = _legacy_checks(_write_wp12_repository(tmp_path / "first"), inventory_factory=_inventory)
+    second = _legacy_checks(_write_wp12_repository(tmp_path / "second"), inventory_factory=_inventory)
 
     assert _check(first, "docs.registry")["actual"] == _check(second, "docs.registry")["actual"]
     assert _check(first, "docs.registry")["generatedDiffCount"] == 0
@@ -164,7 +208,7 @@ def test_documentation_checks_reports_precise_registry_and_local_link_errors(tmp
     plan = root / "Documentation~" / "P2-Development-Plan-20260915.md"
     plan.write_text(plan.read_text(encoding="utf-8") + "[bad](#missing)\n", encoding="utf-8")
 
-    checks = gate().documentation_checks(
+    checks = _legacy_checks(
         root,
         inventory_factory=lambda: {"proxyHandlerGaps": [], "tools": [{"name": "legacy tool"}]},
     )
@@ -182,7 +226,7 @@ def test_documentation_checks_reports_documented_registry_version_drift(tmp_path
     status = root / "Documentation~" / "ToolStatus.md"
     status.write_text("Current generated Registry v6.\n", encoding="utf-8")
 
-    registry = _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.registry")
+    registry = _check(_legacy_checks(root, inventory_factory=_inventory), "docs.registry")
 
     assert registry["status"] == "failed"
     assert registry["sourcePath"] == "Documentation~/ToolStatus.md"
@@ -198,7 +242,7 @@ def test_documentation_checks_reject_current_artifact_hash_mismatch(tmp_path):
         "artifact": {"path": "Documentation~/artifact.txt", "bytes": 6, "sha256": "0" * 64},
     }), encoding="utf-8")
 
-    checks = gate().documentation_checks(root, inventory_factory=_inventory)
+    checks = _legacy_checks(root, inventory_factory=_inventory)
 
     evidence = _check(checks, "docs.evidence")
     assert evidence["status"] == "failed"
@@ -217,7 +261,7 @@ def test_documentation_checks_reports_installed_manifest_without_claiming_client
         "clientInjectionState": "visible",
     }), encoding="utf-8")
 
-    checks = gate().documentation_checks(root, installed_manifests=[installed], inventory_factory=_inventory)
+    checks = _legacy_checks(root, installed_manifests=[installed], inventory_factory=_inventory)
 
     install = _check(checks, "docs.install")
     assert install["status"] == "passed"
@@ -233,7 +277,7 @@ def test_documentation_checks_validates_read_only_installed_skill_metadata_witho
     manifest = installed_root / ".upilot-install.json"
     manifest.write_text(json.dumps({"templateVersion": 29, "contentSha256": recorded_hash}), encoding="utf-8")
 
-    checks = gate().documentation_checks(root, installed_manifests=[manifest], inventory_factory=_inventory)
+    checks = _legacy_checks(root, installed_manifests=[manifest], inventory_factory=_inventory)
 
     install = _check(checks, "docs.install")
     assert install["status"] == "unknown"
@@ -244,7 +288,7 @@ def test_documentation_checks_validates_read_only_installed_skill_metadata_witho
     assert manifest.read_text(encoding="utf-8") == json.dumps({"templateVersion": 29, "contentSha256": recorded_hash})
 
     (installed_root / "SKILL.md").write_text("modified outside installer\n", encoding="utf-8")
-    changed = _check(gate().documentation_checks(root, installed_manifests=[manifest], inventory_factory=_inventory), "docs.install")
+    changed = _check(_legacy_checks(root, installed_manifests=[manifest], inventory_factory=_inventory), "docs.install")
     assert changed["status"] == "failed"
     assert changed["actual"][0]["reason"] == "INSTALLED_SKILL_HASH_MISMATCH"
 
@@ -265,7 +309,7 @@ def test_documentation_checks_marks_installed_skill_mutation_as_input_changed(tm
         skill.write_text("after\n", encoding="utf-8")
         return _inventory()
 
-    checks = gate().documentation_checks(
+    checks = _legacy_checks(
         root, installed_manifests=[manifest], inventory_factory=mutate_during_check,
     )
 
@@ -286,7 +330,7 @@ def test_documentation_checks_preserves_external_old_skill_names_as_mapped_or_un
         },
     }), encoding="utf-8")
 
-    install = _check(gate().documentation_checks(root, installed_manifests=[installed], inventory_factory=_inventory), "docs.install")
+    install = _check(_legacy_checks(root, installed_manifests=[installed], inventory_factory=_inventory), "docs.install")
 
     assert install["status"] == "passed"
     assert install["actual"][0]["externalSkill"]["toolMappings"] == [
@@ -305,7 +349,7 @@ def test_documentation_checks_external_skill_without_source_is_unknown_not_missi
         "externalSkill": {"tools": ["scene_analyze"]},
     }), encoding="utf-8")
 
-    install = _check(gate().documentation_checks(root, installed_manifests=[installed], inventory_factory=_inventory), "docs.install")
+    install = _check(_legacy_checks(root, installed_manifests=[installed], inventory_factory=_inventory), "docs.install")
 
     assert install["status"] == "unknown"
     assert install["severity"] == "warning"
@@ -323,7 +367,7 @@ def test_documentation_checks_empty_external_skill_is_unknown_not_an_absent_decl
     }), encoding="utf-8")
 
     install = _check(
-        gate().documentation_checks(root, installed_manifests=[installed], inventory_factory=_inventory),
+        _legacy_checks(root, installed_manifests=[installed], inventory_factory=_inventory),
         "docs.install",
     )
 
@@ -344,7 +388,7 @@ def test_documentation_checks_detect_input_change(tmp_path):
         plan.write_text(plan.read_text(encoding="utf-8") + "changed\n", encoding="utf-8")
         return _inventory()
 
-    checks = gate().documentation_checks(root, inventory_factory=mutate_during_check)
+    checks = _legacy_checks(root, inventory_factory=mutate_during_check)
 
     evidence = _check(checks, "docs.evidence")
     assert checks["inputUnchanged"] is False
@@ -361,7 +405,7 @@ def test_documentation_checks_detects_concurrent_evidence_manifest_change(tmp_pa
         evidence_path.write_text('{"changed": true}', encoding="utf-8")
         return _inventory()
 
-    checks = gate().documentation_checks(root, inventory_factory=mutate_during_check)
+    checks = _legacy_checks(root, inventory_factory=mutate_during_check)
 
     evidence = _check(checks, "docs.evidence")
     assert checks["inputUnchanged"] is False
@@ -384,7 +428,7 @@ def test_documentation_checks_never_reports_an_artifact_check_as_stable_when_art
         artifact.write_text("after", encoding="utf-8")
         return _inventory()
 
-    checks = gate().documentation_checks(root, inventory_factory=mutate_during_check)
+    checks = _legacy_checks(root, inventory_factory=mutate_during_check)
 
     assert checks["inputUnchanged"] is False
     assert _check(checks, "docs.evidence")["reason"] == "INPUT_CHANGED"
@@ -398,7 +442,7 @@ def test_documentation_checks_reports_missing_and_malformed_artifacts_without_cr
         "malformed": {"path": "Documentation~/also-absent.txt", "sha256": 4},
     }), encoding="utf-8")
 
-    evidence = _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.evidence")
+    evidence = _check(_legacy_checks(root, inventory_factory=_inventory), "docs.evidence")
 
     assert evidence["status"] == "failed"
     assert evidence["severity"] == "error"
@@ -419,8 +463,10 @@ def test_docs_only_mode_skips_contract_commands_and_docs_strict_escalates_unknow
     assert report["steps"] == []
     assert report["documentation"]["passed"] is True
     assert {item["checkId"] for item in report["documentation"]["checks"]} == {
-        "docs.archive", "docs.evidence", "docs.install",
+        "docs.archive", "docs.evidence", "docs.install", "docs.registry", "docs.todo-id",
     }
+    assert all(_check(report["documentation"], name)["status"] == "skipped"
+               for name in ("docs.registry", "docs.todo-id"))
     assert module.main([
         "--docs-only", "--enable-docs-registry", "--enable-docs-todo-id",
         "--output", str(tmp_path / "optional"),
@@ -452,13 +498,13 @@ def test_archive_only_rejects_same_id_same_provenance_and_evidence(tmp_path):
         "- sourceIdentity: build-b\n- evidenceSha256: " + "1" * 64 + "\n",
         encoding="utf-8",
     )
-    assert _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.archive")["status"] == "passed"
+    assert _check(_legacy_checks(root, inventory_factory=_inventory), "docs.archive")["status"] == "passed"
 
     archive.write_text(archive.read_text(encoding="utf-8") + (
         "\n## UP-001 Duplicate declaration\n"
         "- sourceIdentity: build-a\n- evidenceSha256: " + "1" * 64 + "\n"
     ), encoding="utf-8")
-    conflict = _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.archive")
+    conflict = _check(_legacy_checks(root, inventory_factory=_inventory), "docs.archive")
     assert conflict["status"] == "failed"
     assert conflict["actual"] == [{"stableId": "UP-001", "source": "build-a", "evidenceSha256": "1" * 64}]
 
@@ -472,10 +518,10 @@ def test_root_authoritative_status_table_rejects_duplicate_ids_but_keeps_differe
         "| UP-010 | Open | Same title |\n| UP-011 | Open | Same title |\n",
         encoding="utf-8",
     )
-    assert _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.todo-id")["status"] == "passed"
+    assert _check(_legacy_checks(root, inventory_factory=_inventory), "docs.todo-id")["status"] == "passed"
 
     todo.write_text(todo.read_text(encoding="utf-8") + "| UP-010 | Closed | Revised title |\n", encoding="utf-8")
-    conflict = _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.todo-id")
+    conflict = _check(_legacy_checks(root, inventory_factory=_inventory), "docs.todo-id")
     assert conflict["status"] == "failed"
     assert conflict["actual"]["duplicateStableIds"] == ["UP-010"]
 
@@ -486,7 +532,7 @@ def test_documentation_checks_marks_missing_historical_source_provenance_unknown
         "artifact": {"path": "Documentation~/missing.txt", "sha256": "0" * 64},
     }), encoding="utf-8")
 
-    evidence = _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.evidence")
+    evidence = _check(_legacy_checks(root, inventory_factory=_inventory), "docs.evidence")
 
     assert evidence["status"] == "unknown"
     assert evidence["severity"] == "warning"
@@ -499,7 +545,7 @@ def test_documentation_checks_accepts_historical_per_file_source_hash_provenance
         "sourceSha256": {"Editor/Probe.cs": "a" * 64},
     }), encoding="utf-8")
 
-    evidence = _check(gate().documentation_checks(root, inventory_factory=_inventory), "docs.evidence")
+    evidence = _check(_legacy_checks(root, inventory_factory=_inventory), "docs.evidence")
 
     assert evidence["status"] == "passed"
 
@@ -515,8 +561,8 @@ def test_installed_manifest_input_order_and_duplicates_do_not_change_documentati
             "externalSkill": {"source": "external@1", "tools": [external_tool]},
         }), encoding="utf-8")
 
-    forward = gate().documentation_checks(root, installed_manifests=[first, second, first], inventory_factory=_inventory)
-    reverse = gate().documentation_checks(root, installed_manifests=[second, first], inventory_factory=_inventory)
+    forward = _legacy_checks(root, installed_manifests=[first, second, first], inventory_factory=_inventory)
+    reverse = _legacy_checks(root, installed_manifests=[second, first], inventory_factory=_inventory)
 
     assert _check(forward, "docs.install")["actual"] == _check(reverse, "docs.install")["actual"]
     assert forward["inputSnapshot"] == reverse["inputSnapshot"]

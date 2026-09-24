@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import pytest
 
 from upilot_mcp.config import CONFIG
 from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.responses import fail, ok
+
+
+@pytest.fixture(autouse=True)
+def _acceptance_write_grant(monkeypatch):
+    monkeypatch.setattr(CONFIG, "write_access_approved", True)
 
 
 class _AcceptanceCaptureService(TestDomainService):
@@ -54,7 +60,7 @@ def test_acceptance_active_unknown_capture_never_force_stops_even_when_scopes_en
         "sessions": [{"sessionId": "capture-other", "ownerId": "other-task", "active": True}],
     }))
 
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
 
     assert not result.ok
     assert result.error.code == "UPILOT_ACCEPTANCE_CAPTURE_OWNERSHIP_REQUIRED"
@@ -73,7 +79,7 @@ def test_acceptance_unknown_capture_state_does_not_start_runner_or_stop_any_capt
         "captures", "CAPTURE_LIST_FAILED", "Capture state is unavailable.",
     ))
 
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
 
     assert not result.ok
     assert result.error.code == "UPILOT_ACCEPTANCE_CAPTURE_STATE_UNKNOWN"

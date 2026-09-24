@@ -138,20 +138,51 @@ jobs:
             --commit "${{ github.sha }}" `
             --base-url "$baseUrl"
 
-      - name: Verify exe version
+      - name: Verify local release assets and EXE identity
         shell: pwsh
         run: |
-          $exe = Get-ChildItem upilotserver~/dist/upilot-mcp-server-*-win-x64.exe | Select-Object -First 1
-          & $exe.FullName --version
+          python upilotserver~/deploy/build_server_exe.py `
+            --verify-only `
+            --version "${{ steps.version.outputs.server_version }}" `
+            --upm-version "${{ steps.version.outputs.upm_version }}" `
+            --channel "${{ steps.version.outputs.channel }}" `
+            --commit "${{ github.sha }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve local release verification
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
+        with:
+          name: upilot-local-release-verification-${{ github.sha }}
+          path: |
+            artifacts/reliability-quality/local-release-verification.json
+            artifacts/reliability-quality/exe-version.log
+
+      - name: Reject existing release before publishing
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $uri = "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}"
+          try {
+            Invoke-WebRequest -Uri $uri -Headers @{Authorization="Bearer $env:GH_TOKEN"; Accept="application/vnd.github+json"} -ErrorAction Stop | Out-Null
+            throw 'Release already exists; refusing to overwrite it.'
+          } catch {
+            if ($_.Exception.Response.StatusCode -ne [System.Net.HttpStatusCode]::NotFound) {
+              throw
+            }
+          }
 
       - name: Upload artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
         with:
           name: upilot-mcp-server-win-x64
+          if-no-files-found: error
           path: |
-            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
-            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
+            upilotserver~/dist/upilot-mcp-server-${{ steps.version.outputs.server_version }}-win-x64.exe
+            upilotserver~/dist/upilot-mcp-server-${{ steps.version.outputs.server_version }}-win-x64.exe.sha256
             upilotserver~/dist/manifest.json
 
       - name: Publish release assets
@@ -159,8 +190,9 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3, node24
         with:
           make_latest: true
-          overwrite_files: true
+          overwrite_files: false
+          fail_on_unmatched_files: true
           files: |
-            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe
-            upilotserver~/dist/upilot-mcp-server-*-win-x64.exe.sha256
+            upilotserver~/dist/upilot-mcp-server-${{ steps.version.outputs.server_version }}-win-x64.exe
+            upilotserver~/dist/upilot-mcp-server-${{ steps.version.outputs.server_version }}-win-x64.exe.sha256
             upilotserver~/dist/manifest.json

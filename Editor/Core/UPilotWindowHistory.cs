@@ -76,6 +76,8 @@ namespace CodingRiver.UPilot
         private const string RelativePath = "Library/UPilot/window-history.json";
         private static readonly List<EditorWindowHistoryEvent> Events = new List<EditorWindowHistoryEvent>(Capacity);
         private static readonly Dictionary<string, WindowState> Known = new Dictionary<string, WindowState>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, WindowState> Current = new Dictionary<string, WindowState>(StringComparer.Ordinal);
+        private static readonly string DomainGeneration = UPilotWindowDiagnostics.DomainReloadEpoch.ToString(CultureInfo.InvariantCulture);
         private static long _lastSequence;
         private static double _nextSampleAt;
         private static string _persistenceError = string.Empty;
@@ -161,40 +163,39 @@ namespace CodingRiver.UPilot
             var now = EditorApplication.timeSinceStartup;
             if (!force && now < _nextSampleAt) return;
             _nextSampleAt = now + SampleIntervalSeconds;
-            var current = new Dictionary<string, WindowState>(StringComparer.Ordinal);
+            Current.Clear();
             foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
             {
                 if (window == null) continue;
-                EditorWindowInfo info;
                 try
                 {
-                    info = UPilotWindowService.BuildWindowInfo(window);
+                    string instanceId = UPilotEntityIds.ToWireId(window).ToString(CultureInfo.InvariantCulture);
+                    if (instanceId == "0") continue;
+                    Known.TryGetValue(instanceId, out var before);
+                    var state = WindowState.Capture(window, instanceId, DomainGeneration, before);
+                    Current[state.instanceId] = state;
+                    if (before == null)
+                    {
+                        Append("observed-open", state);
+                        continue;
+                    }
+                    if (!string.Equals(before.title, state.title, StringComparison.Ordinal))
+                        Append("title-changed", state);
+                    if (!before.HasSameGeometry(state))
+                        Append("geometry-changed", state);
                 }
                 catch (Exception ex)
                 {
                     RecordObservedGap("window_sampling_failed", ex.GetType().Name);
-                    continue;
                 }
-                if (info == null || info.instanceId == 0) continue;
-                var state = WindowState.From(info);
-                current[state.instanceId] = state;
-                if (!Known.TryGetValue(state.instanceId, out var before))
-                {
-                    Append("observed-open", state);
-                    continue;
-                }
-                if (!string.Equals(before.title, state.title, StringComparison.Ordinal))
-                    Append("title-changed", state);
-                if (!before.HasSameGeometry(state))
-                    Append("geometry-changed", state);
             }
             foreach (var pair in Known)
             {
-                if (!current.ContainsKey(pair.Key))
+                if (!Current.ContainsKey(pair.Key))
                     Append("closed-or-lost", pair.Value, "not_observed_on_next_sample", failureReasonAuthoritative: false);
             }
             Known.Clear();
-            foreach (var pair in current) Known[pair.Key] = pair.Value;
+            foreach (var pair in Current) Known[pair.Key] = pair.Value;
         }
 
         internal static void RecordSafeProbeEnabled(EditorWindow window, string lifecycleKey, bool rebuiltAfterReload)
@@ -202,11 +203,11 @@ namespace CodingRiver.UPilot
             try
             {
                 if (window == null) return;
-                var info = UPilotWindowService.BuildWindowInfo(window);
-                if (info == null || info.instanceId == 0) return;
+                string instanceId = UPilotEntityIds.ToWireId(window).ToString(CultureInfo.InvariantCulture);
+                if (instanceId == "0") return;
                 Append(
                     rebuiltAfterReload ? "probe-rebuilt" : "probe-enabled",
-                    WindowState.From(info),
+                    WindowState.Capture(window, instanceId, DomainGeneration, null),
                     lifecycleKey: lifecycleKey);
             }
             catch (Exception ex)
@@ -357,12 +358,36 @@ namespace CodingRiver.UPilot
             public float height;
             public bool docked;
 
-            public static WindowState From(EditorWindowInfo info) => new WindowState
+            public static WindowState Capture(EditorWindow window, string instanceId, string domainGeneration, WindowState previous)
             {
-                instanceId = info.instanceId.ToString(CultureInfo.InvariantCulture), domainGeneration = info.domainGeneration,
-                fullTypeName = info.fullTypeName, title = info.title, x = info.posX, y = info.posY,
-                width = info.width, height = info.height, docked = info.docked,
-            };
+                var type = window.GetType();
+                string fullTypeName = type.FullName ?? type.Name;
+                string title = window.titleContent?.text ?? string.Empty;
+                Rect rect = window.position;
+                bool docked = window.docked;
+                if (previous != null
+                    && string.Equals(previous.instanceId, instanceId, StringComparison.Ordinal)
+                    && string.Equals(previous.domainGeneration, domainGeneration, StringComparison.Ordinal)
+                    && string.Equals(previous.fullTypeName, fullTypeName, StringComparison.Ordinal)
+                    && string.Equals(previous.title, title, StringComparison.Ordinal)
+                    && previous.x.Equals(rect.x) && previous.y.Equals(rect.y)
+                    && previous.width.Equals(rect.width) && previous.height.Equals(rect.height)
+                    && previous.docked == docked)
+                    return previous;
+
+                return new WindowState
+                {
+                    instanceId = instanceId,
+                    domainGeneration = domainGeneration,
+                    fullTypeName = fullTypeName,
+                    title = title,
+                    x = rect.x,
+                    y = rect.y,
+                    width = rect.width,
+                    height = rect.height,
+                    docked = docked,
+                };
+            }
 
             public bool HasSameGeometry(WindowState other) =>
                 x.Equals(other.x) && y.Equals(other.y) && width.Equals(other.width) && height.Equals(other.height) && docked == other.docked;

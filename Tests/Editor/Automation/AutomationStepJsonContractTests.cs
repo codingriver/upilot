@@ -73,13 +73,13 @@ namespace CodingRiver.UPilot.Tests.Automation
         [Test]
         public void SharedPropertyReplacementPreservesOthersAndArbitraryKeys()
         {
-            var root = AutomationStepJsonCodec.ParseObject("{\"other\":1,\"ksb.logging\":{\"mask\":7}}");
-            AutomationStepJsonCodec.SetProperty(root, "ksb.logging", AutomationStepJsonCodec.ParseJson("{\"mask\":9}"));
+            var root = AutomationStepJsonCodec.ParseObject("{\"other\":1,\"project.logging\":{\"mask\":7}}");
+            AutomationStepJsonCodec.SetProperty(root, "project.logging", AutomationStepJsonCodec.ParseJson("{\"mask\":9}"));
             AutomationStepJsonCodec.SetProperty(root, "key / \" \u4e2d", AutomationStepJsonCodec.ParseJson("[true,null,\"text\"]"));
             string json = AutomationStepJsonCodec.WriteJson(root);
             var parsed = AutomationStepJsonCodec.ParseObject(json);
             Assert.That(parsed.Element("other").Value, Is.EqualTo("1"));
-            Assert.That(parsed.Element("ksb.logging").Element("mask").Value, Is.EqualTo("9"));
+            Assert.That(parsed.Element("project.logging").Element("mask").Value, Is.EqualTo("9"));
             Assert.That(parsed.Elements().Count(), Is.EqualTo(3));
             Assert.That(AutomationStepJsonCodec.WriteJson(parsed), Is.EqualTo(json));
         }
@@ -88,7 +88,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         public void SavingOutsideCallbackIsForbidden()
         {
             Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.SaveCheckpoint("run", "item", "{}"));
-            Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.SaveSharedValue("run", "item", "ksb.logging", "{}"));
+            Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.SaveSharedValue("run", "item", "project.logging", "{}"));
         }
         [TestCase("null")] [TestCase("[null]")] [TestCase("{\"nested\":[true,null,{\"value\":null}]}")]
         [TestCase("\"literal {} [] \\\\\\\"\"")]

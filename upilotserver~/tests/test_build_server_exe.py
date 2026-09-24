@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -38,6 +39,120 @@ def test_release_manifest_requires_a_matching_sha256(tmp_path: Path, monkeypatch
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="SHA256 mismatch"):
         build_server_exe.verify_release_manifest(manifest_path)
+
+
+def test_local_verifier_checks_exact_assets_and_exe_identity(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    dist = repo / "upilotserver~" / "dist"
+    dist.mkdir(parents=True)
+    (repo / "package.json").write_text('{"version": "1.2.3"}')
+    (repo / "upilotserver~" / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n')
+    exe = dist / "upilot-mcp-server-1.2.3-win-x64.exe"
+    exe.write_bytes(b"local exe")
+    monkeypatch.setattr(build_server_exe, "REPO_ROOT", repo)
+    monkeypatch.setattr(build_server_exe, "SERVER_ROOT", repo / "upilotserver~")
+    monkeypatch.setattr(build_server_exe, "DIST", dist)
+    manifest = build_server_exe.write_manifest(exe, version="1.2.3", upm_version="1.2.3",
+                                               channel="release", commit="abc", protocol_version="1", base_url="")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "upilot-mcp 1.2.3 channel=release commit=abc protocol=1\n", "")
+
+    monkeypatch.setattr(build_server_exe.subprocess, "run", fake_run)
+    monkeypatch.setenv("UPILOT_SERVER_VERSION", "pretend")
+    monkeypatch.setenv("UPILOT_BUILD_COMMIT", "pretend")
+    monkeypatch.setenv("UPILOT_BUILD_CHANNEL", "pretend")
+    good = build_server_exe.verify_local_release("1.2.3", "1.2.3", "release", "abc")
+    assert good["passed"] and good["exe"] == exe.name
+    assert calls[0][0] == [str(exe), "--version"]
+    assert calls[0][1]["timeout"] == 30
+    assert all(key not in calls[0][1]["env"] for key in
+               ("UPILOT_SERVER_VERSION", "UPILOT_BUILD_COMMIT", "UPILOT_BUILD_CHANNEL"))
+    baseline = manifest.read_text(encoding="utf-8")
+    for mutate, expected in (
+        (lambda data: data["downloads"].append(data["downloads"][0].copy()), "exactly one"),
+        (lambda data: data["downloads"][0].update(fileName="../wrong.exe"), "filename"),
+        (lambda data: data["downloads"][0].update(sizeBytes=1), "size"),
+        (lambda data: data["downloads"][0].update(sha256="0" * 64), "SHA256"),
+        (lambda data: data.update(commitSha="wrong"), "commitSha"),
+    ):
+        original = json.loads(manifest.read_text(encoding="utf-8"))
+        mutate(original)
+        manifest.write_text(json.dumps(original), encoding="utf-8")
+        with pytest.raises(ValueError, match=expected):
+            build_server_exe.verify_local_release("1.2.3", "1.2.3", "release", "abc")
+        manifest.write_text(baseline, encoding="utf-8")
+
+    checksum = exe.with_suffix(".exe.sha256")
+    checksum.write_text("0" * 64 + "  " + exe.name + "\n")
+    with pytest.raises(ValueError, match="checksum"):
+        build_server_exe.verify_local_release("1.2.3", "1.2.3", "release", "abc")
+    build_server_exe.write_manifest(exe, version="1.2.3", upm_version="1.2.3",
+                                    channel="release", commit="abc", protocol_version="1", base_url="")
+    monkeypatch.setattr(build_server_exe.subprocess, "run", lambda *args, **kw: subprocess.CompletedProcess(args, 0, "wrong", ""))
+    with pytest.raises(ValueError, match="identity mismatch"):
+        build_server_exe.verify_local_release("1.2.3", "1.2.3", "release", "abc")
+
+
+@pytest.mark.parametrize("failure,expected", [
+    (subprocess.CalledProcessError(3, ["exe", "--version"]), "failed"),
+    (subprocess.TimeoutExpired(["exe", "--version"], 30), "timed out"),
+])
+def test_local_verifier_rejects_exe_failure(tmp_path: Path, monkeypatch, failure, expected) -> None:
+    repo = tmp_path / "repo"
+    dist = repo / "upilotserver~" / "dist"
+    dist.mkdir(parents=True)
+    (repo / "package.json").write_text('{"version":"1.2.3"}', encoding="utf-8")
+    (repo / "upilotserver~" / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
+    exe = dist / "upilot-mcp-server-1.2.3-win-x64.exe"
+    exe.write_bytes(b"exe")
+    monkeypatch.setattr(build_server_exe, "REPO_ROOT", repo)
+    monkeypatch.setattr(build_server_exe, "SERVER_ROOT", repo / "upilotserver~")
+    monkeypatch.setattr(build_server_exe, "DIST", dist)
+    build_server_exe.write_manifest(exe, version="1.2.3", upm_version="1.2.3",
+                                    channel="release", commit="abc", protocol_version="1", base_url="")
+
+    def fail_version(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(build_server_exe.subprocess, "run", fail_version)
+    with pytest.raises(ValueError, match=expected):
+        build_server_exe.verify_local_release("1.2.3", "1.2.3", "release", "abc")
+
+
+def test_verify_only_never_rebuilds_or_changes_release_assets(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    dist = repo / "upilotserver~" / "dist"
+    dist.mkdir(parents=True)
+    (repo / "package.json").write_text('{"version":"1.2.3"}', encoding="utf-8")
+    (repo / "upilotserver~" / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
+    exe = dist / "upilot-mcp-server-1.2.3-win-x64.exe"
+    exe.write_bytes(b"exe")
+    monkeypatch.setattr(build_server_exe, "REPO_ROOT", repo)
+    monkeypatch.setattr(build_server_exe, "SERVER_ROOT", repo / "upilotserver~")
+    monkeypatch.setattr(build_server_exe, "DIST", dist)
+    build_server_exe.write_manifest(exe, version="1.2.3", upm_version="1.2.3",
+                                    channel="release", commit="abc", protocol_version="1", base_url="")
+    baseline = {path.name: path.read_bytes() for path in dist.iterdir()}
+    monkeypatch.setattr(build_server_exe, "build_exe", lambda *args: pytest.fail("verify-only rebuilt EXE"))
+    monkeypatch.setattr(build_server_exe, "write_manifest", lambda *args, **kwargs: pytest.fail("verify-only rewrote manifest"))
+    monkeypatch.setattr(build_server_exe, "ensure_pyinstaller", lambda: pytest.fail("verify-only installed dependencies"))
+    monkeypatch.setattr(build_server_exe.subprocess, "run", lambda cmd, **kwargs:
+                        subprocess.CompletedProcess(cmd, 0, "upilot-mcp 1.2.3 channel=release commit=abc protocol=1\n", ""))
+    monkeypatch.setattr(sys, "argv", ["build_server_exe.py", "--verify-only", "--version", "1.2.3",
+                                  "--upm-version", "1.2.3", "--commit", "abc"])
+    assert build_server_exe.main() == 0
+    assert {path.name: path.read_bytes() for path in dist.iterdir()} == baseline
+    assert json.loads(capsys.readouterr().out)["passed"] is True
+    report = json.loads((repo / "artifacts/reliability-quality/local-release-verification.json").read_text(encoding="utf-8"))
+    assert report["versionOutput"] == "upilot-mcp 1.2.3 channel=release commit=abc protocol=1"
+
+    exe.write_bytes(b"tampered")
+    assert build_server_exe.main() == 1
+    assert exe.read_bytes() == b"tampered"
+    assert json.loads((repo / "artifacts/reliability-quality/local-release-verification.json").read_text(encoding="utf-8"))["passed"] is False
 
 
 def test_server_exe_build_bundles_complete_skill_before_entry_script(

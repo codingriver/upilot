@@ -217,6 +217,8 @@ def test_online_requires_bridge_and_never_uses_server_templates(env):
     from upilot_mcp.domain.task_service import TaskDomainService
     from upilot_mcp.responses import ok, fail
     service = TaskDomainService()
+    service.server = SimpleNamespace(session_manager=SimpleNamespace(active=SimpleNamespace(
+        session_id="fixture-session", identity_verified=True)))
     async def unsupported(*args):
         return fail("req", "UNKNOWN_COMMAND", "Old bridge")
     service.dispatcher = SimpleNamespace(call=unsupported)
@@ -228,6 +230,7 @@ def test_online_requires_bridge_and_never_uses_server_templates(env):
     service.dispatcher = SimpleNamespace(call=bridge)
     result = asyncio.run(service.agent_integrations_check())
     assert result.data["agentRulesVersion"] == 789
+    assert result.data["sourceIdentity"]["templateSource"] == "actual-UPM-not-server"
 
 
 def test_junction_target_is_rejected_without_modifying_destination(env, tmp_path):
@@ -285,3 +288,20 @@ def test_proxy_preview_uses_conditional_authorization(monkeypatch):
     assert asyncio.run(tool_registry.dispatch_public_tool(facade, "unity_agent_integrations_sync", {})).ok
     assert not asyncio.run(tool_registry.dispatch_public_tool(facade, "unity_agent_integrations_sync", {"apply": True})).ok
     assert calls == [False]
+
+
+def test_distill_target_routing_and_maintenance_constraints():
+    source = ROOT / "skills/upilot-unity-mcp"
+    template = (source / "AGENTS.md.template").read_text(encoding="utf-8")
+    workflow = (source / "references/workflows.md").read_text(encoding="utf-8")
+    safety = (source / "references/safety.md").read_text(encoding="utf-8")
+    assert "By default, verify `paths.unityProjectAbsolute` matches `{{projectPath}}`" in template
+    assert "current task explicitly selects it" in template
+    assert "existing project business rules explicitly authorize an alternate project" in template
+    assert "A matching basename is never authorization" in template
+    assert "Never automatically switch projects" in template
+    assert "UPilotTest2022" not in template  # Repository-specific allowlist stays project-owned.
+    assert "Do not broaden the existing exact-path acceptance allowlist" in workflow
+    assert "an incomplete inventory cannot establish an idle maintenance window" in workflow
+    assert "independently approved `unity_service_restart` exception" in workflow
+    assert "This grant explicitly permits interruption" in safety

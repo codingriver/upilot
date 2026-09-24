@@ -7,12 +7,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from upilot_mcp.domain.resource_service import ResourceDomainService
+from upilot_mcp.config import CONFIG
 from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.responses import ok
 from upilot_mcp.tool_registry import REGISTRY
 from upilot_mcp.mcp_tools import resource_tools as _resource_tools  # noqa: F401
 from upilot_mcp.mcp_tools import test_tools as _test_tools  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _acceptance_write_grant(monkeypatch):
+    monkeypatch.setattr(CONFIG, "write_access_approved", True)
 
 
 class _Dispatcher:
@@ -106,7 +112,7 @@ class _AcceptanceService(TestDomainService):
 def test_acceptance_checks_correlated_clean_result_without_cross_capture_cleanup() -> None:
     expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
     service = _AcceptanceService(expected)
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
 
     assert result.ok and result.data["acceptancePassed"] is True
     assert "failureCode" not in result.data
@@ -120,7 +126,7 @@ def test_acceptance_checks_correlated_clean_result_without_cross_capture_cleanup
 def test_acceptance_blocks_unknown_active_capture_without_stopping_it() -> None:
     expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
     service = _AcceptanceService(expected, active_capture=True)
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
     assert not result.ok and result.error.code == "UPILOT_ACCEPTANCE_CAPTURE_OWNERSHIP_REQUIRED"
     assert result.error.detail["activeConsoleCaptures"] == [{"sessionId": "old", "ownerId": ""}]
 
@@ -128,7 +134,7 @@ def test_acceptance_blocks_unknown_active_capture_without_stopping_it() -> None:
 def test_acceptance_supports_explicit_repository_unity_2022_project() -> None:
     expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest2022").resolve()
     service = _AcceptanceService(expected)
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
     assert result.ok and result.data["acceptancePassed"]
     assert result.data["expectedProject"] == str(expected)
     assert result.data["acceptanceProject"] == "UPilotTest2022"
@@ -142,7 +148,7 @@ def test_acceptance_does_not_allow_name_only_or_sibling_project_matches(project)
     async def forbidden(**_):
         pytest.fail("Rejected project must not trigger Editor mutations or tests")
     service.ensure_ready = forbidden
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
     assert not result.ok
     assert result.error.code == "UPILOT_ACCEPTANCE_PROJECT_MISMATCH"
 
@@ -169,7 +175,7 @@ def test_acceptance_rejects_failed_or_missing_evidence(change) -> None:
         return response
 
     service.test_results = altered
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
     assert not result.ok
     assert result.error.detail["acceptancePassed"] is False
     assert result.error.detail["runGuid"] == "run-1"
@@ -191,7 +197,73 @@ def test_acceptance_does_not_treat_compile_transport_success_as_acceptance(compi
         return ok("compile", compile_data)
 
     service.safe_compile_and_wait = compile_result
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
     assert not result.ok
     assert result.error.code == "UPILOT_ACCEPTANCE_COMPILE_FAILED"
     assert service.status_calls == 0
+
+
+@pytest.mark.parametrize("case", ["success", "failed", "missing", "many_errors", "oversize", "task_summary"])
+def test_documented_powershell_projection_is_bounded_and_preserves_unknown(tmp_path, case):
+    import base64
+    import shutil
+    import subprocess
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("PowerShell is required to execute the documented example")
+    workflow = (Path(__file__).resolve().parents[2] /
+                "skills/upilot-unity-mcp/references/workflows.md").read_text(encoding="utf-8")
+    code = workflow.split("<!-- bounded-acceptance-projection -->", 1)[1].split("```powershell\n", 1)[1].split("```", 1)[0]
+    report = {"runGuid": "original-run", "acceptancePassed": True, "cleanupVerified": True,
+              "steps": {"testStatus": {"data": {"total": 2, "passed": 2, "failed": 0}},
+                        "compile": {"data": {"compileRequestId": "request-1", "errorsVerified": True}}}}
+    kind = "AcceptanceReport"
+    if case == "failed":
+        report.update(acceptancePassed=False, failureCode="FAILED", failureMessage="x" * 2000)
+    elif case == "missing":
+        report = {}
+    elif case == "many_errors":
+        report["steps"]["compileErrors"] = {"data": {"errors": [{"code": "ERR", "message": "错" * 1000}] * 1000}}
+    elif case == "oversize":
+        report["steps"]["compileErrors"] = {"data": {"errors": [{"code": "\x01" * 512, "message": "\x01" * 512}] * 8}}
+    elif case == "task_summary":
+        kind = "TaskSummary"
+        report = {"taskId": "task-1", "runGuid": "original-run", "status": "completed", "phase": "done",
+                  "tests": {"total": 2}, "result": {"result": {"acceptancePassed": False,
+                  "compile": {"writeBatchId": "original-batch"}, "cleanupVerified": False}},
+                  "error": {"code": "ERR", "message": "x" * 1000, "raw": {"secret": "not printed"}}}
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+    command = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n" + code
+    command += "\n$x=Get-Content -LiteralPath '" + str(path).replace("'", "''") + "' -Raw -Encoding UTF8 | ConvertFrom-Json\n"
+    command += f"ConvertTo-UPilotEvidenceSummary -InputObject $x -Kind {kind}"
+    encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+    completed = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                               capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    raw = completed.stdout.decode("utf-8-sig").strip()
+    assert len(raw.encode("utf-8")) <= 16384
+    value = json.loads(raw)
+    assert "not printed" not in raw
+    if not value.get("projectionOmitted"):
+        assert len(value["projectionOmissions"]) <= 8
+        assert value["projectionOmissionCount"] >= len(value["projectionOmissions"])
+    if case == "missing":
+        assert value["tests"]["total"] is None and value["acceptancePassed"] is None
+        assert value["cleanupVerified"] is None and value["compile"]["errorsVerified"] is None
+    elif case == "oversize":
+        assert value["projectionOmitted"] is True and value["acceptancePassed"] is None
+    elif case == "many_errors":
+        assert value["errorTotal"] == 1000 and len(value["errors"]) == 8
+        assert len(value["errors"][0]["message"]) == 512
+        assert "errors[8:]" in value["projectionOmissions"]
+    elif case == "task_summary":
+        assert value["compile"]["writeBatchId"] == "original-batch"
+        assert value["tests"]["total"] == 2 and value["tests"]["passed"] is None
+        assert value["acceptancePassed"] is False and value["cleanupVerified"] is False
+    else:
+        assert value["acceptancePassed"] is (case == "success")
+        assert value["tests"]["total"] == 2
+        assert value["compile"]["compileRequestId"] == "request-1"
+        if case == "failed":
+            assert len(value["failureMessage"]) == 512 and "failureMessage" in value["projectionOmissions"]

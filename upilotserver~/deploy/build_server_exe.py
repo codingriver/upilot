@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 import re
+import tomllib
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SERVER_ROOT = SCRIPT_DIR.parent
@@ -20,16 +21,19 @@ DIST = SERVER_ROOT / "dist"
 
 
 def read_pyproject_version() -> str:
-    for raw in (SERVER_ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if line.startswith("version") and "=" in line:
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return "0.0.0"
+    data = tomllib.loads((SERVER_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    version = data.get("project", {}).get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("Missing Python project version")
+    return version
 
 
 def read_upm_version() -> str:
     data = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
-    return str(data.get("version") or "0.0.0")
+    version = data.get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError("Missing UPM package version")
+    return version
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -229,6 +233,61 @@ def verify_release_manifest(manifest_path: Path) -> None:
             )
 
 
+def verify_local_release(version: str, upm_version: str, channel: str, commit: str,
+                         protocol_version: str = "1") -> dict:
+    """Verify the exact local release assets without repairing or rebuilding them."""
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-.+][0-9A-Za-z.-]+)?", version):
+        raise ValueError("Invalid target release version")
+    if read_pyproject_version() != version or read_upm_version() != upm_version or upm_version != version:
+        raise ValueError("UPM, Python and requested release versions differ")
+    name = f"upilot-mcp-server-{version}-win-x64.exe"
+    dist = DIST.resolve()
+    if dist.parent != SERVER_ROOT.resolve():
+        raise ValueError("Release dist path resolves outside the server root")
+    exe = DIST / name
+    checksum = DIST / f"{name}.sha256"
+    manifest_path = DIST / "manifest.json"
+    for asset in (exe, checksum, manifest_path):
+        if asset.resolve().parent != dist or not asset.is_file():
+            raise ValueError(f"Missing or unsafe release asset: {asset.name}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = {"serverVersion": version, "upmVersion": upm_version, "channel": channel,
+                "commitSha": commit, "protocolVersion": protocol_version}
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ValueError(f"Release manifest {key} mismatch: {manifest.get(key)!r} != {value!r}")
+    entries = manifest.get("downloads")
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise ValueError("Release manifest must contain exactly one target download")
+    entry = entries[0]
+    if (entry.get("fileName") != name or entry.get("platform") != "windows"
+            or entry.get("architecture") != "x64"):
+        raise ValueError("Release manifest target filename/platform/architecture mismatch")
+    if entry.get("sizeBytes") != exe.stat().st_size:
+        raise ValueError("Release EXE size differs from manifest")
+    digest = sha256(exe)
+    if not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256") or "")) or entry["sha256"] != digest:
+        raise ValueError("Release EXE SHA256 differs from manifest")
+    checksum_text = checksum.read_text(encoding="utf-8")
+    if checksum_text != f"{digest}  {name}\n":
+        raise ValueError("Release checksum file hash, filename or format mismatch")
+    clean_env = {key: value for key, value in os.environ.items()
+                 if key not in {"UPILOT_SERVER_VERSION", "UPILOT_BUILD_COMMIT", "UPILOT_BUILD_CHANNEL"}}
+    try:
+        result = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
+                                timeout=30, env=clean_env, check=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Release EXE --version timed out after 30 seconds") from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"Release EXE --version failed: {exc}") from exc
+    output = result.stdout.strip()
+    match = re.fullmatch(r"upilot-mcp (\S+) channel=(\S+) commit=(\S+) protocol=(\S+)", output)
+    if match is None or match.groups() != (version, channel, commit or "unknown", protocol_version):
+        raise ValueError(f"Release EXE --version identity mismatch: {output!r}")
+    return {"passed": True, "version": version, "commit": commit, "sha256": digest,
+            "sizeBytes": exe.stat().st_size, "exe": name, "versionOutput": output}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", default=read_pyproject_version())
@@ -237,23 +296,26 @@ def main() -> int:
     parser.add_argument("--commit", default=os.getenv("GITHUB_SHA", ""))
     parser.add_argument("--protocol-version", default="1")
     parser.add_argument("--base-url", default="")
+    parser.add_argument("--verify-only", action="store_true", help="Only inspect existing local release assets")
     args = parser.parse_args()
-
-    exe = build_exe(args.version, args.channel, args.commit)
-    manifest = write_manifest(
-        exe,
-        version=args.version,
-        upm_version=args.upm_version,
-        channel=args.channel,
-        commit=args.commit,
-        protocol_version=args.protocol_version,
-        base_url=args.base_url,
-    )
-    verify_release_manifest(manifest)
-    print(f"exe={exe}")
-    print(f"sha256={exe}.sha256")
-    print(f"manifest={manifest}")
-    return 0
+    report_path = REPO_ROOT / "artifacts" / "reliability-quality" / "local-release-verification.json"
+    try:
+        if not args.verify_only:
+            exe = build_exe(args.version, args.channel, args.commit)
+            manifest = write_manifest(
+                exe, version=args.version, upm_version=args.upm_version, channel=args.channel,
+                commit=args.commit, protocol_version=args.protocol_version, base_url=args.base_url,
+            )
+        result = verify_local_release(args.version, args.upm_version, args.channel,
+                                      args.commit, args.protocol_version)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        result = {"passed": False, "version": args.version, "commit": args.commit, "error": str(exc)}
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if result["passed"]:
+        (report_path.parent / "exe-version.log").write_text(result["versionOutput"] + "\n", encoding="utf-8")
+    print(json.dumps(result))
+    return 0 if result["passed"] else 1
 
 
 if __name__ == "__main__":

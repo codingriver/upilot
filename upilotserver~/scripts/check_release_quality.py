@@ -29,6 +29,7 @@ CONTRACT_TESTS = (
     "test_write_batch_changes.py", "test_editor_execution_state_v2.py",
     "test_resource_write_contracts.py", "test_operation_cleanup_barriers.py", "test_release_evidence.py",
     "test_release_evidence_collector.py", "test_release_version_sync.py",
+    "test_build_server_exe.py",
     "test_actions_runtime_contracts.py", "test_snapshot_short_tasks.py",
     "test_skill_validation.py", "test_install_upilot.py",
 )
@@ -93,8 +94,13 @@ def _documentation_result(
     }
 
 
-def _snapshot_paths(repo: Path, installed_manifests: list[Path]) -> dict[str, dict]:
-    paths = [repo / _ROOT_TODO, repo / _P2_PLAN, repo / _ARCHIVE, repo / _TOOL_STATUS, repo / _RULES_SOURCE, repo / _REGISTRY_SOURCE]
+def _snapshot_paths(repo: Path, installed_manifests: list[Path], *, include_registry: bool = True,
+                    include_todo_id: bool = True) -> dict[str, dict]:
+    paths = [repo / _ARCHIVE, repo / _RULES_SOURCE]
+    if include_registry:
+        paths.extend((repo / _TOOL_STATUS, repo / _REGISTRY_SOURCE))
+    if include_todo_id:
+        paths.extend((repo / _ROOT_TODO, repo / _P2_PLAN))
     # Evidence is an explicit input set as well.  Without hashing the manifests
     # themselves, a concurrent replacement could leave a check reporting a
     # result for evidence it never actually inspected.
@@ -334,8 +340,8 @@ def documentation_checks(
     *,
     installed_manifests: list[Path] | None = None,
     inventory_factory=None,
-    include_registry: bool = True,
-    include_todo_id: bool = True,
+    include_registry: bool = False,
+    include_todo_id: bool = False,
 ) -> dict:
     """Run bounded, read-only WP-12 checks over repository-owned documentation.
 
@@ -349,8 +355,15 @@ def documentation_checks(
         {path.resolve() for path in (installed_manifests or [])},
         key=lambda path: str(path).casefold(),
     )
-    before = _snapshot_paths(repo, manifests)
+    before = _snapshot_paths(repo, manifests, include_registry=include_registry, include_todo_id=include_todo_id)
     checks = []
+    for enabled, check_id, flag in (
+        (include_registry, "docs.registry", "--enable-docs-registry"),
+        (include_todo_id, "docs.todo-id", "--enable-docs-todo-id"),
+    ):
+        if not enabled:
+            checks.append(_documentation_result(check_id, "skipped", reason="DISABLED_BY_DEFAULT",
+                                                next_action=f"Use {flag} to run this optional check."))
 
     if include_registry:
         try:
@@ -618,7 +631,7 @@ def documentation_checks(
             actual=install_results, provenance="external", next_action="Client injection remains unknown until a real client call succeeds.",
         ))
 
-    after = _snapshot_paths(repo, manifests)
+    after = _snapshot_paths(repo, manifests, include_registry=include_registry, include_todo_id=include_todo_id)
     if before != after:
         for check in checks:
             # A stable result is meaningful only for the exact input snapshot
@@ -785,21 +798,23 @@ def main(argv=None) -> int:
             inventory_exit_code = 1
         steps.append({"name": "toolInventory", "exitCode": inventory_exit_code, "log": str(inventory_path),
                       "bytes": len(inventory_content), "sha256": _sha256(inventory_content)})
-    after = source_identity(REPO)
     unity = {"checked": False, "skipReason": "No Unity summary supplied; this gate is not Unity acceptance."}
-    if args.require_unity_summary:
-        try:
-            unity = verify_release_evidence(REPO, os.environ.get("UPILOT_ACCEPTANCE_RUN_ID", ""), args.release_tag)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            unity = {"checked": True, "passed": False, "error": str(exc)}
-    elif args.unity_summary:
-        try:
+    run_id = os.environ.get("UPILOT_ACCEPTANCE_RUN_ID", "")
+    from upilot_mcp.release_evidence import tag_acceptance_run
+    try:
+        tag_run_id = tag_acceptance_run(REPO, args.release_tag) if args.release_tag else ""
+        if args.unity_summary and (args.require_unity_summary or run_id or tag_run_id):
+            raise ValueError("Local Unity summary conflicts with controlled acceptance evidence.")
+        if args.require_unity_summary or run_id or tag_run_id:
+            unity = verify_release_evidence(REPO, run_id, args.release_tag)
+        elif args.unity_summary:
             content = args.unity_summary.read_bytes()
             verify_unity_summary(json.loads(content), before)
             unity = {"checked": True, "passed": True, "path": str(args.unity_summary),
                      "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
-        except (OSError, ValueError) as exc:
-            unity = {"checked": True, "passed": False, "error": str(exc)}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        unity = {"checked": True, "passed": False, "error": str(exc)}
+    after = source_identity(REPO)
     report = {
         "schemaVersion": 1, "sourceIdentity": before, "sourceIdentityAfter": after,
         "sourceUnchanged": before == after, "startedAt": started, "endedAt": int(time.time() * 1000),

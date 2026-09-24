@@ -947,3 +947,37 @@ def test_native_and_proxy_keyboard_enum_errors_never_dispatch(monkeypatch) -> No
     assert proxy.error.detail["candidates"] == ["keydown", "keyup", "keypress", "type"]
     assert proxy.error.detail["sideEffectsMayHaveOccurred"] is False
     assert proxy_calls == 0
+
+
+@pytest.mark.parametrize("name", ["unity_script_create", "unity_script_update", "unity_script_delete"])
+def test_script_descriptions_use_one_automatic_batch(name):
+    tools = {tool.name: tool for tool in asyncio.run(runtime._original_mcp_list_tools())}
+    description = tools[name].description
+    for text in ("unity_write_batch_register", "compileWhenEditMode=true", "writeBatchId",
+                 "unity_write_batch_status", "自动批次不得另行 sync/compile", "不主动退出 PlayMode",
+                 "仅未启用自动批次的旧版/手动流程"):
+        assert text in description
+    if name == "unity_script_delete":
+        assert "deletedPaths" in description and "paths=[]" in description
+    else:
+        assert "整批代码落盘后仅调用一次" in description
+    assert list(tools[name].inputSchema["properties"]) == (
+        ["scriptPath"] if name == "unity_script_delete" else ["scriptPath", "content"])
+
+
+def test_workflow_identity_routes_match_registered_tool_parameters():
+    from pathlib import Path
+    workflow = (Path(__file__).resolve().parents[2] /
+                "skills/upilot-unity-mcp/references/workflows.md").read_text(encoding="utf-8")
+    tools = {tool.name: tool for tool in asyncio.run(runtime._original_mcp_list_tools())}
+    routes = {"unity_write_batch_status": "writeBatchId", "unity_compile_status": "compileRequestId",
+              "unity_compile_errors": "compileRequestId", "unity_operation_status": "operationId",
+              "unity_task_status": "taskId", "unity_test_results": "runGuid"}
+    for name, parameter in routes.items():
+        assert name in workflow
+        assert parameter in tools[name].inputSchema["properties"]
+    assert "unity_task_wait" not in workflow
+    assert "Compile `operationId` is correlation metadata, not a generic job ID" in workflow
+    assert "inspect the original persisted batch" in workflow
+    assert "without automatic batch authorization" in workflow
+    assert "do not exit PlayMode without authorization" in workflow

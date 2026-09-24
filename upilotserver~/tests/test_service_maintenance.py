@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -191,7 +191,7 @@ def test_domain_reload_never_resends_maintenance():
         server = WsOrchestratorServer.__new__(WsOrchestratorServer)
         future = asyncio.get_running_loop().create_future()
         server._pending = {"command": future}
-        server.state = SimpleNamespace(commands={
+        server.state = SimpleNamespace(mark_failed=Mock(), commands={
             "command": SimpleNamespace(name="service.restart", payload={"maintenanceId": "original"}),
         })
         server.send_command = AsyncMock()
@@ -201,5 +201,67 @@ def test_domain_reload_never_resends_maintenance():
         result = await future
         assert result["payload"]["code"] == "SERVICE_RESTART_RECOVERY_REQUIRED"
         assert result["payload"]["detail"]["maintenanceId"] == "original"
+        server.state.mark_failed.assert_called_once()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("name,payload,replay", [
+    ("resource.editorState", {}, True),
+    ("test.status", {}, True),
+    ("compile.errors.get", {}, True),
+    ("test.results", {"runGuid": "run-original"}, True),
+    ("test.results", {"runGuid": "  "}, False),
+    ("test.run", {"testMode": "EditMode"}, False),
+    ("compile.request", {}, False),
+    ("console.capture.stop", {"sessionId": "capture-original"}, False),
+])
+def test_reload_only_replays_original_read_only_query(name, payload, replay):
+    from upilot_mcp.server import WsOrchestratorServer
+
+    async def run():
+        server = WsOrchestratorServer.__new__(WsOrchestratorServer)
+        future = asyncio.get_running_loop().create_future()
+        server._pending = {"original-id": future}
+        server.state = SimpleNamespace(mark_failed=Mock(), commands={
+            "original-id": SimpleNamespace(name=name, payload=payload),
+        })
+        server.send_command = AsyncMock()
+        await server._resend_pending_commands()
+        if replay:
+            server.send_command.assert_awaited_once_with("original-id", name, payload)
+            assert not future.done() and "original-id" in server._pending
+            server.state.mark_failed.assert_not_called()
+        else:
+            server.send_command.assert_not_called()
+            result = await future
+            detail = result["payload"]["detail"]
+            assert result["payload"]["code"] == "COMMAND_RECOVERY_REQUIRED"
+            assert detail["commandId"] == "original-id" and detail["commandName"] == name
+            assert detail["outcome"] == "unknown" and detail["replayAttempted"] is False
+            assert not server._pending
+            server.state.mark_failed.assert_called_once()
+
+    asyncio.run(run())
+
+
+def test_reload_missing_record_converges_and_completed_future_is_not_sent():
+    from upilot_mcp.server import WsOrchestratorServer
+
+    async def run():
+        server = WsOrchestratorServer.__new__(WsOrchestratorServer)
+        missing = asyncio.get_running_loop().create_future()
+        done = asyncio.get_running_loop().create_future()
+        done.set_result({"original": True})
+        server._pending = {"missing-id": missing, "done-id": done}
+        server.state = SimpleNamespace(mark_failed=Mock(), commands={
+            "done-id": SimpleNamespace(name="test.status", payload={}),
+        })
+        server.send_command = AsyncMock()
+        await server._resend_pending_commands()
+        server.send_command.assert_not_called()
+        assert (await missing)["payload"]["code"] == "COMMAND_RECOVERY_REQUIRED"
+        assert done.result() == {"original": True} and not server._pending
+        server.state.mark_failed.assert_not_called()
 
     asyncio.run(run())

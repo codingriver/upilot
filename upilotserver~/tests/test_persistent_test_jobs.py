@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.protocol import now_ms
@@ -141,6 +143,8 @@ class AcceptanceService(TaskDomainService, _AcceptanceService):
         _AcceptanceService.__init__(self, expected)
         store = StateStore()
         store.configure_project(str(output_root))
+        # Keep the database isolated, but model the exact authorized project identity.
+        store._project_path = str(expected)
         self.server = SimpleNamespace(state=store)
         self._async_tasks = {}
         self._async_task_handles = {}
@@ -177,7 +181,14 @@ class AcceptanceService(TaskDomainService, _AcceptanceService):
         return TestDomainService._finish_acceptance_report(report, passed, code, message)
 
 
-def test_acceptance_summary_finishes_without_polling_and_has_verified_hash(tmp_path):
+@pytest.fixture
+def acceptance_gate(monkeypatch):
+    from upilot_mcp.domain import task_service
+    monkeypatch.setattr(task_service, "refresh_config_if_changed", lambda: None)
+    monkeypatch.setattr(task_service.CONFIG, "write_access_approved", True)
+
+
+def test_acceptance_summary_finishes_without_polling_and_has_verified_hash(tmp_path, acceptance_gate):
     async def scenario():
         service = AcceptanceService(tmp_path)
         start = await service.task_start("acceptance", "unity_upilot_acceptance_run", {"write_artifact": True})
@@ -197,7 +208,29 @@ def test_acceptance_summary_finishes_without_polling_and_has_verified_hash(tmp_p
     asyncio.run(scenario())
 
 
-def test_interrupted_acceptance_reattaches_without_start_and_writes_summary(tmp_path):
+def test_public_acceptance_returns_queued_task_before_runner_and_full_remains_available(tmp_path, acceptance_gate):
+    async def scenario():
+        service = AcceptanceService(tmp_path)
+        service.hold_result.clear()
+        start = await service.upilot_acceptance_run(timeout_sec=30, write_artifact=False)
+        assert start.ok and start.data["durable"] is True
+        assert start.data["status"] == "queued" and start.data["terminal"] is False
+        assert start.data["projectPath"] == service.server.state.project_path
+        assert start.data["deadlineAt"] and not start.data.get("runGuid")
+        task_id = start.data["taskId"]
+        assert service.server.state.load_test_jobs()[0]["taskId"] == task_id
+        service.hold_result.set()
+        await service._async_task_handles[task_id]
+        summary = await service.task_status(task_id)
+        full = await service.task_status(task_id, detail_level="full")
+        assert summary.data["status"] == "completed" and service.start_count == 1
+        assert "acceptanceReport" not in summary.data
+        assert full.data["acceptanceReport"]["runGuid"] == "run-1"
+
+    asyncio.run(scenario())
+
+
+def test_interrupted_acceptance_reattaches_without_start_and_writes_summary(tmp_path, acceptance_gate):
     async def scenario():
         first = AcceptanceService(tmp_path)
         first.hold_result.clear()
@@ -229,6 +262,9 @@ def test_generic_task_execute_refuses_retries_for_non_idempotent_tool(tmp_path):
 
 def test_acceptance_budget_exhausted_by_compile_never_starts_runner(tmp_path, monkeypatch):
     from upilot_mcp.domain import test_service
+    from upilot_mcp import config
+    monkeypatch.setattr(config, "refresh_config_if_changed", lambda: None)
+    monkeypatch.setattr(config.CONFIG, "write_access_approved", True)
     clock = {"now": 1000}
     monkeypatch.setattr(test_service, "now_ms", lambda: clock["now"])
     service = AcceptanceService(tmp_path)
@@ -238,7 +274,7 @@ def test_acceptance_budget_exhausted_by_compile_never_starts_runner(tmp_path, mo
         return ok("compile", {"status": "success", "errorsVerified": True, "errorTotal": 0})
 
     service.safe_compile_and_wait = compile
-    result = asyncio.run(service.upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
     assert not result.ok
     assert result.error.code == "UPILOT_ACCEPTANCE_DEADLINE_EXCEEDED"
     assert service.start_count == 0
@@ -286,6 +322,9 @@ def test_acceptance_preflight_reports_import_input_changes_without_starting_runn
 
 def test_acceptance_rejects_source_unchanged_when_import_inputs_change(tmp_path, monkeypatch):
     from upilot_mcp.domain import test_service
+    from upilot_mcp import config
+    monkeypatch.setattr(config, "refresh_config_if_changed", lambda: None)
+    monkeypatch.setattr(config.CONFIG, "write_access_approved", True)
 
     snapshots = iter((
         {"schemaVersion": 1, "projectPath": "project", "inputCount": 1, "inputs": {"project:Assets/A.cs.meta": "before"}},
@@ -293,7 +332,7 @@ def test_acceptance_rejects_source_unchanged_when_import_inputs_change(tmp_path,
     ))
     monkeypatch.setattr(test_service, "acceptance_import_inputs", lambda *_args: next(snapshots))
     service = AcceptanceService(tmp_path)
-    result = asyncio.run(service.upilot_acceptance_run(write_artifact=False))
+    result = asyncio.run(service._execute_upilot_acceptance_run(write_artifact=False))
 
     assert not result.ok
     assert result.error.code == "UPILOT_ACCEPTANCE_FAILED"

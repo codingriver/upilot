@@ -28,8 +28,21 @@ jobs:
       - name: Checkout main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Require main dispatch source
+        shell: bash
+        run: |
+          if [[ '${{ github.ref }}' != 'refs/heads/main' ]]; then
+            echo 'Release preparation requires main.' >&2
+            exit 1
+          fi
+          git fetch origin main
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            echo 'main moved since dispatch; do not release a different source.' >&2
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0, node24
@@ -39,6 +52,8 @@ jobs:
       - name: Resolve release version
         id: release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           raw="${{ github.event.inputs.version }}"
           version="${raw#v}"
@@ -49,7 +64,12 @@ jobs:
           tag="v$version"
           git fetch --tags origin
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "Tag $tag already exists. Delete/recreate it intentionally or choose a new version." >&2
+            echo "Tag $tag already exists; choose a new version." >&2
+            exit 1
+          fi
+          release_status="$( { gh api -i "repos/${{ github.repository }}/releases/tags/$tag" 2>/dev/null || true; } | head -n 1 | awk '{print $2}')"
+          if [[ "$release_status" != '404' ]]; then
+            echo "Release check for $tag returned ${release_status:-unknown}; refusing to overwrite or assume absence." >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"

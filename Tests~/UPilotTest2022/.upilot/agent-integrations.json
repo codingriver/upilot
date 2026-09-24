@@ -4,7 +4,7 @@
         {
             "relativePath": "AGENTS.md",
             "normalizedManagedSha256": "c84c374eff98a7727901e70249c8aa818c070aebe540ef2e8c0d9b1d49ae640d",
-            "templateSha256": "16e87b21725b7429aab1cb3fd50299121b81381bca7e04c013777477d4afb06d",
+            "templateSha256": "871d8df52dedffbc5e90157e2d6c9e26337a93438f62e55f76a516b2ebf55bd4",
             "templateVersion": 44,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
@@ -17,7 +17,7 @@
         {
             "relativePath": ".cursor/rules/upilot-unity-mcp.mdc",
             "normalizedManagedSha256": "c84c374eff98a7727901e70249c8aa818c070aebe540ef2e8c0d9b1d49ae640d",
-            "templateSha256": "16e87b21725b7429aab1cb3fd50299121b81381bca7e04c013777477d4afb06d",
+            "templateSha256": "871d8df52dedffbc5e90157e2d6c9e26337a93438f62e55f76a516b2ebf55bd4",
             "templateVersion": 44,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
@@ -30,7 +30,7 @@
         {
             "relativePath": "CLAUDE.md",
             "normalizedManagedSha256": "af5a4067578801769bea0c6727e728ed8f35b075aaa73561a2f5849a658b6674",
-            "templateSha256": "16e87b21725b7429aab1cb3fd50299121b81381bca7e04c013777477d4afb06d",
+            "templateSha256": "871d8df52dedffbc5e90157e2d6c9e26337a93438f62e55f76a516b2ebf55bd4",
             "templateVersion": 44,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",

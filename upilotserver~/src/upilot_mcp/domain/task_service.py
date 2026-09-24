@@ -1385,6 +1385,7 @@ class TaskDomainService:
                 public = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
                 public.update({"collectionPersisted": False, "collectionSuperseded": True,
                                "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0)})
+                if detail_level == "summary": public = self._finalize_summary(public, max_tail_chars)
                 return ok(request_id, public)
             candidate = copy.deepcopy(state)
             candidate["artifacts"] = artifacts
@@ -1399,6 +1400,7 @@ class TaskDomainService:
                 public = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
                 public.update({"collectionPersisted": False, "artifactPersistenceError": str(exc),
                                "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0)})
+                if detail_level == "summary": public = self._finalize_summary(public, max_tail_chars)
                 return fail(request_id, "OPERATION_PERSIST_FAILED", str(exc), public)
             state.clear()
             state.update(candidate)
@@ -1407,6 +1409,7 @@ class TaskDomainService:
                        "responseDetailLevel": self._normalize_operation_detail_level(detail_level)}
             if include_raw_state:
                 payload["operation"] = self._public_operation_state(state, detail_level, max_tail_chars, True)
+            if detail_level == "summary": payload = self._finalize_summary(payload, max_tail_chars)
             return ok(request_id, payload)
 
     async def _operation_collect_artifacts_locked(
@@ -1581,6 +1584,7 @@ class TaskDomainService:
                 "artifactPersistenceError": str(exc),
                 "artifactCollectionSequence": int(state.get("artifactCollectionSequence") or 0),
             })
+            if detail_level == "summary": public = self._finalize_summary(public, max_tail_chars)
             return fail(request_id, "OPERATION_PERSIST_FAILED", str(exc), public)
         state.clear()
         state.update(candidate)
@@ -1590,6 +1594,7 @@ class TaskDomainService:
                    "responseDetailLevel": self._normalize_operation_detail_level(detail_level)}
         if include_raw_state:
             payload["operation"] = self._public_operation_state(state, detail_level, max_tail_chars, True)
+        if detail_level == "summary": payload = self._finalize_summary(payload, max_tail_chars)
         return ok(request_id, payload)
 
     async def _operation_invoke(self, call: dict | None, operation_id: str = "") -> ToolResponse:
@@ -2071,6 +2076,67 @@ class TaskDomainService:
         return normalized if normalized in {"summary", "standard", "full"} else "summary"
 
     @staticmethod
+    def _summary_size(value: dict) -> int:
+        return len(json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":")).encode("utf-8"))
+
+    @staticmethod
+    def _finalize_summary(value: dict, max_tail_chars: int = 2000) -> dict:
+        result = copy.deepcopy(value)
+        truncated = set(result.pop("truncatedFields", []) or [])
+        text_limit = max(0, min(500, int(max_tail_chars)))
+        error_limit = max(0, min(2000, int(max_tail_chars)))
+        def trim(node, path=""):
+            if isinstance(node, str):
+                bound = error_limit if any(part in path.lower() for part in ("error", "failure", "diagnostic")) else text_limit
+                if len(node) > bound:
+                    truncated.add(path)
+                    return node[:bound]
+            if isinstance(node, list):
+                if len(node) > 8: truncated.add(path)
+                return [trim(item, f"{path}[{index}]") for index, item in enumerate(node[:8])]
+            if isinstance(node, dict):
+                required = {"result", "result.result", "businessResult", "error", "tests", "compile", "consoleCapture"}
+                capped = bool(path) and path not in required
+                entries = list(node.items())[:8] if capped else list(node.items())
+                if capped and len(node) > 8: truncated.add(path)
+                bounded = {}
+                for key, item in entries:
+                    name = str(key)[:128]
+                    if name != key: truncated.add(path)
+                    bounded[name] = trim(item, f"{path}.{name}".strip("."))
+                return bounded
+            return node
+        result["summaryVersion"] = 1
+        for _ in range(24):
+            result = trim(result)
+            result["truncatedFields"] = sorted(truncated)[:32]
+            # The count includes its own decimal representation.
+            for _ in range(4):
+                size = TaskDomainService._summary_size(result)
+                if result.get("responseBytes") == size: break
+                result["responseBytes"] = size
+            if TaskDomainService._summary_size(result) <= 16384: return result
+            # Prefer dropping optional diagnostics and collection detail before reducing text.
+            for key in ("recoveryDiagnostics", "artifactErrors", "milestones", "timing", "metrics", "detail", "recommendation", "operation"):
+                if key in result:
+                    result.pop(key)
+                    if key == "artifactErrors":
+                        result["artifactErrorsReturned"] = 0
+                    truncated.add(key)
+                    break
+            else:
+                # Keep an artifact index even when the summary budget is tight.
+                artifacts = result.get("artifacts")
+                if isinstance(artifacts, dict) and len(artifacts) > 1:
+                    artifacts.pop(next(reversed(artifacts)))
+                    result["artifactsReturned"] = len(artifacts)
+                    truncated.add("artifacts")
+                    continue
+                text_limit //= 2
+                error_limit //= 2
+        raise ValueError("Summary cannot fit within 16 KiB without losing required identity")
+
+    @staticmethod
     def _bounded_operation_value(value, max_chars: int, path: str = "", truncated: list[str] | None = None):
         truncated = truncated if truncated is not None else []
         if isinstance(value, str) and max_chars > 0 and len(value) > max_chars:
@@ -2105,6 +2171,40 @@ class TaskDomainService:
     ) -> dict:
         level = self._normalize_operation_detail_level(detail_level)
         max_chars = max(128, min(int(max_tail_chars or 2000), 1000000))
+        if level == "summary":
+            fields = ("operationId", "displayName", "status", "phase", "durable", "recovered",
+                      "startedAt", "updatedAt", "endedAt", "timeoutSec", "error", "failureSignature",
+                      "businessResult", "cleanupError", "cleanupFailureSignature", "cleanupPending",
+                      "businessTerminal", "cleanupTerminal", "editorTerminal", "editorVerification",
+                      "cancelRequested", "nextAction", "artifactCollectionSequence", "artifactPersistenceError")
+            public = {key: copy.deepcopy(state[key]) for key in fields if key in state}
+            public["terminal"] = bool(state.get("endedAt"))
+            public["jobTimeoutAt"] = int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000)
+            public["responseDetailLevel"] = level
+            public["rawStateAvailable"] = True
+            public["unresolvedResourcesTotal"] = len(state.get("unresolvedResources") or [])
+            public["unresolvedResources"] = (state.get("unresolvedResources") or [])[:8]
+            artifacts = state.get("artifacts") or {}
+            public["artifactsTotal"] = len(artifacts)
+            public["artifacts"] = {str(key)[:128]: {field: item[field] for field in ("name", "path", "bytes", "sha256") if field in item}
+                                   for key, item in list(artifacts.items())[:8] if isinstance(item, dict)}
+            public["artifactsReturned"] = len(public["artifacts"])
+            public["artifactErrorsTotal"] = len(state.get("artifactErrors") or [])
+            public["artifactErrors"] = (state.get("artifactErrors") or [])[:8]
+            public["artifactErrorsReturned"] = len(public["artifactErrors"])
+            public["truncatedFields"] = [key for key, total, returned in (
+                ("artifacts", public["artifactsTotal"], public["artifactsReturned"]),
+                ("artifactErrors", public["artifactErrorsTotal"], public["artifactErrorsReturned"]),
+                ("unresolvedResources", public["unresolvedResourcesTotal"], len(public["unresolvedResources"])))
+                if total > returned]
+            capture = state.get("consoleCapture") or {}
+            public["consoleCapture"] = {key: capture[key] for key in (
+                "sessionId", "stopped", "artifactsVerified", "jsonlPath", "summaryPath", "manifestPath",
+                "sha256", "recordCount", "fileBytes") if key in capture}
+            metrics = (state.get("lastStatusData") or {}).get("metrics")
+            if isinstance(metrics, dict): public["metrics"] = dict(list(metrics.items())[:8])
+            if include_raw_state: public["rawStateOmitted"] = True
+            return self._finalize_summary(public, max_tail_chars)
         truncated: list[str] = []
         public = {
             "durable": state.get("durable", False),
@@ -2656,7 +2756,10 @@ class TaskDomainService:
     def _public_task_state(state: dict, detail_level: str = "summary") -> dict:
         if not state.get("durable") or detail_level == "full":
             return state.copy()
-        result = {key: value for key, value in state.items() if key not in {"acceptanceReport", "toolArgs", "result", "error", "cancelResponse", "recoveryDiagnostics"}}
+        fields = ("taskId", "projectPath", "durable", "status", "phase", "terminal", "runGuid",
+                  "deadlineAt", "createdAt", "startedAt", "updatedAt", "endedAt", "nextAction",
+                  "startSendState", "cancelSendState", "cleanupError", "cleanupFailureSignature")
+        result = {key: state[key] for key in fields if key in state}
         report = state.get("acceptanceReport") or {}
         if report:
             result["result"] = {"result": {key: report[key] for key in (
@@ -2688,7 +2791,9 @@ class TaskDomainService:
                                                "message": str(item.get("message") or "")[:500]}
                                               for item in diagnostics[-8:]]
             result["recoveryDiagnosticsTruncated"] = len(diagnostics) > 8
-        return result
+        result["recoveryDiagnosticsDroppedCount"] = state.get("recoveryDiagnosticsDroppedCount")
+        result["recoveryDiagnosticsHistoryComplete"] = state.get("recoveryDiagnosticsDroppedCount") is not None
+        return TaskDomainService._finalize_summary(result)
 
     def _resume_test_observer(self, state: dict) -> None:
         handle = self._async_task_handles.get(state["taskId"])
@@ -2784,6 +2889,7 @@ class TaskDomainService:
                 if old_error:
                     history = state.setdefault("recoveryDiagnostics", [])
                     history.append({"code": str(old_error.get("code") or "")[:120], "message": str(old_error.get("message") or "")[:500]})
+                    state["recoveryDiagnosticsDroppedCount"] = (state.get("recoveryDiagnosticsDroppedCount") or 0) + max(0, len(history) - 8) if state.get("recoveryDiagnosticsDroppedCount") is not None else None
                     state["recoveryDiagnostics"] = history[-8:]
                 state.pop("error", None)
                 state.pop("nextAction", None)

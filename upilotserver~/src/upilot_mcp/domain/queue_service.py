@@ -10,6 +10,7 @@ import secrets
 import time
 
 from ..protocol import new_id
+from ..process_identity import classify_unity_process, process_creation_time, query_unity_processes
 from ..queue_audit import AUDIT, QUEUE_GUARD, notice, outcome, safe_text
 from ..responses import fail, ok
 from ..service_maintenance import same_path, _unique_object
@@ -56,6 +57,7 @@ class QueueDomainService:
 
     async def queue_inventory(self):
         request = new_id("req")
+        deadline = time.monotonic() + 10
         entries, issues = [], []
         test_ids = set()
         store = self.server.state
@@ -70,13 +72,18 @@ class QueueDomainService:
         source_status = {"persisted": "present", "serverMemory": "present",
                          "bridgeCommands": "unknown",
                          "editor": "present" if connected and execution.get("authoritative") and not execution.get("isStale") else "unknown"}
+        source_details = {}
+        oversized = getattr(self.server, "_oversize_observations", [])
+        if oversized:
+            issues.append("BRIDGE_EVENT_OR_FRAME_TOO_LARGE")
+            source_details["bridgeOversize"] = oversized[-8:]
+        process_probe = asyncio.create_task(asyncio.to_thread(query_unity_processes))
+        process_deadline = time.monotonic() + 5
         if not connected:
             issues.append("UNITY_NOT_CONNECTED")
-        else:
-            # Server command records do not enumerate the Bridge main-thread queue.
-            issues.append("BRIDGE_QUEUE_NOT_FULLY_ENUMERATED")
         if execution.get("isStale") or not execution.get("authoritative"):
             issues.append("EDITOR_STATE_STALE_OR_UNKNOWN")
+        persisted_start = len(entries)
         try:
             # Never call task_status / operation_status / recovery to populate the window.
             for kind, key, persisted, memory in (
@@ -137,10 +144,52 @@ class QueueDomainService:
         except Exception:
             source_status["persisted"] = "unknown"
             issues.append("PERSISTED_QUEUE_DATA_INCOMPLETE")
+        source_details["persisted"] = {"observedAt": observed_at, "coverage": "persisted and merged memory records",
+                                       "queryResult": source_status["persisted"],
+                                       "complete": source_status["persisted"] == "present",
+                                       "totalCount": len(entries) - persisted_start,
+                                       "returnedCount": len(entries) - persisted_start}
+        memory_count = sum(1 for records in (getattr(self, "_async_tasks", {}), getattr(self, "_operations", {}))
+                           for value in records.values() if current(value))
+        source_details["serverMemory"] = {"observedAt": observed_at, "coverage": "active task and operation maps",
+                                          "queryResult": source_status["serverMemory"],
+                                          "complete": source_status["persisted"] == "present",
+                                          "totalCount": memory_count, "returnedCount": memory_count}
         if connected:
             try:
+                remaining = min(3, deadline - time.monotonic())
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                bridge_result = await asyncio.wait_for(self.dispatcher.call(
+                    new_id("req"), "queue.snapshot", {}, timeout_ms=int(remaining * 1000)), remaining)
+                snapshot = bridge_result.data if bridge_result.ok and isinstance(bridge_result.data, dict) else {}
+                required = {"complete", "activeCount", "queuedCount", "executingCount", "untrackedCount", "observedAt"}
+                if not required.issubset(snapshot):
+                    raise ValueError("Bridge queue snapshot is missing fields")
+                source_details["bridgeCommands"] = {key: snapshot.get(key) for key in required}
+                bridge_values = (snapshot.get("activeCommands") or []) + (snapshot.get("queuedCommands") or [])
+                source_details["bridgeCommands"].update(totalCount=snapshot["activeCount"] + snapshot["queuedCount"],
+                    returnedCount=min(200, len(bridge_values)), truncated=bool(snapshot.get("truncated")) or len(bridge_values) > 200,
+                    queryResult="verified" if snapshot["complete"] else "incomplete")
+                source_status["bridgeCommands"] = "present" if snapshot["complete"] else "unknown"
+                if not snapshot["complete"] or len(bridge_values) > 200:
+                    issues.append("BRIDGE_QUEUE_INCOMPLETE")
+                active_values = snapshot.get("activeCommands") or []
+                for index, value in enumerate(bridge_values[:200]):
+                    if value.get("commandId"):
+                        entries.append(item("BridgeCommand", value["commandId"], {
+                            "displayName": value.get("commandName"),
+                            "status": "active" if index < len(active_values) else "queued"},
+                            unsupported="No generic Bridge command revocation in v1."))
+            except (Exception, asyncio.CancelledError) as exc:
+                source_details["bridgeCommands"] = {"queryResult": "unknown", "reason": type(exc).__name__}
+                issues.append("BRIDGE_QUEUE_NOT_FULLY_ENUMERATED")
+            try:
+                remaining = min(3.5, deadline - time.monotonic())
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
                 tests = await asyncio.wait_for(
-                    self.dispatcher.call(new_id("req"), "test.status", {}, timeout_ms=3000), 3.5)
+                    self.dispatcher.call(new_id("req"), "test.status", {}, timeout_ms=int(min(3, remaining) * 1000)), remaining)
                 test = tests.data if tests.ok and isinstance(tests.data, dict) else None
                 if test is None or "status" not in test:
                     issues.append("TEST_STATE_UNAVAILABLE")
@@ -153,7 +202,12 @@ class QueueDomainService:
             except Exception:
                 issues.append("TEST_STATE_UNCONFIRMED")
             try:
-                captures = await asyncio.wait_for(self.console_capture_list(count=200, active_only=True), 5)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                captures = await asyncio.wait_for(self.dispatcher.call(new_id("req"),
+                    "console.capture.observe", {"count": 200, "activeOnly": True},
+                    timeout_ms=int(min(remaining, 4) * 1000)), min(remaining, 4.5))
                 if not captures.ok or not isinstance(captures.data, dict):
                     issues.append("CAPTURE_STATE_UNAVAILABLE")
                 else:
@@ -166,9 +220,49 @@ class QueueDomainService:
                             entries.append(item("Capture", value.get("sessionId", ""), {**value, "status": "active"}, "stop"))
             except Exception:
                 issues.append("CAPTURE_STATE_UNCONFIRMED")
+        editor_identity = dict(status="unknown", source="bridge_session" if session else "os_query",
+                               processId=getattr(session, "process_id", 0) if session else 0,
+                               processCreatedAt=getattr(session, "process_created_at", 0) if session else 0,
+                               processRole=getattr(session, "process_role", "") if session else "",
+                               sessionId=getattr(session, "session_id", "") if session else "",
+                               cacheAgeMs=execution.get("ageMs"), queryResult="unknown")
+        try:
+            remaining = min(deadline, process_deadline) - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            rows, diagnostic = await asyncio.wait_for(process_probe, remaining)
+            source_details["editor"] = {"observedAt": int(time.time() * 1000), **diagnostic}
+            if not diagnostic.get("processQuerySucceeded") or diagnostic.get("processQueryExitCode") != 0:
+                raise ValueError("process_query_failed")
+            if any(not isinstance(row, dict) or not row.get("ProcessId") or not row.get("ExecutablePath")
+                   or not row.get("CommandLine") or not row.get("ProcessCreatedAt") for row in rows):
+                raise ValueError("process_identity_rows_incomplete")
+            candidates = [classify_unity_process(row, Path(project)) for row in rows]
+            matches = [row for row in candidates if row["eligibleMainEditor"]]
+            unknown_rows = [row for row in candidates if row["processRole"] == "unknown"
+                            or (row["projectPath"] == "" and row["executableVerified"])]
+            if len(matches) == 1:
+                match = matches[0]
+                created = await asyncio.to_thread(process_creation_time, match["processId"])
+                if created and created == match["processCreatedAt"] and (
+                    not session or (session.identity_verified and session.process_id == match["processId"]
+                                    and session.process_created_at == created)):
+                    editor_identity.update(status="present", source="os_query_and_session" if session else "os_query",
+                                           processId=match["processId"], processCreatedAt=created,
+                                           processRole=match["processRole"], queryResult="verified")
+            elif not matches and not unknown_rows and not session:
+                editor_identity.update(status="absent", queryResult="verified")
+            if editor_identity["status"] == "unknown":
+                issues.append("EDITOR_IDENTITY_UNVERIFIED")
+        except (Exception, asyncio.CancelledError) as exc:
+            source_details["editor"] = {"queryResult": "unknown", "reason": type(exc).__name__}
+            issues.append("EDITOR_IDENTITY_UNVERIFIED")
+        source_status["editor"] = editor_identity["status"]
         if not same_path(project, self.server.state.project_path):
             return fail(request, "QUEUE_PROJECT_MISMATCH", "Project changed during observation.")
         connected = self.server.is_ready()
+        if session is not self.server.session_manager.active:
+            issues.append("BRIDGE_SESSION_CHANGED")
         latest = store.execution_state()
         if not connected and "UNITY_NOT_CONNECTED" not in issues:
             issues.append("UNITY_NOT_CONNECTED")
@@ -180,17 +274,12 @@ class QueueDomainService:
             issues.append("QUEUE_ITEMS_TRUNCATED")
         if "QUEUE_ITEMS_TRUNCATED" in issues:
             source_status["serverMemory"] = "unknown"
-        editor_identity = dict(status="present" if session and session.identity_verified and source_status["editor"] == "present" else "unknown",
-                               source="bridge_session" if session else "cached_execution_state",
-                               processId=getattr(session, "process_id", 0) if session else 0,
-                               processCreatedAt=getattr(session, "process_created_at", 0) if session else 0,
-                               processRole=getattr(session, "process_role", "") if session else "",
-                               sessionId=getattr(session, "session_id", "") if session else "",
-                               cacheAgeMs=execution.get("ageMs"),
-                               queryResult="verified" if session and session.identity_verified else "unverified")
+            source_details["serverMemory"]["complete"] = False
+            source_details["serverMemory"]["reason"] = "QUEUE_ITEMS_TRUNCATED"
         return ok(request, dict(projectPath=project, observedAt=observed_at,
                                 connected=connected, complete=not issues, isStale=bool(latest.get("isStale")),
-                                issues=issues, sources=source_status, editorIdentity=editor_identity,
+                                issues=issues, sources=source_status, sourceDetails=source_details,
+                                editorIdentity=editor_identity,
                                 maintenanceRisk="unknown" if issues else "no_known_blocker",
                                 items=entries, authorization=dict(zip(("allowed", "reason"), authorization(project)))))
 

@@ -106,10 +106,10 @@ namespace CodingRiver.UPilot.Tests.Automation
                     SaveCheckpoint(runId, instanceId, "{\"local\":true}");
                     if (arguments == "save-one")
                     {
-                        SaveSharedValue(runId, instanceId, "ksb.logging", "{\"mask\":7}");
+                        SaveSharedValue(runId, instanceId, "project.logging", "{\"mask\":7}");
                         SaveSharedValue(runId, instanceId, "other.owner", "\"keep\"");
                     }
-                    else SaveSharedValue(runId, instanceId, "ksb.logging", "{\"mask\":9}");
+                    else SaveSharedValue(runId, instanceId, "project.logging", "{\"mask\":9}");
                     Calls.Add("saved:" + arguments);
                     Succeed();
                 }
@@ -117,7 +117,7 @@ namespace CodingRiver.UPilot.Tests.Automation
                 {
                     var root = AutomationStepJsonCodec.ParseObject(contextJson);
                     Assert.That(root.Element("checkpoint").Elements(), Is.Empty);
-                    Assert.That(root.Element("shared").Element("ksb.logging").Element("mask").Value, Is.EqualTo("9"));
+                    Assert.That(root.Element("shared").Element("project.logging").Element("mask").Value, Is.EqualTo("9"));
                     Assert.That(root.Element("shared").Element("other.owner").Value, Is.EqualTo("keep"));
                     Succeed();
                 }
@@ -142,7 +142,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             public override string GetError(string runId, string instanceId, string contextJson, string errorCode, string arguments)
             {
                 ObserveError?.Invoke(errorCode);
-                Assert.Throws<InvalidOperationException>(() => SaveSharedValue(runId, instanceId, "ksb.logging", "null"));
+                Assert.Throws<InvalidOperationException>(() => SaveSharedValue(runId, instanceId, "project.logging", "null"));
                 return "{\"message\":\"readable\",\"code\":\"MUST_NOT_REPLACE\"}";
             }
         }

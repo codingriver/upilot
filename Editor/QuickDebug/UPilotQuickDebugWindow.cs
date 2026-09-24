@@ -20,8 +20,33 @@ namespace CodingRiver.UPilot
         private const int MaxLogEntries = 200;
         private const string ObjectDumpLogRelativePath = "Logs/UPilot/csharp_object_dump.log";
 
+        private static readonly string[] EvalModeValues = { "auto", "expression", "statements" };
+        private static readonly GUIContent[] EvalModeOptions =
+        {
+            new GUIContent("自动判断（auto）", "先尝试把完整代码解析为单个表达式，否则按语句程序解析。"),
+            new GUIContent("单个表达式（expression）", "仅接受一个表达式；末尾分号可选。"),
+            new GUIContent("语句程序（statements）", "按 C# 子集语句块解析，适合变量、控制流和 return。"),
+        };
+        private static readonly string[] EvalBackendValues = { "auto", "interpret", "emit", "compiled" };
+        private static readonly GUIContent[] EvalBackendOptions =
+        {
+            new GUIContent("自动选择（auto）", "首次解释执行并预热 Emit 入口缓存；后续相同代码可命中缓存。"),
+            new GUIContent("解释执行（interpret）", "直接执行完整 V2 AST。"),
+            new GUIContent("Emit 入口缓存（emit）", "通过 DynamicMethod 缓存入口执行 AST，不是源码到 IL 编译。"),
+            new GUIContent("直接编译（compiled）", "把有限的同步、可静态绑定子集编译为 Expression Tree delegate；不支持时不会回退。"),
+        };
+        private static readonly string[] EvalResultModeValues = { "auto", "inline", "handle", "legacyString" };
+        private static readonly GUIContent[] EvalResultModeOptions =
+        {
+            new GUIContent("自动选择（auto）", "优先内联；不能内联且存在 session 时返回 handle。"),
+            new GUIContent("内联结果（inline）", "要求结果可编码为受支持且大小受限的 TypedValue。"),
+            new GUIContent("对象句柄（handle）", "把结果保存到持久 session 并返回 handle；必须填写 sessionId。"),
+            new GUIContent("旧版字符串（legacyString）", "仅用于兼容旧版字符串结果行为。"),
+        };
+
         private int _activeTab;
         private string _evalCode = "";
+        private string _evalMode = "auto";
         private string _evalSessionId = "";
         private string _evalVariablesJson = "";
         private string _evalLimitsJson = "";
@@ -305,6 +330,30 @@ namespace CodingRiver.UPilot
             return new GUIContent(label, tooltip);
         }
 
+        private static string DrawStringPopup(
+            GUIContent label,
+            string currentValue,
+            string[] values,
+            GUIContent[] options,
+            string defaultValue)
+        {
+            var selectedIndex = FindStringOption(currentValue, values);
+            if (selectedIndex < 0)
+                selectedIndex = Math.Max(0, FindStringOption(defaultValue, values));
+            selectedIndex = EditorGUILayout.Popup(label, selectedIndex, options);
+            return values[Mathf.Clamp(selectedIndex, 0, values.Length - 1)];
+        }
+
+        private static int FindStringOption(string value, string[] values)
+        {
+            for (var i = 0; i < values.Length; i++)
+            {
+                if (string.Equals(value, values[i], StringComparison.OrdinalIgnoreCase))
+                    return i;
+            }
+            return -1;
+        }
+
         // DrawCSharpEvalTab
 
         private void DrawCSharpEvalTab()
@@ -357,21 +406,34 @@ namespace CodingRiver.UPilot
                 if (_evalShowOptions)
                 {
                     EditorGUI.indentLevel++;
+                    _evalMode = DrawStringPopup(
+                        ParameterLabel("解析模式", "mode", "_evalMode", "决定将代码解析为单个表达式还是语句程序。", "auto：自动判断\nexpression：只接受一个表达式\nstatements：按语句程序解析"),
+                        _evalMode,
+                        EvalModeValues,
+                        EvalModeOptions,
+                        "auto");
+                    _evalBackend = DrawStringPopup(
+                        ParameterLabel("执行后端", "executionBackend", "_evalBackend", "选择 C# 子集的执行后端；开始执行后不会换后端重放。", "auto：自动选择\ninterpret：使用解释器\nemit：使用解释器入口缓存\ncompiled：直接编译静态同步子集"),
+                        _evalBackend,
+                        EvalBackendValues,
+                        EvalBackendOptions,
+                        "auto");
+                    _evalResultMode = DrawStringPopup(
+                        ParameterLabel("结果模式", "resultMode", "_evalResultMode", "控制结果的编码方式。", "auto：自动选择\ninline：内联返回可序列化值\nhandle：返回 session 对象句柄，必须填 sessionId\nlegacyString：按旧版字符串返回"),
+                        _evalResultMode,
+                        EvalResultModeValues,
+                        EvalResultModeOptions,
+                        "inline");
                     _evalSessionId = EditorGUILayout.TextField(
                         ParameterLabel("会话 ID", "sessionId", "_evalSessionId", "可选的持久会话 ID；跨调用变量、handle、事件订阅或 resultMode=handle 时必需。"),
                         _evalSessionId);
-                    _evalResultMode = EditorGUILayout.TextField(
-                        ParameterLabel("结果模式", "resultMode", "_evalResultMode", "控制结果的编码方式。", "auto：自动选择\ninline：内联返回可序列化值\nhandle：返回 session 对象句柄，必须填 sessionId\nlegacyString：按旧版字符串返回"),
-                        _evalResultMode);
-                    _evalBackend = EditorGUILayout.TextField(
-                        ParameterLabel("执行后端", "executionBackend", "_evalBackend", "选择 C# 子集的执行后端；开始执行后不会换后端重放。", "auto：自动选择\ninterpret：使用解释器\nemit：使用解释器入口缓存\ncompiled：直接编译静态同步子集"),
-                        _evalBackend);
                     _evalVariablesJson = EditorGUILayout.TextField(
                         ParameterLabel("输入变量 JSON", "variables", "_evalVariablesJson", "变量名到普通 JSON 值或 TypedValue 的映射。"),
                         _evalVariablesJson);
                     _evalLimitsJson = EditorGUILayout.TextField(
                         ParameterLabel("预算限制 JSON", "limits", "_evalLimitsJson", "可选预算覆盖，例如 timeoutMs、maxStatements、maxLoopIterations、maxCalls 和 maxResultBytes。"),
                         _evalLimitsJson);
+                    DrawEvalSelectionNotices();
                     EditorGUI.indentLevel--;
                 }
                 EditorGUILayout.EndFoldoutHeaderGroup();
@@ -379,7 +441,7 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.Space(4);
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    GUI.enabled = !_diagnosticRunning && !_evalRunning && !string.IsNullOrWhiteSpace(_evalCode);
+                    GUI.enabled = CanRunCSharpEval();
                     if (GUILayout.Button("执行", GUILayout.Height(28), GUILayout.Width(80)))
                         RunCSharpEval();
                     GUI.enabled = _evalRunning;
@@ -400,48 +462,56 @@ namespace CodingRiver.UPilot
             {
                 case "expression":
                     _evalCode = "var a = 2 + 3 * 4;\nreturn a;";
+                    _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
                     break;
                 case "list-dict":
                     _evalCode = "var list = new System.Collections.Generic.List<int>(new int[] { 10, 20, 30 });\nvar dict = new System.Collections.Generic.Dictionary<string, int> { [\"key\"] = 42 };\nlist";
+                    _evalMode = "auto";
                     _evalSessionId = "";
-                    _evalResultMode = "handle";
+                    _evalResultMode = "auto";
                     _evalBackend = "auto";
                     break;
                 case "gameobject":
                     _evalCode = "var go = new UnityEngine.GameObject(\"UPilot_Test\");\ngo.transform.position = new UnityEngine.Vector3(0, 5, 0);\nreturn go.name;";
+                    _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
                     break;
                 case "async":
                     _evalCode = "var result = await System.Threading.Tasks.Task.FromResult(42);\nreturn result;";
+                    _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
                     break;
                 case "try-catch":
                     _evalCode = "var r = 0;\ntry { r = 100 / 0; }\ncatch (System.DivideByZeroException) { r = -1; }\nfinally { r += 10; }\nreturn r;";
+                    _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
                     break;
                 case "closure":
                     _evalCode = "var offset = 5;\nvar add = (int x) => { return x + offset; };\noffset = 10;\nreturn add(3);";
+                    _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
                     break;
                 case "session-vars":
                     _evalCode = "var counter = (int)(variables.TryGetValue(\"counter\", out var v) ? v : 0) + 1;\nreturn counter;";
+                    _evalMode = "auto";
                     _evalSessionId = "s.<domain>.<id>";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
                     break;
                 case "foreach-array":
                     _evalCode = "int[,] matrix = { { 1, 2 }, { 3, 4 } };\nvar sum = 0;\nforeach (var val in new int[] { 1, 2, 3 }) sum += val;\nreturn new object[] { sum, matrix };";
+                    _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";
                     _evalBackend = "auto";
@@ -454,6 +524,11 @@ namespace CodingRiver.UPilot
         private async void RunCSharpEval()
         {
             if (_diagnosticRunning || _evalRunning) return;
+            if (EvalHandleSessionMissing(_evalResultMode, _evalSessionId))
+            {
+                AppendLog("[csharp_eval 错误] resultMode=handle 必须填写持久会话 ID。", true);
+                return;
+            }
             var bridge = UPilotBridge.Instance;
             var service = bridge.ExecutionService;
             if (service == null)
@@ -467,15 +542,7 @@ namespace CodingRiver.UPilot
             Repaint();
 
             var id = System.Guid.NewGuid().ToString("N");
-            var payload = new CSharpEvalPayload
-            {
-                code = _evalCode,
-                sessionId = _evalSessionId ?? "",
-                variablesJson = _evalVariablesJson ?? "",
-                limitsJson = _evalLimitsJson ?? "",
-                resultMode = string.IsNullOrWhiteSpace(_evalResultMode) ? "inline" : _evalResultMode,
-                executionBackend = string.IsNullOrWhiteSpace(_evalBackend) ? "auto" : _evalBackend,
-            };
+            var payload = CreateEvalPayload();
             var json = UnityEngine.JsonUtility.ToJson(new CSharpEvalMessage { payload = payload });
 
             try
@@ -523,6 +590,60 @@ namespace CodingRiver.UPilot
         }
 
         private void CancelEval() { try { _evalCts?.Cancel(); } catch { } }
+
+        private CSharpEvalPayload CreateEvalPayload()
+        {
+            return new CSharpEvalPayload
+            {
+                code = _evalCode,
+                mode = CanonicalOption(_evalMode, EvalModeValues, "auto"),
+                sessionId = _evalSessionId ?? "",
+                variablesJson = _evalVariablesJson ?? "",
+                limitsJson = _evalLimitsJson ?? "",
+                resultMode = CanonicalOption(_evalResultMode, EvalResultModeValues, "inline"),
+                executionBackend = CanonicalOption(_evalBackend, EvalBackendValues, "auto"),
+            };
+        }
+
+        private bool CanRunCSharpEval()
+        {
+            return !_diagnosticRunning &&
+                   !_evalRunning &&
+                   !string.IsNullOrWhiteSpace(_evalCode) &&
+                   !EvalHandleSessionMissing(_evalResultMode, _evalSessionId);
+        }
+
+        private static bool EvalHandleSessionMissing(string resultMode, string sessionId)
+        {
+            return string.Equals(resultMode, "handle", StringComparison.OrdinalIgnoreCase) &&
+                   string.IsNullOrWhiteSpace(sessionId);
+        }
+
+        private static string CanonicalOption(string value, string[] values, string defaultValue)
+        {
+            var index = FindStringOption(value, values);
+            return index >= 0 ? values[index] : defaultValue;
+        }
+
+        private void DrawEvalSelectionNotices()
+        {
+            if (string.Equals(_evalMode, "auto", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(_evalBackend, "auto", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(_evalResultMode, "inline", StringComparison.OrdinalIgnoreCase))
+                EditorGUILayout.HelpBox("推荐组合：自动解析、自动后端、内联结果，适合日常快捷调试。", MessageType.Info);
+
+            if (string.Equals(_evalMode, "expression", StringComparison.OrdinalIgnoreCase))
+                EditorGUILayout.HelpBox("expression 只接受一个表达式；变量声明、控制流或 return 请改用 statements 或 auto。", MessageType.Info);
+
+            if (string.Equals(_evalBackend, "compiled", StringComparison.OrdinalIgnoreCase))
+                EditorGUILayout.HelpBox("compiled 仅支持有限的同步、可静态绑定子集；不支持时会直接失败，不会回退到解释器。", MessageType.Warning);
+
+            if (string.Equals(_evalResultMode, "legacyString", StringComparison.OrdinalIgnoreCase))
+                EditorGUILayout.HelpBox("legacyString 仅用于旧版结果兼容；新调用建议使用 inline、auto 或 handle。", MessageType.Warning);
+
+            if (EvalHandleSessionMissing(_evalResultMode, _evalSessionId))
+                EditorGUILayout.HelpBox("resultMode=handle 必须填写持久会话 ID，填写前不能执行。", MessageType.Error);
+        }
 
         private void DrawReflectionCallTab()
         {

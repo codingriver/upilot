@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,61 @@ REQUIRED_FIXTURES = (
     "CodingRiver.UPilot.Tests.UPilotScreenshotRenderTests",
     "CodingRiver.UPilot.Tests.UPilotWindowInputContractTests",
 )
+VERSION_FILES = {"package.json", "upilotserver~/pyproject.toml"}
+GENERATED_FILES = {
+    "skills/upilot-unity-mcp/SKILL.md",
+    "skills/upilot-unity-mcp/agents/openai.yaml",
+    "Documentation~/AgentRules/AGENTS.upilot.md",
+}
+
+
+def tag_acceptance_run(root: Path, release_tag: str) -> str:
+    """Return an optional tag marker; reject ambiguous or malformed claims."""
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release_tag):
+        raise ValueError("Expected vMAJOR.MINOR.PATCH tag.")
+    annotation = git(root, "for-each-ref", "--format=%(contents)", "refs/tags/" + release_tag)
+    claims = [line for line in annotation.splitlines() if "UPilot-Acceptance-Run" in line]
+    if not claims:
+        return ""
+    if len(claims) != 1 or not re.fullmatch(r"UPilot-Acceptance-Run: ([0-9]+)", claims[0]):
+        raise ValueError("Tag has an ambiguous or malformed acceptance run reference.")
+    return claims[0].split(": ", 1)[1]
+
+
+def _blob(root: Path, commit: str, name: str) -> bytes:
+    return subprocess.check_output(["git", "show", f"{commit}:{name}"], cwd=root)
+
+
+def _expected_generated(root: Path, checked_commit: str, version: str) -> dict[str, bytes]:
+    """Render from checked-source templates in an isolated temporary repository."""
+    with tempfile.TemporaryDirectory(prefix="upilot-release-render-") as directory:
+        scratch = Path(directory)
+        skill = scratch / "skills" / "upilot-unity-mcp"
+        manifest_name = "skills/upilot-unity-mcp/template-manifest.json"
+        manifest = json.loads(_blob(root, checked_commit, manifest_name))
+        sources = {"package.json", manifest_name, "skills/upilot-unity-mcp/scripts/render_skill_pack.py"}
+        for relative in manifest["templates"].values():
+            if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                raise ValueError("Unsafe release template path.")
+            sources.add("skills/upilot-unity-mcp/" + relative)
+        for name in sources:
+            destination = scratch / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(_blob(root, checked_commit, name))
+        package = json.loads((scratch / "package.json").read_text(encoding="utf-8"))
+        package["version"] = version
+        (scratch / "package.json").write_text(json.dumps(package), encoding="utf-8")
+        script = skill / "scripts" / "render_skill_pack.py"
+        spec = importlib.util.spec_from_file_location("upilot_checked_renderer", script)
+        if spec is None or spec.loader is None:
+            raise ValueError("Checked-source renderer could not be loaded.")
+        renderer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(renderer)
+        source_manifest, context = renderer.source_context(skill)
+        outputs = renderer.render_skill_outputs(skill, context, source_manifest)
+        documentation, text = renderer.render_agent_documentation(skill, source_manifest)
+        outputs[documentation] = text
+        return {path.relative_to(scratch).as_posix(): text.encode("utf-8") for path, text in outputs.items()}
 
 
 def git(root: Path, *args: str) -> str:
@@ -33,15 +89,19 @@ def verify_release_delta(root: Path, checked_commit: str, current_commit: str) -
         return
     if git(root, "show", "-s", "--format=%P", current_commit) != checked_commit:
         raise ValueError("Release must be the checked commit or its single version-only child.")
-    allowed = {"package.json", "upilotserver~/pyproject.toml"}
+    allowed = VERSION_FILES | GENERATED_FILES
     changed = set(git(root, "diff", "--name-only", checked_commit, current_commit).splitlines())
     if not changed or not changed <= allowed:
-        raise ValueError("Release changes include non-version files.")
-    for name in changed:
-        before_mode = git(root, "ls-tree", checked_commit, "--", name).split()[0]
-        after_mode = git(root, "ls-tree", current_commit, "--", name).split()[0]
+        raise ValueError("Release changes include non-version files or unverified generated files.")
+    for name in changed | (GENERATED_FILES if changed & GENERATED_FILES else set()):
+        before_tree = git(root, "ls-tree", checked_commit, "--", name).split()
+        after_tree = git(root, "ls-tree", current_commit, "--", name).split()
+        before_mode = before_tree[0] if before_tree else None
+        after_mode = after_tree[0] if after_tree else None
         if before_mode != after_mode or after_mode != "100644":
-            raise ValueError("Release changed a version file's mode or type.")
+            raise ValueError("Release changed a version or generated file's mode or type.")
+        if name in GENERATED_FILES:
+            continue
         # Command/identity output may be stripped; file blobs must preserve every byte.
         old = subprocess.check_output(["git", "show", checked_commit + ":" + name], cwd=root).decode("utf-8")
         new = subprocess.check_output(["git", "show", current_commit + ":" + name], cwd=root).decode("utf-8")
@@ -61,6 +121,17 @@ def verify_release_delta(root: Path, checked_commit: str, current_commit: str) -
         strip_version = lambda text: re.sub(pattern, r"\1<VERSION>\2", text)
         if strip_version(old) != strip_version(new):
             raise ValueError("Release changed non-version bytes in a version file.")
+    if changed & (VERSION_FILES | GENERATED_FILES):
+        package = json.loads(_blob(root, current_commit, "package.json"))
+        target = package.get("version")
+        if not isinstance(target, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", target):
+            raise ValueError("Release version is missing or invalid.")
+        old_package = json.loads(_blob(root, checked_commit, "package.json"))
+        for commit, version in ((checked_commit, old_package.get("version")), (current_commit, target)):
+            expected = _expected_generated(root, checked_commit, version)
+            for name in GENERATED_FILES:
+                if _blob(root, commit, name) != expected[name]:
+                    raise ValueError("Release generated template artifact is stale or modified: " + name)
 
 
 def verify_required_summary(report: dict, source: dict) -> None:
@@ -112,13 +183,10 @@ def verify_release_evidence(root: Path, run_id: str = "", release_tag: str = "")
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
         raise ValueError("GITHUB_REPOSITORY is required for trusted evidence retrieval.")
     if release_tag:
-        if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release_tag):
-            raise ValueError("Expected vMAJOR.MINOR.PATCH tag.")
-        annotation = git(root, "for-each-ref", "--format=%(contents)", "refs/tags/" + release_tag)
-        matches = re.findall(r"^UPilot-Acceptance-Run: ([0-9]+)$", annotation, re.MULTILINE)
-        if len(matches) != 1 or (run_id and run_id != matches[0]):
-            raise ValueError("Tag lacks an unambiguous acceptance run reference.")
-        run_id = matches[0]
+        marker = tag_acceptance_run(root, release_tag)
+        if run_id and marker and run_id != marker:
+            raise ValueError("Tag acceptance run conflicts with the explicitly supplied run ID.")
+        run_id = marker or run_id
         if git(root, "rev-parse", release_tag + "^{commit}") != git(root, "rev-parse", "HEAD"):
             raise ValueError("Checked-out commit does not match release tag.")
     if not re.fullmatch(r"[0-9]+", run_id):

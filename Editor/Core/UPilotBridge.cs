@@ -8,6 +8,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -182,6 +183,9 @@ namespace CodingRiver.UPilot
         internal UPilotExecutionService ExecutionService => _executionService;
         internal UPilotReflectionService ReflectionService => _reflectionService;
         private readonly ConcurrentQueue<Action>   _mainThreadQueue   = new();
+        private readonly ConcurrentDictionary<Action, string> _trackedQueueActions = new();
+        private readonly object _queueObservationLock = new();
+        private Action _executingQueueAction;
         private readonly SemaphoreSlim             _sendLock          = new(1, 1);
         private readonly object                    _executionStatePublicationLock = new();
         private static readonly object             ExecutionStatePersistenceLock = new();
@@ -557,7 +561,7 @@ namespace CodingRiver.UPilot
                         "sys.bridge.loop.dead", "连接循环异常退出",
                         $"endpoint={GetServerUrl()} wsState={_ws?.State}",
                         "error");
-                    _mainThreadQueue.Enqueue(() =>
+                    EnqueueUntracked(() =>
                     {
                         if (_started && _connectLoopTask == loopTask)
                             StartConnectLoop();
@@ -571,7 +575,7 @@ namespace CodingRiver.UPilot
                     "sys.bridge.loop.crash", "连接循环崩溃",
                     ex.ToString(),
                     "error");
-                _mainThreadQueue.Enqueue(() =>
+                EnqueueUntracked(() =>
                 {
                     if (_started && _connectLoopTask == loopTask)
                         StartConnectLoop();
@@ -588,10 +592,24 @@ namespace CodingRiver.UPilot
             _cachedIsPaused = EditorApplication.isPaused;
             _cachedPlayModeState = _cachedIsPaused ? "pause" : (_cachedIsPlaying ? "play" : "edit");
 
-            while (_mainThreadQueue.TryDequeue(out var action))
+            while (true)
             {
+                Action action;
+                lock (_queueObservationLock)
+                {
+                    if (!_mainThreadQueue.TryDequeue(out action)) break;
+                    Volatile.Write(ref _executingQueueAction, action);
+                }
                 try { action(); }
                 catch (Exception ex) { Debug.LogError($"[UPilotBridge] main thread error: {ex}"); }
+                finally
+                {
+                    lock (_queueObservationLock)
+                    {
+                        Volatile.Write(ref _executingQueueAction, null);
+                        _trackedQueueActions.TryRemove(action, out _);
+                    }
+                }
             }
 
             var startupContext = BuildEditorContextPayload("startup-diagnostics");
@@ -631,7 +649,7 @@ namespace CodingRiver.UPilot
             var ctx = UPilotOperationTracker.Instance.GetContext(commandId);
             ctx?.Step("排队等待主线程");
 
-            _mainThreadQueue.Enqueue(() =>
+            Action tracked = () =>
             {
                 _lastDequeuedCommandId = commandId ?? string.Empty;
                 ctx?.Step("主线程执行中");
@@ -645,7 +663,58 @@ namespace CodingRiver.UPilot
                     ctx?.Fail("MAIN_THREAD_ERROR", ex.Message);
                     throw;
                 }
-            });
+            };
+            lock (_queueObservationLock)
+            {
+                _trackedQueueActions[tracked] = commandId ?? string.Empty;
+                _mainThreadQueue.Enqueue(tracked);
+            }
+        }
+
+        private void EnqueueUntracked(Action action)
+        {
+            lock (_queueObservationLock) _mainThreadQueue.Enqueue(action);
+        }
+
+        internal BridgeQueueSnapshot ObserveQueue(string excludeId)
+        {
+            lock (_queueObservationLock)
+            {
+                var queued = _mainThreadQueue.ToArray();
+                var executing = Volatile.Read(ref _executingQueueAction);
+                var active = UPilotOperationTracker.Instance.GetActiveCommandsSnapshot(excludeId);
+                var result = new BridgeQueueSnapshot
+                {
+                    observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    activeCount = active.Count,
+                    executingCount = executing == null ? 0 : 1,
+                    complete = true,
+                };
+                foreach (var pair in active.Take(200))
+                    result.activeCommands.Add(new BridgeQueueCommand { commandId = pair.Key, commandName = pair.Value });
+                foreach (var action in queued)
+                {
+                    if (_trackedQueueActions.TryGetValue(action, out var id) && !string.IsNullOrEmpty(id))
+                    {
+                        if (string.Equals(id, excludeId, StringComparison.Ordinal)) continue;
+                        result.queuedCount++;
+                        if (result.queuedCommands.Count < 200)
+                            result.queuedCommands.Add(new BridgeQueueCommand { commandId = id });
+                    }
+                    else result.untrackedCount++;
+                }
+                if (executing != null && _trackedQueueActions.TryGetValue(executing, out var executingId)
+                    && !string.IsNullOrEmpty(executingId))
+                {
+                    result.executingCommandId = executingId;
+                    if (string.Equals(executingId, excludeId, StringComparison.Ordinal)) result.executingCount = 0;
+                }
+                else if (executing != null) result.untrackedCount++;
+                result.truncated = result.activeCount > result.activeCommands.Count
+                    || result.queuedCount > result.queuedCommands.Count;
+                result.complete = !result.truncated && result.untrackedCount == 0;
+                return result;
+            }
         }
         private const int ConnectTimeoutMs = 3000;  // 连接超时 3s
         private const int ReconnectDelayMs  = 1000;  // 失败后等待 1s 再重连
@@ -1459,7 +1528,7 @@ namespace CodingRiver.UPilot
             var delayTask = Task.Delay(TimeSpan.FromMilliseconds(timeoutMs), token);
             var winner = await Task.WhenAny(tcs.Task, delayTask);
             stop = true;
-            _mainThreadQueue.Enqueue(() => { EditorApplication.update -= PollIdle; });
+            EnqueueUntracked(() => { EditorApplication.update -= PollIdle; });
 
             if (winner == delayTask)
             {
@@ -1670,7 +1739,7 @@ namespace CodingRiver.UPilot
             Logger.LogWarning("SYSTEM", "收到 editor.forceRestart 命令，即将强制重启编辑器");
             await SendResultAsync(id, "editor.forceRestart", new GenericOkPayload { ok = true }, token);
 
-            _mainThreadQueue.Enqueue(() =>
+            EnqueueUntracked(() =>
             {
                 ForceRestartUnityEditor();
             });
@@ -1751,6 +1820,42 @@ namespace CodingRiver.UPilot
 
         // ──────────────────────────────── Send helpers ────────────────────────────────
 
+        private const int MaxBridgeResponseBytes = 4 * 1024 * 1024;
+        private static int ResponseBytes(string value) => Encoding.UTF8.GetByteCount(value);
+
+        private async Task SendBoundedErrorAsync(string id, string commandName, string code,
+            string message, long actualBytes, CancellationToken token)
+        {
+            var error = new ErrorMessage
+            {
+                id = id,
+                name = "command.error",
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                sessionId = _sessionId,
+                payload = new ErrorPayload
+                {
+                    code = code,
+                    message = message.Length > 512 ? message.Substring(0, 512) : message,
+                    detail = new ErrorDetailPayload
+                    {
+                        commandId = id,
+                        commandName = commandName,
+                        actualBytes = actualBytes,
+                        limitBytes = MaxBridgeResponseBytes,
+                        outcome = "unknown",
+                        replayAttempted = false,
+                        responseTruncated = true,
+                        nextAction = "Observe the original command or operation identity; do not replay its start.",
+                    },
+                },
+            };
+            var json = JsonUtility.ToJson(error);
+            if (ResponseBytes(json) > 8192)
+                throw new InvalidDataException("Bridge error identity exceeds diagnostic frame budget.");
+            await SendJsonAsync(json, token);
+            UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
+        }
+
         public async Task SendResultAsync<TPayload>(string id, string name, TPayload payload, CancellationToken token)
         {
             var timing = UPilotOperationTracker.Instance.GetTimingSnapshot(id);
@@ -1770,6 +1875,14 @@ namespace CodingRiver.UPilot
             timing.serializationMs = serializeWatch.ElapsedMilliseconds;
             if (timing.serializationMs > 0)
                 json = JsonUtility.ToJson(result);
+            var size = ResponseBytes(json);
+            if (size > MaxBridgeResponseBytes)
+            {
+                UPilotOperationTracker.Instance.GetContext(id)?.Fail("BRIDGE_RESPONSE_TOO_LARGE", "Result exceeds Bridge message limit.");
+                await SendBoundedErrorAsync(id, name, "BRIDGE_RESPONSE_TOO_LARGE",
+                    "Result exceeds Bridge message limit; outcome unknown.", size, token);
+                return;
+            }
             await SendJsonAsync(json, token);
             UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(false);
         }
@@ -1784,7 +1897,20 @@ namespace CodingRiver.UPilot
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 sessionId = _sessionId,
             };
-            await SendJsonAsync(JsonUtility.ToJson(evt), token).ConfigureAwait(false);
+            var json = JsonUtility.ToJson(evt);
+            var size = ResponseBytes(json);
+            if (size > MaxBridgeResponseBytes)
+            {
+                var diagnostic = new EventMessage<BridgeOversizeEventPayload>
+                {
+                    id = id, name = "bridge.payload_oversize", sessionId = _sessionId,
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    payload = new BridgeOversizeEventPayload { sourceEvent = name, actualBytes = size,
+                        limitBytes = MaxBridgeResponseBytes },
+                };
+                json = JsonUtility.ToJson(diagnostic);
+            }
+            await SendJsonAsync(json, token).ConfigureAwait(false);
         }
 
         public async Task SendErrorAsync(string id, string code, string message, CancellationToken token,
@@ -1796,7 +1922,7 @@ namespace CodingRiver.UPilot
         public async Task SendErrorAsync(string id, string code, string message, CancellationToken token,
             string commandName, ErrorDetailPayload errorDetail)
         {
-            Logger.LogWarning("NETWORK", $"TX error [{code}] {message}  cmd={commandName} id={id}");
+            Logger.LogWarning("NETWORK", $"TX error [{code}] {Logger.TruncatePayload(message)}  cmd={commandName} id={id}");
             if (errorDetail != null)
             {
                 errorDetail.commandId = id;
@@ -1824,6 +1950,13 @@ namespace CodingRiver.UPilot
             timing.serializationMs = serializeWatch.ElapsedMilliseconds;
             if (timing.serializationMs > 0)
                 json = JsonUtility.ToJson(err);
+            var size = ResponseBytes(json);
+            if (size > MaxBridgeResponseBytes)
+            {
+                UPilotOperationTracker.Instance.GetContext(id)?.Fail(code, message.Length > 512 ? message.Substring(0, 512) : message);
+                await SendBoundedErrorAsync(id, commandName, code, message, size, token);
+                return;
+            }
             await SendJsonAsync(json, token);
             UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
         }
@@ -2428,7 +2561,7 @@ namespace CodingRiver.UPilot
                 },
                 tok);
 
-            _mainThreadQueue.Enqueue(() =>
+            EnqueueUntracked(() =>
             {
                 _ = SendCompileFinishedMcpPushAsync(tok, duration);
             });
@@ -2523,10 +2656,10 @@ namespace CodingRiver.UPilot
         private async Task SendJsonAsync(string json, CancellationToken token)
         {
             if (_ws == null || _ws.State != WebSocketState.Open) return;
-
-            LogOutboundCommand(json);
-
             var bytes = Encoding.UTF8.GetBytes(json);
+            if (bytes.Length > MaxBridgeResponseBytes)
+                throw new InvalidDataException("Bridge message exceeds the 4 MiB send limit.");
+            LogOutboundCommand(json);
             await _sendLock.WaitAsync(token).ConfigureAwait(false);
             try
             {

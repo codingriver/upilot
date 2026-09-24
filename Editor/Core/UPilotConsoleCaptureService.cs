@@ -407,6 +407,8 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("console.capture.read", HandleReadAsync);
             _bridge.Router.Register("console.capture.stop", HandleStopAsync);
             _bridge.Router.Register("console.capture.list", HandleListAsync);
+            _bridge.Router.Register(new CommandDescriptor("console.capture.observe", category: "maintenance",
+                idempotent: true, destructive: false), HandleObserveAsync);
             _bridge.Router.Register("console.capture.cleanup", HandleCleanupAsync);
         }
 
@@ -581,6 +583,18 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             await SendResultOrError(id, "console.capture.list", tcs.Task, token);
+        }
+
+        private async Task HandleObserveAsync(string id, string json, CancellationToken token)
+        {
+            var payload = JsonUtility.FromJson<ConsoleCaptureListMessage>(json)?.payload ?? new ConsoleCaptureListPayload();
+            var tcs = new TaskCompletionSource<ConsoleCaptureListResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try { tcs.TrySetResult(ListCaptures(payload, false)); }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            await SendResultOrError(id, "console.capture.observe", tcs.Task, token);
         }
 
         private async Task HandleCleanupAsync(string id, string json, CancellationToken token)
@@ -1048,11 +1062,27 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static ConsoleCaptureListResult ListCaptures(ConsoleCaptureListPayload payload)
+        private static ConsoleCaptureListResult ListCaptures(ConsoleCaptureListPayload payload, bool recover = true)
         {
-            TryRecoverActiveSession();
+            if (recover) TryRecoverActiveSession();
+            else if (!string.IsNullOrEmpty(SessionState.GetString(ProjectSessionKey(ActiveDirectorySessionKey), string.Empty))
+                && s_active == null)
+                throw new InvalidOperationException("Capture recovery record exists; observation cannot establish the active inventory.");
             int count = Math.Max(1, Math.Min(payload.count, 200));
-            var manifests = LoadDefaultRootManifests();
+            var manifests = recover ? LoadDefaultRootManifests() : LoadDefaultRootManifestsStrict();
+            if (!recover)
+            {
+                var index = LoadCustomSessionIndex();
+                foreach (var entry in index.sessions)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.directory))
+                        throw new InvalidDataException("Capture external index is incomplete.");
+                    var manifest = LoadManifest(Path.Combine(entry.directory, "session.json"));
+                    if (manifest == null || manifest.sessionId != entry.sessionId)
+                        throw new InvalidDataException("Capture external manifest is missing or mismatched.");
+                    if (manifests.All(item => item.sessionId != manifest.sessionId)) manifests.Add(manifest);
+                }
+            }
             lock (CaptureLock)
             {
                 if (s_active != null && manifests.All(item => item.sessionId != s_active.Manifest.sessionId))
@@ -1071,6 +1101,27 @@ namespace CodingRiver.UPilot
                 returnedCount = sessions.Count,
                 sessions = sessions,
             };
+        }
+
+        internal static ConsoleCaptureManifest ObservePersistedCapture(string sessionId)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId)) return null;
+            return LoadManifestBySessionId(sessionId);
+        }
+
+        private static List<ConsoleCaptureManifest> LoadDefaultRootManifestsStrict()
+        {
+            var manifests = new List<ConsoleCaptureManifest>();
+            string root = GetDefaultCaptureRoot();
+            if (!Directory.Exists(root)) return manifests;
+            foreach (string file in Directory.GetFiles(root, "session.json", SearchOption.AllDirectories))
+            {
+                var manifest = LoadManifest(file);
+                if (manifest == null || string.IsNullOrEmpty(manifest.sessionId))
+                    throw new InvalidDataException("Capture inventory contains an unreadable manifest.");
+                manifests.Add(manifest);
+            }
+            return manifests;
         }
 
         private static ConsoleCaptureCleanupResult CleanupCaptures(ConsoleCaptureCleanupPayload payload)

@@ -21,10 +21,13 @@ class Service(QueueDomainService):
     def __init__(self, root):
         store = StateStore()
         store.configure_project(str(root))
-        store.update_editor_execution_state(_snapshot(1, observed_at=now_ms()))
-        store.editor.last_main_thread_pump_at = now_ms() + 100
+        snapshot = _snapshot(1, observed_at=now_ms())
+        snapshot["lastMainThreadPumpAt"] = now_ms() + 100000
+        store.update_editor_execution_state(snapshot)
         self.server = SimpleNamespace(
-            state=store, session_manager=SimpleNamespace(active=SimpleNamespace(project_path=str(root))),
+            state=store, session_manager=SimpleNamespace(active=SimpleNamespace(
+                project_path=str(root), identity_verified=True, process_id=123,
+                process_created_at=1, process_role="main", session_id="fixture-session")),
             is_ready=lambda: True, _pending={}, _suspended={})
         self._async_tasks, self._operations = {}, {}
         self.calls = []
@@ -81,7 +84,8 @@ def test_inventory_read_only_and_disabled_still_visible(tmp_path):
         (tmp_path / ".upilot").mkdir()
         (tmp_path / ".upilot/config.json").write_text('{"aiQueueCleanupAllowed":false}')
         result = await service.queue_cleanup()
-        assert result.ok and result.data["complete"]
+        assert result.ok and not result.data["complete"]
+        assert "BRIDGE_QUEUE_NOT_FULLY_ENUMERATED" in result.data["issues"]
         assert result.data["items"][0]["id"] == "t"
         assert service.calls == []
         denied = await apply(service, "Task", "t")
@@ -162,7 +166,9 @@ def test_backup_failure_and_possible_execution_leave_blocker(tmp_path, monkeypat
         service = Service(tmp_path)
         identity = service.batch()
         service.server._suspended["old"] = object()
-        assert (await apply(service, "WriteBatch", identity, "release")).error.code == "QUEUE_EXECUTION_NOT_EXCLUDED"
+        blocked = await service.queue_cleanup(target_type="WriteBatch", target_id=identity,
+                                              action="release", reason="fixture only")
+        assert blocked.error.code == "QUEUE_EXECUTION_NOT_EXCLUDED"
         service.server._suspended.clear()
         original_open = Path.open
         def broken_open(path, *args, **kwargs):

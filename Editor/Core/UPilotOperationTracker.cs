@@ -279,6 +279,14 @@ namespace CodingRiver.UPilot
             _activeContexts.TryRemove(commandId, out _);
         }
 
+        internal List<KeyValuePair<string, string>> GetActiveCommandsSnapshot(string excludeId)
+        {
+            return _activeContexts
+                .Where(pair => !string.Equals(pair.Key, excludeId, StringComparison.Ordinal))
+                .Select(pair => new KeyValuePair<string, string>(pair.Key, pair.Value.CommandName))
+                .ToList();
+        }
+
         /// <summary>Agent 侧上报的异常，写入操作日志。</summary>
         public void IngestAgentError(string source, string errorType, string message, string relatedCommandId, string context)
         {
