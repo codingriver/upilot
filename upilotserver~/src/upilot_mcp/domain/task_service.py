@@ -2090,13 +2090,24 @@ class TaskDomainService:
                 bound = error_limit if any(part in path.lower() for part in ("error", "failure", "diagnostic")) else text_limit
                 if len(node) > bound:
                     truncated.add(path)
-                    return node[:bound]
+                    if bound <= 0:
+                        return ""
+                    marker = f"…[truncated {len(node) - bound} chars]"
+                    if len(marker) >= bound:
+                        return marker[-bound:]
+                    return node[:bound - len(marker)] + marker
             if isinstance(node, list):
                 if len(node) > 8: truncated.add(path)
                 return [trim(item, f"{path}[{index}]") for index, item in enumerate(node[:8])]
             if isinstance(node, dict):
                 required = {"result", "result.result", "businessResult", "error", "tests", "compile", "consoleCapture"}
-                capped = bool(path) and path not in required
+                # Limit the artifact index, but retain the evidence fields of
+                # every returned artifact (exists/actual hashes/tails, etc.).
+                # Those fields are part of the public operation contract and
+                # are already bounded by the global 16 KiB summary budget.
+                artifact_entry = path.startswith("artifacts.") or ".artifacts." in path
+                milestone_entry = path.startswith("milestones[") or ".milestones[" in path
+                capped = bool(path) and path not in required and not artifact_entry and not milestone_entry
                 entries = list(node.items())[:8] if capped else list(node.items())
                 if capped and len(node) > 8: truncated.add(path)
                 bounded = {}
@@ -2171,40 +2182,6 @@ class TaskDomainService:
     ) -> dict:
         level = self._normalize_operation_detail_level(detail_level)
         max_chars = max(128, min(int(max_tail_chars or 2000), 1000000))
-        if level == "summary":
-            fields = ("operationId", "displayName", "status", "phase", "durable", "recovered",
-                      "startedAt", "updatedAt", "endedAt", "timeoutSec", "error", "failureSignature",
-                      "businessResult", "cleanupError", "cleanupFailureSignature", "cleanupPending",
-                      "businessTerminal", "cleanupTerminal", "editorTerminal", "editorVerification",
-                      "cancelRequested", "nextAction", "artifactCollectionSequence", "artifactPersistenceError")
-            public = {key: copy.deepcopy(state[key]) for key in fields if key in state}
-            public["terminal"] = bool(state.get("endedAt"))
-            public["jobTimeoutAt"] = int(state.get("startedAt") or 0) + int(float(state.get("timeoutSec") or 0) * 1000)
-            public["responseDetailLevel"] = level
-            public["rawStateAvailable"] = True
-            public["unresolvedResourcesTotal"] = len(state.get("unresolvedResources") or [])
-            public["unresolvedResources"] = (state.get("unresolvedResources") or [])[:8]
-            artifacts = state.get("artifacts") or {}
-            public["artifactsTotal"] = len(artifacts)
-            public["artifacts"] = {str(key)[:128]: {field: item[field] for field in ("name", "path", "bytes", "sha256") if field in item}
-                                   for key, item in list(artifacts.items())[:8] if isinstance(item, dict)}
-            public["artifactsReturned"] = len(public["artifacts"])
-            public["artifactErrorsTotal"] = len(state.get("artifactErrors") or [])
-            public["artifactErrors"] = (state.get("artifactErrors") or [])[:8]
-            public["artifactErrorsReturned"] = len(public["artifactErrors"])
-            public["truncatedFields"] = [key for key, total, returned in (
-                ("artifacts", public["artifactsTotal"], public["artifactsReturned"]),
-                ("artifactErrors", public["artifactErrorsTotal"], public["artifactErrorsReturned"]),
-                ("unresolvedResources", public["unresolvedResourcesTotal"], len(public["unresolvedResources"])))
-                if total > returned]
-            capture = state.get("consoleCapture") or {}
-            public["consoleCapture"] = {key: capture[key] for key in (
-                "sessionId", "stopped", "artifactsVerified", "jsonlPath", "summaryPath", "manifestPath",
-                "sha256", "recordCount", "fileBytes") if key in capture}
-            metrics = (state.get("lastStatusData") or {}).get("metrics")
-            if isinstance(metrics, dict): public["metrics"] = dict(list(metrics.items())[:8])
-            if include_raw_state: public["rawStateOmitted"] = True
-            return self._finalize_summary(public, max_tail_chars)
         truncated: list[str] = []
         public = {
             "durable": state.get("durable", False),
@@ -2297,7 +2274,7 @@ class TaskDomainService:
             public["responseBytes"] = len(json.dumps(public, ensure_ascii=False, default=str).encode("utf-8"))
         except (TypeError, ValueError):
             pass
-        return public
+        return self._finalize_summary(public, max_tail_chars) if level == "summary" else public
 
     async def ensure_ready(self, timeout_s: float = 300, required_editor_mode: str = "edit", editor_mode_control: str = "automatic") -> ToolResponse:
         """Pre-task check; concrete modes are automatically coordinated when authorized."""
