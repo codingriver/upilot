@@ -1161,7 +1161,7 @@ namespace CodingRiver.UPilot
                     targetServerVersion: expectedServerVersion);
                 notice?.Invoke("正在停止 MCP 服务…", MessageType.Info);
                 UPilotBridge.Instance.Stop();
-                if (!manager.StopServerAndWaitForExit())
+                if (!manager.StopServerAndWaitForExit(UPilotServerStopOrigin.ManagedServerUpdate))
                 {
                     var message = "无法停止 MCP 服务，已取消更新以避免文件占用";
                     SetOperationFailed(message);

@@ -90,6 +90,7 @@ namespace CodingRiver.UPilot
         private static string FailureKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Failure");
         private static string FailureDialogKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Dialog");
         internal static bool IsRepairing => _repairTask != null && !_repairTask.IsCompleted;
+        internal static bool IsExplicitlyStopped => _explicitlyStopped;
         internal static bool LastRepairSucceeded { get; private set; }
         internal static void SuppressAutomaticRepairForMaintenance() => EditorPrefs.SetBool(AutoAttemptKey, true);
         internal static string DiagnosticDetails => UPilotDeploymentDiagnostics.Details;
@@ -371,8 +372,8 @@ namespace CodingRiver.UPilot
         public static void Stop()
         {
             if (UPilotServiceMaintenance.IsActive) return;
-            if (IsRepairing) return;
             _explicitlyStopped = true;
+            UPilotPackageUpdateLifecycle.CancelDeferredRepairForUserStop();
             BeginOperation(UPilotServiceOperation.Stopping);
             UPilotBridge.Instance.Stop();
             var manager = UPilotMcpServerManager.Instance;
@@ -404,6 +405,7 @@ namespace CodingRiver.UPilot
                 var manager = UPilotMcpServerManager.Instance;
                 _repairPhase = "确认项目、进程与真实来源";
                 var status = await manager.GetFreshStatusAsync();
+                if (_explicitlyStopped) return "已按请求停止 UPilot 服务。";
                 var issues = UPilotDeploymentDiagnostics.Observe(UPilotBridge.Instance.GetStatus(), status);
                 _repairCause = string.Join("\n", issues.Select(issue => issue.Message));
                 SessionState.SetString(PendingCauseKey, _repairCause);
@@ -419,6 +421,7 @@ namespace CodingRiver.UPilot
                 _repairPhase = "准备当前包的配套 Server";
                 UPilotServerRuntimeService.RepairOwnsFailureDialog = true;
                 await UPilotServerRuntimeService.Instance.PrepareMatchingServerForRepairAsync();
+                if (_explicitlyStopped) return "已按请求停止 UPilot 服务。";
                 _repairPhase = "停止旧 Bridge / Server，确认进程退出及端口释放";
                 var previousId = UPilotServerRestartDiagnostics.Current?.operationId;
                 manager.RestartPreparedServer(() => _afterRepairStart?.Invoke());
@@ -445,6 +448,8 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                if (_explicitlyStopped || UPilotServerRestartDiagnostics.Current is { status: "superseded" })
+                    return _explicitlyStopped ? "已按请求停止 UPilot 服务。" : "包生命周期已替代原重启；等待部署稳定后按需恢复。";
                 var failure = "修复失败，阶段：" + _repairPhase + "\n" + ex.Message;
                 EditorPrefs.SetString(FailureKey, failure);
                 ShowRepairFailureOnce(attemptId, failure);

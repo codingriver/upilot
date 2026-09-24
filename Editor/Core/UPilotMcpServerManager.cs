@@ -67,6 +67,11 @@ namespace CodingRiver.UPilot
         internal UPilotServerHealth Health;
     }
 
+    internal enum UPilotServerStopOrigin
+    {
+        User, PackageRegistration, PackageUpdate, ManagedServerUpdate, UpdateWindow, EditorShutdown
+    }
+
     public sealed class UPilotMcpServerManager
     {
         public static UPilotMcpServerManager Instance { get; } = new();
@@ -169,6 +174,7 @@ namespace CodingRiver.UPilot
         private EditorApplication.CallbackFunction _restartObserveCallback;
         private Action _afterRestartStarted;
         private string _restartOperationId = "";
+        private long _restartGeneration;
         private string _restartOldBridgeSessionId = "";
         private string _restartExpectedProjectPath = "";
         private long _restartVerificationDeadlineUtcMs;
@@ -354,7 +360,12 @@ namespace CodingRiver.UPilot
         {
             LoadPrefs();
             AssemblyReloadEvents.beforeAssemblyReload += () => InvalidateStatusCache("domain_reload");
-            EditorApplication.quitting += () => InvalidateStatusCache("editor_exit");
+            EditorApplication.quitting += () =>
+            {
+                CancelPendingRestart(true, UPilotServerStopOrigin.EditorShutdown, Guid.NewGuid().ToString("N"),
+                    _restartOperationId, _restartGeneration);
+                InvalidateStatusCache("editor_exit");
+            };
             try
             {
                 if (!AssetDatabase.IsAssetImportWorkerProcess())
@@ -1167,11 +1178,23 @@ namespace CodingRiver.UPilot
 
         // ── Stop ────────────────────────────────────────────────────────────
 
-        public void StopServer()
+        public void StopServer() => StopServer(UPilotServerStopOrigin.User);
+
+        internal void StopServer(UPilotServerStopOrigin origin, string requestId = "")
         {
             if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
-            CancelPendingRestart(recordCancellation: true);
-            StopCurrentProjectProcesses();
+            var operationId = _restartOperationId;
+            var generation = _restartGeneration;
+            // Capture verified process handles before ending this restart. A delayed stop must
+            // never rediscover and kill a replacement started by another generation.
+            using var prepared = PrepareCurrentProjectStop();
+            if (generation != _restartGeneration || operationId != _restartOperationId) return;
+            if (string.IsNullOrEmpty(requestId)) requestId = Guid.NewGuid().ToString("N");
+            var target = prepared.Processes.FirstOrDefault();
+            CancelPendingRestart(recordCancellation: true, origin, requestId, operationId, generation,
+                target.pid, target.createdAtTicks);
+            InvalidateStatusCache(origin == UPilotServerStopOrigin.User ? "explicit_stop" : "lifecycle_stop");
+            StopPreparedProcesses(prepared, 0);
         }
 
         private sealed class PreparedProcessStop : IDisposable
@@ -1274,12 +1297,17 @@ namespace CodingRiver.UPilot
             InvalidateStatusCache();
         }
 
-        public bool StopServerAndWaitForExit(int timeoutMs = 3000)
+        public bool StopServerAndWaitForExit(int timeoutMs = 3000) =>
+            StopServerAndWaitForExit(UPilotServerStopOrigin.User, "", timeoutMs);
+
+        internal bool StopServerAndWaitForExit(UPilotServerStopOrigin origin, string requestId = "", int timeoutMs = 3000)
         {
-            StopServer();
+            StopServer(origin, requestId);
+            var stoppedGeneration = _restartGeneration;
             var stopwatch = Stopwatch.StartNew();
             while (stopwatch.ElapsedMilliseconds < timeoutMs)
             {
+                if (stoppedGeneration != _restartGeneration) return false;
                 if (StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
                     UPilotPortAllocator.IsPortAvailable(WsPort))
                 {
@@ -1291,7 +1319,7 @@ namespace CodingRiver.UPilot
             }
 
             InvalidateStatusCache();
-            return StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+            return stoppedGeneration == _restartGeneration && StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
                    UPilotPortAllocator.IsPortAvailable(WsPort);
         }
 
@@ -1394,6 +1422,9 @@ namespace CodingRiver.UPilot
                 Debug.LogError("[UPilotMcpServerManager] MCP restart was not started: " + ex.Message);
                 return;
             }
+            _restartGeneration = Math.Max(_restartGeneration + 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            restart.restartGeneration = _restartGeneration;
+            UPilotServerRestartDiagnostics.RecordGeneration(restart.operationId, _restartGeneration);
             _restartOperationId = restart.operationId;
             _restartOldBridgeSessionId = oldBridgeSessionId;
             _restartExpectedProjectPath = restart.projectPath;
@@ -1464,9 +1495,13 @@ namespace CodingRiver.UPilot
             InvalidateStatusCache();
 
             _restartPending = true;
+            var waitingOperationId = _restartOperationId;
+            var waitingGeneration = _restartGeneration;
             var deadline = EditorApplication.timeSinceStartup + 4d;
             _restartWaitCallback = () =>
             {
+                if (waitingGeneration != _restartGeneration || waitingOperationId != _restartOperationId ||
+                    !UPilotServerRestartDiagnostics.IsActive(waitingOperationId)) return;
                 if (_restartMaintenanceDeadlineUtcMs > 0 &&
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartMaintenanceDeadlineUtcMs)
                 {
@@ -1500,7 +1535,9 @@ namespace CodingRiver.UPilot
                     _restartPending = false;
                     InvalidateStatusCache();
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, exitConfirmed: true);
-                    UPilotServerRestartDiagnostics.RecordPortsReleased(_restartOperationId);
+                    UPilotServerRestartDiagnostics.RecordPortsReleased(waitingOperationId);
+                    if (waitingGeneration != _restartGeneration || waitingOperationId != _restartOperationId ||
+                        !UPilotServerRestartDiagnostics.IsActive(waitingOperationId)) return;
                     StartServer();
                     if (IsRestartObservationActive())
                         InvokeAfterRestartStarted();
@@ -1582,9 +1619,14 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void CancelPendingRestart(bool recordCancellation)
+        private void CancelPendingRestart(bool recordCancellation,
+            UPilotServerStopOrigin origin = UPilotServerStopOrigin.User, string requestId = "",
+            string expectedOperationId = null, long expectedGeneration = 0,
+            int targetProcessId = 0, long targetCreatedAtTicks = 0)
         {
             var operationId = _restartOperationId;
+            if (expectedOperationId != null &&
+                (operationId != expectedOperationId || _restartGeneration != expectedGeneration)) return;
             _restartPending = false;
             _afterRestartStarted = null;
             if (_restartWaitCallback != null)
@@ -1600,9 +1642,8 @@ namespace CodingRiver.UPilot
             _restartHealthProbeRunning = false;
             if (recordCancellation && UPilotServerRestartDiagnostics.IsActive(operationId))
             {
-                UPilotServerRestartDiagnostics.RecordCanceled(
-                    operationId,
-                    "MCP Server restart was interrupted by an explicit stop request.");
+                UPilotServerRestartDiagnostics.RecordStop(operationId, _restartGeneration, origin,
+                    requestId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), targetProcessId, targetCreatedAtTicks);
             }
             ClearRestartObservationState();
         }
@@ -1692,6 +1733,7 @@ namespace CodingRiver.UPilot
         {
             if (!UPilotServerRestartDiagnostics.TryGetActive(out var record)) return;
             _restartOperationId = record.operationId ?? "";
+            _restartGeneration = Math.Max(_restartGeneration, record.restartGeneration);
             _restartOldBridgeSessionId = record.oldBridgeSessionId ?? "";
             _restartExpectedProjectPath = record.projectPath ?? "";
             if (record.newProcessId <= 0)
@@ -1919,6 +1961,7 @@ namespace CodingRiver.UPilot
         internal static string ClassifyRestartProbe(McpServerStatus status)
         {
             if (status.StatusCancellationReason == "domain_reload" ||
+                status.StatusCancellationReason == "lifecycle_stop" ||
                 status.StatusCancellationReason == "editor_exit" ||
                 status.StatusCancellationReason == "explicit_stop") return "lifecycle_canceled";
             if (status.StatusCancellationReason == "timeout") return "request_timeout";

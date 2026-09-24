@@ -140,7 +140,7 @@ namespace CodingRiver.UPilot
         private const string LegacyManifestFileName = "upilot-release-manifest.json";
         private const string ReleaseManifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/manifest.json";
         private const int ParallelDownloadThresholdBytes = 8 * 1024 * 1024;
-        private const int ParallelDownloadSegments = 4;
+        internal const int ParallelDownloadSegments = 4;
         private const int SegmentRetryCount = 2;
         private const int FileOperationRetryCount = 3;
         private const int FileOperationRetryDelayMs = 2000;
@@ -612,6 +612,83 @@ namespace CodingRiver.UPilot
 
             _downloadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             return await DownloadLatestServerExeAsync(manifest, activateOnComplete: false, _downloadCts.Token);
+        }
+
+        // Explicit Editor-test benchmark. Reuses the production transfer paths without preparing,
+        // activating, or modifying the managed server cache (including source-package projects).
+        internal async Task<UPilotDownloadState> BenchmarkDownloadAsync(
+            UPilotServerDownloadInfo download, string targetPath, CancellationToken cancellationToken)
+        {
+            if (download == null)
+                throw new ArgumentNullException(nameof(download));
+            if (!TryValidateManagedServerDownload(
+                    new UPilotReleaseManifest { ServerVersion = "benchmark" }, download, out var validationError))
+                throw new ArgumentException(validationError, nameof(download));
+
+            var logsRoot = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Logs", "UPilotDownloadBenchmark"));
+            var fullPath = Path.GetFullPath(targetPath ?? "");
+            var comparison = Application.platform == RuntimePlatform.WindowsEditor
+                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (!fullPath.StartsWith(logsRoot + Path.DirectorySeparatorChar, comparison))
+                throw new ArgumentException("Benchmark target must be inside project Logs/UPilotDownloadBenchmark.", nameof(targetPath));
+            if (File.Exists(fullPath) || Directory.Exists(fullPath) ||
+                File.Exists(fullPath + ".part0"))
+                throw new IOException("Benchmark target already exists; no download files will be overwritten.");
+
+            lock (_stateLock)
+            {
+                if (_downloadState.IsRunning)
+                    throw new InvalidOperationException("A UPilot download is already in progress.");
+                _downloadState = new UPilotDownloadState
+                {
+                    IsRunning = true,
+                    Phase = "Benchmark download",
+                    DownloadUrl = download.Url,
+                    Sha256 = download.Sha256,
+                    TotalBytes = download.SizeBytes,
+                    StartedAt = EditorApplication.timeSinceStartup,
+                };
+            }
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath));
+                EnsureSufficientDiskSpace(Path.GetDirectoryName(fullPath), download.SizeBytes, includeWorkingCopy: true);
+                var ranges = download.SizeBytes >= ParallelDownloadThresholdBytes &&
+                             await SupportsRangeDownloadAsync(download.Url, download.SizeBytes, cancellationToken);
+                if (ranges)
+                    await DownloadInSegmentsAsync(download.Url, fullPath, download.SizeBytes, cancellationToken);
+                else
+                    await DownloadSingleStreamAsync(download.Url, fullPath, download.SizeBytes, cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+                UpdateState(state => state.Phase = "Benchmark SHA256 verification");
+                var actualHash = ComputeSha256(fullPath);
+                if (new FileInfo(fullPath).Length != download.SizeBytes ||
+                    !string.Equals(actualHash, download.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Benchmark download size or SHA256 mismatch; file retained for diagnosis.");
+
+                UpdateState(state =>
+                {
+                    state.IsRunning = false;
+                    state.IsComplete = true;
+                    state.Phase = "Benchmark complete";
+                    state.FinishedAt = EditorApplication.timeSinceStartup;
+                });
+                return DownloadState;
+            }
+            catch (Exception ex)
+            {
+                UpdateState(state =>
+                {
+                    state.IsRunning = false;
+                    state.IsCancelled = ex is OperationCanceledException;
+                    state.Phase = state.IsCancelled ? "Benchmark cancelled" : "Benchmark failed";
+                    state.ErrorMessage = ex.Message;
+                    state.FinishedAt = EditorApplication.timeSinceStartup;
+                });
+                throw;
+            }
         }
 
         internal async Task PrepareMatchingServerForRepairAsync()

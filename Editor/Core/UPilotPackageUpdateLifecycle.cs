@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEngine;
@@ -30,7 +31,12 @@ namespace CodingRiver.UPilot
         private const string PendingOldServerVersionKey = "CodingRiver.UPilot.PackageUpdate.PendingOldServerVersion";
         private const string DeploymentRepairPendingKey = "CodingRiver.UPilot.PackageUpdate.DeploymentRepairPending";
 
+        private const string DeploymentSupersededOperationKey = "CodingRiver.UPilot.PackageUpdate.SupersededRestart";
+        private const string DeploymentRepairAttemptedKey = "CodingRiver.UPilot.PackageUpdate.RepairAttempted";
         private static bool _restartScheduled;
+        private static bool _registrationInProgress;
+        private static bool _deferredRepairScheduled;
+        private static bool _deferredRepairRunning;
 
         static UPilotPackageUpdateLifecycle()
         {
@@ -124,7 +130,7 @@ namespace CodingRiver.UPilot
 
             notice?.Invoke("正在停止 MCP 服务以更新 UPilot 包…", MessageType.Info);
             UPilotBridge.Instance.Stop();
-            if (manager.StopServerAndWaitForExit())
+            if (manager.StopServerAndWaitForExit(UPilotServerStopOrigin.PackageUpdate))
                 return true;
 
             ClearUpdateState();
@@ -287,6 +293,7 @@ namespace CodingRiver.UPilot
                 var currentPackage = FindUPilotPackage(args.changedFrom);
                 var removedPackage = FindUPilotPackage(args.removed);
                 var targetPackage = FindUPilotPackage(args.changedTo) ?? FindUPilotPackage(args.added);
+                if (removedPackage != null || targetPackage != null) _registrationInProgress = true;
                 if (UPilotScriptingDefineManager.ShouldRemoveForPackageRegistration(
                         removedPackage != null,
                         targetPackage != null))
@@ -298,9 +305,13 @@ namespace CodingRiver.UPilot
                      UPilotServerRuntimeService.IsSourcePackage(currentPackage))))
                 {
                     SetSessionBool(DeploymentRepairPendingKey, true);
+                    EraseSessionBool(DeploymentRepairAttemptedKey);
+                    var activeRestart = UPilotServerRestartDiagnostics.Current;
+                    if (activeRestart?.status == "running")
+                        SetSessionString(DeploymentSupersededOperationKey, activeRestart.operationId);
                     // No business-idle gate. Keep intent across removal and the next installation.
                     UPilotBridge.Instance.Stop();
-                    if (!UPilotMcpServerManager.Instance.StopServerAndWaitForExit())
+                    if (!UPilotMcpServerManager.Instance.StopServerAndWaitForExit(UPilotServerStopOrigin.PackageRegistration))
                         Debug.LogError("[UPilot] 包来源切换：旧 Server 未在期限内退出；重装后保留错误并进入统一修复。");
                     return;
                 }
@@ -342,6 +353,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                _registrationInProgress = false;
                 ReportLifecycleError("UPilot 包注册前处理失败", ex);
             }
         }
@@ -373,15 +385,127 @@ namespace CodingRiver.UPilot
             {
                 ReportLifecycleError("UPilot 包注册完成处理失败", ex);
             }
+            finally { _registrationInProgress = false; }
         }
 
         private static void RepairPackageDeployment()
         {
-            if (!GetSessionBool(DeploymentRepairPendingKey, false) || !UPilotSetupState.IsCompleted) return;
+            if (!GetSessionBool(DeploymentRepairPendingKey, false) || !UPilotSetupState.IsCompleted ||
+                _deferredRepairScheduled || _deferredRepairRunning) return;
+            _deferredRepairScheduled = true;
+            EditorApplication.update += PollDeferredPackageRepair;
+        }
+
+        private static void PollDeferredPackageRepair()
+        {
+            if (!GetSessionBool(DeploymentRepairPendingKey, false) || UPilotQuickStart.IsExplicitlyStopped)
+            {
+                if (UPilotQuickStart.IsExplicitlyStopped) EraseSessionBool(DeploymentRepairPendingKey);
+                EditorApplication.update -= PollDeferredPackageRepair;
+                _deferredRepairScheduled = false;
+                return;
+            }
+            if (_registrationInProgress || EditorApplication.isCompiling || EditorApplication.isUpdating ||
+                EditorApplication.isPlayingOrWillChangePlaymode || UPilotQuickStart.IsRepairing ||
+                UPilotServiceMaintenance.IsActive) return;
+            EditorApplication.update -= PollDeferredPackageRepair;
+            _deferredRepairScheduled = false;
+            _deferredRepairRunning = true;
+            _ = CompleteDeferredPackageRepairAsync();
+        }
+
+        private static async Task CompleteDeferredPackageRepairAsync()
+        {
+            var originalId = GetSessionString(DeploymentSupersededOperationKey, "");
+            try
+            {
+                if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                    UPilotUpdateService.ResetSourceChannelState();
+                if (await VerifyCurrentDeploymentAsync(originalId))
+                {
+                    ClearDeferredRepair();
+                    return;
+                }
+                if (UPilotQuickStart.IsExplicitlyStopped)
+                {
+                    ClearDeferredRepair();
+                    return;
+                }
+                if (GetSessionBool(DeploymentRepairAttemptedKey, false))
+                {
+                    UPilotServerRestartDiagnostics.RecordSupersededRecoveryFailure(originalId,
+                        "The previous deferred repair was interrupted; inspect current service state before retrying.");
+                    return;
+                }
+                if (UPilotQuickStart.IsRepairing || _registrationInProgress || EditorApplication.isCompiling ||
+                    EditorApplication.isUpdating || EditorApplication.isPlayingOrWillChangePlaymode)
+                {
+                    EditorApplication.delayCall += RepairPackageDeployment;
+                    return;
+                }
+                SetSessionBool(DeploymentRepairAttemptedKey, true);
+                var result = await UPilotQuickStart.AutoRepairAsync(null);
+                var successor = UPilotServerRestartDiagnostics.Current;
+                if (successor?.operationId != originalId && !string.IsNullOrEmpty(originalId))
+                    UPilotServerRestartDiagnostics.RecordSupersedingOperation(originalId, successor?.operationId);
+                if (UPilotQuickStart.LastRepairSucceeded && await VerifyCurrentDeploymentAsync(originalId))
+                    ClearDeferredRepair();
+                else
+                    UPilotServerRestartDiagnostics.RecordSupersededRecoveryFailure(originalId, result);
+            }
+            catch (Exception ex)
+            {
+                SetSessionBool(DeploymentRepairAttemptedKey, true);
+                UPilotServerRestartDiagnostics.RecordSupersededRecoveryFailure(originalId, ex.Message);
+                UnityEngine.Debug.LogError("[UPilot] Deferred package repair failed: " + ex);
+            }
+            finally
+            {
+                _deferredRepairRunning = false;
+                if (GetSessionBool(DeploymentRepairPendingKey, false) &&
+                    !GetSessionBool(DeploymentRepairAttemptedKey, false))
+                    EditorApplication.delayCall += RepairPackageDeployment;
+            }
+        }
+
+        private static async Task<bool> VerifyCurrentDeploymentAsync(string originalId)
+        {
+            var manager = UPilotMcpServerManager.Instance;
+            var status = await manager.GetFreshStatusAsync();
+            var bridge = UPilotBridge.Instance.GetStatus();
+            if (!status.IsRunning || !status.HttpPortListening || !status.WsPortListening ||
+                !UPilotMcpServerManager.IsVerifiedRestartHealth(status, status.ProcessId ?? 0,
+                    UPilotProjectConfig.ProjectRoot) || !bridge.IsAuthenticated || !bridge.IsWsOpen ||
+                string.IsNullOrEmpty(bridge.SessionId) || string.IsNullOrEmpty(status.Health?.server_instance_id) ||
+                UPilotDeploymentDiagnostics.Observe(bridge, status).Length != 0) return false;
+            try
+            {
+                using (var process = System.Diagnostics.Process.GetProcessById(status.ProcessId.Value))
+                    if (process.HasExited || process.StartTime.ToUniversalTime().Ticks <= 0) return false;
+                await manager.VerifyReadOnlyRoundTripAsync(status, bridge.SessionId);
+            }
+            catch (Exception) { return false; }
+            if (UPilotBridge.Instance.GetStatus().SessionId != bridge.SessionId) return false;
+            UPilotServerRestartDiagnostics.ObserveSupersededRecovery(originalId, status.ProcessId.Value,
+                status.Health.server_instance_id, status.HealthProjectPath, true);
+            return true;
+        }
+
+        internal static void CancelDeferredRepairForUserStop()
+        {
+            if (_deferredRepairScheduled)
+            {
+                EditorApplication.update -= PollDeferredPackageRepair;
+                _deferredRepairScheduled = false;
+            }
+            ClearDeferredRepair();
+        }
+
+        private static void ClearDeferredRepair()
+        {
             EraseSessionBool(DeploymentRepairPendingKey);
-            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
-                UPilotUpdateService.ResetSourceChannelState();
-            _ = UPilotQuickStart.AutoRepairAsync(null);
+            EraseSessionBool(DeploymentRepairAttemptedKey);
+            EraseSessionString(DeploymentSupersededOperationKey);
         }
 
         private static bool ShouldHandleExternalPackageManagerConflict()

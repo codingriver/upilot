@@ -32,7 +32,18 @@ namespace CodingRiver.UPilot
     [Serializable]
     internal sealed class UPilotServerRestartRecord
     {
-        public int schemaVersion = 2;
+        public int schemaVersion = 3;
+        public long restartGeneration;
+        public string stopOrigin;
+        public string stopRequestId;
+        public long stopRequestedAtUtcMs;
+        public int stopTargetProcessId;
+        public long stopTargetCreatedAtTicks;
+        public string supersededByOperationId;
+        public string subsequentRecoveryStatus;
+        public long subsequentVerifiedAtUtcMs;
+        public int subsequentPid;
+        public string subsequentInstanceId;
         public string operationId;
         public string projectPath;
         public string bridgeVersion;
@@ -204,6 +215,11 @@ namespace CodingRiver.UPilot
                 }
             }
             return record;
+        }
+
+        internal static void RecordGeneration(string operationId, long generation)
+        {
+            Update(operationId, record => record.restartGeneration = generation);
         }
 
         internal static void MarkGate(string operationId, string key, string state, string evidenceCode = "", string evidence = "")
@@ -492,6 +508,77 @@ namespace CodingRiver.UPilot
         {
             Update(operationId, record =>
                 FailRecord(record, errorCode, error, diagnosticTail, diagnosticSource, nextAction));
+        }
+
+        internal static void RecordStop(string operationId, long generation, UPilotServerStopOrigin origin,
+            string requestId, long requestedAtUtcMs, int targetProcessId, long targetCreatedAtTicks)
+        {
+            Update(operationId, record =>
+            {
+                if (record.restartGeneration != generation || record.status != "running") return;
+                record.stopOrigin = origin.ToString();
+                record.stopRequestId = requestId ?? "";
+                record.stopRequestedAtUtcMs = requestedAtUtcMs;
+                record.stopTargetProcessId = targetProcessId;
+                record.stopTargetCreatedAtTicks = targetCreatedAtTicks;
+                bool user = origin == UPilotServerStopOrigin.User;
+                bool shutdown = origin == UPilotServerStopOrigin.EditorShutdown;
+                var reason = user ? "MCP Server restart was interrupted by an explicit stop request."
+                    : "MCP Server restart was superseded by " + origin + ".";
+                MarkGateCore(record, FirstUnpassedGate(record), "canceled", user ? "user_stop" : "lifecycle_stop", reason);
+                record.status = user ? "canceled" : "superseded";
+                record.phase = record.status;
+                record.errorCode = user ? "restart_canceled" : "restart_superseded";
+                record.error = reason;
+                record.nextAction = shutdown ? "Editor is shutting down; do not automatically restart."
+                    : "Query current MCP status and identity before deciding whether recovery is needed.";
+                record.endedAtUtcMs = UtcNowMs();
+            });
+        }
+
+        internal static void RecordSupersedingOperation(string operationId, string successorId)
+        {
+            UpdateHistorical(operationId, r => r.supersededByOperationId = successorId ?? "");
+        }
+
+        private static void UpdateHistorical(string operationId, Action<UPilotServerRestartRecord> change)
+        {
+            lock (Sync)
+            {
+                EnsureLoadedLocked();
+                var current = s_record;
+                var record = current?.operationId == operationId ? current :
+                    ReadHistoryAt(HistoryPath, out _).FirstOrDefault(r => r.operationId == operationId);
+                if (record == null || record.status != "superseded") return;
+                change(record);
+                record.updatedAtUtcMs = UtcNowMs();
+                if (record == current) PersistLocked();
+                else if (!TryArchive(record, HistoryPath, out var error))
+                    Logger.LogWarning("SERVER", "Superseded restart history could not be persisted: " + error);
+            }
+        }
+
+        internal static void RecordSupersededRecoveryFailure(string operationId, string reason)
+        {
+            UpdateHistorical(operationId, r =>
+            {
+                if (r.subsequentVerifiedAtUtcMs == 0)
+                    r.subsequentRecoveryStatus = "failed: " + Bound(reason);
+            });
+        }
+
+        internal static void ObserveSupersededRecovery(string operationId, int processId, string instanceId,
+            string projectPath, bool fullyVerified)
+        {
+            if (!fullyVerified || processId <= 0 || string.IsNullOrEmpty(instanceId)) return;
+            UpdateHistorical(operationId, r =>
+            {
+                if (!SamePath(r.projectPath, projectPath) || r.subsequentVerifiedAtUtcMs > 0) return;
+                r.subsequentRecoveryStatus = "verified";
+                r.subsequentVerifiedAtUtcMs = UtcNowMs();
+                r.subsequentPid = processId;
+                r.subsequentInstanceId = instanceId;
+            });
         }
 
         internal static void RecordCanceled(string operationId, string reason)
@@ -904,6 +991,10 @@ namespace CodingRiver.UPilot
         }
 
         internal static string Result(UPilotServerRestartRecord record) => record == null ? "无重启记录" :
+            record.status == "superseded" ?
+                (record.subsequentVerifiedAtUtcMs > 0 ? "生命周期替代（服务随后恢复）" :
+                    (!string.IsNullOrEmpty(record.subsequentRecoveryStatus) && record.subsequentRecoveryStatus.StartsWith("failed:")
+                        ? "生命周期替代（后续恢复失败）" : "生命周期替代，等待恢复")) :
             record.recoveredAtUtcMs > 0 ? "失败（随后恢复）" : record.status switch
             {
                 "succeeded" => "成功", "failed" => "失败", "canceled" => "已取消", _ => "进行中"
@@ -986,6 +1077,12 @@ namespace CodingRiver.UPilot
         internal static string NextAction(UPilotServerRestartRecord r)
         {
             if (r == null) return "检查当前 Server 状态。";
+            if (r.status == "canceled") return "用户主动停止；不会自动恢复。";
+            if (r.status == "superseded") return r.subsequentVerifiedAtUtcMs > 0
+                ? "服务随后通过完整验证；原操作仍为生命周期替代。"
+                : (!string.IsNullOrEmpty(r.subsequentRecoveryStatus) && r.subsequentRecoveryStatus.StartsWith("failed:")
+                    ? "后续恢复失败：" + r.subsequentRecoveryStatus.Substring(7)
+                    : "等待包生命周期结束后检查当前状态并按需恢复。");
             if (r.recoveredAtUtcMs > 0) return "服务随后恢复；原中断任务不会自动重放。";
             var category = FailureCategory(r);
             if (r.status == "succeeded") return "无需操作。";
@@ -1016,7 +1113,16 @@ namespace CodingRiver.UPilot
             var sb = new StringBuilder();
             sb.AppendLine(ZoneLabel());
             sb.AppendLine("结果：" + Result(r) + "  阶段：" + (r.failurePhase ?? r.phase));
-            sb.AppendLine("操作：" + r.operationId);
+            sb.AppendLine("操作：" + r.operationId + (r.restartGeneration > 0 ? "  代次：" + r.restartGeneration : ""));
+            if (!string.IsNullOrEmpty(r.stopOrigin))
+                sb.AppendLine("停止来源：" + r.stopOrigin + "  请求：" + r.stopRequestId +
+                    "  时间：" + Time(r.stopRequestedAtUtcMs, copied) +
+                    "  目标 PID：" + r.stopTargetProcessId + "  创建 ticks：" + r.stopTargetCreatedAtTicks);
+            if (!string.IsNullOrEmpty(r.supersededByOperationId))
+                sb.AppendLine("后续修复操作：" + r.supersededByOperationId);
+            if (r.subsequentVerifiedAtUtcMs > 0)
+                sb.AppendLine("服务随后恢复：" + Time(r.subsequentVerifiedAtUtcMs, copied) +
+                    "  PID：" + r.subsequentPid + "  实例：" + r.subsequentInstanceId);
             sb.AppendLine("请求：" + Time(r.requestedAtUtcMs, copied) + (r.status == "failed" ? "  失败时间：" : "  结束：") + Time(r.endedAtUtcMs, copied) +
                 "  耗时：" + Duration(r.requestedAtUtcMs, r.endedAtUtcMs));
             sb.AppendLine("最后更新：" + Time(r.updatedAtUtcMs, copied));

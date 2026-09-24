@@ -211,3 +211,16 @@
 - 验证：窗口历史精确回归 `EditorWindowHistoryRecordsNormalCloseWithoutInventingFailureAttribution` 与 `EditorWindowHistoryReusesUnchangedWindowState` 2/2 通过；结果为 authoritative terminal，cleanup 成功、无 unresolved resource。关联 Unity 编译同 D11，0 error。
 - 剩余关闭条件：在相同窗口集合和采样模式下关闭 Deep Profiling，测量整改前后的 CPU/GC 与窗口数量，并验证真实窗口打开/关闭/Reload 恢复路径。本次截图主线程总计 9361.91ms，其中 `Profiler.IntegrateSessionData` 7775.69ms（83%），存在严重观察开销；不能把该单帧绝对值或 Deep Profile 状态当作正常编辑器基线，也不据此承诺 FPS 收益。
 - 项目补证/双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260924-WindowHistorySampling`；通用优先级/状态以本 D12 为准。`F:\xclient2` 引用包未修改。
+
+### D13 / P2：下载性能用例缺少每个分片的失败、重试与实测并发证据
+
+- 状态：待改进，不影响已落地的 Unity Editor Test Runner 网络基准用例；现有报告能记录端到端耗时、配置 4 分片、完成分片数、文件字节数与 SHA-256，但 OS 线程数及峰值 HTTP 并发只能标为 unknown。
+- 观察与复现：2026-09-24 在 `Tests~/UPilotTest` 精确运行 `DownloadPinnedReleaseThroughUPilotAndWriteReport`（runGuid `a0b8e734-6d2d-4bbe-9a49-1cc6594ff9c1`），v0.3.37 Windows x64 EXE 的 4 分片下载耗时 172066 ms、0.1493 MiB/s、SHA-256 正确。运行期间曾观察到 `.part0` / `.part3` 文件长度回到 0，推测存在分片重试；现有状态/报告没有每分片尝试次数与错误，不能确认原因，也不能单凭该次速度将限速归因于 GitHub、客户端或本地网络。
+- 建议：在生产下载器的只读状态/基准报告中以有限字段记录各切片的开始/完成时间、下载字节数、重试次数及已脱敏错误、实际并发峰值；保留固定文件、输出目录隔离与哈希校验，再做相同网络时段下的 aria2/UPilot 交错对照与单流/四分片定向比较。不要把配置的异步切片数写成真实 OS 线程数。
+- 补充实测（2026-09-24，先 aria2 后 UPilot）：同一 v0.3.37 GitHub Release 文件、26942250 字节及 SHA-256，aria2（4 连接、split=4）耗时 20780 ms、1.2365 MiB/s；UPilot Unity 定向 EditMode 测试（runGuid `c5b16e16-c89a-425c-a3e7-84ba328e2c45`，4/4 分片）耗时 171456 ms、0.1499 MiB/s，慢约 8.25 倍。两边成功并校验一致；单次顺序对比排除了“GitHub 对所有客户端下载均只能到 200 KB/s”的笼统解释，但不能断定是重试、HTTP 实现或局部链路所致；UPilot 运行时曾观察到部分 `.part` 文件为 0 字节，但不能据此确认重试，需上条所述分片诊断验证。报告位于 `Tests~/UPilotTest/Logs/UPilotDownloadBenchmark/` 两个独立运行目录。
+
+### D14 / P2：后台 Unity 编译请求长时间停留 queued 且前台恢复失败
+
+- 状态：待改进；不属于本次 MCP Server 停止/重启修复。
+- 观察：2026-09-24 canonical 项目 `Tests~/UPilotTest` 的登记批次 `wb-4e433bd7-fa0d-49f4-bcaf-ed9ae9080354` 于 `1790247507370` 请求编译，约 90 秒内一直处于 `compilePhase=queued`，Editor 心跳正常、`isCompiling=true` 但编译开始时间为 0。`unity_editor_focus_state` 指出 Unity 在后台；`unity_editor_focus` 返回 `FOCUS_NOT_ACQUIRED`。最终该批次以关联编译成功终结，不能将延迟误报成编译失败。
+- 建议：在 `unity_write_batch_status` 的长时间 queued 诊断中区分 Editor 未聚焦/主线程持续运行/实际导入阻塞，提示可用且安全的等待/聚焦行动，并明确前台获取失败后的非破坏性处理。保留一次写批次/一次编译、不得自动重复发起编译。

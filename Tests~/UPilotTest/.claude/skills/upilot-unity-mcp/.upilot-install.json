@@ -7,7 +7,7 @@
         "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
         "mcpUrl": "http://127.0.0.1:8011/mcp",
         "healthUrl": "http://127.0.0.1:8011/health",
-        "upilotPackageVersion": "0.3.35"
+        "upilotPackageVersion": "0.3.36"
     },
-    "renderedAt": "2026-09-24T06:12:49Z"
+    "renderedAt": "2026-09-24T10:30:43Z"
 }

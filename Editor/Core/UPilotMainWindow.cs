@@ -410,7 +410,7 @@ namespace CodingRiver.UPilot
             try
             {
                 UPilotBridge.Instance.Stop();
-                var portsReleased = UPilotMcpServerManager.Instance.StopServerAndWaitForExit();
+                var portsReleased = UPilotMcpServerManager.Instance.StopServerAndWaitForExit(UPilotServerStopOrigin.UpdateWindow);
                 UPilotMcpServerManager.Instance.InvalidateStatusCache();
                 RefreshSnapshot();
                 stopped = !IsServiceActive(_bridgeStatus, _mcpStatus);
