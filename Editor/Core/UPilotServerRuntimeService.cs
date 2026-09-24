@@ -1236,15 +1236,16 @@ namespace CodingRiver.UPilot
                 state.SegmentCount = 1;
                 state.CompletedSegments = 0;
             });
-
-            using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
+            
+            using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token)
+                .ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
             var total = response.Content.Headers.ContentLength ?? expectedBytes;
             UpdateState(state => state.TotalBytes = total);
-            using var input = await response.Content.ReadAsStreamAsync();
+            using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
             using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                await CopyDownloadStreamAsync(input, output, token);
+                await CopyDownloadStreamAsync(input, output, token).ConfigureAwait(false);
                 output.Flush();
             }
             UpdateState(state => state.CompletedSegments = 1);
@@ -1278,14 +1279,14 @@ namespace CodingRiver.UPilot
 
             try
             {
-                await Task.WhenAll(tasks);
+                await Task.WhenAll(tasks).ConfigureAwait(false);
                 using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
                     for (var index = 0; index < ParallelDownloadSegments; index++)
                     {
                         var segmentPath = targetPath + ".part" + index;
                         using (var input = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                            await input.CopyToAsync(output, 128 * 1024, token);
+                            await input.CopyToAsync(output, 128 * 1024, token).ConfigureAwait(false);
                     }
                     output.Flush();
                 }
@@ -1314,13 +1315,14 @@ namespace CodingRiver.UPilot
 
                     using var request = new HttpRequestMessage(HttpMethod.Get, url);
                     request.Headers.Range = new RangeHeaderValue(start, end);
-                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
+                        .ConfigureAwait(false);
                     if (response.StatusCode != HttpStatusCode.PartialContent)
                         throw new InvalidOperationException("下载源未返回分片内容。");
 
-                    using var input = await response.Content.ReadAsStreamAsync();
+                    using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
                     using var output = new FileStream(segmentPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                    await CopyDownloadStreamAsync(input, output, token);
+                    await CopyDownloadStreamAsync(input, output, token).ConfigureAwait(false);
                     UpdateState(state => state.CompletedSegments++);
                     return;
                 }
@@ -1338,7 +1340,7 @@ namespace CodingRiver.UPilot
                     }
                     lastError = ex;
                     if (attempt < SegmentRetryCount)
-                        await Task.Delay(350 * (attempt + 1), token);
+                        await Task.Delay(350 * (attempt + 1), token).ConfigureAwait(false);
                 }
             }
 
@@ -1350,10 +1352,12 @@ namespace CodingRiver.UPilot
             var buffer = new byte[128 * 1024];
             while (true)
             {
-                var read = await input.ReadAsync(buffer, 0, buffer.Length, token);
+                // The transfer loop does not require Unity APIs. Keep every buffer continuation
+                // off UnitySynchronizationContext so parallel segments can stream continuously.
+                var read = await input.ReadAsync(buffer, 0, buffer.Length, token).ConfigureAwait(false);
                 if (read <= 0)
                     break;
-                await output.WriteAsync(buffer, 0, read, token);
+                await output.WriteAsync(buffer, 0, read, token).ConfigureAwait(false);
                 UpdateState(state => state.BytesReceived += read);
             }
         }
@@ -1367,7 +1371,8 @@ namespace CodingRiver.UPilot
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.Range = new RangeHeaderValue(0, 0);
-                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
+                    .ConfigureAwait(false);
                 var rangeLength = response.Content.Headers.ContentRange?.Length ?? expectedBytes;
                 return response.StatusCode == HttpStatusCode.PartialContent && rangeLength > 0;
             }
