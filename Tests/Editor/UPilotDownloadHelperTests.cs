@@ -63,9 +63,18 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(options.SegmentCount, Is.EqualTo(12));
             Assert.That(options.MaxConcurrentSegmentRequests, Is.EqualTo(5));
             DownloadProgress last = null;
+            var reportedFive = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var maxReportedActive = 0;
             var download = UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length, Hash(bytes),
-                p => last = p, CancellationToken.None, options);
+                p =>
+                {
+                    last = p;
+                    maxReportedActive = Math.Max(maxReportedActive, p.ActiveSegmentRequests);
+                    if (p.ActiveSegmentRequests == 5)
+                        reportedFive.TrySetResult(true);
+                }, CancellationToken.None, options);
             await Bounded(reachedFive.Task);
+            await Bounded(reportedFive.Task);
             Assert.That(issued, Is.EqualTo(5), "Seven queued slices must not start a network request yet.");
             Assert.That(download.IsCompleted, Is.False);
             release.TrySetResult(true);
@@ -81,6 +90,9 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(result.MaxConcurrentSegmentRequests, Is.EqualTo(5));
             Assert.That(result.SegmentCount, Is.EqualTo(12));
             Assert.That(result.CompletedSegments, Is.EqualTo(12));
+            Assert.That(maxReportedActive, Is.EqualTo(5));
+            Assert.That(last.ActiveSegmentRequests, Is.Zero);
+            Assert.That(result.ActiveSegmentRequests, Is.Zero);
             Assert.That(result.PeakConcurrentSegmentRequests, Is.EqualTo(5));
             Assert.That(result.ObservedOwnedThreadCount, Is.EqualTo(1));
             Assert.That(result.ThreadConstraintViolationCount, Is.Zero);
@@ -114,6 +126,7 @@ namespace CodingRiver.UPilot.Tests
             catch (OperationCanceledException) { }
             Assert.That(issued, Is.EqualTo(5));
             Assert.That(last.Outcome, Is.EqualTo("cancelled"));
+            Assert.That(last.ActiveSegmentRequests, Is.Zero);
             Assert.That(last.PeakConcurrentSegmentRequests, Is.EqualTo(5));
             Assert.That(last.ThreadConstraintViolationCount, Is.Zero);
             await AssertExited(last.DedicatedThread);
@@ -171,11 +184,16 @@ namespace CodingRiver.UPilot.Tests
         {
             var bytes = Encoding.UTF8.GetBytes("single stream");
             DownloadProgress last = null;
+            var maxActive = 0;
             using var handler = new Handler((request, token) =>
                 Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) }));
             using var http = new HttpClient(handler);
             var result = await Bounded(UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length,
-                Hash(bytes), progress => last = progress, CancellationToken.None, SegmentedOptions()));
+                Hash(bytes), progress =>
+                {
+                    last = progress;
+                    maxActive = Math.Max(maxActive, progress.ActiveSegmentRequests);
+                }, CancellationToken.None, SegmentedOptions()));
             await AssertExited(result.DedicatedThread);
             Assert.That(last.RangeProbeOutcome, Is.EqualTo("unsupported"));
             Assert.That(last.RangeProbeDetail, Does.Contain("HTTP 200"));
@@ -184,6 +202,9 @@ namespace CodingRiver.UPilot.Tests
             UPilotServerRuntimeService.LogRangeProbeOutcome(last);
             Assert.That(result.SegmentCount, Is.EqualTo(1));
             Assert.That(result.CompletedSegments, Is.EqualTo(1));
+            Assert.That(maxActive, Is.EqualTo(1));
+            Assert.That(last.ActiveSegmentRequests, Is.Zero);
+            Assert.That(result.ActiveSegmentRequests, Is.Zero);
             Assert.That(result.ObservedOwnedThreadCount, Is.EqualTo(1));
             Assert.That(result.DedicatedThreadId, Is.Not.EqualTo(Thread.CurrentThread.ManagedThreadId));
             Assert.That(result.PeakConcurrentSegmentRequests, Is.EqualTo(1));
@@ -246,6 +267,7 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(last, Is.Not.Null);
                 Assert.That(last.Outcome, Is.EqualTo("failed"));
                 Assert.That(last.IsComplete, Is.False);
+                Assert.That(last.ActiveSegmentRequests, Is.Zero);
                 Assert.That(last.ThreadConstraintViolationCount, Is.Zero);
                 await AssertExited(last.DedicatedThread);
                 AssertNoParts();
@@ -280,6 +302,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(last, Is.Not.Null);
             Assert.That(last.Outcome, Is.EqualTo("cancelled"));
             Assert.That(last.IsCancelled, Is.True);
+            Assert.That(last.ActiveSegmentRequests, Is.Zero);
             Assert.That(last.ThreadConstraintViolationCount, Is.Zero);
             await AssertExited(last.DedicatedThread);
             AssertNoParts();
@@ -312,6 +335,7 @@ namespace CodingRiver.UPilot.Tests
             catch (OperationCanceledException) { }
             Assert.That(last, Is.Not.Null);
             Assert.That(last.Outcome, Is.EqualTo("cancelled"));
+            Assert.That(last.ActiveSegmentRequests, Is.Zero);
             Assert.That(last.ObservedOwnedThreadCount, Is.EqualTo(1));
             Assert.That(last.ThreadConstraintViolationCount, Is.Zero);
             await AssertExited(last.DedicatedThread);

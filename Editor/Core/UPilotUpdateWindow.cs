@@ -286,8 +286,8 @@ namespace CodingRiver.UPilot
             var detail = download.IsRunning
                 ? UPilotUpdateService.FormatDownloadProgressDetail(download)
                 : status.Message;
-            var progress = download.IsRunning && download.TotalBytes > 0
-                ? download.Progress
+            var progress = download.IsRunning
+                ? UPilotDownloadHelper.GetProgress(download)
                 : UPilotUpdateService.EstimateOperationProgress(status.Phase);
 
             DrawInfoRow("更新状态", label);
@@ -593,8 +593,10 @@ namespace CodingRiver.UPilot
 
             EditorGUILayout.Space(4);
             var rect = EditorGUILayout.GetControlRect(false, 18);
-            EditorGUI.ProgressBar(rect, state.Progress, UPilotUpdateService.FormatDownloadProgressLabel(state));
-            EditorGUILayout.LabelField(UPilotUpdateService.FormatDownloadProgressDetail(state), EditorStyles.miniLabel);
+            var detail = UPilotUpdateService.FormatDownloadProgressDetail(state);
+            EditorGUI.ProgressBar(rect, UPilotDownloadHelper.GetProgress(state), UPilotUpdateService.FormatDownloadProgressLabel(state));
+            if (!string.IsNullOrWhiteSpace(detail))
+                EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
             if (!string.IsNullOrWhiteSpace(state.WarningMessage))
                 EditorGUILayout.HelpBox(state.WarningMessage, MessageType.Warning);
         }

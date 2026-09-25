@@ -95,6 +95,7 @@ namespace CodingRiver.UPilot
         public long TotalBytes;
         public int SegmentCount;
         public int CompletedSegments;
+        public int ActiveSegmentRequests;
         public int ConfiguredSegmentCount;
         public int MaxConcurrentSegmentRequests;
         public int PeakConcurrentSegmentRequests;
@@ -110,14 +111,7 @@ namespace CodingRiver.UPilot
         public double StartedAt;
         public double FinishedAt;
 
-        public float Progress
-        {
-            get
-            {
-                if (TotalBytes <= 0) return IsComplete ? 1f : 0f;
-                return Mathf.Clamp01((float)((double)BytesReceived / TotalBytes));
-            }
-        }
+        public float Progress => UPilotDownloadHelper.GetProgress(this);
     }
 
     public sealed class UPilotPreparedServerDownload
@@ -172,6 +166,7 @@ namespace CodingRiver.UPilot
 
         private CancellationTokenSource _downloadCts;
         private CancellationTokenSource _pythonEnvCts;
+        private readonly object _downloadSessionLock = new();
         private readonly object _stateLock = new();
         private readonly object _pythonEnvLock = new();
         private UPilotDownloadState _downloadState = new();
@@ -179,14 +174,8 @@ namespace CodingRiver.UPilot
         private string _lastManagedInstallFailurePath = "";
         internal static bool RepairOwnsFailureDialog { get; set; }
 
-        public UPilotDownloadState DownloadState
-        {
-            get
-            {
-                lock (_stateLock)
-                    return CopyState(_downloadState);
-            }
-        }
+        public UPilotDownloadState DownloadState =>
+            UPilotDownloadHelper.ReadDownloadStateSnapshot(ref _downloadState);
 
         internal string LastManagedInstallFailurePath
         {
@@ -569,7 +558,7 @@ namespace CodingRiver.UPilot
             {
                 lock (_stateLock)
                 {
-                    _downloadState = new UPilotDownloadState
+                    var next = new UPilotDownloadState
                     {
                         IsRunning = false,
                         Phase = "已跳过",
@@ -577,25 +566,40 @@ namespace CodingRiver.UPilot
                         PlatformDisplayName = CurrentPlatformDisplayName,
                         FinishedAt = EditorApplication.timeSinceStartup,
                     };
+                    Volatile.Write(ref _downloadState, next);
                 }
                 return;
             }
 
-            lock (_stateLock)
+            var session = new CancellationTokenSource();
+            var registered = false;
+            lock (_downloadSessionLock)
             {
-                if (_downloadState.IsRunning)
-                    return;
-                _downloadState = new UPilotDownloadState
+                lock (_stateLock)
                 {
-                    IsRunning = true,
-                    Phase = "正在获取服务",
-                    PlatformDisplayName = CurrentPlatformDisplayName,
-                    StartedAt = EditorApplication.timeSinceStartup,
-                };
+                    var current = Volatile.Read(ref _downloadState);
+                    if (!current.IsRunning)
+                    {
+                        var next = new UPilotDownloadState
+                        {
+                            IsRunning = true,
+                            Phase = "正在获取服务",
+                            PlatformDisplayName = CurrentPlatformDisplayName,
+                            StartedAt = EditorApplication.timeSinceStartup,
+                        };
+                        Volatile.Write(ref _downloadState, next);
+                        _downloadCts = session;
+                        registered = true;
+                    }
+                }
             }
 
-            var session = new CancellationTokenSource();
-            lock (_stateLock) _downloadCts = session;
+            if (!registered)
+            {
+                session.Dispose();
+                return;
+            }
+
             _ = RunDownloadLatestServerExeAsync(activateOnComplete: true, manifest: null, session);
         }
 
@@ -607,21 +611,35 @@ namespace CodingRiver.UPilot
             if (IsSourceUpdateChannel() || IsSourceChannel(manifest.Channel) || IsSourceChannel(manifest.ServerVersion))
                 throw new InvalidOperationException("开发版仅支持本机 Python，不准备自动管理 MCP 服务。");
 
-            lock (_stateLock)
+            var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var registered = false;
+            lock (_downloadSessionLock)
             {
-                if (_downloadState.IsRunning)
-                    throw new InvalidOperationException("已有服务下载任务正在进行。");
-                _downloadState = new UPilotDownloadState
+                lock (_stateLock)
                 {
-                    IsRunning = true,
-                    Phase = "正在准备服务文件",
-                    PlatformDisplayName = CurrentPlatformDisplayName,
-                    StartedAt = EditorApplication.timeSinceStartup,
-                };
+                    var current = Volatile.Read(ref _downloadState);
+                    if (!current.IsRunning)
+                    {
+                        var next = new UPilotDownloadState
+                        {
+                            IsRunning = true,
+                            Phase = "正在准备服务文件",
+                            PlatformDisplayName = CurrentPlatformDisplayName,
+                            StartedAt = EditorApplication.timeSinceStartup,
+                        };
+                        Volatile.Write(ref _downloadState, next);
+                        _downloadCts = session;
+                        registered = true;
+                    }
+                }
             }
 
-            var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            lock (_stateLock) _downloadCts = session;
+            if (!registered)
+            {
+                session.Dispose();
+                throw new InvalidOperationException("已有服务下载任务正在进行。");
+            }
+
             try
             {
                 return await DownloadLatestServerExeAsync(manifest, activateOnComplete: false, session.Token);
@@ -651,23 +669,34 @@ namespace CodingRiver.UPilot
                 throw new IOException("Benchmark target already exists; no download files will be overwritten.");
 
             var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            lock (_stateLock)
+            var registered = false;
+            lock (_downloadSessionLock)
             {
-                if (_downloadState.IsRunning)
+                lock (_stateLock)
                 {
-                    session.Dispose();
-                    throw new InvalidOperationException("A UPilot download is already in progress.");
+                    var current = Volatile.Read(ref _downloadState);
+                    if (!current.IsRunning)
+                    {
+                        var next = new UPilotDownloadState
+                        {
+                            IsRunning = true,
+                            Phase = "Benchmark download",
+                            DownloadUrl = download.Url,
+                            Sha256 = download.Sha256,
+                            TotalBytes = download.SizeBytes,
+                            StartedAt = EditorApplication.timeSinceStartup,
+                        };
+                        Volatile.Write(ref _downloadState, next);
+                        _downloadCts = session;
+                        registered = true;
+                    }
                 }
-                _downloadCts = session;
-                _downloadState = new UPilotDownloadState
-                {
-                    IsRunning = true,
-                    Phase = "Benchmark download",
-                    DownloadUrl = download.Url,
-                    Sha256 = download.Sha256,
-                    TotalBytes = download.SizeBytes,
-                    StartedAt = EditorApplication.timeSinceStartup,
-                };
+            }
+
+            if (!registered)
+            {
+                session.Dispose();
+                throw new InvalidOperationException("A UPilot download is already in progress.");
             }
 
             try
@@ -681,6 +710,7 @@ namespace CodingRiver.UPilot
                 {
                     state.IsRunning = false;
                     state.IsComplete = true;
+                    state.ActiveSegmentRequests = 0;
                     state.Phase = "Benchmark complete";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
@@ -692,6 +722,7 @@ namespace CodingRiver.UPilot
                 {
                     state.IsRunning = false;
                     state.IsCancelled = ex is OperationCanceledException;
+                    state.ActiveSegmentRequests = 0;
                     state.Phase = state.IsCancelled ? "Benchmark cancelled" : "Benchmark failed";
                     state.ErrorMessage = ex.Message;
                     state.FinishedAt = EditorApplication.timeSinceStartup;
@@ -790,20 +821,24 @@ namespace CodingRiver.UPilot
 
         public void CancelDownload()
         {
-            lock (_stateLock)
-            {
-                try { _downloadCts?.Cancel(); }
-                catch (ObjectDisposedException) { }
-            }
+            CancellationTokenSource session;
+            lock (_downloadSessionLock)
+                session = _downloadCts;
+
+            try { session?.Cancel(); }
+            catch (ObjectDisposedException) { }
         }
 
         private void ReleaseDownloadSession(CancellationTokenSource session)
         {
-            lock (_stateLock)
+            lock (_downloadSessionLock)
             {
-                if (ReferenceEquals(_downloadCts, session)) _downloadCts = null;
+                if (ReferenceEquals(_downloadCts, session))
+                    _downloadCts = null;
             }
-            session.Dispose();
+
+            try { session.Dispose(); }
+            catch (ObjectDisposedException) { }
         }
 
         private async Task<DownloadResult> DownloadWithRangeProbeLogAsync(string url, string path,
@@ -850,6 +885,7 @@ namespace CodingRiver.UPilot
                 state.TotalBytes = progress.TotalBytes;
                 state.SegmentCount = progress.SegmentCount;
                 state.CompletedSegments = progress.CompletedSegments;
+                state.ActiveSegmentRequests = progress.ActiveSegmentRequests;
                 state.ConfiguredSegmentCount = progress.ConfiguredSegmentCount;
                 state.MaxConcurrentSegmentRequests = progress.MaxConcurrentSegmentRequests;
                 state.PeakConcurrentSegmentRequests = progress.PeakConcurrentSegmentRequests;
@@ -963,6 +999,7 @@ namespace CodingRiver.UPilot
                 UpdateState(state =>
                 {
                     state.IsRunning = false;
+                    state.ActiveSegmentRequests = 0;
                     state.ErrorMessage = ex.Message;
                     state.Phase = "下载失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
@@ -1074,6 +1111,7 @@ namespace CodingRiver.UPilot
                 {
                     state.IsRunning = false;
                     state.IsComplete = true;
+                    state.ActiveSegmentRequests = 0;
                     state.Phase = activateOnComplete ? "安装完成" : "服务文件已准备";
                     state.TargetPath = finalPath;
                     state.BytesReceived = state.TotalBytes;
@@ -1095,6 +1133,7 @@ namespace CodingRiver.UPilot
                 {
                     state.IsRunning = false;
                     state.IsCancelled = true;
+                    state.ActiveSegmentRequests = 0;
                     state.Phase = "已取消";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
@@ -1132,6 +1171,7 @@ namespace CodingRiver.UPilot
                 UpdateState(state =>
                 {
                     state.IsRunning = false;
+                    state.ActiveSegmentRequests = 0;
                     state.ErrorMessage = reportedException.Message;
                     state.Phase = "下载失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
@@ -1943,7 +1983,10 @@ namespace CodingRiver.UPilot
         {
             lock (_stateLock)
             {
-                update(_downloadState);
+                var current = Volatile.Read(ref _downloadState);
+                var next = UPilotDownloadHelper.CloneDownloadState(current);
+                update(next);
+                Volatile.Write(ref _downloadState, next);
             }
         }
 
@@ -1953,42 +1996,6 @@ namespace CodingRiver.UPilot
             {
                 update(_pythonEnvState);
             }
-        }
-
-        private static UPilotDownloadState CopyState(UPilotDownloadState source)
-        {
-            return new UPilotDownloadState
-            {
-                IsRunning = source.IsRunning,
-                IsComplete = source.IsComplete,
-                IsCancelled = source.IsCancelled,
-                Phase = source.Phase,
-                WarningMessage = source.WarningMessage,
-                ErrorMessage = source.ErrorMessage,
-                Version = source.Version,
-                DownloadUrl = source.DownloadUrl,
-                Sha256 = source.Sha256,
-                TargetPath = source.TargetPath,
-                PlatformDisplayName = source.PlatformDisplayName,
-                BytesReceived = source.BytesReceived,
-                TotalBytes = source.TotalBytes,
-                SegmentCount = source.SegmentCount,
-                CompletedSegments = source.CompletedSegments,
-                ConfiguredSegmentCount = source.ConfiguredSegmentCount,
-                MaxConcurrentSegmentRequests = source.MaxConcurrentSegmentRequests,
-                PeakConcurrentSegmentRequests = source.PeakConcurrentSegmentRequests,
-                DedicatedThreadId = source.DedicatedThreadId,
-                ObservedOwnedThreadCount = source.ObservedOwnedThreadCount,
-                ThreadConstraintViolationCount = source.ThreadConstraintViolationCount,
-                SessionDurationMilliseconds = source.SessionDurationMilliseconds,
-                TransferDurationMilliseconds = source.TransferDurationMilliseconds,
-                VerificationDurationMilliseconds = source.VerificationDurationMilliseconds,
-                ThroughputBytesPerSecond = source.ThroughputBytesPerSecond,
-                ActualSha256 = source.ActualSha256,
-                Outcome = source.Outcome,
-                StartedAt = source.StartedAt,
-                FinishedAt = source.FinishedAt,
-            };
         }
 
         private static UPilotPythonEnvironmentState CopyState(UPilotPythonEnvironmentState source)

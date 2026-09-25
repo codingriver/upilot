@@ -1114,9 +1114,11 @@ namespace CodingRiver.UPilot
 
             if (state.SegmentCount > 1)
             {
+                var completed = UPilotDownloadHelper.GetCompletedSegmentCount(state);
+                var active = UPilotDownloadHelper.GetActiveSegmentCount(state);
                 var concurrency = state.MaxConcurrentSegmentRequests > 0
                     ? $"，最多 {Math.Min(state.SegmentCount, state.MaxConcurrentSegmentRequests)} 并发" : "";
-                return $"{phase}（{state.SegmentCount} 分片{concurrency}，已完成 {state.CompletedSegments}/{state.SegmentCount}）";
+                return $"{phase}（{state.SegmentCount} 分片，正在下载 {active}{concurrency}，已完成 {completed}/{state.SegmentCount}）";
             }
             if (state.SegmentCount == 1)
                 return $"{phase}（单流下载）";
@@ -1125,14 +1127,20 @@ namespace CodingRiver.UPilot
 
         internal static string FormatDownloadProgressDetail(UPilotDownloadState state)
         {
+            var phase = string.IsNullOrWhiteSpace(state.Phase) ? "正在更新服务" : state.Phase;
+            if (phase.IndexOf("下载", StringComparison.Ordinal) < 0)
+                return "";
+
             var sizeText = state.TotalBytes > 0
                 ? $"{FormatBytes(state.BytesReceived)} / {FormatBytes(state.TotalBytes)}"
                 : FormatBytes(state.BytesReceived);
             if (state.SegmentCount > 1)
             {
+                var completed = UPilotDownloadHelper.GetCompletedSegmentCount(state);
+                var active = UPilotDownloadHelper.GetActiveSegmentCount(state);
                 var concurrency = state.MaxConcurrentSegmentRequests > 0
-                    ? $"，最多 {Math.Min(state.SegmentCount, state.MaxConcurrentSegmentRequests)} 并发" : "";
-                return $"{sizeText} · {state.SegmentCount} 分片下载{concurrency} · 已完成 {state.CompletedSegments}/{state.SegmentCount}";
+                    ? $" · 最多 {Math.Min(state.SegmentCount, state.MaxConcurrentSegmentRequests)} 并发" : "";
+                return $"{sizeText} · {state.SegmentCount} 分片下载 · 正在下载 {active}{concurrency} · 已完成 {completed}/{state.SegmentCount}";
             }
             if (state.SegmentCount == 1)
                 return $"{sizeText} · 单流下载";

@@ -33,6 +33,7 @@ namespace CodingRiver.UPilot
         public int MaxConcurrentSegmentRequests;
         public int SegmentCount;
         public int CompletedSegments;
+        public int ActiveSegmentRequests;
         public int PeakConcurrentSegmentRequests;
         public int DedicatedThreadId;
         public int ObservedOwnedThreadCount;
@@ -57,6 +58,7 @@ namespace CodingRiver.UPilot
         public int MaxConcurrentSegmentRequests;
         public int SegmentCount;
         public int CompletedSegments;
+        public int ActiveSegmentRequests;
         public int PeakConcurrentSegmentRequests;
         public int DedicatedThreadId;
         public int ObservedOwnedThreadCount;
@@ -88,6 +90,72 @@ namespace CodingRiver.UPilot
         internal const int DefaultBufferSize = 128 * 1024;
 
         private static int _sessionSequence;
+
+        internal static UPilotDownloadState ReadDownloadStateSnapshot(ref UPilotDownloadState state)
+        {
+            return CloneDownloadState(Volatile.Read(ref state));
+        }
+
+        internal static UPilotDownloadState CloneDownloadState(UPilotDownloadState source)
+        {
+            if (source == null)
+                return new UPilotDownloadState();
+
+            return new UPilotDownloadState
+            {
+                IsRunning = source.IsRunning,
+                IsComplete = source.IsComplete,
+                IsCancelled = source.IsCancelled,
+                Phase = source.Phase,
+                WarningMessage = source.WarningMessage,
+                ErrorMessage = source.ErrorMessage,
+                Version = source.Version,
+                DownloadUrl = source.DownloadUrl,
+                Sha256 = source.Sha256,
+                TargetPath = source.TargetPath,
+                PlatformDisplayName = source.PlatformDisplayName,
+                BytesReceived = source.BytesReceived,
+                TotalBytes = source.TotalBytes,
+                SegmentCount = source.SegmentCount,
+                CompletedSegments = source.CompletedSegments,
+                ActiveSegmentRequests = source.ActiveSegmentRequests,
+                ConfiguredSegmentCount = source.ConfiguredSegmentCount,
+                MaxConcurrentSegmentRequests = source.MaxConcurrentSegmentRequests,
+                PeakConcurrentSegmentRequests = source.PeakConcurrentSegmentRequests,
+                DedicatedThreadId = source.DedicatedThreadId,
+                ObservedOwnedThreadCount = source.ObservedOwnedThreadCount,
+                ThreadConstraintViolationCount = source.ThreadConstraintViolationCount,
+                SessionDurationMilliseconds = source.SessionDurationMilliseconds,
+                TransferDurationMilliseconds = source.TransferDurationMilliseconds,
+                VerificationDurationMilliseconds = source.VerificationDurationMilliseconds,
+                ThroughputBytesPerSecond = source.ThroughputBytesPerSecond,
+                ActualSha256 = source.ActualSha256,
+                Outcome = source.Outcome,
+                StartedAt = source.StartedAt,
+                FinishedAt = source.FinishedAt,
+            };
+        }
+
+        internal static float GetProgress(UPilotDownloadState state)
+        {
+            if (state == null)
+                return 0f;
+            if (state.TotalBytes <= 0)
+                return state.IsComplete ? 1f : 0f;
+
+            var progress = (double)state.BytesReceived / state.TotalBytes;
+            return (float)Math.Max(0d, Math.Min(1d, progress));
+        }
+
+        internal static int GetCompletedSegmentCount(UPilotDownloadState state)
+        {
+            return state == null ? 0 : Math.Max(0, state.CompletedSegments);
+        }
+
+        internal static int GetActiveSegmentCount(UPilotDownloadState state)
+        {
+            return state == null ? 0 : Math.Max(0, state.ActiveSegmentRequests);
+        }
 
         public static Task<DownloadResult> DownloadAsync(
             HttpClient http,
@@ -624,6 +692,7 @@ namespace CodingRiver.UPilot
             public long TotalBytes;
             public int SegmentCount;
             public int CompletedSegments;
+            public int ActiveSegmentRequests => _activeRequests;
             public int PeakConcurrentSegmentRequests;
             public int ThreadConstraintViolationCount;
             public bool IsComplete;
@@ -688,7 +757,8 @@ namespace CodingRiver.UPilot
                     BytesReceived = BytesReceived, TotalBytes = TotalBytes,
                     ConfiguredSegmentCount = ConfiguredSegmentCount,
                     MaxConcurrentSegmentRequests = MaxConcurrentSegmentRequests, SegmentCount = SegmentCount,
-                    CompletedSegments = CompletedSegments, PeakConcurrentSegmentRequests = PeakConcurrentSegmentRequests,
+                    CompletedSegments = CompletedSegments, ActiveSegmentRequests = ActiveSegmentRequests,
+                    PeakConcurrentSegmentRequests = PeakConcurrentSegmentRequests,
                     DedicatedThreadId = DedicatedThreadId, ObservedOwnedThreadCount = _observedThreadIds.Count,
                     ThreadConstraintViolationCount = ThreadConstraintViolationCount,
                     SessionDurationMilliseconds = SessionStopwatch.ElapsedMilliseconds,
@@ -711,7 +781,8 @@ namespace CodingRiver.UPilot
                     BytesReceived = BytesReceived, TotalBytes = TotalBytes,
                     ConfiguredSegmentCount = ConfiguredSegmentCount,
                     MaxConcurrentSegmentRequests = MaxConcurrentSegmentRequests, SegmentCount = SegmentCount,
-                    CompletedSegments = CompletedSegments, PeakConcurrentSegmentRequests = PeakConcurrentSegmentRequests,
+                    CompletedSegments = CompletedSegments, ActiveSegmentRequests = ActiveSegmentRequests,
+                    PeakConcurrentSegmentRequests = PeakConcurrentSegmentRequests,
                     DedicatedThreadId = DedicatedThreadId, ObservedOwnedThreadCount = _observedThreadIds.Count,
                     ThreadConstraintViolationCount = ThreadConstraintViolationCount,
                     SessionDurationMilliseconds = SessionStopwatch.ElapsedMilliseconds,

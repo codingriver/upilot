@@ -120,15 +120,12 @@ namespace CodingRiver.UPilot
 
                 if (state.IsRunning || state.IsComplete || !string.IsNullOrEmpty(state.ErrorMessage))
                 {
-                    var progressLabel = string.IsNullOrWhiteSpace(state.Phase) ? "准备中" : state.Phase;
-                    EditorGUI.ProgressBar(EditorGUILayout.GetControlRect(false, 20), state.Progress, progressLabel);
-                    var sizeText = state.TotalBytes > 0
-                        ? $"{FormatSetupBytes(state.BytesReceived)} / {FormatSetupBytes(state.TotalBytes)}"
-                        : FormatSetupBytes(state.BytesReceived);
-                    var segmentText = state.SegmentCount > 1
-                        ? $" · {state.CompletedSegments}/{state.SegmentCount} 个下载任务"
-                        : "";
-                    EditorGUILayout.LabelField(sizeText + segmentText, EditorStyles.miniLabel);
+                    var progress = UPilotDownloadHelper.GetProgress(state);
+                    var progressLabel = UPilotUpdateService.FormatDownloadProgressLabel(state);
+                    var progressDetail = UPilotUpdateService.FormatDownloadProgressDetail(state);
+                    EditorGUI.ProgressBar(EditorGUILayout.GetControlRect(false, 20), progress, progressLabel);
+                    if (!string.IsNullOrWhiteSpace(progressDetail))
+                        EditorGUILayout.LabelField(progressDetail, EditorStyles.miniLabel);
                     if (!string.IsNullOrEmpty(state.WarningMessage))
                         EditorGUILayout.HelpBox(state.WarningMessage, MessageType.Warning);
                     if (!string.IsNullOrEmpty(state.ErrorMessage))

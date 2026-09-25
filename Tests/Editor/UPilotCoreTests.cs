@@ -2454,12 +2454,73 @@ namespace CodingRiver.UPilot.Tests
             {
                 SegmentCount = 4,
                 CompletedSegments = 2,
+                ActiveSegmentRequests = 3,
                 PlatformDisplayName = "Windows x64",
             };
 
             Assert.That(state.SegmentCount, Is.EqualTo(4));
             Assert.That(state.CompletedSegments, Is.EqualTo(2));
+            Assert.That(state.ActiveSegmentRequests, Is.EqualTo(3));
+            Assert.That(UPilotDownloadHelper.GetCompletedSegmentCount(state), Is.EqualTo(2));
+            Assert.That(UPilotDownloadHelper.GetActiveSegmentCount(state), Is.EqualTo(3));
             Assert.That(state.PlatformDisplayName, Is.EqualTo("Windows x64"));
+        }
+
+        [Test]
+        public void DownloadStateSnapshotPublishesCoherentDefensiveCopies()
+        {
+            var published = new UPilotDownloadState
+            {
+                Phase = "old",
+                BytesReceived = 10,
+                TotalBytes = 100,
+                CompletedSegments = 1,
+                ActiveSegmentRequests = 2,
+            };
+            var unpublished = UPilotDownloadHelper.CloneDownloadState(published);
+            unpublished.Phase = "new";
+            unpublished.BytesReceived = 80;
+            unpublished.CompletedSegments = 8;
+            unpublished.ActiveSegmentRequests = 5;
+
+            var before = UPilotDownloadHelper.ReadDownloadStateSnapshot(ref published);
+            Assert.That(before.Phase, Is.EqualTo("old"));
+            Assert.That(before.BytesReceived, Is.EqualTo(10));
+            Assert.That(before.CompletedSegments, Is.EqualTo(1));
+            Assert.That(before.ActiveSegmentRequests, Is.EqualTo(2));
+
+            Volatile.Write(ref published, unpublished);
+
+            var after = UPilotDownloadHelper.ReadDownloadStateSnapshot(ref published);
+            Assert.That(after.Phase, Is.EqualTo("new"));
+            Assert.That(after.BytesReceived, Is.EqualTo(80));
+            Assert.That(after.CompletedSegments, Is.EqualTo(8));
+            Assert.That(after.ActiveSegmentRequests, Is.EqualTo(5));
+            Assert.That(UPilotDownloadHelper.GetProgress(after), Is.EqualTo(0.8f));
+
+            after.Phase = "reader mutation";
+            after.CompletedSegments = 99;
+            after.ActiveSegmentRequests = 99;
+
+            var reread = UPilotDownloadHelper.ReadDownloadStateSnapshot(ref published);
+            Assert.That(reread.Phase, Is.EqualTo("new"));
+            Assert.That(reread.CompletedSegments, Is.EqualTo(8));
+            Assert.That(reread.ActiveSegmentRequests, Is.EqualTo(5));
+        }
+
+        [Test]
+        public void DownloadProgressHelperHandlesUnknownTotals()
+        {
+            Assert.That(UPilotDownloadHelper.GetProgress(new UPilotDownloadState()), Is.Zero);
+            Assert.That(
+                UPilotDownloadHelper.GetProgress(new UPilotDownloadState { IsComplete = true }),
+                Is.EqualTo(1f));
+            Assert.That(
+                UPilotDownloadHelper.GetCompletedSegmentCount(new UPilotDownloadState { CompletedSegments = -1 }),
+                Is.Zero);
+            Assert.That(
+                UPilotDownloadHelper.GetActiveSegmentCount(new UPilotDownloadState { ActiveSegmentRequests = -1 }),
+                Is.Zero);
         }
 
         [Test]
@@ -2471,6 +2532,7 @@ namespace CodingRiver.UPilot.Tests
                 SegmentCount = 12,
                 MaxConcurrentSegmentRequests = 5,
                 CompletedSegments = 2,
+                ActiveSegmentRequests = 5,
                 BytesReceived = 10 * 1024 * 1024,
                 TotalBytes = 20 * 1024 * 1024,
             };
@@ -2478,16 +2540,17 @@ namespace CodingRiver.UPilot.Tests
             {
                 Phase = "正在下载安装",
                 SegmentCount = 1,
+                ActiveSegmentRequests = 1,
                 BytesReceived = 512 * 1024,
                 TotalBytes = 1024 * 1024,
             };
 
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(multiThread),
-                Is.EqualTo("正在下载安装（12 分片，最多 5 并发，已完成 2/12）"));
+                Is.EqualTo("正在下载安装（12 分片，正在下载 5，最多 5 并发，已完成 2/12）"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressDetail(multiThread),
-                Does.Contain("12 分片下载，最多 5 并发"));
+                Is.EqualTo("10.0 MB / 20.0 MB · 12 分片下载 · 正在下载 5 · 最多 5 并发 · 已完成 2/12"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(singleThread),
                 Is.EqualTo("正在下载安装（单流下载）"));
@@ -2504,6 +2567,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(verifying),
                 Is.EqualTo("正在验证文件"));
+            Assert.That(UPilotUpdateService.FormatDownloadProgressDetail(verifying), Is.Empty);
         }
 
         [Test]

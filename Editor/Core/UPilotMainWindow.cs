@@ -539,8 +539,8 @@ namespace CodingRiver.UPilot
                 return;
 
             var download = UPilotServerRuntimeService.Instance.DownloadState;
-            var progress = download.IsRunning && download.TotalBytes > 0
-                ? download.Progress
+            var progress = download.IsRunning
+                ? UPilotDownloadHelper.GetProgress(download)
                 : UPilotUpdateService.EstimateOperationProgress(status.Phase);
             var label = download.IsRunning
                 ? UPilotUpdateService.FormatDownloadProgressLabel(download)
