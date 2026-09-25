@@ -144,6 +144,8 @@ namespace CodingRiver.UPilot
         {
             AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+            EditorApplication.quitting -= OnEditorQuitting;
+            EditorApplication.quitting += OnEditorQuitting;
         }
 
         internal static string[] GetPreferenceKeysForCurrentProject()
@@ -1111,9 +1113,13 @@ namespace CodingRiver.UPilot
                 return phase;
 
             if (state.SegmentCount > 1)
-                return $"{phase}（{state.SegmentCount} 线程，已完成 {state.CompletedSegments}/{state.SegmentCount}）";
+            {
+                var concurrency = state.MaxConcurrentSegmentRequests > 0
+                    ? $"，最多 {Math.Min(state.SegmentCount, state.MaxConcurrentSegmentRequests)} 并发" : "";
+                return $"{phase}（{state.SegmentCount} 分片{concurrency}，已完成 {state.CompletedSegments}/{state.SegmentCount}）";
+            }
             if (state.SegmentCount == 1)
-                return $"{phase}（单线程）";
+                return $"{phase}（单流下载）";
             return phase;
         }
 
@@ -1123,9 +1129,13 @@ namespace CodingRiver.UPilot
                 ? $"{FormatBytes(state.BytesReceived)} / {FormatBytes(state.TotalBytes)}"
                 : FormatBytes(state.BytesReceived);
             if (state.SegmentCount > 1)
-                return $"{sizeText} · {state.SegmentCount} 线程下载 · 已完成 {state.CompletedSegments}/{state.SegmentCount}";
+            {
+                var concurrency = state.MaxConcurrentSegmentRequests > 0
+                    ? $"，最多 {Math.Min(state.SegmentCount, state.MaxConcurrentSegmentRequests)} 并发" : "";
+                return $"{sizeText} · {state.SegmentCount} 分片下载{concurrency} · 已完成 {state.CompletedSegments}/{state.SegmentCount}";
+            }
             if (state.SegmentCount == 1)
-                return $"{sizeText} · 单线程下载";
+                return $"{sizeText} · 单流下载";
             return sizeText;
         }
 
@@ -1621,8 +1631,14 @@ namespace CodingRiver.UPilot
             return message;
         }
 
+        private static void OnEditorQuitting()
+        {
+            UPilotServerRuntimeService.Instance.CancelDownload();
+        }
+
         private static void OnBeforeAssemblyReload()
         {
+            UPilotServerRuntimeService.Instance.CancelDownload();
             if (UPilotServerRuntimeService.IsSourceUpdateChannel())
                 return;
 

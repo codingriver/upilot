@@ -9,7 +9,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -96,6 +95,18 @@ namespace CodingRiver.UPilot
         public long TotalBytes;
         public int SegmentCount;
         public int CompletedSegments;
+        public int ConfiguredSegmentCount;
+        public int MaxConcurrentSegmentRequests;
+        public int PeakConcurrentSegmentRequests;
+        public int DedicatedThreadId;
+        public int ObservedOwnedThreadCount;
+        public int ThreadConstraintViolationCount;
+        public long SessionDurationMilliseconds;
+        public long TransferDurationMilliseconds;
+        public long VerificationDurationMilliseconds;
+        public double ThroughputBytesPerSecond;
+        public string ActualSha256 = "";
+        public string Outcome = "";
         public double StartedAt;
         public double FinishedAt;
 
@@ -139,9 +150,7 @@ namespace CodingRiver.UPilot
         private const string ManifestFileName = "manifest.json";
         private const string LegacyManifestFileName = "upilot-release-manifest.json";
         private const string ReleaseManifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/manifest.json";
-        private const int ParallelDownloadThresholdBytes = 8 * 1024 * 1024;
-        internal const int ParallelDownloadSegments = 4;
-        private const int SegmentRetryCount = 2;
+        internal const int ParallelDownloadSegments = UPilotDownloadHelper.DefaultSegmentCount;
         private const int FileOperationRetryCount = 3;
         private const int FileOperationRetryDelayMs = 2000;
         private const int InstallLockRetryDelayMs = 250;
@@ -585,8 +594,9 @@ namespace CodingRiver.UPilot
                 };
             }
 
-            _downloadCts = new CancellationTokenSource();
-            _ = RunDownloadLatestServerExeAsync(activateOnComplete: true, manifest: null, _downloadCts.Token);
+            var session = new CancellationTokenSource();
+            lock (_stateLock) _downloadCts = session;
+            _ = RunDownloadLatestServerExeAsync(activateOnComplete: true, manifest: null, session);
         }
 
         public async Task<UPilotPreparedServerDownload> PrepareLatestServerExeAsync(
@@ -610,8 +620,13 @@ namespace CodingRiver.UPilot
                 };
             }
 
-            _downloadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            return await DownloadLatestServerExeAsync(manifest, activateOnComplete: false, _downloadCts.Token);
+            var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            lock (_stateLock) _downloadCts = session;
+            try
+            {
+                return await DownloadLatestServerExeAsync(manifest, activateOnComplete: false, session.Token);
+            }
+            finally { ReleaseDownloadSession(session); }
         }
 
         // Explicit Editor-test benchmark. Reuses the production transfer paths without preparing,
@@ -635,10 +650,15 @@ namespace CodingRiver.UPilot
                 File.Exists(fullPath + ".part0"))
                 throw new IOException("Benchmark target already exists; no download files will be overwritten.");
 
+            var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             lock (_stateLock)
             {
                 if (_downloadState.IsRunning)
+                {
+                    session.Dispose();
                     throw new InvalidOperationException("A UPilot download is already in progress.");
+                }
+                _downloadCts = session;
                 _downloadState = new UPilotDownloadState
                 {
                     IsRunning = true,
@@ -654,19 +674,8 @@ namespace CodingRiver.UPilot
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath));
                 EnsureSufficientDiskSpace(Path.GetDirectoryName(fullPath), download.SizeBytes, includeWorkingCopy: true);
-                var ranges = download.SizeBytes >= ParallelDownloadThresholdBytes &&
-                             await SupportsRangeDownloadAsync(download.Url, download.SizeBytes, cancellationToken);
-                if (ranges)
-                    await DownloadInSegmentsAsync(download.Url, fullPath, download.SizeBytes, cancellationToken);
-                else
-                    await DownloadSingleStreamAsync(download.Url, fullPath, download.SizeBytes, cancellationToken);
-
-                cancellationToken.ThrowIfCancellationRequested();
-                UpdateState(state => state.Phase = "Benchmark SHA256 verification");
-                var actualHash = ComputeSha256(fullPath);
-                if (new FileInfo(fullPath).Length != download.SizeBytes ||
-                    !string.Equals(actualHash, download.Sha256, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException("Benchmark download size or SHA256 mismatch; file retained for diagnosis.");
+                await DownloadWithRangeProbeLogAsync(download.Url, fullPath, download.SizeBytes,
+                    download.Sha256, session.Token);
 
                 UpdateState(state =>
                 {
@@ -689,6 +698,7 @@ namespace CodingRiver.UPilot
                 });
                 throw;
             }
+            finally { ReleaseDownloadSession(session); }
         }
 
         internal async Task PrepareMatchingServerForRepairAsync()
@@ -780,7 +790,83 @@ namespace CodingRiver.UPilot
 
         public void CancelDownload()
         {
-            _downloadCts?.Cancel();
+            lock (_stateLock)
+            {
+                try { _downloadCts?.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        private void ReleaseDownloadSession(CancellationTokenSource session)
+        {
+            lock (_stateLock)
+            {
+                if (ReferenceEquals(_downloadCts, session)) _downloadCts = null;
+            }
+            session.Dispose();
+        }
+
+        private async Task<DownloadResult> DownloadWithRangeProbeLogAsync(string url, string path,
+            long expectedBytes, string expectedSha256, CancellationToken token)
+        {
+            DownloadProgress probe = null;
+            try
+            {
+                return await UPilotDownloadHelper.DownloadAsync(Http, url, path, expectedBytes, expectedSha256,
+                    progress =>
+                    {
+                        ApplyDownloadProgress(progress);
+                        if (progress.RangeProbeOutcome.Length != 0) probe = progress;
+                    }, token);
+            }
+            finally
+            {
+                // The helper reports only plain data from its dedicated thread; Unity logging stays on this caller's thread.
+                LogRangeProbeOutcome(probe);
+            }
+        }
+
+        internal static void LogRangeProbeOutcome(DownloadProgress probe)
+        {
+            if (probe == null || probe.RangeProbeOutcome.Length == 0) return; // Small files do not need a probe.
+            if (probe.RangeProbeOutcome == "supported")
+            {
+                Debug.Log("[UPilot] Range 探测成功，服务端支持分片下载。" + probe.RangeProbeDetail);
+                return;
+            }
+            Debug.LogWarning("[UPilot] Range 探测未通过，已降级为不带 Range 的单流下载。原因：" +
+                probe.RangeProbeDetail +
+                "\n服务端：请启用 HTTP byte-range；检查源站和 CDN/反向代理是否透传 Range 请求，并针对有效范围返回 HTTP 206 和正确的 Content-Range（而非 HTTP 200 全量响应）。" +
+                "\n客户端：用 GET 请求头 Range: bytes=0-0 探测；仅当收到 HTTP 206、Content-Range: bytes 0-0/<预期文件字节数> 时才并发请求各片，正式分片还会验证响应范围和长度。" +
+                "\n排查：对实际下载地址执行 curl -L -i -H \"Range: bytes=0-0\" \"<下载地址>\"，检查最终响应的状态码和 Content-Range；注意此命令在服务器忽略 Range 时可能下载完整文件，勿公开带令牌的 URL。");
+        }
+
+        private void ApplyDownloadProgress(DownloadProgress progress)
+        {
+            // Called only from the dedicated download thread; never access Unity here.
+            UpdateState(state =>
+            {
+                state.BytesReceived = progress.BytesReceived;
+                state.TotalBytes = progress.TotalBytes;
+                state.SegmentCount = progress.SegmentCount;
+                state.CompletedSegments = progress.CompletedSegments;
+                state.ConfiguredSegmentCount = progress.ConfiguredSegmentCount;
+                state.MaxConcurrentSegmentRequests = progress.MaxConcurrentSegmentRequests;
+                state.PeakConcurrentSegmentRequests = progress.PeakConcurrentSegmentRequests;
+                state.DedicatedThreadId = progress.DedicatedThreadId;
+                state.ObservedOwnedThreadCount = progress.ObservedOwnedThreadCount;
+                state.ThreadConstraintViolationCount = progress.ThreadConstraintViolationCount;
+                state.SessionDurationMilliseconds = progress.SessionDurationMilliseconds;
+                state.TransferDurationMilliseconds = progress.TransferDurationMilliseconds;
+                state.VerificationDurationMilliseconds = progress.VerificationDurationMilliseconds;
+                state.ThroughputBytesPerSecond = progress.ThroughputBytesPerSecond;
+                state.ActualSha256 = progress.ActualSha256;
+                state.Outcome = progress.Outcome;
+                if (progress.RangeProbeOutcome == "unsupported")
+                    state.WarningMessage = "Range 探测未通过，已降级为单流下载。";
+                if (!string.IsNullOrEmpty(progress.ErrorMessage)) state.ErrorMessage = progress.ErrorMessage;
+                if (progress.Phase == "verifying") state.Phase = "正在验证文件";
+            });
         }
 
         public void StartAutoConfigurePythonEnvironment()
@@ -862,11 +948,11 @@ namespace CodingRiver.UPilot
         private async Task RunDownloadLatestServerExeAsync(
             bool activateOnComplete,
             UPilotReleaseManifest manifest,
-            CancellationToken token)
+            CancellationTokenSource session)
         {
             try
             {
-                await DownloadLatestServerExeAsync(manifest, activateOnComplete, token);
+                await DownloadLatestServerExeAsync(manifest, activateOnComplete, session.Token);
             }
             catch (OperationCanceledException)
             {
@@ -882,6 +968,7 @@ namespace CodingRiver.UPilot
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
             }
+            finally { ReleaseDownloadSession(session); }
         }
 
         private async Task<UPilotPreparedServerDownload> DownloadLatestServerExeAsync(
@@ -951,27 +1038,8 @@ namespace CodingRiver.UPilot
 
                         var totalBytes = download.SizeBytes;
                         EnsureSufficientDiskSpace(versionDir, totalBytes, includeWorkingCopy: true);
-                        var supportsRanges = totalBytes >= ParallelDownloadThresholdBytes &&
-                                             await SupportsRangeDownloadAsync(download.Url, totalBytes, token);
-                        if (supportsRanges)
-                            await DownloadInSegmentsAsync(download.Url, tmpPath, totalBytes, token);
-                        else
-                            await DownloadSingleStreamAsync(download.Url, tmpPath, totalBytes, token);
-
-                        token.ThrowIfCancellationRequested();
-                        UpdateState(state => state.Phase = "正在验证文件");
-                        var actualSha = ComputeSha256(tmpPath);
-                        if (!string.Equals(actualSha, expectedSha256, StringComparison.OrdinalIgnoreCase))
-                        {
-                            await RetryFileOperationAsync(
-                                () => File.Delete(tmpPath),
-                                "删除校验失败的服务文件",
-                                CancellationToken.None,
-                                throwOnFailure: false,
-                                updateProgress: false);
-                            throw new UPilotDownloadUserActionException(
-                                $"下载的 MCP 服务文件未通过完整性校验，请重新执行更新。期望 {expectedSha256}，实际 {actualSha}");
-                        }
+                        await DownloadWithRangeProbeLogAsync(download.Url, tmpPath, totalBytes,
+                            expectedSha256, token);
                         preserveVerifiedDownload = true;
                     }
                     else
@@ -1223,169 +1291,6 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task DownloadSingleStreamAsync(
-            string url,
-            string targetPath,
-            long expectedBytes,
-            CancellationToken token)
-        {
-            UpdateState(state =>
-            {
-                state.BytesReceived = 0;
-                state.TotalBytes = expectedBytes;
-                state.SegmentCount = 1;
-                state.CompletedSegments = 0;
-            });
-            
-            using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token)
-                .ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            var total = response.Content.Headers.ContentLength ?? expectedBytes;
-            UpdateState(state => state.TotalBytes = total);
-            using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                await CopyDownloadStreamAsync(input, output, token).ConfigureAwait(false);
-                output.Flush();
-            }
-            UpdateState(state => state.CompletedSegments = 1);
-        }
-
-        private async Task DownloadInSegmentsAsync(
-            string url,
-            string targetPath,
-            long totalBytes,
-            CancellationToken token)
-        {
-            UpdateState(state =>
-            {
-                state.BytesReceived = 0;
-                state.TotalBytes = totalBytes;
-                state.SegmentCount = ParallelDownloadSegments;
-                state.CompletedSegments = 0;
-            });
-
-            var tasks = new List<Task>(ParallelDownloadSegments);
-            var segmentSize = totalBytes / ParallelDownloadSegments;
-            for (var index = 0; index < ParallelDownloadSegments; index++)
-            {
-                var start = index * segmentSize;
-                var end = index == ParallelDownloadSegments - 1
-                    ? totalBytes - 1
-                    : start + segmentSize - 1;
-                var segmentPath = targetPath + ".part" + index;
-                tasks.Add(DownloadSegmentWithRetryAsync(url, segmentPath, start, end, token));
-            }
-
-            try
-            {
-                await Task.WhenAll(tasks).ConfigureAwait(false);
-                using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
-                {
-                    for (var index = 0; index < ParallelDownloadSegments; index++)
-                    {
-                        var segmentPath = targetPath + ".part" + index;
-                        using (var input = new FileStream(segmentPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                            await input.CopyToAsync(output, 128 * 1024, token).ConfigureAwait(false);
-                    }
-                    output.Flush();
-                }
-            }
-            finally
-            {
-                CleanupSegmentFiles(targetPath, ParallelDownloadSegments);
-            }
-        }
-
-        private async Task DownloadSegmentWithRetryAsync(
-            string url,
-            string segmentPath,
-            long start,
-            long end,
-            CancellationToken token)
-        {
-            Exception lastError = null;
-            for (var attempt = 0; attempt <= SegmentRetryCount; attempt++)
-            {
-                token.ThrowIfCancellationRequested();
-                try
-                {
-                    if (File.Exists(segmentPath))
-                        File.Delete(segmentPath);
-
-                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                    request.Headers.Range = new RangeHeaderValue(start, end);
-                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
-                        .ConfigureAwait(false);
-                    if (response.StatusCode != HttpStatusCode.PartialContent)
-                        throw new InvalidOperationException("下载源未返回分片内容。");
-
-                    using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-                    using var output = new FileStream(segmentPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                    await CopyDownloadStreamAsync(input, output, token).ConfigureAwait(false);
-                    UpdateState(state => state.CompletedSegments++);
-                    return;
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    if (File.Exists(segmentPath))
-                    {
-                        var partialBytes = new FileInfo(segmentPath).Length;
-                        UpdateState(state => state.BytesReceived = Math.Max(0, state.BytesReceived - partialBytes));
-                        File.Delete(segmentPath);
-                    }
-                    lastError = ex;
-                    if (attempt < SegmentRetryCount)
-                        await Task.Delay(350 * (attempt + 1), token).ConfigureAwait(false);
-                }
-            }
-
-            throw new InvalidOperationException("服务分片下载失败。", lastError);
-        }
-
-        private async Task CopyDownloadStreamAsync(Stream input, Stream output, CancellationToken token)
-        {
-            var buffer = new byte[128 * 1024];
-            while (true)
-            {
-                // The transfer loop does not require Unity APIs. Keep every buffer continuation
-                // off UnitySynchronizationContext so parallel segments can stream continuously.
-                var read = await input.ReadAsync(buffer, 0, buffer.Length, token).ConfigureAwait(false);
-                if (read <= 0)
-                    break;
-                await output.WriteAsync(buffer, 0, read, token).ConfigureAwait(false);
-                UpdateState(state => state.BytesReceived += read);
-            }
-        }
-
-        private static async Task<bool> SupportsRangeDownloadAsync(
-            string url,
-            long expectedBytes,
-            CancellationToken token)
-        {
-            try
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Range = new RangeHeaderValue(0, 0);
-                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
-                    .ConfigureAwait(false);
-                var rangeLength = response.Content.Headers.ContentRange?.Length ?? expectedBytes;
-                return response.StatusCode == HttpStatusCode.PartialContent && rangeLength > 0;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private static void CleanupDownloadFiles(string targetPath, int segmentCount)
         {
             if (File.Exists(targetPath))
@@ -1395,12 +1300,7 @@ namespace CodingRiver.UPilot
 
         private static void CleanupSegmentFiles(string targetPath, int segmentCount)
         {
-            for (var index = 0; index < segmentCount; index++)
-            {
-                var segmentPath = targetPath + ".part" + index;
-                if (File.Exists(segmentPath))
-                    File.Delete(segmentPath);
-            }
+            UPilotDownloadHelper.CleanupSegmentFiles(targetPath, segmentCount);
         }
 
         private static bool CleanupOrQuarantineFailedTarget(
@@ -2074,6 +1974,18 @@ namespace CodingRiver.UPilot
                 TotalBytes = source.TotalBytes,
                 SegmentCount = source.SegmentCount,
                 CompletedSegments = source.CompletedSegments,
+                ConfiguredSegmentCount = source.ConfiguredSegmentCount,
+                MaxConcurrentSegmentRequests = source.MaxConcurrentSegmentRequests,
+                PeakConcurrentSegmentRequests = source.PeakConcurrentSegmentRequests,
+                DedicatedThreadId = source.DedicatedThreadId,
+                ObservedOwnedThreadCount = source.ObservedOwnedThreadCount,
+                ThreadConstraintViolationCount = source.ThreadConstraintViolationCount,
+                SessionDurationMilliseconds = source.SessionDurationMilliseconds,
+                TransferDurationMilliseconds = source.TransferDurationMilliseconds,
+                VerificationDurationMilliseconds = source.VerificationDurationMilliseconds,
+                ThroughputBytesPerSecond = source.ThroughputBytesPerSecond,
+                ActualSha256 = source.ActualSha256,
+                Outcome = source.Outcome,
                 StartedAt = source.StartedAt,
                 FinishedAt = source.FinishedAt,
             };

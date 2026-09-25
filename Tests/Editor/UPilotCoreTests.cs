@@ -2463,12 +2463,13 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void UpdateDownloadProgressLabelShowsThreadCount()
+        public void UpdateDownloadProgressLabelShowsSegmentConcurrency()
         {
             var multiThread = new UPilotDownloadState
             {
                 Phase = "正在下载安装",
-                SegmentCount = 4,
+                SegmentCount = 12,
+                MaxConcurrentSegmentRequests = 5,
                 CompletedSegments = 2,
                 BytesReceived = 10 * 1024 * 1024,
                 TotalBytes = 20 * 1024 * 1024,
@@ -2483,16 +2484,16 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(multiThread),
-                Is.EqualTo("正在下载安装（4 线程，已完成 2/4）"));
+                Is.EqualTo("正在下载安装（12 分片，最多 5 并发，已完成 2/12）"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressDetail(multiThread),
-                Does.Contain("4 线程下载"));
+                Does.Contain("12 分片下载，最多 5 并发"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(singleThread),
-                Is.EqualTo("正在下载安装（单线程）"));
+                Is.EqualTo("正在下载安装（单流下载）"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressDetail(singleThread),
-                Does.Contain("单线程下载"));
+                Does.Contain("单流下载"));
 
             var verifying = new UPilotDownloadState
             {

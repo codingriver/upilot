@@ -39,11 +39,18 @@ namespace CodingRiver.UPilot.Tests
             public double verifiedMiBPerSecond;
             public string expectedSha256 = ExpectedSha256;
             public string actualSha256 = "";
-            public int configuredMaxConcurrentSegments = UPilotServerRuntimeService.ParallelDownloadSegments;
+            public int configuredSegmentCount = UPilotServerRuntimeService.ParallelDownloadSegments;
+            public int maxConcurrentSegmentRequests = UPilotDownloadHelper.DefaultMaxConcurrentSegmentRequests;
             public int segmentCount;
             public int completedSegments;
-            public string observedOsThreadCount = "unknown (segments are asynchronous requests, not OS threads)";
-            public string observedPeakHttpConcurrency = "unknown";
+            public int dedicatedThreadId;
+            public int observedOwnedThreadCount;
+            public int threadConstraintViolationCount;
+            public int peakConcurrentSegmentRequests;
+            public long sessionDurationMilliseconds;
+            public long transferDurationMilliseconds;
+            public long verificationDurationMilliseconds;
+            public double transferBytesPerSecond;
             public string phase = "";
             public bool cacheHit; // Per-run target only; never consult or mutate the managed cache.
         }
@@ -124,22 +131,23 @@ namespace CodingRiver.UPilot.Tests
                     report.segmentCount = state.SegmentCount;
                     report.completedSegments = state.CompletedSegments;
                     report.phase = state.Phase;
+                    report.configuredSegmentCount = state.ConfiguredSegmentCount;
+                    report.maxConcurrentSegmentRequests = state.MaxConcurrentSegmentRequests;
+                    report.peakConcurrentSegmentRequests = state.PeakConcurrentSegmentRequests;
+                    report.dedicatedThreadId = state.DedicatedThreadId;
+                    report.observedOwnedThreadCount = state.ObservedOwnedThreadCount;
+                    report.threadConstraintViolationCount = state.ThreadConstraintViolationCount;
+                    report.sessionDurationMilliseconds = state.SessionDurationMilliseconds;
+                    report.transferDurationMilliseconds = state.TransferDurationMilliseconds;
+                    report.verificationDurationMilliseconds = state.VerificationDurationMilliseconds;
+                    report.transferBytesPerSecond = state.ThroughputBytesPerSecond;
+                    report.actualSha256 = state.ActualSha256;
+                    if (!string.IsNullOrEmpty(state.Outcome)) report.outcome = state.Outcome;
+                    if (string.IsNullOrEmpty(report.error) && !string.IsNullOrEmpty(state.ErrorMessage))
+                        report.error = state.ErrorMessage;
                 }
                 if (File.Exists(target))
-                {
-                    try
-                    {
-                        report.fileBytes = new FileInfo(target).Length;
-                        report.actualSha256 = UPilotServerRuntimeService.ComputeSha256(target);
-                    }
-                    catch (Exception hashError)
-                    {
-                        report.outcome = "failed";
-                        report.success = false;
-                        failure = hashError;
-                        report.error = hashError.GetType().Name + ": unable to hash the downloaded file";
-                    }
-                }
+                    report.fileBytes = new FileInfo(target).Length;
                 if (report.success && report.elapsedMilliseconds > 0)
                     report.verifiedMiBPerSecond = report.fileBytes / 1048576.0 / (report.elapsedMilliseconds / 1000.0);
                 // Reports and downloaded files remain under the unique project Logs directory.
@@ -157,6 +165,14 @@ namespace CodingRiver.UPilot.Tests
             if (failure != null)
                 Assert.Fail("UPilot benchmark failed; inspect Logs/UPilotDownloadBenchmark/" + report.runId + "/report.json: " + report.error);
             Assert.That(report.actualSha256, Is.EqualTo(ExpectedSha256).IgnoreCase);
+            Assert.That(report.fileBytes, Is.EqualTo(ExpectedBytes));
+            Assert.That(report.observedOwnedThreadCount, Is.EqualTo(1));
+            Assert.That(report.threadConstraintViolationCount, Is.Zero);
+            Assert.That(report.configuredSegmentCount, Is.EqualTo(12));
+            Assert.That(report.maxConcurrentSegmentRequests, Is.EqualTo(5));
+            Assert.That(report.segmentCount, Is.EqualTo(12));
+            Assert.That(report.completedSegments, Is.EqualTo(12));
+            Assert.That(report.peakConcurrentSegmentRequests, Is.EqualTo(5));
         }
 
         private static UPilotServerDownloadInfo CreateDownload() => new UPilotServerDownloadInfo
