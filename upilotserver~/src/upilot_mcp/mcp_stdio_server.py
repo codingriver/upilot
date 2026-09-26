@@ -458,6 +458,25 @@ async def _run_http_server(
                 else "1009" if latest.get("closeCode") == 1009 else ""
             ),
         }
+        observation_builder = getattr(_orchestrator, "editor_observation", None) if _orchestrator else None
+        if callable(observation_builder):
+            try:
+                payload["editor_observation"] = observation_builder(
+                    observed_at_ms=now_ms, network_connected=connected
+                )
+            except Exception as ex:
+                logger.warning("Failed to build cached Editor observation: %s", ex)
+                payload["editor_observation"] = {
+                    "status": "unknown",
+                    "reason": "observation_error",
+                    "observed_at_ms": now_ms,
+                }
+        else:
+            payload["editor_observation"] = {
+                "status": "unknown",
+                "reason": "evidence_unavailable",
+                "observed_at_ms": now_ms,
+            }
         # Optional bounded round trip through the existing read-only command.
         # Never route repair verification through cached status or replay a job.
         if request.query_params.get("probe") == "bridge":

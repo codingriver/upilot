@@ -230,10 +230,57 @@ namespace CodingRiver.UPilot
                 return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "服务状态异常",
                     bridgeStatus.AuthenticationError + "\n" + mcpStatus.ErrorMessage,
                     bridgeStatus.IsStarted, mcpStatus.IsRunning);
+
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&
                              mcpStatus.WsPortListening;
             var ready = mcpHealthy && bridgeStatus.IsWsOpen && bridgeStatus.IsAuthenticated;
+
+            if (ready && !mcpStatus.DiagnosisPending &&
+                mcpStatus.ProcessOwnership == McpProcessOwnership.Foreign)
+            {
+                return new UPilotMainSnapshot(
+                    UPilotMainState.NeedsRepair,
+                    "端口被其他程序占用",
+                    "已确认端口属于其他程序。修复不会停止该进程，也不会自动修改端口。",
+                    bridgeStatus.IsStarted,
+                    true);
+            }
+
+            if (ready && !mcpStatus.DiagnosisPending &&
+                mcpStatus.ProcessOwnership == McpProcessOwnership.Unknown)
+            {
+                return new UPilotMainSnapshot(
+                    UPilotMainState.NeedsRepair,
+                    "服务身份尚未确认",
+                    "端口正在监听，但暂时无法确认所属进程。UPilot 不会自动切换端口。",
+                    bridgeStatus.IsStarted,
+                    true);
+            }
+
+            if (ready && mcpStatus.EditorObservationAvailable)
+            {
+                if (mcpStatus.EditorObservationStatus == "waiting_editor")
+                {
+                    return new UPilotMainSnapshot(
+                        UPilotMainState.CheckingStatus,
+                        "Unity 主线程暂未响应",
+                        "疑似长时间更新停顿。网络心跳仍正常，正在每秒检查；未执行自动重启。",
+                        bridgeStatus.IsStarted,
+                        mcpStatus.IsRunning);
+                }
+
+                if (mcpStatus.EditorObservationStatus == "unknown")
+                {
+                    return new UPilotMainSnapshot(
+                        UPilotMainState.CheckingStatus,
+                        "Unity 响应状态暂无法确认",
+                        "正在等待新的主线程与网络证据；未执行自动重启。",
+                        bridgeStatus.IsStarted,
+                        mcpStatus.IsRunning);
+                }
+            }
+
             if (ready)
             {
                 return new UPilotMainSnapshot(

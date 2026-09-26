@@ -233,3 +233,10 @@
 - 已实施改进：loopback 状态客户端禁用代理；每个状态请求发送 `Connection: close`，避免跨 Server 进程复用旧连接；先请求权威 `/health`，再读取可选 `/stats`，统计端点失败不覆盖已成功的健康门；项目身份优先读取 `configured_project_path`，缺失时兼容回退 `project_path`。未放宽 PID、项目路径、部署身份、新会话或只读往返验证。
 - 验证证据：写批次 `wb-03b0c6ea-85c5-4192-887a-ef8ff528ada5` 为 verified/passed，`errorsVerified=true`、`correlationVerified=true`、0 编译错误；修复后的 Unity 内真实 `GetFreshStatusAsync` 返回 `health=True`、PID `163176`、项目 `D:\upilot\Tests~\UPilotTest`、空失败阶段/错误；定向 EditMode runGuid `83ebd042-7551-4838-a93b-add3850ffe97` 3/3 通过且 cleanup 成功。
 - 剩余关闭条件：在明确授权的后续维护窗口仅发起一次新的 `unity_service_restart`，观察 `/health`、PID/项目身份、部署身份和实际只读往返全部通过；不得自动重放上述失败 operation，也不得仅凭本次状态探测和单元测试声称重启验收已通过。
+#### D15 补充观察：2026-09-26 最后只读探测失败（P1 / 待定位与改进）
+
+- 触发场景/证据：用户请求只读分析 `F:\xclient2` 的 `restart-aecf426807c640c4923808aa680744c6`。`Library/UPilot/server-restart.json` 记录 PID 71724、版本 0.3.40、身份/Bridge/部署门通过，11:06:52–11:07:00（UTC+08:00）只读门约 7.1 秒后以 `readonly_mismatch` 失败，原错误仅有 `An error occurred while sending the request`；maintenanceDeadlineUtcMs=0。同一项目 `log/mcp-server.log:94148–94151` 显示原 Bridge 会话在 11:07:05–11:07:10 已有两次 editor.state 请求/结果往返。11:40 的实时 MCP 观察仍为同一 Server PID、不同 Bridge 会话，不能把历史失败改为成功。
+- 痛点/影响：`VerifyReadOnlyRoundTripAsync` 仍单独创建默认 HttpClient，未使用 D15 的 loopback handler/request 策略；catch 把非直接 TimeoutException/TaskCanceledException 的发送异常归为 mismatch，且仅保存 Message。手动重启路径遇到此异常立即终结；失败阶段 `verified` 仅表示前置健康/身份/Bridge 门，不等于最终只读门通过。`ObservePossibleRecovery` 不包含 readonly_mismatch。
+- 证据限制：当前系统代理未启用；无当时 InnerException/Socket 错误，不能认定代理、旧连接池或精确超时根因。Unity 内只读 HTTP 对照被执行策略拒绝，未得到复现证据，未绕过限制。
+- 期望能力/验收：复用已有 loopback 请求策略；保存异常类型、InnerException、耗时与请求/会话关联；区分 transport、timeout、identity mismatch 并显式展示 readonly 验证阶段。在 canonical 项目用定向测试覆盖手动重启瞬态探测失败、真实身份不符及恢复观察；如引入有界观察，仅复查只读门，不重启/重放业务，不改写原终态。预期减少把可用服务反复重启及失真归因。
+- 归属/关联：通用 UPilot/MCP，实施与优先级以本 D15 为准；项目现场引用 `F:\xclient2\TODO_UPilot.mcd` 的同 operation 条目。本次仅记录分析，未实施修复或发起重启验收。

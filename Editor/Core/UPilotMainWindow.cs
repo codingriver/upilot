@@ -126,6 +126,7 @@ namespace CodingRiver.UPilot
                 minSize = new Vector2(440, 400);
                 if (UPilotServerRuntimeService.IsSourceUpdateChannel())
                     UPilotUpdateService.ResetSourceChannelState();
+                UPilotMcpServerManager.Instance.EnableEditorHealthObservation();
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
                 EnforceUpdateMaintenanceStop();
@@ -147,6 +148,7 @@ namespace CodingRiver.UPilot
             try
             {
                 EditorApplication.update -= OnEditorUpdate;
+                UPilotMcpServerManager.Instance.DisableEditorHealthObservation();
             }
             catch (Exception ex)
             {
@@ -212,6 +214,7 @@ namespace CodingRiver.UPilot
             {
                 DrawNotice(displaySnapshot.State);
                 DrawReleaseUpdateReminder(displaySnapshot);
+                DrawEditorObservationNotice(displaySnapshot);
                 EditorGUILayout.Space(4);
                 DrawMainCard(displaySnapshot);
                 EditorGUILayout.Space(4);
@@ -601,6 +604,79 @@ namespace CodingRiver.UPilot
             DrawColoredButton("配置并启动", SetupReadyColor, 48f, ConfigureAndStart);
         }
 
+        private void DrawEditorObservationNotice(UPilotMainSnapshot snapshot)
+        {
+            if (!_mcpStatus.EditorObservationAvailable ||
+                snapshot.State == UPilotMainState.Restarting ||
+                snapshot.State == UPilotMainState.NeedsRepair ||
+                snapshot.State == UPilotMainState.Stopping ||
+                snapshot.State == UPilotMainState.Updating)
+                return;
+
+            var observationStatus = _mcpStatus.EditorObservationStatus;
+            if (observationStatus != "waiting_editor" && observationStatus != "unknown")
+                return;
+
+            var observed = FormatObservationTime(_mcpStatus.EditorObservationObservedAtUtcMs);
+            if (observationStatus == "waiting_editor")
+            {
+                var waitingMs = _mcpStatus.EditorObservationWaitingDurationMs;
+                if (_mcpStatus.EditorObservationWaitingSinceUtcMs > 0)
+                    waitingMs = Math.Max(waitingMs,
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _mcpStatus.EditorObservationWaitingSinceUtcMs);
+                EditorGUILayout.HelpBox(
+                    "Unity 主线程暂未响应，疑似长时间更新停顿。网络心跳仍正常，正在每秒检查；未执行自动重启。\n" +
+                    $"已等待 {FormatObservationDuration(waitingMs)}；最近观察 {observed}。该间隔是主线程更新间隔，不是精确帧耗时。",
+                    MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "Unity 响应状态暂无法确认，正在等待新的主线程与网络证据；未执行自动重启。\n" +
+                    $"最近观察 {observed}。明确的认证、身份或连接错误仍按原状态处理。",
+                    MessageType.Info);
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("打开 Server 日志", GUILayout.Width(116f)))
+                    RevealServerLog();
+            }
+        }
+
+        private static string FormatObservationDuration(long durationMs)
+        {
+            if (durationMs < 0) durationMs = 0;
+            var duration = TimeSpan.FromMilliseconds(durationMs);
+            if (duration.TotalMinutes >= 1)
+                return $"{(int)duration.TotalMinutes} 分 {duration.Seconds} 秒";
+            return $"{duration.TotalSeconds:0.0} 秒";
+        }
+
+        private static string FormatObservationTime(long utcMs)
+        {
+            if (utcMs <= 0) return "未知";
+            try
+            {
+                return DateTimeOffset.FromUnixTimeMilliseconds(utcMs).ToLocalTime().ToString("HH:mm:ss");
+            }
+            catch
+            {
+                return "未知";
+            }
+        }
+
+        private void RevealServerLog()
+        {
+            var logPath = UPilotMcpServerManager.ServerLogPath;
+            var target = File.Exists(logPath) ? logPath : Path.GetDirectoryName(logPath);
+            if (!string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)))
+                EditorUtility.RevealInFinder(target);
+            else
+                ShowNotice("Server 日志尚未生成", MessageType.Info);
+        }
+
         private void DrawOperationsDashboard(UPilotMainSnapshot snapshot)
         {
             DrawWriteAccessBanner();
@@ -848,6 +924,26 @@ namespace CodingRiver.UPilot
                 DrawRuntimeDetailRow("进程归属", GetProcessOwnershipLabel(_mcpStatus.ProcessOwnership));
                 DrawRuntimeDetailRow("进程 PID", _mcpStatus.ProcessId?.ToString() ?? "未识别");
                 DrawRuntimeDetailRow("健康检查", GetHealthStatusLabel(_mcpStatus));
+                if (_mcpStatus.EditorObservationAvailable)
+                {
+                    DrawRuntimeDetailRow("主线程观察", GetEditorObservationStatusLabel(_mcpStatus.EditorObservationStatus));
+                    DrawRuntimeDetailRow("最近观察", FormatObservationTime(_mcpStatus.EditorObservationObservedAtUtcMs));
+                    if (_mcpStatus.EditorObservationPumpAgeMs > 0)
+                        DrawRuntimeDetailRow("主线程更新间隔", FormatObservationDuration(_mcpStatus.EditorObservationPumpAgeMs));
+                    if (_mcpStatus.EditorObservationHeartbeatAgeMs > 0)
+                        DrawRuntimeDetailRow("网络心跳年龄", FormatObservationDuration(_mcpStatus.EditorObservationHeartbeatAgeMs));
+                    DrawRuntimeDetailRow("主线程队列深度", _mcpStatus.EditorObservationQueueDepth.ToString());
+                    if (!string.IsNullOrWhiteSpace(_mcpStatus.EditorObservationLastCommandId))
+                        DrawRuntimeDetailRow("最近出队命令", _mcpStatus.EditorObservationLastCommandId);
+                }
+                if (_mcpStatus.RecentEditorStall != null)
+                {
+                    var recent = _mcpStatus.RecentEditorStall;
+                    var outcome = recent.outcome == "recovered" ? "已恢复" : "观察中断";
+                    DrawRuntimeDetailRow("最近主线程停顿", outcome + "，持续 " + FormatObservationDuration(recent.duration_ms));
+                    DrawRuntimeDetailRow("观察到的更新间隔", FormatObservationDuration(recent.observed_update_gap_ms));
+                    DrawRuntimeDetailRow("停顿检查次数", recent.observation_count.ToString());
+                }
                 if (!string.IsNullOrWhiteSpace(_mcpStatus.ProcessOwnershipEvidence))
                     DrawRuntimeDetailRow("身份依据", _mcpStatus.ProcessOwnershipEvidence);
                 if (_mcpStatus.DiagnosisPending)
@@ -909,6 +1005,17 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.LabelField(label, EditorStyles.miniLabel, GUILayout.Width(120f));
                 EditorGUILayout.LabelField(value, EditorStyles.label);
             }
+        }
+
+        internal static string GetEditorObservationStatusLabel(string status)
+        {
+            return status switch
+            {
+                "responsive" => "响应正常",
+                "waiting_editor" => "等待 Unity 主线程推进",
+                "unknown" => "暂无法确认",
+                _ => "旧版或无观察信息",
+            };
         }
 
         internal static string GetBridgeStatusLabel(BridgeStatus status)

@@ -509,6 +509,13 @@ namespace CodingRiver.UPilot.Tests
             {
                 StatusCancellationReason = "timeout", ErrorMessage = "A task was canceled"
             }), Is.EqualTo("request_timeout"));
+            Assert.That(UPilotMcpServerManager.ClassifyRestartProbe(new McpServerStatus
+            {
+                StatusCancellationReason = "timeout",
+                ErrorMessage = "A task was canceled",
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "waiting_editor",
+            }), Is.EqualTo("request_timeout"));
         }
 
         [Test]
@@ -736,6 +743,108 @@ namespace CodingRiver.UPilot.Tests
 
             var legacyJson = "{\"project_path\":\"F:/legacy-project\"}";
             Assert.That(UPilotMcpServerManager.ResolveHealthProjectPath(legacyJson), Is.EqualTo("F:/legacy-project"));
+        }
+
+        [Test]
+        public void EditorHealthObservationUsesFastCadenceOnlyWhileWaiting()
+        {
+            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(default), Is.EqualTo(2000));
+            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(new McpServerStatus
+            {
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "responsive",
+            }), Is.EqualTo(2000));
+            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(new McpServerStatus
+            {
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "unknown",
+            }), Is.EqualTo(2000));
+            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(new McpServerStatus
+            {
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "waiting_editor",
+            }), Is.EqualTo(1000));
+            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(new McpServerStatus
+            {
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "waiting_editor",
+            }), Is.False);
+            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(new McpServerStatus
+            {
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "responsive",
+            }), Is.True);
+        }
+
+        [Test]
+        public void EditorHealthObservationRequiresExactServerAndEditorIdentity()
+        {
+            var expected = new McpServerStatus
+            {
+                HealthServerProcessId = 42,
+                Health = new UPilotServerHealth { server_instance_id = "server-a" },
+                EditorObservationSessionId = "session-a",
+                EditorObservationProducerEpoch = "epoch-a",
+                EditorObservationDomainGeneration = 3,
+            };
+            var health = new UPilotServerHealth
+            {
+                server_pid = 42,
+                server_instance_id = "server-a",
+            };
+            var observation = new UPilotEditorObservation
+            {
+                status = "waiting_editor",
+                session_id = "session-a",
+                producer_epoch = "epoch-a",
+                domain_generation = 3,
+            };
+
+            Assert.That(UPilotMcpServerManager.MatchesEditorObservationIdentity(expected, health, observation), Is.True);
+            health.server_pid = 43;
+            Assert.That(UPilotMcpServerManager.MatchesEditorObservationIdentity(expected, health, observation), Is.False);
+            health.server_pid = 42;
+            observation.domain_generation = 4;
+            Assert.That(UPilotMcpServerManager.MatchesEditorObservationIdentity(expected, health, observation), Is.False);
+        }
+
+        [Test]
+        public void EditorHealthObservationMappingKeepsRecentStallAndClearsLegacyResponses()
+        {
+            var status = new McpServerStatus();
+            var recent = new UPilotEditorStallSummary
+            {
+                outcome = "recovered",
+                duration_ms = 8000,
+            };
+            UPilotMcpServerManager.ApplyEditorObservation(ref status, new UPilotEditorObservation
+            {
+                status = "waiting_editor",
+                reason = "main_thread_pump_stale",
+                observed_at_ms = 10000,
+                pump_age_ms = 8000,
+                heartbeat_age_ms = 500,
+                waiting_since_ms = 9000,
+                waiting_duration_ms = 1000,
+                observation_count = 2,
+                session_id = "session-a",
+                producer_epoch = "epoch-a",
+                domain_generation = 3,
+                main_thread_queue_depth = 4,
+                last_dequeued_command_id = "command-a",
+                recent_stall = recent,
+            });
+
+            Assert.That(status.EditorObservationAvailable, Is.True);
+            Assert.That(status.EditorObservationStatus, Is.EqualTo("waiting_editor"));
+            Assert.That(status.EditorObservationPumpAgeMs, Is.EqualTo(8000));
+            Assert.That(status.EditorObservationCount, Is.EqualTo(2));
+            Assert.That(status.RecentEditorStall, Is.SameAs(recent));
+
+            UPilotMcpServerManager.ApplyEditorObservation(ref status, null);
+            Assert.That(status.EditorObservationAvailable, Is.False);
+            Assert.That(status.EditorObservationStatus, Is.Empty);
+            Assert.That(status.RecentEditorStall, Is.Null);
         }
 
         [Test]

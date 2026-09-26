@@ -1901,6 +1901,118 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void MainStateShowsWaitingEditorWithoutClaimingRestart()
+        {
+            var bridge = new BridgeStatus
+            {
+                IsStarted = true,
+                IsWsOpen = true,
+                IsAuthenticated = true,
+            };
+            var mcp = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "waiting_editor",
+            };
+
+            var snapshot = UPilotQuickStart.EvaluateServiceState(bridge, mcp);
+
+            Assert.That(snapshot.State, Is.EqualTo(UPilotMainState.CheckingStatus));
+            Assert.That(snapshot.Title, Does.Contain("主线程"));
+            Assert.That(snapshot.Message, Does.Contain("每秒检查"));
+            Assert.That(snapshot.Message, Does.Contain("未执行自动重启"));
+        }
+
+        [Test]
+        public void MainStateShowsUnknownEditorEvidenceAsUnconfirmed()
+        {
+            var bridge = new BridgeStatus
+            {
+                IsStarted = true,
+                IsWsOpen = true,
+                IsAuthenticated = true,
+            };
+            var mcp = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "unknown",
+            };
+
+            var snapshot = UPilotQuickStart.EvaluateServiceState(bridge, mcp);
+
+            Assert.That(snapshot.State, Is.EqualTo(UPilotMainState.CheckingStatus));
+            Assert.That(snapshot.Title, Does.Contain("暂无法确认"));
+            Assert.That(snapshot.Message, Does.Contain("未执行自动重启"));
+        }
+
+        [TestCase(false, null)]
+        [TestCase(true, "responsive")]
+        public void MainStateKeepsLegacyOrResponsiveHealthReady(bool observationAvailable, string observationStatus)
+        {
+            var bridge = new BridgeStatus
+            {
+                IsStarted = true,
+                IsWsOpen = true,
+                IsAuthenticated = true,
+            };
+            var mcp = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+                EditorObservationAvailable = observationAvailable,
+                EditorObservationStatus = observationStatus,
+            };
+
+            Assert.That(UPilotQuickStart.EvaluateServiceState(bridge, mcp).State,
+                Is.EqualTo(UPilotMainState.Ready));
+        }
+
+        [Test]
+        public void MainStateDoesNotLetEditorWaitingHideAuthenticationOrIdentityErrors()
+        {
+            var waiting = new McpServerStatus
+            {
+                IsRunning = true,
+                HttpPortListening = true,
+                WsPortListening = true,
+                ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "waiting_editor",
+                ErrorMessage = "health identity mismatch",
+            };
+            var authenticatedBridge = new BridgeStatus
+            {
+                IsStarted = true,
+                IsWsOpen = true,
+                IsAuthenticated = true,
+            };
+
+            Assert.That(UPilotQuickStart.EvaluateServiceState(authenticatedBridge, waiting).State,
+                Is.EqualTo(UPilotMainState.NeedsRepair));
+
+            waiting.ErrorMessage = "";
+            waiting.ProcessOwnership = McpProcessOwnership.Foreign;
+            Assert.That(UPilotQuickStart.EvaluateServiceState(authenticatedBridge, waiting).State,
+                Is.EqualTo(UPilotMainState.NeedsRepair));
+
+            waiting.ProcessOwnership = McpProcessOwnership.CurrentUPilot;
+            var rejectedBridge = authenticatedBridge;
+            rejectedBridge.AuthenticationError = "token rejected";
+            Assert.That(UPilotQuickStart.EvaluateServiceState(rejectedBridge, waiting).State,
+                Is.EqualTo(UPilotMainState.NeedsRepair));
+        }
+
+        [Test]
         public void MainStateTreatsUnconfirmedOwnershipAsChecking()
         {
             var bridge = new BridgeStatus { IsStarted = true };

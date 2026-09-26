@@ -32,6 +32,43 @@ namespace CodingRiver.UPilot
         public string bridge_probe_nonce;
         public string bridge_probe_error;
         public UPilotBridgeHealthDiagnostic bridge_diagnostics;
+        public UPilotEditorObservation editor_observation;
+    }
+
+    [Serializable]
+    internal sealed class UPilotEditorObservation
+    {
+        public string status;
+        public string reason;
+        public long observed_at_ms;
+        public string session_id;
+        public string producer_epoch;
+        public int domain_generation;
+        public long last_main_thread_pump_at_ms;
+        public long pump_age_ms;
+        public long heartbeat_at_ms;
+        public long heartbeat_age_ms;
+        public int main_thread_queue_depth;
+        public string last_dequeued_command_id;
+        public long waiting_since_ms;
+        public long waiting_duration_ms;
+        public int observation_count;
+        public UPilotEditorStallSummary recent_stall;
+    }
+
+    [Serializable]
+    internal sealed class UPilotEditorStallSummary
+    {
+        public string outcome;
+        public string reason;
+        public long started_at_ms;
+        public long ended_at_ms;
+        public long duration_ms;
+        public long observed_update_gap_ms;
+        public int observation_count;
+        public string session_id;
+        public string producer_epoch;
+        public int domain_generation;
     }
 
     [Serializable]

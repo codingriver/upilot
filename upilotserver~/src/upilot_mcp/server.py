@@ -36,6 +36,8 @@ wire_logger = logging.getLogger("upilot.wire")
 IDENTITY_CONTRACT_VERSION = 1
 _CANDIDATE_HANDSHAKE_TIMEOUT_S = 10.0
 _MAX_BRIDGE_MESSAGE_BYTES = 4 * 1024 * 1024
+_EDITOR_PUMP_STALE_MS = 5000
+_EDITOR_STALL_LOG_INTERVAL_MS = 10000
 
 
 def _short_session_id(session_id: str | None) -> str:
@@ -101,6 +103,8 @@ class WsOrchestratorServer(WsTransport):
         self._last_bridge_disconnected_at_ms = 0
         self._last_bridge_close_code = ""
         self._last_bridge_close_reason = ""
+        self._editor_stall_active: dict[str, Any] | None = None
+        self._recent_editor_stall: dict[str, Any] | None = None
 
     @staticmethod
     def _resolve_expected_project_path(configured: str) -> str:
@@ -407,6 +411,190 @@ class WsOrchestratorServer(WsTransport):
 
     def is_ready(self) -> bool:
         return self._ws is not None and self.session_manager.is_connected()
+
+    def editor_observation(
+        self,
+        *,
+        observed_at_ms: int | None = None,
+        network_connected: bool | None = None,
+    ) -> dict[str, Any]:
+        """Return cached, read-only Editor responsiveness evidence.
+
+        This never sends a command to Unity. A stale main-thread pump with a fresh
+        background heartbeat is only a suspected Editor update stall, not proof of
+        an exact giant-frame duration or of UPilot responsibility.
+        """
+        observed_at = int(observed_at_ms or now_ms())
+        session = self.session_manager.active
+        state = self.state
+        editor = getattr(state, "editor", None)
+        heartbeat_at = int(getattr(session, "last_heartbeat_at", 0) or 0) if session else 0
+        heartbeat_age = max(0, observed_at - heartbeat_at) if heartbeat_at else None
+        if network_connected is None:
+            network_connected = self.is_ready()
+        heartbeat_timeout = int(getattr(self.session_manager, "heartbeat_timeout_ms", 0) or 0)
+        network_fresh = bool(
+            session
+            and network_connected
+            and heartbeat_at
+            and (heartbeat_timeout <= 0 or heartbeat_age <= heartbeat_timeout)
+        )
+
+        session_id = str(getattr(session, "session_id", "") or "") if session else ""
+        state_session_id = str(getattr(editor, "session_id", "") or "") if editor else ""
+        producer_epoch = str(getattr(state, "producer_epoch", "") or "")
+        domain_generation = int(getattr(state, "domain_generation", 0) or 0)
+        pump_at = int(getattr(editor, "last_main_thread_pump_at", 0) or 0) if editor else 0
+        pump_age = max(0, observed_at - pump_at) if pump_at else None
+        identity_consistent = bool(
+            session_id
+            and state_session_id == session_id
+            and producer_epoch
+            and bool(getattr(editor, "authoritative", False))
+        )
+
+        status = "unknown"
+        reason = "evidence_unavailable"
+        if not network_fresh:
+            reason = "network_heartbeat_not_fresh"
+        elif not identity_consistent:
+            reason = "identity_transition_or_missing"
+        elif not pump_at:
+            reason = "main_thread_pump_missing"
+        elif pump_age > _EDITOR_PUMP_STALE_MS:
+            status = "waiting_editor"
+            reason = "main_thread_pump_stale"
+        else:
+            status = "responsive"
+            reason = "fresh_same_identity_evidence"
+
+        identity = (session_id, producer_epoch, domain_generation)
+        payload: dict[str, Any] = {
+            "status": status,
+            "reason": reason,
+            "observed_at_ms": observed_at,
+            "session_id": session_id,
+            "producer_epoch": producer_epoch,
+            "domain_generation": domain_generation,
+            "last_main_thread_pump_at_ms": pump_at,
+            "pump_age_ms": pump_age,
+            "heartbeat_at_ms": heartbeat_at,
+            "heartbeat_age_ms": heartbeat_age,
+            "main_thread_queue_depth": int(getattr(editor, "main_thread_queue_depth", 0) or 0) if editor else 0,
+            "last_dequeued_command_id": str(getattr(editor, "last_dequeued_command_id", "") or "")[:128] if editor else "",
+            "waiting_since_ms": 0,
+            "waiting_duration_ms": 0,
+            "observation_count": 0,
+            "recent_stall": dict(self._recent_editor_stall) if self._recent_editor_stall else None,
+        }
+        self._track_editor_stall(payload, identity)
+        return payload
+
+    def _track_editor_stall(self, payload: dict[str, Any], identity: tuple[str, str, int]) -> None:
+        status = payload["status"]
+        observed_at = int(payload["observed_at_ms"] or 0)
+        active = self._editor_stall_active
+
+        if status == "waiting_editor":
+            pump_at = int(payload.get("last_main_thread_pump_at_ms") or 0)
+            if active is None or active.get("identity") != identity:
+                if active is not None:
+                    self._finish_editor_stall(active, observed_at, "interrupted", payload.get("reason", "identity_changed"))
+                active = {
+                    "identity": identity,
+                    "started_at_ms": observed_at,
+                    "initial_pump_at_ms": pump_at,
+                    "last_log_at_ms": observed_at,
+                    "observation_count": 0,
+                    "max_pump_age_ms": 0,
+                    "last_pump_at_ms": pump_at,
+                    "last_heartbeat_at_ms": int(payload.get("heartbeat_at_ms") or 0),
+                    "last_heartbeat_age_ms": int(payload.get("heartbeat_age_ms") or 0),
+                    "last_queue_depth": int(payload.get("main_thread_queue_depth") or 0),
+                    "last_command_id": str(payload.get("last_dequeued_command_id") or "")[:128],
+                    "project_path": str(getattr(self.session_manager.active, "project_path", "") or "") if self.session_manager.active else "",
+                }
+                self._editor_stall_active = active
+                logger.warning(
+                    "Editor main thread has not advanced; suspected long update stall (cause unknown) "
+                    "project=%s session=%s epoch=%s domain=%s observedAtMs=%s pumpAtMs=%s "
+                    "pumpAgeMs=%s heartbeatAtMs=%s heartbeatAgeMs=%s queueDepth=%s lastCommand=%s",
+                    active["project_path"], identity[0], identity[1], identity[2], observed_at, pump_at,
+                    payload.get("pump_age_ms"), payload.get("heartbeat_at_ms"), payload.get("heartbeat_age_ms"),
+                    payload.get("main_thread_queue_depth"), payload.get("last_dequeued_command_id") or "?",
+                )
+            active["observation_count"] += 1
+            active["max_pump_age_ms"] = max(
+                int(active.get("max_pump_age_ms") or 0), int(payload.get("pump_age_ms") or 0)
+            )
+            active["last_pump_at_ms"] = pump_at
+            active["last_heartbeat_at_ms"] = int(payload.get("heartbeat_at_ms") or 0)
+            active["last_heartbeat_age_ms"] = int(payload.get("heartbeat_age_ms") or 0)
+            active["last_queue_depth"] = int(payload.get("main_thread_queue_depth") or 0)
+            active["last_command_id"] = str(payload.get("last_dequeued_command_id") or "")[:128]
+            if observed_at - int(active.get("last_log_at_ms") or 0) >= _EDITOR_STALL_LOG_INTERVAL_MS:
+                active["last_log_at_ms"] = observed_at
+                logger.warning(
+                    "Editor main-thread update stall continues project=%s session=%s epoch=%s domain=%s "
+                    "observedAtMs=%s observedIntervalMs=%s observations=%s pumpAtMs=%s "
+                    "heartbeatAtMs=%s heartbeatAgeMs=%s queueDepth=%s lastCommand=%s",
+                    active["project_path"], identity[0], identity[1], identity[2], observed_at,
+                    active["max_pump_age_ms"], active["observation_count"], pump_at,
+                    payload.get("heartbeat_at_ms"), payload.get("heartbeat_age_ms"),
+                    payload.get("main_thread_queue_depth"), payload.get("last_dequeued_command_id") or "?",
+                )
+            payload["waiting_since_ms"] = int(active["started_at_ms"] or 0)
+            payload["waiting_duration_ms"] = max(0, observed_at - int(active["started_at_ms"] or 0))
+            payload["observation_count"] = int(active["observation_count"] or 0)
+            return
+
+        if active is None:
+            return
+        if status == "responsive" and active.get("identity") == identity and int(payload.get("last_main_thread_pump_at_ms") or 0) > int(active.get("initial_pump_at_ms") or 0):
+            self._finish_editor_stall(active, observed_at, "recovered", payload.get("reason", "responsive"))
+        else:
+            self._finish_editor_stall(active, observed_at, "interrupted", payload.get("reason", "evidence_unknown"))
+        payload["recent_stall"] = dict(self._recent_editor_stall) if self._recent_editor_stall else None
+
+    def _finish_editor_stall(self, active: dict[str, Any], ended_at: int, outcome: str, reason: str) -> None:
+        identity = active.get("identity") or ("", "", 0)
+        summary = {
+            "outcome": outcome,
+            "reason": str(reason or "")[:128],
+            "started_at_ms": int(active.get("started_at_ms") or 0),
+            "ended_at_ms": ended_at,
+            "duration_ms": max(0, ended_at - int(active.get("started_at_ms") or 0)),
+            "observed_update_gap_ms": int(active.get("max_pump_age_ms") or 0),
+            "observation_count": int(active.get("observation_count") or 0),
+            "session_id": str(identity[0] or ""),
+            "producer_epoch": str(identity[1] or ""),
+            "domain_generation": int(identity[2] or 0),
+        }
+        self._recent_editor_stall = summary
+        self._editor_stall_active = None
+        if outcome == "recovered":
+            logger.info(
+                "Editor main thread resumed project=%s session=%s epoch=%s domain=%s "
+                "startedAtMs=%s endedAtMs=%s observedUpdateGapMs=%s stallObservationMs=%s "
+                "observations=%s pumpAtMs=%s heartbeatAtMs=%s heartbeatAgeMs=%s queueDepth=%s lastCommand=%s",
+                active.get("project_path", ""), identity[0], identity[1], identity[2],
+                summary["started_at_ms"], summary["ended_at_ms"], summary["observed_update_gap_ms"],
+                summary["duration_ms"], summary["observation_count"], active.get("last_pump_at_ms", 0),
+                active.get("last_heartbeat_at_ms", 0), active.get("last_heartbeat_age_ms", 0),
+                active.get("last_queue_depth", 0), active.get("last_command_id") or "?",
+            )
+        else:
+            logger.warning(
+                "Editor main-thread stall observation interrupted without claiming recovery "
+                "project=%s session=%s epoch=%s domain=%s reason=%s startedAtMs=%s endedAtMs=%s "
+                "observedUpdateGapMs=%s observations=%s pumpAtMs=%s heartbeatAtMs=%s heartbeatAgeMs=%s "
+                "queueDepth=%s lastCommand=%s",
+                active.get("project_path", ""), identity[0], identity[1], identity[2], summary["reason"],
+                summary["started_at_ms"], summary["ended_at_ms"], summary["observed_update_gap_ms"],
+                summary["observation_count"], active.get("last_pump_at_ms", 0),
+                active.get("last_heartbeat_at_ms", 0), active.get("last_heartbeat_age_ms", 0),
+                active.get("last_queue_depth", 0), active.get("last_command_id") or "?",
+            )
 
     def register_pending(self, command_id: str) -> asyncio.Future:
         loop = asyncio.get_running_loop()
@@ -769,6 +957,7 @@ class WsOrchestratorServer(WsTransport):
             self._last_bridge_close_reason = str(getattr(websocket, "close_reason", "") or "")[:256]
             self._ws = None
             self.session_manager.disconnect(auth_session_id)
+            self.editor_observation(network_connected=False)
             if self.state.compile.status in ("queued", "accepted", "compiling", "verifying"):
                 if self._domain_reloading:
                     self.state.compile.status = "compiling"
@@ -980,6 +1169,7 @@ class WsOrchestratorServer(WsTransport):
                 if int(heartbeat_context.get("stateContractVersion") or 0) >= 2:
                     accepted = self.state.update_editor_execution_state(heartbeat_context)
                     if accepted:
+                        self.editor_observation()
                         self._notify_editor_execution_state()
                 else:
                     self.state.update_editor_state(heartbeat_context)
@@ -1036,6 +1226,7 @@ class WsOrchestratorServer(WsTransport):
                 if str(self.state.transition).lower() == "domain_reload_starting":
                     self._domain_reloading = True
                     self._extend_grace_for_domain_reload()
+                self.editor_observation()
                 self._notify_editor_execution_state()
                 return
             if message.name == "domain_reload.starting":

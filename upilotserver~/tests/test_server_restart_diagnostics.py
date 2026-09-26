@@ -201,6 +201,7 @@ def test_health_bridge_probe_requires_real_roundtrip_and_matching_session(monkey
                                          base_url="http://127.0.0.1") as client:
                 basic = (await client.get("/health")).json()
                 assert "bridge_probe_ok" not in basic
+                assert basic["editor_observation"]["status"] == "unknown"
                 assert bridge.commands == []
                 assert basic["bridge_diagnostics"]["oversize_actual_bytes"] == 1300775
                 nonce = "a" * 32

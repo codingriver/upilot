@@ -64,6 +64,21 @@ namespace CodingRiver.UPilot
         public int StatusGeneration;
         public string StatusCancellationReason;
         public long LastSuccessfulStatusAtUtcMs;
+        public bool EditorObservationAvailable;
+        public string EditorObservationStatus;
+        public string EditorObservationReason;
+        public long EditorObservationObservedAtUtcMs;
+        public long EditorObservationWaitingSinceUtcMs;
+        public long EditorObservationWaitingDurationMs;
+        public long EditorObservationPumpAgeMs;
+        public long EditorObservationHeartbeatAgeMs;
+        public int EditorObservationCount;
+        public string EditorObservationSessionId;
+        public string EditorObservationProducerEpoch;
+        public int EditorObservationDomainGeneration;
+        public int EditorObservationQueueDepth;
+        public string EditorObservationLastCommandId;
+        internal UPilotEditorStallSummary RecentEditorStall;
         internal UPilotServerHealth Health;
     }
 
@@ -81,6 +96,7 @@ namespace CodingRiver.UPilot
         private const string PackageName = "io.github.codingriver.upilot";
         private static readonly string CurrentProjectLogPath =
             Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
+        internal static string ServerLogPath => CurrentProjectLogPath;
         private string _pythonEntryPath = DefaultPythonEntry;
         private string _logLevel = DefaultLogLevel;
         private bool _autoStart = true;
@@ -185,6 +201,12 @@ namespace CodingRiver.UPilot
         private string _activeStatusRefreshStage = "port_probe";
         private bool _recoveryObservationRunning;
         private long _lastRecoveryObservedStatusAtUtcMs;
+        private bool _editorHealthObservationEnabled;
+        private Task _editorHealthObservationTask;
+        private CancellationTokenSource _editorHealthObservationCancellation;
+        private Task _editorHealthObservationLoopTask;
+        private CancellationTokenSource _editorHealthObservationLoopCancellation;
+        private long _nextEditorHealthObservationAtUtcMs;
 
         private static readonly System.Net.Http.HttpClient _httpClient = CreateLoopbackStatusClient();
 
@@ -445,10 +467,12 @@ namespace CodingRiver.UPilot
         public McpServerStatus GetStatus()
         {
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            if (now - _lastRefreshMs > RefreshIntervalMs)
-                RequestBackgroundStatusRefresh();
             McpServerStatus status;
             lock (_statusLock) status = _cachedStatus;
+            if (now - _lastRefreshMs > RefreshIntervalMs && ShouldRequestFullStatusRefresh(status))
+                RequestBackgroundStatusRefresh();
+            lock (_statusLock) status = _cachedStatus;
+            RequestEditorHealthObservationIfNeeded(status, now);
             ObservePossibleRecovery(status);
             return status;
         }
@@ -460,7 +484,12 @@ namespace CodingRiver.UPilot
                 int interrupted = Interlocked.Increment(ref _statusGeneration) - 1;
                 _statusInterruptReason = lifecycleReason;
                 _statusInterruptedGeneration = interrupted;
-                if (!string.IsNullOrEmpty(lifecycleReason)) _statusRefreshCancellation?.Cancel();
+                if (!string.IsNullOrEmpty(lifecycleReason))
+                {
+                    _statusRefreshCancellation?.Cancel();
+                    _editorHealthObservationCancellation?.Cancel();
+                    _nextEditorHealthObservationAtUtcMs = 0;
+                }
                 // A cache refresh must not erase an error or restart its deadline.
                 _lastRefreshMs = 0;
             }
@@ -468,7 +497,7 @@ namespace CodingRiver.UPilot
 
         public async Task<McpServerStatus> GetFreshStatusAsync(long deadlineUtcMs = 0)
         {
-            RequestBackgroundStatusRefresh();
+            RequestBackgroundStatusRefresh(supersedeEditorObservation: true);
             Task<McpServerStatus> task;
             lock (_statusLock) task = _statusRefreshTask;
             if (deadlineUtcMs > 0)
@@ -480,6 +509,228 @@ namespace CodingRiver.UPilot
             var result = await task;
             ObservePossibleRecovery(result);
             return result;
+        }
+
+        internal void EnableEditorHealthObservation()
+        {
+            lock (_statusLock)
+            {
+                _editorHealthObservationEnabled = true;
+                if (_nextEditorHealthObservationAtUtcMs <= 0)
+                {
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var lastObservedAt = Math.Max(
+                        _cachedStatus.LastSuccessfulStatusAtUtcMs,
+                        _cachedStatus.EditorObservationObservedAtUtcMs);
+                    _nextEditorHealthObservationAtUtcMs = lastObservedAt > 0
+                        ? lastObservedAt + GetEditorHealthObservationIntervalMs(_cachedStatus)
+                        : now;
+                }
+
+                if (_editorHealthObservationLoopTask == null || _editorHealthObservationLoopTask.IsCompleted ||
+                    _editorHealthObservationLoopCancellation?.IsCancellationRequested == true)
+                {
+                    var cancellation = new CancellationTokenSource();
+                    _editorHealthObservationLoopCancellation = cancellation;
+                    _editorHealthObservationLoopTask = RunEditorHealthObservationLoopAsync(cancellation);
+                }
+            }
+        }
+
+        internal void DisableEditorHealthObservation()
+        {
+            lock (_statusLock)
+            {
+                _editorHealthObservationEnabled = false;
+                _nextEditorHealthObservationAtUtcMs = 0;
+                _editorHealthObservationCancellation?.Cancel();
+                _editorHealthObservationLoopCancellation?.Cancel();
+            }
+        }
+
+        private async Task RunEditorHealthObservationLoopAsync(CancellationTokenSource cancellation)
+        {
+            try
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    McpServerStatus status;
+                    lock (_statusLock)
+                    {
+                        if (!_editorHealthObservationEnabled) break;
+                        status = _cachedStatus;
+                    }
+
+                    RequestEditorHealthObservationIfNeeded(
+                        status, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    await Task.Delay(200, cancellation.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                // Closing the window or reloading the domain stops the observer without changing service state.
+            }
+            finally
+            {
+                lock (_statusLock)
+                {
+                    if (ReferenceEquals(_editorHealthObservationLoopCancellation, cancellation))
+                    {
+                        _editorHealthObservationLoopCancellation = null;
+                        _editorHealthObservationLoopTask = null;
+                    }
+                }
+                cancellation.Dispose();
+            }
+        }
+
+        private void RequestEditorHealthObservationIfNeeded(McpServerStatus status, long nowUtcMs)
+        {
+            if (!status.IsRunning || !status.HealthEndpointResponded || status.HealthServerProcessId <= 0 ||
+                IsServiceTransitionActive || UPilotServiceMaintenance.IsActive || UPilotQuickStart.IsExplicitlyStopped)
+                return;
+
+            lock (_statusLock)
+            {
+                if (!_editorHealthObservationEnabled ||
+                    (_editorHealthObservationTask != null && !_editorHealthObservationTask.IsCompleted) ||
+                    (_statusRefreshTask != null && !_statusRefreshTask.IsCompleted))
+                    return;
+
+                if (_nextEditorHealthObservationAtUtcMs <= 0)
+                    _nextEditorHealthObservationAtUtcMs =
+                        nowUtcMs + GetEditorHealthObservationIntervalMs(status);
+                if (nowUtcMs < _nextEditorHealthObservationAtUtcMs)
+                    return;
+
+                var generation = Volatile.Read(ref _statusGeneration);
+                var cancellation = new CancellationTokenSource();
+                _editorHealthObservationCancellation = cancellation;
+                _editorHealthObservationTask = RefreshEditorHealthObservationAsync(
+                    HttpPort, generation, status, cancellation);
+            }
+        }
+
+        private async Task RefreshEditorHealthObservationAsync(
+            int httpPort,
+            int generation,
+            McpServerStatus expected,
+            CancellationTokenSource cancellation)
+        {
+            try
+            {
+                using var request = CreateLoopbackStatusRequest($"http://127.0.0.1:{httpPort}/health");
+                using var response = await _httpClient.SendAsync(request, cancellation.Token);
+                if (!response.IsSuccessStatusCode)
+                    return;
+
+                var json = await response.Content.ReadAsStringAsync();
+                var health = JsonUtility.FromJson<UPilotServerHealth>(json);
+                var observation = health?.editor_observation;
+
+                lock (_statusLock)
+                {
+                    if (!_editorHealthObservationEnabled || generation != Volatile.Read(ref _statusGeneration) ||
+                        IsServiceTransitionActive || UPilotServiceMaintenance.IsActive)
+                    {
+                        _lastRefreshMs = 0;
+                        return;
+                    }
+
+                    if (observation == null || !MatchesEditorObservationIdentity(expected, health, observation))
+                    {
+                        // The endpoint changed identity or no longer exposes the optional observation contract.
+                        // Drop the old observation so the normal full status path can establish fresh ownership.
+                        var invalidated = _cachedStatus;
+                        ApplyEditorObservation(ref invalidated, null);
+                        _cachedStatus = invalidated;
+                        _lastRefreshMs = 0;
+                        return;
+                    }
+
+                    var status = _cachedStatus;
+                    status.Health ??= health;
+                    status.Health.editor_observation = observation;
+                    ApplyEditorObservation(ref status, observation);
+                    _cachedStatus = status;
+                }
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                // Window/lifecycle/service transitions invalidate this read-only observation.
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("SERVER", "Lightweight Editor health observation failed: " + ex.GetType().Name + ": " + ex.Message);
+            }
+            finally
+            {
+                lock (_statusLock)
+                {
+                    if (ReferenceEquals(_editorHealthObservationCancellation, cancellation))
+                    {
+                        _editorHealthObservationCancellation = null;
+                        _editorHealthObservationTask = null;
+                        _nextEditorHealthObservationAtUtcMs = _editorHealthObservationEnabled
+                            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
+                              GetEditorHealthObservationIntervalMs(_cachedStatus)
+                            : 0;
+                    }
+                }
+                cancellation.Dispose();
+            }
+        }
+
+        internal static bool MatchesEditorObservationIdentity(
+            McpServerStatus expected,
+            UPilotServerHealth health,
+            UPilotEditorObservation observation)
+        {
+            if (health == null || observation == null ||
+                expected.HealthServerProcessId <= 0 || health.server_pid != expected.HealthServerProcessId)
+                return false;
+            if (!string.IsNullOrEmpty(expected.Health?.server_instance_id) &&
+                health.server_instance_id != expected.Health.server_instance_id)
+                return false;
+            return observation.session_id == expected.EditorObservationSessionId &&
+                   observation.producer_epoch == expected.EditorObservationProducerEpoch &&
+                   observation.domain_generation == expected.EditorObservationDomainGeneration;
+        }
+
+        internal static void ApplyEditorObservation(ref McpServerStatus status, UPilotEditorObservation observation)
+        {
+            var recognized = observation != null &&
+                             (observation.status == "responsive" || observation.status == "waiting_editor" ||
+                              observation.status == "unknown");
+            status.EditorObservationAvailable = recognized;
+            status.EditorObservationStatus = recognized ? observation.status : "";
+            status.EditorObservationReason = recognized ? observation.reason ?? "" : "";
+            status.EditorObservationObservedAtUtcMs = recognized ? observation.observed_at_ms : 0;
+            status.EditorObservationWaitingSinceUtcMs = recognized ? observation.waiting_since_ms : 0;
+            status.EditorObservationWaitingDurationMs = recognized ? observation.waiting_duration_ms : 0;
+            status.EditorObservationPumpAgeMs = recognized ? observation.pump_age_ms : 0;
+            status.EditorObservationHeartbeatAgeMs = recognized ? observation.heartbeat_age_ms : 0;
+            status.EditorObservationCount = recognized ? observation.observation_count : 0;
+            status.EditorObservationSessionId = recognized ? observation.session_id ?? "" : "";
+            status.EditorObservationProducerEpoch = recognized ? observation.producer_epoch ?? "" : "";
+            status.EditorObservationDomainGeneration = recognized ? observation.domain_generation : 0;
+            status.EditorObservationQueueDepth = recognized ? observation.main_thread_queue_depth : 0;
+            status.EditorObservationLastCommandId = recognized ? observation.last_dequeued_command_id ?? "" : "";
+            status.RecentEditorStall = recognized ? observation.recent_stall : null;
+        }
+
+        internal static bool ShouldRequestFullStatusRefresh(McpServerStatus status) =>
+            !status.EditorObservationAvailable || status.EditorObservationStatus != "waiting_editor";
+
+        internal static int GetEditorHealthObservationIntervalMs(McpServerStatus status) =>
+            status.EditorObservationAvailable && status.EditorObservationStatus == "waiting_editor" ? 1000 : 2000;
+
+        private void UpdateEditorHealthObservationScheduleLocked(McpServerStatus status, long completedAtUtcMs)
+        {
+            _nextEditorHealthObservationAtUtcMs =
+                _editorHealthObservationEnabled && status.HealthEndpointResponded && status.HealthServerProcessId > 0
+                    ? completedAtUtcMs + GetEditorHealthObservationIntervalMs(status)
+                    : 0;
         }
 
         private void ObservePossibleRecovery(McpServerStatus status)
@@ -501,6 +752,7 @@ namespace CodingRiver.UPilot
 
         private async Task VerifyRecoveryAsync(string operationId, McpServerStatus status, BridgeStatus bridge)
         {
+            var startedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             try
             {
                 var issues = UPilotDeploymentDiagnostics.Observe(bridge, status);
@@ -513,18 +765,25 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                LogRestartProbeException(operationId, "post_restart_readonly_observation", startedAtUtcMs, ex);
                 Logger.LogWarning("SERVER", "Read-only recovery observation failed: " + ex.Message);
             }
             finally { _recoveryObservationRunning = false; }
         }
 
-        private void RequestBackgroundStatusRefresh()
+        private void RequestBackgroundStatusRefresh(bool supersedeEditorObservation = false)
         {
             var httpPort = HttpPort;
             var wsPort = WsPort;
             lock (_statusLock)
             {
                 if (_statusRefreshTask != null && !_statusRefreshTask.IsCompleted) return;
+                if (_editorHealthObservationTask != null && !_editorHealthObservationTask.IsCompleted)
+                {
+                    if (!supersedeEditorObservation) return;
+                    _editorHealthObservationCancellation?.Cancel();
+                    _nextEditorHealthObservationAtUtcMs = 0;
+                }
                 var generation = Volatile.Read(ref _statusGeneration);
                 var cancellation = new CancellationTokenSource();
                 _activeStatusRefreshStage = "port_probe";
@@ -621,6 +880,7 @@ namespace CodingRiver.UPilot
                     status.HealthServerProcessId = stats.HealthServerProcessId;
                     status.HealthProjectPath = stats.HealthProjectPath;
                     status.Health = stats.Health;
+                    ApplyEditorObservation(ref status, stats.Health?.editor_observation);
                     status.StatusFailureStage = stats.HealthEndpointResponded ? "" : "health_query";
                     if (!stats.HealthEndpointResponded)
                         status.ErrorMessage = "状态获取失败：" + stats.Failure;
@@ -651,8 +911,10 @@ namespace CodingRiver.UPilot
                     ? refreshedAt : _cachedStatus.LastSuccessfulStatusAtUtcMs;
                 if (!string.IsNullOrEmpty(status.ErrorMessage))
                     status.Health ??= _cachedStatus.Health;
+                ApplyEditorObservation(ref status, status.Health?.editor_observation);
                 UpdateDiagnosisTracking(ref status, refreshedAt);
                 _cachedStatus = status;
+                UpdateEditorHealthObservationScheduleLocked(status, refreshedAt);
                 _lastRefreshMs = refreshedAt;
             }
 
@@ -1902,6 +2164,7 @@ namespace CodingRiver.UPilot
 
         private async Task ProbeRestartHealthAsync(string operationId, int processId)
         {
+            var probeStartedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             UPilotServerRestartDiagnostics.BeginStatusProbe(operationId);
             var probeEnded = false;
             var readOnlyStarted = false;
@@ -1923,6 +2186,9 @@ namespace CodingRiver.UPilot
                     UPilotServerRestartDiagnostics.EndStatusProbe(operationId, outcome,
                         status.StatusFailureStage, status.StatusCancellationReason, probeError);
                     probeEnded = true;
+                    if (outcome != "success")
+                        LogRestartProbeOutcome(operationId, "status_collection", probeStartedAtUtcMs,
+                            outcome, probeError, status);
                     if (outcome == "lifecycle_canceled")
                     {
                         UPilotServerRestartDiagnostics.RecordCanceled(operationId,
@@ -1967,6 +2233,8 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                LogRestartProbeException(operationId,
+                    readOnlyStarted ? "readonly_roundtrip" : "status_collection", probeStartedAtUtcMs, ex);
                 if (string.Equals(operationId, _restartOperationId, StringComparison.Ordinal))
                 {
                     if (!probeEnded && UPilotServerRestartDiagnostics.IsActive(operationId))
@@ -1992,6 +2260,80 @@ namespace CodingRiver.UPilot
                         FinishRestartObservation();
                 }
             }
+        }
+
+        private void LogRestartProbeOutcome(
+            string operationId,
+            string phase,
+            long startedAtUtcMs,
+            string outcome,
+            string error,
+            McpServerStatus status)
+        {
+            try
+            {
+                var elapsed = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedAtUtcMs);
+                Logger.LogWarning("SERVER",
+                    $"Restart diagnostic operation={operationId} phase={phase} elapsedMs={elapsed} " +
+                    $"outcome={outcome} error={TruncateDiagnostic(error, 1024)} " +
+                    BuildEditorObservationDiagnostic(status));
+            }
+            catch
+            {
+                // Diagnostic logging must never affect restart control flow or its result.
+            }
+        }
+
+        private void LogRestartProbeException(
+            string operationId,
+            string phase,
+            long startedAtUtcMs,
+            Exception exception)
+        {
+            try
+            {
+                McpServerStatus cached;
+                lock (_statusLock) cached = _cachedStatus;
+                var elapsed = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedAtUtcMs);
+                var chain = new StringBuilder();
+                var current = exception;
+                for (var depth = 0; current != null && depth < 4; depth++, current = current.InnerException)
+                {
+                    if (depth > 0) chain.Append(" -> ");
+                    chain.Append(current.GetType().FullName).Append(": ").Append(current.Message);
+                }
+                var stack = TruncateDiagnostic(exception.StackTrace, 4096);
+                Logger.LogWarning("SERVER",
+                    $"Restart diagnostic operation={operationId} phase={phase} elapsedMs={elapsed} " +
+                    $"exceptionChain={TruncateDiagnostic(chain.ToString(), 2048)} stack={stack} " +
+                    BuildEditorObservationDiagnostic(cached));
+            }
+            catch
+            {
+                // Diagnostic logging must never affect restart control flow or its result.
+            }
+        }
+
+        private static string BuildEditorObservationDiagnostic(McpServerStatus status)
+        {
+            return "editorObservation=" +
+                   $"available:{status.EditorObservationAvailable}," +
+                   $"status:{status.EditorObservationStatus ?? ""}," +
+                   $"reason:{status.EditorObservationReason ?? ""}," +
+                   $"observedAtMs:{status.EditorObservationObservedAtUtcMs}," +
+                   $"session:{status.EditorObservationSessionId ?? ""}," +
+                   $"epoch:{status.EditorObservationProducerEpoch ?? ""}," +
+                   $"domain:{status.EditorObservationDomainGeneration}," +
+                   $"pumpAgeMs:{status.EditorObservationPumpAgeMs}," +
+                   $"heartbeatAgeMs:{status.EditorObservationHeartbeatAgeMs}," +
+                   $"queueDepth:{status.EditorObservationQueueDepth}," +
+                   $"lastCommand:{status.EditorObservationLastCommandId ?? ""}";
+        }
+
+        private static string TruncateDiagnostic(string value, int maxLength)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            return value.Length <= maxLength ? value : value.Substring(0, maxLength) + "…";
         }
 
         internal static string ClassifyRestartProbe(McpServerStatus status)
