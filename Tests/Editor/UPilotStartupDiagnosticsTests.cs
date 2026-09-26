@@ -717,6 +717,28 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void LoopbackStatusProbeBypassesProxyAndDoesNotReuseServerConnections()
+        {
+            using var handler = UPilotMcpServerManager.CreateLoopbackStatusHandler();
+            Assert.That(handler.UseProxy, Is.False);
+
+            using var request = UPilotMcpServerManager.CreateLoopbackStatusRequest(
+                "http://127.0.0.1:8011/health");
+            Assert.That(request.Method, Is.EqualTo(System.Net.Http.HttpMethod.Get));
+            Assert.That(request.Headers.ConnectionClose, Is.True);
+        }
+
+        [Test]
+        public void HealthProjectIdentityUsesConfiguredPathBeforeBridgeSessionIsAvailable()
+        {
+            var json = "{\"configured_project_path\":\"F:/xclient2\",\"project_path\":\"\"}";
+            Assert.That(UPilotMcpServerManager.ResolveHealthProjectPath(json), Is.EqualTo("F:/xclient2"));
+
+            var legacyJson = "{\"project_path\":\"F:/legacy-project\"}";
+            Assert.That(UPilotMcpServerManager.ResolveHealthProjectPath(legacyJson), Is.EqualTo("F:/legacy-project"));
+        }
+
+        [Test]
         public void RestartHealthRejectsPidAndProjectMismatch()
         {
             var project = Path.Combine(Path.GetTempPath(), "upilot-restart-health");

@@ -186,10 +186,27 @@ namespace CodingRiver.UPilot
         private bool _recoveryObservationRunning;
         private long _lastRecoveryObservedStatusAtUtcMs;
 
-        private static readonly System.Net.Http.HttpClient _httpClient = new()
+        private static readonly System.Net.Http.HttpClient _httpClient = CreateLoopbackStatusClient();
+
+        private static System.Net.Http.HttpClient CreateLoopbackStatusClient()
         {
-            Timeout = TimeSpan.FromSeconds(2)
-        };
+            return new System.Net.Http.HttpClient(CreateLoopbackStatusHandler())
+            {
+                Timeout = TimeSpan.FromSeconds(2)
+            };
+        }
+
+        internal static System.Net.Http.HttpClientHandler CreateLoopbackStatusHandler()
+        {
+            return new System.Net.Http.HttpClientHandler { UseProxy = false };
+        }
+
+        internal static System.Net.Http.HttpRequestMessage CreateLoopbackStatusRequest(string url)
+        {
+            var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, url);
+            request.Headers.ConnectionClose = true;
+            return request;
+        }
 
         private readonly struct ServerStatsProbe
         {
@@ -693,10 +710,78 @@ namespace CodingRiver.UPilot
             string healthProjectPath = "";
             UPilotServerHealth health = null;
             string failure = "";
+
+            // /health is the authoritative restart gate. Probe it before optional statistics,
+            // and close each loopback connection so a replaced Server cannot leave a stale
+            // pooled connection poisoning later verification requests.
+            try
+            {
+                var url = $"http://127.0.0.1:{httpPort}/health";
+                using var request = CreateLoopbackStatusRequest(url);
+                using var response = await _httpClient.SendAsync(
+                    request,
+                    System.Net.Http.HttpCompletionOption.ResponseHeadersRead,
+                    token);
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadAsStringAsync();
+                    health = JsonUtility.FromJson<UPilotServerHealth>(json);
+                    if (health == null) throw new InvalidDataException("/health 未返回 JSON 对象");
+                    responded = true;
+                    healthEndpointResponded = true;
+                    identifiesUPilot |= IsUPilotServerPayload(json);
+                    healthServerProcessId = ParseIntFromJson(json, "server_pid");
+                    healthProjectPath = ResolveHealthProjectPath(json);
+                    version = health.server_version;
+                    protocol = health.protocol_version;
+                    commit = health.build_commit;
+                    channel = health.build_channel;
+
+                    var healthToolCountsKnown = HasJsonProperty(json, "tool_count") ||
+                                                HasJsonProperty(json, "available_tool_count");
+                    var healthDetailedToolCountsKnown = HasJsonProperty(json, "registered_tool_count") &&
+                                                        HasJsonProperty(json, "available_tool_count") &&
+                                                        HasJsonProperty(json, "callable_tool_count");
+                    if (healthDetailedToolCountsKnown)
+                    {
+                        toolCountsKnown = true;
+                        detailedToolCountsKnown = true;
+                        registeredToolCount = ParseIntFromJson(json, "registered_tool_count");
+                        availableToolCount = ParseIntFromJson(json, "available_tool_count");
+                        callableToolCount = ParseIntFromJson(json, "callable_tool_count");
+                    }
+                    else if (healthToolCountsKnown)
+                    {
+                        toolCountsKnown = true;
+                        availableToolCount = HasJsonProperty(json, "available_tool_count")
+                            ? ParseIntFromJson(json, "available_tool_count")
+                            : ParseIntFromJson(json, "tool_count");
+                        registeredToolCount = availableToolCount;
+                        callableToolCount = availableToolCount;
+                    }
+
+                    toolRegistryVersion = ParseIntFromJson(json, "registry_version");
+                    toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
+                }
+                else failure = "/health HTTP " + (int)response.StatusCode;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failure = "/health: " + ex.GetType().Name + ": " + ex.Message;
+            }
+
             try
             {
                 var url = $"http://127.0.0.1:{httpPort}/stats";
-                using var response = await _httpClient.GetAsync(url, token);
+                using var request = CreateLoopbackStatusRequest(url);
+                using var response = await _httpClient.SendAsync(
+                    request,
+                    System.Net.Http.HttpCompletionOption.ResponseHeadersRead,
+                    token);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -732,65 +817,8 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                failure = "/stats: " + ex.GetType().Name + ": " + ex.Message;
-            }
-
-            try
-            {
-                var url = $"http://127.0.0.1:{httpPort}/health";
-                using var response = await _httpClient.GetAsync(url, token);
-                if (response.IsSuccessStatusCode)
-                {
-                    var json = await response.Content.ReadAsStringAsync();
-                    health = JsonUtility.FromJson<UPilotServerHealth>(json);
-                    if (health == null) throw new InvalidDataException("/health 未返回 JSON 对象");
-                    responded = true;
-                    healthEndpointResponded = true;
-                    identifiesUPilot |= IsUPilotServerPayload(json);
-                    healthServerProcessId = ParseIntFromJson(json, "server_pid");
-                    healthProjectPath = ParseStringFromJson(json, "project_path");
-                    version = health.server_version;
-                    protocol = health.protocol_version;
-                    commit = health.build_commit;
-                    channel = health.build_channel;
-
-                    var healthToolCountsKnown = HasJsonProperty(json, "tool_count") ||
-                                                HasJsonProperty(json, "available_tool_count");
-                    var healthDetailedToolCountsKnown = HasJsonProperty(json, "registered_tool_count") &&
-                                                        HasJsonProperty(json, "available_tool_count") &&
-                                                        HasJsonProperty(json, "callable_tool_count");
-                    if (healthDetailedToolCountsKnown)
-                    {
-                        toolCountsKnown = true;
-                        detailedToolCountsKnown = true;
-                        registeredToolCount = ParseIntFromJson(json, "registered_tool_count");
-                        availableToolCount = ParseIntFromJson(json, "available_tool_count");
-                        callableToolCount = ParseIntFromJson(json, "callable_tool_count");
-                    }
-                    else if (!toolCountsKnown && healthToolCountsKnown)
-                    {
-                        toolCountsKnown = true;
-                        availableToolCount = HasJsonProperty(json, "available_tool_count")
-                            ? ParseIntFromJson(json, "available_tool_count")
-                            : ParseIntFromJson(json, "tool_count");
-                        registeredToolCount = availableToolCount;
-                        callableToolCount = availableToolCount;
-                    }
-
-                    if (toolRegistryVersion <= 0)
-                        toolRegistryVersion = ParseIntFromJson(json, "registry_version");
-                    if (string.IsNullOrEmpty(toolCategorySummary))
-                        toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
-                }
-                else failure = "/health HTTP " + (int)response.StatusCode;
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                failure = (failure.Length > 0 ? failure + "; " : "") + "/health: " + ex.GetType().Name + ": " + ex.Message;
+                failure = (failure.Length > 0 ? failure + "; " : "") +
+                          "/stats: " + ex.GetType().Name + ": " + ex.Message;
             }
 
             return new ServerStatsProbe(
@@ -828,6 +856,14 @@ namespace CodingRiver.UPilot
                 status.ProcessOwnershipEvidence,
                 "UPilot 健康检查响应",
                 StringComparison.Ordinal);
+        }
+
+        internal static string ResolveHealthProjectPath(string json)
+        {
+            var configured = ParseStringFromJson(json, "configured_project_path");
+            return string.IsNullOrWhiteSpace(configured)
+                ? ParseStringFromJson(json, "project_path")
+                : configured;
         }
 
         private static bool HasJsonProperty(string json, string key)
@@ -1365,7 +1401,7 @@ namespace CodingRiver.UPilot
                 return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             }).GetAwaiter().GetResult();
             return ParseIntFromJson(json, "server_pid") == oldPid &&
-                   SameProjectPath(ParseStringFromJson(json, "project_path"), expectedProjectPath) &&
+                   SameProjectPath(ResolveHealthProjectPath(json), expectedProjectPath) &&
                    IsUPilotServerPayload(json);
         }
 

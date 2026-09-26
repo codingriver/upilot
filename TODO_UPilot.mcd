@@ -224,3 +224,12 @@
 - 状态：待改进；不属于本次 MCP Server 停止/重启修复。
 - 观察：2026-09-24 canonical 项目 `Tests~/UPilotTest` 的登记批次 `wb-4e433bd7-fa0d-49f4-bcaf-ed9ae9080354` 于 `1790247507370` 请求编译，约 90 秒内一直处于 `compilePhase=queued`，Editor 心跳正常、`isCompiling=true` 但编译开始时间为 0。`unity_editor_focus_state` 指出 Unity 在后台；`unity_editor_focus` 返回 `FOCUS_NOT_ACQUIRED`。最终该批次以关联编译成功终结，不能将延迟误报成编译失败。
 - 建议：在 `unity_write_batch_status` 的长时间 queued 诊断中区分 Editor 未聚焦/主线程持续运行/实际导入阻塞，提示可用且安全的等待/聚焦行动，并明确前台获取失败后的非破坏性处理。保留一次写批次/一次编译、不得自动重复发起编译。
+
+### D15 / P1：MCP Server 重启后状态探测复用旧 HTTP 连接导致验证超时
+
+- 状态：2026-09-26 已实施代码修复并完成 canonical Unity 项目定向验证；尚未发起新的 Server 重启，因此不能把原失败维护操作改写为重启验收成功。
+- 观察与复现：维护操作 `restart-930c2a28806043a7a6ccafde6ff8cd6b` 已完成新 Server 进程和新 Bridge 会话替换，但 Unity 内长生命周期状态客户端持续在 `health_query` 阶段报告 `/stats` `HttpRequestException` 与 `/health` `TaskCanceledException`。同一 Unity 进程内由只读往返路径创建的新 `HttpClient` 能成功访问 `/health`，证明端点可用，故障集中在 Server 被替换后遗留的池化连接。此前另一次操作还暴露 `/health` 在 Bridge 会话尚未完整建立时应优先使用 `configured_project_path` 的身份字段。
+- 影响工作流/工具：`UPilotMcpServerManager.GetFreshStatusAsync`、AI 服务维护重启验证的 `/health` 门、PID/精确项目路径和 Bridge 会话身份恢复。
+- 已实施改进：loopback 状态客户端禁用代理；每个状态请求发送 `Connection: close`，避免跨 Server 进程复用旧连接；先请求权威 `/health`，再读取可选 `/stats`，统计端点失败不覆盖已成功的健康门；项目身份优先读取 `configured_project_path`，缺失时兼容回退 `project_path`。未放宽 PID、项目路径、部署身份、新会话或只读往返验证。
+- 验证证据：写批次 `wb-03b0c6ea-85c5-4192-887a-ef8ff528ada5` 为 verified/passed，`errorsVerified=true`、`correlationVerified=true`、0 编译错误；修复后的 Unity 内真实 `GetFreshStatusAsync` 返回 `health=True`、PID `163176`、项目 `D:\upilot\Tests~\UPilotTest`、空失败阶段/错误；定向 EditMode runGuid `83ebd042-7551-4838-a93b-add3850ffe97` 3/3 通过且 cleanup 成功。
+- 剩余关闭条件：在明确授权的后续维护窗口仅发起一次新的 `unity_service_restart`，观察 `/health`、PID/项目身份、部署身份和实际只读往返全部通过；不得自动重放上述失败 operation，也不得仅凭本次状态探测和单元测试声称重启验收已通过。
