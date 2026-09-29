@@ -785,6 +785,24 @@ namespace CodingRiver.UPilot
             return CloneProfilerResult(_profiler.result, false);
         }
 
+        internal static void ResetActive()
+        {
+            var state = _profiler;
+            _profiler = null; // Fence posted samples before disposing owned resources.
+            EditorApplication.update -= SampleProfiler;
+            if (state == null) return;
+            state.editModeSampleTimer?.Dispose();
+            state.editModeSampleTimer = null;
+            foreach (var recorder in state.recorders.Values) recorder.Dispose();
+            state.recorders.Clear();
+            if (state.result.status != "Running") return;
+            state.result.status = "aborted";
+            state.result.endedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            state.result.elapsedFrozen = true;
+            state.result.windowTelemetry = UPilotWindowTelemetry.EndCapture(out state.result.droppedWindowTelemetry);
+            // Do not run telemetry/user callbacks or synchronous report generation during hard reset.
+        }
+
         private static ProfilerCaptureResultPayload StopProfiler(string captureId, string terminalStatus)
         {
             if (_profiler == null) throw new InvalidOperationException("No profiler capture exists in this domain.");

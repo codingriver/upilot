@@ -564,17 +564,16 @@ class StatusDomainService:
         if summary["unavailableReason"]:
             return fail(request_id, summary["unavailableReason"], summary.get("configError") or summary["nextAction"], summary)
         if latest and latest.get("status") in {"accepted", "running"}:
-            return fail(request_id, "SERVICE_RESTART_BUSY", "Another maintenance is active.", {"maintenanceId": latest["maintenanceId"]})
+            if (not maintenance_same_path(expected_project_path, root)
+                    or expected_server_process_id != latest.get("oldServerProcessId")
+                    or expected_bridge_session_id != latest.get("oldBridgeSessionId")):
+                return fail(request_id, "SERVICE_RESTART_IDENTITY_CHANGED", "Current reset belongs to different service identities.")
+            return ok(request_id, {**latest, "changed": False, "joined": True})
         if (not maintenance_same_path(expected_project_path, root) or
                 expected_server_process_id != os.getpid() or
                 expected_bridge_session_id != summary["expectedBridgeSessionId"] or
                 expected_maintenance_id != summary["expectedMaintenanceId"]):
             return fail(request_id, "SERVICE_RESTART_IDENTITY_CHANGED", "Project, component or maintenance identity changed; inspect status.")
-        state_response = await self.editor_state()
-        state = state_response.data or {}
-        if (not state_response.ok or not state.get("ready") or not state.get("authoritative") or
-                state.get("isStale", True) or state.get("playModeState") != "edit"):
-            return fail(request_id, "SERVICE_RESTART_EDITOR_NOT_READY", "Stable authoritative EditMode is required; no mode change was requested.")
         # Independent authorization is rechecked by Unity immediately before any stop/start.
         return await self.dispatcher.call(request_id, "service.restart", {
             "maintenanceId": maintenance_id, "target": target, "reason": reason,
@@ -2853,6 +2852,8 @@ class StatusDomainService:
                 created, persisted = store.create_capture_attachment(candidate)
             except (OSError, RuntimeError) as exc:
                 return fail(request_id, "CAPTURE_ATTACHMENT_PERSIST_FAILED", str(exc), {"sessionId": session_id})
+            if created == "stale":
+                return ok(request_id, {"status": "not_found", "changed": False})
             if created == "limit":
                 return fail(request_id, "CAPTURE_ATTACHMENT_LIMIT", "At most 64 capture attachments may be active.")
             if created == "conflict":

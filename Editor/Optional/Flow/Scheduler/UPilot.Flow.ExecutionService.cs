@@ -100,7 +100,7 @@ namespace CodingRiver.UPilot.Flow
 
             for (int index = 0; index < yamlPaths.Count; index++)
             {
-                if (linkedCancellation.IsCancellationRequested)
+                if (linkedCancellation.IsCancellationRequested || UPilotFlowExecutionRegistry.IsRetired(executionId))
                 {
                     batch.Cancelled = true;
                     break;

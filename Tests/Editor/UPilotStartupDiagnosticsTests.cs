@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.IO;
 using System.Reflection;
 using System.Runtime.Serialization;
@@ -861,6 +862,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotRestartDiagnosticView.Duration(1, 2201), Is.EqualTo("2.2 秒"));
             Assert.That(UPilotRestartDiagnosticView.Duration(1, 30001), Is.EqualTo("30 秒"));
             var record = UPilotServerRestartDiagnostics.CreateRecordForTests("C:/test", 1, "old");
+            record.schemaVersion = 2; // Explicitly exercise the retained legacy schema, not the new-record default.
             record.statusProbeCount = 3;
             record.lastBridgeCloseCode = "1009";
             record.lastBridgeOversizeActualBytes = 1300775;
@@ -1120,5 +1122,157 @@ namespace CodingRiver.UPilot.Tests
                 StatusFailureStage = "health_query", ErrorMessage = "/health: JsonException: broken"
             }), Is.EqualTo("malformed_response"));
         }
+        [TestCase(21000, false)]
+        [TestCase(121000, false)]
+        [TestCase(599000, false)]
+        [TestCase(600000, true)]
+        public void RestartDeadlineIsAcceptanceBasedAcrossSessionAndPhaseChanges(long elapsed, bool expired)
+        {
+            var r = new UPilotServerRestartRecord { requestedAtUtcMs = 1000, deadlineAtUtcMs = 601000 };
+            r.newProcessStartedAtUtcMs = 150000;
+            r.newBridgeSessionId = "replacement";
+            r.phase = "bridge_verified";
+            var reloaded = JsonUtility.FromJson<UPilotServerRestartRecord>(JsonUtility.ToJson(r));
+            Assert.That(UPilotServerRestartDiagnostics.Deadline(reloaded), Is.EqualTo(601000));
+            Assert.That(UPilotServerRestartDiagnostics.HasExpired(reloaded, 1000 + elapsed), Is.EqualTo(expired));
+            Assert.That(UPilotQuickStart.EvaluateRestartRecord(reloaded, true, true).State, Is.EqualTo(UPilotMainState.Restarting),
+                "UI must wait for authoritative terminal record, even if sockets are ready or the wall clock has expired.");
+        }
+
+        [Test]
+        public void LegacyOrdinaryRecordKeepsOriginalVerificationBudget()
+        {
+            var legacy = new UPilotServerRestartRecord { requestedAtUtcMs = 1000, newProcessStartedAtUtcMs = 5000 };
+            Assert.That(UPilotServerRestartDiagnostics.Deadline(legacy), Is.EqualTo(25000));
+            legacy.maintenanceDeadlineUtcMs = 121000;
+            Assert.That(UPilotServerRestartDiagnostics.Deadline(legacy), Is.EqualTo(121000));
+        }
+
+        [Test]
+        public void LateSuccessAndLaterGateTimeoutCannotBecomeHealthTimeout()
+        {
+            var r = new UPilotServerRestartRecord { requestedAtUtcMs = 1000, deadlineAtUtcMs = 601000,
+                healthVerified = true, projectIdentityVerified = true, bridgeVerified = true, deploymentVerified = true,
+                readOnlyVerified = true, gateDiagnostics = UPilotServerRestartDiagnostics.GateKeys.Select(key =>
+                    new UPilotRestartGate { key = key, state = key == "readonly" ? "running" : "passed" }).ToArray() };
+            UPilotServerRestartDiagnostics.TryComplete(r, 601000);
+            Assert.That(r.status, Is.EqualTo("failed"));
+            Assert.That(r.error, Does.Not.Contain(UPilotServerRestartDiagnostics.HealthTimeoutMessage));
+            Assert.That(r.error, Does.Contain("只读"));
+            var original = r.error;
+            UPilotServerRestartDiagnostics.TryComplete(r, 601001);
+            Assert.That(r.error, Is.EqualTo(original));
+        }
+
+        [Test]
+        public void HealthSuccessWithMissingOwnershipKeepsIdentityAsPendingGate()
+        {
+            var r = new UPilotServerRestartRecord { requestedAtUtcMs = 1000, deadlineAtUtcMs = 601000,
+                gateDiagnostics = UPilotServerRestartDiagnostics.GateKeys.Select(key =>
+                    new UPilotRestartGate { key = key, state = Array.IndexOf(UPilotServerRestartDiagnostics.GateKeys, key) < 6 ? "passed" : "pending" }).ToArray() };
+            UPilotServerRestartDiagnostics.ApplyProbeOutcome(r, "process_identity_timeout", "process_identity", "", "ownership unknown");
+            Assert.That(UPilotServerRestartDiagnostics.FirstUnpassedGate(r), Is.EqualTo("identity"));
+            UPilotServerRestartDiagnostics.ApplyProbeOutcome(r, "request_timeout", "health_query", "", "transient");
+            Assert.That(UPilotServerRestartDiagnostics.FirstUnpassedGate(r), Is.EqualTo("identity"));
+            Assert.That(UPilotServerRestartDiagnostics.TimeoutMessage(r, 601000), Does.Not.Contain("/health 仍未验证通过"));
+            Assert.That(UPilotMcpServerManager.ClassifyRestartProbe(new McpServerStatus {
+                StatusFailureStage = "health_query", ErrorMessage = "/health: TimeoutException: body timed out" }), Is.EqualTo("request_timeout"));
+        }
+
+        [Test]
+        public async Task LifecycleCancellationEndsHungHealthRequestWithoutApplyingLateResponse()
+        {
+            var body = new StalledHealthBody();
+            using var cancel = new System.Threading.CancellationTokenSource();
+            var handler = new RestartHealthHandler { Response = _ =>
+                new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = body } };
+            using var client = new System.Net.Http.HttpClient(handler);
+            var request = UPilotMcpServerManager.SendBoundedStatusAsync(client, "http://127.0.0.1:1/health",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 600000, cancel.Token);
+            cancel.Cancel();
+            try { using var response = await request; Assert.Fail("Canceled observation must not accept a response."); }
+            catch (OperationCanceledException) { }
+            finally { body.Release.TrySetResult(true); }
+            Assert.That(handler.Calls, Is.EqualTo(1));
+        }
+
+        private sealed class RestartHealthHandler : System.Net.Http.HttpMessageHandler
+        {
+            internal int Calls;
+            internal Func<int, System.Net.Http.HttpResponseMessage> Response;
+            protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,
+                System.Threading.CancellationToken token)
+            {
+                Assert.That(request.RequestUri.AbsolutePath, Is.EqualTo("/health"), "/stats is optional and must never delay restart.");
+                return Task.FromResult(Response(++Calls));
+            }
+        }
+
+        private sealed class StalledHealthBody : System.Net.Http.HttpContent
+        {
+            internal readonly TaskCompletionSource<bool> Release = new TaskCompletionSource<bool>();
+            protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext context) => Release.Task;
+            protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        }
+
+        [Test]
+        public async Task HealthRetriesTransport503AndInvalidJsonWithoutRequestingStats()
+        {
+            var handler = new RestartHealthHandler { Response = n =>
+            {
+                if (n == 1) throw new System.Net.Http.HttpRequestException("fixture refused", new IOException("socket fixture"));
+                if (n == 2) throw new TaskCanceledException("fixture timeout");
+                return new System.Net.Http.HttpResponseMessage(n == 3 ? System.Net.HttpStatusCode.ServiceUnavailable : System.Net.HttpStatusCode.OK)
+                { Content = new System.Net.Http.StringContent(n == 4 ? "not JSON" :
+                    "{\"server_version\":\"fixture\",\"server_pid\":42,\"configured_project_path\":\"fixture\"}") };
+            } };
+            using var client = new System.Net.Http.HttpClient(handler);
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 600000;
+            for (var i = 0; i < 4; i++)
+            {
+                var failed = await UPilotMcpServerManager.GetRestartHealthAsync(client, 1, deadline);
+                Assert.That(failed.HealthEndpointResponded, Is.False);
+                Assert.That(failed.ErrorMessage, Is.Not.Empty);
+            }
+            var recovered = await UPilotMcpServerManager.GetRestartHealthAsync(client, 1, deadline);
+            Assert.That(recovered.HealthEndpointResponded, Is.True);
+            Assert.That(recovered.HealthServerProcessId, Is.EqualTo(42));
+            Assert.That(handler.Calls, Is.EqualTo(5));
+            Assert.That(UPilotMcpServerManager.RestartProbeIntervalMs, Is.EqualTo(2000));
+        }
+
+        [Test]
+        public async Task HungResponseBodyIsBoundedAndLateResponseIsNotApplied()
+        {
+            var body = new StalledHealthBody();
+            using var client = new System.Net.Http.HttpClient(new RestartHealthHandler { Response = _ =>
+                new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = body } });
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                try
+                {
+                    using var result = await UPilotMcpServerManager.SendBoundedStatusAsync(client, "http://127.0.0.1:1/health",
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 60, default, 2000);
+                    Assert.Fail("Hung body must not pass the health gate.");
+                }
+                catch (TimeoutException) { }
+                catch (OperationCanceledException) { }
+                Assert.That(watch.ElapsedMilliseconds, Is.LessThan(1500));
+            }
+            finally { body.Release.TrySetResult(true); }
+        }
+
+        [Test]
+        public void ProbeErrorsKeepBoundedRedactedInnerExceptionEvidence()
+        {
+            var text = UPilotMcpServerManager.DescribeProbeException(new IOException("token=secret fixture",
+                new InvalidOperationException("inner " + new string('x', 3000))));
+            Assert.That(text, Does.Contain("IOException"));
+            Assert.That(text, Does.Contain("InvalidOperationException"));
+            Assert.That(text, Does.Not.Contain("token=secret"));
+            Assert.That(text.Length, Is.LessThanOrEqualTo(1025));
+        }
+
     }
 }

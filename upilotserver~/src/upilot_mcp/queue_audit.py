@@ -6,8 +6,10 @@ from contextvars import ContextVar
 from functools import wraps
 import logging
 import re
+import time
 
 from .protocol import new_id
+from .responses import fail, ok
 
 AUDIT = ContextVar("queue_cleanup_audit", default=None)
 QUEUE_GUARD = ContextVar("queue_cleanup_target_guard", default=None)
@@ -55,7 +57,12 @@ def outcome(response):
         code = response.error.code if response.error else "CLEANUP_FAILED"
         unknown = any(s in (code + nested_code).upper() for s in ("TIMEOUT", "UNKNOWN", "DISCONNECT", "RECOVERY", "CANCELLED", "NOT_CONNECTED"))
         return ("unconfirmed" if unknown else "failed", "结果未确认" if unknown else "取消或停止失败", code)
-    if data.get("cleanupStatus") == "failed" or data.get("cleanupErrors"):
+    if data.get("status") == "not_found":
+        return "noop", "任务不存在，无需操作", ""
+    if data.get("status") == "ending":
+        return "accepted", "正在结束", ""
+    if (data.get("cleanupStatus") in {"failed", "timed_out"} or data.get("cleanupErrors")
+            or data.get("terminal") and data.get("cleanupSucceeded") is False):
         return "failed", "清理失败", "CLEANUP_FAILED"
     if data.get("status") == "RecoveryRequired":
         return "unconfirmed", "结果未确认", "CLEANUP_UNCONFIRMED"
@@ -72,17 +79,42 @@ def outcome(response):
     return "accepted", "尚未停止", ""
 
 
+async def _bounded_stop(service, method, args, kwargs, deadline):
+    work = asyncio.create_task(method(service, *args, **kwargs))
+    work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+    try:
+        done, _ = await asyncio.wait({work}, timeout=max(0, deadline - time.monotonic()))
+        if not done:
+            work.cancel() # Do not join a cancellation-resistant user callback.
+            return fail(new_id("cleanup"), "SOFT_STOP_TIMEOUT", "Soft stop exceeded its 60-second deadline.",
+                        {"cleanupSucceeded": False})
+        return work.result()
+    except asyncio.CancelledError:
+        work.cancel()
+        raise
+    except Exception as exc:
+        return fail(new_id("cleanup"), "SOFT_STOP_FAILED", safe_text(exc), {"cleanupSucceeded": False})
+
+
 def audited(kind, action, identity):
     """Wrap actual domain cancellation, not just MCP envelopes."""
     def decorate(method):
         @wraps(method)
         async def invoke(self, *args, **kwargs):
-            existing = AUDIT.get()
-            if existing:
-                return await method(self, *args, **kwargs)
-            request = new_id("cleanup")
             raw_target = kwargs.get(identity, args[0] if args else "")
             target = raw_target if isinstance(raw_target, str) else "<invalid>"
+            deadlines = self.__dict__.setdefault("_soft_stop_deadlines", {})
+            # The command response has its own bounded transport window. The
+            # execution's cleanup deadline below is immutable and enforced by
+            # its observer. An expired cleanup clock must not suppress a later
+            # normal not_found response (or replace a permission error).
+            deadline = time.monotonic() + 60
+            if target:
+                deadlines.setdefault((kind, target), deadline)
+            existing = AUDIT.get()
+            if existing:
+                return await _bounded_stop(self, method, args, kwargs, deadline)
+            request = new_id("cleanup")
             states = getattr(self, "_operations" if kind == "Operation" else "_async_tasks", {})
             before = states.get(target, {})
             already_terminal = bool(before.get("terminal") or before.get("endedAt")) and not before.get("cleanupPending")
@@ -90,10 +122,18 @@ def audited(kind, action, identity):
             token = AUDIT.set(context)
             await notice(self, *context[:4], "started", "开始取消或停止", context[4])
             try:
-                response = await method(self, *args, **kwargs)
+                response = await _bounded_stop(self, method, args, kwargs, deadline)
                 if not target and isinstance(response.data, dict):
                     target = str(response.data.get("runGuid") or response.data.get("sessionId") or "")
                     context = (request, kind, target, action, "direct")
+                    if target:
+                        deadlines.setdefault((kind, target), deadline)
+                escalate = getattr(self, "_maybe_auto_hard_stop", None)
+                if escalate:
+                    response = await escalate(response)
+                watch = getattr(self, "_watch_soft_stop", None)
+                if watch:
+                    watch(kind, target, response)
                 phase, result, code = outcome(response)
                 if response.ok and already_terminal:
                     phase, result, code = "noop", "已结束，无需操作", ""
@@ -132,6 +172,18 @@ def observed_test(method):
 
 def observe(service, kind, state):
     """Called at existing observer checkpoints; emit only terminal/recovery transitions."""
+    # Cleanup failure is relevant even when normal execution (not a stop request)
+    # entered bounded finalization. Business failure alone must never restart.
+    cleanup_failed = state.get("cleanupSucceeded") is False and (
+        state.get("terminal") or state.get("endedAt") or state.get("cleanupStatus") in {"failed", "timed_out"})
+    if cleanup_failed and not state.get("_cleanupEscalationObserved"):
+        state["_cleanupEscalationObserved"] = True
+        escalate = getattr(service, "_maybe_auto_hard_stop", None)
+        if escalate:
+            try:
+                asyncio.get_running_loop().create_task(escalate(ok(new_id("cleanup"), dict(state))))
+            except RuntimeError:
+                pass
     if not state.get("cancelRequested"):
         return
     terminal = bool(state.get("terminal") or state.get("endedAt")) and not state.get("cleanupPending")

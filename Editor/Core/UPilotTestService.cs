@@ -124,6 +124,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class TestRunResultPayload : ISerializationCallbackReceiver
     {
+        public string serviceLifecycleId;
         public int resultStreamVersion = 1;
         public long nextEventSequence;
         public long earliestEventSequence = 1;
@@ -467,6 +468,7 @@ namespace CodingRiver.UPilot
                     long startedAt = NowMs();
                     _lastResults = new TestRunResultPayload
                     {
+                        serviceLifecycleId = UPilotServiceLifetime.Id,
                         testMode = mode,
                         status = "started",
                         phase = "starting",
@@ -763,14 +765,26 @@ namespace CodingRiver.UPilot
             await _bridge.SendResultAsync(id, "test.status", CreateStatusSummary(SnapshotStatus()), token);
         }
 
+        [Serializable] private sealed class StopReply
+        { public string status, runGuid; public bool changed; }
+        private StopReply ExistingStopReply(string requested)
+        {
+            var known = _activeRunGuid ?? _lastResults?.runGuid;
+            if (!_isRunning || _lastResults == null || _lastResults.terminal ||
+                (!string.IsNullOrWhiteSpace(requested) && requested != known))
+                return new StopReply { status = "not_found", runGuid = requested ?? "", changed = false };
+            if (_lastResults.cancelRequested || _lastResults.cleanupAttemptDeadlineAt > 0)
+                return new StopReply { status = "ending", runGuid = known, changed = false };
+            return null;
+        }
+
         private async Task HandleCancelAsync(string id, string json, CancellationToken token)
         {
             var payload = JsonUtility.FromJson<TestCancelMessage>(json)?.payload ?? new TestCancelPayload();
-            string knownRunGuid = _activeRunGuid ?? _lastResults?.runGuid;
-            if (!string.IsNullOrWhiteSpace(payload.runGuid)
-                && !string.Equals(payload.runGuid, knownRunGuid, StringComparison.Ordinal))
+            var existing = ExistingStopReply(payload.runGuid);
+            if (existing != null)
             {
-                await _bridge.SendErrorAsync(id, "TEST_RUN_NOT_FOUND", $"Active test run does not match runGuid: {payload.runGuid}", token, "test.cancel");
+                await _bridge.SendResultAsync(id, "test.cancel", existing, token);
                 return;
             }
 
@@ -795,11 +809,10 @@ namespace CodingRiver.UPilot
             string responseName,
             CancellationToken token)
         {
-            string knownRunGuid = _activeRunGuid ?? _lastResults?.runGuid;
-            if (!string.IsNullOrWhiteSpace(payload.runGuid)
-                && !string.Equals(payload.runGuid, knownRunGuid, StringComparison.Ordinal))
+            var existing = ExistingStopReply(payload.runGuid);
+            if (existing != null)
             {
-                await _bridge.SendErrorAsync(id, "TEST_RUN_NOT_FOUND", $"Active test run does not match runGuid: {payload.runGuid}", token, responseName);
+                await _bridge.SendResultAsync(id, responseName, existing, token);
                 return;
             }
             // A completed Runner needs resource cleanup, not a cancellation binding.
@@ -1815,12 +1828,14 @@ namespace CodingRiver.UPilot
 
         private bool BeginCleanupAttempt(bool explicitRequest)
         {
-            if (_lastResults == null) return false;
+            if (_lastResults == null || _lastResults.terminal) return false;
             long now = NowMs();
-            bool recovery = _lastResults.phase == "recovery_required";
-            bool expired = _lastResults.cleanupAttemptDeadlineAt > 0 && now >= _lastResults.cleanupAttemptDeadlineAt;
-            if ((recovery || expired) && !explicitRequest) return false;
-            if (_lastResults.cleanupAttemptDeadlineAt == 0 || (explicitRequest && (recovery || expired)))
+            if (_lastResults.cleanupAttemptDeadlineAt > 0 && now >= _lastResults.cleanupAttemptDeadlineAt)
+            {
+                RequireCleanupRecovery("The single cleanup deadline expired.");
+                return false;
+            }
+            if (_lastResults.cleanupAttemptDeadlineAt == 0)
             {
                 _lastResults.cleanupAttemptDeadlineAt = now + CleanupAttemptBudgetMs;
                 _lastResults.phase = "cleanup";
@@ -1851,13 +1866,35 @@ namespace CodingRiver.UPilot
             s_recoveryCallbackAttached = false;
         }
 
+        internal void ResetActive()
+        {
+            StopCleanupScheduling();
+            _isRunning = false;
+            _activeRunGuid = null; // Invalidate callback proxy before releasing registrations.
+            _pendingTerminalStatus = null;
+            if (_lastResults != null && !_lastResults.terminal && IsNonTerminal(_lastResults.status))
+            {
+                _lastResults.status = "aborted"; _lastResults.phase = "aborted";
+                _lastResults.terminal = true; _lastResults.isRunning = false;
+                _lastResults.cleanupPending = false; _lastResults.cleanupSucceeded = false;
+                _lastResults.terminalReason = "UPilot service hard stop; underlying Unity execution may still be running.";
+                try { PersistSnapshot(true); } catch { /* History cannot keep the active slot alive. */ }
+            }
+            try { ReleaseOwnedRunnerResources(hardReset: true); }
+            finally { _activeCallback = null; _activeApi = null; _lastResults = null; }
+        }
+
         private void RequireCleanupRecovery(string reason)
         {
             StopCleanupScheduling();
-            _lastResults.status = "cleanup";
-            _lastResults.phase = "recovery_required";
-            _lastResults.cleanupStatus = "recovery_required";
-            _lastResults.cleanupPending = true;
+            _isRunning = false;
+            _activeRunGuid = null;
+            _lastResults.isRunning = false;
+            _lastResults.status = "aborted";
+            _lastResults.phase = "aborted";
+            _lastResults.terminal = true;
+            _lastResults.cleanupStatus = "failed";
+            _lastResults.cleanupPending = false;
             _lastResults.cleanupSucceeded = false;
             _lastResults.nextAction = reason;
             if (_lastResults.disposition == null) RefreshUnresolvedResources();
@@ -1866,13 +1903,13 @@ namespace CodingRiver.UPilot
 
         private void CleanupActiveRun()
         {
-            if (_lastResults == null || _lastResults.phase == "recovery_required") return;
+            if (_lastResults == null || _lastResults.terminal) return;
             if (_lastResults.disposition != null) { ContinueDispositionCommit(); return; }
             long now = NowMs();
             if (now < _nextCleanupProbeAt) return;
             if (_lastResults.cleanupAttemptDeadlineAt <= 0 || now >= _lastResults.cleanupAttemptDeadlineAt)
             {
-                RequireCleanupRecovery("Cleanup attempt is missing or expired; explicitly request cleanup for the same runGuid.");
+                RequireCleanupRecovery("The single cleanup deadline expired; this task is aborted. Project hard stop is available.");
                 return;
             }
             // A failed result/intent write must be repaired before releasing its callback/API.
@@ -1956,6 +1993,7 @@ namespace CodingRiver.UPilot
             candidate.lastProgressAt = NowMs();
             candidate.cleanupPending = false;
             candidate.cleanupSucceeded = true;
+            candidate.terminal = true;
             candidate.cleanupStatus = "completed";
             candidate.unresolvedResources.Clear();
             candidate.nextAction = "";
@@ -1979,7 +2017,7 @@ namespace CodingRiver.UPilot
                 _lastResults.cleanupStatus = "committing";
                 _lastResults.persistenceError = ex.GetType().Name + ": " + ex.Message;
                 AddCleanupError("persistence-commit", ex);
-                ScheduleNextCleanupProbe(now, false);
+                RequireCleanupRecovery("Terminal result persistence failed: " + ex.Message);
             }
         }
 
@@ -2031,7 +2069,7 @@ namespace CodingRiver.UPilot
             return string.IsNullOrWhiteSpace(_lastResults.persistenceError);
         }
 
-        internal bool ReleaseOwnedRunnerResources()
+        internal bool ReleaseOwnedRunnerResources(bool hardReset = false)
         {
             var api = _activeApi;
             var callback = _activeCallback;
@@ -2062,7 +2100,7 @@ namespace CodingRiver.UPilot
 
             if (!ReferenceEquals(api, null) && _activeCallback == null)
             {
-                if (_lastResults?.cleanupAttemptDeadlineAt > 0 && NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
+                if (!hardReset && _lastResults?.cleanupAttemptDeadlineAt > 0 && NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
                     return false;
                 try
                 {
@@ -2280,7 +2318,7 @@ namespace CodingRiver.UPilot
                 _lastResults.unresolvedResources.Add("test-callback");
             if (_editorCleanupPending)
                 _lastResults.unresolvedResources.Add("editor-playmode");
-            _lastResults.cleanupPending = (_lastResults.cancelRequested || _lastResults.status == "cleanup")
+            _lastResults.cleanupPending = !_lastResults.terminal && (_lastResults.cancelRequested || _lastResults.status == "cleanup")
                 && _lastResults.unresolvedResources.Count > 0;
         }
 
@@ -2294,8 +2332,8 @@ namespace CodingRiver.UPilot
                 return;
 
             _lastResults = LoadPersistedSnapshot(runGuid);
-            if (_lastResults == null)
-                return;
+            if (_lastResults == null || _lastResults.serviceLifecycleId != UPilotServiceLifetime.Id)
+            { _lastResults = null; return; }
 
             _activeRunGuid = active ? runGuid : null;
             _isRunning = active;

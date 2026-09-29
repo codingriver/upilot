@@ -136,6 +136,8 @@ namespace CodingRiver.UPilot.Automation
         public bool cancelRequested;
         public long startedAtUtcMs;
         public long finishedAtUtcMs;
+        public long finalizationDeadlineUtcMs;
+        public string serviceLifecycleId;
         public AutomationStepError error;
         public List<AutomationStepError> secondaryErrors = new();
         public string sharedCheckpointJson = "{}";

@@ -91,12 +91,45 @@ namespace CodingRiver.UPilot.Flow
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, Entry> Entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
         private static string _latestExecutionId;
+        // Only IDs retired by an explicit service reset are fenced. Reconnect and
+        // ordinary Domain Reload do not call this reset.
+        private static readonly HashSet<string> RetiredIds = new HashSet<string>(StringComparer.Ordinal);
+
+        public static bool IsRetired(string executionId)
+        {
+            lock (Gate) return executionId != null && RetiredIds.Contains(executionId);
+        }
+
+        public static void ResetActive()
+        {
+            List<Action> cancellations;
+            lock (Gate)
+            {
+                cancellations = Entries.Values.SelectMany(entry => entry.CancelActions).ToList();
+                foreach (var pair in Entries)
+                {
+                    RetiredIds.Add(pair.Key);
+                    foreach (var controller in pair.Value.Controllers)
+                        controller.StateChanged = null;
+                }
+                Entries.Clear();
+                _latestExecutionId = null;
+            }
+            // User cancellation registrations can block; never join them on the
+            // Editor thread or keep an activity slot while they run.
+            foreach (Action cancel in cancellations)
+                System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { cancel(); } catch { } });
+        }
 
         public static IDisposable Register(string executionId, string source, Action cancelAction = null)
         {
             executionId = string.IsNullOrWhiteSpace(executionId) ? Guid.NewGuid().ToString("N") : executionId;
             lock (Gate)
             {
+                if (RetiredIds.Contains(executionId))
+                    throw new OperationCanceledException("Flow execution belongs to a stopped UPilot lifetime.");
+                if (Entries.TryGetValue(executionId, out Entry finished) && finished.Snapshot.endedAt > 0)
+                    throw new OperationCanceledException("Flow execution has already ended.");
                 if (!Entries.TryGetValue(executionId, out Entry entry))
                 {
                     long now = NowMs();
@@ -417,6 +450,7 @@ namespace CodingRiver.UPilot.Flow
             {
                 if (!Entries.TryGetValue(executionId, out Entry entry))
                     return;
+                if (entry.Snapshot.endedAt > 0) return;
                 mutate(entry.Snapshot);
                 entry.Snapshot.lastProgressAt = NowMs();
             }
@@ -454,6 +488,7 @@ namespace CodingRiver.UPilot.Flow
 
         private static void FinalizeLocked(Entry entry, string terminalStatus)
         {
+            if (entry.Snapshot.endedAt > 0) return;
             entry.Snapshot.cleanupPending = false;
             entry.Snapshot.currentCase = null;
             entry.Snapshot.currentStep = null;

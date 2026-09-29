@@ -58,7 +58,8 @@ def test_deleted_only_batch_is_durable_and_uses_server_timestamp(service, tmp_pa
     assert recovered["deletedPaths"] == [deleted]
     assert recovered["filesSha256"] == result.data["filesSha256"]
     assert recovered["changes"] == result.data["changes"]
-    assert restored.pending_write_batches()[0]["deletedPaths"] == [deleted]
+    assert restored.pending_write_batches() == []
+    assert restored.pending_write_batch_id == ""
 
 
 def test_move_and_mixed_writes_preserve_complete_manifest_hash(service, tmp_path):
@@ -183,7 +184,7 @@ def test_legacy_database_migration_keeps_old_records_separate(tmp_path, monkeypa
     new = state.register_write_batch([], created_at=0, files_sha256="", compile_when_edit_mode=True,
                                      changes=[{"path": str(tmp_path / "Gone.cs"), "kind": "delete", "contentSha256": ""}])
     assert new["writeBatchId"] != "legacy" and not new["coalesced"]
-    assert len(state.pending_write_batches()) == 2
+    assert [b["writeBatchId"] for b in state.pending_write_batches()] == [new["writeBatchId"]]
     assert state.get_write_batch("legacy") == legacy
 
 
@@ -194,7 +195,7 @@ def test_new_batches_do_not_mix_compile_authorization(service):
     assert service.server.state.get_write_batch(first["writeBatchId"])["compileWhenEditMode"] is False
 
 
-def test_delete_batch_without_persisted_terminal_requires_recovery_after_editmode(service, monkeypatch):
+def test_delete_batch_without_verified_terminal_aborts_without_replay(service, monkeypatch):
     result = register(service, deleted=["Gone.cs"])
     calls = []
 
@@ -214,9 +215,9 @@ def test_delete_batch_without_persisted_terminal_requires_recovery_after_editmod
     asyncio.run(service._resume_pending_write_batches())
     assert len(calls) == 1 and calls[0]["write_batch_id"] == result.data["writeBatchId"]
     stored = service.server.state.get_write_batch(result.data["writeBatchId"])
-    assert stored["status"] == "recovery_required"
+    assert stored["status"] == "aborted"
+    assert stored["terminal"] is True
     assert stored["outcome"] == "unknown"
-    assert stored["terminal"] is False
 
 
 def test_new_input_time_is_not_older_than_future_file_mtime(service, tmp_path):

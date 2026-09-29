@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -1178,6 +1178,20 @@ namespace CodingRiver.UPilot
                 ok = true, action = "CleanupCaptures", dryRun = false, confirmToken = token,
                 directories = targets, totalBytes = totalBytes, deletedCount = deleted,
             };
+        }
+
+        internal static void ResetActive()
+        {
+            ConsoleCaptureManifest manifest;
+            lock (CaptureLock)
+            {
+                manifest = s_active?.Manifest;
+                if (manifest != null) manifest.active = false;
+                s_active = null;
+                SessionState.EraseString(ProjectSessionKey(ActiveDirectorySessionKey));
+            }
+            // Best-effort archive is not a prerequisite for releasing the active slot.
+            if (manifest != null) WriteManifest(manifest);
         }
 
         private static void TryRecoverActiveSession()

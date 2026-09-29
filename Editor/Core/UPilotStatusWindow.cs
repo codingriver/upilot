@@ -1316,18 +1316,15 @@ namespace CodingRiver.UPilot
                     settings.approvedAtUtc = selected ? DateTimeOffset.UtcNow.ToString("O") : "";
                     UPilotProjectConfig.Save(config);
                 }
-                EditorGUI.BeginChangeCheck();
-                var timeout = EditorGUILayout.DelayedIntField("维护超时（秒）", settings.restartTimeoutSeconds);
-                if (EditorGUI.EndChangeCheck())
+                var timeout = EditorGUILayout.IntSlider("重启总期限（秒）", settings.restartTimeoutSeconds, 30, 600);
+                var autoHardStop = EditorGUILayout.ToggleLeft("软停止失败后自动硬停止全部任务并重启 UPilot", settings.autoHardStopOnSoftFailure);
+                if (timeout != settings.restartTimeoutSeconds || autoHardStop != settings.autoHardStopOnSoftFailure)
                 {
-                    if (timeout >= 30 && timeout <= 600)
-                    {
-                        settings.restartTimeoutSeconds = timeout;
-                        UPilotProjectConfig.Save(config);
-                    }
-                    else ShowToast("维护超时必须为 30～600 秒，不会自动截断");
+                    settings.restartTimeoutSeconds = timeout;
+                    settings.autoHardStopOnSoftFailure = autoHardStop;
+                    UPilotProjectConfig.Save(config);
                 }
-                EditorGUILayout.HelpBox("仅 EditMode。允许 AI 重启当前项目的 Bridge/Server，可能中断正在运行的工具和任务，不会自动重新执行。此授权独立于自动处置授权。", MessageType.Warning);
+                EditorGUILayout.HelpBox("允许 AI 重置当前项目所有聊天的队列并重启 Server/Bridge，不恢复旧任务。自动升级另需开启上方选项；可能在运行或编译期间发生，不切换模式、不重启 Unity。此授权独立于软停止授权。", MessageType.Warning);
                 try
                 {
                     UPilotServiceMaintenance.ReadSettings();
@@ -1336,6 +1333,17 @@ namespace CodingRiver.UPilot
                     {
                         EditorGUILayout.LabelField("最近维护", record.maintenanceId, EditorStyles.miniLabel);
                         EditorGUILayout.LabelField("状态", record.status + " / " + record.phase);
+                        EditorGUILayout.LabelField("活动队列重置", record.queueReset ? "已完成（不代表底层同步代码已停止）" : "尚未完成或存在错误");
+                        if (!string.IsNullOrEmpty(record.queueResetError))
+                            EditorGUILayout.HelpBox("队列重置：" + record.queueResetError, MessageType.Warning);
+                        if (record.Active)
+                        {
+                            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                            EditorGUILayout.HelpBox((record.healthVerified ? "正在验证：" + record.phase :
+                                "正在验证服务健康状态，失败后将继续重试") +
+                                $"；已耗时 {Math.Max(0, now - record.acceptedAtUtcMs) / 1000} 秒 / 剩余 {Math.Max(0, record.deadlineAtUtcMs - now) / 1000} 秒；" +
+                                $"探测 {record.healthProbeCount} 次；最近错误：{record.healthProbeError}", MessageType.Info);
+                        }
                         if (!string.IsNullOrEmpty(record.error))
                             EditorGUILayout.HelpBox(record.errorCode + ": " + record.error, MessageType.Warning);
                     }
@@ -1355,7 +1363,14 @@ namespace CodingRiver.UPilot
             {
                 EditorGUILayout.LabelField("高级设置 > 自动处置授权", EditorStyles.boldLabel);
                 if (GUILayout.Button("查看当前任务队列")) UPilotQueueWindow.Open();
-                if (GUILayout.Button("批量清理可安全处理项…")) UPilotQueueCleanupWindow.Open();
+                if (GUILayout.Button("软停止全部任务…")) UPilotQueueCleanupWindow.Open();
+                using (new EditorGUI.DisabledScope(UPilotServiceMaintenance.IsActive || UPilotMcpServerManager.Instance.IsServiceTransitionActive))
+                    if (GUILayout.Button("硬停止全部任务并重启 UPilot…") && EditorUtility.DisplayDialog(
+                        "硬停止当前项目全部任务", "影响当前项目所有聊天的任务；跳过软收尾，清空活动队列并重启 Server/Bridge。旧任务不恢复，历史产物不删除。不重启 Unity，也不能强行中断已进入 Unity 主线程的同步代码。", "硬停止并重启", "取消"))
+                    {
+                        try { UPilotServiceMaintenance.HardStopFromSettings(); }
+                        catch (Exception ex) { EditorUtility.DisplayDialog("硬停止失败", ex.Message, "确定"); }
+                    }
                 var cleanupAllowed = EditorGUILayout.ToggleLeft("允许 AI 清理当前项目队列占用", config.aiQueueCleanupAllowed);
                 if (cleanupAllowed != config.aiQueueCleanupAllowed)
                 {

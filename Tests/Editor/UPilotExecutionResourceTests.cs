@@ -12,6 +12,22 @@ namespace CodingRiver.UPilot.Tests
     public sealed class UPilotExecutionResourceTests
     {
         [Test]
+        public void HardCloseInvalidatesSessionsWithoutCallingUserCleanup()
+        {
+            var registry = new ExecutionSessionRegistry();
+            var session = registry.Open("hard-close", 60, 8, 2, 2);
+            int cleanups = 0;
+            session.RegisterCleanup(() => { cleanups++; throw new InvalidOperationException("Must not run"); });
+            session.Store("object", new object());
+            registry.CloseAll();
+            Assert.That(session.IsClosed, Is.True);
+            Assert.That(session.HandleCount, Is.Zero);
+            Assert.That(cleanups, Is.Zero);
+            registry.CloseAll();
+            Assert.That(cleanups, Is.Zero, "Repeated hard reset cannot run cleanup.");
+        }
+
+        [Test]
         public void EvalEmitValidationAllowsAsyncAndClosuresWithoutExecutingUserCode()
         {
             ExecutionThrowingGetterFixture.GetterCallCount = 0;

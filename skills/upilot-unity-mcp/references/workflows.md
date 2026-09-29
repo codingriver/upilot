@@ -34,13 +34,13 @@ for every ordinary Editor operation.
    Unknown freshness never triggers an automatic restart. Preserve active task/run/operation
    identities; report a busy or unobservable endpoint instead of disrupting its work unless
    the independent AI Service Maintenance grant explicitly covers `unity_service_restart`.
-   That route may interrupt in-flight work but never cancels or replays it.
+   That route aborts in-flight UPilot work without replaying it.
 5. After an authorized refresh, recheck the exact project, connection, relevant identities
    and one real read-only call. Report the evidence actually established; reconnect success
-   alone is not source attestation. Resume observing existing identities, never replay start.
+   alone is not source attestation. Retain previous identities only as history after a service restart; never replay start.
 
-This workflow does not introduce a runtime fingerprint API or require restarting both
-components when only one changed.
+This workflow does not introduce a runtime fingerprint API. Actual service restart resets both
+Server and Bridge activity, even when only one component changed.
 
 ## Compile Fix
 
@@ -76,7 +76,7 @@ Do not trigger another compile when no C# or assembly file changed. Never infer 
 4. For long operations, report only phase changes, errors, or suspected-stuck state.
 5. Read Console errors and artifacts before declaring success.
 
-New generic Operation/Step starts and public validation return `GENERIC_ORCHESTRATION_DISABLED`. Do not wrap them in Task, reflection or temporary scripts. Historical status/artifacts and supported safe cleanup remain available; `operation_wait` reports `RecoveryRequired` immediately as a non-terminal recovery blocker, not a request to keep waiting normally.
+New generic Operation/Step starts and public validation return `GENERIC_ORCHESTRATION_DISABLED`. Do not wrap them in Task, reflection or temporary scripts. Historical status/artifacts and supported safe cleanup remain available; unknown outcomes end aborted within the original deadline, without recovery/release procedures. Service restart starts empty; historical reports never recreate active work.
 
 `status=no_tests` is a distinct cleaned terminal state with `total=0`; do not represent it as a fake failed test. If tests are required, fail the acceptance criterion explicitly.
 

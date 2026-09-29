@@ -25,7 +25,7 @@ _reject_write_if_unapproved = runtime._reject_write_if_unapproved
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
-@mcp.tool(description="当前项目任务汇总及精确占位清理。默认 dryRun=true 只读；执行需原目标/action/reason、expectedProjectPath 和一次性 confirmToken。仅独立 aiQueueCleanupAllowed 授权。Operation recover 恢复原 Step 未决清理；Task/Operation release 仅限安全适配器，备份后行政终态 Released 不代表业务成功。测试 Task release 仍需原 runGuid 权威停止及清理证据；Step release 首版仅全 wait_seconds 计划。Task abandon 仅处置经验证的 Reload 后测试清理孤儿，保留未释放证据，非清理成功。All/* + force_clear_all 预览有限批次；apply 前保留预览 requestId，All/<requestId> + force_clear_status 只观察。未支持项保留，不保证全部清空。不重放未知请求、不自动重启、不删除历史证据。")
+@mcp.tool(description="当前项目任务汇总及有界软停止。默认 dryRun=true 只读；执行需原目标/action/reason、expectedProjectPath 和一次性 confirmToken，受独立 aiQueueCleanupAllowed 授权控制。重复结束正常返回 ending/not_found，不重复收尾。All/* + force_clear_all 为软停止全部，60 秒总预算；保留预览 requestId，以 force_clear_status 观察原请求。软停止失败仅在独立 AI 服务维护授权及自动硬停止选项同时有效时升级为项目级 Server/Bridge 重启；不重启 Unity、不恢复旧队列、不删除历史产物。不再提供 recover/release/abandon 行政处置。")
 async def unity_queue_cleanup(targetType: str = "", targetId: str = "", action: str = "",
                               reason: str = "", dryRun: bool = True, confirmToken: str = "",
                               expectedProjectPath: str = ""):
@@ -80,7 +80,7 @@ async def unity_task_execute(
     )
     return _log_tool_result("unity_task_execute", _payload(r))
 
-@mcp.tool(description="异步启动工具并返回 taskId。测试/包验收要求 retryCount=0，持久保存 runGuid、期限和摘要并支持只观察式恢复；其他任务仍为内存任务。")
+@mcp.tool(description="异步启动有界任务并返回 taskId。测试/包验收要求 retryCount=0；保存 runGuid、原期限和历史摘要。服务重启不恢复活动任务或观察器，普通重连不延长期限。")
 async def unity_task_start(
     taskName: str,
     toolName: str,
@@ -104,7 +104,7 @@ async def unity_task_status(taskId: str, detailLevel: str = "summary"):
     r = await _get_facade().task_status(task_id=taskId, detail_level=detailLevel)
     return _log_tool_result("unity_task_status", _payload(r))
 
-@mcp.tool(description="请求底层测试取消并等待权威清理终态；返回 cancel_requested 不代表已停止。没有取消适配器的普通任务返回明确不支持，不伪造业务取消。")
+@mcp.tool(description="请求一次有界软停止。重复请求正常返回 ending/not_found；收尾失败或超时仍终结任务，不冒充业务成功或底层已停止。不支持协作停止时明确报告，只有授权的自动升级才硬停止当前项目。")
 async def unity_task_cancel(taskId: str):
     _log_tool_call("unity_task_cancel", {"taskId": taskId})
     r = await _get_facade().task_cancel(task_id=taskId)
@@ -142,7 +142,7 @@ async def unity_operation_status(operationId: str, detailLevel: str = "summary",
 
 @mcp.tool(
     description=(
-        "等待已有通用长作业直到终态、等待窗口结束或疑似卡住；RecoveryRequired 立即返回恢复阻塞，不自动取消或重放。只返回 phase/status/error/"
+        "等待已有通用长作业直到终态、等待窗口结束或疑似卡住；原执行及收尾期限不可续期，无法取得结果则中止，不启动恢复或重放。只返回 phase/status/error/"
         "failureSignature/artifact 变化摘要，并在终态收集 artifacts。"
     )
 )

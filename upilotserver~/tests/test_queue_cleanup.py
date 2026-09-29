@@ -63,6 +63,8 @@ async def apply(service, kind, target, action="cancel", **overrides):
     args = dict(target_type=kind, target_id=target, action=action, reason="fixture only")
     preview = await service.queue_cleanup(**args)
     assert preview.ok, preview
+    if preview.data.get("status") == "not_found":
+        return preview
     args.update(dry_run=False, confirm_token=preview.data["confirmToken"],
                 expected_project_path=service.server.state.project_path)
     args.update(overrides)
@@ -130,55 +132,39 @@ def test_changed_target_or_wrong_project_cannot_apply(tmp_path):
     asyncio.run(run())
 
 
-def test_release_retains_unknown_backup_and_survives_restart(tmp_path):
+def test_cancel_write_batch_retains_history_but_restart_starts_empty(tmp_path):
     async def run():
         service = Service(tmp_path)
-        first = service.batch()
-        second = service.batch()
+        first, second = service.batch(), service.batch()
+        response = await apply(service, "WriteBatch", first, "cancel")
+        assert response.ok
         original = service.server.state.get_write_batch(first)
-        response = await apply(service, "WriteBatch", first, "release")
-        assert response.ok, response
-        assert response.data["outcome"] == "unknown"
-        disposition = response.data["disposition"]
-        content = Path(disposition["backupPath"]).read_bytes()
-        assert hashlib.sha256(content).hexdigest() == disposition["backupSha256"]
-        assert json.loads(content)["write_batch_id"] == first
-        assert json.loads(content)["error"] == "Original unknown"
+        assert original["terminal"] and original["status"] == "aborted"
+        assert [v["writeBatchId"] for v in service.server.state.pending_write_batches()] == [second]
         restored = StateStore()
         restored.configure_project(str(tmp_path))
-        actual = restored.get_write_batch(first)
-        assert actual["status"] == original["status"] == "recovery_required"
-        assert actual["outcome"] == "unknown" and not actual["terminal"]
-        assert [v["writeBatchId"] for v in restored.pending_write_batches()] == [second]
-        assert restored.pending_write_batch_id == second
-        before = restored.get_write_batch(first)
+        assert restored.get_write_batch(first) == original
+        assert restored.pending_write_batches() == []
+        assert not restored.pending_write_batch_id
         late = _snapshot(2, observed_at=now_ms(), write_batch_id=first,
-                         write_batch_created_at=before["writeBatchCreatedAt"])
+                         write_batch_created_at=original["writeBatchCreatedAt"])
         late["pendingWriteBatchId"] = first
         restored.update_editor_execution_state(late)
-        assert restored.get_write_batch(first) == before
-        assert restored.pending_write_batch_id != first
+        assert restored.get_write_batch(first) == original
+        assert restored.pending_write_batches() == []
+        assert (await apply(service, "WriteBatch", first)).data["status"] == "not_found"
     asyncio.run(run())
 
 
-def test_backup_failure_and_possible_execution_leave_blocker(tmp_path, monkeypatch):
+def test_removed_administrative_release_does_not_mutate_batch(tmp_path):
     async def run():
         service = Service(tmp_path)
         identity = service.batch()
-        service.server._suspended["old"] = object()
-        blocked = await service.queue_cleanup(target_type="WriteBatch", target_id=identity,
-                                              action="release", reason="fixture only")
-        assert blocked.error.code == "QUEUE_EXECUTION_NOT_EXCLUDED"
-        service.server._suspended.clear()
-        original_open = Path.open
-        def broken_open(path, *args, **kwargs):
-            if path.parent.name == "queue-backups":
-                raise OSError("fixture backup failure")
-            return original_open(path, *args, **kwargs)
-        monkeypatch.setattr(Path, "open", broken_open)
-        response = await apply(service, "WriteBatch", identity, "release")
-        assert not response.ok
-        assert not service.server.state.get_write_batch(identity)["disposition"]
+        original = service.server.state.get_write_batch(identity)
+        response = await service.queue_cleanup(target_type="WriteBatch", target_id=identity,
+                                               action="release", reason="fixture only")
+        assert response.error.code == "QUEUE_CLEANUP_UNSUPPORTED"
+        assert service.server.state.get_write_batch(identity) == original
         assert service.server.state.pending_write_batches()[0]["writeBatchId"] == identity
     asyncio.run(run())
 
@@ -366,7 +352,7 @@ def test_completed_test_is_noop_not_second_cancel(tmp_path, caplog):
                 resultAuthoritative=True, cleanupSucceeded=True, cleanupPending=False))
         service.test_results = result
         response = await apply(service, "Test", "run-done")
-        assert response.ok and response.data["status"] == "noop"
+        assert response.ok and response.data["status"] == "not_found"
         assert "无需操作" in caplog.text
     caplog.set_level(logging.INFO)
     asyncio.run(run())
@@ -403,21 +389,17 @@ def test_queued_test_task_can_cancel_before_start_but_unknown_start_cannot(tmp_p
     asyncio.run(run())
 
 
-def test_step_records_keep_original_instance_and_operation_ids_and_mark_unverified(tmp_path):
+def test_historical_steps_are_not_admitted_without_live_lifetime(tmp_path):
     async def run():
         service = Service(tmp_path)
         path = tmp_path / "Library/UPilot/step-run.json"
-        path.write_text(json.dumps(dict(runId="run-1", operationId="op-1", status="Running",
-            terminal=False, steps=[
-                dict(instanceId="original-step-id", typeIdentity="FixtureStep", stage="Polling", startedAtUtcMs=123),
-                dict(instanceId="finished", stage="Completed", finishedAtUtcMs=456),
-            ])))
+        original = json.dumps(dict(runId="run-1", operationId="op-1", status="Running",
+            terminal=False, serviceLifecycleId="old-service", steps=[
+                dict(instanceId="original-step-id", typeIdentity="FixtureStep", stage="Polling")]))
+        path.write_text(original)
         response = await service.queue_inventory()
         assert not response.data["complete"]
-        assert "STEP_LIVE_STATE_UNVERIFIED" in response.data["issues"]
-        entries = [v for v in response.data["items"] if v["type"] == "Step"]
-        assert len(entries) == 1
-        assert entries[0]["id"] == "original-step-id"
-        assert entries[0]["operationId"] == "op-1" and entries[0]["runId"] == "run-1"
-        assert entries[0]["source"] == "persisted"
+        assert "BRIDGE_QUEUE_NOT_FULLY_ENUMERATED" in response.data["issues"]
+        assert not [v for v in response.data["items"] if v["type"] in {"Step", "StepRun"}]
+        assert path.read_text() == original, "History must not be rewritten or used to restore occupancy."
     asyncio.run(run())

@@ -64,30 +64,48 @@ namespace CodingRiver.UPilot
 
         public void Step(string step, string detail = null)
         {
-            _entry.AddStep(step, detail);
-            // 文件日志精简：只有关键步骤才落盘，避免高频命令产生噪音
-            if (step is "完成" or "失败" or "⚠ 卡住检测" or "主线程执行完毕")
+            lock (_entry)
             {
-                var d = detail != null ? $"{step} | {detail}" : step;
-                _tracker.WriteLogLine("INFO", "COMMAND", $"STEP {_entry.CommandName} id={_entry.CommandId} | {d}");
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.AddStep(step, detail);
+                // 文件日志精简：只有关键步骤才落盘，避免高频命令产生噪音
+                if (step is "完成" or "失败" or "⚠ 卡住检测" or "主线程执行完毕")
+                {
+                    var d = detail != null ? $"{step} | {detail}" : step;
+                    _tracker.WriteLogLine("INFO", "COMMAND", $"STEP {_entry.CommandName} id={_entry.CommandId} | {d}");
+                }
+
             }
         }
 
         public void Progress(int percent, string detail = null)
         {
-            _entry.Progress = percent < 0 ? 0 : percent > 100 ? 100 : percent;
-            _entry.AddStep($"进度 {percent}%", detail);
-            // 进度变化不写文件日志（内存中保留即可）
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.Progress = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+                _entry.AddStep($"进度 {percent}%", detail);
+                // 进度变化不写文件日志（内存中保留即可）
+
+            }
         }
 
         public void Warn(string message)
         {
-            _entry.AddStep("⚠ " + message);
-            _tracker.WriteLogLine("WARN", "COMMAND", $"WARN {_entry.CommandName} id={_entry.CommandId} | {message}");
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.AddStep("⚠ " + message);
+                _tracker.WriteLogLine("WARN", "COMMAND", $"WARN {_entry.CommandName} id={_entry.CommandId} | {message}");
+
+            }
         }
 
         public void Complete(string summary = null)
         {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
             _entry.CompletedAt = DateTime.Now;
             _entry.ElapsedMs   = (long)(DateTime.Now - _entry.ReceivedAt).TotalMilliseconds;
             _entry.Phase       = "completed";
@@ -95,10 +113,14 @@ namespace CodingRiver.UPilot
             _entry.AddStep("完成", summary);
             _tracker.WriteLogLine("INFO", "COMMAND",
                 $"DONE {_entry.CommandName} id={_entry.CommandId} | elapsed={_entry.ElapsedMs}ms" + (summary != null ? $" | {summary}" : ""));
+            }
         }
 
         public void Fail(string code, string message)
         {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
             _entry.CompletedAt  = DateTime.Now;
             _entry.ElapsedMs    = (long)(DateTime.Now - _entry.ReceivedAt).TotalMilliseconds;
             _entry.Phase        = "failed";
@@ -108,6 +130,7 @@ namespace CodingRiver.UPilot
             _entry.AddStep($"失败: {code}", message);
             _tracker.WriteLogLine("ERROR", "COMMAND",
                 $"FAIL {_entry.CommandName} id={_entry.CommandId} | {code}: {message} | elapsed={_entry.ElapsedMs}ms");
+            }
         }
 
         public void MarkReported(bool isError = false)
@@ -329,6 +352,25 @@ namespace CodingRiver.UPilot
         public List<OperationLogEntry> GetEntriesCopy()
         {
             lock (_listLock) { return new List<OperationLogEntry>(_entries); }
+        }
+
+        internal void AbortActive()
+        {
+            lock (_listLock)
+            {
+                foreach (var entry in _entries)
+                {
+                    lock (entry)
+                    {
+                        if (entry.CompletedAt.HasValue) continue;
+                        entry.CompletedAt = DateTime.Now;
+                        entry.Phase = "aborted";
+                        entry.ErrorCode = "SERVICE_HARD_STOP";
+                        entry.CurrentStep = "UPilot service lifetime ended; underlying execution is not asserted stopped.";
+                    }
+                }
+            }
+            _activeContexts.Clear();
         }
 
         public void ClearEntries()

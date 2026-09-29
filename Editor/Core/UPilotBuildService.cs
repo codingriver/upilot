@@ -61,6 +61,16 @@ namespace CodingRiver.UPilot
 
         public UPilotBuildService(UPilotBridge bridge) { _bridge = bridge; }
 
+        internal void ResetActive()
+        {
+            var cancellation = _buildCts;
+            _buildCts = null;
+            _isBuildingAsync = false;
+            if (_lastBuildStatus.status == "building")
+                _lastBuildStatus = new BuildStatusPayload { status = "aborted", summary = "UPilot hard stop; an already executing Unity build may still be running." };
+            try { cancellation?.Cancel(); } catch { }
+        }
+
         public void RegisterCommands()
         {
             _bridge.Router.Register("build.start",   HandleStartAsync);
@@ -126,6 +136,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            var lifetime = UPilotServiceLifetime.Id;
             opCtx?.Step("开始构建", $"target={target} scenes={scenes.Length}");
             _buildCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             _isBuildingAsync = true;
@@ -200,6 +211,7 @@ namespace CodingRiver.UPilot
                 var timeoutTask = Task.Delay(600000, _buildCts.Token);
                 var completed = await Task.WhenAny(tcs.Task, timeoutTask);
 
+                if (lifetime != UPilotServiceLifetime.Id) return;
                 if (completed == timeoutTask && !tcs.Task.IsCompleted)
                 {
                     _lastBuildStatus = new BuildStatusPayload
@@ -217,6 +229,7 @@ namespace CodingRiver.UPilot
             }
             catch (OperationCanceledException)
             {
+                if (lifetime != UPilotServiceLifetime.Id) return;
                 _lastBuildStatus = new BuildStatusPayload
                 {
                     status      = "failed",
@@ -227,8 +240,11 @@ namespace CodingRiver.UPilot
             }
             finally
             {
-                _isBuildingAsync = false;
-                _buildCts = null;
+                if (lifetime == UPilotServiceLifetime.Id)
+                {
+                    _isBuildingAsync = false;
+                    _buildCts = null;
+                }
             }
 
             await _bridge.SendResultAsync(id, "build.start", _lastBuildStatus, token);

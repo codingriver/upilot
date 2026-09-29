@@ -812,6 +812,13 @@ namespace CodingRiver.UPilot.Execution
             return session.Close();
         }
 
+        public void CloseAll()
+        {
+            var sessions = _sessions.Values.ToArray();
+            _sessions.Clear();
+            foreach (var session in sessions) session.HardClose();
+        }
+
         public string Store(string sessionId, string kind, object value)
         {
             return Get(sessionId).Store(kind, value);
@@ -1153,6 +1160,26 @@ namespace CodingRiver.UPilot.Execution
                         _cleanupDiagnostics.Add("subscription: " + ex.GetType().FullName + ": " + ex.Message);
                 }
                 _cleanup.RemoveAt(i);
+            }
+        }
+
+        // Hard reset fences escaped delegates first. Never invoke user cleanup on the control path.
+        internal void HardClose()
+        {
+            if (_closed) return;
+            _closed = true;
+            var subscriptions = _cleanup.Where(entry => entry.Kind == "subscription").ToArray();
+            _cleanup.Clear(); _handles.Clear(); _variables.Clear(); _executionScope = null;
+            // Cancellation callbacks are arbitrary code. Signal off the control thread and do not join.
+            _ = System.Threading.Tasks.Task.Run(() => { try { _cancellation.Cancel(); } catch { } });
+            foreach (var entry in subscriptions)
+            {
+                // Engine event removal is known infrastructure; custom accessors may run user code.
+                // Their escaped handlers are already fenced by IsClosed even if physical removal is unsafe.
+                var assembly = entry.EventInfo?.DeclaringType?.Assembly.GetName().Name ?? "";
+                if (!assembly.StartsWith("UnityEditor", StringComparison.Ordinal) &&
+                    !assembly.StartsWith("UnityEngine", StringComparison.Ordinal)) continue;
+                try { entry.Action?.Invoke(); } catch { }
             }
         }
 

@@ -119,3 +119,23 @@ def test_editor_endpoint_uses_same_finite_contract(tmp_path):
         assert result.status_code == 400
         assert not service.calls
     asyncio.run(run())
+
+
+def test_journal_failure_does_not_prevent_stop_or_in_memory_status(tmp_path, monkeypatch):
+    from upilot_mcp.domain import queue_bulk
+    def cannot_write(*args):
+        raise OSError("fixture disk full")
+    async def run():
+        service = Service(tmp_path)
+        service.task('original')
+        apply, _ = await prepare(service)
+        monkeypatch.setattr(queue_bulk, '_write_journal', cannot_write)
+        result = await service.queue_cleanup(**apply)
+        status = await finish(service, result)
+        assert service.calls == ['original']
+        assert status.ok and status.data['terminal']
+        assert status.data['dispatchComplete']
+        assert 'fixture disk full' in status.data['persistenceError']
+        assert not (await service.queue_cleanup(**apply)).ok
+        assert service.calls == ['original']
+    asyncio.run(run())

@@ -133,13 +133,15 @@ def test_authorized_dispatch_ignores_unrelated_write_gate(tmp_path, monkeypatch)
     {"ready": False}, {"authoritative": False}, {"isStale": True}, {"playModeState": "play"},
     {"playModeState": "pause"}, {"playModeState": "enteringEdit"},
 ])
-def test_not_ready_never_dispatches_or_switches_modes(tmp_path, state):
+def test_hard_stop_does_not_require_ready_or_switch_modes(tmp_path, state):
     config(tmp_path)
     instance = service(tmp_path)
     instance.editor_state.return_value.data.update(state)
     result = asyncio.run(instance.service_restart(**args(tmp_path)))
-    assert result.error.code == "SERVICE_RESTART_EDITOR_NOT_READY"
-    instance.dispatcher.call.assert_not_called()
+    assert result.ok
+    instance.editor_state.assert_not_awaited()
+    instance.dispatcher.call.assert_awaited_once()
+    assert instance.dispatcher.call.call_args.args[1] == "service.restart"
 
 
 def test_duplicate_after_lost_response_is_observation_even_after_revocation(tmp_path):
@@ -160,7 +162,10 @@ def test_busy_and_stale_identity_do_not_start_new_attempt(tmp_path):
     config(tmp_path)
     original = record(tmp_path)
     instance = service(tmp_path)
-    assert asyncio.run(instance.service_restart(**args(tmp_path))).error.code == "SERVICE_RESTART_BUSY"
+    joined = asyncio.run(instance.service_restart(**args(tmp_path)))
+    assert joined.ok and joined.data["joined"] and not joined.data["changed"]
+    assert joined.data["maintenanceId"] == original["maintenanceId"]
+    assert joined.data["deadlineAtUtcMs"] == original["deadlineAtUtcMs"]
     record(tmp_path, **{**original, "status": "failed"})
     assert asyncio.run(instance.service_restart(**args(tmp_path))).error.code == "SERVICE_RESTART_IDENTITY_CHANGED"
     instance.dispatcher.call.assert_not_called()
@@ -170,7 +175,7 @@ def test_registry_and_public_schema_prevent_retry_and_timeout_override():
     descriptor = REGISTRY.resolve("unity_service_restart")
     assert descriptor.destructive and not descriptor.idempotent
     assert not descriptor.requires_write_access
-    assert descriptor.required_editor_mode == "edit"
+    assert descriptor.required_editor_mode == "any"
     tools = {tool.name: tool for tool in asyncio.run(runtime._original_mcp_list_tools())}
     properties = tools["unity_service_restart"].inputSchema["properties"]
     assert "timeout" not in properties and "restartTimeoutSeconds" not in properties
@@ -265,3 +270,11 @@ def test_reload_missing_record_converges_and_completed_future_is_not_sent():
         server.state.mark_failed.assert_not_called()
 
     asyncio.run(run())
+
+
+def test_configured_timeout_read_does_not_write_config(tmp_path):
+    config(tmp_path, restartTimeoutSeconds=30)
+    path = tmp_path / ".upilot" / "config.json"
+    original = path.read_bytes()
+    assert read_summary(tmp_path)["restartTimeoutSeconds"] == 30
+    assert path.read_bytes() == original

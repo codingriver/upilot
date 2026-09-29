@@ -36,7 +36,14 @@ namespace CodingRiver.UPilot
         public int unityProcessId, oldServerProcessId, newServerProcessId, restartTimeoutSeconds;
         public long acceptedAtUtcMs, deadlineAtUtcMs, endedAtUtcMs;
         public bool stopAttempted, startAttempted, readOnlyVerified;
+        public bool healthVerified;
+        public int healthProbeCount;
+        public long healthProbeStartedAtUtcMs, healthProbeElapsedMs;
+        public string healthProbeError = "";
         public bool affectedWorkComplete;
+        public bool humanConfirmed, queueReset;
+        public string queueResetError = "";
+        public bool underlyingExecutionStopped; // Not asserted by resetting UPilot.
         public string[] affectedCommandIds = Array.Empty<string>();
         public string[] affectedComponents;
         public bool Active => status == "accepted" || status == "running";
@@ -45,7 +52,9 @@ namespace CodingRiver.UPilot
         {
             if (!Active || now < deadlineAtUtcMs) return false;
             Finish("timed_out", "SERVICE_RESTART_TIMEOUT",
-                "The maintenance deadline elapsed. Services may still recover; business was not replayed.", now);
+                phase == "health_query" && !healthVerified && deadlineAtUtcMs - acceptedAtUtcMs == 600000
+                    ? UPilotServerRestartDiagnostics.HealthTimeoutMessage + " 最近错误：" + healthProbeError
+                    : "重启验证期限已到；未通过：" + phase + "。最近错误：" + healthProbeError, now);
             return true;
         }
 
@@ -108,16 +117,21 @@ namespace CodingRiver.UPilot
             return Current;
         }
 
-        internal ServiceMaintenanceRecord Accept(ServiceRestartRequest request, int timeout, int unityPid, string[] affected)
+        internal ServiceMaintenanceRecord Accept(ServiceRestartRequest request, int timeout, int unityPid, string[] affected, bool humanConfirmed = false)
         {
+            // A human-confirmed emergency reset must not depend on a readable old archive.
+            // MCP requests still require the exact previously observed identity.
+            var archiveError = LoadError;
+            if (humanConfirmed && LoadError != null) { LoadError = null; Current = null; }
             var duplicate = FindDuplicate(request);
             if (duplicate != null) return duplicate;
             if (Current?.Active == true)
-                throw new ServiceMaintenanceException("SERVICE_RESTART_BUSY", "Maintenance already active: " + Current.maintenanceId);
+                return Current; // Project-local concurrent requests share the original deadline and dispatch.
             // Compare-and-set prevents an old request from becoming a new restart after journal replacement.
             if ((request.expectedMaintenanceId ?? "") != (Current?.maintenanceId ?? ""))
                 throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Latest maintenance identity changed; inspect status.");
             var now = _now();
+            timeout = Math.Max(30, Math.Min(600, timeout));
             var record = new ServiceMaintenanceRecord
             {
                 maintenanceId = request.maintenanceId, projectPath = Path.GetFullPath(request.expectedProjectPath),
@@ -125,11 +139,12 @@ namespace CodingRiver.UPilot
                 oldServerProcessId = request.expectedServerProcessId, oldBridgeSessionId = request.expectedBridgeSessionId,
                 unityProcessId = unityPid, restartTimeoutSeconds = timeout, acceptedAtUtcMs = now,
                 deadlineAtUtcMs = checked(now + timeout * 1000L), affectedCommandIds = affected ?? Array.Empty<string>(),
-                affectedWorkComplete = false,
-                affectedComponents = request.target == "server" ? new[] { "server", "bridge" } : new[] { "bridge" },
+                affectedWorkComplete = false, humanConfirmed = humanConfirmed,
+                queueResetError = archiveError == null ? "" : "Previous journal: " + archiveError,
+                affectedComponents = new[] { "server", "bridge" },
             };
-            Write(record);
             Current = record;
+            Save();
             return record;
         }
 
@@ -140,7 +155,12 @@ namespace CodingRiver.UPilot
             return true;
         }
 
-        internal void Save() { if (Current != null) Write(Current); }
+        internal void Save()
+        {
+            if (Current == null) return;
+            try { Write(Current); }
+            catch (Exception ex) { Current.queueResetError = "Journal: " + ex.Message; }
+        }
 
         internal bool Dispatch(Action validate, Action<ServiceMaintenanceRecord> execute)
         {
@@ -202,6 +222,9 @@ namespace CodingRiver.UPilot
                 if (timeout != null && ((string)timeout.Attribute("type") != "number" ||
                     !int.TryParse(timeout.Value, NumberStyles.None, CultureInfo.InvariantCulture, out seconds) || seconds < 30 || seconds > 600))
                     throw new FormatException("restartTimeoutSeconds must be an integer between 30 and 600.");
+                var automatic = section.Element("autoHardStopOnSoftFailure");
+                if (automatic != null && (string)automatic.Attribute("type") != "boolean")
+                    throw new FormatException("autoHardStopOnSoftFailure must be a boolean.");
                 var approved = section.Element("approved");
                 if (approved != null && (string)approved.Attribute("type") != "boolean")
                     throw new FormatException("approved must be a boolean.");
@@ -214,6 +237,7 @@ namespace CodingRiver.UPilot
                     projectPath = (string)section.Element("projectPath") ?? "",
                     approvedAtUtc = (string)section.Element("approvedAtUtc") ?? "",
                     restartTimeoutSeconds = seconds,
+                    autoHardStopOnSoftFailure = section.Element("autoHardStopOnSoftFailure")?.Value == "true",
                 };
             }
             catch (Exception ex) { throw new ServiceMaintenanceException("SERVICE_MAINTENANCE_CONFIG_INVALID", ex.Message); }
@@ -233,6 +257,7 @@ namespace CodingRiver.UPilot
         private static ServiceMaintenanceJournal _journal;
         private static bool _executing, _probeRunning, _recoveryChecked;
         private static long _dispatchAfter, _nextProbe;
+        private static CancellationTokenSource _probeCancellation;
         private static string _storageError = "";
         internal static string RecordPath => Path.Combine(UPilotProjectConfig.ProjectRoot, "Library", "UPilot", "service-maintenance.json");
         private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -246,6 +271,8 @@ namespace CodingRiver.UPilot
         {
             if (!UPilotBridge.IsMainEditorProcess()) return;
             EditorApplication.update += Update;
+            AssemblyReloadEvents.beforeAssemblyReload += () => _probeCancellation?.Cancel();
+            EditorApplication.quitting += () => _probeCancellation?.Cancel();
             EditorApplication.delayCall += Recover;
         }
 
@@ -269,12 +296,12 @@ namespace CodingRiver.UPilot
         private static async Task Handle(UPilotBridge bridge, string id, string json, CancellationToken token)
         {
             var completion = new TaskCompletionSource<ServiceMaintenanceRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
-            bridge.EnqueueTracked(id, () =>
+            bridge.EnqueueControl(() =>
             {
                 try
                 {
                     token.ThrowIfCancellationRequested();
-                    if (!_recoveryChecked || !string.IsNullOrEmpty(StorageError))
+                    if (!_recoveryChecked)
                         throw new ServiceMaintenanceException("SERVICE_RESTART_RECOVERY_REQUIRED", "Maintenance journal is recovering or could not be persisted.");
                     var request = JsonUtility.FromJson<ServiceRestartMessage>(json)?.payload;
                     if (request == null || !Guid.TryParseExact(request.maintenanceId, "D", out _) ||
@@ -285,6 +312,7 @@ namespace CodingRiver.UPilot
                     var duplicate = Journal.FindDuplicate(request);
                     if (duplicate != null) { completion.SetResult(duplicate); return; }
                     RequireGate(request);
+                    if (IsActive) { completion.SetResult(Current); return; }
                     if (UPilotQuickStart.IsRepairing || UPilotMcpServerManager.Instance.IsServiceTransitionActive)
                         throw new ServiceMaintenanceException("SERVICE_RESTART_BUSY", "A manual restart or automatic repair is active.");
                     var affected = UPilotOperationTracker.Instance.GetEntriesCopy()
@@ -314,17 +342,35 @@ namespace CodingRiver.UPilot
             }
         }
 
+        // Human confirmation is supplied only by the local settings button, never by MCP payload.
+        internal static ServiceMaintenanceRecord HardStopFromSettings()
+        {
+            if (IsActive) return Current;
+            var bridge = UPilotBridge.Instance;
+            var manager = UPilotMcpServerManager.Instance;
+            int timeout = 120;
+            try { timeout = ReadSettings().restartTimeoutSeconds; } catch { /* Human control remains available. */ }
+            var record = Journal.Accept(new ServiceRestartRequest
+            {
+                maintenanceId = Guid.NewGuid().ToString("D"), target = "server",
+                reason = "Human-confirmed project hard stop", expectedProjectPath = UPilotProjectConfig.ProjectRoot,
+                expectedBridgeSessionId = bridge.GetStatus().SessionId ?? "",
+                expectedServerProcessId = manager.GetStatus().ProcessId ?? 0,
+                expectedMaintenanceId = Current?.maintenanceId ?? "",
+            }, timeout, System.Diagnostics.Process.GetCurrentProcess().Id, Array.Empty<string>(), humanConfirmed: true);
+            record.humanConfirmed = true;
+            Journal.Save();
+            _recoveryChecked = true;
+            _dispatchAfter = Now;
+            return record;
+        }
+
         private static void RequireGate(ServiceRestartRequest request)
         {
             ServiceMaintenanceJournal.RequireAuthorization(ReadSettings(), UPilotProjectConfig.ProjectRoot);
             if (!ServiceMaintenanceJournal.SamePath(request.expectedProjectPath, UPilotProjectConfig.ProjectRoot))
                 throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Project identity changed.");
             var bridge = UPilotBridge.Instance;
-            var state = bridge.GetEditorExecutionContext("service.restart");
-            if (!state.ready || !state.authoritative || state.isStale || state.playModeState != "edit" ||
-                EditorApplication.isPlayingOrWillChangePlaymode || EditorApplication.isPaused ||
-                EditorApplication.isCompiling || EditorApplication.isUpdating)
-                throw new ServiceMaintenanceException("SERVICE_RESTART_EDITOR_NOT_READY", "Authoritative stable EditMode is required; mode is never changed.");
             var status = UPilotMcpServerManager.Instance.GetStatus();
             if (!UPilotBridge.IsMainEditorProcess() || bridge.GetStatus().SessionId != request.expectedBridgeSessionId ||
                 status.ProcessId != request.expectedServerProcessId || status.ProcessOwnership != McpProcessOwnership.CurrentUPilot)
@@ -354,7 +400,7 @@ namespace CodingRiver.UPilot
                     return;
                 }
                 // Observation can resume, never dispatch a second stop/start after reload.
-                if (r.target == "server" && string.IsNullOrEmpty(r.serverRestartId))
+                if ((r.target == "server" || r.target == "bridge") && string.IsNullOrEmpty(r.serverRestartId))
                     Fail("SERVICE_RESTART_RECOVERY_REQUIRED", "Replacement restart identity is missing; inspect original evidence.");
             }
             catch (Exception ex) { _storageError = ex.Message; }
@@ -367,12 +413,9 @@ namespace CodingRiver.UPilot
             var r = Current;
             if (r?.Active != true || Now >= r.deadlineAtUtcMs)
                 throw new ServiceMaintenanceException("SERVICE_RESTART_TIMEOUT", "Maintenance is no longer active.");
-            ServiceMaintenanceJournal.RequireAuthorization(ReadSettings(), UPilotProjectConfig.ProjectRoot);
-            var phase = UPilotBridge.Instance.GetEditorExecutionContext("service.restart.continue").compilePhase;
-            if (!UPilotBridge.IsMainEditorProcess() || EditorApplication.isPlayingOrWillChangePlaymode ||
-                EditorApplication.isPaused || EditorApplication.isCompiling || EditorApplication.isUpdating ||
-                new[] { "queued", "compiling", "compiler_finished", "domain_reload", "verifying" }.Contains(phase))
-                throw new ServiceMaintenanceException("SERVICE_RESTART_EDITOR_NOT_READY", "Editor state changed before the next stop/start.");
+            if (!r.humanConfirmed) ServiceMaintenanceJournal.RequireAuthorization(ReadSettings(), UPilotProjectConfig.ProjectRoot);
+            if (!UPilotBridge.IsMainEditorProcess())
+                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Main Editor identity is required.");
         }
 
         private static void Execute(ServiceMaintenanceRecord r)
@@ -382,18 +425,13 @@ namespace CodingRiver.UPilot
             try
             {
                 RequireContinuation();
-                if (r.target == "bridge")
-                {
-                    UPilotBridge.Instance.Stop();
-                    RequireContinuation();
-                    r.startAttempted = true;
-                    Journal.Save();
-                    UPilotBridge.Instance.EnsureStarted();
-                }
-                else
+                var resetError = UPilotBridge.Instance.ResetActiveWork();
+                r.queueReset = string.IsNullOrEmpty(resetError);
+                if (!string.IsNullOrEmpty(resetError)) r.queueResetError += resetError;
+                try { Journal.Save(); } catch (Exception ex) { r.queueResetError += ex.Message; }
                 {
                     UPilotMcpServerManager.Instance.RestartPreparedServer(
-                        maintenanceDeadlineUtcMs: r.deadlineAtUtcMs, expectedProcessId: r.oldServerProcessId);
+                        maintenanceDeadlineUtcMs: r.deadlineAtUtcMs, expectedProcessId: r.oldServerProcessId, acceptedAtUtcMs: r.acceptedAtUtcMs);
                     var restart = UPilotServerRestartDiagnostics.Current;
                     if (restart == null || restart.maintenanceDeadlineUtcMs != r.deadlineAtUtcMs ||
                         restart.requestedAtUtcMs < r.acceptedAtUtcMs)
@@ -414,13 +452,30 @@ namespace CodingRiver.UPilot
                 Recover();
                 return;
             }
-            if (!string.IsNullOrEmpty(StorageError)) return;
+            // Journal errors are displayed, never used as an activity lease.
             var r = Current;
             if (r?.Active != true) return;
             try
             {
+                var observedRestart = UPilotServerRestartDiagnostics.Current;
+                if ((r.target == "server" || r.target == "bridge") && observedRestart?.operationId == r.serverRestartId)
+                {
+                    r.healthVerified = UPilotServerRestartDiagnostics.HasPassedHealthGate(observedRestart);
+                    r.phase = r.healthVerified ? UPilotServerRestartDiagnostics.FirstUnpassedGate(observedRestart) : "health_query";
+                    r.healthProbeStartedAtUtcMs = observedRestart.statusProbeStartedAtUtcMs;
+                    r.healthProbeElapsedMs = Math.Max(0, observedRestart.statusProbeEndedAtUtcMs - observedRestart.statusProbeStartedAtUtcMs);
+                    r.healthProbeCount = observedRestart.statusProbeCount;
+                    r.healthProbeError = observedRestart.statusProbeError;
+                    if (observedRestart.status == "failed")
+                    {
+                        Fail(observedRestart.errorCode, observedRestart.error);
+                        return;
+                    }
+                    if (observedRestart.newProcessId > 0 && !r.healthVerified) r.phase = "health_query";
+                }
                 if (Journal.Expire())
                 {
+                    _probeCancellation?.Cancel();
                     UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId);
                     return;
                 }
@@ -429,23 +484,24 @@ namespace CodingRiver.UPilot
                     if (Now < _dispatchAfter) return;
                     if (!Journal.Dispatch(() =>
                     {
-                        RequireGate(OriginalRequest(r));
+                        if (!r.humanConfirmed) RequireGate(OriginalRequest(r));
                         if (UPilotQuickStart.IsRepairing || UPilotMcpServerManager.Instance.IsServiceTransitionActive)
                             throw new ServiceMaintenanceException("SERVICE_RESTART_BUSY", "Another service transition began before dispatch.");
                     }, Execute)) return;
                 }
-                if (r.target == "server")
+                if ((r.target == "server" || r.target == "bridge"))
                 {
                     var restart = UPilotServerRestartDiagnostics.Current;
                     if (restart == null || restart.operationId != r.serverRestartId)
                         throw new ServiceMaintenanceException("SERVICE_RESTART_RECOVERY_REQUIRED", "Server restart identity changed.");
-                    var changed = r.phase != restart.phase || r.newServerProcessId != restart.newProcessId ||
+                    var phase = UPilotServerRestartDiagnostics.FirstUnpassedGate(restart);
+                    var changed = r.phase != phase || r.newServerProcessId != restart.newProcessId ||
                         r.newBridgeSessionId != (restart.newBridgeSessionId ?? "") ||
                         r.startAttempted != (restart.portsReleasedAtUtcMs > 0);
                     r.newServerProcessId = restart.newProcessId;
                     r.newBridgeSessionId = restart.newBridgeSessionId ?? "";
                     r.startAttempted = restart.portsReleasedAtUtcMs > 0;
-                    r.phase = restart.phase;
+                    r.phase = phase;
                     if (restart.status == "succeeded")
                     {
                         r.readOnlyVerified = restart.readOnlyVerified;
@@ -458,7 +514,6 @@ namespace CodingRiver.UPilot
                 }
                 else if (!_probeRunning && Now >= _nextProbe)
                 {
-                    _nextProbe = Now + 500;
                     _ = ProbeBridge(r);
                 }
             }
@@ -473,42 +528,90 @@ namespace CodingRiver.UPilot
             }
         }
 
+        // Missing identity is retryable; only positive, conflicting evidence is a mismatch.
+        internal static bool BridgeIdentityChanged(McpServerStatus status, int expectedPid, string project) =>
+            (status.HealthEndpointResponded && ((status.HealthServerProcessId > 0 && status.HealthServerProcessId != expectedPid) ||
+                (!string.IsNullOrWhiteSpace(status.HealthProjectPath) && !ServiceMaintenanceJournal.SamePath(status.HealthProjectPath, project)))) ||
+            (status.ProcessOwnership == McpProcessOwnership.Foreign) ||
+            (status.ProcessId > 0 && status.ProcessId != expectedPid);
+
         private static async Task ProbeBridge(ServiceMaintenanceRecord r)
         {
             _probeRunning = true;
+            var cancellation = new CancellationTokenSource();
+            _probeCancellation = cancellation;
+            r.healthProbeCount++;
+            r.healthProbeStartedAtUtcMs = Now;
+            if (!r.healthVerified) r.phase = "health_query";
             try
             {
+                using (var process = System.Diagnostics.Process.GetProcessById(r.oldServerProcessId))
+                    if (process.HasExited) throw new ServiceMaintenanceException("SERVICE_RESTART_PROCESS_EXITED", "The original Server exited.");
                 var manager = UPilotMcpServerManager.Instance;
-                var status = await manager.GetFreshStatusAsync(r.deadlineAtUtcMs);
-                if (!r.Active || Journal.Expire()) return;
-                if (status.ProcessId != r.oldServerProcessId || status.ProcessOwnership != McpProcessOwnership.CurrentUPilot)
-                    throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Bridge-only maintenance must not replace the Server.");
+                var status = await manager.GetRestartStatusAsync(r.deadlineAtUtcMs, cancellation.Token);
+                if (!ReferenceEquals(Current, r) || !r.Active || Journal.Expire() || cancellation.IsCancellationRequested) return;
+                r.healthProbeError = status.ErrorMessage ?? "";
+                if (status.HealthEndpointResponded && !r.healthVerified) { r.healthVerified = true; r.phase = "identity"; }
+                r.healthProbeElapsedMs = Math.Max(0, Now - r.healthProbeStartedAtUtcMs);
+                Journal.Save();
+                if (BridgeIdentityChanged(status, r.oldServerProcessId, r.projectPath))
+                    throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Bridge-only maintenance observed a different Server PID/project/owner.");
                 var bridge = UPilotBridge.Instance.GetStatus();
-                if (!string.IsNullOrEmpty(bridge.AuthenticationError))
+                if (!string.IsNullOrEmpty(bridge.AuthenticationError) && bridge.AuthenticationFailureAtUtcMs >= r.acceptedAtUtcMs)
                     throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", bridge.AuthenticationError);
-                if (!bridge.IsAuthenticated || bridge.SessionId == r.oldBridgeSessionId) return;
-                await manager.VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, r.deadlineAtUtcMs);
-                if (!r.Active || Journal.Expire()) return;
+                if (!UPilotMcpServerManager.IsVerifiedRestartHealth(status, r.oldServerProcessId, r.projectPath)) return;
+                r.healthVerified = true;
+                if (r.phase == "identity" || r.phase == "health_query" || r.phase == "verifying") r.phase = "bridge_session";
+                var issues = UPilotDeploymentDiagnostics.Observe(bridge, status);
+                if (issues.Any(issue => issue.Confirmed && issue.Code != "timeout" && issue.Code != "authentication"))
+                    throw new ServiceMaintenanceException("SERVICE_RESTART_VALIDATION_FAILED", string.Join("\n", issues.Select(issue => issue.Message)));
+                if (!bridge.IsAuthenticated || !bridge.IsWsOpen || bridge.SessionId == r.oldBridgeSessionId) return;
+                if (r.phase == "bridge_session") r.phase = "deployment";
+                if (issues.Length > 0) return;
+                r.phase = "readonly";
+                await manager.VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, r.deadlineAtUtcMs, cancellation.Token);
+                if (!ReferenceEquals(Current, r) || !r.Active || Journal.Expire() || cancellation.IsCancellationRequested) return;
+                var verifiedBridge = UPilotBridge.Instance.GetStatus();
+                if (!verifiedBridge.IsWsOpen || !verifiedBridge.IsAuthenticated || verifiedBridge.SessionId != bridge.SessionId) return;
                 r.newServerProcessId = status.ProcessId ?? 0;
                 r.newBridgeSessionId = bridge.SessionId;
                 r.readOnlyVerified = true;
                 r.Finish("succeeded", "", "", Now);
                 Journal.Save();
             }
-            catch (ServiceMaintenanceException ex) { Fail(ex.Code, ex.Message); }
-            catch (InvalidOperationException ex) { Fail("SERVICE_RESTART_VALIDATION_FAILED", ex.Message); }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // A transient probe failure consumes time, not another stop/start attempt.
-                if (r.Active && Now >= r.deadlineAtUtcMs) Fail("SERVICE_RESTART_TIMEOUT", "Maintenance deadline elapsed.");
+                if (!ReferenceEquals(Current, r) || !r.Active || cancellation.IsCancellationRequested) return;
+                r.healthProbeError = UPilotMcpServerManager.DescribeProbeException(ex);
+                r.healthProbeElapsedMs = Math.Max(0, Now - r.healthProbeStartedAtUtcMs);
+                if (Journal.Expire()) return;
+                if (ex is ServiceMaintenanceException specific) Fail(specific.Code, specific.Message);
+                else if (ex is ArgumentException) Fail("SERVICE_RESTART_PROCESS_EXITED", "The original Server process no longer exists.");
+                else if (ex is InvalidOperationException) Fail("SERVICE_RESTART_VALIDATION_FAILED", r.healthProbeError);
+                else Journal.Save(); // Transient transport errors consume only the original budget.
             }
-            finally { _probeRunning = false; }
+            finally
+            {
+                if (ReferenceEquals(_probeCancellation, cancellation))
+                {
+                    _probeRunning = false;
+                    _nextProbe = Now + UPilotMcpServerManager.RestartProbeIntervalMs;
+                    _probeCancellation = null;
+                    if (ReferenceEquals(Current, r) && r.Active)
+                    {
+                        try { Journal.Save(); }
+                        catch (Exception ex) { _storageError = ex.Message; }
+                    }
+                }
+                cancellation.Dispose();
+            }
         }
 
         private static void Fail(string code, string message)
         {
             var r = Current;
             if (r?.Active != true) return;
+            _probeCancellation?.Cancel();
             r.Finish(code == "SERVICE_RESTART_TIMEOUT" ? "timed_out" : "failed", code, message, Now);
             try { Journal.Save(); }
             catch (Exception ex) { _storageError = ex.Message; }

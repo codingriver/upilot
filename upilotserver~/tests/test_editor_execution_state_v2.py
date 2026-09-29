@@ -15,6 +15,14 @@ from upilot_mcp.server import WsOrchestratorServer
 from upilot_mcp.state_store import StateStore
 
 
+@pytest.fixture(autouse=True)
+def controlled_batch_clock(monkeypatch):
+    # These evidence fixtures deliberately use small timestamps. Deadline tests
+    # advance their own clock; real wall time must not expire unrelated batches.
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 3000)
+    monkeypatch.setattr("upilot_mcp.domain.resource_service.now_ms", lambda: 3000)
+
+
 def _snapshot(
     sequence: int,
     *,
@@ -83,7 +91,7 @@ def test_v2_snapshot_ordering_rejects_duplicate_old_domain_and_old_session(tmp_p
     assert state.producer_epoch == "epoch-new"
 
 
-def test_sqlite_restart_restores_stale_snapshot_and_inflight_batch(tmp_path: Path) -> None:
+def test_sqlite_restart_keeps_stale_evidence_but_never_restores_activity(tmp_path: Path) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
     batch = state.register_write_batch(
@@ -101,12 +109,15 @@ def test_sqlite_restart_restores_stale_snapshot_and_inflight_batch(tmp_path: Pat
     assert execution["source"] == "server-persisted"
     assert execution["authoritative"] is False
     assert execution["isStale"] is True
-    assert restored.pending_write_batches()[0]["status"] == "recovery_required"
+    assert restored.pending_write_batches() == []
+    assert restored.pending_write_batch_id == ""
+    assert restored.get_write_batch(batch["writeBatchId"]) is not None
 
     heartbeat = _snapshot(2, observed_at=1100, transition="heartbeat")
     heartbeat["playModeState"] = "play"
     assert restored.update_editor_execution_state(heartbeat)
-    assert restored.execution_state()["compileDeferredReason"] == "PlayMode"
+    assert restored.pending_write_batches() == []
+    assert restored.execution_state()["pendingWriteBatchId"] == ""
 
 
 def test_write_batches_coalesce_before_compile_but_not_during_compile(tmp_path: Path) -> None:
@@ -317,7 +328,7 @@ def test_state_events_keep_transitions_and_exclude_heartbeats(tmp_path: Path) ->
     assert transitions == ["compile_queued"]
 
 
-def test_v2_heartbeat_notifies_pending_batch_coordinator_after_server_restart(tmp_path: Path) -> None:
+def test_v2_heartbeat_notifies_pending_batch_coordinator_in_same_lifetime(tmp_path: Path) -> None:
     async def scenario() -> None:
         server = WsOrchestratorServer()
         server.state.configure_project(str(tmp_path))
@@ -400,7 +411,7 @@ def test_playmode_write_batch_is_durable_and_resumes_once_on_editmode(tmp_path: 
     assert service.resume_calls == 1
 
 
-def test_auto_resumed_compile_failure_without_persisted_snapshot_requires_recovery(tmp_path: Path, monkeypatch) -> None:
+def test_auto_resumed_compile_without_persisted_snapshot_aborts_without_claiming_success(tmp_path: Path, monkeypatch) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
     state.editor.connected = True
@@ -431,9 +442,12 @@ def test_auto_resumed_compile_failure_without_persisted_snapshot_requires_recove
 
     stored = state.get_write_batch(batch["writeBatchId"])
     assert stored is not None
-    assert stored["status"] == "recovery_required"
+    assert stored["status"] == "aborted"
     assert stored["outcome"] == "unknown"
-    assert stored["terminal"] is False
+    assert stored["terminal"] is True
+
+    assert state.pending_write_batch_id == ""
+    assert state.pending_write_batches() == []
 
 
 def test_auto_resumed_compile_predispatch_stale_context_waits_for_fresh_editor_state(tmp_path: Path, monkeypatch) -> None:
@@ -475,7 +489,7 @@ def test_auto_resumed_compile_predispatch_stale_context_waits_for_fresh_editor_s
     assert stored["terminal"] is False
 
 
-def test_legacy_predispatch_stale_recovery_is_safely_reclassified(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_recovery_is_aborted_without_replaying_compile(tmp_path: Path, monkeypatch) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
     state.editor.connected = True
@@ -515,11 +529,12 @@ def test_legacy_predispatch_stale_recovery_is_safely_reclassified(tmp_path: Path
     asyncio.run(service._resume_pending_write_batches())
 
     stored = state.get_write_batch(batch["writeBatchId"])
-    assert len(calls) == 1
+    assert calls == []
     assert stored is not None
-    assert stored["status"] == "deferred"
-    assert stored["compileOperationId"] == ""
-    assert stored["error"] == ""
+    assert stored["status"] == "aborted"
+    assert stored["compileOperationId"] == "compile-from-earlier-batch"
+    assert stored["terminal"] is True
+    assert state.pending_write_batches() == []
 
 
 def test_auto_resumed_compile_accepts_only_a_persisted_correlated_terminal(tmp_path: Path, monkeypatch) -> None:
@@ -564,7 +579,7 @@ def test_auto_resumed_compile_accepts_only_a_persisted_correlated_terminal(tmp_p
     assert stored["outcome"] == "passed"
 
 
-def test_auto_resumed_compile_timeout_requires_recovery_without_replay(tmp_path: Path, monkeypatch) -> None:
+def test_auto_resumed_compile_timeout_terminates_without_replay(tmp_path: Path, monkeypatch) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
     state.editor.connected = True
@@ -597,12 +612,12 @@ def test_auto_resumed_compile_timeout_requires_recovery_without_replay(tmp_path:
     stored = state.get_write_batch(batch["writeBatchId"])
     assert len(calls) == 1
     assert stored is not None
-    assert stored["status"] == "recovery_required"
+    assert stored["status"] == "timed_out"
     assert stored["compileOperationId"] == "compile-timeout"
     assert stored["outcome"] == "unknown"
-    assert stored["terminal"] is False
-    assert state.pending_write_batch_id == batch["writeBatchId"]
-    assert state.execution_state()["blockedReason"] == "WriteBatchRecoveryRequired"
+    assert stored["terminal"] is True
+    assert state.pending_write_batch_id == ""
+    assert state.pending_write_batches() == []
 
 
 def test_verified_successor_supersedes_fully_covered_recovery_without_rewriting_history(tmp_path: Path) -> None:
@@ -694,3 +709,115 @@ def test_write_batch_tool_is_registered_write_gated_and_has_public_schema() -> N
     assert list(signature.parameters) == ["paths", "compileWhenEditMode", "deletedPaths"]
     assert signature.parameters["compileWhenEditMode"].default is True
     assert signature.parameters["deletedPaths"].default is None
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_compile_coordinator_exception_ends_batch_once(tmp_path, monkeypatch, interrupted):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.updated_at = 3000
+    state.editor.play_mode_state = "edit"
+    batch = state.register_write_batch([str(tmp_path / "A.cs")], created_at=1000,
+        files_sha256="fixture", compile_when_edit_mode=True)
+    service = _ResourceService(tmp_path, state)
+    calls = []
+
+    async def no_sleep(_delay):
+        pass
+
+    async def raises(**kwargs):
+        calls.append(kwargs)
+        if interrupted:
+            raise asyncio.CancelledError()
+        raise RuntimeError("fixture coordinator failed")
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(service, "safe_compile_and_wait", raises, raising=False)
+    if interrupted:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(service._resume_pending_write_batches())
+    else:
+        asyncio.run(service._resume_pending_write_batches())
+    asyncio.run(service._resume_pending_write_batches())
+    assert len(calls) == 1
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored["terminal"] and stored["status"] == "aborted"
+    assert stored["outcome"] == "unknown"
+    assert service._write_batch_active_id == ""
+    assert not state.pending_write_batch_id
+    assert state.pending_write_batches() == []
+
+
+def test_verified_compile_clears_transient_error_but_preserves_evidence_checks(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch([str(tmp_path / "A.cs")], created_at=1000,
+        files_sha256="fixture", compile_when_edit_mode=True)
+    state.mark_write_batch(batch["writeBatchId"], "deferred", error="Editor not ready")
+    state.mark_write_batch(batch["writeBatchId"], "compiling", compile_operation_id="compile-a",
+                           error="Editor not ready")
+    assert state.update_editor_execution_state(_snapshot(1, write_batch_id=batch["writeBatchId"],
+        write_batch_created_at=1000, observed_at=2000))
+    stored = state.get_write_batch(batch["writeBatchId"])
+    assert stored["terminal"] and stored["correlationVerified"]
+    assert stored["outcome"] == "passed" and stored["error"] == ""
+
+
+def test_old_batch_cannot_be_mutated_by_new_service(tmp_path):
+    original = StateStore()
+    original.configure_project(str(tmp_path))
+    batch = original.register_write_batch([str(tmp_path / "A.cs")], created_at=1000,
+        files_sha256="fixture", compile_when_edit_mode=True)
+    replacement = StateStore()
+    replacement.configure_project(str(tmp_path))
+    before = replacement.get_write_batch(batch["writeBatchId"])
+    replacement.mark_write_batch(batch["writeBatchId"], "compiling", compile_operation_id="late")
+    replacement.mark_write_batch(batch["writeBatchId"], "aborted")
+    assert replacement.get_write_batch(batch["writeBatchId"]) == before
+    assert replacement.pending_write_batches() == []
+
+
+def test_compile_coordinator_deadline_does_not_join_resistant_work(tmp_path, monkeypatch):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.updated_at = 3000
+    state.editor.play_mode_state = "edit"
+    batch = state.register_write_batch([str(tmp_path / "A.cs")], created_at=1000,
+        files_sha256="fixture", compile_when_edit_mode=True)
+    service = _ResourceService(tmp_path, state)
+    monkeypatch.setattr("upilot_mcp.domain.resource_service.now_ms", lambda: 600990)
+
+    async def no_sleep(_delay):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    async def scenario():
+        release = asyncio.Event()
+        completed = asyncio.Event()
+
+        async def resistant(**kwargs):
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            finally:
+                completed.set()
+            state.mark_write_batch(batch["writeBatchId"], "compiling")
+            return ok("late", {"status": "completed", "terminal": True})
+
+        monkeypatch.setattr(service, "safe_compile_and_wait", resistant, raising=False)
+        await asyncio.wait_for(service._resume_pending_write_batches(), timeout=1)
+        assert not completed.is_set()
+        assert state.get_write_batch(batch["writeBatchId"])["status"] == "timed_out"
+        assert service._write_batch_active_id == ""
+        assert state.pending_write_batches() == []
+        release.set()
+        await asyncio.wait_for(completed.wait(), timeout=1)
+        assert state.get_write_batch(batch["writeBatchId"])["status"] == "timed_out"
+
+    asyncio.run(scenario())

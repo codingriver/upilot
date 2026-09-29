@@ -1,10 +1,10 @@
 <!-- upilot:start -->
 # UPilot Unity MCP
 
-rulesVersion: 48
-upilotPackageVersion: 0.3.41
+rulesVersion: 49
+upilotPackageVersion: 0.3.42
 projectPath: D:\upilot\Tests~\UPilotTest2022
-generatedAt: 2026-09-29T03:43:10Z
+generatedAt: 2026-09-29T12:19:44Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.
@@ -52,7 +52,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 
 - After Server, Bridge or protocol changes, and when diagnosing suspected version mismatch, verify deployment evidence for each intended endpoint before attributing failures to networking or compatibility. A healthy endpoint, matching version string, recent disk files or process timestamps alone do not prove which code is loaded; report verified, suspected-stale or unverified evidence explicitly.
 - Follow the existing Skill's deployment-freshness workflow. Unknown identity is not restart authorization: inspect in-flight tasks, tests, operations and Capture ownership, then refresh only affected components in an authorized maintenance window. Do not cancel other work, automatically restart Unity with the Server, or replay existing operation starts.
-- For AI-requested Bridge/Server maintenance, use `unity_service_restart` only with effective `aiServiceMaintenance` approval from this project's Unity settings. This independent grant applies to every package version/source, only in stable EditMode, and permits interruption of in-flight tasks through this tool; automation select-all, `hangRestart`, and project write access do not grant it. Never self-enable it or change its timeout through files, reflection, or UI automation. Read the Skill recovery reference before use: the default total deadline is 120 seconds (UI range 30-600), `accepted` is not completion, and disconnect/timeout requires observing the original maintenance identity, never replaying a restart or business call. The grant does not authorize exiting PlayMode, compiling, installing updates, restarting Unity, or stopping another Capture.
+- For AI-requested Bridge/Server maintenance, use `unity_service_restart` only with effective `aiServiceMaintenance` approval from this project's Unity settings. This independent grant applies to every package version/source, only in stable EditMode, and permits interruption of in-flight tasks through this tool; automation select-all, `hangRestart`, and project write access do not grant it. Never self-enable it or change its timeout through files, reflection, or UI automation. Read the Skill recovery reference before use: new requests have a fixed 600-second total deadline from acceptance (UI read-only); in-flight journals retain their original deadline; transient health failures retry read-only probes within that same deadline and are not evidence of a port conflict, `accepted` is not completion, and disconnect/timeout requires observing the original maintenance identity, never replaying a restart or business call. The grant does not authorize exiting PlayMode, compiling, installing updates, restarting Unity, or stopping another Capture.
 
 ## Capabilities
 

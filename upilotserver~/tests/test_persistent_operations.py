@@ -18,7 +18,7 @@ async def stop_observers(service):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def test_background_completion_without_client_poll_and_restart_read(tmp_path):
+def test_background_completion_is_archived_but_restart_starts_empty(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [{"status": "Succeeded"}])
         result = await service.seed_legacy_operation(durable_spec())
@@ -27,26 +27,28 @@ def test_background_completion_without_client_poll_and_restart_read(tmp_path):
         assert stored["endedAt"] and stored["status"] == "Succeeded"
         restored = _OperationService(tmp_path, [])
         latest = await restored.operation_status(result.data["operationId"])
-        assert latest.data["terminal"] and latest.data["recovered"]
+        assert not latest.ok and latest.error.code == "OPERATION_NOT_FOUND"
+        assert service.server.state.load_operations()[0]["status"] == "Succeeded"
         assert restored.calls == []
         await stop_observers(service)
     asyncio.run(run())
 
 
-def test_restart_resumes_only_original_status_and_never_start(tmp_path):
+def test_restart_never_restores_status_observers_or_starts(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
         first = await service.seed_legacy_operation(durable_spec())
         await stop_observers(service)
         restored = _OperationService(tmp_path, [{"status": "Succeeded"}])
         result = await restored.operation_status(first.data["operationId"])
-        assert result.data["terminal"]
-        assert restored.calls == [("status", {"captureId": "capture-123"})]
+        assert not result.ok and result.error.code == "OPERATION_NOT_FOUND"
+        assert restored.calls == []
+        assert restored.server.state.load_operations() == []
         await stop_observers(restored)
     asyncio.run(run())
 
 
-def test_lost_start_result_requires_recovery_without_replay(tmp_path):
+def test_lost_start_result_aborts_without_replay(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
         async def lost(*args):
@@ -58,9 +60,9 @@ def test_lost_start_result_requires_recovery_without_replay(tmp_path):
         assert first.error.detail["startAttemptCount"] == 1
         restored = _OperationService(tmp_path, [])
         result = await restored.operation_status(operation_id)
-        assert result.data["status"] == "RecoveryRequired"
-        assert result.data["startAttemptCount"] == 1
-        assert not result.data["terminal"] and not restored.calls
+        assert first.error.detail["terminal"] and first.error.detail["status"] == "aborted"
+        assert not result.ok and result.error.code == "OPERATION_NOT_FOUND"
+        assert not restored.calls
     asyncio.run(run())
 
 
@@ -91,14 +93,15 @@ def test_lost_cancel_response_never_replays_cancel(tmp_path):
         second_cancel = await service.operation_cancel(result.data["operationId"])
         assert len(attempts) == 1
         assert first_cancel.error.detail["cancelAttemptCount"] == 1
-        assert second_cancel.data["cancelAttemptCount"] == 1
+        assert second_cancel.ok and not second_cancel.data["changed"]
+        assert second_cancel.data["status"] in {"ending", "not_found"}
         await stop_observers(service)
         restored = _OperationService(tmp_path, [{"status": "Canceled", "cleanupPending": False}])
         recovered_cancel = await restored.operation_cancel(result.data["operationId"])
-        assert recovered_cancel.data["cancelAttemptCount"] == 1
+        assert recovered_cancel.ok and recovered_cancel.data["status"] == "not_found"
         assert restored.calls == []
         terminal = await restored.operation_status(result.data["operationId"])
-        assert terminal.data["terminal"]
+        assert not terminal.ok and terminal.error.code == "OPERATION_NOT_FOUND"
         await stop_observers(restored)
     asyncio.run(run())
 
@@ -112,7 +115,10 @@ def test_timeout_cancels_once_but_waits_for_business_and_cleanup(tmp_path):
         result = await service.seed_legacy_operation(durable_spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
         operation_id = result.data["operationId"]
         state = service._operations[operation_id]
-        state["startedAt"] = 1
+        from upilot_mcp.protocol import now_ms
+        # Expire execution, not the reserved cleanup allowance as well.
+        await stop_observers(service)
+        state["startedAt"] = now_ms() - int(state["timeoutSec"] * 1000) - 1
         first = await service.operation_status(operation_id)
         assert not first.data["terminal"]
         assert not first.data["businessTerminal"]
@@ -133,8 +139,8 @@ def test_invalid_start_response_does_not_invent_business_completion(tmp_path):
         service._operation_invoke = invalid
         result = await service.seed_legacy_operation(durable_spec(
             startCall={"kind": "reflection", "typeName": "Bridge", "methodName": "Start"}))
-        assert not result.ok and not result.error.detail["terminal"]
-        assert result.error.detail["status"] == "RecoveryRequired"
+        assert not result.ok and result.error.detail["terminal"]
+        assert result.error.detail["status"] == "aborted"
         stored = service.server.state.load_operations()[0]
         assert stored["startIntentSent"] and not stored.get("businessTerminal")
     asyncio.run(run())
@@ -146,12 +152,13 @@ def test_unresolved_status_identity_is_not_recoverable(tmp_path):
         result = await service.seed_legacy_operation(spec(statusCall={
             "kind": "tool", "toolName": "status", "toolArgs": {"id": "${start.missing}"},
         }))
-        assert result.data["status"] == "RecoveryRequired"
+        assert result.data["status"] == "aborted" and result.data["terminal"]
         assert [name for name, _ in service.calls] == ["start"]
         await stop_observers(service)
         restored = _OperationService(tmp_path, [])
         recovered = await restored.operation_status(result.data["operationId"])
-        assert recovered.data["status"] == "RecoveryRequired" and not restored.calls
+        assert not recovered.ok and recovered.error.code == "OPERATION_NOT_FOUND"
+        assert not restored.calls
     asyncio.run(run())
 
 
@@ -164,15 +171,17 @@ def test_capture_response_loss_preserves_intent_and_blocks_business(tmp_path):
             raise TimeoutError("capture may already exist")
         service._start_owned_operation_capture = lost
         result = await service.seed_legacy_operation(durable_spec(consoleCapture={"enabled": True}))
-        assert not result.ok and not result.error.detail["terminal"]
+        assert not result.ok and result.error.detail["terminal"]
         stored = service.server.state.load_operations()[0]
         assert stored["captureIntentSent"] and not stored.get("startIntentSent")
         assert stored["consoleCapture"]["ownerId"] == stored["operationId"]
         assert stored["consoleCapture"]["ownerToken"]
-        assert stored["cleanupPending"] and not service.calls and len(attempts) == 1
+        assert not stored["cleanupPending"] and stored["status"] == "aborted"
+        assert not stored.get("businessTerminal") and not service.calls and len(attempts) == 1
         restored = _OperationService(tmp_path, [])
         observed = await restored.operation_status(stored["operationId"])
-        assert observed.data["status"] == "RecoveryRequired" and not restored.calls
+        assert not observed.ok and observed.error.code == "OPERATION_NOT_FOUND"
+        assert not restored.calls
     asyncio.run(run())
 
 
@@ -184,7 +193,8 @@ def test_arbitrary_start_exception_response_does_not_prove_no_side_effect(tmp_pa
         service._operation_invoke = failed
         result = await service.seed_legacy_operation(durable_spec())
         assert result.error.code == "OPERATION_START_UNKNOWN"
-        assert not result.error.detail["terminal"]
+        assert result.error.detail["terminal"]
+        assert not result.error.detail["businessTerminal"]
         assert service.server.state.load_operations()[0]["startResult"]["requestId"] == "original"
     asyncio.run(run())
 
@@ -194,8 +204,14 @@ def test_status_cannot_accept_another_job_terminal(tmp_path):
         service = _OperationService(tmp_path, [{"status": "Succeeded", "captureId": "another"}])
         start = await service.seed_legacy_operation(durable_spec())
         result = await service.operation_status(start.data["operationId"])
-        assert not result.ok and result.error.code == "OPERATION_IDENTITY_MISMATCH"
-        assert not result.error.detail["terminal"]
+        # The background observer can reject it before this explicit status query.
+        state = result.data if result.ok else result.error.detail
+        if not result.ok:
+            assert result.error.code == "OPERATION_IDENTITY_MISMATCH"
+        assert state["terminal"] and state["status"] == "aborted"
+        assert not state["businessTerminal"] and state["businessResult"] == {}
+        assert "does not match original" in state["error"]
+        assert "another" in state["error"] and "capture-123" in state["error"]
         await stop_observers(service)
     asyncio.run(run())
 
@@ -252,11 +268,9 @@ def test_reconnected_success_clears_transient_recovery_diagnostics(tmp_path):
         service.server.state.save_operation(stored)
         restored = _OperationService(tmp_path, [])
         reloaded = await restored.operation_status(operation_id)
-        assert reloaded.data["terminal"] is True
-        assert reloaded.data["nextAction"] == ""
-        reloaded_state = restored.server.state.load_operations()[0]
-        assert reloaded_state["lastObservationError"] == ""
-        assert reloaded_state["nextAction"] == ""
+        assert not reloaded.ok and reloaded.error.code == "OPERATION_NOT_FOUND"
+        assert restored.server.state.load_operations() == []
+        assert not restored.calls
 
     asyncio.run(run())
 

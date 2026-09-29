@@ -109,6 +109,7 @@ namespace CodingRiver.UPilot
         public int mcpPort;
         /// <summary>MCP Python 进程当前工作目录绝对路径（通常为 Cursor 打开的仓库根目录）。</summary>
         public string mcpWorkingDirectory;
+        public string serverLifecycleId;
     }
 
     [Serializable]

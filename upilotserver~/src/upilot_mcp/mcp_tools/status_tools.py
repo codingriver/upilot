@@ -59,8 +59,8 @@ async def unity_capabilities_get(forceFresh: bool = False):
 
 @mcp.tool(description=(
     "请求重启当前项目 Bridge 或 Server，需 Unity 设置中的独立 AI 服务维护授权。"
-    "仅权威 EditMode；允许中断在途任务，但不重启 Unity、不编译、不安装更新、不重放业务。"
-    "server 同时重建 Bridge。默认总时限 120 秒，仅 UI 可配置；accepted 不是完成。"
+    "项目级硬停止不等待业务队列或 EditorReady；允许中断在途任务，不切换 PlayMode、不重启 Unity、不编译、不安装更新。"
+    "两种 target 均清空活动状态并重启 Server/Bridge，旧任务不恢复、历史产物保留。默认总期限 120 秒（UI 可设 30–600 秒）；accepted 不是完成，队列重置与服务重启分别报告。"
     "从 unity_mcp_status.aiServiceMaintenance 取得 expected 身份；首次 expectedMaintenanceId 为空。"
     "断线或超时后查询原 maintenanceId，不自动重试。"
 ))
@@ -857,6 +857,6 @@ for _name, _value in list(globals().items()):
 register_public_tool(
     "unity_service_restart", public_handler=unity_service_restart,
     destructive=True, idempotent=False, requires_write_access=False,
-    write_access_predicate=lambda _: False, required_editor_mode="edit", play_mode_policy="blocked",
+    write_access_predicate=lambda _: False, required_editor_mode="any", play_mode_policy="allowed",
     capability_requirements=("aiServiceMaintenance",),
 )

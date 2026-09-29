@@ -228,7 +228,7 @@ def check_repository_consistency() -> None:
         "repository UPilot Tracer discovery": (repo_entry, "optional UPilot Tracer diagnostics"),
         "repository UPilot Tracer terminology": (repo_entry, "`追踪器` means UPilot Tracer (`UPilot 追踪器`)"),
         "focused test selectors": (skill, "testNames"),
-        "persistent test job recovery": (skill, "RecoveryRequired"),
+        "bounded task ending": (skill, "Duplicates are normal ending/not_found responses"),
         "bounded scene summary": (skill, "unity_scene_summary"),
         "guarded prefab patch": (skill, "unity_prefab_patch"),
         "no external compilers": (agent_template, "Never use external compilers"),

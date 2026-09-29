@@ -31,7 +31,7 @@ namespace CodingRiver.UPilot
         private double _expiresAt;
         private Vector2 _scroll;
         private UnityWebRequest _request;
-        public static void Open() { var w = GetWindow<UPilotQueueCleanupWindow>("批量清理可安全处理项"); w.minSize = new Vector2(600, 380); w.Show(); }
+        public static void Open() { var w = GetWindow<UPilotQueueCleanupWindow>("软停止全部任务"); w.minSize = new Vector2(600, 380); w.Show(); }
         private string SessionKey => "UPilot.QueueCleanup." + UPilotProjectConfig.ProjectRoot;
         private void OnEnable() { if (string.IsNullOrEmpty(_requestId)) _requestId = SessionState.GetString(SessionKey, ""); }
         private void OnDisable() { _request?.Abort(); _request?.Dispose(); _request = null; }
@@ -66,7 +66,7 @@ namespace CodingRiver.UPilot
         }
         private void OnGUI()
         {
-            EditorGUILayout.HelpBox("对预览中的任务逐项请求取消、恢复或有证据的行政处置；不删除记录，不伪造测试成功。无法安全处理的任务会保留并列出原因。关闭窗口不取消后台清理。", MessageType.Warning);
+            EditorGUILayout.HelpBox("对预览中的任务逐项请求协作停止；不删除记录，不伪造测试成功。无法安全处理的任务会保留并列出原因。关闭窗口不取消后台清理。", MessageType.Warning);
             _reason = EditorGUILayout.TextField("清理原因", _reason);
             using (new EditorGUI.DisabledScope(_request != null))
             {
@@ -76,7 +76,7 @@ namespace CodingRiver.UPilot
                     || _reason != _previewReason || EditorApplication.timeSinceStartup >= _expiresAt))
                     if (GUILayout.Button("2. 确认执行预览中的可处理项"))
                     {
-                        if (EditorUtility.DisplayDialog("批量清理可安全处理项", "将影响当前项目其他聊天提交的任务。未确认安全的项目不会强行释放，行政处置不代表业务完成。继续？", "执行", "取消"))
+                        if (EditorUtility.DisplayDialog("软停止全部任务", "将影响当前项目其他聊天提交的任务。软停止失败时可在高级设置执行项目级硬停止；不会重放任务或进行行政释放。继续？", "执行", "取消"))
                         {
                             // Remember the preview's original identity before dispatch: a lost response is not retry permission.
                             _requestId = _data.requestId;

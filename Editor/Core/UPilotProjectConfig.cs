@@ -71,6 +71,7 @@ namespace CodingRiver.UPilot
         public string approvedAtUtc = "";
         public string projectPath = "";
         public int restartTimeoutSeconds = 120;
+        public bool autoHardStopOnSoftFailure = false;
     }
 
     [Serializable]

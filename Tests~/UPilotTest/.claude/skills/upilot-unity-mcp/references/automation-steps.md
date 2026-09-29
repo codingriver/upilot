@@ -12,9 +12,8 @@ reflection, eval, temporary scripts or internal executors to bypass this boundar
 The remaining schema, authoring examples and lifecycle descriptions are **historical
 contracts and internal maintenance reference only**, not an executable new-plan guide.
 They describe already accepted runs and isolated engine fixtures. Existing status,
-artifacts and supported safe cancel/cleanup/recovery/disposition retain original
-identities and resource protections. A historical `RecoveryRequired` is not completion;
-Operation wait returns its blocker immediately while safe observers may continue.
+artifacts and bounded stop retain original identities within the current service lifetime.
+aborted is not an active lifecycle; unknown outcomes end aborted, never success.
 
 ## Ownership and Discovery
 
@@ -303,83 +302,16 @@ static constraints, not whether a future login panel or runtime object already e
 Operation timeout must cover the summed step/cleanup budgets plus the evidence margin;
 do not shorten it to a single tool wait window.
 
-## Lifecycle and Recovery
+## Bounded Lifecycle
 
-- Execute starts once and returns quickly; Poll returns Running or a terminal result.
-  Never block Unity's main thread waiting for async completion.
-- Failures use stable error codes. GetError provides human text and diagnostics;
-  a GetError exception must not replace the original failure code.
-- Cleanup is polled after every executed step, including successful steps.
-  Failure/cancel/timeout freezes the first error, requests Cancel, cleans up, skips
-  remaining Normal items and runs all Finally items. Cleanup is not automatic rollback.
-- Put project restoration and explicit enter_edit_mode in Finally when the workflow
-  needs them. UPilot does not guess recovery actions from a failed business step.
-- A cleanup failure preserves first-error evidence, continues Finally, and leaves
-  RecoveryRequired for unresolved resources. Do not report it as finished or delete
-  the store to permit another run.
-- State queries do not call step code. One plan at a time owns the Unity executor.
-- Same-process Domain Reload uses durable intent/checkpoints and explicit Restore,
-  never another Execute. Base Restore is Unsupported. Reconstruct state only when
-  identity and actual side effects are provable.
-- Server reconnect resumes observation, not start. Editor restart does not auto-resume.
-  Store: `Library/UPilot/step-run.json`; reports: `Log/UPilotSteps/<runId>/`.
-- Synchronous main-thread hangs cannot be preempted by a step deadline; use existing
-  Hang diagnostics, not repeated starts.
-
-## Recovery Observation, Cleanup and Disposition
-
-**A — observe the original run.** The Server keeps its existing per-operation/test
-observer alive across transient observation failures, without chat polling. Only the
-built-in Step state query and original test runGuid query are audited for automatic
-recovery. Identity and explicit terminal/cleanup evidence are mandatory; arbitrary
-reflection callbacks are not retried. Error backoff is 3–60 seconds. Query failure is
-not business failure, and observation never replays Start/Cancel/Restore. A real result
-then follows the original authorized finalization path and required Editor readiness.
-
-**B — explicitly recover cleanup.** Preview/apply the existing `unity_queue_cleanup`
-with `targetType=Operation`, the original operationId and `action=recover`. The Step
-executor persists a per-instance cleanup ledger: Unknown, NotStarted, NotRequired,
-Pending, Verified, Unresolved or Uncertain. Only known failed cleanup (Unresolved) with
-a supported Restore of the same registered type/instance/checkpoint may resume. An
-exception or unknown cleanup side effect is not permission to retry. Original business
-cursor and completed Finally steps never replay. Legacy ledgers remain unknown.
-
-The recovery request ID is durable before callbacks; a lost response or reload observes
-that request, never resends it. One request uses the original cleanup budgets. Expiry
-stops new cleanup actions; safe original Capture/Snapshot observation can still verify
-late resource release. Snapshot observation never recaptures; Capture uses only the
-original session and stop intent. Custom steps need a safe existing Restore/Cleanup
-contract; unsupported cases report the unresolved reason. Test Tasks reuse their
-original runGuid `cleanup` path, not a second cleanup framework.
-
-Every unresolved item must be verified before Busy clears. The first business error
-and immutable original report stay intact; a separate hashed cleanup recovery receipt
-records convergence. Successful cleanup cannot turn a failed business run into success.
-Persistence/report/identity failures remain recovery barriers. Finishing one resource
-never clears another instance's unresolved ledger.
-
-**C — explicit administrative release.** Preview/apply `action=release` for an exact
-Operation or persistent test Task. This does not fabricate a business result. Initial
-Step support is limited to plans composed entirely of the concrete sealed
-`WaitSecondsStep`, with the cursor consumed, all cleanup Verified/NotRequired, same
-Editor identity and no Capture/Snapshot/external resources. Tests require retained
-original authoritative terminal and cleanup evidence and an inactive runner; only the
-outer workflow/report result may be lost. Arbitrary/custom Steps, scene/mode steps,
-unknown starts and fully lost test cleanup evidence are deliberately unsupported.
-
-Apply must still match preview, project, independent cleanup grant and execution proof.
-Server/Unity retain verified backups and original errors. Unity persists a disposition
-fence before releasing Busy; original operation identities cannot Start again, and old
-status/cancel calls return original history rather than touching the new run. Missing
-or invalid Step disposition evidence fails closed after reload. Uncertain dispatch is
-observed under its original ID, not repeated. Released is terminal for waiting/admission,
-not for business success: unknown result stays `businessTerminal=false/outcome=unknown`;
-partial real results are preserved. Never count Released as test/acceptance passed.
-
-There is no new scheduler, disconnect cancellation, automatic Unity restart, queue
-record deletion or generic force-unlock. Admission of the next job uses the existing
-mechanism; a never-accepted request may be resubmitted, but an accepted unknown Start
-must only be observed by its original identity.
+- Generic admission remains disabled. These rules cover historical same-lifetime work and isolated executor fixtures only.
+- Execute is called at most once per Step. Normal completion, failure, cancel and timeout share one finalization path. Cancel is sent at most once; Poll/Cleanup reuse the original deadline.
+- Normal cleanup timeout skips remaining Normal and enters Finally once. Finally failure without timeout records the error and advances. Any Finally execution or cleanup timeout immediately finalizes timed_out, skips the remaining Finally steps and performs no additional cleanup/report wait.
+- ResourceCleaning consumes cleanupTimeoutSeconds, not a separate unbounded phase. Existing timeoutSeconds and cleanupTimeoutSeconds are the only per-Step budgets. Evidence, Capture stop and report finalization otherwise share 60 seconds total.
+- Terminal results are immutable. Necessary cleanup failure cannot be reported as success. Unknown outcomes become aborted, not recovery blockers. No recovery observers, administrative release or abandon are prerequisites to vacating the active slot.
+- Duplicate stop returns ending while the sole cleanup is in progress, otherwise not_found, normally with changed=false. It never restarts cleanup or renews a deadline.
+- Service hard stop invalidates old callbacks and clears activity without executing user Finally/Cleanup. Startup never loads historical runs into the active queue. Ordinary reconnect/Domain Reload may continue only same-lifetime work within its original deadline; never Execute again.
+- Reports in Log/UPilotSteps remain historical evidence. Synchronous Unity callbacks cannot be forcibly interrupted by a deadline or Server restart; report this physical limitation, not false success.
 
 ## Built-in Steps
 
@@ -434,7 +366,7 @@ For failure-site evidence, ordinary Steps use base helpers
 `CancelSnapshotJson(runId,instanceId,evidenceKey)` inside writable callbacks.
 They return Step-result JSON. `SnapshotErrorJson` is readonly and may be used
 from GetError. `required=false` permits a confirmed failed capture to produce a
-warning, but unknown ownership/release still requires recovery. No Snapshot DTO
+warning, but unknown ownership/release still prevents a successful result, not task finalization. No Snapshot DTO
 or project observer is required. The package owns evidence validity; business
 assertions decide what the image proves.
 
@@ -454,7 +386,7 @@ after a project file is complete. Registration is synchronous and follows checkp
 write authorization: the current run/item, Editor main thread, and a writable lifecycle
 callback. Validate/GetError, asynchronous callbacks and terminal runs cannot register.
 Finally may register restoration evidence after an earlier cleanup failure while the
-executor is still running; this does not resolve RecoveryRequired.
+executor is still running; this does not resolve aborted.
 
 Files must exist inside the project, without symlink/junction traversal. Registration
 captures size and SHA256 and saves ownership durably; identical same-owner registration
@@ -497,11 +429,9 @@ separates execution and cleanup; missing/unstarted timestamps stay blank, not ze
 Text reports retain the final outcome and Console decision even when Finally succeeds.
 Business metrics stay in project attachments; the package does not interpret them.
 
-Finalizing persists the exact report intent before file writes. Same-process recovery
-commits that snapshot, without replaying Steps or choosing a new terminal time. It
-revalidates frozen local attachment hashes; new missing/changed evidence requires
-recovery and cannot replace the first error or rewrite the frozen report. Existing
-export bytes must match the frozen summary and are never silently repaired.
+Finalizing freezes the report result once. Report/file errors remain diagnostics and
+prevent unverified success, but cannot keep the active task alive beyond its fixed
+budget or reopen its terminal result. A service restart never resumes report work.
 Historical `exportVersion=0` reports remain readable without backfilled exports.
 Report commit proves neither Capture shutdown nor Operation cleanup; verify those
 separately through the original Operation.

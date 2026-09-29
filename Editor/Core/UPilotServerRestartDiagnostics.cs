@@ -66,6 +66,7 @@ namespace CodingRiver.UPilot
         public string newBridgeSessionId;
         public long requestedAtUtcMs;
         public long maintenanceDeadlineUtcMs;
+        public long deadlineAtUtcMs; // Optional: zero keeps the pre-upgrade observation deadline.
         public long oldProcessStopRequestedAtUtcMs;
         public long portsReleasedAtUtcMs;
         public long newProcessStartedAtUtcMs;
@@ -179,11 +180,43 @@ namespace CodingRiver.UPilot
             }
         }
 
+        internal const string HealthTimeoutMessage = "服务健康检查异常：重启总等待已达 10 分钟，/health 仍未验证通过。";
+
+        internal static long Deadline(UPilotServerRestartRecord record) =>
+            record.deadlineAtUtcMs > 0 ? record.deadlineAtUtcMs :
+            record.maintenanceDeadlineUtcMs > 0 ? record.maintenanceDeadlineUtcMs :
+            (record.newProcessStartedAtUtcMs > 0 ? record.newProcessStartedAtUtcMs : record.requestedAtUtcMs) + 20000;
+
+        internal static bool HasExpired(UPilotServerRestartRecord record, long now) => now >= Deadline(record);
+
+        internal static bool HasPassedHealthGate(UPilotServerRestartRecord record) =>
+            record.healthVerified || (record.gateDiagnostics ?? Array.Empty<UPilotRestartGate>()).Any(g => g.key == "health" && g.state == "passed");
+
+        internal static bool IsHealthFailure(UPilotServerRestartRecord record) =>
+            record != null && record.status == "failed" && !record.healthVerified &&
+            FirstUnpassedGate(record) == "health" &&
+            (record.errorCode == "restart_verification_timeout" || record.errorCode == "SERVICE_RESTART_TIMEOUT");
+
+        internal static string TimeoutMessage(UPilotServerRestartRecord record, long now)
+        {
+            var gate = FirstUnpassedGate(record);
+            var summary = gate == "health" && Deadline(record) - record.requestedAtUtcMs == 600000
+                ? HealthTimeoutMessage : "重启验证期限已到；未通过：" + UPilotRestartDiagnosticView.Label(gate) + "。";
+            return summary + $" 已耗时 {Math.Max(0, now - record.requestedAtUtcMs) / 1000} 秒；探测 {record.statusProbeCount} 次；" +
+                "最后通过：" + UPilotRestartDiagnosticView.LastPassed(record) + "；最近错误：" + record.statusProbeError;
+        }
+
+        internal static string WaitingMessage(UPilotServerRestartRecord record, long now) =>
+            (HasPassedHealthGate(record) ? "正在验证：" + UPilotRestartDiagnosticView.Label(FirstUnpassedGate(record)) :
+                "正在验证服务健康状态，失败后将继续重试") +
+            $"；已耗时 {Math.Max(0, now - record.requestedAtUtcMs) / 1000} 秒 / 剩余 {Math.Max(0, Deadline(record) - now) / 1000} 秒；" +
+            $"探测 {record.statusProbeCount} 次；最近错误：{record.statusProbeError}";
+
         internal static UPilotServerRestartRecord Begin(
             string projectPath,
             int oldProcessId,
             string oldBridgeSessionId,
-            long maintenanceDeadlineUtcMs = 0)
+            long maintenanceDeadlineUtcMs = 0, long acceptedAtUtcMs = 0)
         {
             var now = UtcNowMs();
             var record = new UPilotServerRestartRecord
@@ -198,7 +231,8 @@ namespace CodingRiver.UPilot
                 expectedEntry = UPilotDeploymentDiagnostics.PythonEntry,
                 oldProcessId = Math.Max(0, oldProcessId),
                 oldBridgeSessionId = oldBridgeSessionId ?? "",
-                requestedAtUtcMs = now,
+                requestedAtUtcMs = acceptedAtUtcMs > 0 ? acceptedAtUtcMs : now,
+                deadlineAtUtcMs = maintenanceDeadlineUtcMs > 0 ? maintenanceDeadlineUtcMs : now + Math.Max(30, Math.Min(600, UPilotProjectConfig.Current.aiServiceMaintenance?.restartTimeoutSeconds ?? 120)) * 1000L,
                 maintenanceDeadlineUtcMs = maintenanceDeadlineUtcMs,
                 oldProcessStopRequestedAtUtcMs = now,
                 updatedAtUtcMs = now,
@@ -252,7 +286,7 @@ namespace CodingRiver.UPilot
                 record.statusProbeStartedAtUtcMs = UtcNowMs();
                 record.statusProbeEndedAtUtcMs = 0;
                 record.statusProbeOutcome = "running";
-                MarkGateCore(record, "health", "running");
+                if (!HasPassedHealthGate(record)) MarkGateCore(record, "health", "running");
             });
         }
 
@@ -260,6 +294,12 @@ namespace CodingRiver.UPilot
         {
             Update(operationId, record =>
             {
+                ApplyProbeOutcome(record, outcome, stage, cancellation, error);
+            });
+        }
+
+        internal static void ApplyProbeOutcome(UPilotServerRestartRecord record, string outcome, string stage, string cancellation, string error)
+        {
                 record.statusProbeEndedAtUtcMs = UtcNowMs();
                 record.statusProbeOutcome = outcome ?? "unknown";
                 record.statusProbeFailureStage = Bound(stage);
@@ -272,8 +312,12 @@ namespace CodingRiver.UPilot
                     MarkGateCore(record, "identity", "failed", outcome, error);
                 }
                 else if (outcome == "lifecycle_canceled") MarkGateCore(record, "health", "canceled", outcome, error);
-                else MarkGateCore(record, "health", "failed", outcome, error);
-            });
+                else if (outcome == "process_identity_timeout")
+                {
+                    MarkGateCore(record, "health", "passed", "health_ok");
+                    MarkGateCore(record, "identity", "running", outcome, error);
+                }
+                else if (!HasPassedHealthGate(record)) MarkGateCore(record, "health", "failed", outcome, error);
         }
 
         internal static void RecordBridgeSnapshot(string operationId, BridgeStatus status)
@@ -674,17 +718,22 @@ namespace CodingRiver.UPilot
                     !string.Equals(s_record.operationId, operationId, StringComparison.Ordinal) ||
                     !string.Equals(s_record.status, "running", StringComparison.Ordinal))
                     return;
-                update(s_record);
+                if (HasExpired(s_record, UtcNowMs()))
+                    FailRecord(s_record, s_record.maintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout",
+                        TimeoutMessage(s_record, UtcNowMs()), "", "", "Inspect the original diagnostics; do not replay restart.");
+                else update(s_record);
                 s_record.updatedAtUtcMs = UtcNowMs();
                 PersistLocked();
             }
         }
 
-        private static void TryComplete(UPilotServerRestartRecord record)
+        internal static void TryComplete(UPilotServerRestartRecord record, long? observedAtUtcMs = null)
         {
-            if (record.maintenanceDeadlineUtcMs > 0 && UtcNowMs() >= record.maintenanceDeadlineUtcMs)
+            if (record.status != "running") return;
+            var now = observedAtUtcMs ?? UtcNowMs();
+            if (HasExpired(record, now))
             {
-                FailRecord(record, "SERVICE_RESTART_TIMEOUT", "Maintenance deadline elapsed.", "", "",
+                FailRecord(record, record.maintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout", TimeoutMessage(record, now), "", "",
                     "Inspect the original maintenance; do not replay start.");
                 return;
             }
@@ -919,7 +968,7 @@ namespace CodingRiver.UPilot
             record.healthVerified = true;
             record.projectIdentityVerified = SamePath(record.projectPath, healthProjectPath);
             record.healthProjectPath = NormalizePath(healthProjectPath);
-            TryComplete(record);
+            TryComplete(record, record.updatedAtUtcMs);
         }
 
         internal static void RecordBridgeVerifiedForTests(
@@ -931,19 +980,19 @@ namespace CodingRiver.UPilot
                 return;
             record.bridgeVerified = true;
             record.newBridgeSessionId = bridgeSessionId;
-            TryComplete(record);
+            TryComplete(record, record.updatedAtUtcMs);
         }
 
         internal static void RecordDeploymentVerifiedForTests(UPilotServerRestartRecord record)
         {
             record.deploymentVerified = true;
-            TryComplete(record);
+            TryComplete(record, record.updatedAtUtcMs);
         }
 
         internal static void RecordReadOnlyVerifiedForTests(UPilotServerRestartRecord record)
         {
             record.readOnlyVerified = true;
-            TryComplete(record);
+            TryComplete(record, record.updatedAtUtcMs);
         }
 
         internal static bool TryWriteRecordForTests(
@@ -1077,7 +1126,8 @@ namespace CodingRiver.UPilot
         internal static string NextAction(UPilotServerRestartRecord r)
         {
             if (r == null) return "检查当前 Server 状态。";
-            if (r.status == "canceled") return "用户主动停止；不会自动恢复。";
+            if (r.status == "canceled") return r.statusProbeOutcome == "lifecycle_canceled"
+                ? "等待 Editor 生命周期操作结束，然后重新检查状态。" : "用户主动停止；不会自动恢复。";
             if (r.status == "superseded") return r.subsequentVerifiedAtUtcMs > 0
                 ? "服务随后通过完整验证；原操作仍为生命周期替代。"
                 : (!string.IsNullOrEmpty(r.subsequentRecoveryStatus) && r.subsequentRecoveryStatus.StartsWith("failed:")

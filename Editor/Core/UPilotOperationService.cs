@@ -92,6 +92,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class BridgeQueueSnapshot
     {
+        public string serviceLifecycleId;
         public long observedAt;
         public bool complete;
         public bool truncated;

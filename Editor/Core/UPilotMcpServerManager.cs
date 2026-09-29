@@ -167,8 +167,10 @@ namespace CodingRiver.UPilot
         private const int RefreshIntervalMs = 2000;
         private const int IdentityGraceMs = 8000;
         private const int IdentityFailureThreshold = 3;
-        private const long RestartVerificationTimeoutMs = 20000;
-        private const long RestartProbeIntervalMs = 250;
+        private CancellationTokenSource _restartProbeCancellation;
+        private string _restartLastLoggedError;
+        private long _restartLastLoggedAt;
+        internal const long RestartProbeIntervalMs = 2000;
         private readonly object _statusLock = new();
         private McpServerStatus _cachedStatus;
         private Task<McpServerStatus> _statusRefreshTask;
@@ -522,6 +524,7 @@ namespace CodingRiver.UPilot
                 if (!string.IsNullOrEmpty(lifecycleReason))
                 {
                     _activeStatusRefresh?.Cancel(lifecycleReason);
+                    _restartProbeCancellation?.Cancel();
                     _editorHealthObservationCancellation?.Cancel();
                     _nextEditorHealthObservationAtUtcMs = 0;
                 }
@@ -995,7 +998,7 @@ namespace CodingRiver.UPilot
                 nowMs - _identityPendingSinceMs < IdentityGraceMs;
         }
 
-        private async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort, CancellationToken token = default)
+        private static async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort, CancellationToken token = default, bool includeStats = true, long deadlineUtcMs = 0, System.Net.Http.HttpClient client = null)
         {
             int wsCount = 0;
             int httpCount = 0;
@@ -1024,16 +1027,14 @@ namespace CodingRiver.UPilot
             try
             {
                 var url = $"http://127.0.0.1:{httpPort}/health";
-                using var request = CreateLoopbackStatusRequest(url);
-                using var response = await _httpClient.SendAsync(
-                    request,
-                    System.Net.Http.HttpCompletionOption.ResponseHeadersRead,
-                    token);
+                using var response = await SendBoundedStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
                     health = JsonUtility.FromJson<UPilotServerHealth>(json);
-                    if (health == null) throw new InvalidDataException("/health 未返回 JSON 对象");
+                    if (health == null || !IsUPilotServerPayload(json) || health.server_pid <= 0 ||
+                        string.IsNullOrWhiteSpace(ResolveHealthProjectPath(json)))
+                        throw new InvalidDataException("/health 未返回有效的服务身份 JSON 对象");
                     responded = true;
                     healthEndpointResponded = true;
                     identifiesUPilot |= IsUPilotServerPayload(json);
@@ -1078,17 +1079,13 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                failure = "/health: " + ex.GetType().Name + ": " + ex.Message;
+                failure = "/health: " + DescribeProbeException(ex);
             }
 
-            try
+            if (includeStats) try
             {
                 var url = $"http://127.0.0.1:{httpPort}/stats";
-                using var request = CreateLoopbackStatusRequest(url);
-                using var response = await _httpClient.SendAsync(
-                    request,
-                    System.Net.Http.HttpCompletionOption.ResponseHeadersRead,
-                    token);
+                using var response = await SendBoundedStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -1149,6 +1146,94 @@ namespace CodingRiver.UPilot
                 healthProjectPath,
                 health,
                 failure);
+        }
+
+        // The request budget covers headers AND buffered body, independently of a handler's
+        // cancellation implementation. Late completion is disposed, never applied to a record.
+        internal static async Task<System.Net.Http.HttpResponseMessage> SendBoundedStatusAsync(
+            System.Net.Http.HttpClient client, string url, long deadlineUtcMs, CancellationToken token,
+            int requestTimeoutMs = 2000)
+        {
+            var remaining = deadlineUtcMs > 0 ? deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : requestTimeoutMs;
+            if (remaining <= 0) throw new TimeoutException("/health operation deadline elapsed.");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var budget = (int)Math.Min(requestTimeoutMs, remaining);
+            timeout.CancelAfter(budget);
+            using var request = CreateLoopbackStatusRequest(url);
+            var send = client.SendAsync(request, System.Net.Http.HttpCompletionOption.ResponseContentRead, timeout.Token);
+            var delay = Task.Delay(budget, token);
+            if (await Task.WhenAny(send, delay) != send)
+            {
+                timeout.Cancel();
+                _ = send.ContinueWith(t => { if (t.Status == TaskStatus.RanToCompletion) t.Result.Dispose(); else { var ignored = t.Exception; } }, TaskScheduler.Default);
+                token.ThrowIfCancellationRequested();
+                throw new TimeoutException("/health request headers/body timed out.");
+            }
+            var response = await send;
+            if (timeout.IsCancellationRequested || (deadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= deadlineUtcMs))
+            {
+                response.Dispose();
+                token.ThrowIfCancellationRequested();
+                throw new TimeoutException("/health operation deadline elapsed.");
+            }
+            return response;
+        }
+
+        internal static string DescribeProbeException(Exception error)
+        {
+            var parts = new List<string>();
+            for (var e = error; e != null && parts.Count < 5; e = e.InnerException)
+                parts.Add(e.GetType().Name + ": " + e.Message);
+            // Do not include response payloads or credentials in diagnostic evidence.
+            var text = string.Join(" -> ", parts);
+            text = System.Text.RegularExpressions.Regex.Replace(text,
+                @"(?i)(authorization|bearer|token|secret|password|nonce)([=:\s]+)[^\s,;]+", "$1=<redacted>");
+            return TruncateDiagnostic(text, 1024);
+        }
+
+        internal static async Task<McpServerStatus> GetRestartHealthAsync(System.Net.Http.HttpClient client, int httpPort,
+            long deadlineUtcMs, CancellationToken token = default)
+        {
+            // No shared status-refresh task: optional /stats cannot delay this verification gate.
+            var stats = await FetchServerStatsAsync(httpPort, token, false, deadlineUtcMs, client);
+            var status = new McpServerStatus
+            {
+                StatusQueryCompleted = true, HealthResponded = stats.Responded,
+                HealthEndpointResponded = stats.HealthEndpointResponded, HealthIdentifiesUPilot = stats.IdentifiesUPilot,
+                HealthServerProcessId = stats.HealthServerProcessId, HealthProjectPath = stats.HealthProjectPath,
+                Health = stats.Health, ServerVersion = stats.Version, ProtocolVersion = stats.Protocol,
+                BuildCommit = stats.Commit, BuildChannel = stats.Channel,
+                StatusFailureStage = stats.HealthEndpointResponded ? "" : "health_query",
+                ErrorMessage = stats.HealthEndpointResponded ? "" : stats.Failure,
+            };
+            return status;
+        }
+
+        internal async Task<McpServerStatus> GetRestartStatusAsync(long deadlineUtcMs, CancellationToken token = default)
+        {
+            var status = await GetRestartHealthAsync(_httpClient, HttpPort, deadlineUtcMs, token);
+            token.ThrowIfCancellationRequested();
+            if (!status.HealthEndpointResponded) return status;
+            var remaining = deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (remaining <= 0) throw new TimeoutException("Restart identity deadline elapsed.");
+            var processTask = Task.Run(() => ProbeMcpProcessOwnership(HttpPort, WsPort));
+            if (await Task.WhenAny(processTask, Task.Delay((int)Math.Min(2000, remaining), token)) != processTask)
+            {
+                _ = processTask.ContinueWith(t => { var ignored = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+                token.ThrowIfCancellationRequested();
+                status.StatusFailureStage = "process_identity";
+                status.ErrorMessage = "Process ownership probe timed out; ownership unconfirmed.";
+                return status;
+            }
+            var process = await processTask;
+            token.ThrowIfCancellationRequested();
+            status.ProcessId = process.ProcessId;
+            status.ProcessOwnership = process.Ownership;
+            status.ProcessOwnershipEvidence = process.Evidence;
+            status.IsRunning = true;
+            status.HttpPortListening = true;
+            status.WsPortListening = UPilotBridge.Instance.GetStatus().IsWsOpen;
+            return status;
         }
 
         internal static bool IsVerifiedStartupHealth(McpServerStatus status)
@@ -1764,7 +1849,7 @@ namespace CodingRiver.UPilot
             _ = UPilotQuickStart.AutoRepairAsync(null, afterStart);
         }
 
-        internal void RestartPreparedServer(Action afterStart = null, long maintenanceDeadlineUtcMs = 0, int expectedProcessId = 0)
+        internal void RestartPreparedServer(Action afterStart = null, long maintenanceDeadlineUtcMs = 0, int expectedProcessId = 0, long acceptedAtUtcMs = 0)
         {
             if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
             if (maintenanceDeadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= maintenanceDeadlineUtcMs)
@@ -1805,7 +1890,7 @@ namespace CodingRiver.UPilot
             UPilotServerRestartRecord restart;
             try
             {
-                restart = UPilotServerRestartDiagnostics.Begin(projectRoot, oldProcessId, oldBridgeSessionId, maintenanceDeadlineUtcMs);
+                restart = UPilotServerRestartDiagnostics.Begin(projectRoot, oldProcessId, oldBridgeSessionId, maintenanceDeadlineUtcMs, acceptedAtUtcMs);
             }
             catch (Exception ex)
             {
@@ -1818,7 +1903,7 @@ namespace CodingRiver.UPilot
             _restartOperationId = restart.operationId;
             _restartOldBridgeSessionId = oldBridgeSessionId;
             _restartExpectedProjectPath = restart.projectPath;
-            _restartVerificationDeadlineUtcMs = 0;
+            _restartVerificationDeadlineUtcMs = UPilotServerRestartDiagnostics.Deadline(restart);
             _restartMaintenanceDeadlineUtcMs = maintenanceDeadlineUtcMs;
             _restartNextProbeAtUtcMs = 0;
             _restartHealthProbeRunning = false;
@@ -1829,7 +1914,9 @@ namespace CodingRiver.UPilot
                 RunVerifiedStopSequence(() =>
                 {
                     UPilotServerRestartDiagnostics.RecordPhase(_restartOperationId, "identity_probe");
+                    RequireRestartBudget();
                     prepared = PrepareCurrentProjectStop(expectedProcessId);
+                    bridge.ResetActiveWork();
                     UPilotServerRestartDiagnostics.MarkGate(_restartOperationId, "old_identity", "passed",
                         prepared.Processes.Count == 0 ? "no_old_process" : "identity_verified",
                         prepared.Processes.Count == 0 ? "未发现旧进程，无需停止" : "已核实进程归属");
@@ -1841,33 +1928,37 @@ namespace CodingRiver.UPilot
                         oldProcessId = prepared.Processes[0].pid;
                         UPilotServerRestartDiagnostics.RecordOldProcessId(_restartOperationId, oldProcessId);
                     }
+                    RequireRestartBudget();
                     if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
                     UPilotServerRestartDiagnostics.RecordPhase(_restartOperationId, "stopping_old_services");
                 }, bridgeWasStarted, () =>
                 {
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, bridgeAttempted: true);
+                    RequireRestartBudget();
                     bridge.Stop();
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId,
                         bridgeConfirmed: !bridge.GetStatus().IsStarted);
                 }, onAttempt => StopPreparedProcesses(prepared, expectedProcessId, () =>
                 {
+                    RequireRestartBudget();
                     onAttempt();
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, serverAttempted: true);
                 }), () =>
                 {
                     if (oldProcessId <= 0) return false;
                     var ownership = ProbeMcpProcessOwnership(HttpPort, WsPort);
-                    var health = GetHealthForRecovery(oldProcessId, _restartExpectedProjectPath, maintenanceDeadlineUtcMs);
+                    var health = GetHealthForRecovery(oldProcessId, _restartExpectedProjectPath, _restartVerificationDeadlineUtcMs);
                     using var original = Process.GetProcessById(oldProcessId);
                     return ownership.Ownership == McpProcessOwnership.CurrentUPilot &&
                         ownership.ProcessId == oldProcessId && health &&
                         prepared.Processes.Any(entry => entry.pid == oldProcessId &&
                             !original.HasExited && original.StartTime.ToUniversalTime().Ticks == entry.createdAtTicks);
-                }, () => bridge.EnsureStarted(), (attempted, result, error) =>
+                }, () => { RequireRestartBudget(); bridge.EnsureStarted(); }, (attempted, result, error) =>
                     UPilotServerRestartDiagnostics.RecordBridgeRestore(_restartOperationId, attempted, result, error));
                 UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, exitConfirmed: StoppedProcessesExited());
                 _afterRestartStarted += () =>
                 {
+                    RequireRestartBudget();
                     if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
                     bridge.EnsureStarted();
                 };
@@ -1892,10 +1983,12 @@ namespace CodingRiver.UPilot
             {
                 if (waitingGeneration != _restartGeneration || waitingOperationId != _restartOperationId ||
                     !UPilotServerRestartDiagnostics.IsActive(waitingOperationId)) return;
-                if (_restartMaintenanceDeadlineUtcMs > 0 &&
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartMaintenanceDeadlineUtcMs)
+                if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartVerificationDeadlineUtcMs)
                 {
-                    EndMaintenanceObservation(_restartOperationId);
+                    var pending = UPilotServerRestartDiagnostics.Current;
+                    RecordRestartStartFailure(_restartMaintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout",
+                        UPilotServerRestartDiagnostics.TimeoutMessage(pending, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+                    CancelPendingRestart(recordCancellation: false);
                     return;
                 }
                 if (!_restartPending)
@@ -1928,6 +2021,13 @@ namespace CodingRiver.UPilot
                     UPilotServerRestartDiagnostics.RecordPortsReleased(waitingOperationId);
                     if (waitingGeneration != _restartGeneration || waitingOperationId != _restartOperationId ||
                         !UPilotServerRestartDiagnostics.IsActive(waitingOperationId)) return;
+                    if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartVerificationDeadlineUtcMs)
+                    {
+                        RecordRestartStartFailure(_restartMaintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout",
+                            UPilotServerRestartDiagnostics.TimeoutMessage(restart, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+                        FinishRestartObservation();
+                        return;
+                    }
                     StartServer();
                     if (IsRestartObservationActive())
                         InvokeAfterRestartStarted();
@@ -1935,7 +2035,7 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                if (_restartMaintenanceDeadlineUtcMs > 0 || EditorApplication.timeSinceStartup < deadline)
+                if (restart.deadlineAtUtcMs > 0 || _restartMaintenanceDeadlineUtcMs > 0 || EditorApplication.timeSinceStartup < deadline)
                     return;
 
                 var timedOutCallback = _restartWaitCallback;
@@ -2086,6 +2186,12 @@ namespace CodingRiver.UPilot
             return processes.Count == 1 ? processes[0].pid : 0;
         }
 
+        private void RequireRestartBudget()
+        {
+            if (!IsRestartObservationActive() || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartVerificationDeadlineUtcMs)
+                throw new TimeoutException("重启总期限已到；不再执行停止或启动。");
+        }
+
         private bool IsRestartObservationActive() =>
             !string.IsNullOrEmpty(_restartOperationId) &&
             UPilotServerRestartDiagnostics.IsActive(_restartOperationId);
@@ -2108,10 +2214,9 @@ namespace CodingRiver.UPilot
 
             var record = UPilotServerRestartDiagnostics.Current;
             _restartMaintenanceDeadlineUtcMs = record?.maintenanceDeadlineUtcMs ?? 0;
-            _restartVerificationDeadlineUtcMs = _restartMaintenanceDeadlineUtcMs > 0
-                ? _restartMaintenanceDeadlineUtcMs
-                : (record?.newProcessStartedAtUtcMs > 0
-                    ? record.newProcessStartedAtUtcMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) + RestartVerificationTimeoutMs;
+            _restartVerificationDeadlineUtcMs = UPilotServerRestartDiagnostics.Deadline(record);
+            _restartProbeCancellation?.Cancel();
+            _restartProbeCancellation = new CancellationTokenSource();
             _restartNextProbeAtUtcMs = 0;
             if (_restartObserveCallback != null)
                 EditorApplication.update -= _restartObserveCallback;
@@ -2165,6 +2270,8 @@ namespace CodingRiver.UPilot
 
         private void ObserveRestart()
         {
+            // Reload/exit cancels observation, never starts another probe in the old domain.
+            if (_restartProbeCancellation?.IsCancellationRequested == true) return;
             var operationId = _restartOperationId;
             if (!UPilotServerRestartDiagnostics.IsActive(operationId))
             {
@@ -2236,9 +2343,7 @@ namespace CodingRiver.UPilot
                 UPilotServerRestartDiagnostics.RecordFailure(
                     operationId,
                     _restartMaintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout",
-                    $"重启验证等待 {waitSeconds} 秒；status probe {pending?.statusProbeCount ?? 0} 次；" +
-                    $"最后阶段 {pending?.statusProbeFailureStage ?? "未知"}；最后通过 {passed}；首个未通过验证门 {UPilotRestartDiagnosticView.Label(nextGate)}。" +
-                    (string.IsNullOrEmpty(pending?.statusProbeError) ? "" : " 最后错误：" + pending.statusProbeError),
+                    UPilotServerRestartDiagnostics.TimeoutMessage(pending, now),
                     UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
                     "log/mcp-server.log",
                     "Inspect health, exact projectPath, and Bridge session diagnostics before requesting one new restart.");
@@ -2249,7 +2354,6 @@ namespace CodingRiver.UPilot
             if (!_restartHealthProbeRunning && now >= _restartNextProbeAtUtcMs)
             {
                 _restartHealthProbeRunning = true;
-                _restartNextProbeAtUtcMs = now + RestartProbeIntervalMs;
                 _ = ProbeRestartHealthAsync(operationId, processId);
             }
         }
@@ -2260,15 +2364,20 @@ namespace CodingRiver.UPilot
             UPilotServerRestartDiagnostics.BeginStatusProbe(operationId);
             var probeEnded = false;
             var readOnlyStarted = false;
+            var cancellation = _restartProbeCancellation.Token;
             try
             {
-                var status = await GetFreshStatusAsync(_restartMaintenanceDeadlineUtcMs);
+                var status = await GetRestartStatusAsync(_restartVerificationDeadlineUtcMs, cancellation);
+                if (cancellation.IsCancellationRequested || operationId != _restartOperationId || !UPilotServerRestartDiagnostics.IsActive(operationId)) return;
+                if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartVerificationDeadlineUtcMs) { ObserveRestart(); return; }
                 if (UPilotServerRestartDiagnostics.IsActive(operationId))
                 {
                     var outcome = ClassifyRestartProbe(status);
-                    if (outcome == "success" && status.HealthServerProcessId != processId)
+                    if (status.ProcessOwnership == McpProcessOwnership.Foreign ||
+                        (status.ProcessId > 0 && status.ProcessId != processId)) outcome = "process_identity_mismatch";
+                    if (status.HealthEndpointResponded && status.HealthServerProcessId > 0 && status.HealthServerProcessId != processId)
                         outcome = "process_identity_mismatch";
-                    else if (outcome == "success" && !SameProjectPath(status.HealthProjectPath, _restartExpectedProjectPath))
+                    else if (status.HealthEndpointResponded && !string.IsNullOrWhiteSpace(status.HealthProjectPath) && !SameProjectPath(status.HealthProjectPath, _restartExpectedProjectPath))
                         outcome = "project_identity_mismatch";
                     var probeError = outcome == "project_identity_mismatch"
                         ? "期望项目 " + _restartExpectedProjectPath + "；实际项目 " + status.HealthProjectPath
@@ -2281,6 +2390,11 @@ namespace CodingRiver.UPilot
                     if (outcome != "success")
                         LogRestartProbeOutcome(operationId, "status_collection", probeStartedAtUtcMs,
                             outcome, probeError, status);
+                    if (outcome == "process_identity_mismatch" || outcome == "project_identity_mismatch")
+                    {
+                        RecordRestartStartFailure(outcome, probeError);
+                        return;
+                    }
                     if (outcome == "lifecycle_canceled")
                     {
                         UPilotServerRestartDiagnostics.RecordCanceled(operationId,
@@ -2302,19 +2416,20 @@ namespace CodingRiver.UPilot
                     UPilotServerRestartDiagnostics.RecordHealthVerified(operationId, processId, status.HealthProjectPath);
                     var bridge = UPilotBridge.Instance.GetStatus();
                     var issues = UPilotDeploymentDiagnostics.Observe(bridge, status);
-                    if (issues.Any(issue => issue.Code != "authentication" && issue.Code != "timeout"))
+                    if (issues.Any(issue => issue.Confirmed && issue.Code != "authentication" && issue.Code != "timeout"))
                     {
                         RecordRestartStartFailure("deployment_mismatch", string.Join("\n", issues.Select(issue => issue.Message)));
                         return;
                     }
-                    if (issues.Any(issue => issue.Code == "timeout") ||
+                    if (issues.Length > 0 ||
                         !bridge.IsWsOpen || !bridge.IsAuthenticated ||
                         !IsNewBridgeSession(_restartOldBridgeSessionId, bridge.SessionId))
                         return;
                     UPilotServerRestartDiagnostics.RecordDeploymentVerified(operationId);
                     UPilotServerRestartDiagnostics.MarkGate(operationId, "readonly", "running");
                     readOnlyStarted = true;
-                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, _restartMaintenanceDeadlineUtcMs);
+                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, _restartVerificationDeadlineUtcMs, cancellation);
+                    if (cancellation.IsCancellationRequested) return;
                     if (!string.Equals(operationId, _restartOperationId, StringComparison.Ordinal) ||
                         !UPilotServerRestartDiagnostics.IsActive(operationId)) return;
                     var verifiedBridge = UPilotBridge.Instance.GetStatus();
@@ -2325,6 +2440,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                if (cancellation.IsCancellationRequested || operationId != _restartOperationId) return;
                 LogRestartProbeException(operationId,
                     readOnlyStarted ? "readonly_roundtrip" : "status_collection", probeStartedAtUtcMs, ex);
                 if (string.Equals(operationId, _restartOperationId, StringComparison.Ordinal))
@@ -2332,12 +2448,12 @@ namespace CodingRiver.UPilot
                     if (!probeEnded && UPilotServerRestartDiagnostics.IsActive(operationId))
                         UPilotServerRestartDiagnostics.EndStatusProbe(operationId,
                             ex is TimeoutException || ex is TaskCanceledException ? "request_timeout" : "unknown",
-                            "status_collection", "", ex.Message);
+                            "health_query", "", DescribeProbeException(ex));
                     else if (readOnlyStarted && UPilotServerRestartDiagnostics.IsActive(operationId))
-                        UPilotServerRestartDiagnostics.MarkGate(operationId, "readonly", "failed",
-                            ex is TimeoutException || ex is TaskCanceledException ? "readonly_timeout" : "readonly_mismatch", ex.Message);
+                        UPilotServerRestartDiagnostics.MarkGate(operationId, "readonly", "running",
+                            "readonly_retry", DescribeProbeException(ex));
                     // Transient probe timeouts may recover within the original maintenance budget.
-                    if (_restartMaintenanceDeadlineUtcMs <= 0 || ex is InvalidOperationException)
+                    if (ex is InvalidOperationException)
                         RecordRestartStartFailure(readOnlyStarted
                             ? (ex is TimeoutException || ex is TaskCanceledException ? "readonly_timeout" : "readonly_mismatch")
                             : "restart_validation_failed", ex.Message);
@@ -2348,6 +2464,7 @@ namespace CodingRiver.UPilot
                 if (string.Equals(operationId, _restartOperationId, StringComparison.Ordinal))
                 {
                     _restartHealthProbeRunning = false;
+                    _restartNextProbeAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + RestartProbeIntervalMs;
                     if (!UPilotServerRestartDiagnostics.IsActive(operationId))
                         FinishRestartObservation();
                 }
@@ -2364,6 +2481,11 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                var key = phase + ":" + outcome + ":" + error;
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (_restartLastLoggedError == key && now - _restartLastLoggedAt < 30000) return;
+                _restartLastLoggedError = key;
+                _restartLastLoggedAt = now;
                 var elapsed = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedAtUtcMs);
                 Logger.LogWarning("SERVER",
                     $"Restart diagnostic operation={operationId} phase={phase} elapsedMs={elapsed} " +
@@ -2382,28 +2504,10 @@ namespace CodingRiver.UPilot
             long startedAtUtcMs,
             Exception exception)
         {
-            try
-            {
-                McpServerStatus cached;
-                lock (_statusLock) cached = _cachedStatus;
-                var elapsed = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedAtUtcMs);
-                var chain = new StringBuilder();
-                var current = exception;
-                for (var depth = 0; current != null && depth < 4; depth++, current = current.InnerException)
-                {
-                    if (depth > 0) chain.Append(" -> ");
-                    chain.Append(current.GetType().FullName).Append(": ").Append(current.Message);
-                }
-                var stack = TruncateDiagnostic(exception.StackTrace, 4096);
-                Logger.LogWarning("SERVER",
-                    $"Restart diagnostic operation={operationId} phase={phase} elapsedMs={elapsed} " +
-                    $"exceptionChain={TruncateDiagnostic(chain.ToString(), 2048)} stack={stack} " +
-                    BuildEditorObservationDiagnostic(cached));
-            }
-            catch
-            {
-                // Diagnostic logging must never affect restart control flow or its result.
-            }
+            McpServerStatus cached;
+            lock (_statusLock) cached = _cachedStatus;
+            LogRestartProbeOutcome(operationId, phase, startedAtUtcMs, exception.GetType().Name,
+                DescribeProbeException(exception), cached);
         }
 
         private static string BuildEditorObservationDiagnostic(McpServerStatus status)
@@ -2442,7 +2546,7 @@ namespace CodingRiver.UPilot
                     var error = status.ErrorMessage;
                     if (error.Contains("/health HTTP ")) return "http_status_failure";
                     if (error.Contains("HttpRequestException") || error.Contains("SocketException")) return "connect_failure";
-                    if (error.Contains("TaskCanceledException") || error.Contains("A task was canceled")) return "request_timeout";
+                    if (error.Contains("TaskCanceledException") || error.Contains("TimeoutException") || error.Contains("A task was canceled")) return "request_timeout";
                     return "malformed_response";
                 }
                 if (status.StatusFailureStage == "port_probe") return "connect_failure";
@@ -2454,14 +2558,15 @@ namespace CodingRiver.UPilot
                 : "connect_failure";
         }
 
-        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId, long deadlineUtcMs = 0)
+        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId, long deadlineUtcMs = 0, CancellationToken token = default)
         {
             var nonce = Guid.NewGuid().ToString("N");
             var remaining = deadlineUtcMs <= 0 ? 7000 : Math.Min(7000, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             if (remaining <= 0) throw new TimeoutException("Maintenance deadline elapsed.");
-            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMilliseconds(remaining) };
-            using var response = await client.GetAsync(
-                $"http://127.0.0.1:{HttpPort}/health?probe=bridge&session={Uri.EscapeDataString(bridgeSessionId)}&nonce={nonce}");
+            using var client = CreateLoopbackStatusClient();
+            using var response = await SendBoundedStatusAsync(client,
+                $"http://127.0.0.1:{HttpPort}/health?probe=bridge&session={Uri.EscapeDataString(bridgeSessionId)}&nonce={nonce}",
+                deadlineUtcMs, token, (int)remaining);
             response.EnsureSuccessStatusCode();
             var health = JsonUtility.FromJson<UPilotServerHealth>(await response.Content.ReadAsStringAsync());
             if (health == null || !health.bridge_probe_ok || health.bridge_probe_nonce != nonce ||
@@ -2522,13 +2627,18 @@ namespace CodingRiver.UPilot
             _restartPending = false;
             _afterRestartStarted = null;
             UPilotServerRestartDiagnostics.RecordFailure(restartId, "SERVICE_RESTART_TIMEOUT",
-                "Maintenance observation ended; no further stop/start was scheduled.", "", "",
+                UPilotServerRestartDiagnostics.TimeoutMessage(UPilotServerRestartDiagnostics.Current, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), "", "",
                 "Inspect current service identity and original maintenance diagnostics.");
             FinishRestartObservation();
         }
 
         private void ClearRestartObservationState()
         {
+            _restartProbeCancellation?.Cancel();
+            _restartProbeCancellation?.Dispose();
+            _restartProbeCancellation = null;
+            _restartLastLoggedError = null;
+            _restartLastLoggedAt = 0;
             _restartOperationId = "";
             _restartOldBridgeSessionId = "";
             _restartExpectedProjectPath = "";

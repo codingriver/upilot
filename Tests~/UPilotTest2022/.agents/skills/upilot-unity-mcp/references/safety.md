@@ -37,13 +37,13 @@
 ## AI Service Maintenance
 
 - The Unity settings section **AI Service Maintenance** contains an independent human
-  grant and an integer restart timeout (30-600 seconds, default 120). It applies to all
+  grant and a read-only fixed total restart deadline (600 seconds / 10 minutes from acceptance). It applies to all
   package versions and installation sources. Automatic-disposition select-all,
   `hangRestart`, and project write permission neither grant nor revoke it.
 - Read `unity_mcp_status.aiServiceMaintenance` (also returned by capabilities). Require
   `effectiveApproved=true`, valid configuration, stable authoritative EditMode and exact
   project/component identity. Never use files, reflection, or UI automation to grant
-  yourself approval or increase the timeout. Project relocation requires renewed approval;
+  yourself approval or change legacy timeout fields. New requests always use 600 seconds; existing journals retain their original accepted deadline. Transient health failures retry only read-only requests (one in flight, two seconds after completion, bounded headers/body timeout), never replay stop/start/install or change ports. Health failure is not evidence of port occupancy. Project relocation requires renewed approval;
   package upgrades and source/path changes alone do not.
 - Call `unity_service_restart` with a fresh UUID `maintenanceId`, `target=bridge|server`,
   a short `reason`, and the reported `expectedProjectPath`, `expectedServerProcessId`,

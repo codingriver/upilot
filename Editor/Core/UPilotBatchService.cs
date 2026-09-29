@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -64,6 +65,13 @@ namespace CodingRiver.UPilot
         private readonly UPilotBridge _bridge;
         private readonly ConcurrentDictionary<string, BatchExecuteResultPayload> _batches = new();
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _batchCts = new();
+        internal void ResetActive()
+        {
+            var sources = _batchCts.Values.ToArray();
+            _batchCts.Clear();
+            _batches.Clear();
+            foreach (var source in sources) { try { source.Cancel(); } catch { } }
+        }
 
         private const int MaxOperations  = 100;
         private const int TotalTimeoutMs = 60000;
@@ -153,7 +161,7 @@ namespace CodingRiver.UPilot
                 _batchCts.TryRemove(batchId, out _);
             }
 
-            _batches[batchId] = batchResult;
+            _batches.TryUpdate(batchId, batchResult, batchResult);
             await _bridge.SendResultAsync(id, "batch.execute", batchResult, token);
         }
 

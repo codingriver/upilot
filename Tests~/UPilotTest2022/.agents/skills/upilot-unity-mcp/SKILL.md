@@ -119,7 +119,7 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 For AI-requested Bridge/Server restarts, first read `references/safety.md` (AI Service Maintenance).
 Use `unity_service_restart` only with the independent UI grant reported in
 `aiServiceMaintenance`. It applies to all versions/install sources, but only in EditMode.
-Never self-enable the grant or edit its timeout. The default total deadline is 120 seconds;
+Never self-enable the grant or edit timeout fields. New requests share one fixed 600-second total deadline from acceptance (UI read-only); existing journals keep their original deadline. Transient health failures retry only read-only probes every two seconds after completion, never stop/start or install again; health failure is not evidence of a port conflict;
 an interrupted response is not permission to resend or replay business.
 
 - If Unity stops pumping commands, call `unity_hang_status` before retrying or restarting it.

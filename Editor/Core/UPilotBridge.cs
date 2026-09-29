@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -236,6 +236,39 @@ namespace CodingRiver.UPilot
         private UPilotRuntimeDiagnosticsService _runtimeDiagnosticsService;
         private object _flowService;
 
+        private readonly ConcurrentQueue<Action> _controlQueue = new ConcurrentQueue<Action>();
+        private volatile bool _resettingWork;
+        private volatile bool _admissionClosed;
+        private string _resetErrors = "";
+        internal void EnqueueControl(Action action) => _controlQueue.Enqueue(action);
+
+        internal string ResetActiveWork()
+        {
+            if (_resettingWork) return _resetErrors;
+            _resettingWork = true;
+            UPilotServiceLifetime.Advance(); // Fence callbacks before touching any owned resource.
+            var errors = new System.Collections.Generic.List<string>();
+            void Reset(Action action) { try { action(); } catch (Exception ex) { errors.Add(ex.Message); } }
+            lock (_queueObservationLock)
+            {
+                while (_mainThreadQueue.TryDequeue(out _)) { }
+                _trackedQueueActions.Clear();
+            }
+            Reset(() => UPilotOperationTracker.Instance.AbortActive());
+            Reset(() => Automation.UPilotAutomationStepService.ResetActive());
+            Reset(() => _testService?.ResetActive());
+            Reset(() => _snapshotService?.ResetActive());
+            Reset(() => _batchService?.ResetActive());
+            Reset(() => _buildService?.ResetActive());
+            Reset(() => _editorDelayService?.ResetActive());
+            Reset(() => _flowService?.GetType().GetMethod("ResetActive")?.Invoke(_flowService, null));
+            Reset(UPilotRuntimeDiagnosticsService.ResetActive);
+            Reset(() => _executionService?.Sessions.CloseAll());
+            Reset(UPilotConsoleCaptureService.ResetActive);
+            _resetErrors = string.Join("; ", errors);
+            return _resetErrors;
+        }
+
         private ClientWebSocket      _ws;
         private CancellationTokenSource _cts;
         private Task                 _connectLoopTask;
@@ -468,8 +501,7 @@ namespace CodingRiver.UPilot
                 return;
             UPilotOperationTracker.Instance.RecordSystemEvent(
                 "sys.bridge.restart", "Bridge重启", "手动触发重启");
-            Stop();
-            EnsureStarted();
+            UPilotMcpServerManager.Instance.RestartPreparedServer(() => EnsureStarted());
         }
 
         // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -614,6 +646,10 @@ namespace CodingRiver.UPilot
 
         private void ProcessMainThreadQueue()
         {
+            while (_controlQueue.TryDequeue(out var control))
+            {
+                try { control(); } catch (Exception ex) { Debug.LogError("[UPilot] Control failed: " + ex.Message); }
+            }
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _activeSceneName = SceneManager.GetActiveScene().name;
             _cachedIsCompiling = CurrentIsCompiling();
@@ -675,11 +711,14 @@ namespace CodingRiver.UPilot
         /// </summary>
         public void EnqueueTracked(string commandId, Action action)
         {
+            if (_resettingWork) throw new InvalidOperationException("UPILOT_RESET_IN_PROGRESS");
+            var lifetime = UPilotServiceLifetime.Id;
             var ctx = UPilotOperationTracker.Instance.GetContext(commandId);
             ctx?.Step("排队等待主线程");
 
             Action tracked = () =>
             {
+                if (lifetime != UPilotServiceLifetime.Id) return;
                 _lastDequeuedCommandId = commandId ?? string.Empty;
                 ctx?.Step("主线程执行中");
                 try
@@ -714,6 +753,7 @@ namespace CodingRiver.UPilot
                 var active = UPilotOperationTracker.Instance.GetActiveCommandsSnapshot(excludeId);
                 var result = new BridgeQueueSnapshot
                 {
+                    serviceLifecycleId = UPilotServiceLifetime.Id,
                     observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     activeCount = active.Count,
                     executingCount = executing == null ? 0 : 1,
@@ -1157,6 +1197,19 @@ namespace CodingRiver.UPilot
                         try { _ws?.Abort(); } catch { /* ignored */ }
                         return;
                     }
+                    _admissionClosed = true; // Do not dispatch new-generation work before the main-thread reset.
+                    var serverLifetime = ack.payload.serverLifecycleId;
+                    if (!string.IsNullOrEmpty(serverLifetime))
+                        EnqueueControl(() =>
+                        {
+                            const string key = "UPilot.ServerLifetime";
+                            var previous = SessionState.GetString(key, "");
+                            if (previous != serverLifetime) ResetActiveWork();
+                            SessionState.SetString(key, serverLifetime);
+                            _resettingWork = false;
+                            _admissionClosed = false;
+                        });
+                    else EnqueueControl(() => { _resettingWork = false; _admissionClosed = false; }); // Older servers do not publish a generation.
                     _mcpLabelFromServer = ack.payload.mcpLabel ?? "";
                     _mcpHostFromServer = ack.payload.mcpHost ?? "";
                     _mcpPortFromServer = ack.payload.mcpPort;
@@ -1206,6 +1259,12 @@ namespace CodingRiver.UPilot
 
             try
             {
+                if ((_resettingWork || _admissionClosed) && envelope.name != "service.restart" && envelope.name != "queue.snapshot"
+                    && envelope.name != "editor.state")
+                {
+                    await SendErrorAsync(id, "UPILOT_RESET_IN_PROGRESS", "UPilot hard stop is in progress.", token, envelope.name);
+                    return;
+                }
                 if (!await _router.TryHandleAsync(envelope.name, id, json, token))
                 {
                     Logger.LogWarning("COMMAND", $"Unknown command: {envelope.name}");

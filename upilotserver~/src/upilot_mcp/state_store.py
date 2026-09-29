@@ -77,6 +77,9 @@ class EditorSnapshot:
 class StateStore:
     def __init__(self) -> None:
         self.commands: dict[str, CommandRecord] = {}
+        self.lifecycle_id = uuid.uuid4().hex
+        self._current_write_batches: set[str] = set()
+        self._write_batch_runtime: dict[str, dict] = {}
         self.compile = CompileSnapshot()
         self.editor = EditorSnapshot()
         self.auto_fix = None
@@ -212,19 +215,10 @@ class StateStore:
                     "UPDATE hang_captures SET state_json=? WHERE project_path=? AND capture_id=?",
                     (json.dumps(capture_state, ensure_ascii=False), resolved, capture_id),
                 )
-            db.execute(
-                "UPDATE write_batches SET status='recovery_required',updated_at=?,"
-                "error=CASE WHEN error='' THEN 'Server restarted while compile execution was in flight.' ELSE error END "
-                "WHERE project_path=? AND status IN ('syncing','compiling')",
-                (_now_ms(), resolved),
-            )
             row = db.execute("SELECT snapshot_json FROM project_state WHERE project_path = ?", (resolved,)).fetchone()
-            pending = db.execute(
-                "SELECT write_batch_id FROM write_batches WHERE project_path=? "
-                "AND status IN ('pending','deferred','recovery_required') AND superseded_by='' AND disposition_json IS NULL "
-                "ORDER BY updated_at DESC LIMIT 1",
-                (resolved,),
-            ).fetchone()
+        # History is evidence, never an active queue for a new Server instance.
+        self._current_write_batches.clear()
+        self._write_batch_runtime.clear()
         if row:
             try:
                 payload = json.loads(row[0])
@@ -234,8 +228,7 @@ class StateStore:
                 self.editor.source = "server-persisted"
             except (TypeError, ValueError, json.JSONDecodeError):
                 self.persist_failure_count += 1
-        if pending:
-            self.pending_write_batch_id = str(pending[0])
+        self.pending_write_batch_id = ""
 
     @property
     def project_path(self) -> str:
@@ -263,7 +256,7 @@ class StateStore:
                 (self._project_path,),
             ).fetchone()
             coalesced = bool(
-                row and now - int(row[3]) <= 500
+                row and row[0] in self._current_write_batches and now - int(row[3]) <= 500
                 and (row[5] is None) == (changes is None)
                 and bool(row[6]) == compile_when_edit_mode
             )
@@ -278,7 +271,7 @@ class StateStore:
             changes_json = json.dumps(changes) if changes is not None else None
             if coalesced:
                 batch_id, operation_id = str(row[0]), str(row[1])
-                created_at = max(int(row[2]), created_at)
+                created_at = int(row[2])  # Coalescing never extends the first registration deadline.
                 if changes is None:
                     previous = json.loads(row[4])
                     normalized_paths = sorted(dict.fromkeys([*previous, *normalized_paths]))
@@ -294,10 +287,11 @@ class StateStore:
                     (batch_id, self._project_path, operation_id, created_at, now, "pending", int(compile_when_edit_mode), json.dumps(normalized_paths), files_sha256, changes_json),
                 )
                 coalesced = False
+        self._current_write_batches.add(batch_id)
         self.pending_write_batch_id = batch_id
         self.compile_deferred_reason = "PlayMode" if self.editor.play_mode_state in ("play", "pause") else ""
         self.correlation_verified = False
-        return {
+        result = {
             "writeBatchId": batch_id,
             "operationId": operation_id,
             "writeBatchCreatedAt": created_at,
@@ -307,6 +301,10 @@ class StateStore:
             "coalesced": coalesced,
             **self._write_batch_change_fields(changes_json),
         }
+
+        self._write_batch_runtime.setdefault(batch_id, dict(result, status="pending", storedStatus="pending",
+            terminal=False, errorsVerified=False, correlationVerified=False, outcome="unknown"))
+        return result
 
     @staticmethod
     def _write_batch_change_fields(changes_json: str | None) -> dict[str, Any]:
@@ -368,8 +366,19 @@ class StateStore:
     def save_test_job(self, state: dict) -> None:
         if self._db_path is None or state.get("projectPath") != self._project_path:
             raise RuntimeError("Test job persistence is not configured for this project.")
+        if state.get("lifecycleId", self.lifecycle_id) != self.lifecycle_id:
+            return
+        state["lifecycleId"] = self.lifecycle_id
         with sqlite3.connect(self._db_path) as db:
             db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT state_json FROM test_jobs WHERE project_path=? AND task_id=?",
+                                  (self._project_path, state["taskId"])).fetchone()
+            if previous:
+                original = json.loads(previous[0])
+                # History is immutable across lifetimes; a late callback cannot resurrect it.
+                if (original.get("lifecycleId") != self.lifecycle_id
+                        or original.get("terminal") or original.get("endedAt")):
+                    return
             self._check_job_disposition(db, "test_jobs", "taskId", self._project_path, state)
             db.execute(
                 "INSERT INTO test_jobs(project_path,task_id,state_json) VALUES(?,?,?) "
@@ -382,14 +391,25 @@ class StateStore:
             return []
         with sqlite3.connect(self._db_path) as db:
             rows = db.execute("SELECT state_json FROM test_jobs WHERE project_path=?", (self._project_path,)).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [value for row in rows if (value := json.loads(row[0])).get("lifecycleId") == self.lifecycle_id]
 
     def save_operation(self, state: dict) -> None:
         if self._db_path is None or state.get("projectPath") != self._project_path:
             raise RuntimeError("Operation persistence is not configured for this project.")
+        if state.get("lifecycleId", self.lifecycle_id) != self.lifecycle_id:
+            return
+        state["lifecycleId"] = self.lifecycle_id
         persisted = {key: value for key, value in state.items() if not key.startswith("_")}
         with sqlite3.connect(self._db_path) as db:
             db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT state_json FROM operation_jobs WHERE project_path=? AND operation_id=?",
+                                  (self._project_path, state["operationId"])).fetchone()
+            if previous:
+                original = json.loads(previous[0])
+                # History is immutable across lifetimes; a late callback cannot resurrect it.
+                if (original.get("lifecycleId") != self.lifecycle_id
+                        or original.get("terminal") or original.get("endedAt")):
+                    return
             self._check_job_disposition(db, "operation_jobs", "operationId", self._project_path, persisted)
             db.execute(
                 "INSERT INTO operation_jobs(project_path,operation_id,state_json) VALUES(?,?,?) "
@@ -402,11 +422,14 @@ class StateStore:
             return []
         with sqlite3.connect(self._db_path) as db:
             rows = db.execute("SELECT state_json FROM operation_jobs WHERE project_path=?", (self._project_path,)).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [value for row in rows if (value := json.loads(row[0])).get("lifecycleId") == self.lifecycle_id]
 
     def save_capture_attachment(self, state: dict) -> None:
         if self._db_path is None or state.get("projectPath") != self._project_path:
             raise RuntimeError("Capture attachment persistence is not configured for this project.")
+        if state.get("serviceLifecycleId", self.lifecycle_id) != self.lifecycle_id:
+            return
+        state["serviceLifecycleId"] = self.lifecycle_id
         with sqlite3.connect(self._db_path) as db:
             db.execute(
                 "INSERT INTO capture_attachments(project_path,attachment_id,state_json) VALUES(?,?,?) "
@@ -421,6 +444,9 @@ class StateStore:
         request_key = str(state.get("requestKey") or "")
         if not request_key:
             raise RuntimeError("Capture attachment requestKey is required.")
+        if state.get("serviceLifecycleId", self.lifecycle_id) != self.lifecycle_id:
+            return "stale", None
+        state["serviceLifecycleId"] = self.lifecycle_id
         with sqlite3.connect(self._db_path) as db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
@@ -433,7 +459,7 @@ class StateStore:
                     item = json.loads(row[0])
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
-                if isinstance(item, dict):
+                if isinstance(item, dict) and item.get("serviceLifecycleId") == self.lifecycle_id:
                     parsed.append(item)
             matches = [item for item in parsed if item.get("requestKey") == request_key]
             if matches:
@@ -466,7 +492,7 @@ class StateStore:
                 state = json.loads(row[0])
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            if isinstance(state, dict):
+            if isinstance(state, dict) and state.get("serviceLifecycleId") == self.lifecycle_id:
                 result.append(state)
         return result
 
@@ -476,6 +502,9 @@ class StateStore:
         request_key = str(state.get("requestKey") or "")
         if not request_key:
             raise RuntimeError("Capture start requestKey is required.")
+        if state.get("serviceLifecycleId", self.lifecycle_id) != self.lifecycle_id:
+            return
+        state["serviceLifecycleId"] = self.lifecycle_id
         with sqlite3.connect(self._db_path) as db:
             db.execute(
                 "INSERT INTO capture_start_intents(project_path,request_key,state_json) VALUES(?,?,?) "
@@ -497,7 +526,7 @@ class StateStore:
             state = json.loads(row[0])
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
-        return state if isinstance(state, dict) else None
+        return state if isinstance(state, dict) and state.get("serviceLifecycleId") == self.lifecycle_id else None
 
     def create_hang_capture(self, state: dict) -> tuple[str, dict | None]:
         if self._db_path is None or state.get("projectPath") != self._project_path:
@@ -573,8 +602,17 @@ class StateStore:
             return None
         return value if isinstance(value, dict) else None
 
+    def expire_write_batches(self) -> None:
+        for batch_id in tuple(self._current_write_batches):
+            batch = self.get_write_batch(batch_id)
+            if batch and not batch.get("terminal") and _now_ms() >= batch["writeBatchCreatedAt"] + 600000:
+                self.mark_write_batch(batch_id, "timed_out", error="Write batch exceeded 600 seconds from registration.")
+
     def pending_write_batches(self) -> list[dict[str, Any]]:
+        self.expire_write_batches()
         if self._db_path is None or not self._project_path:
+            return []
+        if all(self._write_batch_runtime.get(key, {}).get("terminal") for key in self._current_write_batches):
             return []
         with sqlite3.connect(self._db_path) as db:
             rows = db.execute(
@@ -583,45 +621,61 @@ class StateStore:
                 "AND superseded_by='' AND disposition_json IS NULL ORDER BY created_at",
                 (self._project_path,),
             ).fetchall()
-        batches = (self.get_write_batch(row[0]) for row in rows)
+        batches = (self.get_write_batch(row[0]) for row in rows if row[0] in self._current_write_batches)
         return [batch for batch in batches if batch and batch.get("storedStatus") != "verified" and batch["status"] in
                 {"pending", "deferred", "recovery_required"} and not batch.get("disposition")]
 
     def mark_write_batch(self, write_batch_id: str, status: str, *, compile_operation_id: str = "", error: str = "") -> None:
-        if self._db_path is None or not write_batch_id:
+        if self._db_path is None or write_batch_id not in self._current_write_batches:
             return
         if status == "verified":
             raise ValueError("Verified write batches require a correlated persisted terminal snapshot.")
-        with sqlite3.connect(self._db_path) as db:
-            db.execute(
-                "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
-                (status, _now_ms(), compile_operation_id, compile_operation_id, error, self._project_path, write_batch_id),
-            )
-        if status in ("verified", "failed", "canceled") and self.pending_write_batch_id == write_batch_id:
-            self.pending_write_batch_id = ""
-            self.compile_deferred_reason = ""
+        previous = self.get_write_batch(write_batch_id)
+        if previous and previous.get("terminal"):
+            return
+        terminal = status in {"failed", "canceled", "aborted", "timed_out"}
+        candidate = dict(previous or {}, status=status, storedStatus=status, error=error)
+        if compile_operation_id:
+            candidate["compileOperationId"] = compile_operation_id
+        if terminal:
+            candidate.update(terminal=True, updatedAt=_now_ms())
+            # Release the logical slot before best-effort archival. Disk failure
+            # cannot leave an expired batch in the active queue.
+            self._write_batch_runtime[write_batch_id] = candidate
+            if self.pending_write_batch_id == write_batch_id:
+                self.pending_write_batch_id = ""
+                self.compile_deferred_reason = ""
+        try:
+            with sqlite3.connect(self._db_path) as db:
+                db.execute(
+                    "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL AND status NOT IN ('verified','failed','canceled','aborted','timed_out')",
+                    (status, _now_ms(), compile_operation_id, compile_operation_id, error, self._project_path, write_batch_id),
+                )
+        except sqlite3.Error as exc:
+            self.persist_failure_count += 1
+            candidate["persistenceError"] = str(exc)
+            self._write_batch_runtime[write_batch_id] = candidate
 
-    def defer_write_batch_after_predispatch_failure(self, write_batch_id: str, expected_error: str) -> bool:
-        if self._db_path is None or not write_batch_id or not expected_error:
-            return False
-        with sqlite3.connect(self._db_path) as db:
-            cursor = db.execute(
-                "UPDATE write_batches SET status='deferred',updated_at=?,compile_operation_id='',error='' "
-                "WHERE project_path=? AND write_batch_id=? AND status='recovery_required' "
-                "AND terminal_snapshot_json IS NULL AND disposition_json IS NULL AND error=?",
-                (_now_ms(), self._project_path, write_batch_id, expected_error),
-            )
-        return cursor.rowcount == 1
 
     def get_write_batch(self, write_batch_id: str) -> dict[str, Any] | None:
         if self._db_path is None or not write_batch_id:
             return None
-        with sqlite3.connect(self._db_path) as db:
-            row = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by,disposition_json "
-                "FROM write_batches WHERE project_path=? AND write_batch_id=?",
-                (self._project_path, write_batch_id),
-            ).fetchone()
+        cached = self._write_batch_runtime.get(write_batch_id)
+        if cached and cached.get("terminal") and not cached.get("terminalSnapshot"):
+            return dict(cached)
+        try:
+            with sqlite3.connect(self._db_path) as db:
+                row = db.execute(
+                    "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by,disposition_json "
+                    "FROM write_batches WHERE project_path=? AND write_batch_id=?",
+                    (self._project_path, write_batch_id),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            if cached is None:
+                raise
+            self.persist_failure_count += 1
+            cached["persistenceError"] = str(exc)
+            return dict(cached)
         if row is None:
             return None
         try:
@@ -679,7 +733,7 @@ class StateStore:
             "compileOperationId": row[8], "error": row[9],
             **self._write_batch_change_fields(row[10]),
             "terminalSnapshot": evidence,
-            "terminal": (correlation or status in {"failed", "canceled"}),
+            "terminal": (correlation or status in {"failed", "canceled", "aborted", "timed_out"}),
             "errorsVerified": correlation,
             "correlationVerified": correlation,
             "compileRequestId": row[12] or (evidence or {}).get("compileRequestId", ""),
@@ -693,6 +747,8 @@ class StateStore:
         result["warningsTruncated"] = bool(row[15]) if details_available else False
         if details_available and warnings is not None:
             result["warnings"] = warnings
+        if write_batch_id in self._current_write_batches:
+            self._write_batch_runtime[write_batch_id] = dict(result)
         return result
 
     def dispose_write_batch(self, write_batch_id: str, expected: dict, *, reason: str, request_id: str) -> dict:
@@ -798,7 +854,7 @@ class StateStore:
     def _persist_batch_evidence(self, payload: dict[str, Any]) -> None:
         batch_id = str(payload.get("writeBatchId") or "")
         batch = self.get_write_batch(batch_id)
-        if not batch or batch.get("storedStatus") in {"verified", "failed", "canceled"} or batch.get("evidenceAvailable") or batch.get("terminalSnapshot") is not None:
+        if batch_id not in self._current_write_batches or not batch or batch.get("storedStatus") in {"verified", "failed", "canceled", "aborted", "timed_out"} or batch.get("evidenceAvailable") or batch.get("terminalSnapshot") is not None:
             return
         operation_id = str(payload.get("compileOperationId") or "")
         if not (
@@ -818,7 +874,7 @@ class StateStore:
             return
         with sqlite3.connect(self._db_path) as db:
             cursor = db.execute(
-                "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=? "
+                "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=?,error='' "
                 "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
                 ("verified" if payload["compilePhase"] == "completed" else "failed",
                  _now_ms(), json.dumps(payload, ensure_ascii=False), self._project_path, batch_id),
@@ -957,7 +1013,7 @@ class StateStore:
         if "pendingWriteBatchId" in payload:
             incoming_pending = str(payload.get("pendingWriteBatchId") or "")
             incoming_batch = self.get_write_batch(incoming_pending)
-            if incoming_batch and incoming_batch.get("disposition"):
+            if incoming_pending not in self._current_write_batches or (incoming_batch and incoming_batch.get("terminal")):
                 incoming_pending = ""
             if incoming_pending != self.pending_write_batch_id:
                 owned_batch = self.get_write_batch(self.pending_write_batch_id)
@@ -1414,6 +1470,7 @@ class StateStore:
         return "idle" if folded in ("", "idle", "ready") else folded
 
     def execution_state(self, *, stale_after_ms: int = 5000) -> dict[str, Any]:
+        self.expire_write_batches()
         now = _now_ms()
         updated_at = int(self.editor.updated_at or 0)
         age_ms = max(0, now - updated_at) if updated_at else 0

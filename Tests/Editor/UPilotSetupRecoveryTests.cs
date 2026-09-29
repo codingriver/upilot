@@ -240,5 +240,42 @@ namespace CodingRiver.UPilot.Tests
         private static void SetLastRepairSucceeded(bool value) =>
             typeof(UPilotQuickStart).GetProperty(nameof(UPilotQuickStart.LastRepairSucceeded),
                 BindingFlags.Static | BindingFlags.NonPublic).GetSetMethod(true).Invoke(null, new object[] { value });
+        [Test]
+        public void HealthDeadlineShowsDiagnosticOnceWithoutSetupOrPortAdvice()
+        {
+            var record = UPilotServerRestartDiagnostics.CreateRecordForTests("test", 41, "old");
+            record.operationId = "health-recovery-test-" + Guid.NewGuid().ToString("N");
+            record.status = "failed";
+            record.errorCode = "restart_verification_timeout";
+            record.gateDiagnostics = new[] { new UPilotRestartGate { key = "health", state = "failed" } };
+            // Explicit evidence that all preceding gates passed.
+            record.newProcessId = 42;
+            record.newProcessStartedAtUtcMs = 2;
+            record.portsReleasedAtUtcMs = 2;
+            record.hasIdentityProbe = true;
+            record.verifiedCount = 1;
+            record.hasBridgeStopConfirmation = record.bridgeStopConfirmed = true;
+            record.hasOldServerExitConfirmation = record.oldServerExitConfirmed = true;
+            var gates = new List<UPilotRestartGate>();
+            foreach (var key in UPilotServerRestartDiagnostics.GateKeys)
+                gates.Add(new UPilotRestartGate { key = key, state = key == "health" ? "failed" :
+                    Array.IndexOf(UPilotServerRestartDiagnostics.GateKeys, key) < 5 ? "passed" : "pending" });
+            record.gateDiagnostics = gates.ToArray();
+            Assert.That(UPilotServerRestartDiagnostics.IsHealthFailure(record), Is.True);
+            var dialogs = 0;
+            Action<string> setup = _ => Assert.Fail("Health failure must not open setup.");
+            Action<string, string> dialog = (_, message) =>
+            {
+                dialogs++;
+                Assert.That(message, Does.Contain("服务健康检查异常"));
+                Assert.That(message, Does.Not.Contain("端口占用"));
+                Assert.That(message, Does.Not.Contain("已重新打开安装向导"));
+            };
+            for (var i = 0; i < 2; i++)
+                UPilotQuickStart.ShowRepairFailureOnce(record.operationId, UPilotServerRestartDiagnostics.HealthTimeoutMessage,
+                    setup, dialog, record);
+            Assert.That(dialogs, Is.EqualTo(1));
+        }
+
     }
 }

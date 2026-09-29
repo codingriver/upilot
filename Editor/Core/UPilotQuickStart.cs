@@ -76,6 +76,7 @@ namespace CodingRiver.UPilot
 
         private static UPilotServiceOperation _operation;
         private static double _operationStartedAt;
+        private static long _operationStartedAtUtcMs;
         private static Task<string> _repairTask;
         private static string _repairPhase = "";
         private static string _repairCause = "";
@@ -113,7 +114,7 @@ namespace CodingRiver.UPilot
             var record = UPilotServerRestartDiagnostics.Current;
             if (record?.status == "running")
             {
-                _repairPhase = "重启中：" + record.phase;
+                _repairPhase = UPilotServerRestartDiagnostics.WaitingMessage(record, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 _repairCause = SessionState.GetString(PendingCauseKey, "");
                 return;
             }
@@ -190,9 +191,12 @@ namespace CodingRiver.UPilot
             }
 
             var issues = UPilotDeploymentDiagnostics.Observe(bridgeStatus, mcpStatus);
-            if (IsRepairing || UPilotServerRestartDiagnostics.TryGetActive(out _))
+            var activeRestart = UPilotServerRestartDiagnostics.Current;
+            if (IsRepairing || activeRestart?.status == "running")
                 return new UPilotMainSnapshot(UPilotMainState.Restarting, "正在重启 UPilot",
-                    _repairPhase + "\n" + _repairCause, bridgeStatus.IsStarted, mcpStatus.IsRunning);
+                    activeRestart?.status == "running"
+                        ? UPilotServerRestartDiagnostics.WaitingMessage(activeRestart, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                        : _repairPhase + "\n" + _repairCause, bridgeStatus.IsStarted, mcpStatus.IsRunning);
             var failure = EditorPrefs.GetString(FailureKey, "");
             if (issues.Length > 0 || !string.IsNullOrEmpty(failure))
                 return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "UPilot 需要修复",
@@ -479,7 +483,7 @@ namespace CodingRiver.UPilot
                 SessionState.SetString(PendingAttemptKey, attemptId);
                 while (UPilotServerRestartDiagnostics.IsActive(attemptId))
                 {
-                    _repairPhase = "重启中：" + record.phase;
+                    _repairPhase = UPilotServerRestartDiagnostics.WaitingMessage(record, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                     await Task.Delay(100);
                     record = UPilotServerRestartDiagnostics.Current;
                     if (record?.operationId != attemptId)
@@ -513,26 +517,29 @@ namespace CodingRiver.UPilot
         }
 
         internal static void ShowRepairFailureOnce(string attemptId, string failure,
-            Action<string> openSetup = null, Action<string, string> showDialog = null)
+            Action<string> openSetup = null, Action<string, string> showDialog = null,
+            UPilotServerRestartRecord diagnosticRecord = null)
         {
             if (EditorPrefs.GetString(FailureDialogKey, "") == attemptId) return;
             LastRepairSucceeded = false;
             EditorPrefs.SetString(FailureDialogKey, attemptId);
             EditorPrefs.SetString(FailureKey, failure);
             EditorPrefs.SetBool(AutoAttemptKey, true);
-            var record = UPilotServerRestartDiagnostics.Current;
+            var record = diagnosticRecord ?? UPilotServerRestartDiagnostics.Current;
             var diagnosis = record != null && record.operationId == attemptId
                 ? UPilotRestartDiagnosticView.Full(record)
                 : "失败时间：" + UPilotRestartDiagnosticView.Time(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) +
                   "\n尝试 ID：" + attemptId + "（尚无对应重启 operation ID）" +
                   "\n最后通过的验证门：未知；首个未通过的验证门：未知；status probe：未采集" +
                   "\n重启诊断记录与此次尝试不匹配；请打开高级设置核对 operation ID。";
-            // Reopen configuration, not the failed restart. Port changes and another start
-            // still require confirmation in the wizard; never stop an unverified process.
-            (openSetup ?? UPilotMainWindow.OpenSetupForRecovery)(failure);
+            var healthFailure = record?.operationId == attemptId && UPilotServerRestartDiagnostics.IsHealthFailure(record);
+            // A failed health request is not evidence that the configured port is occupied.
+            // Other setup failures retain the explicit configuration recovery entry point.
+            if (!healthFailure) (openSetup ?? UPilotMainWindow.OpenSetupForRecovery)(failure);
             (showDialog ?? UPilotScrollableDialog.ShowDialog)("UPilot 自动修复失败", failure + "\n\n" +
                 diagnosis +
-                "\n已重新打开安装向导，请从网络端口开始检查并确认可用端口，再安装配套服务、写入配置并启动。" +
+                (healthFailure ? "\n请查看上述健康检查诊断；本次不更改配置，不自动重装服务。" :
+                    "\n已重新打开安装向导；请按已确认的故障证据选择恢复步骤。未确认的原因不作结论。") +
                 "\n只有服务身份、Bridge 握手和实际只读调用验证通过后才算完成。" +
                 "\n不会停止归属未知或其他项目的进程，也不会自动重放重启或被中断的任务。");
         }
@@ -603,6 +610,11 @@ namespace CodingRiver.UPilot
                     mcpStatus.IsRunning);
             }
 
+            var restart = UPilotServerRestartDiagnostics.Current;
+            if (_operation == UPilotServiceOperation.Restarting && restart != null &&
+                restart.requestedAtUtcMs >= _operationStartedAtUtcMs)
+                return EvaluateRestartRecord(restart, bridgeStatus.IsStarted, mcpStatus.IsRunning);
+
             if (ready)
             {
                 ClearOperation();
@@ -640,16 +652,28 @@ namespace CodingRiver.UPilot
                 mcpStatus.IsRunning);
         }
 
+        internal static UPilotMainSnapshot EvaluateRestartRecord(UPilotServerRestartRecord record, bool bridgeStarted, bool serverRunning)
+        {
+            if (record.status == "running")
+                return new UPilotMainSnapshot(UPilotMainState.Restarting, "正在重启 UPilot",
+                    UPilotServerRestartDiagnostics.WaitingMessage(record, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), bridgeStarted, serverRunning);
+            ClearOperation();
+            return new UPilotMainSnapshot(record.status == "succeeded" ? UPilotMainState.Ready : UPilotMainState.NeedsRepair,
+                record.status == "succeeded" ? "已就绪" : "重启验证异常", record.error ?? "", bridgeStarted, serverRunning);
+        }
+
         private static void BeginOperation(UPilotServiceOperation operation)
         {
             _operation = operation;
             _operationStartedAt = EditorApplication.timeSinceStartup;
+            _operationStartedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
         private static void ClearOperation()
         {
             _operation = UPilotServiceOperation.None;
             _operationStartedAt = 0d;
+            _operationStartedAtUtcMs = 0;
         }
 
         private static bool EnsureAvailablePortsWhenStopped()

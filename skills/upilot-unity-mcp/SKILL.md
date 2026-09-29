@@ -75,7 +75,7 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - For PlayMode tests, keep the returned `runGuid` and query `unity_test_results(runGuid=...)`; UPilot persists the run across Domain Reload and MCP reconnects.
 - New generic Operation/Step admission and public validation are suspended with `GENERIC_ORCHESTRATION_DISABLED`. Use dedicated tools; do not submit handwritten callbacks or `stepPlan`, including built-ins.
-- For a historical Operation, `RecoveryRequired` returns immediately from wait with `recoveryBlocked=true/terminal=false`. Report the blocker without replaying Start/Cancel or extending deadlines. A normal `waitWindowElapsed=true/terminal=false` is only a wait-window boundary; existing safe background observation continues independently.
+- Historical Operations end once within their fixed execution/cleanup budget. A tool wait-window boundary is not a new task deadline. Never replay Start/Cancel or extend deadlines; restart never restores old observers.
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
 - Use `detailLevel=summary` and a bounded `maxTailChars` for routine `unity_operation_status/wait`; use `standard` or `full` only for targeted diagnosis.
 - Retry automatically only when the operation is idempotent and non-destructive.
@@ -85,7 +85,7 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - Use `unity_test_run`, `unity_upilot_acceptance_run`, the compile/write-batch workflow, `unity_build_start`, `unity_console_capture_start` or `unity_snapshot_capture` for their respective jobs; observe their original identities and authoritative cleanup.
 - Generic `unity_operation_start/validate` are retained compatibility endpoints that reject new work before validation, records, Capture or business dispatch. Unity public Step start/validation also reject. This fixed pause is not controlled by Flow or a user switch.
 - Task wrappers, reflection/eval, temporary scripts and internal executors must not be used to repackage or bypass the suspended workflow. Ordinary unrelated single calls remain available.
-- Existing Operations/Steps keep status, artifacts and already supported safe cancellation, cleanup, recovery and disposition. Never clear unknown resource ownership or rewrite old records merely because new admission is disabled.
+- Existing same-lifetime Operations/Steps keep status, artifacts and bounded stop. Recovery, release and abandon are not lifecycle stages; service reset never restores old activity.
 - Read `references/automation-steps.md` only for historical contracts or explicitly scoped internal maintenance. No new plan composition, production Step launch, recovery-framework expansion or production testing bypass is authorized by that reference. Use isolated engine fixtures for direct regressions.
 
 ## Persistent Console Capture
@@ -118,8 +118,8 @@ Exception: canonical UPilot package acceptance should use `unity_upilot_acceptan
 
 For AI-requested Bridge/Server restarts, first read `references/safety.md` (AI Service Maintenance).
 Use `unity_service_restart` only with the independent UI grant reported in
-`aiServiceMaintenance`. It applies to all versions/install sources, but only in EditMode.
-Never self-enable the grant or edit its timeout. The default total deadline is 120 seconds;
+`aiServiceMaintenance`. It applies to all versions/install sources; hard stop does not require EditMode.
+Never self-enable the grant or edit timeout fields. The total deadline defaults to 120 seconds (UI range 30–600); accepted requests keep their original deadline. Transient health failures retry only read-only probes every two seconds after completion, never stop/start or install again; health failure is not evidence of a port conflict;
 an interrupted response is not permission to resend or replay business.
 
 - If Unity stops pumping commands, call `unity_hang_status` before retrying or restarting it.
@@ -146,89 +146,23 @@ an interrupted response is not permission to resend or replay business.
 
 ## Queue Inspection And Cleanup
 
-Use `unity_queue_cleanup()` to inspect the current project without advancing its tasks.
-The Advanced Settings window uses the same read-only snapshot and manual refresh.
-Missing, disconnected or stale data must not be described as an empty queue.
-
-The independent **允许 AI 清理当前项目队列占用** switch defaults to enabled and is
-unaffected by automation select-all. Never change this setting yourself. Disabled
-permission still permits inspection and preview. When enabled, it is standing
-authorization for exact-target cleanup across chat ownership, without a second human
-confirmation; it does not grant arbitrary writes or change the original tools' grants.
-
-1. Preview `unity_queue_cleanup(targetType, targetId, action, reason, dryRun=true)`.
-2. Inspect the exact identity, action and project. Apply the identical request with
-   `dryRun=false`, `confirmToken`, and `expectedProjectPath` from the preview.
-3. Keep original task/run/operation/session IDs. Accepted cancellation is not completion;
-   observe the existing status tools until cleanup is confirmed, or report unconfirmed.
-
-Task/Test support `cancel` and existing `cleanup`; Operation supports `cancel`, including
-associated Steps, and explicit `recover` for supported original Step cleanup. Recovery
-uses the original run/type/instance/checkpoint, never Execute, a rewound cursor or
-completed Finally. An uncertain recovery request is observed under its persisted ID,
-not resent. Expired cleanup budgets stop new actions, not safe read-only observation.
-See `references/automation-steps.md` for the cleanup ledger and supported boundaries.
-Capture supports exact `stop` while retaining artifacts. Step force recovery and
-generic Bridge-command revocation remain unsupported.
-
-Task/Operation `release` is a separate administrative terminal (`Released`), not business
-success or acceptance passed. Initial adapters are intentionally finite:
-- Test Tasks must retain original runGuid authoritative terminal and verified cleanup
-  evidence, with an inactive runner. This can dispose a lost outer report/workflow
-  result, not a test whose authoritative execution/cleanup evidence is itself lost.
-- Step Operations must be composed only of the concrete built-in `wait_seconds`, have
-  consumed their business cursor and verified all cleanup, and own no external
-  Capture/Snapshot resources. Custom, scene/mode and other Steps are unsupported.
-
-Release verifies original identity, no pending/in-flight execution, fresh Editor state,
-backup bytes/hash and unchanged preview. Unity persists the original Step disposition
-before clearing Busy; late original calls cannot act on a new run. Server restart or
-lost response observes the original disposition ID and never resubmits release. Unknown
-business outcome stays unknown and partial real results are retained. No age-based or
-chat-disconnect release, `force` bypass, fabricated failure or record deletion.
-
-WriteBatch `release` retains its existing separate disposition: inactive historical
-blocker, verified backup, original result unknown. Never use another compile's success
-as evidence for that old batch.
-
-Failed backup, possible execution, target changes, permission refusal and unsupported
-adapters leave records intact. Preview tokens expire after 120 seconds and are one-shot.
-Do not replay an uncertain apply or Start. No automatic Unity restart or unconditional queue reset.
-This exception permits ownerless Capture disposition only through `unity_queue_cleanup`;
-it does not relax the direct Capture ownership rules.
-
-Explicit `Task/abandon` is a separate emergency adapter for original post-Reload test
-cleanup orphans only: different original/current callback domains, inactive original
-Runner, no remaining managed API/callback references, stable Editor and no pending
-Bridge execution. Preview/apply verifies backups and persists a disposition before
-releasing the slot. It does NOT prove original resource release: preserve unresolved
-evidence, known business results, `cleanupSucceeded=false`, and `Released` rather than
-passed acceptance. It does not relax strict `release` or support arbitrary async work.
-
-Advanced Settings **批量清理可安全处理项** uses the same finite backend as AI clients:
-1. Preview `unity_queue_cleanup(targetType="All", targetId="*", action="force_clear_all",
-   reason="<short reason>")`. Inspect ready/unsupported entries and incomplete sources.
-2. Remember the preview `requestId` BEFORE apply. Apply identical fields with
-   `dryRun=false`, `confirmToken`, `expectedProjectPath`. Independent queue permission
-   remains mandatory. Changed membership or target identity rejects before dispatch.
-3. Observe `unity_queue_cleanup(targetType="All", targetId="<original requestId>",
-   action="force_clear_status")`. Unknown dispatch is never resent after timeout,
-   window close, Domain Reload or Server restart. Individual actions revalidate state.
-4. `dispatchComplete` means requests processed, not resources stopped. Only complete
-   inventory with no remaining blockers yields `allCleared=true`. Unsupported targets
-   remain with reasons; do not hide them or delete history. Never invoke this action
-   automatically as a test prerequisite; it affects other chats in the same project.
-
-Critical cancel/stop notices use `[UPilot][QueueCleanup]`. Failed/unconfirmed results
-are Server Error and, when Unity is reachable, real `Debug.LogError`; a disconnected
-Editor cannot immediately display a forwarded error. Never log tokens or full arguments.
+- Current tasks belong to the Unity project and service lifetime, not to a chat. Closing an AI chat is not a stop signal. Inspect with `unity_queue_cleanup()`; missing, stale or disconnected data is not an empty queue.
+- Advanced Settings provides **查看当前任务队列**, **软停止全部任务**, and **硬停止全部任务并重启 UPilot…**. Human-confirmed hard stop does not require the AI grant. It affects every chat in this project, skips user cleanup, clears activity and restarts Server/Bridge, not Unity; history and project assets remain.
+- `aiQueueCleanupAllowed` is the independent soft-stop grant, enabled by default. Never change it through files, reflection or UI automation. Preview an exact target/action/reason, then apply the same request with `confirmToken` and `expectedProjectPath`. It grants no service restart permission.
+- A finite task ends once: queued → running → ending → succeeded / failed / stopped / timed_out / aborted. Duplicate stop returns `ok=true, changed=false`, with `ending` or `not_found`. Missing/already-ended tasks are normal results; project, permission and parameter errors remain errors.
+- Soft stop has one fixed deadline. Repeated stop, polling and reconnect do not extend it. Cleanup failure or expiry ends the task without recovery, administrative release or proof-of-release prerequisites. Unknown outcome is aborted, never success. Verified compilation and authoritative test success remain required to claim acceptance.
+- `force_clear_all` is the existing bulk **soft** stop route, not physical termination. Keep its original requestId and observe `force_clear_status`; do not replay uncertain dispatch. Unsupported cooperative stops and failures are explicit, not silently reported cleared.
+- Explicit AI hard stop uses `unity_service_restart` with the independent effective service-maintenance grant. Automatic escalation additionally requires **软停止失败后自动硬停止全部任务并重启 UPilot**, default off. Valid-target soft-stop failure, exception, cleanup timeout or unsupported cooperative stop may escalate once; ordinary business failure, successfully cleaned timeout, not_found and validation/authorization errors do not. Concurrent failures merge; restart failure never loops.
+- Every actual UPilot service restart creates empty activity on both sides. Never restore previous tasks, observers, WriteBatches or Finally from history. Ordinary network reconnect and normal Domain Reload retain the same lifetime/deadlines, not a new global reset. Old IDs are not active tasks; late callbacks cannot change terminal results or reinsert old work.
+- Hard stop does not wait for queue idle, EditorReady or user Finally. It does not switch PlayMode, compile, save scenes, delete history or restart Unity. Unity synchronous code already running cannot be preempted; report actual engine/external-resource busy state separately from queue reset. Default maintenance deadline is 120 seconds (UI range 30–600); observe the original maintenance identity, never retry an uncertain restart.
+- Cleanup logs must omit ownership/confirmation secrets. Duplicate not_found/ending is not an error. Report queue reset and service restart results separately; accepted is not completion.
 
 ## Focused Reliability
 
 - Use `unity_test_list`, `unity_test_run` and `unity_upilot_acceptance_run` with exact `testNames`, fully qualified `fixtures`, `assemblies` and/or `categories`. `matchMode=union` preserves the default; `intersection` intersects nonempty field groups while values inside each group remain a union. List and execute use the same assembly-isolated selection. Inspect selector counts; do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
-- `unity_upilot_acceptance_run` (except `preflightOnly=true`) immediately returns a durable queued Task with `taskId` and no fabricated `runGuid`. Poll `unity_task_status(taskId=...)` for the final acceptance report and summary artifact; `ok=true` on submission is not acceptance success. `preflightOnly=true` remains synchronous and creates no Task. The older `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})` route uses the same single Task execution path. Tests/package acceptance and historical `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Historical generic operations preserve start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
-- `unity_task_cancel` requests underlying test cancellation. It is not terminal until authoritative cleanup succeeds. Unsupported generic-task cancellation leaves both work and observation running.
-- Audited recovery observers continue independently of client polling and reattach after Server restart by original Step run or test runGuid, with observation-error backoff from 3 to 60 seconds. They never replay start or assume an arbitrary reflection status callback is read-only. `RecoveryRequired` is not success or cancellation; true terminal results plus verified cleanup (and required Editor readiness) end the original task. A known failure stays failed after cleanup recovery. Missing identity, unsafe adapters and persistence barriers remain protected.
+- `unity_upilot_acceptance_run` (except read-only preflight) returns a queued Task, not acceptance success. Retain its taskId and query the original result. SQLite history is retained for evidence, but service startup never restores old activity or observers. Only ordinary reconnect/Domain Reload within the same service lifetime may continue within the original deadline.
+- `unity_task_cancel` requests bounded cooperative stop. A task finalizes once even if cleanup fails or its result is unavailable. Duplicates are normal ending/not_found responses; unsupported stop is explicit and only authorized escalation may reset the project.
+- Polling never renews execution or cleanup deadlines. Do not request recover/release/abandon, resurrect old tasks after service restart, or infer success from a cleared queue. Hard stop fences old callbacks and retains actual Unity/external busy diagnostics.
 - Acceptance requires a matching authoritative run, successful cleanup, verified compile evidence and unchanged checked source. Already verified compilation covering the current C# input timestamps is reused without a second compile.
 - `unity_prefab_patch` supports one ordinary non-nested prefab, one unambiguous child/component and supported existing value fields. Use `dryRun=true`, inspect old/new values and hashes, obtain explicit approval, then apply with the returned confirmToken and identical request.
 - Prefab patch v1 rejects an open target Prefab Mode, model/variant/nested prefabs, component/array structure changes, object-reference changes and numeric enums. It creates a temporary candidate only on apply, verifies the reload and preserves a backup; recovery is conditional on current asset/meta hashes. It is not a transaction over user callbacks.

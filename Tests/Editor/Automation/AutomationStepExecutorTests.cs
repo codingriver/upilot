@@ -196,6 +196,49 @@ namespace CodingRiver.UPilot.Tests.Automation
             _reports.Add(state.reportDirectory);
         }
         private void Pump(int ticks = 50) { for (int i = 0; i < ticks; i++) _executor.Tick(); }
+        [Test]
+        public void LifecycleFinallyExecuteTimeoutEndsOnceWithoutFollowingFinally()
+        {
+            var first = Item("base", "wait", "Finally"); first.timeoutSeconds = 1;
+            Start(first, Item("base", "after", "Finally"));
+            _executor.Tick(); _now += 1001; Pump();
+            Assert.That(_executor.State.terminal, Is.True);
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
+            Assert.That(_executor.Busy, Is.False);
+            Assert.That(Calls, Is.EqualTo(new[] { "execute:wait" }));
+            var finished = _executor.State.finishedAtUtcMs;
+            _executor.RequestCancel(); _executor.Finish("Aborted", "LATE", "late"); Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
+            Assert.That(_executor.State.finishedAtUtcMs, Is.EqualTo(finished));
+        }
+
+        [Test]
+        public void LifecycleFinallyCleanupTimeoutSkipsRestAndDoesNotRenew()
+        {
+            var first = Item("base", "cleanup_wait", "Finally"); first.cleanupTimeoutSeconds = 1;
+            Start(first, Item("base", "after", "Finally"));
+            Pump(3); var deadlineStart = _executor.State.steps[0].cleanupStartedAtUtcMs;
+            _executor.RequestCancel(); _executor.RequestCancel();
+            _now = deadlineStart + 1001; Pump();
+            Assert.That(_executor.State.terminal, Is.True);
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
+            Assert.That(Calls.Count(c => c == "execute:cleanup_wait"), Is.EqualTo(1));
+            Assert.That(Calls, Does.Not.Contain("execute:after"));
+            Assert.That(_executor.State.steps[0].cleanupStartedAtUtcMs, Is.EqualTo(deadlineStart));
+        }
+
+        [Test]
+        public void LifecycleNormalCleanupTimeoutRunsFinallyOnceAndReleasesSlot()
+        {
+            var normal = Item("base", "cleanup_wait"); normal.cleanupTimeoutSeconds = 1;
+            Start(normal, Item("base", "after", "Finally"));
+            Pump(3); _now += 1001; Pump();
+            Assert.That(_executor.State.terminal, Is.True);
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
+            Assert.That(_executor.Busy, Is.False);
+            Assert.That(Calls.Count(c => c == "execute:after"), Is.EqualTo(1));
+        }
+
         [UnityTest]
         public IEnumerator ConsolePolicyPublishesNormalAndFinallyEvidence() => VerifyConsolePolicyEvidence(false);
 
@@ -375,7 +418,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             File.WriteAllText(path, "{}");
             Pump();
             Assert.That(Calls, Does.Not.Contain("after-artifact-save"));
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
         }
 
         [Test]
@@ -388,7 +431,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             path = Path.Combine(_executor.State.reportDirectory, "release.json");
             File.WriteAllText(path, "{\"released\":true}");
             Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
+            Assert.That(_executor.State.status, Is.EqualTo("Failed"));
             Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
             Assert.That(_executor.State.registeredArtifacts.Single().kind, Is.EqualTo("release-evidence"));
             Assert.That(_executor.State.steps[1].outcome, Is.EqualTo(AutomationStepStatus.Succeeded));
@@ -517,8 +560,9 @@ namespace CodingRiver.UPilot.Tests.Automation
                 Assert.That(File.ReadAllBytes(summaryPath), Is.EqualTo(frozenBytes));
                 return;
             }
-            Assert.That(recovered.status, Is.EqualTo("RecoveryRequired"));
-            Assert.That(recovered.terminal, Is.False);
+            Assert.That(recovered.status, Is.EqualTo("Aborted"));
+            Assert.That(recovered.terminal, Is.True);
+            Assert.That(_executor.Busy, Is.False);
             Assert.That(recovered.error.code, Is.EqualTo(firstError ? "ORIGINAL_FAILURE" : "STEP_ARTIFACT_VERIFICATION_FAILED"));
             if (firstError) Assert.That(recovered.secondaryErrors.Any(e => e.code == "STEP_ARTIFACT_VERIFICATION_FAILED"), Is.True);
             var error = firstError ? recovered.secondaryErrors.Single(e => e.code == "STEP_ARTIFACT_VERIFICATION_FAILED") : recovered.error;
@@ -576,232 +620,132 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(_executor.State.status, Is.EqualTo(status));
         }
         [Test]
-        public void CleanupTimeoutStillRunsFinallyAndBlocksNewRun()
-        {
-            Start(Item("base", "cleanup_wait"), Item("base", "last", "Finally"));
-            Pump(3); _now += 11000; Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
-            Assert.That(_executor.State.cleanupPending, Is.True);
-            Assert.That(Calls, Does.Contain("execute:last"));
-            Assert.Throws<InvalidOperationException>(() => Start(Item("base")));
-        }
-        [Test]
-        public void ExplicitCleanupRecoveryPreservesFailureReportAndReleasesBusy()
+        public void CleanupTimeoutRunsFinallyReleasesSlotAndPreservesFailureReport()
         {
             Start(Item("recover", "fail"), Item("base", "finally", "Finally"));
             Pump(3); _now += 11000; Pump();
             var before = _executor.State;
             string report = File.ReadAllText(Path.Combine(before.reportDirectory, "summary.json"));
-            Assert.That(before.status, Is.EqualTo("RecoveryRequired"));
-            RecoverCleanupProbe.Released = true;
-            _executor.RequestCleanupRecovery("recovery-one");
-            _executor.RequestCleanupRecovery("recovery-one");
-            Assert.That(Calls.Count(c => c.StartsWith("recover-restore:")), Is.Zero);
-            Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("Failed"));
-            Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
-            Assert.That(_executor.State.cleanupPending, Is.False);
+            Assert.That(before.status, Is.EqualTo("TimedOut"));
+            Assert.That(before.error.code, Is.EqualTo("TEST_FAILURE"));
+            Assert.That(before.secondaryErrors.Any(e => e.code == "STEP_CLEANUP_TIMEOUT"), Is.True);
+            Assert.That(before.cleanupPending, Is.False);
             Assert.That(_executor.Busy, Is.False);
-            Assert.That(_executor.State.cursor, Is.EqualTo(before.cursor));
+            RecoverCleanupProbe.Released = true;
+            _executor.RequestCancel(); Pump();
+            Assert.That(_executor.State.finishedAtUtcMs, Is.EqualTo(before.finishedAtUtcMs));
             Assert.That(Calls.Count(c => c == "execute:fail"), Is.EqualTo(1));
             Assert.That(Calls.Count(c => c == "execute:finally"), Is.EqualTo(1));
+            Assert.That(Calls.Count(c => c.StartsWith("recover-restore:")), Is.Zero);
             Assert.That(File.ReadAllText(Path.Combine(before.reportDirectory, "summary.json")), Is.EqualTo(report));
             _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            _executor.RestoreStored();
+            _executor.RestoreStored(); Pump();
             Assert.That(_executor.Busy, Is.False);
             Start(Item("base", "next")); Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
         }
 
-        [TestCase("unknown")] [TestCase("barrier")] [TestCase("resource")]
-        public void CleanupRecoveryDoesNotClearUnrelatedOrUnknownEvidence(string blocker)
+        [TestCase("unknown")] [TestCase("barrier")] [TestCase("resource")] [TestCase("missing-report")]
+        public void LegacyRecoveryHistoryAbortsWithoutProofOrReplayingCleanup(string fault)
         {
             Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
             var state = _executor.State;
-            if (blocker == "unknown") state.cleanupTrackingVersion = 0;
-            if (blocker == "barrier") state.recoveryBlockedReason = "STEP_STORE_RECOVERY_FAILED";
-            if (blocker == "resource") state.steps[0].cleanupState = "Unknown";
+            // Simulate a pre-migration record, not a new execution or a new service lifetime.
+            state.status = "RecoveryRequired"; state.terminal = false; state.cleanupPending = true;
+            if (fault == "unknown") state.cleanupTrackingVersion = 0;
+            if (fault == "barrier") state.recoveryBlockedReason = "STEP_STORE_RECOVERY_FAILED";
+            if (fault == "resource") state.steps[0].cleanupState = "Unknown";
+            if (fault == "missing-report") File.Delete(Path.Combine(state.reportDirectory, "summary.json"));
             new AutomationStepRunStore(_store).Save(state);
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            _executor.RestoreStored();
-            Assert.Throws<InvalidOperationException>(() => _executor.RequestCleanupRecovery("blocked"));
-            Assert.That(_executor.Busy, Is.True);
-            Assert.That(Calls.Count(c => c.StartsWith("recover-restore:")), Is.Zero);
-        }
-
-        [Test]
-        public void UncertainCleanupRecoveryCannotBeReplayedEvenAfterReload()
-        {
-            Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
-            RecoverCleanupProbe.ThrowOnCleanup = true;
-            _executor.RequestCleanupRecovery("uncertain"); Pump();
             int calls = Calls.Count;
-            Assert.That(_executor.State.cleanupRecoveryState, Is.EqualTo("Uncertain"));
-            _executor.RequestCleanupRecovery("uncertain"); Pump();
-            Assert.That(Calls.Count, Is.EqualTo(calls));
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            _executor.RestoreStored();
-            Assert.Throws<InvalidOperationException>(() => _executor.RequestCleanupRecovery("another"));
-            Assert.That(_executor.Busy, Is.True);
-        }
-
-        [Test]
-        public void RecoveryAcceptedBeforeReloadDoesNotReplayRestoreOrCleanup()
-        {
-            Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
-            _executor.RequestCleanupRecovery("accepted"); int calls = Calls.Count;
             _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
             _executor.RestoreStored(); Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
+            Assert.That(_executor.State.terminal, Is.True);
+            Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
+            Assert.That(_executor.State.cleanupPending, Is.False);
+            Assert.That(_executor.Busy, Is.False);
             Assert.That(Calls.Count, Is.EqualTo(calls));
-            Assert.That(_executor.State.cleanupRecoveryState, Is.EqualTo("Uncertain"));
-            Assert.That(_executor.Busy, Is.True);
+            Assert.That(_executor.State.steps[0].cleanupState, Is.EqualTo(state.steps[0].cleanupState));
+        }
+
+        [TestCase(false)] [TestCase(true)]
+        public void LateCleanupAvailabilityOrExceptionCannotReopenTerminal(bool throws)
+        {
+            Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
+            var before = JsonUtility.ToJson(_executor.State);
+            int calls = Calls.Count;
+            RecoverCleanupProbe.Released = !throws; RecoverCleanupProbe.ThrowOnCleanup = throws;
+            _now += 11000; _executor.RequestCancel(); Pump();
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.RestoreStored(); Pump();
+            Assert.That(JsonUtility.ToJson(_executor.State), Is.EqualTo(before));
+            Assert.That(Calls.Count, Is.EqualTo(calls));
+            Assert.That(_executor.Busy, Is.False);
         }
 
         [Test]
-        public void CleanupVerifiedAtRecoveryDeadlineStillConvergesWithoutAnotherCleanup()
+        public void FinallyCleanupTimeoutDoesNotRevisitEarlierUnreleasedResource()
         {
-            Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
+            Start(Item("recover", "fail"), Item("base", "cleanup_wait", "Finally"), Item("base", "never", "Finally"));
+            Pump(3); _now += 11000; Pump(3); _now += 11000; Pump();
             RecoverCleanupProbe.Released = true;
-            _executor.RequestCleanupRecovery("deadline"); Pump(1);
             int calls = Calls.Count;
-            _now += 11000; Pump();
+            _executor.RequestCancel(); Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
+            Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
+            Assert.That(_executor.State.steps[0].cleanupState, Is.EqualTo("Unresolved"));
+            Assert.That(_executor.State.steps[1].cleanupState, Is.EqualTo("Unresolved"));
             Assert.That(_executor.State.terminal, Is.True);
             Assert.That(_executor.Busy, Is.False);
             Assert.That(Calls.Count, Is.EqualTo(calls));
-            Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
-        }
-
-        [Test]
-        public void RecoveryWithRemainingResourceNeverClearsBusyOrRepeatsFinally()
-        {
-            Start(Item("recover", "fail"), Item("base", "cleanup_wait", "Finally"));
-            Pump(3); _now += 11000; Pump(3); _now += 11000; Pump();
-            RecoverCleanupProbe.Released = true;
-            _executor.RequestCleanupRecovery("two-resources"); Pump();
-            Assert.That(_executor.State.steps[0].cleanupState, Is.EqualTo("Verified"));
-            Assert.That(_executor.State.steps[1].cleanupState, Is.EqualTo("Unresolved"));
-            Assert.That(_executor.State.cleanupRecoveryState, Is.EqualTo("Unsupported"));
-            Assert.That(_executor.State.terminal, Is.False);
-            Assert.That(_executor.Busy, Is.True);
             Assert.That(Calls.Count(c => c == "execute:cleanup_wait"), Is.EqualTo(1));
+            Assert.That(Calls, Does.Not.Contain("execute:never"));
         }
 
         [Test]
-        public void ReloadAfterVerifiedCleanupStillObservesWithoutReplayingCallbacks()
-        {
-            Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
-            RecoverCleanupProbe.Released = true;
-            _executor.RequestCleanupRecovery("reload-after-cleanup"); Pump(1);
-            Assert.That(_executor.State.steps[0].cleanupState, Is.EqualTo("Verified"));
-            int calls = Calls.Count;
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            _executor.RestoreStored(); Pump();
-            Assert.That(Calls.Count, Is.EqualTo(calls));
-            Assert.That(_executor.State.status, Is.EqualTo("Failed"));
-            Assert.That(_executor.Busy, Is.False);
-        }
-
-        [Test]
-        public void ExplicitRecoveryDoesNotExtendOriginalShortCleanupBudget()
+        public void RepeatedStopDoesNotExtendOriginalShortCleanupBudget()
         {
             var item = Item("recover", "fail"); item.cleanupTimeoutSeconds = 1;
-            Start(item); Pump(3); _now += 2000; Pump();
-            _executor.RequestCleanupRecovery("short-budget");
-            Assert.That(_executor.State.cleanupRecoveryDeadlineUtcMs - _now, Is.EqualTo(1000));
-        }
-
-        private void PrepareReleasableHistory()
-        {
-            _executor.Dispose(); _registry = Registry(Entry<WaitSecondsStep>("wait"));
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            Start(Item("wait", "0")); Pump();
-            var state = _executor.State;
-            Assert.That(state.terminal, Is.True);
-            File.Delete(Path.Combine(state.reportDirectory, "summary.json"));
-            state.status = "RecoveryRequired"; state.terminal = false; state.cleanupPending = true;
-            state.recoveryRequired = true; state.stage = "Finalizing"; state.reportCommitJson = "";
-            state.error = new AutomationStepError { code = "STEP_REPORT_LOST", message = "Original report unavailable." };
-            new AutomationStepRunStore(_store).Save(state);
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            _executor.RestoreStored();
-        }
-
-        [Test]
-        public void DispositionBacksUpFencesOriginalIdentityAndSurvivesNewRunAndReload()
-        {
-            PrepareReleasableHistory();
-            var original = _executor.State;
-            var proof = _executor.PreviewRelease(); Assert.That(proof.eligible, Is.True, proof.reason);
-            Assert.That(_executor.Busy, Is.True); // preview is read-only
-            var released = _executor.Release("release-once", proof.stateHash, "Missing report");
-            Assert.That(released.status, Is.EqualTo("Released")); Assert.That(_executor.Busy, Is.False);
-            Assert.That(released.error.code, Is.EqualTo("STEP_REPORT_LOST"));
-            var backup = JsonUtility.FromJson<AutomationStepRun>(File.ReadAllText(released.disposition.backupPath));
-            Assert.That(backup.status, Is.EqualTo("RecoveryRequired")); Assert.That(backup.terminal, Is.False);
-            Assert.That(UPilotAutomationStepService.Public(released).businessTerminal, Is.False);
-            Assert.That(UPilotAutomationStepService.Public(released).outcome, Is.EqualTo("unknown"));
-            Assert.Throws<InvalidOperationException>(() => Start(Item("wait", "0")));
-            var next = _executor.Start(Plan(Item("wait", "0")), "next-operation"); _reports.Add(next.reportDirectory);
-            var historical = UPilotAutomationStepService.ReadState(_executor, original.runId, original.operationId);
-            Assert.That(historical.status, Is.EqualTo("Released")); Assert.That(_executor.State.runId, Is.EqualTo(next.runId));
-            Pump(); _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
-            _executor.RestoreStored();
+            Start(item); Pump(3);
+            long began = _executor.State.steps[0].cleanupStartedAtUtcMs;
+            _executor.RequestCancel(); _now += 500; _executor.RequestCancel(); Pump();
+            Assert.That(_executor.State.steps[0].cleanupStartedAtUtcMs, Is.EqualTo(began));
+            _now += 501; Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
             Assert.That(_executor.Busy, Is.False);
-            Assert.That(UPilotAutomationStepService.ReadState(_executor, original.runId).disposition.requestId, Is.EqualTo("release-once"));
-            Assert.Throws<InvalidOperationException>(() => new AutomationStepRunStore(_store).Save(original));
-            Assert.Throws<InvalidOperationException>(() => Start(Item("wait", "0")));
         }
 
-        [TestCase("custom")] [TestCase("resource")] [TestCase("legacy")] [TestCase("changed")] [TestCase("backup")]
-        public void DispositionRefusesUnknownWorkChangedPreviewAndFailedBackup(string fault)
-        {
-            if (fault == "custom")
-            {
-                Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
-                Assert.That(_executor.PreviewRelease().eligible, Is.False); return;
-            }
-            PrepareReleasableHistory(); var proof = _executor.PreviewRelease();
-            var state = _executor.State;
-            if (fault == "resource") state.captureStartIntent = true;
-            if (fault == "legacy") state.cleanupTrackingVersion = 0;
-            if (fault == "changed") state.secondaryErrors.Add(new AutomationStepError { code = "NEW_ERROR" });
-            if (fault != "backup")
-            {
-                new AutomationStepRunStore(_store).Save(state);
-                _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now); _executor.RestoreStored();
-            }
-            else
-            {
-                Directory.CreateDirectory(_store + ".dispositions");
-                Directory.CreateDirectory(Path.Combine(_store + ".dispositions", AutomationStepRunStore.HashText(state.operationId) + ".json.backup"));
-            }
-            Assert.That(() => _executor.Release("denied", proof.stateHash, "test"), Throws.Exception);
-            Assert.That(_executor.Busy, Is.True); Assert.That(_executor.State.terminal, Is.False);
-        }
-
-        [TestCase("tamper")] [TestCase("missing-backup")] [TestCase("missing-fence")]
-        public void DispositionBackupTamperCannotBeReportedAsVerifiedAfterReload(string fault)
-        {
-            PrepareReleasableHistory();
-            var released = _executor.Release("tamper", _executor.PreviewRelease().stateHash, "test");
-            if (fault == "tamper") File.AppendAllText(released.disposition.backupPath, "modified");
-            if (fault == "missing-backup") File.Delete(released.disposition.backupPath);
-            if (fault == "missing-fence") File.Delete(released.disposition.backupPath.Substring(0, released.disposition.backupPath.Length - ".backup".Length));
-            Assert.That(() => UPilotAutomationStepService.ReadState(_executor, released.runId), Throws.Exception);
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now); _executor.RestoreStored();
-            Assert.That(_executor.Busy, Is.True);
-        }
-
-        [Test]
-        public void CleanupRecoveryWillNotTrustTamperedOriginalReport()
+        [TestCase("modified")] [TestCase("missing")]
+        public void DamagedTerminalReportCannotReviveOrRewriteExecution(string fault)
         {
             Start(Item("recover", "fail")); Pump(3); _now += 11000; Pump();
-            File.AppendAllText(Path.Combine(_executor.State.reportDirectory, "summary.json"), "changed");
-            RecoverCleanupProbe.Released = true;
-            _executor.RequestCleanupRecovery("tampered"); Pump();
-            Assert.That(_executor.Busy, Is.True);
-            Assert.That(_executor.State.terminal, Is.False);
-            Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
+            string path = Path.Combine(_executor.State.reportDirectory, "summary.json");
+            if (fault == "missing") File.Delete(path); else File.AppendAllText(path, "modified");
+            int calls = Calls.Count;
+            var before = JsonUtility.ToJson(_executor.State);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.RestoreStored(); _executor.RequestCancel(); Pump();
+            Assert.That(JsonUtility.ToJson(_executor.State), Is.EqualTo(before));
+            Assert.That(Calls.Count, Is.EqualTo(calls));
+            Assert.That(_executor.Busy, Is.False);
+            Assert.That(File.Exists(path), Is.EqualTo(fault != "missing"));
+            if (fault != "missing") Assert.That(File.ReadAllText(path), Does.EndWith("modified"));
+        }
+
+        [Test]
+        public void PreviousServiceLifetimeNeverRestoresActiveStepOrFinally()
+        {
+            Start(Item("restore", "wait"), Item("base", "never", "Finally")); _executor.Tick();
+            var state = _executor.State; state.serviceLifecycleId = "previous-service";
+            new AutomationStepRunStore(_store).Save(state);
+            string history = File.ReadAllText(_store); int calls = Calls.Count;
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.RestoreStored(); _executor.RequestCancel(); Pump();
+            Assert.That(_executor.State, Is.Null);
+            Assert.That(_executor.Busy, Is.False);
+            Assert.That(Calls.Count, Is.EqualTo(calls));
+            Assert.That(File.ReadAllText(_store), Is.EqualTo(history));
         }
 
         [Test]
@@ -852,7 +796,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         {
             Start(Item("base", "fail_cleanup"), Item("base", "last", "Finally"));
             Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
+            Assert.That(_executor.State.status, Is.EqualTo("Failed"));
             Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
             Assert.That(_executor.State.secondaryErrors.Any(e => e.code == "STEP_CLEANUP_EXCEPTION"), Is.True);
             Assert.That(Calls, Does.Contain("execute:last"));
@@ -869,7 +813,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
         }
         [Test]
-        public void UnsupportedRestoreStillRunsFinallyButRequiresRecovery()
+        public void UnsupportedRestoreRunsFinallyAndAbortsWithoutOccupancy()
         {
             Start(Item("base", "wait"), Item("base", "last", "Finally")); _executor.Tick();
             _executor.Dispose();
@@ -877,7 +821,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             _executor.RestoreStored(); Pump();
             Assert.That(Calls.Count(x => x == "execute:wait"), Is.EqualTo(1));
             Assert.That(Calls, Does.Contain("execute:last"));
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
         }
         [Test]
         public void EditorRestartDoesNotResumeEvenRecoverableSteps()
@@ -888,7 +832,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             _executor.Dispose();
             _executor = new AutomationStepExecutor(_registry, _store, () => _now);
             _executor.RestoreStored(); Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
             Assert.That(Calls, Does.Not.Contain("restore"));
         }
         [Test]
@@ -909,8 +853,8 @@ namespace CodingRiver.UPilot.Tests.Automation
             Start(Item("json", "save-one"));
             Pump();
             Assert.That(Calls, Does.Not.Contain("saved:save-one"));
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
-            Assert.That(_executor.Busy, Is.True);
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
+            Assert.That(_executor.Busy, Is.False);
         }
         [Test]
         public void WrongIdentityFailsAndWorkerCannotSave()
@@ -985,7 +929,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             _executor.Dispose();
             _executor = new AutomationStepExecutor(_registry, _store, () => _now);
             _executor.RestoreStored(); Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("RecoveryRequired"));
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
             Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));
             Assert.That(Calls, Does.Contain("execute:finally"));
         }

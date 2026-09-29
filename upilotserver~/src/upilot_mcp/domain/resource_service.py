@@ -25,7 +25,6 @@ from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
 
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-_PREDISPATCH_STALE_ERROR = "Unity Editor context is stale, unknown, or recovering after Domain Reload."
 
 
 def _normalize_reflection_parameters(parameters: list | None) -> list:
@@ -345,6 +344,7 @@ class ResourceDomainService:
         self._write_batch_resume_task = asyncio.create_task(self._resume_pending_write_batches())
 
     async def _on_editor_execution_state(self, execution: dict) -> None:
+        self.server.state.expire_write_batches()
         if not execution.get("authoritative") or execution.get("playModeState") != "edit":
             return
         if self.server.state.pending_write_batches():
@@ -359,11 +359,11 @@ class ResourceDomainService:
             if not batch["compileWhenEditMode"]:
                 continue
             if batch["status"] == "recovery_required":
-                if not self.server.state.defer_write_batch_after_predispatch_failure(
-                    str(batch["writeBatchId"]), _PREDISPATCH_STALE_ERROR
-                ):
-                    continue
-                batch = self.server.state.get_write_batch(str(batch["writeBatchId"])) or batch
+                self.server.state.mark_write_batch(
+                    str(batch["writeBatchId"]), "aborted",
+                    error="Interrupted legacy execution is not resumed.",
+                )
+                continue
             # A write registered after Unity had already begun an automatic
             # compile cannot borrow that compile's result.  Leave this batch
             # pending; the next fresh EditMode execution snapshot schedules
@@ -388,15 +388,36 @@ class ResourceDomainService:
             if batch_id in getattr(self, "_write_batch_safe_waits", ()):
                 continue
             self._write_batch_active_id = batch_id
+            work = None
             try:
-                result = await self.safe_compile_and_wait(
-                    timeout_s=600,
+                remaining = max(0, (int(batch["writeBatchCreatedAt"]) + 600000 - now_ms()) / 1000)
+                if remaining <= 0:
+                    self.server.state.mark_write_batch(batch_id, "timed_out", error="Registration deadline expired.")
+                    continue
+                work = asyncio.create_task(self.safe_compile_and_wait(
+                    timeout_s=remaining,
                     poll_interval_s=1.0,
                     prefer_events=True,
                     post_compile_delay_s=1.0,
                     write_batch_id=batch_id,
                     write_batch_created_at=int(batch["writeBatchCreatedAt"]),
-                )
+                ))
+                work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+                done, _ = await asyncio.wait({work}, timeout=remaining)
+                if not done:
+                    # Logical termination must not join cancellation-resistant code.
+                    work.cancel()
+                    self.server.state.mark_write_batch(batch_id, "timed_out", error="Registration deadline expired.")
+                    continue
+                result = work.result()
+            except asyncio.CancelledError:
+                if work is not None and not work.done():
+                    work.cancel()
+                self.server.state.mark_write_batch(batch_id, "aborted", error="Compile coordinator stopped.")
+                raise
+            except Exception as exc:
+                self.server.state.mark_write_batch(batch_id, "aborted", error=str(exc))
+                continue
             finally:
                 self._write_batch_active_id = ""
             compile_operation_id = str(self.server.state.compile.compile_operation_id or "")
@@ -432,7 +453,7 @@ class ResourceDomainService:
                 )
                 self.server.state.mark_write_batch(
                     batch_id,
-                    "recovery_required",
+                    "timed_out" if error_code in {"COMMAND_TIMEOUT", "COMPILE_TIMEOUT"} else "aborted",
                     compile_operation_id=compile_operation_id,
                     error=message,
                 )

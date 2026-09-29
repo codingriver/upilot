@@ -55,6 +55,85 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void OperationTerminalIgnoresLateProgressAndSecondCompletion()
+        {
+            var entry = new OperationLogEntry { ReceivedAt = DateTime.Now };
+            var context = new OperationContext(entry, new UPilotOperationTracker());
+            context.Complete("original");
+            var finished = entry.CompletedAt;
+            var step = entry.CurrentStep;
+            var count = entry.Steps.Count;
+            context.Progress(90, "late");
+            context.Step("late");
+            context.Warn("late");
+            context.Fail("LATE", "late");
+            context.Complete("late");
+            Assert.That(entry.CompletedAt, Is.EqualTo(finished));
+            Assert.That(entry.Phase, Is.EqualTo("completed"));
+            Assert.That(entry.CurrentStep, Is.EqualTo(step));
+            Assert.That(entry.Steps.Count, Is.EqualTo(count));
+            Assert.That(entry.Progress, Is.EqualTo(-1));
+        }
+
+        [Test]
+        public void FlowHardResetFencesLateLeaseAndAllowsFreshRun()
+        {
+            var registry = Type.GetType("CodingRiver.UPilot.Flow.UPilotFlowExecutionRegistry, UPilot.Flow");
+            if (registry == null) Assert.Ignore("Flow is not installed.");
+            var list = (IEnumerable)registry.GetMethod("List").Invoke(null, null);
+            foreach (var item in list)
+                if ((long)item.GetType().GetField("endedAt").GetValue(item) == 0)
+                    Assert.Ignore("An unrelated Flow execution is active.");
+            var register = registry.GetMethod("Register");
+            var get = registry.GetMethod("Get");
+            var reset = registry.GetMethod("ResetActive");
+            var oldId = Guid.NewGuid().ToString("N");
+            var nextId = Guid.NewGuid().ToString("N");
+            var lease = (IDisposable)register.Invoke(null, new object[] { oldId, "reset-test", null });
+            reset.Invoke(null, null);
+            Assert.That(get.Invoke(null, new object[] { oldId }), Is.Null);
+            var rejected = Assert.Throws<TargetInvocationException>(() =>
+                register.Invoke(null, new object[] { oldId, "late", null }));
+            Assert.That(rejected.InnerException, Is.TypeOf<OperationCanceledException>());
+            using (var fresh = (IDisposable)register.Invoke(null, new object[] { nextId, "reset-test", null }))
+            {
+                lease.Dispose();
+                registry.GetMethod("MarkTerminal").Invoke(null, new object[] { oldId, "completed" });
+                Assert.That(get.Invoke(null, new object[] { oldId }), Is.Null);
+                Assert.That(get.Invoke(null, new object[] { nextId }), Is.Not.Null);
+            }
+        }
+
+        [Test]
+        public void FlowLateContextCannotReplaceOrClearFreshExecutionContext()
+        {
+            var type = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(a => a.GetType("CodingRiver.UPilot.UPilotFlowService")).FirstOrDefault(t => t != null);
+            if (type == null) Assert.Ignore("Flow adapter is not installed.");
+            // Isolated service shell: do not register UI callbacks or reset the live registry.
+            var service = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+            var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            type.GetField("_stateLock", flags).SetValue(service, new object());
+            var executionsField = type.GetField("_executions", flags);
+            var executions = Activator.CreateInstance(executionsField.FieldType);
+            executionsField.SetValue(service, executions);
+            var payloadType = executionsField.FieldType.GetGenericArguments()[1];
+            executions.GetType().GetMethod("TryAdd").Invoke(executions,
+                new object[] { "fresh", Activator.CreateInstance(payloadType) });
+            type.GetField("_activeExecutionId", flags).SetValue(service, "fresh");
+            var contextField = type.GetField("_activeContext", flags);
+            var fresh = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(contextField.FieldType);
+            var retired = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(contextField.FieldType);
+            var update = type.GetMethod("TrySetActiveContext", flags);
+            Assert.That(update.Invoke(service, new object[] { "fresh", fresh }), Is.True);
+            Assert.That(update.Invoke(service, new object[] { "retired", retired }), Is.False);
+            Assert.That(update.Invoke(service, new object[] { "retired", null }), Is.False);
+            Assert.That(contextField.GetValue(service), Is.SameAs(fresh));
+            Assert.That(update.Invoke(service, new object[] { "fresh", null }), Is.True);
+            Assert.That(contextField.GetValue(service), Is.Null);
+        }
+
+        [Test]
         public void LoggerInfoConsolePolicyKeepsRoutineTransportQuietByDefault()
         {
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("COMMAND", false, false), Is.False);

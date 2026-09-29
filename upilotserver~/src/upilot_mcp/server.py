@@ -206,9 +206,11 @@ class WsOrchestratorServer(WsTransport):
         )
         self._listening_event.set()
         logger.info("WebSocket server listening on %s:%s", self.host, self.port)
+        expiry = asyncio.create_task(self._expire_write_batches(), name="write-batch-deadlines")
         try:
             await self._stop_event.wait()
         finally:
+            expiry.cancel()
             logger.info("WebSocket server shutting down on %s:%s", self.host, self.port)
             self._shutting_down = True
             self._cancel_reconnect_grace()
@@ -231,6 +233,16 @@ class WsOrchestratorServer(WsTransport):
             self.session_manager.disconnect(force=True)
             self._fail_all_pending_and_suspended("SERVER_STOPPED", "MCP 服务器已关闭")
             logger.info("WebSocket server stopped")
+
+    async def _expire_write_batches(self) -> None:
+        # Independent of Bridge heartbeat and client polling (including PlayMode
+        # and disconnection). The original registration deadline never renews.
+        while True:
+            await asyncio.sleep(1)
+            try:
+                self.state.expire_write_batches()
+            except Exception:
+                logger.exception("Write batch deadline persistence failed")
 
     async def wait_until_listening(self, timeout_s: float | None = None) -> bool:
         if self._listening_event.is_set():
@@ -1134,6 +1146,7 @@ class WsOrchestratorServer(WsTransport):
                 "mcpPort": self.port,
                 "unityProjectPath": unity_project_path,
                 "mcpWorkingDirectory": mcp_cwd,
+                "serverLifecycleId": self.state.lifecycle_id,
             }
             hello_payload.update(version_payload())
             if self.mcp_label:

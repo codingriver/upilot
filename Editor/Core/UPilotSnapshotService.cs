@@ -276,6 +276,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class SnapshotJobPayload
     {
+        public string serviceLifecycleId;
         public int snapshotSchemaVersion = 1;
         public int persistenceSchemaVersion = 2;
         public long snapshotSequence;
@@ -496,6 +497,7 @@ namespace CodingRiver.UPilot
                 var now = UtcNowMs();
                 var job = new SnapshotJobPayload
                 {
+                    serviceLifecycleId = UPilotServiceLifetime.Id,
                     snapshotId = snapshotId,
                     status = "queued",
                     terminal = false,
@@ -1790,6 +1792,7 @@ namespace CodingRiver.UPilot
         {
             lock (WriterFor(job.snapshotId))
             {
+                if (job.terminal) return;
                 job.status = status;
                 job.phase = phase;
                 job.terminal = terminal;
@@ -1813,6 +1816,16 @@ namespace CodingRiver.UPilot
                 job.updatedAtUtcMs = UtcNowMs();
                 job.endedAtUtcMs = job.updatedAtUtcMs;
                 PersistJobLocked(job);
+            }
+        }
+
+        internal void ResetActive()
+        {
+            SnapshotJobPayload[] jobs;
+            lock (_gate) { jobs = _jobs.Values.ToArray(); _jobs.Clear(); _requestKeys.Clear(); _scheduledJobs.Clear(); }
+            foreach (var job in jobs)
+            {
+                try { FinishJob(job, "aborted", false); } catch { /* Terminal flag is set before archive. */ }
             }
         }
 
@@ -2021,6 +2034,7 @@ namespace CodingRiver.UPilot
                     var rebuildState = false;
                     var job = ResolvePersistedSnapshot(state, manifest, manifestBytes, out rebuildState);
                     if (job == null) continue;
+                    if (job.serviceLifecycleId != UPilotServiceLifetime.Id) continue;
                     EnsureJobCollections(job);
 
                     if (rebuildState)

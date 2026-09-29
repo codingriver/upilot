@@ -14,7 +14,8 @@ from ..protocol import new_id
 from ..process_identity import classify_unity_process, process_creation_time, query_unity_processes
 from ..queue_audit import AUDIT, QUEUE_GUARD, notice, outcome, safe_text
 from ..responses import fail, ok
-from ..service_maintenance import same_path, _unique_object
+from ..service_maintenance import same_path, _unique_object, read_summary
+import uuid
 
 
 def authorization(project):
@@ -34,8 +35,7 @@ def fingerprint(value):
 
 
 def current(value):
-    return bool(value.get("cleanupPending") or str(value.get("status", "")).lower() == "recoveryrequired"
-                or not (value.get("terminal") or value.get("endedAt")))
+    return not bool(value.get("terminal") or value.get("endedAt"))
 
 
 def item(kind, identity, value, action="", unsupported=""):
@@ -49,6 +49,92 @@ def item(kind, identity, value, action="", unsupported=""):
 
 
 class QueueDomainService(QueueBulkMixin):
+    async def _maybe_auto_hard_stop(self, response):
+        """A single project-wide escalation per Server lifetime, never a restart loop."""
+        data = response.data if isinstance(response.data, dict) else {}
+        code = str(getattr(response.error, "code", "") or "")
+        failed = code in {"TASK_CANCELLATION_UNSUPPORTED", "CANCEL_UNSUPPORTED", "QUEUE_CLEANUP_UNSUPPORTED",
+                          "QUEUE_RESPONSE_UNKNOWN", "TEST_CANCEL_FAILED", "TEST_CLEANUP_FAILED",
+                          "COMMAND_TIMEOUT", "OPERATION_CANCEL_UNKNOWN", "OPERATION_CANCEL_FAILED",
+                          "SOFT_STOP_FAILED", "SOFT_STOP_TIMEOUT"}
+        failed = failed or data.get("cleanupSucceeded") is False and (
+            data.get("terminal") is True or data.get("cleanupStatus") in {"failed", "timed_out", "recovery_required"})
+        if not failed or data.get("status") in {"not_found", "ending"}:
+            return response
+        try:
+            root = Path(self._queue_project(allow_disconnected=True))
+            summary = read_summary(root, self.server.session_manager.active)
+        except Exception:
+            data["hardStopAvailable"] = True
+            response.data = data
+            return response
+        if not (summary.get("effectiveApproved") and summary.get("autoHardStopOnSoftFailure")):
+            data["hardStopAvailable"] = True
+            response.data = data
+            return response
+        existing = getattr(self, "_automatic_hard_stop_id", "")
+        if existing:
+            data["hardStopMaintenanceId"] = existing
+            response.data = data
+            return response
+        maintenance_id = str(uuid.uuid4())
+        self._automatic_hard_stop_id = maintenance_id # Latch before the first await, including failed dispatch.
+        try:
+            result = await self.service_restart(maintenance_id=maintenance_id, target="server",
+                reason="Authorized escalation after failed soft stop", expected_project_path=str(root),
+                expected_server_process_id=summary["expectedServerProcessId"],
+                expected_bridge_session_id=summary["expectedBridgeSessionId"],
+                expected_maintenance_id=summary["expectedMaintenanceId"])
+            data["hardStop"] = {"maintenanceId": maintenance_id, "accepted": result.ok,
+                                "result": result.data, "error": str(result.error or "")}
+        except Exception as exc:
+            data["hardStop"] = {"maintenanceId": maintenance_id, "accepted": False, "error": str(exc)}
+        response.data = data
+        return response
+
+    def _watch_soft_stop(self, kind, target, response):
+        """One finite observation window for an accepted stop; never redispatch cleanup."""
+        data = response.data if isinstance(response.data, dict) else {}
+        if (not response.ok or not target or kind not in {"Task", "Operation", "Test"}
+                or data.get("terminal") or data.get("endedAt") or data.get("status") == "not_found"):
+            return
+        watches = self.__dict__.setdefault("_soft_stop_watches", {})
+        key = (kind, target)
+        if key in watches:
+            return
+        project = self.server.state.project_path
+        deadline = self.__dict__.setdefault("_soft_stop_deadlines", {}).setdefault(key, time.monotonic() + 60)
+
+        async def observe_stop():
+            try:
+                async with asyncio.timeout_at(deadline):
+                    while self.server.state.project_path == project:
+                        value = await self._queue_target(kind, target)
+                        if value is None:
+                            return
+                        if not current(value):
+                            await self._maybe_auto_hard_stop(ok(new_id("cleanup"), value))
+                            return
+                        await asyncio.sleep(min(1, max(0, deadline - time.monotonic())))
+            except asyncio.CancelledError:
+                return # Server shutdown must not schedule another restart.
+            except Exception as exc:
+                state = getattr(self, "_async_tasks" if kind == "Task" else "_operations", {}).get(target)
+                if state is not None and current(state):
+                    state.update(terminal=True, status="aborted", phase="aborted", endedAt=int(time.time() * 1000),
+                                 cleanupSucceeded=False, cleanupPending=False, cleanupStatus="timed_out",
+                                 error={"code": "SOFT_STOP_TIMEOUT", "message": str(exc) or "Soft stop exceeded 60 seconds."})
+                    try:
+                        if kind == "Operation": self.server.state.save_operation(state)
+                        elif state.get("durable"): self.server.state.save_test_job(state)
+                    except Exception as archive_error:
+                        state["persistenceError"] = str(archive_error)
+                if self.server.state.project_path == project:
+                    await self._maybe_auto_hard_stop(fail(new_id("cleanup"), "SOFT_STOP_TIMEOUT",
+                        "Soft stop did not finish within its original 60-second window.",
+                        {"targetId": target, "terminal": True, "cleanupSucceeded": False}))
+        watches[key] = asyncio.create_task(observe_stop(), name="soft-stop-" + target)
+
     def _queue_project(self, *, allow_disconnected=False):
         session = self.server.session_manager.active
         project = self.server.state.project_path
@@ -99,51 +185,24 @@ class QueueDomainService(QueueBulkMixin):
                         continue
                     supported = bool(value.get("durable")) if kind == "Task" else bool(
                         value.get("startEstablished") and (value.get("jobSpec") or {}).get("cancelCall"))
-                    recovery = kind == "Operation" and value.get("status") == "RecoveryRequired" and (
-                        (value.get("resolvedStatusCall") or {}).get("route") == "automation.steps.state")
-                    entries.append(item(kind, identity, value, "recover" if recovery else "cancel" if supported else "",
-                                        "" if recovery or supported else "No established safe cancellation adapter."))
+                    entries.append(item(kind, identity, value, "cancel" if supported else "",
+                                        "" if supported else "No cooperative adapter; use project hard stop."))
                     if value.get("runGuid"):
                         test_ids.add(value["runGuid"])
             batches = {v["writeBatchId"]: v for v in store.pending_write_batches()}
             for identity in (store.pending_write_batch_id, store.compile.write_batch_id):
-                if identity:
+                if identity in store._current_write_batches:
                     value = store.get_write_batch(identity)
                     if value and not value.get("terminal") and not value.get("disposition") and not value.get("supersededBy"):
                         batches[identity] = value
             for identity, value in batches.items():
                 value = store.get_write_batch(identity) or value
-                releasable = (value["status"] == "recovery_required" and not value.get("terminalSnapshot")
-                    and value.get("storedStatus") in {"recovery_required", "verified"}) or (
-                    value["status"] == "deferred" and not value["compileWhenEditMode"]
-                    and not value.get("compileOperationId") and not value.get("compileRequestId"))
-                entries.append(item("WriteBatch", identity, value, "release" if releasable else "",
-                                    "" if releasable else "Batch may still execute; cancellation is unsupported."))
+                entries.append(item("WriteBatch", identity, value, "cancel"))
             for command in store.commands.values():
                 if command.status in {"pending", "sent", "running"} and command.name != "queue.cleanup.log":
                     entries.append(item("Command", command.command_id, dict(displayName=command.name,
                         status=command.status, updatedAt=command.sent_at or command.created_at),
                         unsupported="No generic Bridge command revocation in v1."))
-            step_path = Path(project) / "Library" / "UPilot" / "step-run.json"
-            if step_path.exists():
-                step = json.loads(step_path.read_text(encoding="utf-8-sig"))
-                if current(step):
-                    entry = item("StepRun", step.get("runId", ""), step, unsupported="Preview recover on its original Operation; unsupported recovery remains blocked.")
-                    entry["operationId"] = step.get("operationId", "")
-                    entry["source"] = "persisted"
-                    entries.append(entry)
-                    issues.append("STEP_LIVE_STATE_UNVERIFIED")
-                    for record in step.get("steps", []):
-                        if record.get("finishedAtUtcMs"):
-                            continue
-                        entry = item("Step", record.get("instanceId", ""), {
-                            "displayName": record.get("typeIdentity"),
-                            "status": record.get("stage"),
-                            "updatedAt": record.get("cleanupStartedAtUtcMs") or record.get("startedAtUtcMs"),
-                            "error": record.get("error"),
-                        }, unsupported="Preview recover on its original Operation; unsupported recovery remains blocked.")
-                        entry.update(operationId=step.get("operationId", ""), runId=step.get("runId", ""), source="persisted")
-                        entries.append(entry)
         except Exception:
             source_status["persisted"] = "unknown"
             issues.append("PERSISTED_QUEUE_DATA_INCOMPLETE")
@@ -169,6 +228,19 @@ class QueueDomainService(QueueBulkMixin):
                 required = {"complete", "activeCount", "queuedCount", "executingCount", "untrackedCount", "observedAt"}
                 if not required.issubset(snapshot):
                     raise ValueError("Bridge queue snapshot is missing fields")
+                # Historical files are evidence only. Compare with a live Bridge generation,
+                # never a guessed Session field, before showing a persisted Step as active.
+                step_path = Path(project) / "Library" / "UPilot" / "step-run.json"
+                if step_path.exists():
+                    step = json.loads(step_path.read_text(encoding="utf-8-sig"))
+                    lifetime = snapshot.get("serviceLifecycleId")
+                    if not lifetime:
+                        issues.append("STEP_LIFECYCLE_UNVERIFIED")
+                    elif current(step) and step.get("serviceLifecycleId") == lifetime:
+                        entry = item("StepRun", step.get("runId", ""), step,
+                                     unsupported="Stop its original Operation, or use project hard stop.")
+                        entry.update(operationId=step.get("operationId", ""), source="persisted")
+                        entries.append(entry)
                 source_details["bridgeCommands"] = {key: snapshot.get(key) for key in required}
                 bridge_values = (snapshot.get("activeCommands") or []) + (snapshot.get("queuedCommands") or [])
                 source_details["bridgeCommands"].update(totalCount=snapshot["activeCount"] + snapshot["queuedCount"],
@@ -296,9 +368,9 @@ class QueueDomainService(QueueBulkMixin):
             if not value or value.get("runGuid") != target:
                 return None
             return {k: value.get(k) for k in ("runGuid", "status", "phase", "cleanupPending",
-                                             "cleanupSucceeded", "resultAuthoritative", "cancelRequested")}
+                                             "cleanupSucceeded", "resultAuthoritative", "cancelRequested", "terminal", "endedAt")}
         if kind == "WriteBatch":
-            return store.get_write_batch(target)
+            return store.get_write_batch(target) if target in store._current_write_batches else None
         if kind in {"Task", "Operation"}:
             memory = getattr(self, "_async_tasks" if kind == "Task" else "_operations", {})
             key = "taskId" if kind == "Task" else "operationId"
@@ -311,7 +383,7 @@ class QueueDomainService(QueueBulkMixin):
                 k: value.get(k) for k in (key, "projectPath", "status", "phase", "terminal", "endedAt",
                                          "runGuid", "durable", "startEstablished", "cancelIntentSent",
                                          "startIntentSent", "startSendState", "cancelSendState",
-                                         "cancelRequested", "cleanupPending", "jobSpec", "startData", "resolvedStatusCall",
+                                         "cancelRequested", "cleanupPending", "cleanupSucceeded", "cleanupStatus", "jobSpec", "startData", "resolvedStatusCall",
                                          "recoveryIdentityEstablished", "recoveryObservationOnly",
                                          "cleanupRecoveryRequestId", "cleanupRecoverySendState", "disposition", "releaseRequest")})
             if snapshot is not None and action == "recover":
@@ -448,7 +520,10 @@ class QueueDomainService(QueueBulkMixin):
         dispatched = False
         async def reject(code, message):
             await notice(self, request, target_type, target_id, action, "failed", message, reason, code)
-            return fail(request, code, message, {"dispatchAttempted": dispatched})
+            response = fail(request, code, message, {"dispatchAttempted": dispatched})
+            if not dry_run and dispatched:
+                return await self._maybe_auto_hard_stop(response)
+            return response
         try:
             project = self._queue_project()
             if expected_project_path and not same_path(project, expected_project_path):
@@ -458,16 +533,20 @@ class QueueDomainService(QueueBulkMixin):
             if not target_id or not reason.strip() or len(reason) > 256:
                 return await reject("QUEUE_TARGET_REQUIRED", "Exact target and a short reason are required.")
             if (target_type, action) not in {("Task", "cancel"), ("Task", "cleanup"), ("Test", "cancel"),
-                                          ("Test", "cleanup"), ("Operation", "cancel"), ("Operation", "recover"),
-                                          ("Capture", "stop"), ("WriteBatch", "release"), ("Task", "release"), ("Operation", "release"), ("Task", "abandon")}:
+                                          ("Test", "cleanup"), ("Operation", "cancel"),
+                                          ("Capture", "stop"), ("WriteBatch", "cancel")}:
                 return await reject("QUEUE_CLEANUP_UNSUPPORTED", "No safe adapter for this target/action; records were not removed.")
             try:
                 value = await self._queue_target(target_type, target_id, action)
             except ValueError as exc:
                 return await reject("QUEUE_CLEANUP_UNSUPPORTED", str(exc))
-            if value is None:
-                return await reject("QUEUE_TARGET_NOT_FOUND", "Exact target not found in this project.")
-            if target_type == "WriteBatch" and not self._queue_release_safe(value):
+            if not dry_run:
+                allowed, denial = authorization(project)
+                if not allowed:
+                    return await reject(denial, "Queue cleanup permission is disabled.")
+            if value is None or not current(value) or (target_type == "Capture" and not value.get("active")):
+                return ok(request, dict(status="not_found", changed=False, targetId=target_id))
+            if target_type == "WriteBatch" and action == "release" and not self._queue_release_safe(value):
                 return await reject("QUEUE_EXECUTION_NOT_EXCLUDED", "Cannot exclude pending execution; original evidence retained.")
             signature = fingerprint([project, target_type, target_id, action, reason, value])
             previews = self.__dict__.setdefault("_queue_previews", {})
@@ -508,11 +587,14 @@ class QueueDomainService(QueueBulkMixin):
                 and value.get("status") in {"completed", "failed", "aborted", "no_tests"}
             ):
                 await notice(self, request, target_type, target_id, action, "noop", "已结束，无需操作", reason)
-                return ok(request, dict(status="noop", terminal=True, targetId=target_id))
+                return ok(request, dict(status="not_found", changed=False, terminal=True, targetId=target_id))
             context = AUDIT.set((request, target_type, target_id, action, reason))
             guard = QUEUE_GUARD.set((target_id, value, project) if target_type in {"Task", "Operation"} else None)
             try:
-                if target_type == "WriteBatch":
+                if target_type == "WriteBatch" and action == "cancel":
+                    self.server.state.mark_write_batch(target_id, "aborted", error="Soft stop requested; in-flight Unity compilation is not interrupted.")
+                    response = ok(request, dict(status="aborted", terminal=True, changed=True, targetId=target_id))
+                elif target_type == "WriteBatch":
                     if not self._queue_release_safe(value):
                         return await reject("QUEUE_EXECUTION_NOT_EXCLUDED", "Cannot exclude pending execution; original evidence retained.")
                     disposition = self.server.state.dispose_write_batch(target_id, value, reason=safe_text(reason), request_id=request)
@@ -526,6 +608,7 @@ class QueueDomainService(QueueBulkMixin):
                 elif target_type == "Task":
                     cancel_before_start = action == "cancel" and value.get("startIntentSent") is False
                     if not value.get("durable") or not (value.get("runGuid") or cancel_before_start):
+                        dispatched = True  # Established target, no cooperative adapter.
                         return await reject("QUEUE_CLEANUP_UNSUPPORTED", "Task has no established test run; observer and record retained.")
                     dispatched = True
                     response = await (self.task_cancel(target_id) if action == "cancel"
@@ -555,7 +638,8 @@ class QueueDomainService(QueueBulkMixin):
                 if isinstance(response.data, dict):
                     response.data["queueCleanupRequestId"] = request
                 response.request_id = request
-                return response
+                self._watch_soft_stop(target_type, target_id, response)
+                return await self._maybe_auto_hard_stop(response)
             finally:
                 QUEUE_GUARD.reset(guard)
                 AUDIT.reset(context)
@@ -563,6 +647,6 @@ class QueueDomainService(QueueBulkMixin):
             if dispatched:
                 await notice(self, request, target_type, target_id, action, "unconfirmed",
                              "结果未确认", reason, "QUEUE_RESPONSE_UNKNOWN")
-                return fail(request, "QUEUE_RESPONSE_UNKNOWN", "结果未确认；不要重放操作。",
-                            {"dispatchAttempted": True, "targetId": target_id})
+                return await self._maybe_auto_hard_stop(fail(request, "QUEUE_RESPONSE_UNKNOWN", "软停止异常；不会重放操作。",
+                            {"dispatchAttempted": True, "targetId": target_id}))
             return await reject("QUEUE_CLEANUP_FAILED", "清理校验、备份或处置失败；请检查原目标记录。")

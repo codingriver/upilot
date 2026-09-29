@@ -126,7 +126,9 @@ class QueueBulkMixin:
             if kind != 'All':
                 return fail(request, 'QUEUE_INVALID_ARGUMENTS', 'Bulk actions require targetType=All.')
             if action == 'force_clear_status':
-                value = json.loads(self._bulk_path(project, target).read_text(encoding='utf-8'))
+                path = self._bulk_path(project, target)
+                value = self.__dict__.get('_queue_bulk_results', {}).get(target)
+                value = dict(value) if value is not None else json.loads(path.read_text(encoding='utf-8'))
                 if not same_path(project, value.get('projectPath', '')):
                     raise ValueError('Journal project mismatch.')
                 if value['status'] == 'running' and target not in self.__dict__.get('_queue_bulk_handles', {}):
@@ -151,18 +153,18 @@ class QueueBulkMixin:
                     return inventory
                 rows = []
                 for row in inventory.data['items']:
-                    candidates = []
-                    if row['type'] == 'Task':
-                        candidates = ['abandon', 'cleanup'] if row['status'] == 'RecoveryRequired' else ['cancel']
-                    elif row['type'] == 'Operation':
-                        candidates = ['release', 'recover'] if row.get('action') == 'recover' else ([row['action']] if row.get('action') else [])
-                    elif row['type'] in {'Test', 'Capture', 'WriteBatch'} and row.get('action'):
-                        candidates = ['cleanup' if row['type'] == 'Test' else row['action']]
+                    candidates = {
+                        "Task": ["cancel"], "Operation": ["cancel"], "Test": ["cancel"],
+                        "Capture": ["stop"], "WriteBatch": ["cancel"],
+                    }.get(row["type"], [])
                     chosen = dict(type=row['type'], id=row['id'], action='', status='unsupported',
                                   reason=row.get('unsupportedReason') or 'No safe adapter.')
                     for candidate in candidates:
                         preview = await self.queue_cleanup(target_type=row['type'], target_id=row['id'],
                             action=candidate, reason=reason)
+                        if preview.ok and preview.data.get('status') == 'not_found':
+                            chosen.update(action=candidate, status='not_found', reason='Already ended.')
+                            break
                         if preview.ok:
                             chosen.update(action=candidate, status='ready', reason='', token=preview.data['confirmToken'])
                             break
@@ -175,7 +177,7 @@ class QueueBulkMixin:
                 return ok(request, dict(dryRun=True, projectPath=project, requestId=request, confirmToken=token, expiresInSeconds=120,
                     allowed=authorization(project)[0], complete=inventory.data['complete'], issues=inventory.data['issues'],
                     targets=[{k: v for k, v in row.items() if k != 'token'} for row in rows],
-                    warning='Administrative release is not business success. Unsupported/uncertain targets remain blocked.'))
+                    warning='Cooperative stops only; no recovery or administrative release. Failed stops may require a project hard stop.'))
             allowed, denial = authorization(project)
             if not allowed:
                 return fail(request, denial, 'Queue cleanup permission is disabled.')
@@ -205,7 +207,18 @@ class QueueBulkMixin:
                 allCleared=False, startedAt=now_ms(), reason=safe_text(reason),
                 targets=[{k: v for k, v in row.items() if k != 'token'} for row in value['rows']])
             path = self._bulk_path(project, request)
-            _write_journal(path, journal)
+            # Journals are evidence, never a prerequisite for stopping work.
+            results = self.__dict__.setdefault('_queue_bulk_results', {})
+            results[request] = journal
+            for old in list(results):
+                if len(results) <= 64:
+                    break
+                if results[old].get('terminal') and old != request:
+                    del results[old]
+            try:
+                _write_journal(path, journal)
+            except Exception as exc:
+                journal['persistenceError'] = safe_text(str(exc))
             handles[request] = asyncio.create_task(self._execute_bulk(path, journal, value), name=request)
             return ok(request, dict(requestId=request, projectPath=project, status='running', allCleared=False,
                                    nextAction='Observe action=force_clear_status with this requestId; never replay apply.'))
@@ -214,34 +227,82 @@ class QueueBulkMixin:
 
     async def _execute_bulk(self, path, journal, preview):
         from .queue_service import authorization
-        try:
+        deadline = time.monotonic() + 60
+        closed = False
+
+        def archive():
+            try:
+                _write_journal(path, journal)
+            except Exception as exc:
+                journal['persistenceError'] = safe_text(str(exc))
+
+        async def dispatch_and_observe():
             for row, output in zip(preview['rows'], journal['targets']):
-                if row['status'] != 'ready':
-                    continue
+                if closed:
+                    return
                 if not same_path(self._queue_project(), journal['projectPath']) or not authorization(journal['projectPath'])[0]:
                     raise ValueError('Project/authorization changed; remaining requests not sent.')
-                output['status'] = 'dispatching_unconfirmed'
-                _write_journal(path, journal)  # durable before any target side effect
+                if row['status'] == 'unsupported':
+                    # This is an existing target in the authorized finite preview,
+                    # not an invalid target/action supplied by a caller.
+                    await self._maybe_auto_hard_stop(fail(journal['requestId'], 'QUEUE_CLEANUP_UNSUPPORTED',
+                        'This active target does not support cooperative stop.', {'targetId': row['id']}))
+                    continue
+                if row['status'] != 'ready':
+                    continue
+                self.__dict__.setdefault('_soft_stop_deadlines', {}).setdefault((row['type'], row['id']), deadline)
+                output['status'] = 'ending'
+                archive()
                 result = await self.queue_cleanup(target_type=row['type'], target_id=row['id'], action=row['action'],
                     reason=preview['reason'], dry_run=False, confirm_token=row['token'],
                     expected_project_path=journal['projectPath'])
-                output.update(status='observed' if result.ok else 'refused_or_unconfirmed',
+                if closed:
+                    return
+                output.update(status='observed' if result.ok else 'failed',
                     resultStatus=(result.data or {}).get('status', ''),
                     requestId=result.request_id, reason='' if result.ok else result.error.code)
-                _write_journal(path, journal)
+                archive()
+            journal['dispatchComplete'] = True
+            # Observe only original targets; unrelated new work is not ours to stop.
+            while not closed:
+                pending = False
+                for row in preview['rows']:
+                    if row['status'] != 'ready':
+                        continue
+                    value = await self._queue_target(row['type'], row['id'])
+                    if value and not (value.get('terminal') or value.get('endedAt') or value.get('active') is False):
+                        pending = True
+                if not pending:
+                    break
+                await asyncio.sleep(min(1, max(0, deadline - time.monotonic())))
             inventory = await self.queue_inventory()
+            if closed:
+                return
             data = inventory.data if inventory.ok else {}
-            journal.update(status='finished', dispatchComplete=True, finishedAt=now_ms(),
+            journal.update(status='finished', terminal=True, finishedAt=now_ms(),
                 allCleared=data.get('complete') is True and not data.get('items'),
                 remaining=data.get('items', []), issues=data.get('issues', ['QUEUE_INVENTORY_UNCONFIRMED']) if inventory.ok else ['QUEUE_INVENTORY_UNCONFIRMED'])
-        except (Exception, asyncio.CancelledError) as exc:
-            journal.update(status='interrupted_unconfirmed', dispatchComplete=False, allCleared=False,
-                           error=safe_text(str(exc)), finishedAt=now_ms())
+
+        work = asyncio.create_task(dispatch_and_observe())
+        work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        try:
+            done, _ = await asyncio.wait({work}, timeout=max(0, deadline - time.monotonic()))
+            if not done:
+                closed = True
+                work.cancel() # Never join a cancellation-resistant cleanup.
+                journal.update(status='timed_out', terminal=True, allCleared=False, finishedAt=now_ms())
+                await self._maybe_auto_hard_stop(fail(journal['requestId'], 'SOFT_STOP_TIMEOUT',
+                    'Soft stop all exceeded its original 60-second budget.', {'cleanupSucceeded': False}))
+            else:
+                work.result()
+        except asyncio.CancelledError:
+            closed = True
+            work.cancel()
+            journal.update(status='aborted', terminal=True, allCleared=False, finishedAt=now_ms())
+        except Exception as exc:
+            journal.update(status='aborted', terminal=True, allCleared=False, error=safe_text(str(exc)), finishedAt=now_ms())
+            await self._maybe_auto_hard_stop(fail(journal['requestId'], 'SOFT_STOP_FAILED', safe_text(str(exc))))
         finally:
-            try:
-                _write_journal(path, journal)
-            except Exception:
-                logging.getLogger("upilot.mcp").exception("[UPilot][QueueCleanup] Bulk final journal failed; outcome unconfirmed")
-                # Original durable dispatching receipt remains unknown; never resend or claim success.
-                pass
+            closed = True
+            archive()
             self.__dict__.get('_queue_bulk_handles', {}).pop(journal['requestId'], None)

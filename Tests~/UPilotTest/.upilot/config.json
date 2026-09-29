@@ -22,7 +22,7 @@
     },
     "safety": {
         "writeAccessApproved": true,
-        "writeAccessApprovedAtUtc": "2026-08-15T05:03:13.9068441+00:00",
+        "writeAccessApprovedAtUtc": "2026-09-29T10:21:39.7208591+00:00",
         "unsavedScenePolicy": "ignore",
         "automationAuthorizationScopes": [
             "editorModeTransition",
@@ -49,6 +49,7 @@
         "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
         "restartTimeoutSeconds": 120
     },
+    "aiQueueCleanupAllowed": true,
     "updates": {
         "manifestUrl": "",
         "channel": "auto"

@@ -60,7 +60,7 @@ _UPILOT_BLOCK_END = "<!-- upilot:end -->"
 _SKILL_TEMPLATE_ROOT_RELATIVE = Path("skills") / "upilot-unity-mcp"
 _TEMPLATE_MANIFEST_RELATIVE = _SKILL_TEMPLATE_ROOT_RELATIVE / "template-manifest.json"
 _DEFAULT_OPERATION_SUCCESS = {"succeeded", "success", "complete", "completed", "passed", "ok"}
-_DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "aborted", "timeout", "timedout", "error"}
+_DEFAULT_OPERATION_FAILURE = {"failed", "failure", "canceled", "cancelled", "aborted", "timeout", "timedout", "timed_out", "stopped", "error"}
 _TERMINAL_STATUSES = _DEFAULT_OPERATION_SUCCESS | _DEFAULT_OPERATION_FAILURE
 
 
@@ -79,8 +79,13 @@ def _serialized_operation(method):
             result = await method(self, operation_id, *args, **kwargs)
             state = self._operations.get(operation_id)
             collect_after = bool(state and state.pop("_deferredArtifactCollection", False))
+            interrupted = bool(state and state.get("status") == "RecoveryRequired")
             if state is not None and not self._save_operation(state):
-                return fail(new_id("req"), "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+                return fail(new_id("req"), "OPERATION_PERSIST_FAILED", state.get("persistenceError", "Archive failed"), self._public_operation_state(state))
+            if interrupted:
+                public = self._public_operation_state(state)
+                result = (ok(result.request_id, public) if result.ok else
+                          fail(result.request_id, result.error.code, result.error.message, public))
         if collect_after and result.ok:
             # Artifact reads can block on project files; they deliberately run after
             # the status/cancel lock is released so cancellation and newer samples
@@ -344,38 +349,24 @@ def _read_text_tail(path: Path, lines: int) -> str:
 
 class TaskDomainService:
     def _save_operation(self, state: dict) -> bool:
+        if not state.get("terminal") and state.get("status") == "RecoveryRequired":
+            state.update(status="aborted", phase="aborted", terminal=True, endedAt=now_ms(),
+                         cleanupPending=False, cleanupSucceeded=False, recoveryObservationOnly=False,
+                         nextAction="Original execution interrupted. Start new work explicitly; no recovery is scheduled.")
         try:
             self.server.state.save_operation(state)
             observe(self, "Operation", state)
             return True
         except Exception as exc:
-            state.update(status="RecoveryRequired", phase="persistence_failed", endedAt=0,
-                         error=str(exc), nextAction="Inspect persisted operation evidence; do not replay start.")
+            if not state.get("terminal") and not state.get("endedAt"):
+                state.update(status="aborted", phase="persistence_failed", terminal=True, endedAt=now_ms(),
+                             cleanupSucceeded=False, cleanupPending=False)
+            state["persistenceError"] = str(exc)
             return False
 
     def _recover_operations(self) -> None:
-        store = getattr(self.server, "state", None)
-        project = getattr(store, "_project_path", "")
-        if not project or getattr(self, "_operations_loaded_project", "") == project:
-            return
-        if getattr(self, "_operations_loaded_project", ""):
-            for handle in self.__dict__.get("_operation_observers", {}).values():
-                handle.cancel()
-            self._operations.clear()
-        self._operations_loaded_project = project
-        for state in store.load_operations():
-            if state["operationId"] in self._operations:
-                continue
-            state["recovered"] = True
-            self._operations[state["operationId"]] = state
-            if state.get("endedAt"):
-                continue
-            if not state.get("startEstablished") or not state.get("recoveryIdentityEstablished"):
-                state.update(status="RecoveryRequired", phase="start_identity_unknown", endedAt=0,
-                             nextAction="Inspect the original start/capture evidence; start was not replayed.")
-                self._save_operation(state)
-            else:
-                self._resume_operation_observer(state)
+        # Historical files are reports, never admission into a new service lifetime.
+        return
 
     def _resume_operation_observer(self, state: dict) -> None:
         handles = self.__dict__.setdefault("_operation_observers", {})
@@ -493,25 +484,45 @@ class TaskDomainService:
         state["updatedAt"] = now_ms()
 
     async def _observe_operation(self, state: dict) -> None:
+        # One deadline for this accepted run, including a bounded finalization
+        # allowance. No reconnect, status read, or stop request can renew it.
+        deadline = int(state.get("startedAt") or now_ms()) + int(
+            (float(state.get("timeoutSec") or 300) + min(60, float(
+                state.get("jobSpec", {}).get("cleanup", {}).get("timeoutSec", 60)))) * 1000)
+        work = None
         try:
             while not state.get("endedAt"):
+                remaining = (deadline - now_ms()) / 1000
+                if remaining <= 0:
+                    state.update(status="timed_out", phase="deadline", terminal=True, endedAt=now_ms(),
+                                 cleanupPending=False, cleanupSucceeded=False,
+                                 error="Execution and cleanup deadline expired; original outcome may be unknown.")
+                    break
                 delay = max(0.05, float(state.get("pollIntervalSec") or 3))
-                delay = max(delay, (int(state.get("nextRecoveryObservationAt") or 0) - now_ms()) / 1000)
-                await asyncio.sleep(delay)
-                if state.get("projectPath") != self.server.state._project_path:
+                await asyncio.sleep(min(delay, remaining))
+                if state.get("endedAt") or state.get("projectPath") != self.server.state._project_path:
                     return
                 if state.get("status") == "RecoveryRequired":
-                    call, reason = self._operation_recovery_call(state)
-                    if call is None:
-                        state["recoveryObservationUnsupportedReason"] = reason
-                        return
+                    self._save_operation(state)
+                    return
                 try:
-                    await self.operation_status(state["operationId"])
+                    work = asyncio.create_task(self.operation_status(state["operationId"]))
+                    work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+                    done, _ = await asyncio.wait({work}, timeout=max(0, (deadline - now_ms()) / 1000))
+                    if not done:
+                        work.cancel()  # Never join cancellation-resistant project callbacks.
+                        state.update(status="timed_out", phase="deadline", terminal=True, endedAt=now_ms(),
+                                     cleanupPending=False, cleanupSucceeded=False,
+                                     error="Execution and cleanup deadline expired.")
+                        break
+                    work.result()
                 except Exception as exc:
-                    state.update(status="RecoveryRequired", phase="observer_failed", endedAt=0)
-                    self._recovery_observation_failed(state, str(exc))
+                    if not state.get("terminal") and not state.get("endedAt"):
+                        state.update(status="aborted", phase="observer_failed", terminal=True, endedAt=now_ms(),
+                                     cleanupPending=False, cleanupSucceeded=False, error=str(exc))
         except asyncio.CancelledError:
-            # Shutdown stops observation, not the underlying operation.
+            if work is not None and not work.done():
+                work.cancel()
             raise
         finally:
             self._save_operation(state)
@@ -826,7 +837,7 @@ class TaskDomainService:
             state.update(timedOut=True, phase="JobTimeoutAwaitingBusiness",
                          timeoutAt=now_ms(), cleanupPending=True)
             if not self._save_operation(state):
-                return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+                return fail(request_id, "OPERATION_PERSIST_FAILED", state.get("persistenceError", "Archive failed"), self._public_operation_state(state))
             # This caller already holds the job lock. Use the same cancellation
             # adapter without re-entering it; intent is persisted before effects.
             if isinstance(state["jobSpec"].get("cancelCall"), dict):
@@ -839,6 +850,8 @@ class TaskDomainService:
         except Exception as exc:
             state.update(phase="Recovering", lastObservationError=str(exc))
             return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
+        if state.get("terminal") or state.get("endedAt"):
+            return ok(request_id, self._public_operation_state(state))
         self._accumulate_timing(state, result)
         state["lastStatusAt"] = now_ms()
         if not result.ok:
@@ -1075,97 +1088,14 @@ class TaskDomainService:
 
     @_serialized_operation
     async def operation_release(self, operation_id: str, request_id: str, reason: str) -> ToolResponse:
-        guard = QUEUE_GUARD.get()
-        state = self._operations.get(operation_id)
-        if not guard or guard[0] != operation_id or "_releaseEvidence" not in guard[1] or state is None:
-            return fail(request_id, "QUEUE_RELEASE_GRANT_REQUIRED", "Use queue cleanup preview/apply.")
-        if state.get("releaseRequest") or not self._queue_job_execution_idle():
-            return fail(request_id, "QUEUE_EXECUTION_NOT_EXCLUDED", "Observe the original identity; release was not sent.")
-        if not self._save_operation(state):
-            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"])
-        evidence = guard[1]["_releaseEvidence"]
-        intent = self.server.state.backup_job_disposition("Operation", state, evidence, request_id, safe_text(reason))
-        state.update(releaseRequest=intent, status="RecoveryRequired", recoveryObservationOnly=True,
-                     nextRecoveryObservationAt=0, phase="release_pending")
-        if not self._save_operation(state):
-            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"])
-        # The persisted identity is never resubmitted, even if the response is lost or the Server restarts.
-        call = dict(state["resolvedStatusCall"], route="automation.steps.release",
-                    payload=dict(state["resolvedStatusCall"]["payload"], dispositionRequestId=request_id,
-                                 expectedStateHash=evidence["stateHash"], reason=safe_text(reason)))
-        try:
-            await self._operation_invoke(call, operation_id)
-        except Exception as exc:
-            state["lastObservationError"] = str(exc)
-        await self._observe_operation_release(state)
-        self._resume_operation_observer(state)
-        return ok(request_id, self._public_operation_state(state))
+        return fail(new_id("req"), "LIFECYCLE_RECOVERY_REMOVED", "Use bounded stop or project hard stop; recovery and administrative release are removed.")
 
     def task_release(self, task_id: str, expected: dict, request_id: str, reason: str) -> ToolResponse:
-        guard = QUEUE_GUARD.get()
-        state = self._async_tasks.get(task_id)
-        if (not guard or guard[0] != task_id or guard[1] != expected or state is None
-                or "_releaseEvidence" not in expected or not self._queue_job_execution_idle()
-                or not self._operation_project_matches(state) or not self._queue_task_release_eligible(state)):
-            return fail(request_id, "QUEUE_RELEASE_GRANT_REQUIRED", "Use queue cleanup preview/apply.")
-        # No await between the Queue's last evidence/CAS check and this durable administrative closure.
-        self.server.state.save_test_job(state)
-        evidence = expected["_releaseEvidence"]
-        disposition = self.server.state.backup_job_disposition("Task", state, evidence, request_id, safe_text(reason))
-        disposition.update(disposedAt=now_ms(), testEvidence=evidence)
-        candidate = self._released_candidate(state, disposition)
-        # Preserve authoritative partial test results; Released itself is never acceptance/test success.
-        candidate["originalTestResult"] = evidence
-        # A legacy consumer may inspect result.result.acceptancePassed without the
-        # outer status. Keep old report/results as history, not the current result.
-        if candidate.get("acceptanceReport"):
-            candidate["originalAcceptanceReport"] = candidate.pop("acceptanceReport")
-        if candidate.get("result"):
-            candidate["originalTaskResult"] = candidate["result"]
-        candidate["result"] = {"result": {"status": "Released", "acceptancePassed": False,
-            "businessTerminal": candidate["businessTerminal"], "outcome": candidate["outcome"]}}
-        self.server.state.save_test_job(candidate)
-        # Mirror the persisted replacement, including removal of the current report.
-        # Keep the same dict identity for observers already holding this Task.
-        state.clear()
-        state.update(candidate)
-        return ok(request_id, self._public_task_state(state))
+        return fail(new_id("req"), "LIFECYCLE_RECOVERY_REMOVED", "Use bounded stop or project hard stop; recovery and administrative release are removed.")
 
     @_serialized_operation
     async def operation_recover(self, operation_id: str, recovery_request_id: str) -> ToolResponse:
-        """Queue-granted original Step cleanup; durable intent prevents uncertain replay."""
-        state = self._operations.get(operation_id)
-        if state is None:
-            return fail(recovery_request_id, "OPERATION_NOT_FOUND", "Original operation not found.")
-        guard = QUEUE_GUARD.get()
-        if not guard or guard[0] != operation_id or "_stepRecovery" not in guard[1]:
-            return fail(recovery_request_id, "QUEUE_RECOVERY_GRANT_REQUIRED", "Use queue cleanup preview/apply.")
-        call, reason = self._operation_recovery_call(state)
-        if call is None or not self._operation_project_matches(state):
-            return fail(recovery_request_id, "OPERATION_RECOVERY_UNSUPPORTED", reason or "Project identity changed.")
-        payload = dict(call["payload"], recoveryRequestId=recovery_request_id)
-        state.update(cleanupRecoveryRequestId=recovery_request_id, cleanupRecoverySendState="unknown",
-                     recoveryObservationOnly=True, nextRecoveryObservationAt=0)
-        if not self._save_operation(state):
-            return fail(recovery_request_id, "OPERATION_PERSIST_FAILED", state["error"])
-        try:
-            response = await self._operation_invoke(
-                {"kind": "bridge", "route": "automation.steps.recover", "payload": payload}, operation_id)
-            state["cleanupRecoverySendState"] = "response_received"
-            if response.ok:
-                sample = response.data if isinstance(response.data, dict) else {}
-                error = self._operation_recovery_evidence_error(state, sample)
-                if error or (sample.get("domain") or {}).get("cleanupRecoveryRequestId") != recovery_request_id:
-                    state["cleanupRecoverySendState"] = "unknown"
-                    return fail(recovery_request_id, "OPERATION_RECOVERY_RESPONSE_UNKNOWN", error or "Recovery identity is unconfirmed.")
-                self._merge_operation_status(state, sample)
-            return response
-        except Exception:
-            return fail(recovery_request_id, "OPERATION_RECOVERY_RESPONSE_UNKNOWN",
-                        "Observe the original run/request; do not resend cleanup recovery.",
-                        {"operationId": operation_id, "cleanupRecoveryRequestId": recovery_request_id})
-        finally:
-            self._resume_operation_observer(state)
+        return fail(new_id("req"), "LIFECYCLE_RECOVERY_REMOVED", "Use bounded stop or project hard stop; recovery and administrative release are removed.")
 
     @_serialized_operation
     @audited("Operation", "cancel", "operation_id")
@@ -1173,13 +1103,19 @@ class TaskDomainService:
         request_id = new_id("req")
         state = self._operations.get(operation_id)
         if state is None:
-            return fail(request_id, "OPERATION_NOT_FOUND", f"Operation not found: {operation_id}", {"operationId": operation_id})
+            return ok(request_id, {"operationId": operation_id, "status": "not_found", "changed": False})
         if not self._operation_project_matches(state):
             return self._operation_project_mismatch(request_id, state)
-        if state.get("endedAt"):
-            return ok(request_id, self._public_operation_state(state))
+        if state.get("endedAt") or state.get("terminal"):
+            return ok(request_id, {"operationId": operation_id, "status": "not_found", "changed": False})
+        if state.get("cancelRequested"):
+            return ok(request_id, {"operationId": operation_id, "status": "ending", "changed": False})
         if not state.get("startEstablished"):
-            return fail(request_id, "OPERATION_RECOVERY_REQUIRED", "Start identity is unknown; cancellation was not dispatched.", self._public_operation_state(state))
+            state.update(status="aborted", phase="aborted", terminal=True, endedAt=now_ms(),
+                         cleanupPending=False, cleanupSucceeded=False,
+                         error="Original start identity is unavailable; execution was interrupted.")
+            self._save_operation(state)
+            return ok(request_id, self._public_operation_state(state))
         if state.get("businessTerminal"):
             await self._operation_stop_console_capture(state)
             return ok(request_id, self._public_operation_state(state))
@@ -1195,13 +1131,14 @@ class TaskDomainService:
         state["cancelRequested"] = True
         state["cancelRequestedAt"] = state.get("cancelRequestedAt") or now_ms()
         state["cancelAttemptCount"] = int(state.get("cancelAttemptCount") or 0) + 1
-        if not self._save_operation(state):
-            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        self._save_operation(state) # Archive failure cannot prevent the one cooperative stop attempt.
         try:
             result = await self._operation_invoke(self._resolve_operation_call(cancel_call, state), operation_id)
         except Exception as exc:
             state.update(phase="CancelResultUnknown", error=str(exc))
             return fail(request_id, "OPERATION_CANCEL_UNKNOWN", str(exc), self._public_operation_state(state))
+        if state.get("terminal") or state.get("endedAt"):
+            return ok(request_id, self._public_operation_state(state))
         self._accumulate_timing(state, result)
         state["cancelResult"] = self._tool_response_summary(result)
         state["cancelRequested"] = True
@@ -1240,7 +1177,7 @@ class TaskDomainService:
             state["failureSignature"] = result.error.code if result.error else "CancelCallFailed"
         state["updatedAt"] = now_ms()
         self._finalize_operation_timing(state)
-        return ok(request_id, self._public_operation_state(state)) if result.ok else fail(request_id, "OPERATION_CANCEL_FAILED", state["error"], self._public_operation_state(state))
+        return ok(request_id, self._public_operation_state(state)) if result.ok else fail(request_id, "OPERATION_CANCEL_FAILED", state.get("persistenceError", "Archive failed"), self._public_operation_state(state))
 
     async def operation_collect_artifacts(
         self, operation_id: str, detail_level: str = "summary", max_tail_chars: int = 2000,
@@ -1671,6 +1608,8 @@ class TaskDomainService:
         target["unityMainThreadMs"] = int(target.get("unityMainThreadMs", 0)) + int(timing.get("unityExecutionMs") or 0)
 
     def _merge_operation_status(self, state: dict, payload: dict) -> None:
+        if state.get("terminal") or state.get("endedAt"):
+            return
         state["lastStatusData"] = payload
         if payload.get("ok") is False and not payload.get("status"):
             state["status"] = "Failed"
@@ -1811,6 +1750,8 @@ class TaskDomainService:
 
     async def _operation_stop_console_capture(self, state: dict, *, observe_business: bool = True) -> None:
         # All terminal routes converge here; business completion is not final completion.
+        if state.get("terminal"):
+            return
         first_cleanup = not state.get("businessTerminal")
         if not state.get("businessTerminal"):
             if state.get("timedOut"):
@@ -1829,6 +1770,8 @@ class TaskDomainService:
                 call = state.get("resolvedStatusCall") or self._resolve_operation_call(state["jobSpec"]["statusCall"], state)
                 result = await asyncio.wait_for(
                     self._operation_invoke(call, state["operationId"]), timeout=5)
+                if state.get("terminal"):
+                    return
                 payload, error, diagnostic = self._operation_adapt_payload(result, call, state["jobSpec"])
                 if error:
                     state["parseDiagnostic"] = diagnostic
@@ -1843,7 +1786,7 @@ class TaskDomainService:
                 await asyncio.wait_for(self._stop_owned_operation_capture(state), timeout=5)
             except Exception as exc:
                 capture["stopError"] = str(exc)
-            if state.get("phase") == "persistence_failed":
+            if state.get("terminal") or state.get("phase") == "persistence_failed":
                 return
         capture_done = not capture.get("sessionId") or (
             capture.get("stopped") is True and capture.get("artifactsVerified") is True)
@@ -1857,6 +1800,8 @@ class TaskDomainService:
         if require_edit:
             try:
                 observed = await asyncio.wait_for(self.mcp_status(force_fresh=True, include_capabilities=False), timeout=5)
+                if state.get("terminal"):
+                    return
                 editor = (observed.data or {}).get("executionState", {})
                 state["cleanupEditorEvidence"] = editor
                 transition = (observed.data or {}).get("playModeTransition") or {}
@@ -1893,8 +1838,9 @@ class TaskDomainService:
                 state["editorVerification"] = "failed"
             state["cleanupFailureSignature"] = "OperationCleanupTimeout"
             state["cleanupError"] = "Business ended but cleanup is unverified; inspect capture and Editor state before starting another operation."
-            state.update(status="RecoveryRequired", phase="CleanupTimeout", endedAt=0,
-                         nextAction="Observe the original run; cleanup expiry is not resource release.")
+            state.update(status="timed_out", phase="CleanupTimeout", terminal=True, endedAt=now_ms(),
+                         cleanupPending=False, cleanupSucceeded=False,
+                         nextAction="Cleanup deadline expired; use project hard stop if underlying work remains.")
         state["updatedAt"] = now_ms()
 
     async def _stop_owned_operation_capture(self, state: dict) -> None:
@@ -1904,8 +1850,9 @@ class TaskDomainService:
             return
         owner_token = str(capture.get("ownerToken") or "")
         if not owner_token and not capture.get("stopped"):
-            state.update(status="RecoveryRequired", phase="capture_owner_token_unknown", cleanupPending=True,
-                         nextAction="The operation capture ownership token is unavailable; do not stop or adopt the session automatically.")
+            state.update(status="aborted", phase="capture_owner_token_unknown", terminal=True, endedAt=now_ms(),
+                         cleanupPending=False, cleanupSucceeded=False,
+                         nextAction="Capture ownership is unavailable; use project hard stop if needed.")
             return
         if not capture.get("stopped"):
             # Persist before dispatch. A lost response (including shutdown) is never a stop retry.
@@ -2571,33 +2518,40 @@ class TaskDomainService:
         self._async_tasks[task_id] = state
 
         async def run() -> None:
-            state["status"] = "running"
-            state["phase"] = "executing"
-            state["updatedAt"] = now_ms()
-            result = await self.task_execute(
-                task_name=task_name,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                timeout_s=timeout_s,
-                max_total_s=timeout_s * max(1, retry_count + 1),
-                retry_count=retry_count,
-                restart_unity_on_timeout=False,
-            )
-            state["updatedAt"] = now_ms()
-            state["endedAt"] = now_ms()
-            state["terminal"] = True
-            if result.ok:
-                state["status"] = "completed"
-                state["phase"] = "completed"
-                state["result"] = result.data
-            else:
-                state["status"] = "failed"
-                state["phase"] = "failed"
-                state["error"] = {
-                    "code": result.error.code if result.error else "TASK_FAILED",
-                    "message": result.error.message if result.error else "Task failed",
-                    "detail": result.error.detail if result.error else {},
-                }
+            state.update(status="running", phase="executing", updatedAt=now_ms())
+            work = asyncio.create_task(self.task_execute(
+                task_name=task_name, tool_name=tool_name, tool_args=tool_args,
+                timeout_s=timeout_s, max_total_s=timeout_s * max(1, retry_count + 1),
+                retry_count=retry_count, restart_unity_on_timeout=False))
+            # Observe late exceptions without waiting for a cancellation-resistant coroutine.
+            work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+            try:
+                done, _ = await asyncio.wait({work}, timeout=timeout_s * max(1, retry_count + 1) + 60)
+                if state.get("terminal"):
+                    return
+                if not done:
+                    state.update(status="timed_out", cleanupSucceeded=False)
+                    work.cancel()
+                else:
+                    result = work.result()
+                    if result.ok:
+                        state.update(status="completed", result=result.data)
+                    else:
+                        state.update(status="failed", error={
+                            "code": result.error.code if result.error else "TASK_FAILED",
+                            "message": result.error.message if result.error else "Task failed",
+                            "detail": result.error.detail if result.error else {}})
+            except asyncio.CancelledError:
+                work.cancel()
+                if not state.get("terminal"):
+                    state.update(status="aborted", cleanupSucceeded=False)
+                raise
+            except Exception as exc:
+                if not state.get("terminal"):
+                    state.update(status="failed", error={"code": "TASK_EXCEPTION", "message": str(exc)})
+            finally:
+                if not state.get("terminal"):
+                    state.update(terminal=True, phase=state["status"], endedAt=now_ms(), updatedAt=now_ms())
 
         self._async_task_handles[task_id] = asyncio.create_task(run(), name=task_id)
         return ok(request_id, state.copy())
@@ -2618,16 +2572,18 @@ class TaskDomainService:
     async def task_cancel(self, task_id: str) -> ToolResponse:
         self._recover_test_jobs()
         state = self._async_tasks.get(task_id)
-        if state is None:
-            return fail(new_id("req"), "TASK_NOT_FOUND", f"Task not found: {task_id}", {"taskId": task_id})
-        if state.get("terminal"):
-            return ok(new_id("req"), self._public_task_state(state))
+        if state is not None and state.get("projectPath") and state["projectPath"] != self.server.state._project_path:
+            return fail(new_id("req"), "TASK_PROJECT_MISMATCH", "Task belongs to another Unity project.")
+        if state is None or state.get("terminal") or state.get("endedAt"):
+            return ok(new_id("req"), {"taskId": task_id, "status": "not_found", "changed": False})
+        if state.get("cancelRequested"):
+            return ok(new_id("req"), {"taskId": task_id, "status": "ending", "changed": False})
         if not state.get("durable"):
             return fail(new_id("req"), "TASK_CANCELLATION_UNSUPPORTED", "This task has no business cancellation adapter; its work and observer were left running.", {"taskId": task_id})
         if state.get("projectPath") != self.server.state._project_path:
             return fail(new_id("req"), "TASK_PROJECT_MISMATCH", "Task belongs to another Unity project.", {"taskId": task_id})
         state["cancelRequested"] = True
-        state["status"] = "cancel_requested"
+        state["status"] = "ending"
         if AUDIT.get():
             state["queueAuditRequest"] = AUDIT.get()[0]
             state["queueAuditReason"] = safe_text(AUDIT.get()[4])
@@ -2640,7 +2596,7 @@ class TaskDomainService:
             self.server.state.save_test_job(state)
         except Exception as exc:
             state.update(
-                status="RecoveryRequired", phase="cancel_intent_persist_failed", terminal=False,
+                status="aborted", phase="cancel_intent_persist_failed", terminal=True, endedAt=now_ms(),
                 error={"code": "TEST_TASK_PERSIST_FAILED", "message": str(exc)},
                 nextAction="Inspect the original run; cancellation was not dispatched and will not be replayed.",
             )
@@ -2655,6 +2611,7 @@ class TaskDomainService:
         fields = ("taskId", "projectPath", "durable", "status", "phase", "terminal", "runGuid",
                   "deadlineAt", "createdAt", "startedAt", "updatedAt", "endedAt", "nextAction",
                   "startSendState", "cancelSendState", "cleanupError", "cleanupFailureSignature",
+                  "cleanupSucceeded", "cleanupPending", "cleanupStatus", "cancelRequested",
                   "lastRecoveryObservationAt", "nextRecoveryObservationAt", "recoveryObservationFailures",
                   "lastObservationError", "disposition", "originalTerminal", "outcome", "businessTerminal", "originalTestResult")
         result = {key: state[key] for key in fields if key in state}
@@ -2696,48 +2653,12 @@ class TaskDomainService:
         return TaskDomainService._finalize_summary(result)
 
     def _resume_test_observer(self, state: dict) -> None:
-        handle = self._async_task_handles.get(state["taskId"])
-        if state.get("durable") and state.get("runGuid") and not state.get("terminal") and (handle is None or handle.done()):
-            if state.get("status") == "RecoveryRequired" or state.get("recoveryObservationOnly"):
-                observer = self._observe_test_recovery(state)
-            else:
-                observer = self._run_test_task(state, recovering=True)
-            self._async_task_handles[state["taskId"]] = asyncio.create_task(observer, name=state["taskId"])
+        # The starting coroutine owns the finite lifetime; status/cancel never reattach it.
+        pass
 
     def _recover_test_jobs(self) -> None:
-        store = getattr(getattr(self, "server", None), "state", None)
-        if store is None or not getattr(store, "_project_path", ""):
-            return
-        project_path = store._project_path
-        if getattr(self, "_test_jobs_loaded_project", "") == project_path:
-            return
-        self._test_jobs_loaded_project = project_path
-        for state in store.load_test_jobs():
-            task_id = state["taskId"]
-            if task_id in self._async_tasks:
-                continue
-            # Older durable records predate explicit send-state evidence.  Do
-            # not reinterpret an old intent as proof that nothing was sent.
-            # ``sent_unknown`` makes the observer evidence-only until a human
-            # resolves the original run/cancel request.
-            state.setdefault(
-                "startSendState",
-                "sent_unknown" if state.get("startIntentSent") else "not_sent",
-            )
-            state.setdefault(
-                "cancelSendState",
-                "sent_unknown" if state.get("cancelRequested") else "not_sent",
-            )
-            state["recovered"] = True
-            self._async_tasks[task_id] = state
-            if state.get("terminal"):
-                continue
-            if not state.get("runGuid"):
-                state.update(status="RecoveryRequired", phase="start_identity_unknown", terminal=False,
-                             error={"code": "TEST_RECOVERY_REQUIRED", "message": "Server restarted without an established runGuid. Start was not replayed."})
-                store.save_test_job(state)
-                continue
-            self._resume_test_observer(state)
+        # A new Server starts with no tasks. Persisted records are history only.
+        pass
 
     async def _run_test_task(self, state: dict, recovering: bool = False) -> None:
         store = self.server.state
@@ -2745,23 +2666,40 @@ class TaskDomainService:
         try:
             state.update(status="running", phase="recovering" if recovering else "executing", updatedAt=now_ms())
             store.save_test_job(state)
-            if recovering:
-                report = state.get("acceptanceReport")
-                if report:
-                    report["runGuid"] = state["runGuid"]
-                    result = await self._complete_acceptance_report(report)
+            async def execute():
+                if recovering:
+                    report = state.get("acceptanceReport")
+                    if report:
+                        report["runGuid"] = state["runGuid"]
+                        result = await self._complete_acceptance_report(report)
+                    else:
+                        result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
                 else:
-                    result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
-            else:
-                if state["toolName"] == "unity_upilot_acceptance_run":
-                    result = await self._execute_upilot_acceptance_run(**state["toolArgs"])
-                else:
-                    result = await self._dispatch_tool(state["toolName"], state["toolArgs"])
-                if state.get("runGuid") and not state.get("acceptanceReport"):
-                    result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
-
+                    if state["toolName"] == "unity_upilot_acceptance_run":
+                        result = await self._execute_upilot_acceptance_run(**state["toolArgs"])
+                    else:
+                        result = await self._dispatch_tool(state["toolName"], state["toolArgs"])
+                    if state.get("runGuid") and not state.get("acceptanceReport"):
+                        result = await self._wait_for_test_result(state["runGuid"], state["deadlineAt"])
+                return result
+            work = asyncio.create_task(execute())
+            work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+            try:
+                done, _ = await asyncio.wait({work}, timeout=max(0, (int(state["deadlineAt"]) + 60000 - now_ms()) / 1000))
+                if not done:
+                    work.cancel()
+                    raise TimeoutError()
+                result = work.result()
+            except asyncio.CancelledError:
+                work.cancel()
+                raise
             self._apply_test_task_result(state, result)
+        except TimeoutError:
+            if not state.get("terminal"):
+                state.update(status="timed_out", terminal=True, cleanupSucceeded=False)
         except TestJobCancelledBeforeStart:
+            if state.get("terminal"):
+                return
             state.update(status="cancelled", terminal=True)
             if state.get("acceptanceReport"):
                 report = state["acceptanceReport"]
@@ -2770,28 +2708,24 @@ class TaskDomainService:
                 if report.get("artifact"):
                     state["artifact"] = report["artifact"]
         except asyncio.CancelledError:
-            # Server shutdown only stops observation. A later server may reattach by runGuid.
-            state.update(status="RecoveryRequired", terminal=False, phase="observer_interrupted")
+            if not state.get("terminal"):
+                state.update(status="aborted", terminal=True, phase="interrupted")
             raise
         except Exception as exc:
-            state.update(status="RecoveryRequired", terminal=False, error={"code": "TEST_TASK_EXCEPTION", "message": str(exc)})
+            if not state.get("terminal"):
+                state.update(status="aborted", terminal=True, error={"code": "TEST_TASK_EXCEPTION", "message": str(exc)})
         finally:
             TEST_JOB_CONTEXT.reset(token)
+            if not state.get("terminal"):
+                state.update(status="aborted", terminal=True)
             state["phase"] = state["status"]
             state["updatedAt"] = now_ms()
-            state["endedAt"] = now_ms() if state.get("terminal") else 0
+            state["endedAt"] = state.get("endedAt") or now_ms()
             try:
                 store.save_test_job(state)
             except Exception as exc:
-                state.update(status="RecoveryRequired", terminal=False, endedAt=0,
-                             error={"code": "TEST_TASK_PERSIST_FAILED", "message": str(exc)})
+                state["persistenceError"] = str(exc)
             observe(self, "Task", state)
-
-        if (state.get("status") == "RecoveryRequired" and state.get("runGuid")
-                and (state.get("error") or {}).get("code") != "TEST_TASK_PERSIST_FAILED"):
-            state["recoveryObservationOnly"] = True
-            self._async_task_handles[state["taskId"]] = asyncio.create_task(
-                self._observe_test_recovery(state), name=state["taskId"])
 
     async def _observe_test_recovery(self, state: dict) -> None:
         """Read the original run only; never re-enter test start/cancel/deadline dispatch."""
@@ -2865,11 +2799,16 @@ class TaskDomainService:
             TEST_JOB_CONTEXT.reset(token)
 
     def _apply_test_task_result(self, state: dict, result: ToolResponse) -> None:
+        if state.get("terminal"):
+            return
         report = state.get("acceptanceReport") or {}
         test_result = (report.get("steps", {}).get("testStatus", {}).get("data")
                        if report else result.data) or {}
         no_tests = bool(test_result.get("noTests"))
         cleaned = self._test_cleanup_verified(test_result)
+        state["cleanupSucceeded"] = cleaned
+        state["cleanupPending"] = False
+        state["cleanupStatus"] = "completed" if cleaned else "failed"
         identity_verified = test_result.get("runGuid") == state.get("runGuid") and test_result.get("resultAuthoritative") is True
         state["result"] = {"result": result.data or (result.error.detail if result.error else {}), "runGuid": state.get("runGuid")}
         if report.get("artifact"):
@@ -2877,7 +2816,7 @@ class TaskDomainService:
         if no_tests and not state.get("runGuid") and not report:
             state.update(status="no_tests", terminal=True)
         elif state.get("runGuid") and not (cleaned and identity_verified):
-            state.update(status="RecoveryRequired", terminal=False)
+            state.update(status="aborted", terminal=True)
         elif state.get("cancelRequested"):
             state.update(status="cancelled", terminal=True)
         elif state.get("timedOut"):
@@ -2889,7 +2828,7 @@ class TaskDomainService:
         else:
             state.update(status="completed" if result.ok and test_result.get("status") == "completed" and test_result.get("failed") == 0 else "failed", terminal=True)
         if state.get("startIntentSent") and not state.get("runGuid") and not no_tests:
-            state.update(status="RecoveryRequired", terminal=False)
+            state.update(status="aborted", terminal=True)
         if result.error:
             state["error"] = {"code": result.error.code, "message": result.error.message, "detail": result.error.detail}
         elif state["status"] == "completed" and report.get("acceptancePassed"):

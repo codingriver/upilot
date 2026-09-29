@@ -89,8 +89,8 @@ def test_editor_verification_distinguishes_not_requested_pending_and_failed(tmp_
         assert not pending.data["terminal"] and pending.data["editorVerification"] == "pending"
         required._operations[started.data["operationId"]]["cleanupDeadlineAt"] = 1
         failed = await required.operation_status(started.data["operationId"])
-        assert not failed.data["terminal"] and failed.data["editorVerification"] == "failed"
-        assert failed.data["status"] == "RecoveryRequired"
+        assert failed.data["terminal"] and failed.data["editorVerification"] == "failed"
+        assert failed.data["status"] == "timed_out"
         assert failed.data["cleanupFailureSignature"] == "OperationCleanupTimeout"
         assert failed.data["businessResult"]["status"] == "Succeeded"
     asyncio.run(run())
@@ -117,8 +117,9 @@ def test_capture_failure_is_not_stopped_or_success(tmp_path):
         assert state["consoleCapture"]["stopped"] is False
         state["cleanupDeadlineAt"] = 1
         result = await service.operation_status(operation_id)
-        assert not result.data["terminal"] and result.data["cleanupPending"]
-        assert result.data["status"] == "RecoveryRequired"
+        assert result.data["terminal"] and not result.data["cleanupPending"]
+        assert result.data["status"] == "timed_out"
+        assert state["consoleCapture"]["stopped"] is False
         assert result.data["cleanupFailureSignature"] == "OperationCleanupTimeout"
         assert result.data["businessResult"]["status"] == "Succeeded"
     asyncio.run(run())
@@ -204,7 +205,10 @@ def test_cancel_terminal_latches_business_result_before_project_cleanup(tmp_path
         assert canceled.data["businessTerminal"] and not canceled.data["terminal"]
         assert canceled.data["status"] == "CleaningUp"
         assert canceled.data["businessResult"]["status"] == "Canceled"
-        final = await service.operation_cancel(operation_id)
+        duplicate = await service.operation_cancel(operation_id)
+        assert duplicate.ok and not duplicate.data["changed"]
+        assert duplicate.data["status"] in {"ending", "not_found"}
+        final = await service.operation_status(operation_id)
         assert final.data["terminal"] and final.data["status"] == "Canceled"
         assert final.data["businessEndedAt"] == canceled.data["businessEndedAt"]
         assert [name for name, _ in service.calls].count("cancel") == 1

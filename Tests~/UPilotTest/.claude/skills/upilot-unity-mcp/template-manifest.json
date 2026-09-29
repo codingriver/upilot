@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "agentRulesVersion": 48,
-  "skillPackVersion": 57,
+  "agentRulesVersion": 50,
+  "skillPackVersion": 59,
   "defaultHttpPort": 8011,
   "templates": {
     "agentRules": "AGENTS.md.template",

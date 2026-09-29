@@ -64,7 +64,13 @@ namespace CodingRiver.UPilot.Automation
             s_executor = new AutomationStepExecutor(Registry, Path.Combine(Application.dataPath, "../Library/UPilot/step-run.json"));
             s_executor.RestoreStored();
             EditorApplication.update += Update;
-            AssemblyReloadEvents.beforeAssemblyReload += () => s_executor.Dispose();
+            AssemblyReloadEvents.beforeAssemblyReload += () => s_executor?.Dispose();
+        }
+        internal static void ResetActive()
+        {
+            s_executor?.Finish("Aborted", "SERVICE_HARD_STOP", "UPilot service lifetime ended.");
+            s_executor?.Dispose();
+            s_executor = null;
         }
         private static void Update() => s_executor?.Tick();
         private static AutomationStepRegistry Registry
@@ -156,8 +162,23 @@ namespace CodingRiver.UPilot.Automation
             return state;
         }
         public static string StateJson(string runId) => JsonUtility.ToJson(Public(State(runId)));
-        public static string CancelJson(string runId)
-        { State(runId); if (s_executor.State?.runId == runId) s_executor.RequestCancel(); return StateJson(runId); }
+        [Serializable] internal sealed class StopReply
+        {
+            public bool ok = true, changed;
+            public string status;
+        }
+        internal static StopReply Stop(string runId)
+        {
+            RequireMainThread();
+            var run = s_executor?.State;
+            if (run == null || run.terminal || run.runId != runId)
+                return new StopReply { status = "not_found" };
+            if (run.cancelRequested || run.stage == "Finalizing")
+                return new StopReply { status = "ending" };
+            s_executor.RequestCancel();
+            return new StopReply { status = "ending", changed = true };
+        }
+        public static string CancelJson(string runId) => JsonUtility.ToJson(Stop(runId));
         public static string ArtifactsJson(string runId) => JsonUtility.ToJson(PublicArtifacts(State(runId)));
         public UPilotAutomationStepService(UPilotBridge bridge) { _bridge = bridge; }
         public void RegisterCommands()
@@ -188,28 +209,12 @@ namespace CodingRiver.UPilot.Automation
                         completion.SetResult(new CatalogResult { steps = Registry.Catalog(),
                             diagnostics = System.Linq.Enumerable.ToArray(Registry.Diagnostics) }); return;
                     }
+                    if (action == "cancel") { completion.SetResult(Stop(request.runId)); return; }
+                    if (action == "recover" || action == "release" || action == "release_preview")
+                        throw new InvalidOperationException("STEP_RECOVERY_REMOVED_USE_STOP");
                     var original = ReadState(s_executor, request.runId, request.operationId ?? "");
                     if (!string.IsNullOrEmpty(original.disposition?.requestId)) { completion.SetResult(Public(original)); return; }
-                    if (action == "release_preview")
-                    {
-                        var preview = Public(original); preview.releaseProof = s_executor.PreviewRelease();
-                        completion.SetResult(preview); return;
-                    }
-                    if (action == "release")
-                    {
-                        if (!UPilotProjectConfig.Load().aiQueueCleanupAllowed)
-                            throw new InvalidOperationException("STEP_RELEASE_NOT_AUTHORIZED");
-                        completion.SetResult(Public(s_executor.Release(request.dispositionRequestId, request.expectedStateHash, request.reason)));
-                        return;
-                    }
-                    if (action == "cancel") s_executor.RequestCancel();
-                    if (action == "recover")
-                    {
-                        if (string.IsNullOrEmpty(request.operationId) || !UPilotProjectConfig.Load().aiQueueCleanupAllowed)
-                            throw new InvalidOperationException("STEP_RECOVERY_NOT_AUTHORIZED");
-                        s_executor.RequestCleanupRecovery(request.recoveryRequestId);
-                    }
-                    completion.SetResult(Public(s_executor.State));
+                    completion.SetResult(Public(original));
                 }
                 catch (Exception ex) { completion.SetException(ex); }
             });
@@ -219,6 +224,7 @@ namespace CodingRiver.UPilot.Automation
                 var result = await completion.Task;
                 if (result is CatalogResult catalog) await _bridge.SendResultAsync(id, route, catalog, token);
                 else if (result is AutomationStepValidation validation) await _bridge.SendResultAsync(id, route, validation, token);
+                else if (result is StopReply stopped) await _bridge.SendResultAsync(id, route, stopped, token);
                 else if (result is StateResult state) await _bridge.SendResultAsync(id, route, state, token);
                 else throw new InvalidOperationException("STEP_RESPONSE_INVALID");
             }

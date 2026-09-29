@@ -131,7 +131,7 @@ namespace CodingRiver.UPilot.Tests
         [TestCase(30)]
         [TestCase(120)]
         [TestCase(600)]
-        public void ValidTimeoutIsPreserved(int timeout)
+        public void ConfiguredTimeoutIsPreserved(int timeout)
         {
             Assert.That(ServiceMaintenanceJournal.ParseSettings(
                 "{\"aiServiceMaintenance\":{\"restartTimeoutSeconds\":" + timeout + "}}").restartTimeoutSeconds, Is.EqualTo(timeout));
@@ -168,8 +168,9 @@ namespace CodingRiver.UPilot.Tests
         {
             var request = Request();
             var record = _journal.Accept(request, 120, 456, null);
-            Assert.That(Assert.Throws<ServiceMaintenanceException>(() =>
-                _journal.Accept(Request(), 120, 456, null)).Code, Is.EqualTo("SERVICE_RESTART_BUSY"));
+            var joined = _journal.Accept(Request(), 120, 456, null);
+            Assert.That(joined, Is.SameAs(record));
+            Assert.That(joined.deadlineAtUtcMs, Is.EqualTo(record.deadlineAtUtcMs));
             request.reason = "different";
             Assert.That(Assert.Throws<ServiceMaintenanceException>(() =>
                 _journal.FindDuplicate(request)).Code, Is.EqualTo("SERVICE_RESTART_REQUEST_CONFLICT"));
@@ -215,13 +216,13 @@ namespace CodingRiver.UPilot.Tests
         public void SuccessAtDeadlineIsTimeoutEvenWithoutObserverTick()
         {
             var record = _journal.Accept(Request("bridge"), 120, 456, null);
-            Assert.That(record.affectedComponents, Is.EqualTo(new[] { "bridge" }));
+            Assert.That(record.affectedComponents, Is.EqualTo(new[] { "server", "bridge" }));
             record.Finish("succeeded", "", "", record.deadlineAtUtcMs);
             Assert.That(record.status, Is.EqualTo("timed_out"));
         }
 
         [Test]
-        public void CorruptJournalRefusesNewWorkAndPersistenceFailureDoesNotAccept()
+        public void CorruptJournalRefusesAmbiguousHistoryButArchiveFailureDoesNotBlockReset()
         {
             Directory.CreateDirectory(_root);
             File.WriteAllText(_path, "{");
@@ -230,8 +231,27 @@ namespace CodingRiver.UPilot.Tests
                 corrupt.Accept(Request(), 120, 456, null)).Code, Is.EqualTo("SERVICE_RESTART_RECOVERY_REQUIRED"));
             var blockedPath = Path.Combine(_path, "cannot-be-created.json");
             var blocked = new ServiceMaintenanceJournal(blockedPath, () => _now);
-            Assert.Throws<ServiceMaintenanceException>(() => blocked.Accept(Request(), 120, 456, null));
-            Assert.That(blocked.Current, Is.Null);
+            var accepted = blocked.Accept(Request(), 120, 456, null);
+            Assert.That(blocked.Current, Is.SameAs(accepted));
+            Assert.That(accepted.queueResetError, Is.Not.Empty);
+            var calls = 0;
+            Assert.That(blocked.Dispatch(() => { }, _ => calls++), Is.True);
+            Assert.That(calls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void HumanConfirmedHardResetCanReplaceCorruptJournalWithoutDispatchingRealServices()
+        {
+            Directory.CreateDirectory(_root);
+            File.WriteAllText(_path, "{");
+            var journal = new ServiceMaintenanceJournal(_path, () => _now);
+            var record = journal.Accept(Request(), 120, 456, null, humanConfirmed: true);
+            Assert.That(record.humanConfirmed, Is.True);
+            Assert.That(record.queueResetError, Does.Contain("Previous journal"));
+            var calls = 0;
+            Assert.That(journal.Dispatch(() => { }, _ => calls++), Is.True);
+            Assert.That(journal.Dispatch(() => { }, _ => calls++), Is.False);
+            Assert.That(calls, Is.EqualTo(1));
         }
 
         [Test]
@@ -269,14 +289,70 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void DispatchPersistenceFailurePreventsEffects()
+        public void DispatchPersistenceFailureDoesNotBlockSingleHardReset()
         {
             var record = _journal.Accept(Request(), 120, 456, null);
             File.Delete(_path);
             Directory.CreateDirectory(_path);
             var starts = 0;
-            Assert.Throws<ServiceMaintenanceException>(() => _journal.Dispatch(() => { }, _ => starts++));
-            Assert.That(starts, Is.Zero);
+            Assert.That(_journal.Dispatch(() => { }, _ => starts++), Is.True);
+            Assert.That(starts, Is.EqualTo(1));
+            Assert.That(record.queueResetError, Is.Not.Empty);
+            Assert.That(_journal.Dispatch(() => { }, _ => starts++), Is.False);
+            Assert.That(starts, Is.EqualTo(1));
         }
+        [TestCase(1000)]
+        [TestCase(21000)]
+        [TestCase(29999)]
+        public void MaintenanceDoesNotRenewConfiguredDeadline(long elapsed)
+        {
+            var r = _journal.Accept(Request("bridge"), 30, 456, null);
+            r.phase = "health_query";
+            r.healthProbeError = "/health HTTP 503";
+            var accepted = _now;
+            _now += elapsed;
+            Assert.That(_journal.Expire(), Is.False);
+            _journal.Save();
+            _journal = new ServiceMaintenanceJournal(_path, () => _now);
+            r = _journal.Current;
+            Assert.That(r.deadlineAtUtcMs, Is.EqualTo(accepted + 30000));
+            _now = accepted + 30000;
+            Assert.That(_journal.Expire(), Is.True);
+            Assert.That(_journal.Expire(), Is.False, "Finalization is once-only.");
+            Assert.That(r.error, Does.Contain("health_query"));
+            Assert.That(r.error, Does.Contain("/health HTTP 503"));
+            r.Finish("succeeded", "", "", _now + 1);
+            Assert.That(r.status, Is.EqualTo("timed_out"));
+        }
+
+        [Test]
+        public void LegacyInFlightJournalAndConfigAreNotRewrittenOnRead()
+        {
+            var r = _journal.Accept(Request(), 120, 456, null);
+            r.restartTimeoutSeconds = 120;
+            r.deadlineAtUtcMs = r.acceptedAtUtcMs + 120000; // Persisted pre-upgrade journal.
+            _journal.Save();
+            var bytes = File.ReadAllBytes(_path);
+            _journal = new ServiceMaintenanceJournal(_path, () => _now);
+            Assert.That(_journal.Current.deadlineAtUtcMs, Is.EqualTo(r.deadlineAtUtcMs));
+            Assert.That(File.ReadAllBytes(_path), Is.EqualTo(bytes));
+            _now = r.deadlineAtUtcMs;
+            Assert.That(_journal.Expire(), Is.True);
+            Assert.That(_journal.Current.error, Does.Not.Contain("10 分钟"));
+        }
+
+        [Test]
+        public void BridgeHealthMissingIsNotAnIdentityConflict()
+        {
+            Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(default, 42, _root), Is.False);
+            var status = new McpServerStatus { HealthEndpointResponded = true, HealthServerProcessId = 42, HealthProjectPath = _root };
+            Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.False);
+            status.HealthServerProcessId = 43;
+            Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.True);
+            status.HealthServerProcessId = 42;
+            status.HealthProjectPath = _root + "-foreign";
+            Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.True);
+        }
+
     }
 }

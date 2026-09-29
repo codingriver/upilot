@@ -248,6 +248,10 @@
 - 观察：2026-09-24 canonical 项目 `Tests~/UPilotTest` 的登记批次 `wb-4e433bd7-fa0d-49f4-bcaf-ed9ae9080354` 于 `1790247507370` 请求编译，约 90 秒内一直处于 `compilePhase=queued`，Editor 心跳正常、`isCompiling=true` 但编译开始时间为 0。`unity_editor_focus_state` 指出 Unity 在后台；`unity_editor_focus` 返回 `FOCUS_NOT_ACQUIRED`。最终该批次以关联编译成功终结，不能将延迟误报成编译失败。
 - 建议：在 `unity_write_batch_status` 的长时间 queued 诊断中区分 Editor 未聚焦/主线程持续运行/实际导入阻塞，提示可用且安全的等待/聚焦行动，并明确前台获取失败后的非破坏性处理。保留一次写批次/一次编译、不得自动重复发起编译。
 
+
+- 2026-09-29 外部业务补证（弹道起点 Transform 开发，非包验收）：Unity PID `51160` 心跳正常而主线程停泵；批次 `wb-bcfb6961-0593-4e8e-bc13-3664152e5246` deferred / EditorContextStale，`unity_editor_focus` 返回 `FOCUS_NOT_ACQUIRED`。只读原生窗口枚举确认同 PID 模态“UPilot 端口配置失败”（HWND 9244650），后方还有“UPilot 自动修复失败”（HWND 9376560），主窗口 disabled。未点击对话框、改端口或重启；不能归因于 C# 编译失败。
+- 补充建议/验收：在 hang/status/focus 只读诊断中提供精确 PID 对应的 modal/owner HWND、标题、主窗口 enabled 状态和安全 nextAction；canonical 项目用受控模态验证诊断，无需自动关闭未知提示。维持 P2 / 待改进，预计每次节省 3–5 分钟人工定位。双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260929-ModalCompileBlock`；通用实施状态以本 D14 为准。
+
 ### D15 / P1：MCP Server 重启后状态探测复用旧 HTTP 连接导致验证超时
 
 - 状态：2026-09-26 已实施代码修复并完成 canonical Unity 项目定向验证；尚未发起新的 Server 重启，因此不能把原失败维护操作改写为重启验收成功。
@@ -518,3 +522,42 @@
 - 产物：Tests~/UPilotTest/Log/UPilotAcceptance/1790657859832_req-87ec820c-9861-40ea-bc46-1922412f8d14/summary.json，SHA256=9403b9ba1780062dfa4c7b8d6a17b40b825a7432cfe79c4153a02fd8184902c7；1790657893624_req-089cdd88-69af-4ec9-9df6-1a6197182c13/summary.json，SHA256=4fa70c744d470075211fada2e405a7c2b5ce48a8ce0decf1fdfdbeda6e1126e5（同目录根）。
 - 边界：未执行2022工程原生窗口完整点击及现场服务恢复，不声明原失败重启已成功；编译关联Console窗口存在Domain Reload覆盖缺口，不声称完整无错误历史。
 - 后续观察：首批 wb-56cd634b-cc34-43d6-9947-1065aa281dd7 与 unity_auto 编译发生覆盖身份竞态，返回 recovery_required。建议独立复现自动导入与写批次登记竞争，核验关联证据和后续批次覆盖语义；不通过猜测覆盖或删除旧批次放行。本轮最终批次关联验证已通过，不扩展该独立修复。
+
+## D15 补充观察：2026-09-29 canonical 工程 health 验证超时与通用端口引导（待定位）
+- 原操作：restart-532ee5cb18d84c83a8c838aeb479cc62，18:21:44–18:22:06（UTC+08:00），9 次 status probe，restart_verification_timeout；新 PID 62640、新 Bridge 会话 d34bb80e155c4c399b82caac7f4e0196 已建立，health/PID项目/deployment/readonly 门未通过。maintenanceDeadlineUtcMs=0，源码普通重启验证预算 20000ms；不能套用 AI maintenance 的 120 秒预算。
+- 只读现场证据：18:23–18:25，8011/8765 的唯一监听 owner 均为该 PID，父进程为 canonical Unity PID 43112；Server 日志 18:21:46 监听启动、18:21:48 精确项目会话建立。直连 /health HTTP200（约158ms），/stats 返回 JSON（约19ms）；unity_scene_list 实际 Bridge 往返成功（req-89db113a-f376-4752-bf5c-427bf271843a）。不支持其他进程抢占端口的归因，不把事后可用性改写成原重启成功。
+- 产品问题：UPilotQuickStart.ShowRepairFailureOnce 对失败统一显示“从网络端口开始…安装配套服务”，未按 health 超时/身份不符/真实端口冲突区分；该提示不是端口冲突检测结果。建议按首个失败门与已验证监听归属给出恢复建议，已运行本项目服务优先只读诊断而非重新安装。
+- 根因限制与后续：此前 D15 已有同类 HTTP 状态探测故障；当前源码含 UseProxy=false、ConnectionClose=true，运行域可发现 CreateLoopbackStatusHandler，但未证明加载方法体与当前磁盘完全一致，也未取得本次内部 socket/InnerException。原记录 Bridge=0.3.41，当前 Server health=0.3.42/source，仅作为配套身份核对线索，不归因为端口占用或已证实旧连接池。后续应在同一 Unity 中对照原状态客户端和新客户端，记录完整内部异常与各请求耗时，保持 PID/精确项目/部署身份门不放宽。
+- 状态：本次仅诊断及追加产品待办；未修改产品代码、端口配置或历史失败记录，未重启/停止/重装/重放任务；尚未完成新的重启端到端验收。
+### D15 实施更新：2026-09-29 重启统一期限与 health 诊断（定向验收通过，真实重启未覆盖）
+- 已实施：新普通/自动修复/AI Server 与 Bridge 重启从接受起共享 600 秒持久化期限；旧运行 journal 保留原期限，历史终态不改写。health-only 首次立即探测、每轮结束后间隔 2 秒，单次请求/响应体与只读往返受剩余预算约束；不等待可选 /stats，不重放停启。已确认进程退出、身份/认证/部署冲突立即失败，暂缺身份继续观察。
+- 提示修复已定向验收：等待期展示耗时/剩余/次数/最近错误；总期限结束按实际失败门报告。health 异常不打开端口起始安装向导、不宣称端口占用；后续验证失败不回退为 health 错误。AI 设置只读展示 10 分钟，旧字段保留且查询不改配置。
+- Unity 编译证据：canonical Tests~/UPilotTest，writeBatchId=wb-d1ea1c88-d44b-4d4c-9edc-d3bfdee05e69，compileOperationId=4c64474711274db1a3b4c7bc1333c2fd，verified/passed，errorsVerified=true、correlationVerified=true，lastCompileVerifiedAt=1790681687396（晚于批次创建 1790681668539）；0 errors、3 项既有 Flow UAC1009 warnings。关联 Console 未发现 Error，但 Domain Reload 边界 coverage=partial，不作全历史无错声明。
+- 定向测试：runGuid=fd2b3125-05c0-4721-8e44-4fb7959dd9e1；StartupDiagnostics 68、SetupRecovery 8、ServiceMaintenance 30，共 106 passed/0 failed/0 skipped，resultAuthoritative=true、cleanupSucceeded=true、unresolvedResources=[]。Python tests/test_service_maintenance.py：37 passed。未运行全量 EditMode。
+- 规则交付：权威模板 agentRulesVersion=49、skillPackVersion=58；生成/源验证、五目标同步和两份 installed Skill 验证通过。第二次完整 apply 及最终 check 均 current/changed=false；64 个受管/备份文件的文件集、SHA256 和 mtime_ns 不变，无新增备份；三个规则文件受管块外原始字节不变。
+- 原始 HTTP 故障根因仍待证实：本次修复预算、只读重试和误导恢复提示，不证明旧连接池或代理就是原故障原因。原失败 restart-532ee5cb18d84c83a8c838aeb479cc62 保持失败，不把事后恢复写成原操作成功。
+- 真实重启尚未验证：本次未停止/启动真实服务、未重放原操作、未清队列、未更改 AI 维护授权或端口。Server PID 62640 未重启；Python 变更仅完成磁盘和单元测试验证，不声称该存量进程加载了新代码。剩余：在独立获准维护窗口仅发起一次新重启，核验 health、精确 PID/项目、部署、Bridge 握手及真实只读调用全门通过。
+- 独立待办（不扩展本轮）：unity_test_results 对上述 run 返回 completed、isRunning=false、权威结果/清理成功，但顶层 data.terminal=false。建议统一终态投影，并增加 completed+cleanupSucceeded 的状态契约回归；保留原 run 证据，不重跑/清队列掩盖矛盾。当前状态：已记录，未修复。
+
+
+## 生命周期简化实施更新：2026-09-29（代码与定向验证完成，真实硬停止端到端待验收）
+- 问题/范围：旧任务清理失败依赖恢复/证明/行政释放，多个聊天之间出现长期占位；改为一次性终态、有界软停止、当前项目 Server/Bridge 硬停止，服务重启不从历史恢复活动任务。Generic Operation/Step 新启动仍禁用。
+- 已实施：Normal/Finally 单向收尾与超时终结，ResourceCleaning 纳入清理期限，报告/Capture 60 秒总收尾；Task/Test/Operation/WriteBatch 迟到结果与服务代际隔离；WriteBatch 登记起 600 秒，包括排队/EditMode 等待，异常与不响应取消的等待不再无限占位；终态写盘失败不重新占位。重启清空两端自有队列、会话、采集登记和观察器，历史文件保留。
+- UI/权限：高级设置提供查看队列、软停止全部、人工确认硬停止并重启；自动升级默认关闭，需独立 AI 服务维护授权及显式自动升级选项同时有效。多个失败合并一次重启，硬停止失败不循环，不自动切换模式、编译、保存场景或重启 Unity。
+- 对 D15 上述阶段记录的明确更新：本轮用户方案优先，新的维护默认期限为 120 秒，UI 可设 30–600 秒；不再采用上一阶段固定 600 秒/只读 10 分钟设置。旧终态与原操作证据不改写。保留 D15 的精确身份校验、有限 health 验证和失败诊断改进。
+- Python 验证：10 个直接相关文件最终 213 passed（140.30s）；之后工具帮助契约与维护测试 56 passed，其中与前次重叠，不累加。两个既有 websockets 弃用 warning。旧测试的重启恢复占位期望已迁移为历史保留/活动为空，固定证据时钟避免古老时间戳误触新登记期限；编译关联/权威结果断言保留。
+- Unity 定向 EditMode：Step fixture 89 passed，runGuid=60bed4b4-6b78-4ce4-aa36-89bb235a5652；维护/Flow 迟到回调/Operation 终态/会话硬关闭 36 passed，runGuid=f60fff26-4000-43c1-ba5a-ca9f553cd56f。两次均权威结果且 cleanupSucceeded=true，未运行全量套件。
+- 最后 Unity 编译：canonical Tests~/UPilotTest，writeBatchId=wb-78742f00-7948-4233-9eab-842e5fa28a4c，compileOperationId=00f435a152e049d1870327b4d86579ee，verified/passed，terminal/errorsVerified/correlationVerified=true，verifiedAt=1790692096362 > createdAt=1790692081832；结构化编译 0 errors/0 warnings。关联 Console Error 查询 0 条，但 coverage=partial（跨 Domain Reload），不宣称完整 Console 无错。
+- 发现并修复：live 旧 Server 在已关联 verified 的 WriteBatch 上仍保留先前 admission 暂不可用 error。磁盘 StateStore 在提交关联终态时清除 transient error，并增加回归；不能据该旧字段否认已验证编译，也不能宣称运行中 Server 已加载修复。
+- 规则交付：权威模板 agentRulesVersion=50、skillPackVersion=59；源生成/验证、canonical 五目标同步、两份 installed Skill 验证完成；最终完整 check=current/changed=false。公开 MCP 工具帮助已同步新的软停止、默认 120 秒与重启空队列语义。保留其他并行工作，包括 UPilotTest2022 既有改动，未对其同步。
+- 剩余验收：Server PID62640 未重启，本轮不声称该进程加载 Python 新实现；尚未点击真实硬停止按钮或执行真实重启/自动升级 E2E。在获准维护窗口验证一次硬停止、断连本地入口、重启后全部活动为空、旧 ID/迟到消息无效、实际底层忙碌如实显示，以及其他项目/Unity/场景/PlayMode/历史产物不受影响。不要用进程仍可用或单元测试替代此项证据。
+- 物理边界：任意已经进入 Unity 主线程且不响应取消的同步代码仍不可抢占；逻辑队列清空不是所有底层执行停止的证明。
+
+
+### 生命周期真实重启验收：2026-09-29（用户明确授权，单次 MCP Server/Bridge 重启成功）
+- 仅向 canonical Tests~/UPilotTest 的 unity_service_restart 发起一次请求，maintenanceId=980fbf28-609f-4afb-9bc5-56fc27765770；独立 effectiveApproved=true，期限120秒，未修改授权/期限/自动升级设置。重连后原身份 status=succeeded、terminalConfirmed=true、queueReset=true、queueResetError为空、healthVerified/readOnlyVerified=true，耗时5830ms。serverRestartId=restart-ca69b4cd0c9b42f1aa2a150fea0f583a。
+- Server PID62640 -> 53476，Bridge dd4b0f15720b49829adeefe2ef08f4fb -> 2d53d5232dbd4c5eb2584c9a9bf23d49；Unity PID43112、domainGeneration53保持不变。新进程由Unity启动，命令行指向 D:/upilot/upilotserver~/run_upilot_mcp.py；这是启动源路径证据，不是完整加载源码哈希证明。新响应呈现 autoHardStopOnSoftFailure=false 和旧Operation正常not_found语义，已验证相关运行行为，不宣称逐文件部署认证。
+- 重启前库存为7条旧Operation及1条WriteBatch；重启后持久化活动查询、Server内存活动、Bridge排队/执行均为0，items=[]；test.status=none/isRunning=false，专用Capture列表activeCount=0；实际 unity_scene_list Bridge往返成功，Editor ready/authoritative且非PlayMode、非编译。结束旧Operation op-e340ea72-d14e-45a2-a997-a8fc2f47ecb0 返回ok=true、changed=false、status=not_found。历史WriteBatch仍可读，未删除历史产物。未再次编译、运行测试、保存场景、重启Unity或操作其他项目。
+- 新发现待修复（队列库存诊断）：unity_queue_cleanup 重启前后都返回 complete=false，issues=[CAPTURE_STATE_UNAVAILABLE,EDITOR_IDENTITY_UNVERIFIED]，但专用capture.list正常且mcp_status身份已验证。建议核对 console.capture.observe 与队列身份字段映射，增加与专用接口一致性的回归；保留未知覆盖标记，不能把本次空items表述为完整全源验收。
+- 新发现待修复（历史WriteBatch状态投影）：旧 wb-56cd634b-cc34-43d6-9947-1065aa281dd7 已不在活动库存，但 unity_write_batch_status 仍输出 recovery_required、terminal=false，并建议观察原编译。建议保留storedStatus等历史证据，将跨服务旧非终态的查询明确标记为已中断/仅历史，不再提供等待恢复指引；增加重启后旧批次查询不会复活且不误导等待的回归。本轮仅重启及记录，不以修改历史数据掩盖问题。
+- 边界：本次验证真实MCP重启与旧占位不恢复，尚未覆盖人工按钮、断连本地入口、自动升级故障注入、所有类型迟到回调现场验证。underlyingExecutionStopped=false为明确物理边界，不宣称任意不响应取消的Unity同步代码已被抢占。原D15失败记录不改写。

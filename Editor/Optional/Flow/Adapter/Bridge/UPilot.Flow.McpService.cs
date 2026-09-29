@@ -221,6 +221,33 @@ namespace CodingRiver.UPilot
             CodingRiver.UPilot.Flow.TestRunnerWindow.OnWindowOpened = SyncWindowOnOpen;
         }
 
+        private bool TrySetActiveContext(string executionId, CodingRiver.UPilot.Flow.ExecutionContext context)
+        {
+            lock (_stateLock)
+            {
+                if (_activeExecutionId != executionId || !_executions.ContainsKey(executionId))
+                    return false;
+                _activeContext = context;
+                return true;
+            }
+        }
+
+        public void ResetActive()
+        {
+            var cancellations = _executionCts.Values.ToArray();
+            lock (_stateLock)
+            {
+                _activeContext = null;
+                _activeExecutionId = null;
+                _isRunning = false;
+                _executions.Clear();
+                _executionCts.Clear();
+            }
+            UPilotFlowExecutionRegistry.ResetActive();
+            foreach (var cancellation in cancellations)
+                ThreadPool.QueueUserWorkItem(_ => { try { cancellation.Cancel(); } catch { } finally { cancellation.Dispose(); } });
+        }
+
         public void RegisterCommands()
         {
             _bridge.Router.Register("upilot_flow.run", HandleRunAsync);
@@ -621,6 +648,7 @@ namespace CodingRiver.UPilot
 
         private async Task ExecuteRunAsync(string executionId, List<string> yamlPaths, UPilotFlowRunPayload payload, CancellationToken cancellationToken)
         {
+            if (!_executions.ContainsKey(executionId) || UPilotFlowExecutionRegistry.IsRetired(executionId)) return;
             bool shouldAbortBeforeStart = false;
             UpdateExecution(executionId, execution =>
             {
@@ -689,6 +717,7 @@ namespace CodingRiver.UPilot
                         TotalCases = yamlPaths.Count,
                         CaseStarted = (caseIndex, totalCases, yamlPath) =>
                         {
+                            if (!TrySetActiveContext(executionId, null)) return;
                             UpdateExecution(executionId, execution =>
                             {
                                 execution.currentYamlPath = MakeProjectRelative(yamlPath);
@@ -706,7 +735,7 @@ namespace CodingRiver.UPilot
                         {
                             lock (_stateLock)
                             {
-                                _activeContext = context;
+                                if (!TrySetActiveContext(executionId, context)) return;
                                 if (_executions.TryGetValue(executionId, out UPilotFlowExecutionResultPayload current))
                                 {
                                     current.currentCaseName = context.CaseName;
@@ -729,10 +758,7 @@ namespace CodingRiver.UPilot
                         },
                         CaseCompleted = (caseIndex, totalCases, yamlPath, caseResult) =>
                         {
-                            lock (_stateLock)
-                            {
-                                _activeContext = null;
-                            }
+                            if (!TrySetActiveContext(executionId, null)) return;
 
                             string reportPath = _executions.TryGetValue(executionId, out UPilotFlowExecutionResultPayload executionForCase)
                                 ? executionForCase.reportPath
@@ -848,9 +874,12 @@ namespace CodingRiver.UPilot
             {
                 lock (_stateLock)
                 {
-                    _activeContext = null;
-                    _activeExecutionId = null;
-                    _isRunning = false;
+                    if (_activeExecutionId == executionId)
+                    {
+                        _activeContext = null;
+                        _activeExecutionId = null;
+                        _isRunning = false;
+                    }
                 }
 
                 if (_executionCts.TryRemove(executionId, out CancellationTokenSource cts))

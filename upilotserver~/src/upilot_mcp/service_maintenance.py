@@ -27,7 +27,7 @@ def same_path(left: object, right: object) -> bool:
 
 def read_summary(project: Path | None, session=None, *, now_ms: int | None = None) -> dict:
     result = {
-        "approved": False, "effectiveApproved": False, "restartTimeoutSeconds": 120,
+        "approved": False, "effectiveApproved": False, "restartTimeoutSeconds": 120, "autoHardStopOnSoftFailure": False,
         "configError": "", "unavailableReason": "SERVICE_MAINTENANCE_NOT_APPROVED",
         "nextAction": "Enable AI service maintenance in the Unity settings; never self-authorize.",
         "recordStatus": "missing", "latest": None, "deadlineExceeded": False,
@@ -49,6 +49,8 @@ def read_summary(project: Path | None, session=None, *, now_ms: int | None = Non
             raise ValueError("restartTimeoutSeconds must be an integer between 30 and 600.")
         if type(section.get("approved", False)) is not bool:
             raise ValueError("approved must be a boolean.")
+        if type(section.get("autoHardStopOnSoftFailure", False)) is not bool:
+            raise ValueError("autoHardStopOnSoftFailure must be a boolean.")
         for field in ("projectPath", "approvedAtUtc"):
             if not isinstance(section.get(field, ""), str):
                 raise ValueError(f"{field} must be a string.")
@@ -56,6 +58,7 @@ def read_summary(project: Path | None, session=None, *, now_ms: int | None = Non
             approved=section.get("approved", False),
             effectiveApproved=section.get("approved", False) and same_path(section.get("projectPath"), project),
             restartTimeoutSeconds=timeout,
+            autoHardStopOnSoftFailure=section.get("autoHardStopOnSoftFailure", False),
         )
         if result["effectiveApproved"]:
             result.update(unavailableReason="", nextAction="Inspect current EditMode and identities before requesting maintenance.")
