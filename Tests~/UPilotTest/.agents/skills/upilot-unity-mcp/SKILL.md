@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, registered Automation Step development and stepPlan composition, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, historical Automation Step diagnosis and suspended-orchestration boundaries, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
 ---
 
 <!-- Generated from SKILL.md.template. Do not edit SKILL.md directly. -->
@@ -74,41 +74,25 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - `unity_compile` already forces one incremental script-compilation request (`AssetDatabase.Refresh` + `RequestScriptCompilation`); it is not a Clean Build and cannot bypass a disconnected Bridge, PlayMode, an active compile, or stale Editor state. Prefer the correlated write-batch workflow after code changes.
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - For PlayMode tests, keep the returned `runGuid` and query `unity_test_results(runGuid=...)`; UPilot persists the run across Domain Reload and MCP reconnects.
-- Before starting a hand-authored generic operation, call `unity_operation_validate(jobSpec)` to check calls, placeholders, mappings, timeouts, and artifact rules without starting business work.
-- A long-operation wait window ending is non-terminal when `waitWindowElapsed=true` and `terminal=false`; continue polling until the job completes or reaches `jobTimeoutAt`.
+- New generic Operation/Step admission and public validation are suspended with `GENERIC_ORCHESTRATION_DISABLED`. Use dedicated tools; do not submit handwritten callbacks or `stepPlan`, including built-ins.
+- For a historical Operation, `RecoveryRequired` returns immediately from wait with `recoveryBlocked=true/terminal=false`. Report the blocker without replaying Start/Cancel or extending deadlines. A normal `waitWindowElapsed=true/terminal=false` is only a wait-window boundary; existing safe background observation continues independently.
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
 - Use `detailLevel=summary` and a bounded `maxTailChars` for routine `unity_operation_status/wait`; use `standard` or `full` only for targeted diagnosis.
 - Retry automatically only when the operation is idempotent and non-destructive.
 
-## Project Workflows
+## Dedicated Workflows And Historical Steps
 
-- When a project exposes an authoritative compiled orchestration entry point for a test, build, or workflow, call it and poll its state. Do not reconstruct the workflow with shell commands, temporary scripts, menu calls, or UI automation.
-- Keep business step implementations, assertions and restoration in project code. For UPilot Automation, read `references/automation-steps.md`: query the UPilot-owned directory, compose approved Skill templates with selected Cases into `jobSpec.stepPlan`, validate the complete list, then use existing Operation tools. Project Steps implement the string-only `IAutomationStep` contract or inherit `AutomationStepBase`; `arguments` is always last and results are JSON. Do not add parallel start/status tools, make the legacy project Bridge mandatory for new Step plans, or drive individual steps from client polling.
-
-## Step Development
-
-For adding, changing or removing a registered Step, read the **Authoring A Step**
-section of `references/automation-steps.md` before editing code. It includes the
-responsibility decision, lifecycle override table, guarded C# example, optional-package
-behavior, registration troubleshooting and targeted acceptance checklist.
-Load the active project's business rules/Skill as well; those define prerequisites,
-arguments, ordering and assertions, not the UPilot framework.
-
-Deliver the stable ID, source/type, argument example, completion/error contract,
-resource restoration strategy, intended plan position and actual validation evidence.
-Update the owning Skill template/selection when an approved Step becomes selectable;
-never restore a removed project Runner, Registry or test menu to make it discoverable.
-For instruction-only tasks, validate and synchronize instructions without creating
-a sample production Step or launching a workflow.
+- Use `unity_test_run`, `unity_upilot_acceptance_run`, the compile/write-batch workflow, `unity_build_start`, `unity_console_capture_start` or `unity_snapshot_capture` for their respective jobs; observe their original identities and authoritative cleanup.
+- Generic `unity_operation_start/validate` are retained compatibility endpoints that reject new work before validation, records, Capture or business dispatch. Unity public Step start/validation also reject. This fixed pause is not controlled by Flow or a user switch.
+- Task wrappers, reflection/eval, temporary scripts and internal executors must not be used to repackage or bypass the suspended workflow. Ordinary unrelated single calls remain available.
+- Existing Operations/Steps keep status, artifacts and already supported safe cancellation, cleanup, recovery and disposition. Never clear unknown resource ownership or rewrite old records merely because new admission is disabled.
+- Read `references/automation-steps.md` only for historical contracts or explicitly scoped internal maintenance. No new plan composition, production Step launch, recovery-framework expansion or production testing bypass is authorized by that reference. Use isolated engine fixtures for direct regressions.
 
 ## Persistent Console Capture
 
-For plans with `upilot.console_capture_start`, use plan ownership instead of the
-manual sequence below: start that Step first and once, set Operation
-`consoleCapture.enabled=false`, and let the executor stop/verify Capture after
-Finally. Use `upilot.capture_snapshot` or the base class's string/JSON evidence
-helpers for run-owned screenshots; projects should not duplicate observers.
-See `references/automation-steps.md`.
+Already accepted plans with `upilot.console_capture_start` retain executor ownership;
+do not start a new plan or another Capture around them. Keep original IDs and inspect
+historical cleanup/evidence through `references/automation-steps.md`.
 
 Use persistent capture when logs must survive long waits, Console clears, or Agent polling gaps:
 
@@ -179,17 +163,61 @@ confirmation; it does not grant arbitrary writes or change the original tools' g
    observe the existing status tools until cleanup is confirmed, or report unconfirmed.
 
 Task/Test support `cancel` and existing `cleanup`; Operation supports `cancel`, including
-associated Steps; Capture supports exact `stop` while retaining artifacts. Step force
-recovery and generic Bridge-command revocation are unsupported. WriteBatch `release`
-only disposes an inactive historical recovery blocker after verified backup. Its
-original result stays unknown; disposition is separate and survives Server restart.
-Never use another compile's success as evidence for that old batch.
+associated Steps, and explicit `recover` for supported original Step cleanup. Recovery
+uses the original run/type/instance/checkpoint, never Execute, a rewound cursor or
+completed Finally. An uncertain recovery request is observed under its persisted ID,
+not resent. Expired cleanup budgets stop new actions, not safe read-only observation.
+See `references/automation-steps.md` for the cleanup ledger and supported boundaries.
+Capture supports exact `stop` while retaining artifacts. Step force recovery and
+generic Bridge-command revocation remain unsupported.
+
+Task/Operation `release` is a separate administrative terminal (`Released`), not business
+success or acceptance passed. Initial adapters are intentionally finite:
+- Test Tasks must retain original runGuid authoritative terminal and verified cleanup
+  evidence, with an inactive runner. This can dispose a lost outer report/workflow
+  result, not a test whose authoritative execution/cleanup evidence is itself lost.
+- Step Operations must be composed only of the concrete built-in `wait_seconds`, have
+  consumed their business cursor and verified all cleanup, and own no external
+  Capture/Snapshot resources. Custom, scene/mode and other Steps are unsupported.
+
+Release verifies original identity, no pending/in-flight execution, fresh Editor state,
+backup bytes/hash and unchanged preview. Unity persists the original Step disposition
+before clearing Busy; late original calls cannot act on a new run. Server restart or
+lost response observes the original disposition ID and never resubmits release. Unknown
+business outcome stays unknown and partial real results are retained. No age-based or
+chat-disconnect release, `force` bypass, fabricated failure or record deletion.
+
+WriteBatch `release` retains its existing separate disposition: inactive historical
+blocker, verified backup, original result unknown. Never use another compile's success
+as evidence for that old batch.
 
 Failed backup, possible execution, target changes, permission refusal and unsupported
 adapters leave records intact. Preview tokens expire after 120 seconds and are one-shot.
-Do not replay an uncertain apply or Start. No automatic Unity restart or blanket cleanup.
+Do not replay an uncertain apply or Start. No automatic Unity restart or unconditional queue reset.
 This exception permits ownerless Capture disposition only through `unity_queue_cleanup`;
 it does not relax the direct Capture ownership rules.
+
+Explicit `Task/abandon` is a separate emergency adapter for original post-Reload test
+cleanup orphans only: different original/current callback domains, inactive original
+Runner, no remaining managed API/callback references, stable Editor and no pending
+Bridge execution. Preview/apply verifies backups and persists a disposition before
+releasing the slot. It does NOT prove original resource release: preserve unresolved
+evidence, known business results, `cleanupSucceeded=false`, and `Released` rather than
+passed acceptance. It does not relax strict `release` or support arbitrary async work.
+
+Advanced Settings **批量清理可安全处理项** uses the same finite backend as AI clients:
+1. Preview `unity_queue_cleanup(targetType="All", targetId="*", action="force_clear_all",
+   reason="<short reason>")`. Inspect ready/unsupported entries and incomplete sources.
+2. Remember the preview `requestId` BEFORE apply. Apply identical fields with
+   `dryRun=false`, `confirmToken`, `expectedProjectPath`. Independent queue permission
+   remains mandatory. Changed membership or target identity rejects before dispatch.
+3. Observe `unity_queue_cleanup(targetType="All", targetId="<original requestId>",
+   action="force_clear_status")`. Unknown dispatch is never resent after timeout,
+   window close, Domain Reload or Server restart. Individual actions revalidate state.
+4. `dispatchComplete` means requests processed, not resources stopped. Only complete
+   inventory with no remaining blockers yields `allCleared=true`. Unsupported targets
+   remain with reasons; do not hide them or delete history. Never invoke this action
+   automatically as a test prerequisite; it affects other chats in the same project.
 
 Critical cancel/stop notices use `[UPilot][QueueCleanup]`. Failed/unconfirmed results
 are Server Error and, when Unity is reachable, real `Debug.LogError`; a disconnected
@@ -198,9 +226,9 @@ Editor cannot immediately display a forwarded error. Never log tokens or full ar
 ## Focused Reliability
 
 - Use `unity_test_list`, `unity_test_run` and `unity_upilot_acceptance_run` with exact `testNames`, fully qualified `fixtures`, `assemblies` and/or `categories`. `matchMode=union` preserves the default; `intersection` intersects nonempty field groups while values inside each group remain a union. List and execute use the same assembly-isolated selection. Inspect selector counts; do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
-- `unity_upilot_acceptance_run` (except `preflightOnly=true`) immediately returns a durable queued Task with `taskId` and no fabricated `runGuid`. Poll `unity_task_status(taskId=...)` for the final acceptance report and summary artifact; `ok=true` on submission is not acceptance success. `preflightOnly=true` remains synchronous and creates no Task. The older `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})` route uses the same single Task execution path. Tests/package acceptance and generic `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Generic operations persist start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
+- `unity_upilot_acceptance_run` (except `preflightOnly=true`) immediately returns a durable queued Task with `taskId` and no fabricated `runGuid`. Poll `unity_task_status(taskId=...)` for the final acceptance report and summary artifact; `ok=true` on submission is not acceptance success. `preflightOnly=true` remains synchronous and creates no Task. The older `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})` route uses the same single Task execution path. Tests/package acceptance and historical `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Historical generic operations preserve start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
 - `unity_task_cancel` requests underlying test cancellation. It is not terminal until authoritative cleanup succeeds. Unsupported generic-task cancellation leaves both work and observation running.
-- A recovered test task observes its established runGuid and never replays start. `RecoveryRequired` means the outcome or cleanup is unproven, not success or cancellation. Inspect original evidence before any new run.
+- Audited recovery observers continue independently of client polling and reattach after Server restart by original Step run or test runGuid, with observation-error backoff from 3 to 60 seconds. They never replay start or assume an arbitrary reflection status callback is read-only. `RecoveryRequired` is not success or cancellation; true terminal results plus verified cleanup (and required Editor readiness) end the original task. A known failure stays failed after cleanup recovery. Missing identity, unsafe adapters and persistence barriers remain protected.
 - Acceptance requires a matching authoritative run, successful cleanup, verified compile evidence and unchanged checked source. Already verified compilation covering the current C# input timestamps is reused without a second compile.
 - `unity_prefab_patch` supports one ordinary non-nested prefab, one unambiguous child/component and supported existing value fields. Use `dryRun=true`, inspect old/new values and hashes, obtain explicit approval, then apply with the returned confirmToken and identical request.
 - Prefab patch v1 rejects an open target Prefab Mode, model/variant/nested prefabs, component/array structure changes, object-reference changes and numeric enums. It creates a temporary candidate only on apply, verifies the reload and preserves a backup; recovery is conditional on current asset/meta hashes. It is not a transaction over user callbacks.
@@ -212,7 +240,7 @@ For execution-tool selection and typed values, read `references/execution-tools.
 
 - Installation: read `references/installation.md`.
 - Common flows: read `references/workflows.md`.
-- Adding/changing Steps, lifecycle examples, optional-package isolation, registered plans and evidence ownership: read `references/automation-steps.md`.
+- Historical Step lifecycle, internal maintenance, optional-package isolation and evidence ownership: read `references/automation-steps.md`.
 - Tool choice: read `references/tool-routing.md` and `references/tool-boundaries.md`.
 - Client transport/config: read `references/client-configs.md`.
 - Recovery and destructive work: read `references/safety.md`.

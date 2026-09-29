@@ -41,9 +41,6 @@ namespace CodingRiver.UPilot
             _setupStartAfterSetup = EditorGUILayout.ToggleLeft("完成后启动 UPilot 服务", _setupStartAfterSetup);
             DrawProjectWriteAccessToggle();
 
-            if (!string.IsNullOrWhiteSpace(_setupCompletionMessage))
-                EditorGUILayout.HelpBox(_setupCompletionMessage, _setupCompletionMessageType);
-
             EditorGUILayout.Space(12);
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -101,6 +98,17 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
+                // Ports may have been taken while the runtime was being installed.
+                // Return to port selection before writing config or attempting a restart.
+                EvaluateSetupPorts();
+                if (!_setupPortsReady)
+                {
+                    _setupCompletionMessage = "端口配置未完成，未启动服务。请确认可用端口后继续。";
+                    _setupCompletionMessageType = MessageType.Error;
+                    SetSetupStep(0);
+                    return;
+                }
+
                 SaveSetupPorts();
                 if (_setupApproveProjectWrites)
                     UPilotProjectConfig.ApproveProjectWriteAccess();
@@ -147,7 +155,7 @@ namespace CodingRiver.UPilot
                 _mainView = UPilotMainView.Dashboard;
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
-                ShowNotice("UPilot 配置完成并已启动");
+                ShowNotice(_setupStartAfterSetup ? "UPilot 配置完成并已启动" : "UPilot 配置已保存，未启动服务");
             }
             catch (Exception ex)
             {

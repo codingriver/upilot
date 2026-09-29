@@ -381,6 +381,10 @@ async def _run_http_server(
         return JSONResponse({"ok": response.ok, "data": response.data,
                              "error": response.error.code if response.error else None})
 
+    async def queue_cleanup_endpoint(request):
+        from .queue_http import cleanup_endpoint
+        return await cleanup_endpoint(request, _get_facade())
+
     # Friendly endpoint for clients that probe /mcp with a browser-like GET.
     # Actual MCP JSON-RPC requests must still use POST against the same path.
     async def mcp_get_endpoint(request):
@@ -556,6 +560,7 @@ async def _run_http_server(
         starlette.routing.Route("/stats", endpoint=stats_endpoint)
     )
     wrapped_app.router.routes.append(starlette.routing.Route("/queue", endpoint=queue_endpoint, methods=["GET"]))
+    wrapped_app.router.routes.append(starlette.routing.Route("/queue/cleanup", endpoint=queue_cleanup_endpoint, methods=["POST"]))
 
     config = Config(
         app=wrapped_app,

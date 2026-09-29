@@ -88,8 +88,8 @@ namespace CodingRiver.UPilot
         }
 
         internal static CommandDescriptor AutomationStepDescriptor(string route, string action) =>
-            new(route, category: "automation", idempotent: action != "start" && action != "cancel",
-                destructive: action == "start" || action == "cancel", playModePolicy: "allowed");
+            new(route, category: "automation", idempotent: action != "start" && action != "cancel" && action != "recover" && action != "release",
+                destructive: action == "start" || action == "cancel" || action == "recover" || action == "release", playModePolicy: "allowed");
 
         private static OperationLogEntry GetEntryForContext(string commandId)
         {

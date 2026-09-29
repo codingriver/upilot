@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -89,6 +89,25 @@ namespace CodingRiver.UPilot.Automation
         public long cleanupStartedAtUtcMs;
         public long finishedAtUtcMs;
         public bool cancelSent;
+        // Unknown is intentional for old records: absence is not release evidence.
+        public string cleanupState = "Unknown";
+        public string cleanupRecoveryError = "";
+    }
+
+    [Serializable]
+    public sealed class AutomationStepDisposition
+    {
+        public string requestId, reason, runId, operationId, originalStatus, backupPath, backupSha256;
+        public long disposedAtUtcMs, backupBytes;
+        public bool originalTerminal;
+    }
+
+    [Serializable]
+    internal sealed class AutomationStepReleaseProof
+    {
+        public bool eligible;
+        public string runId, operationId, stateHash, reason;
+        public string adapter = "builtin-wait-v1";
     }
 
     [Serializable]
@@ -107,6 +126,13 @@ namespace CodingRiver.UPilot.Automation
         public bool terminal;
         public bool cleanupPending;
         public bool recoveryRequired;
+        public AutomationStepDisposition disposition;
+        public int cleanupTrackingVersion;
+        public string recoveryBlockedReason = "";
+        public string cleanupRecoveryRequestId = "";
+        public string cleanupRecoveryState = "";
+        public long cleanupRecoveryDeadlineUtcMs;
+        public string resourceRecoveryError = "";
         public bool cancelRequested;
         public long startedAtUtcMs;
         public long finishedAtUtcMs;

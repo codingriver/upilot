@@ -218,6 +218,30 @@ namespace CodingRiver.UPilot.Automation
             }
             return Result(record);
         }
+        // Recovery is observation-only: never Start/Cancel, including after cancellation grace expires.
+        internal bool ObserveRelease(AutomationSnapshotRecord record)
+        {
+            if (string.IsNullOrEmpty(record.snapshotId)) throw new InvalidDataException("STEP_SNAPSHOT_IDENTITY_INVALID");
+            var observed = UPilotSnapshotApiV1.Status(record.snapshotId);
+            if (!observed.ok) throw new InvalidDataException("STEP_SNAPSHOT_OBSERVATION_FAILED");
+            return AcceptReleased(record, observed.job);
+        }
+        internal bool AcceptReleased(AutomationSnapshotRecord record, SnapshotJobPayload job)
+        {
+            string expectedKey = RequestKey(_run.runId, record.instanceId, record.evidenceKey);
+            string directory = Path.GetFullPath(Path.Combine(_run.reportDirectory, "snapshots", expectedKey.Substring("step:".Length)));
+            if (record.requestedAt <= 0 || string.IsNullOrEmpty(record.snapshotId) || record.requestKey != expectedKey
+                || job == null || job.snapshotId != record.snapshotId || job.requestKey != expectedKey
+                || string.IsNullOrEmpty(job.outputDirectory) || !string.Equals(Path.GetFullPath(job.outputDirectory),
+                    directory, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("STEP_SNAPSHOT_IDENTITY_INVALID");
+            if (!job.terminal) return false;
+            VerifyFiles(job, artifacts => { foreach (var artifact in artifacts) AddArtifact(record, artifact); });
+            // Preserve the original business/evidence failure even when the underlying request is now finished.
+            record.unresolved = false; record.recorded = true; _save();
+            return true;
+        }
+
         internal bool CompleteItem(string instanceId)
         {
             foreach (var record in _run.snapshots.Where(s => s.instanceId == instanceId).ToArray())

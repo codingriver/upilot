@@ -340,6 +340,8 @@ namespace CodingRiver.UPilot
 
         private static void Recover()
         {
+            // Update may recover before the delayed callback; never recover a newly accepted request twice.
+            if (_recoveryChecked) return;
             try
             {
                 var r = Current;
@@ -406,7 +408,13 @@ namespace CodingRiver.UPilot
 
         private static void Update()
         {
-            if (!_recoveryChecked) return;
+            if (!_recoveryChecked)
+            {
+                // delayCall depends on Inspector updates and may not run while the Editor is unattended.
+                Recover();
+                return;
+            }
+            if (!string.IsNullOrEmpty(StorageError)) return;
             var r = Current;
             if (r?.Active != true) return;
             try

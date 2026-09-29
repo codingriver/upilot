@@ -145,16 +145,18 @@ namespace CodingRiver.UPilot
         {
             var methods = _api.GetMethods(BindingFlags.Public | BindingFlags.NonPublic
                 | BindingFlags.Static | BindingFlags.Instance);
-            var method = methods.FirstOrDefault(candidate => candidate.Name == "UnregisterTestCallback"
-                && candidate.IsPublic && candidate.IsStatic && candidate.IsGenericMethodDefinition
+            // Pair the public instance registration with its original managed owner, even
+            // when Unity has destroyed its native object. Static-only APIs remain supported.
+            var method = methods.FirstOrDefault(candidate => candidate.Name == "UnregisterCallbacks"
+                && candidate.IsPublic && !candidate.IsStatic && candidate.IsGenericMethodDefinition
                 && candidate.GetGenericArguments().Length == 1 && candidate.GetParameters().Length == 1
                 && candidate.GetParameters()[0].ParameterType == candidate.GetGenericArguments()[0]);
             if (method != null) return method;
-            return methods.FirstOrDefault(candidate => candidate.Name == "UnregisterCallbacks"
-                && candidate.IsPublic && !candidate.IsStatic && candidate.IsGenericMethodDefinition
+            return methods.FirstOrDefault(candidate => candidate.Name == "UnregisterTestCallback"
+                && candidate.IsPublic && candidate.IsStatic && candidate.IsGenericMethodDefinition
                 && candidate.GetGenericArguments().Length == 1 && candidate.GetParameters().Length == 1
                 && candidate.GetParameters()[0].ParameterType == candidate.GetGenericArguments()[0])
-                ?? throw BindingFailure(_api, "UnregisterTestCallback<T>(T) or UnregisterCallbacks<T>(T)");
+                ?? throw BindingFailure(_api, "UnregisterCallbacks<T>(T) or UnregisterTestCallback<T>(T)");
         }
 
         private static MissingMemberException BindingFailure(Type api, string required, Type candidateType = null)

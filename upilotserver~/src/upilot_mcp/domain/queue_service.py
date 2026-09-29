@@ -9,6 +9,7 @@ from pathlib import Path
 import secrets
 import time
 
+from .queue_bulk import QueueBulkMixin
 from ..protocol import new_id
 from ..process_identity import classify_unity_process, process_creation_time, query_unity_processes
 from ..queue_audit import AUDIT, QUEUE_GUARD, notice, outcome, safe_text
@@ -47,7 +48,7 @@ def item(kind, identity, value, action="", unsupported=""):
                 blockingReason=safe_text(error), action=action, unsupportedReason=unsupported)
 
 
-class QueueDomainService:
+class QueueDomainService(QueueBulkMixin):
     def _queue_project(self, *, allow_disconnected=False):
         session = self.server.session_manager.active
         project = self.server.state.project_path
@@ -98,8 +99,10 @@ class QueueDomainService:
                         continue
                     supported = bool(value.get("durable")) if kind == "Task" else bool(
                         value.get("startEstablished") and (value.get("jobSpec") or {}).get("cancelCall"))
-                    entries.append(item(kind, identity, value, "cancel" if supported else "",
-                                        "" if supported else "No established safe cancellation adapter."))
+                    recovery = kind == "Operation" and value.get("status") == "RecoveryRequired" and (
+                        (value.get("resolvedStatusCall") or {}).get("route") == "automation.steps.state")
+                    entries.append(item(kind, identity, value, "recover" if recovery else "cancel" if supported else "",
+                                        "" if recovery or supported else "No established safe cancellation adapter."))
                     if value.get("runGuid"):
                         test_ids.add(value["runGuid"])
             batches = {v["writeBatchId"]: v for v in store.pending_write_batches()}
@@ -125,7 +128,7 @@ class QueueDomainService:
             if step_path.exists():
                 step = json.loads(step_path.read_text(encoding="utf-8-sig"))
                 if current(step):
-                    entry = item("StepRun", step.get("runId", ""), step, unsupported="Cancel its associated Operation; no forced Step recovery.")
+                    entry = item("StepRun", step.get("runId", ""), step, unsupported="Preview recover on its original Operation; unsupported recovery remains blocked.")
                     entry["operationId"] = step.get("operationId", "")
                     entry["source"] = "persisted"
                     entries.append(entry)
@@ -138,7 +141,7 @@ class QueueDomainService:
                             "status": record.get("stage"),
                             "updatedAt": record.get("cleanupStartedAtUtcMs") or record.get("startedAtUtcMs"),
                             "error": record.get("error"),
-                        }, unsupported="Cancel its associated Operation; no forced Step recovery.")
+                        }, unsupported="Preview recover on its original Operation; unsupported recovery remains blocked.")
                         entry.update(operationId=step.get("operationId", ""), runId=step.get("runId", ""), source="persisted")
                         entries.append(entry)
         except Exception:
@@ -283,7 +286,7 @@ class QueueDomainService:
                                 maintenanceRisk="unknown" if issues else "no_known_blocker",
                                 items=entries, authorization=dict(zip(("allowed", "reason"), authorization(project)))))
 
-    async def _queue_target(self, kind, target):
+    async def _queue_target(self, kind, target, action=""):
         store = self.server.state
         if kind == "Test":
             if not self.server.is_ready():
@@ -304,11 +307,20 @@ class QueueDomainService:
             if value and value.get("projectPath") and not same_path(value["projectPath"], store.project_path):
                 raise ValueError("QUEUE_PROJECT_MISMATCH")
             # Bind only safety-relevant state, not poll timestamps/progress/capture counters.
-            return None if value is None else copy.deepcopy({
+            snapshot = None if value is None else copy.deepcopy({
                 k: value.get(k) for k in (key, "projectPath", "status", "phase", "terminal", "endedAt",
                                          "runGuid", "durable", "startEstablished", "cancelIntentSent",
                                          "startIntentSent", "startSendState", "cancelSendState",
-                                         "cancelRequested", "cleanupPending", "jobSpec")})
+                                         "cancelRequested", "cleanupPending", "jobSpec", "startData", "resolvedStatusCall",
+                                         "recoveryIdentityEstablished", "recoveryObservationOnly",
+                                         "cleanupRecoveryRequestId", "cleanupRecoverySendState", "disposition", "releaseRequest")})
+            if snapshot is not None and action == "recover":
+                snapshot["_stepRecovery"] = await self._queue_step_recovery_probe(value)
+            if snapshot is not None and action == "abandon":
+                snapshot["_abandonEvidence"] = await self._queue_test_abandon_probe(value)
+            if snapshot is not None and action == "release" and not value.get("disposition"):
+                snapshot["_releaseEvidence"] = await self._queue_job_release_probe(kind, value)
+            return snapshot
         if kind == "Capture":
             root = Path(store.project_path) / "Log" / "UPilotConsole"
             for path in root.glob("*/session.json"):
@@ -317,9 +329,84 @@ class QueueDomainService:
                     return {k: value.get(k) for k in ("sessionId", "active", "startedAtUtcMs", "ownerId", "ownerTokenSha256")}
         return None
 
+    def _queue_job_execution_idle(self):
+        execution = self.server.state.execution_state()
+        return (self.server.is_ready() and execution.get("authoritative") is True
+                and execution.get("isStale") is False and execution.get("playModeState") == "edit"
+                and execution.get("isCompiling") is False and execution.get("mainThreadQueueDepth") == 0
+                and execution.get("compilePhase") in {"idle", "completed", "failed"}
+                and not execution.get("suspectedStuck")
+                and not getattr(self.server, "_pending", {}) and not getattr(self.server, "_suspended", {})
+                and not any(c.status in {"pending", "sent"} for c in self.server.state.commands.values()))
+
+    @staticmethod
+    def _queue_task_release_eligible(value):
+        return (value.get("status") == "RecoveryRequired" and not value.get("terminal")
+                and not value.get("endedAt") and value.get("durable") is True
+                and not value.get("disposition") and not value.get("releaseRequest")
+                and bool(value.get("runGuid")) and value.get("startSendState") == "response_received"
+                and value.get("recoveryObservationOnly") is True and not value.get("_recoveryFinalizing")
+                and value.get("cancelSendState") != "sent_unknown"
+                and (value.get("error") or {}).get("code") != "TEST_TASK_PERSIST_FAILED")
+
+    async def _queue_job_release_probe(self, kind, value):
+        if (not self._queue_job_execution_idle() or value.get("status") != "RecoveryRequired"
+                or value.get("endedAt") or value.get("releaseRequest") or not value.get("durable")):
+            raise ValueError("QUEUE_RELEASE_UNSUPPORTED: original execution/dispatch is not safely fenced.")
+        if kind == "Task":
+            if not self._queue_task_release_eligible(value):
+                raise ValueError("QUEUE_RELEASE_UNSUPPORTED: test start/observer identity is uncertain.")
+            result = await self.test_results(run_guid=value["runGuid"])
+            sample = result.data if result.ok and isinstance(result.data, dict) else {}
+            if (not self._queue_task_release_eligible(value)
+                    or sample.get("runGuid") != value["runGuid"] or sample.get("resultAuthoritative") is not True
+                    or sample.get("status") not in {"completed", "failed", "aborted", "no_tests"}
+                    or sample.get("runnerState") != "inactive" or not self._test_cleanup_verified(sample)):
+                raise ValueError("QUEUE_RELEASE_UNSUPPORTED: original authoritative test cleanup evidence is missing.")
+            return {k: sample.get(k) for k in ("runGuid", "status", "resultAuthoritative", "cleanupSucceeded",
+                "cleanupPending", "runnerState", "unresolvedResources", "total", "passed", "failed", "skipped",
+                "cleanupStatus", "cleanupSucceeded", "cleanupErrors", "cleanupErrorHistory",
+                "cleanupAttemptDeadlineAt", "cleanupResourcesReleased", "persistenceError")}
+        call, reason = self._operation_recovery_call(value)
+        capture = value.get("consoleCapture") or {}
+        if call is None or capture.get("sessionId") or capture.get("startIntentSent"):
+            raise ValueError(reason or "QUEUE_RELEASE_UNSUPPORTED: outer Capture requires separate verified cleanup.")
+        result = await self._operation_invoke(dict(call, route="automation.steps.release_preview"), value["operationId"])
+        sample = result.data if result.ok and isinstance(result.data, dict) else {}
+        proof = sample.get("releaseProof") or {}
+        if (self._operation_recovery_evidence_error(value, sample) or proof.get("eligible") is not True
+                or proof.get("runId") != call["payload"]["runId"] or proof.get("operationId") != value["operationId"]
+                or proof.get("adapter") != "builtin-wait-v1" or len(str(proof.get("stateHash") or "")) != 64):
+            raise ValueError(proof.get("reason") or "QUEUE_RELEASE_UNSUPPORTED: no audited Step release adapter.")
+        return proof
+
+    async def _queue_step_recovery_probe(self, value):
+        call, reason = self._operation_recovery_call(value)
+        if call is None or value.get("endedAt") or not self.server.is_ready():
+            raise ValueError(reason or "Original Step run is not available for recovery.")
+        result = await self._operation_invoke(call, value["operationId"])
+        payload = result.data if result.ok and isinstance(result.data, dict) else {}
+        if self._operation_recovery_evidence_error(value, payload):
+            raise ValueError("Original Step identity or cleanup evidence is unavailable.")
+        domain = payload.get("domain") or {}
+        if (payload.get("status") != "RecoveryRequired" or domain.get("cleanupTrackingVersion") != 1
+                or domain.get("recoveryBlockedReason") or domain.get("stage") != "Completed"
+                or not domain.get("reportCommitJson") or domain.get("cleanupRecoveryState") in {"Running", "Uncertain", "Observing"}
+                or not (any(s.get("cleanupState") == "Unresolved" for s in domain.get("steps", []))
+                        or (domain.get("captureOwned") and domain.get("captureStartIntent") and not domain.get("captureStopVerified"))
+                        or any(s.get("unresolved") for s in domain.get("snapshots", [])))
+                or any(s.get("cleanupState") not in {"Verified", "NotRequired", "Unresolved"}
+                       for s in domain.get("steps", []))):
+            raise ValueError("STEP_CLEANUP_RECOVERY_UNSUPPORTED: original cleanup/resource evidence is insufficient.")
+        previous = value.get("cleanupRecoveryRequestId")
+        if previous and (domain.get("cleanupRecoveryRequestId") != previous
+                         or domain.get("cleanupRecoveryState") not in {"Failed", "TimedOut", "Unsupported"}):
+            raise ValueError("Observe the original recovery request; its dispatch cannot be replayed.")
+        return payload
+
     async def _queue_operation_guard_valid(self, identity, expected, project):
         return (same_path(self._queue_project(), project) and authorization(project)[0]
-                and self.server.is_ready() and await self._queue_target("Operation", identity) == expected)
+                and self.server.is_ready() and await self._queue_target("Operation", identity, "release" if "_releaseEvidence" in expected else "recover" if "_stepRecovery" in expected else "") == expected)
 
     def _queue_release_safe(self, value):
         state = self.server.state
@@ -354,6 +441,8 @@ class QueueDomainService:
         )):
             await notice(self, request, "", "", "", "failed", "参数无效", "", "QUEUE_INVALID_ARGUMENTS")
             return fail(request, "QUEUE_INVALID_ARGUMENTS", "Expected strings and a boolean dryRun.")
+        if action in {"force_clear_all", "force_clear_status"}:
+            return await self.queue_bulk(target_type, target_id, action, reason, dry_run, confirm_token, expected_project_path)
         if dry_run and not target_type and not target_id:
             return await self.queue_inventory()
         dispatched = False
@@ -369,10 +458,13 @@ class QueueDomainService:
             if not target_id or not reason.strip() or len(reason) > 256:
                 return await reject("QUEUE_TARGET_REQUIRED", "Exact target and a short reason are required.")
             if (target_type, action) not in {("Task", "cancel"), ("Task", "cleanup"), ("Test", "cancel"),
-                                          ("Test", "cleanup"), ("Operation", "cancel"),
-                                          ("Capture", "stop"), ("WriteBatch", "release")}:
+                                          ("Test", "cleanup"), ("Operation", "cancel"), ("Operation", "recover"),
+                                          ("Capture", "stop"), ("WriteBatch", "release"), ("Task", "release"), ("Operation", "release"), ("Task", "abandon")}:
                 return await reject("QUEUE_CLEANUP_UNSUPPORTED", "No safe adapter for this target/action; records were not removed.")
-            value = await self._queue_target(target_type, target_id)
+            try:
+                value = await self._queue_target(target_type, target_id, action)
+            except ValueError as exc:
+                return await reject("QUEUE_CLEANUP_UNSUPPORTED", str(exc))
             if value is None:
                 return await reject("QUEUE_TARGET_NOT_FOUND", "Exact target not found in this project.")
             if target_type == "WriteBatch" and not self._queue_release_safe(value):
@@ -400,9 +492,9 @@ class QueueDomainService:
             if not self.server.is_ready():
                 return await reject("UNITY_NOT_CONNECTED", "结果未确认：Unity 断连，未发送清理。")
             await notice(self, request, target_type, target_id, action, "started",
-                         "开始备份并解除历史阻断" if target_type == "WriteBatch" else "开始取消或停止", reason)
+                         "开始备份并解除历史阻断" if action == "release" else "开始恢复清理" if action == "recover" else "开始取消或停止", reason)
             # Logging crosses an await boundary; recheck the target and grant immediately before dispatch.
-            if await self._queue_target(target_type, target_id) != value or authorization(project)[0] is not True:
+            if await self._queue_target(target_type, target_id, action) != value or authorization(project)[0] is not True:
                 return await reject("QUEUE_TARGET_CHANGED", "Target or authorization changed before dispatch.")
             if not same_path(self._queue_project(), project):
                 return await reject("QUEUE_PROJECT_MISMATCH", "Project changed before dispatch.")
@@ -418,7 +510,7 @@ class QueueDomainService:
                 await notice(self, request, target_type, target_id, action, "noop", "已结束，无需操作", reason)
                 return ok(request, dict(status="noop", terminal=True, targetId=target_id))
             context = AUDIT.set((request, target_type, target_id, action, reason))
-            guard = QUEUE_GUARD.set((target_id, value, project) if target_type == "Operation" else None)
+            guard = QUEUE_GUARD.set((target_id, value, project) if target_type in {"Task", "Operation"} else None)
             try:
                 if target_type == "WriteBatch":
                     if not self._queue_release_safe(value):
@@ -426,6 +518,11 @@ class QueueDomainService:
                     disposition = self.server.state.dispose_write_batch(target_id, value, reason=safe_text(reason), request_id=request)
                     response = ok(request, dict(status="released", terminal=True, outcome=value["outcome"],
                                                 originalTerminal=False, disposition=disposition, targetId=target_id))
+                elif target_type == "Task" and action == "abandon":
+                    dispatched = True
+                    response = await self.task_abandon(target_id, value, request, reason)
+                elif target_type == "Task" and action == "release":
+                    response = self.task_release(target_id, value, request, reason)
                 elif target_type == "Task":
                     cancel_before_start = action == "cancel" and value.get("startIntentSent") is False
                     if not value.get("durable") or not (value.get("runGuid") or cancel_before_start):
@@ -443,13 +540,17 @@ class QueueDomainService:
                                       else self.test_force_cleanup(run_guid=target_id))
                 elif target_type == "Operation":
                     dispatched = True
-                    response = await self.operation_cancel(target_id)
+                    response = await (self.operation_release(target_id, request, reason) if action == "release"
+                                      else self.operation_recover(target_id, request) if action == "recover"
+                                      else self.operation_cancel(target_id))
                 else:
                     dispatched = True
                     response = await self.console_capture_stop(session_id=target_id, force_stop=True)
                 phase, result, code = outcome(response)
                 if target_type == "WriteBatch" and response.ok:
                     result = "已解除阻断；原执行结果仍为 unknown"
+                elif action == "release" and response.ok and (response.data or {}).get("status") == "Released":
+                    result = "已行政处置解除阻断；不代表业务成功，原结果与证据保留"
                 await notice(self, request, target_type, target_id, action, phase, result, reason, code)
                 if isinstance(response.data, dict):
                     response.data["queueCleanupRequestId"] = request

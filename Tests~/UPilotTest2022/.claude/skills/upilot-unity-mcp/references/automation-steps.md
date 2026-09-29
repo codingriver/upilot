@@ -314,6 +314,61 @@ do not shorten it to a single tool wait window.
 - Synchronous main-thread hangs cannot be preempted by a step deadline; use existing
   Hang diagnostics, not repeated starts.
 
+## Recovery Observation, Cleanup and Disposition
+
+**A — observe the original run.** The Server keeps its existing per-operation/test
+observer alive across transient observation failures, without chat polling. Only the
+built-in Step state query and original test runGuid query are audited for automatic
+recovery. Identity and explicit terminal/cleanup evidence are mandatory; arbitrary
+reflection callbacks are not retried. Error backoff is 3–60 seconds. Query failure is
+not business failure, and observation never replays Start/Cancel/Restore. A real result
+then follows the original authorized finalization path and required Editor readiness.
+
+**B — explicitly recover cleanup.** Preview/apply the existing `unity_queue_cleanup`
+with `targetType=Operation`, the original operationId and `action=recover`. The Step
+executor persists a per-instance cleanup ledger: Unknown, NotStarted, NotRequired,
+Pending, Verified, Unresolved or Uncertain. Only known failed cleanup (Unresolved) with
+a supported Restore of the same registered type/instance/checkpoint may resume. An
+exception or unknown cleanup side effect is not permission to retry. Original business
+cursor and completed Finally steps never replay. Legacy ledgers remain unknown.
+
+The recovery request ID is durable before callbacks; a lost response or reload observes
+that request, never resends it. One request uses the original cleanup budgets. Expiry
+stops new cleanup actions; safe original Capture/Snapshot observation can still verify
+late resource release. Snapshot observation never recaptures; Capture uses only the
+original session and stop intent. Custom steps need a safe existing Restore/Cleanup
+contract; unsupported cases report the unresolved reason. Test Tasks reuse their
+original runGuid `cleanup` path, not a second cleanup framework.
+
+Every unresolved item must be verified before Busy clears. The first business error
+and immutable original report stay intact; a separate hashed cleanup recovery receipt
+records convergence. Successful cleanup cannot turn a failed business run into success.
+Persistence/report/identity failures remain recovery barriers. Finishing one resource
+never clears another instance's unresolved ledger.
+
+**C — explicit administrative release.** Preview/apply `action=release` for an exact
+Operation or persistent test Task. This does not fabricate a business result. Initial
+Step support is limited to plans composed entirely of the concrete sealed
+`WaitSecondsStep`, with the cursor consumed, all cleanup Verified/NotRequired, same
+Editor identity and no Capture/Snapshot/external resources. Tests require retained
+original authoritative terminal and cleanup evidence and an inactive runner; only the
+outer workflow/report result may be lost. Arbitrary/custom Steps, scene/mode steps,
+unknown starts and fully lost test cleanup evidence are deliberately unsupported.
+
+Apply must still match preview, project, independent cleanup grant and execution proof.
+Server/Unity retain verified backups and original errors. Unity persists a disposition
+fence before releasing Busy; original operation identities cannot Start again, and old
+status/cancel calls return original history rather than touching the new run. Missing
+or invalid Step disposition evidence fails closed after reload. Uncertain dispatch is
+observed under its original ID, not repeated. Released is terminal for waiting/admission,
+not for business success: unknown result stays `businessTerminal=false/outcome=unknown`;
+partial real results are preserved. Never count Released as test/acceptance passed.
+
+There is no new scheduler, disconnect cancellation, automatic Unity restart, queue
+record deletion or generic force-unlock. Admission of the next job uses the existing
+mechanism; a never-accepted request may be resubmitted, but an accepted unknown Start
+must only be observed by its original identity.
+
 ## Built-in Steps
 
 | ID | String argument | Behavior |

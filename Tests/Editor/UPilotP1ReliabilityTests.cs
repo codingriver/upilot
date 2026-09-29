@@ -24,6 +24,53 @@ namespace CodingRiver.UPilot.Tests
             if (Directory.Exists(_directory)) Directory.Delete(_directory, true);
         }
 
+        [TestCase("snapshot")]
+        [TestCase("last-pointer")]
+        [TestCase("active-clear")]
+        public void FinalCommitFailureRetainsActivePointerAndCanResume(string failure)
+        {
+            var original = new TestRunResultPayload { runGuid = "commit-boundary", status = "cleanup",
+                phase = "cleanup", cleanupPending = true, resultAuthoritative = true, outcomeStatus = "failed",
+                cleanupResourcesReleased = true };
+            UPilotTestRunStore.Save(_directory, original, true, false);
+            File.WriteAllText(Path.Combine(_directory, "last-run.txt"), "older-run");
+            var candidate = original.ShallowCopyForPersistence();
+            candidate.status = "failed";
+            candidate.phase = "failed";
+            candidate.cleanupPending = false;
+            candidate.cleanupSucceeded = true;
+            candidate.cleanupStatus = "completed";
+            candidate.endedAt = 100;
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = path =>
+            {
+                if ((failure == "snapshot" && Path.GetFileName(path) == "commit-boundary.json")
+                    || (failure == "last-pointer" && Path.GetFileName(path) == "last-run.txt"))
+                    throw new IOException("injected " + failure);
+            };
+            UPilotTestRunStore.BeforeActivePointerClearForTests = _ =>
+            {
+                if (failure == "active-clear") throw new IOException("injected active clear");
+            };
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, candidate, false, true));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(original.runGuid));
+            var read = UPilotTestRunStore.Read(Path.Combine(_directory, "commit-boundary.json"));
+            Assert.That(read.cleanupSucceeded, Is.False);
+            Assert.That(read.cleanupPending, Is.True);
+            Assert.That(read.outcomeStatus, Is.EqualTo("failed"));
+            if (failure != "snapshot")
+            {
+                Assert.That(read.cleanupStatus, Is.EqualTo("committing"));
+                Assert.That(read.endedAt, Is.EqualTo(100));
+            }
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = null;
+            UPilotTestRunStore.BeforeActivePointerClearForTests = null;
+            UPilotTestRunStore.Save(_directory, candidate, false, true);
+            var committed = UPilotTestRunStore.Read(Path.Combine(_directory, "commit-boundary.json"));
+            Assert.That(committed.cleanupSucceeded, Is.True);
+            Assert.That(committed.status, Is.EqualTo("failed"));
+            Assert.That(File.Exists(Path.Combine(_directory, "active-run.txt")), Is.False);
+        }
+
         [Test]
         public void SnapshotSequenceRejectsOlderWriterAndProtectsOtherActiveRun()
         {
@@ -33,9 +80,14 @@ namespace CodingRiver.UPilot.Tests
             UPilotTestRunStore.Save(_directory, first, true, false);
             Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, stale, true, false));
             var second = new TestRunResultPayload { runGuid = "second", status = "running" };
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, second, true, false));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo("first"));
+            // A new owner may enter only after the original owner commits its release.
+            first.endedAt = 50;
+            UPilotTestRunStore.Save(_directory, first, false, true);
             UPilotTestRunStore.Save(_directory, second, true, false);
             first.endedAt = 100;
-            UPilotTestRunStore.Save(_directory, first, false, true);
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, first, false, true));
             Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo("second"));
             Assert.That(Directory.GetFiles(_directory, "*.tmp"), Is.Empty);
         }

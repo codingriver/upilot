@@ -179,17 +179,61 @@ confirmation; it does not grant arbitrary writes or change the original tools' g
    observe the existing status tools until cleanup is confirmed, or report unconfirmed.
 
 Task/Test support `cancel` and existing `cleanup`; Operation supports `cancel`, including
-associated Steps; Capture supports exact `stop` while retaining artifacts. Step force
-recovery and generic Bridge-command revocation are unsupported. WriteBatch `release`
-only disposes an inactive historical recovery blocker after verified backup. Its
-original result stays unknown; disposition is separate and survives Server restart.
-Never use another compile's success as evidence for that old batch.
+associated Steps, and explicit `recover` for supported original Step cleanup. Recovery
+uses the original run/type/instance/checkpoint, never Execute, a rewound cursor or
+completed Finally. An uncertain recovery request is observed under its persisted ID,
+not resent. Expired cleanup budgets stop new actions, not safe read-only observation.
+See `references/automation-steps.md` for the cleanup ledger and supported boundaries.
+Capture supports exact `stop` while retaining artifacts. Step force recovery and
+generic Bridge-command revocation remain unsupported.
+
+Task/Operation `release` is a separate administrative terminal (`Released`), not business
+success or acceptance passed. Initial adapters are intentionally finite:
+- Test Tasks must retain original runGuid authoritative terminal and verified cleanup
+  evidence, with an inactive runner. This can dispose a lost outer report/workflow
+  result, not a test whose authoritative execution/cleanup evidence is itself lost.
+- Step Operations must be composed only of the concrete built-in `wait_seconds`, have
+  consumed their business cursor and verified all cleanup, and own no external
+  Capture/Snapshot resources. Custom, scene/mode and other Steps are unsupported.
+
+Release verifies original identity, no pending/in-flight execution, fresh Editor state,
+backup bytes/hash and unchanged preview. Unity persists the original Step disposition
+before clearing Busy; late original calls cannot act on a new run. Server restart or
+lost response observes the original disposition ID and never resubmits release. Unknown
+business outcome stays unknown and partial real results are retained. No age-based or
+chat-disconnect release, `force` bypass, fabricated failure or record deletion.
+
+WriteBatch `release` retains its existing separate disposition: inactive historical
+blocker, verified backup, original result unknown. Never use another compile's success
+as evidence for that old batch.
 
 Failed backup, possible execution, target changes, permission refusal and unsupported
 adapters leave records intact. Preview tokens expire after 120 seconds and are one-shot.
-Do not replay an uncertain apply or Start. No automatic Unity restart or blanket cleanup.
+Do not replay an uncertain apply or Start. No automatic Unity restart or unconditional queue reset.
 This exception permits ownerless Capture disposition only through `unity_queue_cleanup`;
 it does not relax the direct Capture ownership rules.
+
+Explicit `Task/abandon` is a separate emergency adapter for original post-Reload test
+cleanup orphans only: different original/current callback domains, inactive original
+Runner, no remaining managed API/callback references, stable Editor and no pending
+Bridge execution. Preview/apply verifies backups and persists a disposition before
+releasing the slot. It does NOT prove original resource release: preserve unresolved
+evidence, known business results, `cleanupSucceeded=false`, and `Released` rather than
+passed acceptance. It does not relax strict `release` or support arbitrary async work.
+
+Advanced Settings **强制清理所有任务** uses the same finite backend as AI clients:
+1. Preview `unity_queue_cleanup(targetType="All", targetId="*", action="force_clear_all",
+   reason="<short reason>")`. Inspect ready/unsupported entries and incomplete sources.
+2. Remember the preview `requestId` BEFORE apply. Apply identical fields with
+   `dryRun=false`, `confirmToken`, `expectedProjectPath`. Independent queue permission
+   remains mandatory. Changed membership or target identity rejects before dispatch.
+3. Observe `unity_queue_cleanup(targetType="All", targetId="<original requestId>",
+   action="force_clear_status")`. Unknown dispatch is never resent after timeout,
+   window close, Domain Reload or Server restart. Individual actions revalidate state.
+4. `dispatchComplete` means requests processed, not resources stopped. Only complete
+   inventory with no remaining blockers yields `allCleared=true`. Unsupported targets
+   remain with reasons; do not hide them or delete history. Never invoke this action
+   automatically as a test prerequisite; it affects other chats in the same project.
 
 Critical cancel/stop notices use `[UPilot][QueueCleanup]`. Failed/unconfirmed results
 are Server Error and, when Unity is reachable, real `Debug.LogError`; a disconnected
@@ -200,7 +244,7 @@ Editor cannot immediately display a forwarded error. Never log tokens or full ar
 - Use `unity_test_list`, `unity_test_run` and `unity_upilot_acceptance_run` with exact `testNames`, fully qualified `fixtures`, `assemblies` and/or `categories`. `matchMode=union` preserves the default; `intersection` intersects nonempty field groups while values inside each group remain a union. List and execute use the same assembly-isolated selection. Inspect selector counts; do not combine these arrays with legacy `testFilter`. Empty arrays are invalid; zero matches do not start a full suite.
 - `unity_upilot_acceptance_run` (except `preflightOnly=true`) immediately returns a durable queued Task with `taskId` and no fabricated `runGuid`. Poll `unity_task_status(taskId=...)` for the final acceptance report and summary artifact; `ok=true` on submission is not acceptance success. `preflightOnly=true` remains synchronous and creates no Task. The older `unity_task_start(toolName="unity_upilot_acceptance_run", retryCount=0, toolArgs={...})` route uses the same single Task execution path. Tests/package acceptance and generic `unity_operation_*` jobs use project-isolated SQLite records; other generic tasks are not durable. Generic operations persist start/cancel intent and observe established identities independently of client polling. After Server restart they resume queries, never replay start; lost start identity requires `RecoveryRequired`. Cancellation or timeout is not proof of business completion or cleanup.
 - `unity_task_cancel` requests underlying test cancellation. It is not terminal until authoritative cleanup succeeds. Unsupported generic-task cancellation leaves both work and observation running.
-- A recovered test task observes its established runGuid and never replays start. `RecoveryRequired` means the outcome or cleanup is unproven, not success or cancellation. Inspect original evidence before any new run.
+- Audited recovery observers continue independently of client polling and reattach after Server restart by original Step run or test runGuid, with observation-error backoff from 3 to 60 seconds. They never replay start or assume an arbitrary reflection status callback is read-only. `RecoveryRequired` is not success or cancellation; true terminal results plus verified cleanup (and required Editor readiness) end the original task. A known failure stays failed after cleanup recovery. Missing identity, unsafe adapters and persistence barriers remain protected.
 - Acceptance requires a matching authoritative run, successful cleanup, verified compile evidence and unchanged checked source. Already verified compilation covering the current C# input timestamps is reused without a second compile.
 - `unity_prefab_patch` supports one ordinary non-nested prefab, one unambiguous child/component and supported existing value fields. Use `dryRun=true`, inspect old/new values and hashes, obtain explicit approval, then apply with the returned confirmToken and identical request.
 - Prefab patch v1 rejects an open target Prefab Mode, model/variant/nested prefabs, component/array structure changes, object-reference changes and numeric enums. It creates a temporary candidate only on apply, verifies the reload and preserves a backup; recovery is conditional on current asset/meta hashes. It is not a transaction over user callbacks.

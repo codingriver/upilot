@@ -994,6 +994,7 @@ class TestDomainService:
             data.get("cleanupPending") is False and data.get("cleanupSucceeded") is True
             and data.get("cleanupStatus") == "completed" and data.get("cleanupErrors") == []
             and data.get("unresolvedResources") == []
+            and not data.get("persistenceError")
         )
 
     async def _wait_for_test_result(self, run_guid: str, deadline_at: int) -> ToolResponse:
@@ -1011,9 +1012,16 @@ class TestDomainService:
                 return fail(new_id("req"), "TEST_RECOVERY_REQUIRED",
                             "Runner recovery requires evidence; the original run was not restarted or cancelled.", data)
             terminal = str(data.get("status") or "").lower() in {"completed", "failed", "aborted", "no_tests"}
-            if final_status.ok and terminal and data.get("cleanupPending") is not True:
-                return final_status
+            if final_status.ok and terminal:
+                if data.get("resultAuthoritative") is True and self._test_cleanup_verified(data):
+                    return final_status
+                return fail(new_id("req"), "TEST_RECOVERY_REQUIRED",
+                            "Terminal business result lacks authoritative cleanup/commit evidence; no cancellation was sent.", data)
             timed_out = now_ms() >= deadline_at
+            if timed_out and (not final_status.ok or data.get("resultAuthoritative") is True
+                              or data.get("cleanupStatus") == "committing"):
+                return fail(new_id("req"), "TEST_RECOVERY_REQUIRED",
+                            "Observation/cleanup remains incomplete; retain the original run without replaying cancellation.", data)
             if (timed_out or state.get("cancelRequested")) and not cleanup_deadline:
                 # A recovered legacy task or an interrupted send has no
                 # response boundary.  Preserve that uncertainty instead of
@@ -1047,9 +1055,10 @@ class TestDomainService:
                 })
             await asyncio.sleep(1.0)
 
-    async def _complete_acceptance_report(self, report: dict) -> ToolResponse:
+    async def _complete_acceptance_report(self, report: dict, *, final_status: ToolResponse | None = None) -> ToolResponse:
         run_guid = report["runGuid"]
-        final_status = await self._wait_for_test_result(run_guid, report["deadlineAt"])
+        if final_status is None:
+            final_status = await self._wait_for_test_result(run_guid, report["deadlineAt"])
         report["steps"]["testStatus"] = _response_summary(final_status)
         if not final_status.ok:
             return self._finish_acceptance_report(report, False, "UPILOT_ACCEPTANCE_RECOVERY_REQUIRED", "Test outcome or cleanup could not be proven.")

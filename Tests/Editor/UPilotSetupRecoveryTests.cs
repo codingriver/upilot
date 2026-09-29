@@ -1,0 +1,189 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
+using NUnit.Framework;
+using UnityEditor;
+using UnityEngine;
+
+namespace CodingRiver.UPilot.Tests
+{
+    public sealed class UPilotSetupRecoveryTests
+    {
+        private readonly Dictionary<string, (bool exists, string value)> _strings = new();
+        private readonly Dictionary<string, (bool exists, bool value)> _bools = new();
+        private bool _lastRepairSucceeded;
+
+        private static string RepairKey(string suffix) =>
+            UPilotPreferences.ProjectKey("UPilot.DirectRepair." + suffix);
+
+        [SetUp]
+        public void SetUp()
+        {
+            foreach (var key in new[] { RepairKey("Failure"), RepairKey("Dialog") })
+                _strings[key] = (EditorPrefs.HasKey(key), EditorPrefs.GetString(key, ""));
+            foreach (var key in new[] { RepairKey("Attempted"), UPilotPreferences.SetupCompletedKey })
+                _bools[key] = (EditorPrefs.HasKey(key), EditorPrefs.GetBool(key, false));
+            _lastRepairSucceeded = UPilotQuickStart.LastRepairSucceeded;
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            foreach (var entry in _strings)
+            {
+                if (entry.Value.exists) EditorPrefs.SetString(entry.Key, entry.Value.value);
+                else EditorPrefs.DeleteKey(entry.Key);
+            }
+            foreach (var entry in _bools)
+            {
+                if (entry.Value.exists) EditorPrefs.SetBool(entry.Key, entry.Value.value);
+                else EditorPrefs.DeleteKey(entry.Key);
+            }
+            SetLastRepairSucceeded(_lastRepairSucceeded);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void RepairFailureReopensWizardOnceWithoutCompletingOrReplaying(bool previouslyConfigured)
+        {
+            EditorPrefs.SetBool(UPilotPreferences.SetupCompletedKey, previouslyConfigured);
+            SetLastRepairSucceeded(true);
+            var attempt = "setup-recovery-test-" + Guid.NewGuid().ToString("N");
+            const string failure = "identity_probe\n无法安全停止 Server：端口进程不属于当前项目或身份未知。";
+            var calls = new List<string>();
+            var record = UPilotServerRestartDiagnostics.Current;
+            var repairing = UPilotQuickStart.IsRepairing;
+            Action<string> openSetup = message =>
+            {
+                Assert.That(message, Is.EqualTo(failure));
+                Assert.That(UPilotQuickStart.LastRepairSucceeded, Is.False);
+                calls.Add("setup");
+            };
+            Action<string, string> showDialog = (title, message) =>
+            {
+                Assert.That(title, Does.Contain("失败"));
+                Assert.That(message, Does.Contain(failure));
+                Assert.That(message, Does.Contain("已重新打开安装向导"));
+                Assert.That(message, Does.Contain("实际只读调用验证通过后才算完成"));
+                Assert.That(message, Does.Contain("不会自动重放"));
+                calls.Add("dialog");
+            };
+
+            UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, openSetup, showDialog);
+            UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, openSetup, showDialog);
+            Assert.That(calls, Is.EqualTo(new[] { "setup", "dialog" }));
+            Assert.That(EditorPrefs.GetString(RepairKey("Failure")), Is.EqualTo(failure));
+            Assert.That(EditorPrefs.GetBool(RepairKey("Attempted")), Is.True);
+            Assert.That(UPilotSetupState.IsCompleted, Is.EqualTo(previouslyConfigured));
+            Assert.That(UPilotQuickStart.IsRepairing, Is.EqualTo(repairing));
+            Assert.That(UPilotServerRestartDiagnostics.Current, Is.SameAs(record));
+
+            UPilotQuickStart.ShowRepairFailureOnce(attempt + "-new", failure, openSetup, showDialog);
+            Assert.That(calls, Is.EqualTo(new[] { "setup", "dialog", "setup", "dialog" }));
+        }
+
+        [Test]
+        public void RecoveryFromFinalStepReturnsToPortsWithStartupEnabledAndFailureVisible()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
+            try
+            {
+                var bridge = UPilotBridge.Instance;
+                var beforeWs = bridge.WsPort;
+                var beforeHttp = bridge.HttpPort;
+                var record = UPilotServerRestartDiagnostics.Current;
+                EditorPrefs.SetBool(UPilotPreferences.SetupCompletedKey, false);
+                SetField(window, "_setupInitialized", true);
+                SetField(window, "_setupStep", 2);
+                SetField(window, "_setupStartAfterSetup", false);
+                SetField(window, "_setupCompletionMessage", "设置完成");
+                SetField(window, "_setupScroll", new Vector2(0, 200));
+                var dialogShown = false;
+                const string failure = "identity_probe: occupied port";
+
+                UPilotQuickStart.ShowRepairFailureOnce("setup-recovery-test-" + Guid.NewGuid().ToString("N"),
+                    failure, window.EnterSetupRecovery, (title, message) =>
+                    {
+                        Assert.That(GetField(window, "_mainView").ToString(), Is.EqualTo("Setup"));
+                        Assert.That(GetField(window, "_setupStep"), Is.EqualTo(0));
+                        dialogShown = true;
+                    });
+
+                Assert.That(dialogShown, Is.True);
+                Assert.That(GetField(window, "_setupStartAfterSetup"), Is.True);
+                Assert.That(GetField(window, "_setupCompletionMessage"), Is.EqualTo(failure));
+                Assert.That(GetField(window, "_setupCompletionMessageType"), Is.EqualTo(MessageType.Error));
+                Assert.That(GetField(window, "_setupScroll"), Is.EqualTo(Vector2.zero));
+                Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(beforeWs));
+                Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(beforeHttp));
+                Assert.That(bridge.WsPort, Is.EqualTo(beforeWs));
+                Assert.That(bridge.HttpPort, Is.EqualTo(beforeHttp));
+                Assert.That(UPilotSetupState.IsCompleted, Is.False);
+                Assert.That(UPilotServerRestartDiagnostics.Current, Is.SameAs(record));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(window); }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void CompletionRechecksOccupiedPortsBeforeWritingOrStarting(bool startAfterSetup)
+        {
+            var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
+            var ws = new TcpListener(IPAddress.Loopback, 0);
+            var http = new TcpListener(IPAddress.Loopback, 0);
+            try
+            {
+                window.EnterSetupRecovery("previous failure");
+                EditorPrefs.SetBool(UPilotPreferences.SetupCompletedKey, false);
+                var beforeConfig = File.Exists(UPilotProjectConfig.ConfigPath)
+                    ? File.ReadAllBytes(UPilotProjectConfig.ConfigPath) : null;
+                var record = UPilotServerRestartDiagnostics.Current;
+                var beforeWs = UPilotBridge.Instance.WsPort;
+                var beforeHttp = UPilotBridge.Instance.HttpPort;
+                ws.Start();
+                http.Start();
+                SetField(window, "_setupWsPort", ((IPEndPoint)ws.LocalEndpoint).Port);
+                SetField(window, "_setupHttpPort", ((IPEndPoint)http.LocalEndpoint).Port);
+                SetField(window, "_setupStep", 2);
+                SetField(window, "_setupPortsReady", true);
+                SetField(window, "_setupStartAfterSetup", startAfterSetup);
+
+                typeof(UPilotMainWindow).GetMethod("CompleteSetupAsync",
+                    BindingFlags.Instance | BindingFlags.NonPublic).Invoke(window, null);
+
+                Assert.That(GetField(window, "_mainView").ToString(), Is.EqualTo("Setup"));
+                Assert.That(GetField(window, "_setupStep"), Is.EqualTo(0));
+                Assert.That(GetField(window, "_setupPortsReady"), Is.False);
+                Assert.That(GetField(window, "_setupCompletionRunning"), Is.False);
+                Assert.That(GetField(window, "_setupCompletionMessageType"), Is.EqualTo(MessageType.Error));
+                Assert.That(GetField(window, "_setupCompletionMessage").ToString(), Does.Contain("未启动服务"));
+                Assert.That(UPilotSetupState.IsCompleted, Is.False);
+                Assert.That(UPilotBridge.Instance.WsPort, Is.EqualTo(beforeWs));
+                Assert.That(UPilotBridge.Instance.HttpPort, Is.EqualTo(beforeHttp));
+                Assert.That(UPilotServerRestartDiagnostics.Current, Is.SameAs(record));
+                Assert.That(File.Exists(UPilotProjectConfig.ConfigPath), Is.EqualTo(beforeConfig != null));
+                if (beforeConfig != null)
+                    Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(beforeConfig));
+            }
+            finally
+            {
+                ws.Stop();
+                http.Stop();
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        private static object GetField(UPilotMainWindow window, string name) =>
+            typeof(UPilotMainWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(window);
+
+        private static void SetField(UPilotMainWindow window, string name, object value) =>
+            typeof(UPilotMainWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic).SetValue(window, value);
+
+        private static void SetLastRepairSucceeded(bool value) =>
+            typeof(UPilotQuickStart).GetProperty(nameof(UPilotQuickStart.LastRepairSucceeded),
+                BindingFlags.Static | BindingFlags.NonPublic).GetSetMethod(true).Invoke(null, new object[] { value });
+    }
+}

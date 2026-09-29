@@ -191,9 +191,9 @@ def test_config_csv_and_operation_camelcase_arguments_match_native_and_proxy_dis
             calls.append(("csv", received))
             return ok("csv", {"received": received})
 
-        async def operation_start(self, job_spec: dict):
-            calls.append(("operation", {"job_spec": job_spec}))
-            return ok("operation", {"received": job_spec})
+        # Use the real admission gate, not a fake that re-enables a suspended tool.
+        from upilot_mcp.domain.task_service import TaskDomainService
+        operation_start = TaskDomainService.operation_start
 
     facade = Facade()
     monkeypatch.setattr(analysis_tools, "_get_facade", lambda: facade)
@@ -211,13 +211,11 @@ def test_config_csv_and_operation_camelcase_arguments_match_native_and_proxy_dis
 
     assert native_csv.structuredContent["data"]["received"]["header_row_index"] == 3
     assert proxy_csv.ok and proxy_csv.data["received"]["header_row_index"] == 3
-    assert native_operation.structuredContent["data"]["received"] == job_args["jobSpec"]
-    assert proxy_operation.ok and proxy_operation.data["received"] == job_args["jobSpec"]
+    assert native_operation.structuredContent["error"]["code"] == "GENERIC_ORCHESTRATION_DISABLED"
+    assert not proxy_operation.ok and proxy_operation.error.code == "GENERIC_ORCHESTRATION_DISABLED"
     assert calls == [
         ("csv", {"path": "Assets/P2.csv", "keys": {"id": "42"}, "fields": None, "header_row_index": 3, "encoding": "auto"}),
         ("csv", {"path": "Assets/P2.csv", "keys": {"id": "42"}, "fields": None, "header_row_index": 3, "encoding": "auto"}),
-        ("operation", {"job_spec": job_args["jobSpec"]}),
-        ("operation", {"job_spec": job_args["jobSpec"]}),
     ]
 
 

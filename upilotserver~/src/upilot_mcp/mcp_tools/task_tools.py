@@ -25,7 +25,7 @@ _reject_write_if_unapproved = runtime._reject_write_if_unapproved
 CONFIG = runtime.CONFIG
 logger = logging.getLogger("upilot.mcp")
 
-@mcp.tool(description="当前项目任务汇总及精确占位清理。默认 dryRun=true 只读；执行需原目标/action/reason、expectedProjectPath 和一次性 confirmToken。仅独立 aiQueueCleanupAllowed 授权，不自动重启、不删除历史证据。")
+@mcp.tool(description="当前项目任务汇总及精确占位清理。默认 dryRun=true 只读；执行需原目标/action/reason、expectedProjectPath 和一次性 confirmToken。仅独立 aiQueueCleanupAllowed 授权。Operation recover 恢复原 Step 未决清理；Task/Operation release 仅限安全适配器，备份后行政终态 Released 不代表业务成功。测试 Task release 仍需原 runGuid 权威停止及清理证据；Step release 首版仅全 wait_seconds 计划。Task abandon 仅处置经验证的 Reload 后测试清理孤儿，保留未释放证据，非清理成功。All/* + force_clear_all 预览有限批次；apply 前保留预览 requestId，All/<requestId> + force_clear_status 只观察。未支持项保留，不保证全部清空。不重放未知请求、不自动重启、不删除历史证据。")
 async def unity_queue_cleanup(targetType: str = "", targetId: str = "", action: str = "",
                               reason: str = "", dryRun: bool = True, confirmToken: str = "",
                               expectedProjectPath: str = ""):
@@ -122,24 +122,13 @@ async def unity_operation_get(commandId: str):
     r = await _get_facade().operation_get(command_id=commandId)
     return _log_tool_result("unity_operation_get", _payload(r))
 
-@mcp.tool(
-    description=(
-        "启动一个通用长作业编排。可用 jobSpec.stepPlan={version:1,steps:[{instanceId,stepId,arguments,phase}]}，"
-        "arguments 只能是字符串，phase 为 Normal/Finally；与 startCall/statusCall/cancelCall 互斥。"
-        "全列表发现及参数预检通过后才创建 Capture 并启动；Unity 推进步骤，状态查询不推进 Case。"
-        "也支持既有 jobSpec displayName、startCall、statusCall、cancelCall、"
-        "timeoutSec、pollIntervalSec、terminalStatusMapping、artifactRules、consoleCapture、retryPolicy。"
-        "statusCall/cancelCall 参数可使用 ${start.field}、${status.field}、${operation.operationId} 精确占位符。"
-        "stepPlan 由 UPilot 注册目录预检并由 Unity 执行器推进；项目 Step 使用字符串生命周期契约，arguments 始终最后。"
-        "既有调用组继续调用项目入口；两种形式均不解析业务 domain 字段。"
-    )
-)
+@mcp.tool(description="通用 Operation／Step 计划的新启动已暂停。保留兼容入口并返回 GENERIC_ORCHESTRATION_DISABLED；请使用专用工具，不创建任务或 Capture。")
 async def unity_operation_start(jobSpec: dict):
     _log_tool_call("unity_operation_start", {"jobSpec": jobSpec})
     r = await _get_facade().operation_start(job_spec=jobSpec)
     return _log_tool_result("unity_operation_start", _payload(r))
 
-@mcp.tool(description="只读预校验通用长作业 jobSpec。stepPlan 由 Unity 检查全部 Step 注册、接口、字符串参数和 Finally 顺序；不创建 Capture、不执行步骤。既有调用组检查保持兼容。")
+@mcp.tool(description="通用编排验证已暂停，返回 GENERIC_ORCHESTRATION_DISABLED；不会调用项目验证回调，不再建议启动新的 Operation。")
 async def unity_operation_validate(jobSpec: dict, inspectReflection: bool = True):
     _log_tool_call("unity_operation_validate", {"jobSpec": jobSpec, "inspectReflection": inspectReflection})
     r = await _get_facade().operation_validate(job_spec=jobSpec, inspect_reflection=inspectReflection)
@@ -153,7 +142,7 @@ async def unity_operation_status(operationId: str, detailLevel: str = "summary",
 
 @mcp.tool(
     description=(
-        "等待一个通用长作业直到终态、超时或疑似卡住。只返回 phase/status/error/"
+        "等待已有通用长作业直到终态、等待窗口结束或疑似卡住；RecoveryRequired 立即返回恢复阻塞，不自动取消或重放。只返回 phase/status/error/"
         "failureSignature/artifact 变化摘要，并在终态收集 artifacts。"
     )
 )

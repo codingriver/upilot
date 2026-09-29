@@ -269,7 +269,7 @@ def test_operation_uses_existing_cancel_not_new_start_and_grant_is_independent(t
     async def run():
         service = OperationService(tmp_path, [])
         service.server.is_ready = lambda: True
-        started = await service.operation_start(spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
+        started = await service.seed_legacy_operation(spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
         identity = started.data["operationId"]
         # Authorization for cleanup does not depend on general write access.
         monkeypatch.setattr(CONFIG, "write_access_approved", False)
@@ -327,11 +327,17 @@ def test_disposition_compare_and_set_rejects_changed_record(tmp_path):
 def test_connection_lost_during_inventory_is_incomplete(tmp_path):
     async def run():
         service = Service(tmp_path)
-        async def lost(**kwargs):
-            service.server.is_ready = lambda: False
-            return ok("list", {"sessions": [], "activeCount": 0})
-        service.console_capture_list = lost
+        observed = []
+        original = service.dispatcher.call
+        async def lost(*args, **kwargs):
+            if args[1] == "console.capture.observe":
+                observed.append(args[1])
+                service.server.is_ready = lambda: False
+                return ok("list", {"sessions": [], "activeCount": 0})
+            return await original(*args, **kwargs)
+        service.dispatcher.call = lost
         response = await service.queue_inventory()
+        assert observed == ["console.capture.observe"], "Disconnect must occur on the actual inventory route"
         assert response.ok and not response.data["connected"] and not response.data["complete"]
     asyncio.run(run())
 

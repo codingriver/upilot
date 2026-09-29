@@ -1355,6 +1355,7 @@ namespace CodingRiver.UPilot
             {
                 EditorGUILayout.LabelField("高级设置 > 自动处置授权", EditorStyles.boldLabel);
                 if (GUILayout.Button("查看当前任务队列")) UPilotQueueWindow.Open();
+                if (GUILayout.Button("批量清理可安全处理项…")) UPilotQueueCleanupWindow.Open();
                 var cleanupAllowed = EditorGUILayout.ToggleLeft("允许 AI 清理当前项目队列占用", config.aiQueueCleanupAllowed);
                 if (cleanupAllowed != config.aiQueueCleanupAllowed)
                 {

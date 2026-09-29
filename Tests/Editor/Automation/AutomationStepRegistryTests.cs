@@ -1,4 +1,8 @@
 ﻿using System;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 using CodingRiver.UPilot.Automation;
@@ -77,13 +81,72 @@ namespace CodingRiver.UPilot.Tests.Automation
         [Test]
         public void WireValidationAggregatesTypeAndMissingStepErrors()
         {
-            var result = AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(
+            var result = AutomationStepPlanValidator.Parse(
                 "{\"steps\":[{\"instanceId\":\"bad\",\"stepId\":\"missing.step\",\"arguments\":42},"
-                + "{\"instanceId\":\"wait\",\"stepId\":\"upilot.wait_seconds\",\"arguments\":\"invalid\"}]}"));
+                + "{\"instanceId\":\"wait\",\"stepId\":\"upilot.wait_seconds\",\"arguments\":\"invalid\"}]}", out var plan);
+            var validation = AutomationStepPlanValidator.Validate(plan, new AutomationStepRegistry());
+            result.diagnostics.AddRange(validation.diagnostics);
+            result.ok &= validation.ok;
             Assert.That(result.ok, Is.False);
             Assert.That(result.diagnostics.Any(x => x.code == "STEP_FIELD_TYPE_INVALID"), Is.True);
             Assert.That(result.diagnostics.Any(x => x.code == "STEP_NOT_FOUND"), Is.True);
             Assert.That(result.diagnostics.Any(x => x.code == "STEP_ARGUMENTS_INVALID"), Is.True);
         }
+
+        [AutomationStep("upilot.test.suspension_probe")]
+        public sealed class SuspensionProbe : AutomationStepBase
+        {
+            internal static int Constructed, Validated, Executed;
+            public SuspensionProbe() { Constructed++; }
+            public override string Validate(string runId, string instanceId, string contextJson, string arguments)
+            { Validated++; return "{\"ok\":true}"; }
+            public override void Execute(string runId, string instanceId, string contextJson, string arguments) { Executed++; }
+        }
+        private static string StoredRun() => File.Exists("Library/UPilot/step-run.json")
+            ? File.ReadAllText("Library/UPilot/step-run.json") : null;
+
+        [TestCase(null)] [TestCase("not-json")]
+        [TestCase("{\"steps\":[{\"instanceId\":\"probe\",\"stepId\":\"upilot.test.suspension_probe\"}]}")]
+        [TestCase("{\"steps\":[{\"instanceId\":\"wait\",\"stepId\":\"upilot.wait_seconds\",\"arguments\":\"0\"}]}")]
+        public void PublicEntryPointsRejectWithoutValidationOrRunWrites(string plan)
+        {
+            var before = StoredRun();
+            var constructed = SuspensionProbe.Constructed;
+            var validated = SuspensionProbe.Validated;
+            var executed = SuspensionProbe.Executed;
+            var result = AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(plan));
+            Assert.That(result.ok, Is.False);
+            Assert.That(result.diagnostics.Single().code, Is.EqualTo("GENERIC_ORCHESTRATION_DISABLED"));
+            // Use the same public method resolution as a generic reflection caller.
+            var method = typeof(UPilotAutomationStepService).GetMethod("StartJson");
+            var error = Assert.Throws<TargetInvocationException>(() => method.Invoke(null, new object[] { "never-start", "", plan }));
+            Assert.That(error.InnerException.Message, Does.StartWith("GENERIC_ORCHESTRATION_DISABLED:"));
+            Assert.That(StoredRun(), Is.EqualTo(before));
+            Assert.That(SuspensionProbe.Constructed, Is.EqualTo(constructed));
+            Assert.That(SuspensionProbe.Validated, Is.EqualTo(validated));
+            Assert.That(SuspensionProbe.Executed, Is.EqualTo(executed));
+        }
+
+        [TestCase("start")] [TestCase("validate")]
+        public async Task BridgeRejectsBeforeParsingOrQueueing(string action)
+        {
+            // A uniquely named rejection reply is the only traffic. Never starts or changes the real executor.
+            var bridge = UPilotBridge.Instance;
+            var before = StoredRun();
+            var count = bridge.MainThreadQueue.Count;
+            var service = new UPilotAutomationStepService(bridge);
+            var handle = typeof(UPilotAutomationStepService).GetMethod("Handle", BindingFlags.Instance | BindingFlags.NonPublic);
+            var pending = (Task)handle.Invoke(service, new object[] {
+                "automation.steps." + action, action, "suspension-test-" + Guid.NewGuid().ToString("N"),
+                "deliberately invalid json", CancellationToken.None });
+            await pending;
+            Assert.That(bridge.MainThreadQueue.Count, Is.EqualTo(count));
+            Assert.That(StoredRun(), Is.EqualTo(before));
+        }
+
+        [TestCase("catalog")] [TestCase("state")] [TestCase("cancel")]
+        [TestCase("recover")] [TestCase("release_preview")] [TestCase("release")] [TestCase("artifacts")]
+        public void HistoryRoutesAreNotNewRunActions(string action) =>
+            Assert.That(UPilotAutomationStepService.IsNewRunAction(action), Is.False);
     }
 }

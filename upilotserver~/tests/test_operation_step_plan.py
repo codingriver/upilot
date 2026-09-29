@@ -85,7 +85,7 @@ def test_legacy_attachment_array_remains_metadata_and_step_schema_is_checked(tmp
 
 def test_validation_is_read_only_and_preserves_arguments(tmp_path):
     svc = service(tmp_path)
-    response = asyncio.run(svc.operation_validate(spec()))
+    response = asyncio.run(svc.validate_legacy_spec(spec()))
     assert response.ok
     assert [c[0] for c in svc.bridge_calls] == ["automation.steps.validate"]
     assert json.loads(svc.bridge_calls[0][1]["planJson"]) == spec()["stepPlan"]
@@ -95,7 +95,7 @@ def test_validation_is_read_only_and_preserves_arguments(tmp_path):
 def test_invalid_plan_never_creates_capture_or_starts(tmp_path):
     svc = service(tmp_path, valid=False)
     job = {**spec(), "consoleCapture": {"enabled": True}}
-    response = asyncio.run(svc.operation_start(job))
+    response = asyncio.run(svc.seed_legacy_operation(job))
     assert not response.ok
     assert svc._operations == {}
     assert [c[0] for c in svc.bridge_calls] == ["automation.steps.validate"]
@@ -104,23 +104,23 @@ def test_invalid_plan_never_creates_capture_or_starts(tmp_path):
 @pytest.mark.parametrize("field", ["startCall", "statusCall", "cancelCall"])
 def test_plan_and_calls_are_mutually_exclusive(tmp_path, field):
     svc = service(tmp_path)
-    response = asyncio.run(svc.operation_validate({**spec(), field: {}}))
+    response = asyncio.run(svc.validate_legacy_spec({**spec(), field: {}}))
     assert not response.ok
     assert any(e["code"] == "STEP_PLAN_CALLS_CONFLICT" for e in response.error.detail["errors"])
 
 
 def test_budget_does_not_truncate_long_plan(tmp_path):
     svc = service(tmp_path, budget=900)
-    response = asyncio.run(svc.operation_validate(spec()))
+    response = asyncio.run(svc.validate_legacy_spec(spec()))
     assert response.data["normalizedJobSpec"]["timeoutSec"] == 900
-    rejected = asyncio.run(svc.operation_validate({**spec(), "timeoutSec": 300}))
+    rejected = asyncio.run(svc.validate_legacy_spec({**spec(), "timeoutSec": 300}))
     assert not rejected.ok
 
 
 def test_start_persists_existing_operation_identity_without_expanding_arguments(tmp_path):
     async def run():
         svc = service(tmp_path)
-        response = await svc.operation_start(spec("${operation.operationId}"))
+        response = await svc.seed_legacy_operation(spec("${operation.operationId}"))
         assert response.ok
         state = svc._operations[response.data["operationId"]]
         assert state["recoveryIdentityEstablished"]
@@ -134,7 +134,7 @@ def test_start_persists_existing_operation_identity_without_expanding_arguments(
 
 @pytest.mark.parametrize("value", [None, True, "bad", 0, float("inf")])
 def test_timeout_type_is_structured_error(tmp_path, value):
-    response = asyncio.run(service(tmp_path).operation_validate({**spec(), "timeoutSec": value}))
+    response = asyncio.run(service(tmp_path).validate_legacy_spec({**spec(), "timeoutSec": value}))
     assert not response.ok
 
 
@@ -142,14 +142,14 @@ def test_nonfinite_plan_never_dispatches(tmp_path):
     svc = service(tmp_path)
     job = spec()
     job["stepPlan"]["steps"][0]["timeoutSeconds"] = float("nan")
-    response = asyncio.run(svc.operation_validate(job))
+    response = asyncio.run(svc.validate_legacy_spec(job))
     assert not response.ok
     assert svc.bridge_calls == []
 
 
 def test_normalized_plan_is_a_detached_snapshot(tmp_path):
     job = spec()
-    response = asyncio.run(service(tmp_path).operation_validate(job))
+    response = asyncio.run(service(tmp_path).validate_legacy_spec(job))
     job["stepPlan"]["steps"][0]["arguments"] = "mutated"
     assert response.data["normalizedJobSpec"]["stepPlan"]["steps"][0]["arguments"] != "mutated"
 
@@ -158,7 +158,7 @@ def test_log_policy_cannot_be_silently_bypassed_without_capture(tmp_path):
     svc = service(tmp_path)
     job = spec()
     job["stepPlan"]["logPolicy"] = [{"id": "project-rule"}]
-    response = asyncio.run(svc.operation_start(job))
+    response = asyncio.run(svc.seed_legacy_operation(job))
     assert not response.ok
     assert svc._operations == {}
     assert any(e["code"] == "STEP_CAPTURE_REQUIRED" for e in response.error.detail["errors"])
@@ -171,7 +171,7 @@ def test_plan_capture_requires_explicitly_disabled_operation_capture(tmp_path, e
     job["stepPlan"]["steps"].insert(0, {"instanceId": "capture", "stepId": "upilot.console_capture_start", "arguments": ""})
     if enabled is not None:
         job["consoleCapture"] = {"enabled": enabled}
-    response = asyncio.run(svc.operation_start(job))
+    response = asyncio.run(svc.seed_legacy_operation(job))
     assert not response.ok
     assert svc._operations == {}
     assert any(e["code"] == "STEP_CAPTURE_OWNERSHIP_CONFLICT" for e in response.error.detail["errors"])
@@ -183,7 +183,7 @@ def test_plan_capture_supplies_policy_evidence_without_operation_ownership(tmp_p
     job["stepPlan"]["steps"].insert(0, {"instanceId": "capture", "stepId": "upilot.console_capture_start", "arguments": ""})
     job["stepPlan"]["logPolicy"] = [{"id": "business-rule"}]
     job["consoleCapture"] = {"enabled": False}
-    response = asyncio.run(svc.operation_validate(job))
+    response = asyncio.run(svc.validate_legacy_spec(job))
     assert response.ok
     assert response.data["normalizedJobSpec"]["consoleCapture"]["enabled"] is False
     assert [route for route, _ in svc.bridge_calls] == ["automation.steps.validate"]
@@ -192,7 +192,7 @@ def test_plan_capture_supplies_policy_evidence_without_operation_ownership(tmp_p
 def test_initializing_step_service_keeps_observing_same_run_without_replay(tmp_path):
     async def run():
         svc = service(tmp_path)
-        started = await svc.operation_start(spec())
+        started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
         state = svc._operations[operation_id]
         previous = svc.dispatcher.call
@@ -231,7 +231,7 @@ def test_initializing_step_service_keeps_observing_same_run_without_replay(tmp_p
 def test_real_step_identity_mismatch_is_not_treated_as_initialization(tmp_path):
     async def run():
         svc = service(tmp_path)
-        started = await svc.operation_start(spec())
+        started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
         previous = svc.dispatcher.call
 
@@ -256,7 +256,7 @@ def test_real_step_identity_mismatch_is_not_treated_as_initialization(tmp_path):
 def test_editor_restart_recovery_is_not_cleared_after_initialization(tmp_path):
     async def run():
         svc = service(tmp_path)
-        started = await svc.operation_start(spec())
+        started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
 
         async def call(request_id, route, payload, **kwargs):
@@ -280,7 +280,7 @@ def test_editor_restart_recovery_is_not_cleared_after_initialization(tmp_path):
 def test_initialization_error_does_not_relax_unrelated_status_routes(tmp_path):
     async def run():
         svc = service(tmp_path)
-        started = await svc.operation_start(spec())
+        started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
         svc._operations[operation_id]["resolvedStatusCall"]["route"] = "another.state"
 

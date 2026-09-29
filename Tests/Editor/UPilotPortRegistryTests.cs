@@ -52,6 +52,112 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void RecommendationKeepsAvailableHttpAcrossExcludedWsRange()
+        {
+            var probes = 0;
+            var registry = new UPilotPortRegistry(_user, port =>
+            {
+                probes++;
+                return !(port >= 8769 && port <= 8868) && !(port >= 8081 && port <= 8180);
+            });
+            Assert.That(registry.Recommend(_a, 8770, 8017, 100), Is.EqualTo((8869, 8017)));
+            Assert.That(probes, Is.LessThanOrEqualTo(200));
+            Assert.That(File.Exists(registry.RegistryPath), Is.False, "Recommendation must not reserve ports.");
+            Assert.That(File.Exists(UPilotPortRegistry.ConfigPath(_a)), Is.False);
+        }
+
+        [Test]
+        public void RecommendationKeepsAvailableWsWhileHttpAdvances()
+        {
+            var registry = new UPilotPortRegistry(_user, port => port == 18001 || port == 19003);
+            Assert.That(registry.Recommend(_a, 18001, 19001, 3), Is.EqualTo((18001, 19003)));
+        }
+
+        [TestCase(18000, 18001, 18002, 18001)]
+        [TestCase(18001, 18000, 18002, 18001)]
+        [TestCase(18000, 18002, 18001, 18002)]
+        [TestCase(18002, 18000, 18002, 18001)]
+        public void OverlappingSearchRangesDoNotLoseDistinctPair(int ws, int http, int expectedWs, int expectedHttp)
+        {
+            var registry = new UPilotPortRegistry(_user, port => port == 18001 || port == 18002);
+            Assert.That(registry.Recommend(_a, ws, http, 3), Is.EqualTo((expectedWs, expectedHttp)));
+        }
+
+        [Test]
+        public void OneAvailablePortCannotServeBothProtocols()
+        {
+            var registry = new UPilotPortRegistry(_user, port => port == 18002);
+            Assert.Throws<IOException>(() => registry.Recommend(_a, 18000, 18001, 3));
+        }
+
+        [TestCase(65535, 18000, 65535, 18002)]
+        [TestCase(18000, 65535, 18002, 65535)]
+        [TestCase(65535, 65535, 65535, 65534)]
+        public void RecommendationHandlesPortUpperBoundary(int ws, int http, int expectedWs, int expectedHttp)
+        {
+            var registry = new UPilotPortRegistry(_user, port =>
+            {
+                Assert.That(port, Is.InRange(1, 65535));
+                return port == expectedWs || port == expectedHttp;
+            });
+            Assert.That(registry.Recommend(_a, ws, http, 3), Is.EqualTo((expectedWs, expectedHttp)));
+        }
+
+        [TestCase(0)]
+        [TestCase(2)]
+        public void RecommendationNeverProbesOutsideAttemptBudget(int attempts)
+        {
+            var probes = 0;
+            var registry = new UPilotPortRegistry(_user, port =>
+            {
+                probes++;
+                return port == 18001 || port == 19003;
+            });
+            Assert.Throws<IOException>(() => registry.Recommend(_a, 18001, 19001, attempts));
+            Assert.That(probes, Is.LessThanOrEqualTo(2 * attempts));
+        }
+
+        [Test]
+        public void IndependentRecommendationStillHonorsCrossProtocolReservations()
+        {
+            _registry.Commit(_a, Config(18001, 19001));
+            var before = File.ReadAllBytes(_registry.RegistryPath);
+            var registry = new UPilotPortRegistry(_user, port =>
+            {
+                Assert.That(port, Is.Not.EqualTo(18001).And.Not.EqualTo(19001));
+                return true;
+            });
+            Assert.That(registry.Recommend(_b, 19001, 18001, 3), Is.EqualTo((19002, 18002)));
+            Assert.That(File.ReadAllBytes(_registry.RegistryPath), Is.EqualTo(before));
+        }
+
+        [Test]
+        public void SetupRecommendationFailurePreservesProblemAndUnderlyingError()
+        {
+            const string problem = "端口不可监听：WS 8770。";
+            const string error = "未找到未预留且可监听的 HTTP/WS 端口对";
+            var message = UPilotMainWindow.FormatSetupPortMessage(problem, 0, 0, error);
+            Assert.That(message, Is.EqualTo(problem + "\n" + error));
+            Assert.That(message, Does.Not.Contain("WS 0").And.Not.Contain("HTTP 0"));
+        }
+
+        [TestCase(0, 0)]
+        [TestCase(8869, 0)]
+        [TestCase(8869, 8869)]
+        [TestCase(65536, 8017)]
+        public void SetupNeverDisplaysInvalidRecommendation(int ws, int http)
+        {
+            Assert.That(UPilotMainWindow.FormatSetupPortMessage("原始问题", ws, http), Is.EqualTo("原始问题"));
+        }
+
+        [Test]
+        public void SetupDisplaysValidRecommendationAlongsideOriginalProblem()
+        {
+            Assert.That(UPilotMainWindow.FormatSetupPortMessage("原始问题", 8869, 8017),
+                Is.EqualTo("原始问题\n推荐 WS 8869，HTTP 8017。"));
+        }
+
+        [Test]
         public void ProjectConfigWinsAndOtherProjectsAreNeverRewritten()
         {
             _registry.Commit(_a, Config(18001, 19001));

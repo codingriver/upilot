@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot.Automation
 {
-    /// <summary>Internal Bridge routes; public long-running control remains unity_operation_*.</summary>
+    /// <summary>Historical Step control. New generic orchestration is suspended at every public entry.</summary>
     [InitializeOnLoad]
     public sealed class UPilotAutomationStepService
     {
@@ -18,6 +18,8 @@ namespace CodingRiver.UPilot.Automation
             public string operationId;
             public string runId;
             public string captureSessionId;
+            public string recoveryRequestId;
+            public string dispositionRequestId, expectedStateHash, reason;
         }
         [Serializable] private sealed class CatalogResult
         { public AutomationStepDescriptor[] steps; public AutomationDiagnostic[] diagnostics; }
@@ -44,6 +46,10 @@ namespace CodingRiver.UPilot.Automation
             public float progress;
             public ArtifactSet artifacts;
             public AutomationStepRun domain;
+            public AutomationStepReleaseProof releaseProof;
+            public AutomationStepDisposition disposition;
+            public bool businessTerminal;
+            public string outcome;
         }
         private static AutomationStepExecutor s_executor;
         private static AutomationStepRegistry s_registry;
@@ -124,25 +130,14 @@ namespace CodingRiver.UPilot.Automation
             return JsonUtility.ToJson(new CatalogResult { steps = registry.Catalog(),
                 diagnostics = System.Linq.Enumerable.ToArray(registry.Diagnostics) });
         }
-        public static string ValidateJson(string planJson) => JsonUtility.ToJson(ValidatePlanJson(planJson, out _));
-        private static AutomationStepValidation ValidatePlanJson(string planJson, out AutomationStepPlan plan)
-        {
-            var parsed = AutomationStepPlanValidator.Parse(planJson, out plan);
-            if (plan == null) return parsed;
-            var validation = AutomationStepPlanValidator.Validate(plan, Registry);
-            parsed.diagnostics.AddRange(validation.diagnostics);
-            parsed.ok &= validation.ok;
-            parsed.budgetSeconds = validation.budgetSeconds;
-            return parsed;
-        }
-        /// <summary>Start once after full preflight; the caller retains any supplied Capture ownership.</summary>
-        public static string StartJson(string operationId, string captureSessionId, string planJson)
-        {
-            var validation = ValidatePlanJson(planJson, out var plan);
-            if (!validation.ok) throw new InvalidOperationException("STEP_PLAN_INVALID: " + JsonUtility.ToJson(validation));
-            Initialize();
-            return JsonUtility.ToJson(Public(s_executor.Start(plan, operationId, captureSessionId)));
-        }
+        internal const string OrchestrationDisabledCode = "GENERIC_ORCHESTRATION_DISABLED";
+        internal const string OrchestrationDisabledReason = "通用编排新启动已暂停；请使用测试、验收、编译、Capture、Snapshot 或构建专用工具。";
+        internal static bool IsNewRunAction(string action) => action == "start" || action == "validate";
+        public static string ValidateJson(string planJson) => JsonUtility.ToJson(
+            AutomationStepValidation.Invalid(OrchestrationDisabledCode, OrchestrationDisabledReason));
+        /// <summary>Fixed product suspension; no validation, allocation, persistence or test bypass.</summary>
+        public static string StartJson(string operationId, string captureSessionId, string planJson) =>
+            throw new InvalidOperationException(OrchestrationDisabledCode + ": " + OrchestrationDisabledReason);
         private static AutomationStepRun State(string runId)
         {
             RequireMainThread();
@@ -153,6 +148,8 @@ namespace CodingRiver.UPilot.Automation
             // Observation must not initialize/restore the executor or advance a lifecycle callback.
             if (executor == null) throw new InvalidOperationException("STEP_SERVICE_INITIALIZING");
             var state = executor.State;
+            if (state?.runId != runId || !string.IsNullOrEmpty(state?.disposition?.requestId))
+                state = executor.Historical(runId, operationId);
             if (state == null || string.IsNullOrEmpty(runId) || state.runId != runId
                 || (operationId != null && state.operationId != operationId))
                 throw new InvalidOperationException("STEP_RUN_IDENTITY_MISMATCH");
@@ -160,12 +157,12 @@ namespace CodingRiver.UPilot.Automation
         }
         public static string StateJson(string runId) => JsonUtility.ToJson(Public(State(runId)));
         public static string CancelJson(string runId)
-        { State(runId); s_executor.RequestCancel(); return StateJson(runId); }
+        { State(runId); if (s_executor.State?.runId == runId) s_executor.RequestCancel(); return StateJson(runId); }
         public static string ArtifactsJson(string runId) => JsonUtility.ToJson(PublicArtifacts(State(runId)));
         public UPilotAutomationStepService(UPilotBridge bridge) { _bridge = bridge; }
         public void RegisterCommands()
         {
-            foreach (string action in new[] { "catalog", "validate", "start", "state", "cancel", "artifacts" })
+            foreach (string action in new[] { "catalog", "validate", "start", "state", "cancel", "recover", "release_preview", "release", "artifacts" })
             {
                 string route = "automation.steps." + action;
                 _bridge.Router.Register(UPilotCommandRouter.AutomationStepDescriptor(route, action),
@@ -174,6 +171,12 @@ namespace CodingRiver.UPilot.Automation
         }
         private async Task Handle(string route, string action, string id, string json, CancellationToken token)
         {
+            // Reject even malformed plans before parsing, enqueueing or invoking project callbacks.
+            if (IsNewRunAction(action))
+            {
+                await _bridge.SendErrorAsync(id, OrchestrationDisabledCode, OrchestrationDisabledReason, token, route);
+                return;
+            }
             var request = JsonUtility.FromJson<Message>(json)?.payload ?? new Request();
             var completion = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
@@ -185,16 +188,27 @@ namespace CodingRiver.UPilot.Automation
                         completion.SetResult(new CatalogResult { steps = Registry.Catalog(),
                             diagnostics = System.Linq.Enumerable.ToArray(Registry.Diagnostics) }); return;
                     }
-                    if (action == "validate" || action == "start")
+                    var original = ReadState(s_executor, request.runId, request.operationId ?? "");
+                    if (!string.IsNullOrEmpty(original.disposition?.requestId)) { completion.SetResult(Public(original)); return; }
+                    if (action == "release_preview")
                     {
-                        var validation = ValidatePlanJson(request.planJson, out var plan);
-                        if (action == "validate") { completion.SetResult(validation); return; }
-                        if (!validation.ok) throw new InvalidOperationException("STEP_PLAN_INVALID: " + JsonUtility.ToJson(validation));
-                        Initialize();
-                        completion.SetResult(Public(s_executor.Start(plan, request.operationId, request.captureSessionId))); return;
+                        var preview = Public(original); preview.releaseProof = s_executor.PreviewRelease();
+                        completion.SetResult(preview); return;
                     }
-                    ReadState(s_executor, request.runId, request.operationId ?? "");
+                    if (action == "release")
+                    {
+                        if (!UPilotProjectConfig.Load().aiQueueCleanupAllowed)
+                            throw new InvalidOperationException("STEP_RELEASE_NOT_AUTHORIZED");
+                        completion.SetResult(Public(s_executor.Release(request.dispositionRequestId, request.expectedStateHash, request.reason)));
+                        return;
+                    }
                     if (action == "cancel") s_executor.RequestCancel();
+                    if (action == "recover")
+                    {
+                        if (string.IsNullOrEmpty(request.operationId) || !UPilotProjectConfig.Load().aiQueueCleanupAllowed)
+                            throw new InvalidOperationException("STEP_RECOVERY_NOT_AUTHORIZED");
+                        s_executor.RequestCleanupRecovery(request.recoveryRequestId);
+                    }
                     completion.SetResult(Public(s_executor.State));
                 }
                 catch (Exception ex) { completion.SetException(ex); }
@@ -221,7 +235,9 @@ namespace CodingRiver.UPilot.Automation
             error = run.error?.code ?? "", failureSignature = run.error?.code ?? "", detail = run.error?.message ?? "",
             terminal = run.terminal, cleanupPending = run.cleanupPending || !run.terminal,
             progress = run.steps.Count == 0 ? 0 : (float)run.cursor / run.steps.Count,
-            artifacts = PublicArtifacts(run), domain = run,
+            artifacts = PublicArtifacts(run), domain = run, disposition = run.disposition,
+            businessTerminal = run.terminal && string.IsNullOrEmpty(run.disposition?.requestId),
+            outcome = string.IsNullOrEmpty(run.disposition?.requestId) ? run.status : "unknown",
         };
         private static ArtifactSet PublicArtifacts(AutomationStepRun run)
         {

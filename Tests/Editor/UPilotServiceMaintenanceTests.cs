@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using NUnit.Framework;
 
 namespace CodingRiver.UPilot.Tests
@@ -23,6 +24,75 @@ namespace CodingRiver.UPilot.Tests
         public void TearDown()
         {
             if (Directory.Exists(_root)) Directory.Delete(_root, true);
+        }
+
+        // These synchronous tests swap only the in-memory journal, and restore every field in finally.
+        // They never dispatch service maintenance or touch the project's maintenance journal.
+        private void WithIsolatedRecovery(Action<Type, BindingFlags> test)
+        {
+            Assert.That(UPilotServiceMaintenance.IsActive, Is.False, "Do not isolate an active maintenance request.");
+            var type = typeof(UPilotServiceMaintenance);
+            const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
+            var names = new[] { "_journal", "_recoveryChecked", "_storageError" };
+            var previous = new object[names.Length];
+            for (var i = 0; i < names.Length; i++) previous[i] = type.GetField(names[i], flags).GetValue(null);
+            try
+            {
+                type.GetField("_journal", flags).SetValue(null, _journal);
+                type.GetField("_recoveryChecked", flags).SetValue(null, false);
+                type.GetField("_storageError", flags).SetValue(null, "");
+                test(type, flags);
+            }
+            finally
+            {
+                for (var i = 0; i < names.Length; i++) type.GetField(names[i], flags).SetValue(null, previous[i]);
+            }
+        }
+
+        [Test]
+        public void UpdateInitializesRecoveryWithoutInspectorDelayCall()
+        {
+            WithIsolatedRecovery((type, flags) =>
+            {
+                type.GetMethod("Update", flags).Invoke(null, null);
+                Assert.That(type.GetField("_recoveryChecked", flags).GetValue(null), Is.True);
+                Assert.That(UPilotServiceMaintenance.StorageError, Is.Empty);
+                Assert.That(_journal.Current, Is.Null);
+                Assert.That(File.Exists(_path), Is.False, "No request was accepted or dispatched.");
+            });
+        }
+
+        [Test]
+        public void LateRecoveryCallbackDoesNotFailNewlyAcceptedRequest()
+        {
+            WithIsolatedRecovery((type, flags) =>
+            {
+                type.GetMethod("Update", flags).Invoke(null, null);
+                var record = _journal.Accept(Request(), 120, 456, null);
+                var original = File.ReadAllBytes(_path);
+                type.GetMethod("Recover", flags).Invoke(null, null);
+                Assert.That(record.status, Is.EqualTo("accepted"));
+                Assert.That(record.stopAttempted || record.startAttempted, Is.False);
+                Assert.That(File.ReadAllBytes(_path), Is.EqualTo(original));
+            });
+        }
+
+        [Test]
+        public void UpdateRecoveryRetainsCorruptJournalProtection()
+        {
+            Directory.CreateDirectory(_root);
+            File.WriteAllText(_path, "{");
+            _journal = new ServiceMaintenanceJournal(_path, () => _now);
+            WithIsolatedRecovery((type, flags) =>
+            {
+                type.GetMethod("Update", flags).Invoke(null, null);
+                type.GetMethod("Update", flags).Invoke(null, null);
+                Assert.That(type.GetField("_recoveryChecked", flags).GetValue(null), Is.True);
+                Assert.That(UPilotServiceMaintenance.StorageError, Is.Not.Empty);
+                Assert.That(File.ReadAllText(_path), Is.EqualTo("{"));
+                Assert.That(Assert.Throws<ServiceMaintenanceException>(() =>
+                    _journal.Accept(Request(), 120, 456, null)).Code, Is.EqualTo("SERVICE_RESTART_RECOVERY_REQUIRED"));
+            });
         }
 
         private ServiceRestartRequest Request(string target = "server") => new()

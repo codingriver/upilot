@@ -83,13 +83,20 @@ namespace CodingRiver.UPilot
             }
         }
 
-        public static void OpenSetup()
+        public static void OpenSetup() => OpenSetupWindow(null);
+
+        internal static void OpenSetupForRecovery(string failure) => OpenSetupWindow(failure);
+
+        private static void OpenSetupWindow(string failure)
         {
             try
             {
                 var window = GetWindow<UPilotMainWindow>("UPilot");
                 window.minSize = new Vector2(440, 400);
-                window.EnterSetupView();
+                if (failure == null)
+                    window.EnterSetupView();
+                else
+                    window.EnterSetupRecovery(failure);
                 window.Show();
                 window.Focus();
             }
@@ -2184,7 +2191,7 @@ namespace CodingRiver.UPilot
                 RefreshAgentConfigs(force: true);
                 RefreshSnapshot();
                 _stateChangedAt = EditorApplication.timeSinceStartup;
-                ShowNotice(message);
+                ShowNotice(message, UPilotQuickStart.LastRepairSucceeded ? MessageType.Info : MessageType.Error);
             }
             catch (Exception ex)
             {

@@ -13,6 +13,7 @@ from upilot_mcp.config import CONFIG
 from upilot_mcp.responses import ok
 from upilot_mcp.tool_registry import REGISTRY
 from upilot_mcp.state_store import StateStore
+from legacy_operation_fixture import LegacyOperationFixture
 
 
 class _Session:
@@ -34,7 +35,7 @@ class _Server:
         self.state.configure_project(str(project_path))
 
 
-class _OperationService(TaskDomainService):
+class _OperationService(LegacyOperationFixture, TaskDomainService):
     def __init__(self, project_path: Path, statuses: list[dict], cancel_results: list | None = None) -> None:
         self.server = _Server(project_path)
         self._operations: dict[str, dict] = {}
@@ -215,7 +216,7 @@ def test_operation_wait_collects_artifacts_and_timing(tmp_path: Path) -> None:
         "artifactRules": {"readReportTailLines": 2, "fieldKinds": {"reportPath": "file"}},
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     waited = asyncio.run(service.operation_wait(started.data["operationId"], timeout_s=1, poll_interval_s=0.01))
 
     assert waited.ok and waited.data["status"] == "Succeeded"
@@ -274,7 +275,7 @@ def test_operation_artifact_classification_reads_only_declared_files_and_retains
         return original(path)
     monkeypatch.setattr("upilot_mcp.domain.task_service._read_stable_artifact", counted)
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "artifactRules": {"fieldKinds": {"hash": "sha256", "size": "bytes", "meta": "metadata"}},
@@ -309,7 +310,7 @@ def test_operation_artifact_rejects_outside_and_marks_bare_hash_ambiguous(tmp_pa
     except OSError:
         link_created = False
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "artifactRules": {"fieldKinds": {"external": "file", "link": "file"}},
@@ -333,7 +334,7 @@ def test_operation_artifact_rejects_outside_and_marks_bare_hash_ambiguous(tmp_pa
 
 def test_operation_artifact_late_collection_cannot_overwrite_newer_snapshot(tmp_path: Path, monkeypatch) -> None:
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
     }))
@@ -364,7 +365,7 @@ def test_operation_artifact_late_collection_cannot_overwrite_newer_snapshot(tmp_
 
 def test_operation_cancel_is_not_blocked_by_artifact_file_io(tmp_path: Path, monkeypatch) -> None:
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
@@ -394,7 +395,7 @@ def test_operation_artifact_kind_conflict_does_not_read_declared_file(tmp_path: 
     report = tmp_path / "report.txt"
     report.write_text("must not be read", encoding="utf-8")
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "artifactRules": {"fieldKinds": {"reportPath": "file", "hash": "sha256"}},
@@ -427,7 +428,7 @@ def test_operation_explicit_path_object_conflicting_with_scalar_declaration_is_n
         lambda path: reads.append(path) or ({}, ""),
     )
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "artifactRules": {"fieldKinds": {"reportPath": "metadata"}},
@@ -455,7 +456,7 @@ def test_operation_artifact_collection_keeps_last_durable_snapshot_when_persist_
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "artifactRules": {"fieldKinds": {"reportPath": "file"}},
     }
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     operation_id = started.data["operationId"]
     state = service._operations[operation_id]
     state["lastStatusData"] = {"artifacts": {"reportPath": str(report)}}
@@ -482,7 +483,7 @@ def test_operation_artifact_collections_serialize_per_operation(tmp_path: Path) 
     report = tmp_path / "report.txt"
     report.write_text("concurrent", encoding="utf-8")
     service = _OperationService(tmp_path, [])
-    started = asyncio.run(service.operation_start({
+    started = asyncio.run(service.seed_legacy_operation({
         "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
         "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
         "artifactRules": {"fieldKinds": {"reportPath": "file"}},
@@ -532,7 +533,7 @@ def test_operation_parses_nested_reflection_business_status_and_artifacts(tmp_pa
         "timeoutSec": 5,
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     terminal = asyncio.run(service.operation_status(started.data["operationId"]))
 
     assert terminal.ok
@@ -556,7 +557,7 @@ def test_operation_supports_explicit_result_and_field_paths(tmp_path: Path) -> N
         "terminalStatusMapping": {"success": ["Done"]},
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     terminal = asyncio.run(service.operation_status(started.data["operationId"]))
 
     assert terminal.ok
@@ -574,7 +575,7 @@ def test_operation_invalid_reflection_json_requires_recovery(tmp_path: Path) -> 
         "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     failed = asyncio.run(service.operation_status(started.data["operationId"]))
 
     assert failed.ok is False
@@ -597,7 +598,7 @@ def test_operation_cancel_accepts_nested_terminal_result(tmp_path: Path) -> None
         "cancelCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Cancel"},
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     canceled = asyncio.run(service.operation_cancel(started.data["operationId"]))
 
     assert canceled.ok
@@ -624,7 +625,7 @@ def test_operation_validate_normalizes_without_starting_business(tmp_path: Path)
         "artifactRules": {"fromStatusFields": ["summaryPath"]},
     }
 
-    result = asyncio.run(service.operation_validate(job_spec))
+    result = asyncio.run(service.validate_legacy_spec(job_spec))
 
     assert result.ok and result.data["valid"] is True
     assert result.data["normalizedJobSpec"]["timeoutSec"] == 300
@@ -634,7 +635,7 @@ def test_operation_validate_normalizes_without_starting_business(tmp_path: Path)
 
 def test_operation_validate_reports_precise_field_errors(tmp_path: Path) -> None:
     service = _OperationService(tmp_path, [])
-    result = asyncio.run(service.operation_validate({
+    result = asyncio.run(service.validate_legacy_spec({
         "startCall": {"kind": "reflection", "typeName": "", "methodName": ""},
         "statusCall": {"kind": "tool", "toolName": "missing_tool", "toolArgs": {"id": "prefix-${start.id}"}},
         "timeoutSec": 0,
@@ -668,7 +669,7 @@ def test_operation_resolves_start_result_placeholders_for_status_and_cancel(tmp_
         "timeoutSec": 5,
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     asyncio.run(service.operation_status(started.data["operationId"]))
     canceled = asyncio.run(service.operation_cancel(started.data["operationId"]))
 
@@ -693,7 +694,7 @@ def test_operation_cancel_waits_for_status_and_cleanup_before_terminal(tmp_path:
         "timeoutSec": 5,
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     operation_id = started.data["operationId"]
     canceled = asyncio.run(service.operation_cancel(operation_id))
 
@@ -730,7 +731,7 @@ def test_operation_cancel_is_idempotent_after_acceptance(tmp_path: Path) -> None
         "timeoutSec": 5,
     }
 
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     operation_id = started.data["operationId"]
     first = asyncio.run(service.operation_cancel(operation_id))
     second = asyncio.run(service.operation_cancel(operation_id))
@@ -754,7 +755,7 @@ def test_operation_wait_window_does_not_terminate_running_job(tmp_path: Path) ->
         "timeoutSec": 5,
         "pollIntervalSec": 0.01,
     }
-    started = asyncio.run(service.operation_start(job_spec))
+    started = asyncio.run(service.seed_legacy_operation(job_spec))
     first = asyncio.run(service.operation_wait(started.data["operationId"], timeout_s=0.001, poll_interval_s=0.01))
 
     assert first.ok
@@ -786,9 +787,9 @@ def test_operation_repeat_failure_signature_is_reported(tmp_path: Path) -> None:
     }
     service = _OperationService(tmp_path, [failure, failure])
 
-    first = asyncio.run(service.operation_start(job_spec))
+    first = asyncio.run(service.seed_legacy_operation(job_spec))
     first_wait = asyncio.run(service.operation_wait(first.data["operationId"], timeout_s=1, poll_interval_s=0.01))
-    second = asyncio.run(service.operation_start(job_spec))
+    second = asyncio.run(service.seed_legacy_operation(job_spec))
     second_wait = asyncio.run(service.operation_wait(second.data["operationId"], timeout_s=1, poll_interval_s=0.01))
 
     assert first_wait.data["status"] == "Failed"

@@ -512,9 +512,11 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static void ShowRepairFailureOnce(string attemptId, string failure)
+        internal static void ShowRepairFailureOnce(string attemptId, string failure,
+            Action<string> openSetup = null, Action<string, string> showDialog = null)
         {
             if (EditorPrefs.GetString(FailureDialogKey, "") == attemptId) return;
+            LastRepairSucceeded = false;
             EditorPrefs.SetString(FailureDialogKey, attemptId);
             EditorPrefs.SetString(FailureKey, failure);
             EditorPrefs.SetBool(AutoAttemptKey, true);
@@ -525,9 +527,14 @@ namespace CodingRiver.UPilot
                   "\n尝试 ID：" + attemptId + "（尚无对应重启 operation ID）" +
                   "\n最后通过的验证门：未知；首个未通过的验证门：未知；status probe：未采集" +
                   "\n重启诊断记录与此次尝试不匹配；请打开高级设置核对 operation ID。";
-            UPilotScrollableDialog.ShowDialog("UPilot 自动修复失败", failure + "\n\n" +
+            // Reopen configuration, not the failed restart. Port changes and another start
+            // still require confirmation in the wizard; never stop an unverified process.
+            (openSetup ?? UPilotMainWindow.OpenSetupForRecovery)(failure);
+            (showDialog ?? UPilotScrollableDialog.ShowDialog)("UPilot 自动修复失败", failure + "\n\n" +
                 diagnosis +
-                "\n被中断的任务不会自动重放。请确认当前身份和维护授权后，再显式点击‘重新启动’。");
+                "\n已重新打开安装向导，请从网络端口开始检查并确认可用端口，再安装配套服务、写入配置并启动。" +
+                "\n只有服务身份、Bridge 握手和实际只读调用验证通过后才算完成。" +
+                "\n不会停止归属未知或其他项目的进程，也不会自动重放重启或被中断的任务。");
         }
 
         internal static UPilotRepairAction DetermineRepairAction(

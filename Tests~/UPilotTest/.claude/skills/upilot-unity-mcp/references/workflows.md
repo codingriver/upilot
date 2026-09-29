@@ -70,13 +70,13 @@ Do not trigger another compile when no C# or assembly file changed. Never infer 
 
 ## Tests And Builds
 
-1. Start the operation.
+1. Use the dedicated `unity_test_run`, `unity_upilot_acceptance_run` or `unity_build_start`, not a generic Operation wrapper.
 2. Keep the returned test `runGuid`; for PlayMode/Domain Reload query `unity_test_results(runGuid=...)` after reconnect.
 3. Poll the result/status tool to a terminal state.
 4. For long operations, report only phase changes, errors, or suspected-stuck state.
 5. Read Console errors and artifacts before declaring success.
 
-For a generic project bridge operation, call `unity_operation_validate(jobSpec)` before `unity_operation_start`; validation is read-only and returns a normalized spec or precise field errors.
+New generic Operation/Step starts and public validation return `GENERIC_ORCHESTRATION_DISABLED`. Do not wrap them in Task, reflection or temporary scripts. Historical status/artifacts and supported safe cleanup remain available; `operation_wait` reports `RecoveryRequired` immediately as a non-terminal recovery blocker, not a request to keep waiting normally.
 
 `status=no_tests` is a distinct cleaned terminal state with `total=0`; do not represent it as a fake failed test. If tests are required, fail the acceptance criterion explicitly.
 

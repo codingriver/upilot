@@ -102,6 +102,41 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(evidence.Error("item", "bad"), Does.Contain("STEP_SNAPSHOT_CHECKPOINT_INVALID"));
         }
 
+        [Test]
+        public void SnapshotLateReleaseRequiresOriginalIdentityAndPreservesFailure()
+        {
+            string directory = Path.Combine("Log/UPilotSteps/tests", Guid.NewGuid().ToString("N"));
+            var run = new AutomationStepRun { runId = "original", reportDirectory = directory };
+            string key = AutomationSnapshotEvidence.RequestKey(run.runId, "item", "evidence");
+            string output = Path.Combine(directory, "snapshots", key.Substring("step:".Length));
+            Directory.CreateDirectory(output);
+            try
+            {
+                string manifest = Path.Combine(output, "manifest.json"); File.WriteAllText(manifest, "{}");
+                var file = AutomationReportWriter.GetArtifactMetadata("snapshot.manifest", manifest);
+                var record = new AutomationSnapshotRecord { instanceId = "item", evidenceKey = "evidence",
+                    requestKey = key, snapshotId = "original-snapshot", requestedAt = 1,
+                    status = "Failed", errorCode = "ORIGINAL_TIMEOUT", unresolved = true };
+                run.snapshots.Add(record);
+                var evidence = new AutomationSnapshotEvidence(run, () => { }, () => 100);
+                var job = new SnapshotJobPayload { snapshotId = "other", requestKey = key, terminal = true,
+                    success = false, outputDirectory = output, persistenceStatus = "verified",
+                    manifestPath = manifest, manifestBytes = file.bytes, manifestSha256 = file.sha256,
+                    artifacts = new List<SnapshotArtifactPayload>() };
+                Assert.Throws<InvalidDataException>(() => evidence.AcceptReleased(record, job));
+                job.snapshotId = record.snapshotId; job.terminal = false;
+                Assert.That(evidence.AcceptReleased(record, job), Is.False);
+                Assert.That(record.unresolved, Is.True);
+                job.terminal = true;
+                Assert.That(evidence.AcceptReleased(record, job), Is.True);
+                Assert.That(record.unresolved, Is.False);
+                Assert.That(record.status, Is.EqualTo("Failed"));
+                Assert.That(record.errorCode, Is.EqualTo("ORIGINAL_TIMEOUT"));
+                Assert.That(run.registeredArtifacts.Count, Is.EqualTo(1));
+            }
+            finally { Directory.Delete(directory, true); }
+        }
+
         [UnityTest]
         public IEnumerator CaptureOwnershipSurvivesReloadObservationAndIncludesFinallyLogs()
         {

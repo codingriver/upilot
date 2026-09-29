@@ -323,10 +323,54 @@ class StateStore:
             "filesHashScope": "changes-v1" if changes is not None else "legacy",
         }
 
+    @staticmethod
+    def _check_job_disposition(db, table, key, project, state):
+        column = "task_id" if key == "taskId" else "operation_id"
+        row = db.execute(f"SELECT state_json FROM {table} WHERE project_path=? AND {column}=?",
+                         (project, state[key])).fetchone()
+        previous = json.loads(row[0]) if row else {}
+        disposition = previous.get("disposition")
+        if disposition and (state.get("disposition") != disposition or state.get("status") != "Released"
+                            or not state.get("terminal") or state.get("cleanupPending")):
+            raise ValueError("QUEUE_DISPOSITION_IS_IMMUTABLE")
+
+    def backup_job_disposition(self, kind: str, expected: dict, evidence: dict, request_id: str, reason: str) -> dict:
+        """Compare/back up the exact durable record before any lower-layer release is dispatched."""
+        if kind not in {"Task", "Operation"} or self._db_path is None:
+            raise ValueError("QUEUE_DISPOSITION_UNSUPPORTED")
+        table, key = ("test_jobs", "taskId") if kind == "Task" else ("operation_jobs", "operationId")
+        column = "task_id" if kind == "Task" else "operation_id"
+        expected = {k: v for k, v in expected.items() if kind == "Task" or not k.startswith("_")}
+        with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(f"SELECT state_json FROM {table} WHERE project_path=? AND {column}=?",
+                             (self._project_path, expected[key])).fetchone()
+            if not row or json.loads(row[0]) != expected or expected.get("disposition"):
+                raise ValueError("QUEUE_TARGET_CHANGED")
+            root = self._db_path.parent / "queue-backups"
+            root.mkdir(exist_ok=True)
+            if (root.resolve().parent != self._db_path.parent.resolve()
+                    or not root.resolve().is_relative_to(Path(self._project_path).resolve())):
+                raise ValueError("QUEUE_BACKUP_PATH_UNSAFE")
+            path = root / f"{uuid.uuid4().hex}.json"
+            content = json.dumps({"kind": kind, "state": expected, "evidence": evidence},
+                                 ensure_ascii=False, sort_keys=True).encode("utf-8")
+            with path.open("xb") as stream:
+                stream.write(content); stream.flush(); os.fsync(stream.fileno())
+            digest = hashlib.sha256(content).hexdigest()
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise OSError("QUEUE_BACKUP_VERIFICATION_FAILED")
+        return dict(requestId=request_id, reason=reason, projectPath=self._project_path,
+                    targetId=expected[key], originalTerminal=bool(expected.get("terminal") or expected.get("endedAt")),
+                    originalStatus=expected.get("status"), backupPath=str(path),
+                    backupBytes=len(content), backupSha256=digest)
+
     def save_test_job(self, state: dict) -> None:
         if self._db_path is None or state.get("projectPath") != self._project_path:
             raise RuntimeError("Test job persistence is not configured for this project.")
         with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_job_disposition(db, "test_jobs", "taskId", self._project_path, state)
             db.execute(
                 "INSERT INTO test_jobs(project_path,task_id,state_json) VALUES(?,?,?) "
                 "ON CONFLICT(project_path,task_id) DO UPDATE SET state_json=excluded.state_json",
@@ -345,6 +389,8 @@ class StateStore:
             raise RuntimeError("Operation persistence is not configured for this project.")
         persisted = {key: value for key, value in state.items() if not key.startswith("_")}
         with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_job_disposition(db, "operation_jobs", "operationId", self._project_path, persisted)
             db.execute(
                 "INSERT INTO operation_jobs(project_path,operation_id,state_json) VALUES(?,?,?) "
                 "ON CONFLICT(project_path,operation_id) DO UPDATE SET state_json=excluded.state_json",

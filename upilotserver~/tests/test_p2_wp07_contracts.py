@@ -25,7 +25,7 @@ def test_direct_tool_json_parse_failure_has_unicode_diagnostic_on_start_and_is_p
             return ok("start", {"result": malformed})
 
         service._operation_invoke = broken_start
-        result = await service.operation_start(_spec())
+        result = await service.seed_legacy_operation(_spec())
 
         assert not result.ok and result.error.code == "OPERATION_RESULT_INVALID"
         diagnostic = result.error.detail["parseDiagnostic"]
@@ -43,7 +43,7 @@ def test_direct_tool_json_parse_failure_has_unicode_diagnostic_on_start_and_is_p
 def test_direct_tool_json_parse_failure_on_status_never_promotes_terminal_state(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
-        started = await service.operation_start(_spec())
+        started = await service.seed_legacy_operation(_spec())
         operation_id = started.data["operationId"]
         original = service._operation_invoke
 
@@ -87,7 +87,7 @@ def test_project_mismatch_blocks_status_cancel_and_artifact_read_without_dispatc
         first_project.mkdir()
         second_project.mkdir()
         service = _OperationService(first_project, [])
-        started = await service.operation_start(_spec(cancelCall={"kind": "tool", "toolName": "cancel", "toolArgs": {}}))
+        started = await service.seed_legacy_operation(_spec(cancelCall={"kind": "tool", "toolName": "cancel", "toolArgs": {}}))
         operation_id = started.data["operationId"]
         service.server.session_manager.active.project_path = str(second_project)
         reads = []
@@ -137,7 +137,7 @@ def test_artifact_changed_during_single_handle_read_is_rejected(tmp_path, monkey
 def test_canceling_artifact_collection_keeps_last_persisted_snapshot_and_business_running(tmp_path, monkeypatch):
     async def run():
         service = _OperationService(tmp_path, [])
-        started = await service.operation_start(_spec())
+        started = await service.seed_legacy_operation(_spec())
         operation_id = started.data["operationId"]
         entered = asyncio.Event()
         never = asyncio.Event()
@@ -165,7 +165,7 @@ def test_canceling_artifact_collection_keeps_last_persisted_snapshot_and_busines
 def test_late_artifact_collection_cannot_overwrite_a_newer_persisted_snapshot(tmp_path, monkeypatch):
     async def run():
         service = _OperationService(tmp_path, [])
-        started = await service.operation_start(_spec())
+        started = await service.seed_legacy_operation(_spec())
         operation_id = started.data["operationId"]
         first_started = asyncio.Event()
         release_first = asyncio.Event()
@@ -202,7 +202,7 @@ def test_terminal_status_surfaces_deferred_artifact_persistence_failure_without_
         service = _OperationService(tmp_path, [{
             "status": "Failed", "failureSignature": "business-failure",
         }])
-        started = await service.operation_start(_spec())
+        started = await service.seed_legacy_operation(_spec())
         operation_id = started.data["operationId"]
         original_save = service.server.state.save_operation
 
@@ -235,7 +235,7 @@ def test_status_artifact_scalars_are_not_reinterpreted_as_project_paths(tmp_path
         report = tmp_path / "report.json"
         report.write_text('{"ok":true}', encoding="utf-8")
         service = _OperationService(tmp_path, [])
-        started = await service.operation_start(_spec(artifactRules={
+        started = await service.seed_legacy_operation(_spec(artifactRules={
             "fieldKinds": {
                 "reportPath": "file",
                 "reportBytes": "bytes",

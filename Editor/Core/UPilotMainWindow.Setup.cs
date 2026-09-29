@@ -67,6 +67,18 @@ namespace CodingRiver.UPilot
             Repaint();
         }
 
+        internal void EnterSetupRecovery(string failure)
+        {
+            // A previous visit may still be on the final step with startup unchecked.
+            // Refresh from saved settings without changing endpoints or starting services.
+            InitializeSetupState();
+            _setupStartAfterSetup = true;
+            _setupScroll = Vector2.zero;
+            _setupCompletionMessage = failure;
+            _setupCompletionMessageType = MessageType.Error;
+            EnterSetupView();
+        }
+
         private void InitializeSetupState()
         {
             _setupInitialized = true;
@@ -115,6 +127,9 @@ namespace CodingRiver.UPilot
                     EditorGUILayout.Space(8);
                     DrawSetupProgress();
                     EditorGUILayout.Space(8);
+
+                    if (!string.IsNullOrWhiteSpace(_setupCompletionMessage))
+                        EditorGUILayout.HelpBox(_setupCompletionMessage, _setupCompletionMessageType);
 
                     if (_setupStep == 0)
                         DrawSetupPortStep();

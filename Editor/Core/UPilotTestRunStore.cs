@@ -29,6 +29,10 @@ namespace CodingRiver.UPilot
             if (!acquired) throw new IOException("Another TestRuns writer owns the persistence directory.");
             try
             {
+                string activePath = Path.Combine(directory, "active-run.txt");
+                if ((active || clearActive) && File.Exists(activePath)
+                    && File.ReadAllText(activePath).Trim() != snapshot.runGuid)
+                    throw new IOException("Active TestRuns pointer belongs to another run; commit refused.");
                 string path = Path.Combine(directory, snapshot.runGuid + ".json");
                 SnapshotHeader previous = ReadHeader(path);
                 if (previous.exists && (previous.snapshotSequence > snapshot.snapshotSequence
@@ -40,19 +44,20 @@ namespace CodingRiver.UPilot
                 copy.persistenceError = "";
                 AtomicWrite(path, JsonUtility.ToJson(copy, true));
                 snapshot.snapshotSequence = sequence;
-                snapshot.persistenceError = "";
                 WritePointerIfChanged(Path.Combine(directory, "last-run.txt"), snapshot.runGuid);
-                string activePath = Path.Combine(directory, "active-run.txt");
                 if (clearActive)
                 {
                     if (File.Exists(activePath) && File.ReadAllText(activePath).Trim() == snapshot.runGuid)
                     {
                         BeforeActivePointerClearForTests?.Invoke(activePath);
+                        if (File.ReadAllText(activePath).Trim() != snapshot.runGuid)
+                            throw new IOException("Active TestRuns pointer changed before commit.");
                         File.Delete(activePath);
                     }
                 }
                 else if (active)
                     WritePointerIfChanged(activePath, snapshot.runGuid);
+                snapshot.persistenceError = "";
             }
             finally { mutex.ReleaseMutex(); }
         }
@@ -106,7 +111,26 @@ namespace CodingRiver.UPilot
             if (!File.Exists(path)) return null;
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var reader = new StreamReader(stream);
-            return JsonUtility.FromJson<TestRunResultPayload>(reader.ReadToEnd());
+            var snapshot = JsonUtility.FromJson<TestRunResultPayload>(reader.ReadToEnd());
+            if (snapshot == null) return null;
+            string pointer = Path.Combine(Path.GetDirectoryName(path), "active-run.txt");
+            // A terminal candidate is not committed while its active pointer remains.
+            // Read errors propagate: an unreadable pointer is not evidence of release.
+            if ((snapshot.cleanupSucceeded || snapshot.disposition != null) && File.Exists(pointer)
+                && File.ReadAllText(pointer).Trim() == snapshot.runGuid)
+            {
+                snapshot.status = "cleanup";
+                snapshot.phase = "cleanup";
+                snapshot.cleanupStatus = "committing";
+                snapshot.cleanupPending = true;
+                snapshot.cleanupSucceeded = false;
+                snapshot.terminal = false;
+                snapshot.isRunning = true;
+                snapshot.unresolvedResources ??= new System.Collections.Generic.List<string>();
+                if (!snapshot.unresolvedResources.Contains("run-guid:" + snapshot.runGuid))
+                    snapshot.unresolvedResources.Add("run-guid:" + snapshot.runGuid);
+            }
+            return snapshot;
         }
 
         internal static void AtomicWrite(string path, string text)

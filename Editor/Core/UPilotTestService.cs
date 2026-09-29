@@ -122,7 +122,7 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
-    public class TestRunResultPayload
+    public class TestRunResultPayload : ISerializationCallbackReceiver
     {
         public int resultStreamVersion = 1;
         public long nextEventSequence;
@@ -155,6 +155,10 @@ namespace CodingRiver.UPilot
         public bool   forceStopSucceeded;
         public string forceStopError;
         public List<string> cleanupErrors = new List<string>();
+        public List<string> cleanupErrorHistory = new List<string>();
+        public long cleanupAttemptDeadlineAt;
+        // Positive evidence, not inferred from managed references disappearing on Reload.
+        public bool cleanupResourcesReleased;
         public List<string> unresolvedResources = new List<string>();
         public int    total;
         public int    passed;
@@ -196,12 +200,24 @@ namespace CodingRiver.UPilot
         public string runnerState = "unknown";
         public string recoveryDiagnostic;
         public string callbackDomain;
+        public TestRunDisposition disposition;
+        public bool terminal; // Administrative disposition only; ordinary consumers retain existing contract.
         public string[] selectedLeafIdentities;
         public List<TestResultItemPayload> results = new List<TestResultItemPayload>();
 
+        public void OnBeforeSerialize() { }
+        public void OnAfterDeserialize()
+        {
+            if (disposition != null && !disposition.HasEvidence) disposition = null;
+        }
+
         internal TestRunResultPayload ShallowCopyForPersistence()
         {
-            return (TestRunResultPayload)MemberwiseClone();
+            var copy = (TestRunResultPayload)MemberwiseClone();
+            copy.cleanupErrors = new List<string>(cleanupErrors ?? new List<string>());
+            copy.cleanupErrorHistory = new List<string>(cleanupErrorHistory ?? new List<string>());
+            copy.unresolvedResources = new List<string>(unresolvedResources ?? new List<string>());
+            return copy;
         }
     }
 
@@ -230,7 +246,7 @@ namespace CodingRiver.UPilot
 
     // ── Service ─────────────────────────────────────────────────────────────────
 
-    public class UPilotTestService
+    public partial class UPilotTestService
     {
         public static UPilotTestService Instance { get; private set; }
 
@@ -243,6 +259,8 @@ namespace CodingRiver.UPilot
         private string _activeRunGuid;
         private string _pendingTerminalStatus;
         private bool _cleanupScheduled;
+        private bool _cleanupOwnershipUnknown;
+        private const long CleanupAttemptBudgetMs = 30000;
         private long _forceStopDeadline;
         private bool _forceStopRequested;
         private long _recoveryDeadline;
@@ -291,7 +309,7 @@ namespace CodingRiver.UPilot
             _bridge = bridge;
             Instance = this;
             RecoverPersistedState();
-            if (_isRunning && !s_recoveryCallbackAttached)
+            if (_isRunning && CanReattachPersistedRun() && !s_recoveryCallbackAttached)
                 EditorApplication.update += ReattachPersistedRun;
         }
 
@@ -342,6 +360,7 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("test.force_reset", HandleForceResetAsync);
             _bridge.Router.Register("test.results", HandleResultsAsync);
             _bridge.Router.Register("test.list",    HandleListAsync);
+            RegisterDispositionCommands();
         }
 
         // ── test.run ────────────────────────────────────────────────────────────
@@ -483,7 +502,7 @@ namespace CodingRiver.UPilot
                         throw new Exception("TestRunnerApi not found. Ensure Test Framework package is installed.");
                     }
 
-                    var api = ScriptableObject.CreateInstance(apiType);
+                    var api = CreateOwnedApi(apiType);
                     _activeApi = api;
 
                     // Create filter
@@ -628,7 +647,8 @@ namespace CodingRiver.UPilot
                         _lastResults.cleanupStartedAt = NowMs();
                         _lastResults.lastProgressAt = NowMs();
                     }
-                    CleanupActiveRun();
+                    if (BeginCleanupAttempt(explicitRequest: false))
+                        ScheduleCleanup();
                     tcs.SetException(ex);
                 }
             });
@@ -782,8 +802,7 @@ namespace CodingRiver.UPilot
                 await _bridge.SendErrorAsync(id, "TEST_RUN_NOT_FOUND", $"Active test run does not match runGuid: {payload.runGuid}", token, responseName);
                 return;
             }
-            // Force cleanup still starts with the Test Framework's supported cancel API.
-            // State is intentionally retained until RunFinished and callback cleanup complete.
+            // A completed Runner needs resource cleanup, not a cancellation binding.
             RequestCancel(force: true);
             await _bridge.SendResultAsync(id, responseName, SnapshotStatus(), token);
         }
@@ -858,6 +877,7 @@ namespace CodingRiver.UPilot
             var tcs = new TaskCompletionSource<TestListResultPayload>();
             _bridge.EnqueueTracked(id, () =>
             {
+                UnityEngine.Object api = null;
                 try
                 {
                     var result = new TestListResultPayload
@@ -876,7 +896,7 @@ namespace CodingRiver.UPilot
                     if (apiType == null || adaptorType == null || testModeType == null)
                         throw new Exception("Unity Test Runner discovery API is unavailable.");
 
-                    var api = ScriptableObject.CreateInstance(apiType);
+                    api = CreateOwnedApi(apiType);
                     var retrieve = apiType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
                         .FirstOrDefault(method => method.Name == "RetrieveTestList" &&
                                                   method.GetParameters().Length == 2 &&
@@ -896,7 +916,8 @@ namespace CodingRiver.UPilot
                         }
                         finally
                         {
-                            UnityEngine.Object.DestroyImmediate(api);
+                            if (api != null) UnityEngine.Object.DestroyImmediate(api);
+                            api = null;
                         }
                     };
 
@@ -907,13 +928,24 @@ namespace CodingRiver.UPilot
                     object modeValue = Enum.Parse(testModeType, mode);
                     retrieve.Invoke(api, new[] { modeValue, callback });
                 }
-                catch (Exception ex) { tcs.SetException(ex); }
+                catch (Exception ex)
+                {
+                    try { if (api != null) UnityEngine.Object.DestroyImmediate(api); }
+                    finally { tcs.TrySetException(ex); }
+                }
             });
 
             return tcs.Task;
         }
 
         // ── Helpers ─────────────────────────────────────────────────────────────
+
+        private static ScriptableObject CreateOwnedApi(Type apiType)
+        {
+            var api = ScriptableObject.CreateInstance(apiType);
+            api.hideFlags = HideFlags.HideAndDontSave;
+            return api;
+        }
 
         private static string NormalizeTestMode(string mode)
         {
@@ -929,7 +961,7 @@ namespace CodingRiver.UPilot
 
             _lastResults.isRunning = _isRunning;
             _lastResults.runGuid = _activeRunGuid ?? _lastResults.runGuid;
-            RefreshUnresolvedResources();
+            if (_lastResults.disposition == null) RefreshUnresolvedResources();
             return _lastResults;
         }
 
@@ -975,14 +1007,46 @@ namespace CodingRiver.UPilot
             if (!_isRunning || _lastResults == null)
                 return;
 
-            if (_lastResults.cancelRequested)
+            if (string.IsNullOrWhiteSpace(_activeRunGuid))
+                throw new InvalidOperationException("Cleanup requires the original runGuid; no Runner API was invoked.");
+
+            if (!BeginCleanupAttempt(explicitRequest: true))
+                return;
+            if (_lastResults.disposition != null)
             {
-                if (force)
-                    ScheduleForceStop();
+                // An explicit same-run cleanup retries only the original disposition commit.
+                ContinueDispositionCommit();
+                if (!_lastResults.terminal) ScheduleCleanup();
+                return;
+            }
+            string runnerState = ProbeFrameworkRun(out _);
+            if (runnerState == "inactive")
+            {
+                ResolveCleanupErrors(_lastResults, "cancel-binding");
+                FinalizeCancelledRun();
+                return;
+            }
+            if (runnerState == "unknown")
+            {
+                _lastResults.status = "cleanup";
+                _lastResults.phase = "cleanup";
+                _lastResults.cleanupPending = true;
+                PersistSnapshot();
+                ScheduleCleanup();
                 return;
             }
 
-            Type apiType = _activeApi != null ? _activeApi.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+            if (_lastResults.cancelRequested)
+            {
+                // An uncertain response permits observation only, not another cancellation path.
+                if (force && _lastResults.cancelAccepted)
+                    ScheduleForceStop();
+                else
+                    ScheduleCancelCompletionMonitor();
+                return;
+            }
+
+            Type apiType = !ReferenceEquals(_activeApi, null) ? _activeApi.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
             try
             {
                 if (_cancelApiType != apiType || _cancelMethod == null)
@@ -996,14 +1060,15 @@ namespace CodingRiver.UPilot
                 Exception root = RootException(ex);
                 string diagnostic = "Runner binding unavailable before cancellation; no cancel API was invoked. "
                     + root.GetType().Name + ": " + root.Message;
-                _lastResults.runnerState = "unknown";
                 _lastResults.cancelBinding = diagnostic;
                 _lastResults.recoveryDiagnostic = diagnostic;
                 _lastResults.nextAction = "Restore the verified Unity Test Framework binding, then retry cancellation for this runGuid.";
                 _lastResults.lastProgressAt = NowMs();
-                PersistSnapshot();
+                AddCleanupError("cancel-binding", root);
+                RequireCleanupRecovery(_lastResults.nextAction);
                 throw new InvalidOperationException(diagnostic, root);
             }
+            ResolveCleanupErrors(_lastResults, "cancel-binding");
             _lastResults.cancelBinding = _cancelMethod.DeclaringType.Assembly.FullName + "::" + _cancelMethod;
             _lastResults.cancelRequested = true;
             _lastResults.cancelAttemptCount++;
@@ -1042,7 +1107,7 @@ namespace CodingRiver.UPilot
             }
             PersistSnapshot();
             ScheduleCancelCompletionMonitor();
-            if (force)
+            if (force && _lastResults.cancelAccepted)
                 ScheduleForceStop();
         }
 
@@ -1532,7 +1597,8 @@ namespace CodingRiver.UPilot
 
         private void OnRunFinished(object rootResult)
         {
-            if (!_isRunning || _lastResults == null || _cleanupScheduled) return;
+            if (!_isRunning || _lastResults == null || _lastResults.resultAuthoritative) return;
+            bool recoveryBlocked = _lastResults.phase == "recovery_required";
             // UTF's PlayMode RunFinished callback precedes its ExitPlayModeTask.
             // Do not invent a new exit intent if an exit is already in progress.
             if (ShouldRecordFrameworkExit(_lastResults,
@@ -1567,8 +1633,8 @@ namespace CodingRiver.UPilot
             finally
             {
                 _lastResults.status = "cleanup";
-                _lastResults.phase = "cleanup";
-                _lastResults.cleanupStatus = "running";
+                _lastResults.phase = recoveryBlocked ? "recovery_required" : "cleanup";
+                _lastResults.cleanupStatus = recoveryBlocked ? "recovery_required" : "running";
                 _lastResults.cleanupPending = true;
                 _lastResults.cleanupStartedAt = _lastResults.cleanupStartedAt > 0
                     ? _lastResults.cleanupStartedAt
@@ -1576,7 +1642,16 @@ namespace CodingRiver.UPilot
                 _lastResults.currentTest = null;
                 _lastResults.lastProgressAt = NowMs();
                 PersistSnapshot();
-                ScheduleCleanup();
+                // UTF invokes RunFinished before post-build cleanup / unlocking reloads and
+                // before unregistering its Runner. Release only OUR callback/API while the
+                // original domain still owns them; the Runner/Editor/final-commit barrier
+                // remains in CleanupActiveRun. A late result never renews recovery authority.
+                if (!recoveryBlocked)
+                {
+                    if (_lastResults.resultAuthoritative && BeginCleanupAttempt(explicitRequest: false))
+                        ReleaseAndPersistRunnerResources();
+                    ScheduleCleanup();
+                }
             }
         }
 
@@ -1738,12 +1813,69 @@ namespace CodingRiver.UPilot
                 ?.GetValue(target);
         }
 
+        private bool BeginCleanupAttempt(bool explicitRequest)
+        {
+            if (_lastResults == null) return false;
+            long now = NowMs();
+            bool recovery = _lastResults.phase == "recovery_required";
+            bool expired = _lastResults.cleanupAttemptDeadlineAt > 0 && now >= _lastResults.cleanupAttemptDeadlineAt;
+            if ((recovery || expired) && !explicitRequest) return false;
+            if (_lastResults.cleanupAttemptDeadlineAt == 0 || (explicitRequest && (recovery || expired)))
+            {
+                _lastResults.cleanupAttemptDeadlineAt = now + CleanupAttemptBudgetMs;
+                _lastResults.phase = "cleanup";
+                _lastResults.cleanupStatus = "running";
+                _lastResults.cleanupPending = true;
+                _lastResults.cleanupSucceeded = false;
+                _nextCleanupProbeAt = 0;
+                _cleanupProbeDelayMs = InitialCleanupProbeDelayMs;
+                PersistSnapshot(); // Intent/deadline must be durable before any release or cancel.
+            }
+            if (!string.IsNullOrWhiteSpace(_lastResults.persistenceError))
+            {
+                ScheduleCleanup();
+                return false;
+            }
+            return true;
+        }
+
+        private void StopCleanupScheduling()
+        {
+            EditorApplication.update -= ForceStopTick;
+            EditorApplication.update -= CleanupActiveRunFromUpdate;
+            EditorApplication.update -= ReattachPersistedRun;
+            EditorApplication.update -= RecoveredRunWatchdog;
+            EditorApplication.update -= TestProgressWatchdog;
+            EditorApplication.delayCall -= CleanupActiveRun;
+            _cleanupScheduled = false;
+            s_recoveryCallbackAttached = false;
+        }
+
+        private void RequireCleanupRecovery(string reason)
+        {
+            StopCleanupScheduling();
+            _lastResults.status = "cleanup";
+            _lastResults.phase = "recovery_required";
+            _lastResults.cleanupStatus = "recovery_required";
+            _lastResults.cleanupPending = true;
+            _lastResults.cleanupSucceeded = false;
+            _lastResults.nextAction = reason;
+            if (_lastResults.disposition == null) RefreshUnresolvedResources();
+            PersistSnapshot();
+        }
+
         private void CleanupActiveRun()
         {
-            if (_lastResults == null) return;
+            if (_lastResults == null || _lastResults.phase == "recovery_required") return;
+            if (_lastResults.disposition != null) { ContinueDispositionCommit(); return; }
             long now = NowMs();
             if (now < _nextCleanupProbeAt) return;
-            // A failed result write must be repaired before releasing its callback/API.
+            if (_lastResults.cleanupAttemptDeadlineAt <= 0 || now >= _lastResults.cleanupAttemptDeadlineAt)
+            {
+                RequireCleanupRecovery("Cleanup attempt is missing or expired; explicitly request cleanup for the same runGuid.");
+                return;
+            }
+            // A failed result/intent write must be repaired before releasing its callback/API.
             if (!string.IsNullOrWhiteSpace(_lastResults.persistenceError))
             {
                 PersistSnapshot();
@@ -1753,6 +1885,11 @@ namespace CodingRiver.UPilot
                     return;
                 }
             }
+            if (_cleanupOwnershipUnknown && !_lastResults.cleanupResourcesReleased)
+            {
+                RequireCleanupRecovery("Original callback/API release has no durable evidence after Reload; no replacement API was created.");
+                return;
+            }
             if (!string.IsNullOrWhiteSpace(_activeRunGuid))
             {
                 string previousRunnerState = _lastResults.runnerState;
@@ -1760,11 +1897,10 @@ namespace CodingRiver.UPilot
                 bool previousEditorCleanupPending = _editorCleanupPending;
                 bool previousCleanupPending = _lastResults.cleanupPending;
                 bool previousCleanupSucceeded = _lastResults.cleanupSucceeded;
-
                 var runnerState = ProbeFrameworkRun(out _);
-                bool editorClean = !string.Equals(_lastResults.testMode, "PlayMode", StringComparison.OrdinalIgnoreCase)
-                    || (!EditorApplication.isPlaying && !EditorApplication.isPlayingOrWillChangePlaymode
-                        && !EditorApplication.isCompiling && !EditorApplication.isUpdating);
+                bool editorClean = !EditorApplication.isCompiling && !EditorApplication.isUpdating
+                    && (!string.Equals(_lastResults.testMode, "PlayMode", StringComparison.OrdinalIgnoreCase)
+                        || (!EditorApplication.isPlaying && !EditorApplication.isPlayingOrWillChangePlaymode));
                 _editorCleanupPending = !editorClean;
                 if (runnerState != "inactive" || !editorClean)
                 {
@@ -1772,84 +1908,88 @@ namespace CodingRiver.UPilot
                     _lastResults.cleanupSucceeded = false;
                     bool resourcesChanged = !UnresolvedResourcesMatchCurrentState();
                     if (resourcesChanged) RefreshUnresolvedResources();
-                    bool stateChanged = !string.Equals(previousRunnerState, _lastResults.runnerState, StringComparison.Ordinal)
-                        || !string.Equals(previousDiagnostic, _lastResults.recoveryDiagnostic, StringComparison.Ordinal)
+                    bool stateChanged = previousRunnerState != _lastResults.runnerState
+                        || previousDiagnostic != _lastResults.recoveryDiagnostic
                         || previousEditorCleanupPending != _editorCleanupPending
                         || previousCleanupPending != _lastResults.cleanupPending
-                        || previousCleanupSucceeded != _lastResults.cleanupSucceeded
-                        || resourcesChanged;
+                        || previousCleanupSucceeded != _lastResults.cleanupSucceeded || resourcesChanged;
                     if (stateChanged) PersistSnapshot();
                     ScheduleNextCleanupProbe(now, stateChanged);
                     return;
                 }
             }
-            EditorApplication.update -= ForceStopTick;
-            EditorApplication.update -= CleanupActiveRunFromUpdate;
-            EditorApplication.update -= ReattachPersistedRun;
-            EditorApplication.update -= RecoveredRunWatchdog;
-            EditorApplication.update -= TestProgressWatchdog;
-            s_recoveryCallbackAttached = false;
-            EditorApplication.delayCall -= CleanupActiveRun;
-            _cleanupScheduled = false;
-            try { ReleaseOwnedRunnerResources(); }
-            finally
+            if (NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
             {
-                if (_lastResults != null)
-                {
-                    if (_activeCallback != null || _activeApi != null)
-                    {
-                        _lastResults.cleanupPending = true;
-                        _lastResults.cleanupSucceeded = false;
-                        _lastResults.cleanupStatus = "failed";
-                        _lastResults.nextAction = "Retry cleanup for the same runGuid after resolving the reported callback/API release error.";
-                        RefreshUnresolvedResources();
-                        PersistSnapshot();
-                        ScheduleCleanup();
-                    }
-                    else if (!_lastResults.resultAuthoritative && string.IsNullOrWhiteSpace(_pendingTerminalStatus))
-                    {
-                        _lastResults.cleanupPending = false;
-                        _lastResults.cleanupStatus = "completed";
-                        _lastResults.cleanupSucceeded = _lastResults.cleanupErrors.Count == 0;
-                        MarkRecoveredRunOrphaned();
-                    }
-                    else
-                    {
-                    _lastResults.cleanupPending = false;
-                    _lastResults.isRunning = false;
-                    _lastResults.currentTest = null;
-                    _lastResults.lastProgressAt = NowMs();
-                    if (!string.IsNullOrWhiteSpace(_pendingTerminalStatus))
-                        _lastResults.status = _pendingTerminalStatus;
-                    _lastResults.phase = _lastResults.status;
-                    _lastResults.endedAt = NowMs();
-                    _lastResults.unresolvedResources.Clear();
-                    _lastResults.cleanupSucceeded = _lastResults.cleanupErrors.Count == 0;
-                    _lastResults.cleanupStatus = _lastResults.cleanupSucceeded ? "completed" : "failed";
-                    PersistSnapshot(clearActivePointer: true);
-                    if (string.IsNullOrWhiteSpace(_lastResults.persistenceError))
-                    {
-                        _isRunning = false;
-                        _activeRunGuid = null;
-                        _pendingTerminalStatus = null;
-                        _forceStopRequested = false;
-                    }
-                    else
-                    {
-                        _lastResults.status = "cleanup";
-                        _lastResults.cleanupPending = true;
-                        _lastResults.cleanupSucceeded = false;
-                        ScheduleCleanup();
-                    }
-                    }
-                }
+                RequireCleanupRecovery("Cleanup budget expired while observing Runner/Editor; no new release was attempted.");
+                return;
+            }
+            if (!ReleaseAndPersistRunnerResources())
+            {
+                if (_lastResults.phase != "recovery_required") ScheduleNextCleanupProbe(now, false);
+                return;
+            }
+            if (!_lastResults.resultAuthoritative || string.IsNullOrWhiteSpace(_lastResults.outcomeStatus)
+                || _lastResults.outcomeStatus == "unknown" || _lastResults.outcomeStatus == "pending")
+            {
+                RequireCleanupRecovery("Resources released, but the original business outcome remains unknown; do not replay start.");
+                return;
+            }
+            if (_lastResults.cleanupErrors.Any(error => !error.StartsWith("persistence-commit:", StringComparison.Ordinal)))
+            {
+                RequireCleanupRecovery("Unresolved cleanup stages remain; successful resource release did not clear unrelated errors.");
+                return;
+            }
+            if (NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
+            {
+                RequireCleanupRecovery("Cleanup budget expired; resource release evidence retained for explicit commit retry.");
+                return;
+            }
+            var candidate = _lastResults.ShallowCopyForPersistence();
+            // Resolve commit errors only in the independent candidate, published after commit.
+            ResolveCleanupErrors(candidate, "persistence-commit");
+            candidate.persistenceError = "";
+            candidate.status = candidate.outcomeStatus;
+            candidate.phase = candidate.status;
+            candidate.isRunning = false;
+            candidate.currentTest = null;
+            candidate.endedAt = candidate.endedAt > 0 ? candidate.endedAt : NowMs();
+            candidate.lastProgressAt = NowMs();
+            candidate.cleanupPending = false;
+            candidate.cleanupSucceeded = true;
+            candidate.cleanupStatus = "completed";
+            candidate.unresolvedResources.Clear();
+            candidate.nextAction = "";
+            candidate.recoveryDiagnostic = "";
+            try
+            {
+                SaveSnapshot(candidate, active: false, clearActive: true);
+                // Publish only after the snapshot, last pointer and original active pointer committed.
+                _lastResults = candidate;
+                _isRunning = false;
+                _activeRunGuid = null;
+                _pendingTerminalStatus = null;
+                _forceStopRequested = false;
+                StopCleanupScheduling();
+            }
+            catch (Exception ex)
+            {
+                // Snapshot may already be durable. Preserve sequence and terminal-time monotonicity.
+                _lastResults.snapshotSequence = Math.Max(_lastResults.snapshotSequence, candidate.snapshotSequence);
+                _lastResults.endedAt = Math.Max(_lastResults.endedAt, candidate.endedAt);
+                _lastResults.cleanupStatus = "committing";
+                _lastResults.persistenceError = ex.GetType().Name + ": " + ex.Message;
+                AddCleanupError("persistence-commit", ex);
+                ScheduleNextCleanupProbe(now, false);
             }
         }
 
         private void ScheduleCleanup()
         {
-            if (_cleanupScheduled)
-                return;
+            if (_cleanupScheduled || _lastResults == null || _lastResults.phase == "recovery_required") return;
+            // Only live completion/explicit cleanup creates a first window. Recovery checks before scheduling.
+            if (_lastResults.cleanupAttemptDeadlineAt == 0)
+                BeginCleanupAttempt(explicitRequest: false);
+            if (_cleanupScheduled) return;
             _cleanupScheduled = true;
             _cleanupProbeDelayMs = InitialCleanupProbeDelayMs;
             _nextCleanupProbeAt = 0;
@@ -1865,6 +2005,32 @@ namespace CodingRiver.UPilot
             _nextCleanupProbeAt = now + _cleanupProbeDelayMs;
         }
 
+        private bool ReleaseAndPersistRunnerResources()
+        {
+            if (_lastResults.cleanupResourcesReleased)
+                return string.IsNullOrWhiteSpace(_lastResults.persistenceError);
+            if (_cleanupOwnershipUnknown)
+            {
+                RequireCleanupRecovery("Original callback/API ownership is unknown; no replacement API was created.");
+                return false;
+            }
+            if (_lastResults.cleanupAttemptDeadlineAt <= 0 || NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
+            {
+                RequireCleanupRecovery("Cleanup budget expired before releasing owned callback/API resources.");
+                return false;
+            }
+            if (!ReleaseOwnedRunnerResources())
+            {
+                RequireCleanupRecovery("Resolve the callback/API release error, then explicitly retry the same runGuid.");
+                return false;
+            }
+            _lastResults.cleanupResourcesReleased = true;
+            // Positive evidence is distinct from Runner completion. If this write fails,
+            // keep the slot occupied; Reload must not infer release from missing references.
+            PersistSnapshot();
+            return string.IsNullOrWhiteSpace(_lastResults.persistenceError);
+        }
+
         internal bool ReleaseOwnedRunnerResources()
         {
             var api = _activeApi;
@@ -1873,19 +2039,20 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    var apiType = api != null ? api.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+                    var apiType = !ReferenceEquals(api, null) ? api.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
                     var unregister = ResolveRunnerAdapter(apiType).Unregister;
                     var callbacksType = callback.GetType().GetInterfaces()
                         .FirstOrDefault(type => type.FullName == "UnityEditor.TestTools.TestRunner.Api.ICallbacks");
                     if (unregister == null || callbacksType == null)
                         throw new MissingMethodException("UnregisterTestCallback<T>(T) is unavailable.");
-                    if (!unregister.IsStatic && api == null)
+                    if (!unregister.IsStatic && ReferenceEquals(api, null))
                         throw new InvalidOperationException("Instance callback registration owner is unavailable; no replacement API was created.");
                     var invoker = CallbackUnregisterInvokerForTests;
                     if (invoker != null) invoker(unregister, callbacksType, callback);
                     else unregister.MakeGenericMethod(callbacksType).Invoke(unregister.IsStatic ? null : api,
                         new[] { callback });
                     _activeCallback = null;
+                    ResolveCleanupErrors(_lastResults, "callback-unregister");
                 }
                 catch (Exception ex)
                 {
@@ -1893,14 +2060,20 @@ namespace CodingRiver.UPilot
                 }
             }
 
-            if (api != null && _activeCallback == null)
+            if (!ReferenceEquals(api, null) && _activeCallback == null)
             {
+                if (_lastResults?.cleanupAttemptDeadlineAt > 0 && NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
+                    return false;
                 try
                 {
-                    var destroyer = ApiDestroyerForTests;
-                    if (destroyer != null) destroyer(api);
-                    else UnityEngine.Object.DestroyImmediate(api);
+                    if (api != null)
+                    {
+                        var destroyer = ApiDestroyerForTests;
+                        if (destroyer != null) destroyer(api);
+                        else UnityEngine.Object.DestroyImmediate(api);
+                    }
                     _activeApi = null;
+                    ResolveCleanupErrors(_lastResults, "api-release");
                 }
                 catch (Exception ex)
                 {
@@ -1908,7 +2081,7 @@ namespace CodingRiver.UPilot
                 }
             }
             RefreshUnresolvedResources();
-            return _activeCallback == null && _activeApi == null;
+            return _activeCallback == null && ReferenceEquals(_activeApi, null);
         }
 
         private void AddCleanupError(string stage, Exception error)
@@ -1916,6 +2089,19 @@ namespace CodingRiver.UPilot
             if (_lastResults == null) return;
             string message = stage + ": " + error.GetType().Name + ": " + error.Message;
             if (!_lastResults.cleanupErrors.Contains(message)) _lastResults.cleanupErrors.Add(message);
+        }
+
+        private static void ResolveCleanupErrors(TestRunResultPayload snapshot, string stage)
+        {
+            if (snapshot == null) return;
+            snapshot.cleanupErrorHistory ??= new List<string>();
+            for (int index = snapshot.cleanupErrors.Count - 1; index >= 0; index--)
+            {
+                string error = snapshot.cleanupErrors[index];
+                if (!error.StartsWith(stage + ":", StringComparison.Ordinal)) continue;
+                if (!snapshot.cleanupErrorHistory.Contains(error)) snapshot.cleanupErrorHistory.Add(error);
+                snapshot.cleanupErrors.RemoveAt(index);
+            }
         }
 
         private UPilotTestRunnerAdapter ResolveRunnerAdapter(Type apiType)
@@ -1960,6 +2146,19 @@ namespace CodingRiver.UPilot
                 EditorApplication.update -= ForceStopTick;
                 return;
             }
+            if (_lastResults.phase == "recovery_required")
+            {
+                EditorApplication.update -= ForceStopTick;
+                return;
+            }
+            long now = NowMs();
+            if (_lastResults.cleanupAttemptDeadlineAt <= 0 || now >= _lastResults.cleanupAttemptDeadlineAt)
+            {
+                RequireCleanupRecovery("Cancellation observation budget expired; observe the original run or explicitly retry cleanup.");
+                return;
+            }
+            if (now < _nextCleanupProbeAt) return;
+            ScheduleNextCleanupProbe(now, false);
             try
             {
                 string runnerState = ProbeFrameworkRun(out object runner);
@@ -1969,11 +2168,6 @@ namespace CodingRiver.UPilot
                 // Once the framework no longer owns the job, it is safe to finish UPilot cleanup.
                 if (runnerState == "inactive")
                 {
-                    if (_forceStopRequested)
-                    {
-                        _lastResults.forceStopAttempted = true;
-                        _lastResults.forceStopSucceeded = true;
-                    }
                     FinalizeCancelledRun();
                     return;
                 }
@@ -2013,9 +2207,15 @@ namespace CodingRiver.UPilot
                 : NowMs();
             _lastResults.currentTest = null;
             _lastResults.lastProgressAt = NowMs();
-            _pendingTerminalStatus = "aborted";
-            _lastResults.outcomeStatus = "aborted";
-            _lastResults.resultAuthoritative = true;
+            if (_lastResults.resultAuthoritative && !string.IsNullOrWhiteSpace(_lastResults.outcomeStatus)
+                && _lastResults.outcomeStatus != "unknown" && _lastResults.outcomeStatus != "pending")
+                _pendingTerminalStatus = _lastResults.outcomeStatus;
+            else if (_lastResults.cancelAccepted || _lastResults.forceStopSucceeded)
+            {
+                _pendingTerminalStatus = "aborted";
+                _lastResults.outcomeStatus = "aborted";
+                _lastResults.resultAuthoritative = true;
+            }
             PersistSnapshot();
             ScheduleCleanup();
         }
@@ -2031,7 +2231,7 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrWhiteSpace(_activeRunGuid)
                 && !NextRunGuidResourceMatches(_lastResults.unresolvedResources, ref index, _activeRunGuid))
                 return false;
-            if (_activeApi != null
+            if (!ReferenceEquals(_activeApi, null)
                 && !NextResourceMatches(_lastResults.unresolvedResources, ref index, "test-runner-api"))
                 return false;
             if (_activeCallback != null
@@ -2068,12 +2268,13 @@ namespace CodingRiver.UPilot
         {
             if (_lastResults == null)
                 return;
+            if (_cleanupOwnershipUnknown && !_lastResults.cleanupResourcesReleased) return;
             _lastResults.unresolvedResources.Clear();
             if (_isRunning && _lastResults.runnerState != "inactive")
                 _lastResults.unresolvedResources.Add("test-runner-job");
             if (!string.IsNullOrWhiteSpace(_activeRunGuid))
                 _lastResults.unresolvedResources.Add($"run-guid:{_activeRunGuid}");
-            if (_activeApi != null)
+            if (!ReferenceEquals(_activeApi, null))
                 _lastResults.unresolvedResources.Add("test-runner-api");
             if (_activeCallback != null)
                 _lastResults.unresolvedResources.Add("test-callback");
@@ -2101,6 +2302,35 @@ namespace CodingRiver.UPilot
             _lastResults.isRunning = _isRunning;
             if (active)
             {
+                if (_lastResults.disposition != null)
+                {
+                    _lastResults.terminal = false;
+                    _lastResults.cleanupPending = true;
+                    _lastResults.phase = "cleanup";
+                    ScheduleCleanup(); // Persistence only; never repeat resource release.
+                    return;
+                }
+                bool cleanupRecovery = _lastResults.cleanupPending || _lastResults.status == "cleanup"
+                    || _lastResults.resultAuthoritative || _lastResults.cancelRequested;
+                if (cleanupRecovery)
+                {
+                    _cleanupOwnershipUnknown = !_lastResults.cleanupResourcesReleased;
+                    _lastResults.status = "cleanup";
+                    _lastResults.cleanupPending = true;
+                    _lastResults.cleanupSucceeded = false;
+                    if (_lastResults.phase == "recovery_required" || _cleanupOwnershipUnknown
+                        || _lastResults.cleanupAttemptDeadlineAt <= NowMs())
+                    {
+                        _lastResults.phase = "recovery_required";
+                        _lastResults.cleanupStatus = "recovery_required";
+                        _lastResults.nextAction = "Original cleanup budget/ownership requires explicit recovery; Reload did not renew it.";
+                        return;
+                    }
+                    _lastResults.phase = "cleanup";
+                    _pendingTerminalStatus = _lastResults.outcomeStatus;
+                    ScheduleCleanup();
+                    return;
+                }
                 _lastResults.phase = "recovering_after_reload";
                 _lastResults.callbackDomain = CallbackDomain;
                 if (_lastResults.resultAuthoritative && !string.IsNullOrWhiteSpace(_lastResults.outcomeStatus)
@@ -2119,9 +2349,14 @@ namespace CodingRiver.UPilot
             }
         }
 
+        private bool CanReattachPersistedRun() => _lastResults != null
+            && _lastResults.status != "cleanup" && _lastResults.phase != "recovery_required"
+            && !_lastResults.cancelRequested && !_lastResults.cleanupResourcesReleased
+            && !_cleanupOwnershipUnknown;
+
         private void ReattachPersistedRun()
         {
-            if (!_isRunning || string.IsNullOrWhiteSpace(_activeRunGuid) || _activeCallback != null
+            if (!CanReattachPersistedRun() || !_isRunning || string.IsNullOrWhiteSpace(_activeRunGuid) || _activeCallback != null
                 || !string.IsNullOrWhiteSpace(_pendingTerminalStatus))
             {
                 EditorApplication.update -= ReattachPersistedRun;
@@ -2138,7 +2373,7 @@ namespace CodingRiver.UPilot
                     MarkRecoveredRunOrphaned();
                     return;
                 }
-                var api = _activeApi ?? ScriptableObject.CreateInstance(apiType);
+                var api = _activeApi ?? CreateOwnedApi(apiType);
                 _activeApi = api;
                 var callback = CreateCallbackProxy(callbacksType);
                 RegisterCallbacks(apiType, api, callbacksType, callback);
@@ -2171,7 +2406,6 @@ namespace CodingRiver.UPilot
             _lastResults.terminalReason = "Test Runner callback was not recovered after Domain Reload; assertion outcome is unknown.";
             _lastResults.nextAction = "Inspect this runGuid and Runner diagnostics; do not replay test start.";
             _lastResults.isRunning = true;
-            _lastResults.endedAt = 0;
             PersistSnapshot();
         }
 
@@ -2258,7 +2492,7 @@ namespace CodingRiver.UPilot
             runner = null;
             try
             {
-                Type apiType = _activeApi != null ? _activeApi.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
+                Type apiType = !ReferenceEquals(_activeApi, null) ? _activeApi.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
                 _lastResults.runnerState = ResolveRunnerAdapter(apiType).Probe(_activeRunGuid, out runner, out var diagnostic);
                 _lastResults.recoveryDiagnostic = diagnostic;
             }
@@ -2266,6 +2500,15 @@ namespace CodingRiver.UPilot
             {
                 _lastResults.runnerState = "unknown";
                 _lastResults.recoveryDiagnostic = ex.GetType().Name + ": " + ex.Message;
+            }
+            if (_lastResults.runnerState == "unknown")
+            {
+                string error = "runner-observation: " + _lastResults.recoveryDiagnostic;
+                if (!_lastResults.cleanupErrors.Contains(error)) _lastResults.cleanupErrors.Add(error);
+            }
+            else
+            {
+                ResolveCleanupErrors(_lastResults, "runner-observation");
             }
             return _lastResults.runnerState;
         }
@@ -2276,24 +2519,33 @@ namespace CodingRiver.UPilot
                 || status == "cancel_requested" || status == "stopping" || status == "cleanup";
         }
 
+        private void SaveSnapshot(TestRunResultPayload snapshot, bool active, bool clearActive)
+        {
+            var saver = SnapshotSaverForTests;
+            if (saver != null) saver(snapshot, active, clearActive);
+            else UPilotTestRunStore.Save(PersistenceDirectory, snapshot, active, clearActive);
+        }
+
         private void PersistSnapshot(bool clearActivePointer = false)
         {
-            if (_lastResults == null || string.IsNullOrWhiteSpace(_lastResults.runGuid ?? _activeRunGuid))
-                return;
-            string runGuid = _lastResults.runGuid ?? _activeRunGuid;
-            _lastResults.runGuid = runGuid;
+            if (_lastResults == null || string.IsNullOrWhiteSpace(_lastResults.runGuid ?? _activeRunGuid)) return;
+            _lastResults.runGuid = _lastResults.runGuid ?? _activeRunGuid;
+            var candidate = _lastResults.ShallowCopyForPersistence();
+            ResolveCleanupErrors(candidate, "persistence");
+            candidate.persistenceError = "";
             try
             {
-                bool active = _isRunning || IsNonTerminal(_lastResults.status);
-                var saver = SnapshotSaverForTests;
-                if (saver != null) saver(_lastResults, active, clearActivePointer);
-                else UPilotTestRunStore.Save(PersistenceDirectory, _lastResults, active, clearActivePointer);
+                SaveSnapshot(candidate, _isRunning || IsNonTerminal(candidate.status), clearActivePointer);
+                _lastResults.snapshotSequence = candidate.snapshotSequence;
+                _lastResults.persistenceError = "";
+                _lastResults.cleanupErrors = candidate.cleanupErrors;
+                _lastResults.cleanupErrorHistory = candidate.cleanupErrorHistory;
             }
             catch (Exception ex)
             {
-                _lastResults.persistenceError = $"{ex.GetType().Name}: {ex.Message}";
-                if (!_lastResults.cleanupErrors.Any(item => item.StartsWith("persistence:", StringComparison.Ordinal)))
-                    _lastResults.cleanupErrors.Add($"persistence: {ex.GetType().Name}: {ex.Message}");
+                _lastResults.snapshotSequence = Math.Max(_lastResults.snapshotSequence, candidate.snapshotSequence);
+                _lastResults.persistenceError = ex.GetType().Name + ": " + ex.Message;
+                AddCleanupError("persistence", ex);
             }
         }
 

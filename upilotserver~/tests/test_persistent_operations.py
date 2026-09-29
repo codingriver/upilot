@@ -21,7 +21,7 @@ async def stop_observers(service):
 def test_background_completion_without_client_poll_and_restart_read(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [{"status": "Succeeded"}])
-        result = await service.operation_start(durable_spec())
+        result = await service.seed_legacy_operation(durable_spec())
         await asyncio.sleep(0.15)
         stored = service.server.state.load_operations()[0]
         assert stored["endedAt"] and stored["status"] == "Succeeded"
@@ -36,7 +36,7 @@ def test_background_completion_without_client_poll_and_restart_read(tmp_path):
 def test_restart_resumes_only_original_status_and_never_start(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
-        first = await service.operation_start(durable_spec())
+        first = await service.seed_legacy_operation(durable_spec())
         await stop_observers(service)
         restored = _OperationService(tmp_path, [{"status": "Succeeded"}])
         result = await restored.operation_status(first.data["operationId"])
@@ -52,7 +52,7 @@ def test_lost_start_result_requires_recovery_without_replay(tmp_path):
         async def lost(*args):
             raise TimeoutError("response lost after dispatch")
         service._operation_invoke = lost
-        first = await service.operation_start(durable_spec())
+        first = await service.seed_legacy_operation(durable_spec())
         assert not first.ok
         operation_id = first.error.detail["operationId"]
         assert first.error.detail["startAttemptCount"] == 1
@@ -70,7 +70,7 @@ def test_missing_persistence_blocks_start_side_effects(tmp_path):
         def disk_error(_state):
             raise OSError("disk full")
         service.server.state.save_operation = disk_error
-        result = await service.operation_start(durable_spec())
+        result = await service.seed_legacy_operation(durable_spec())
         assert not result.ok and not service.calls
     asyncio.run(run())
 
@@ -78,7 +78,7 @@ def test_missing_persistence_blocks_start_side_effects(tmp_path):
 def test_lost_cancel_response_never_replays_cancel(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
-        result = await service.operation_start(durable_spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
+        result = await service.seed_legacy_operation(durable_spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
         original = service._operation_invoke
         attempts = []
         async def invoke(call, operation_id):
@@ -109,7 +109,7 @@ def test_timeout_cancels_once_but_waits_for_business_and_cleanup(tmp_path):
             {"status": "Running"}, {"status": "Canceled"},
             {"status": "Canceled", "cleanupPending": False},
         ])
-        result = await service.operation_start(durable_spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
+        result = await service.seed_legacy_operation(durable_spec(cancelCall={"kind": "tool", "toolName": "cancel"}))
         operation_id = result.data["operationId"]
         state = service._operations[operation_id]
         state["startedAt"] = 1
@@ -131,7 +131,7 @@ def test_invalid_start_response_does_not_invent_business_completion(tmp_path):
         async def invalid(*_):
             return ok("start", {"result": "{invalid"})
         service._operation_invoke = invalid
-        result = await service.operation_start(durable_spec(
+        result = await service.seed_legacy_operation(durable_spec(
             startCall={"kind": "reflection", "typeName": "Bridge", "methodName": "Start"}))
         assert not result.ok and not result.error.detail["terminal"]
         assert result.error.detail["status"] == "RecoveryRequired"
@@ -143,7 +143,7 @@ def test_invalid_start_response_does_not_invent_business_completion(tmp_path):
 def test_unresolved_status_identity_is_not_recoverable(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
-        result = await service.operation_start(spec(statusCall={
+        result = await service.seed_legacy_operation(spec(statusCall={
             "kind": "tool", "toolName": "status", "toolArgs": {"id": "${start.missing}"},
         }))
         assert result.data["status"] == "RecoveryRequired"
@@ -163,7 +163,7 @@ def test_capture_response_loss_preserves_intent_and_blocks_business(tmp_path):
             attempts.append({"args": args, "kwargs": kwargs})
             raise TimeoutError("capture may already exist")
         service._start_owned_operation_capture = lost
-        result = await service.operation_start(durable_spec(consoleCapture={"enabled": True}))
+        result = await service.seed_legacy_operation(durable_spec(consoleCapture={"enabled": True}))
         assert not result.ok and not result.error.detail["terminal"]
         stored = service.server.state.load_operations()[0]
         assert stored["captureIntentSent"] and not stored.get("startIntentSent")
@@ -182,7 +182,7 @@ def test_arbitrary_start_exception_response_does_not_prove_no_side_effect(tmp_pa
         async def failed(*args):
             return fail("original", "TARGET_INVOCATION_EXCEPTION", "failed after spawning work")
         service._operation_invoke = failed
-        result = await service.operation_start(durable_spec())
+        result = await service.seed_legacy_operation(durable_spec())
         assert result.error.code == "OPERATION_START_UNKNOWN"
         assert not result.error.detail["terminal"]
         assert service.server.state.load_operations()[0]["startResult"]["requestId"] == "original"
@@ -192,7 +192,7 @@ def test_arbitrary_start_exception_response_does_not_prove_no_side_effect(tmp_pa
 def test_status_cannot_accept_another_job_terminal(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [{"status": "Succeeded", "captureId": "another"}])
-        start = await service.operation_start(durable_spec())
+        start = await service.seed_legacy_operation(durable_spec())
         result = await service.operation_status(start.data["operationId"])
         assert not result.ok and result.error.code == "OPERATION_IDENTITY_MISMATCH"
         assert not result.error.detail["terminal"]
@@ -203,7 +203,7 @@ def test_status_cannot_accept_another_job_terminal(tmp_path):
 def test_disconnected_unity_status_returns_recovering_without_dispatch(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [{"status": "Succeeded"}])
-        started = await service.operation_start(durable_spec())
+        started = await service.seed_legacy_operation(durable_spec())
         operation_id = started.data["operationId"]
         service.server.is_ready = lambda: False
 
@@ -225,7 +225,7 @@ def test_disconnected_unity_status_returns_recovering_without_dispatch(tmp_path)
 def test_reconnected_success_clears_transient_recovery_diagnostics(tmp_path):
     async def run():
         service = _OperationService(tmp_path, [])
-        started = await service.operation_start(durable_spec())
+        started = await service.seed_legacy_operation(durable_spec())
         operation_id = started.data["operationId"]
         await stop_observers(service)
         service.server.is_ready = lambda: False

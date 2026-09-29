@@ -114,8 +114,6 @@ namespace CodingRiver.UPilot
                 _setupPortMessage = conflict;
                 _setupPortMessageType = MessageType.Error;
                 FindRecommendedSetupPorts();
-                if (_recommendedWsPort > 0)
-                    _setupPortMessage += $"\n推荐 WS {_recommendedWsPort}，HTTP {_recommendedHttpPort}。";
                 return;
             }
             var owned = serviceStatus.ProcessOwnership == McpProcessOwnership.CurrentUPilot;
@@ -131,13 +129,21 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            FindRecommendedSetupPorts();
             var conflicts = !wsAvailable && !httpAvailable
                 ? $"WS {_setupWsPort} 和 HTTP {_setupHttpPort}"
                 : !wsAvailable ? $"WS {_setupWsPort}" : $"HTTP {_setupHttpPort}";
             _setupPortMessage =
-                $"检测到端口冲突：{conflicts} 已被占用。推荐使用 WS {_recommendedWsPort}，HTTP {_recommendedHttpPort}。";
+                $"端口不可监听：{conflicts}。可能已被占用、被系统保留或无绑定权限。";
             _setupPortMessageType = MessageType.Error;
+            FindRecommendedSetupPorts();
+        }
+
+        internal static string FormatSetupPortMessage(string problem, int ws, int http, string error = null)
+        {
+            if (!string.IsNullOrEmpty(error)) return problem + "\n" + error;
+            if (ws > 0 && ws <= 65535 && http > 0 && http <= 65535 && ws != http)
+                return problem + $"\n推荐 WS {ws}，HTTP {http}。";
+            return problem;
         }
 
         private void FindRecommendedSetupPorts()
@@ -153,11 +159,12 @@ namespace CodingRiver.UPilot
                 var pair = UPilotPortAllocator.FindAvailablePair(startWs, startHttp);
                 _recommendedWsPort = pair.wsPort;
                 _recommendedHttpPort = pair.httpPort;
+                _setupPortMessage = FormatSetupPortMessage(_setupPortMessage, pair.wsPort, pair.httpPort);
             }
             catch (Exception ex)
             {
                 _recommendedWsPort = _recommendedHttpPort = 0;
-                _setupPortMessage = ex.Message;
+                _setupPortMessage = FormatSetupPortMessage(_setupPortMessage, 0, 0, ex.Message);
                 _setupPortMessageType = MessageType.Error;
                 UPilotPortRegistration.Report("推荐端口", ex);
             }

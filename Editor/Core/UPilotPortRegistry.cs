@@ -188,11 +188,23 @@ namespace CodingRiver.UPilot
             if (ws == http) http = http < 65535 ? http + 1 : http - 1;
             var reserved = new HashSet<int>(data.projects
                 .Where(e => NormalizeProject(e.projectPath) != project).SelectMany(ReservedPorts));
-            for (var i = 0; i < attempts && ws <= 65535 && http <= 65535; i++, ws++, http++)
+            // Two WS candidates suffice: an HTTP candidate can conflict with at most
+            // one of them. Search independently so excluded ranges, overlapping ranges
+            // and reaching 65535 on one side cannot discard a usable pair.
+            var wsCandidates = new List<int>(2);
+            for (var i = 0; i < attempts && ws <= 65535; i++, ws++)
             {
-                if (ws > 0 && http > 0 && ws != http && !reserved.Contains(ws) && !reserved.Contains(http) &&
-                    _available(ws) && _available(http))
-                    return (ws, http);
+                if (ws > 0 && !reserved.Contains(ws) && _available(ws))
+                {
+                    wsCandidates.Add(ws);
+                    if (wsCandidates.Count == 2) break;
+                }
+            }
+            for (var i = 0; i < attempts && http <= 65535 && wsCandidates.Count > 0; i++, http++)
+            {
+                if (http <= 0 || reserved.Contains(http) || !_available(http)) continue;
+                foreach (var candidate in wsCandidates)
+                    if (candidate != http) return (candidate, http);
             }
             throw new IOException("未找到未预留且可监听的 HTTP/WS 端口对，请手动指定其他端口范围。");
         }
