@@ -27,7 +27,7 @@ Use the narrowest tool that matches the request.
 | Long package acceptance | `unity_upilot_acceptance_run` returns a durable Task immediately; retain `taskId`, then poll `unity_task_status`. Explicit `unity_task_start` with `retryCount=0` remains compatible. |
 | Visual snapshots | `unity_camera_list`, `unity_snapshot_capture/status/collect_artifacts`; use `unity_snapshot_baseline_compare` for managed pixel/SSIM acceptance and `unity_snapshot_baseline_update` only through explicit two-phase approval |
 | Legacy screenshots | `unity_screenshot_*` compatibility wrappers; use only for one Color target or a compatibility save path, never for silent fallback |
-| Long tasks | `unity_operation_validate` before hand-authored specs, then `unity_task_*`, `unity_operation_*`; default `detailLevel=summary` with bounded `maxTailChars` |
+| Long tasks | Dedicated test/acceptance/build/Capture/Snapshot tools and their status endpoints; no new generic Operation/Step starts or validation. Historical `unity_operation_status/wait/collect_artifacts` use original IDs, `detailLevel=summary` and bounded `maxTailChars`; RecoveryRequired is a blocker |
 | Existing compiled API | `unity_reflection_call(typeName=..., methodName=...)` |
 | One bounded reflection expression | `unity_reflection_call(expression=...)` |
 | Bounded C# expression/statements | `csharp_eval`; open `execution_session` when state or handles must persist |

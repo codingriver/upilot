@@ -2,6 +2,7 @@
 
 - Server registration, client injection, and successful invocation are separate capability states.
 - Query capabilities before declaring a missing client-side tool unavailable.
+- All new generic Operation/Step starts and public validation are fixed-disabled with `GENERIC_ORCHESTRATION_DISABLED`. No Flow or user-switch exception exists. Do not use Task wrappers, reflection/eval, temporary scripts or internal executor calls to bypass the pause. Dedicated tools and historical status/artifacts/safe cleanup remain available; a historical recovery blocker never proves resource release.
 - Read/list/find/get before destructive or persistent operations.
 - Do not place destructive calls inside automatic retries.
 - `unity_task_execute` retries only idempotent, non-destructive operations.

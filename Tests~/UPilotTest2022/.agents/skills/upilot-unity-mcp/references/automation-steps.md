@@ -1,13 +1,25 @@
 # Automation Steps
 
-Use this reference when implementing a registered step or composing a step plan.
-Step execution is Editor-only and belongs to the existing Operation workflow.
-It does not require UPilot Flow and does not create public automation_start/status tools.
+## Suspension boundary (mandatory)
+
+All new generic Operation/Step starts and public validation are suspended with
+`GENERIC_ORCHESTRATION_DISABLED`, including built-in-only plans, handwritten callbacks,
+Bridge `automation.steps.start/validate` and public `StartJson`/`ValidateJson`.
+There is no re-enable switch or Flow exception. Use dedicated test, acceptance,
+compile, build, Capture or Snapshot tools instead. Never use Task wrappers,
+reflection, eval, temporary scripts or internal executors to bypass this boundary.
+
+The remaining schema, authoring examples and lifecycle descriptions are **historical
+contracts and internal maintenance reference only**, not an executable new-plan guide.
+They describe already accepted runs and isolated engine fixtures. Existing status,
+artifacts and supported safe cancel/cleanup/recovery/disposition retain original
+identities and resource protections. A historical `RecoveryRequired` is not completion;
+Operation wait returns its blocker immediately while safe observers may continue.
 
 ## Ownership and Discovery
 
 - The project owns business step implementations, case assertions, business recovery
-  and log rules. Skills compose approved fixed templates and selected Cases. Do not
+  and log rules. Historical plans preserve their approved templates and selected Cases. Do not
   infer a login/GM/business sequence from generic step names.
 - UPilot owns neutral sequencing, deadlines, polling, checkpoints, Finally processing,
   fixed-range Console evidence and report finalization.
@@ -19,13 +31,13 @@ It does not require UPilot Flow and does not create public automation_start/stat
   Business/runtime classes do not need to reference UPilot.
 - Discover through the compiled `UPilotAutomationStepService.CatalogJson()` facade.
   UPilot keeps one type/factory registry snapshot per assembly generation, shared by
-  Catalog, Validate and Start; it does not pool mutable Step instances. The project
-  Bridge is not a required entry for new Step plans. Use capability discovery before
-  a reflection fallback. Do not invent IDs from class names or text descriptions.
+  internal validation and execution; it does not pool mutable Step instances. Public
+  validation/start now reject before accessing that registry. Catalog is read-only
+  discovery, not permission to launch. Do not invent IDs or reflection fallbacks.
 - Internal Bridge routes are `automation.steps.catalog/validate/start/state/cancel/artifacts`;
   these are implementation routes, not a second public MCP surface.
 
-## Authoring A Step
+## Authoring A Step (internal maintenance only)
 
 ### Decide Ownership Before Coding
 
@@ -159,13 +171,13 @@ Inspect and manually remove stale local symbols when necessary, preserving other
 Do not commit local package paths or generated PlayerSettings changes for teammates.
 
 After the correlated Unity compile, query UPilot Catalog, check the exact ID, type,
-metadata and diagnostics, then validate the **whole** proposed plan. A file on disk,
+metadata and diagnostics. Internal fixtures may validate historical plans; public validation remains disabled. A file on disk,
 an attribute text search or a catalog entry with diagnostics is not usable registration.
 If absent, inspect compile evidence, current target defines, Editor assembly inclusion,
 attribute placement, public no-argument constructor, interface and duplicate IDs.
 Do not fix absence by adding another registry, recompiling unchanged code blindly,
 manually constructing a Step, or bypassing preflight. Missing/invalid registrations
-must be repaired before starting any plan.
+remain explicit diagnostics; do not try to start a production plan.
 
 ### Skill Integration And Acceptance
 
@@ -250,9 +262,9 @@ structured objects, not JSON strings inside another JSON envelope.
 
 ## Plan and Arguments
 
-Submit `jobSpec.stepPlan` to `unity_operation_validate`, then start once with
-`unity_operation_start`. Do not also supply handwritten startCall/statusCall/cancelCall.
-Keep operationId and observe it with status/wait until authoritative completion.
+This is the stored schema of historical `jobSpec.stepPlan` records, not a request
+to submit. Both `unity_operation_validate` and `unity_operation_start` reject all new
+plans. Preserve an existing operationId for status/wait and evidence; never Start again.
 
 ```json
 {
@@ -270,8 +282,8 @@ Keep operationId and observe it with status/wait until authoritative completion.
 }
 ```
 
-Replace the scene with a verified, saved project scene. Business steps/cases go between
-startup and Finally according to a project-approved template.
+The scene and ordered steps above illustrate a historical record only. Do not replace
+its fields to launch a new plan, or mutate an accepted run to manufacture recovery evidence.
 
 Each item needs a unique instanceId and a discovered, case-sensitive stepId.
 There is exactly one business argument string; omission means empty string.
@@ -387,7 +399,7 @@ workflow before starting. A successful setter call is not a successful mode tran
 
 ## Evidence
 
-For new self-contained plans, put `upilot.console_capture_start` first and once,
+Historical self-contained plans may have `upilot.console_capture_start` first and once;
 with empty arguments, and explicitly set Operation `consoleCapture.enabled=false`.
 Do not wrap that plan in another Capture. Its Step Cleanup does not stop the run's
 Capture. UPilot persists private credentials and start/stop intents separately
@@ -496,13 +508,12 @@ separately through the original Operation.
 
 ## Deployment and Verification
 
-Check actual project identity and deployment freshness before use. A running Server
-that still requires startCall/statusCall has not loaded the stepPlan integration.
-Do not silently rebuild business workflows with hand-authored calls as a production
-fallback. For package development, an explicitly bounded internal-route acceptance
-can verify the Unity executor but is not proof that public stepPlan deployment is live.
-Refresh only with authorized maintenance and verified in-flight work; never replay
-an uncertain original start.
+Check exact project identity and loaded code, not only version/health. Public start and
+validation must return `GENERIC_ORCHESTRATION_DISABLED` before parsing or dispatch;
+capability discovery must mark new Operation admission unavailable. Historical query
+and dedicated tools stay registered. Do not use internal routes as a production fallback.
+Isolated internal executor tests are not permission to start real Step runs.
+Refresh only through authorized maintenance; never replay an uncertain original start.
 
 Run targeted contract/executor/built-in/evidence tests in Tests~/UPilotTest. Verify real
 PlayMode/Domain Reload separately from synthetic Restore tests, preserve run identity,
