@@ -121,6 +121,11 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "domain_reload"), Is.True);
             Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "editor_exit"), Is.True);
             Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "explicit_stop"), Is.True);
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "lifecycle_stop"), Is.True);
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "timeout"), Is.False);
+            Assert.That(Expected(new OperationCanceledException(), cancelled.Token, "unknown"), Is.False);
+            Assert.That(Expected(new IOException("network"), cancelled.Token, "lifecycle_stop"), Is.False);
+            Assert.That(Expected(new OperationCanceledException(), CancellationToken.None, "lifecycle_stop"), Is.False);
             Assert.That(Expected(new OperationCanceledException(), cancelled.Token, ""), Is.False);
             Assert.That(Expected(new IOException("network"), cancelled.Token, "domain_reload"), Is.False);
             Assert.That(Expected(new OperationCanceledException(), CancellationToken.None, "domain_reload"), Is.False);

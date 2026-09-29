@@ -172,9 +172,45 @@ namespace CodingRiver.UPilot
         private readonly object _statusLock = new();
         private McpServerStatus _cachedStatus;
         private Task<McpServerStatus> _statusRefreshTask;
-        private CancellationTokenSource _statusRefreshCancellation;
-        private string _statusInterruptReason = "";
-        private int _statusInterruptedGeneration = -1;
+        private StatusRefreshRequest _activeStatusRefresh;
+
+        // Cancellation provenance belongs to the work, not to the latest cache invalidation.
+        internal sealed class StatusRefreshRequest : IDisposable
+        {
+            private readonly object _gate = new();
+            private readonly CancellationTokenSource _cancellation = new();
+            private string _reason = "";
+            private bool _disposed;
+            internal readonly int Generation;
+            internal readonly CancellationToken Token;
+            internal string Reason { get { lock (_gate) return _reason; } }
+
+            internal StatusRefreshRequest(int generation)
+            {
+                Generation = generation;
+                Token = _cancellation.Token;
+            }
+
+            internal void Cancel(string reason)
+            {
+                lock (_gate)
+                {
+                    if (_disposed || _reason.Length > 0 || string.IsNullOrEmpty(reason)) return;
+                    _reason = reason; // First cause wins, including timeout before a later stop.
+                    _cancellation.Cancel();
+                }
+            }
+
+            public void Dispose()
+            {
+                lock (_gate)
+                {
+                    if (_disposed) return;
+                    _disposed = true;
+                    _cancellation.Dispose();
+                }
+            }
+        }
         private int _statusGeneration;
         private int _consecutiveIdentityMisses;
         private long _identityPendingSinceMs;
@@ -469,7 +505,8 @@ namespace CodingRiver.UPilot
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             McpServerStatus status;
             lock (_statusLock) status = _cachedStatus;
-            if (now - _lastRefreshMs > RefreshIntervalMs && ShouldRequestFullStatusRefresh(status))
+            if (now - _lastRefreshMs > RefreshIntervalMs &&
+                ShouldRequestFullStatusRefresh(status, Volatile.Read(ref _statusGeneration)))
                 RequestBackgroundStatusRefresh();
             lock (_statusLock) status = _cachedStatus;
             RequestEditorHealthObservationIfNeeded(status, now);
@@ -481,12 +518,10 @@ namespace CodingRiver.UPilot
         {
             lock (_statusLock)
             {
-                int interrupted = Interlocked.Increment(ref _statusGeneration) - 1;
-                _statusInterruptReason = lifecycleReason;
-                _statusInterruptedGeneration = interrupted;
+                Interlocked.Increment(ref _statusGeneration);
                 if (!string.IsNullOrEmpty(lifecycleReason))
                 {
-                    _statusRefreshCancellation?.Cancel();
+                    _activeStatusRefresh?.Cancel(lifecycleReason);
                     _editorHealthObservationCancellation?.Cancel();
                     _nextEditorHealthObservationAtUtcMs = 0;
                 }
@@ -719,6 +754,10 @@ namespace CodingRiver.UPilot
             status.RecentEditorStall = recognized ? observation.recent_stall : null;
         }
 
+        internal static bool ShouldRequestFullStatusRefresh(McpServerStatus status, int currentGeneration) =>
+            // An explicit invalidation must escape the waiting_editor lightweight-only path.
+            status.StatusGeneration != currentGeneration || ShouldRequestFullStatusRefresh(status);
+
         internal static bool ShouldRequestFullStatusRefresh(McpServerStatus status) =>
             !status.EditorObservationAvailable || status.EditorObservationStatus != "waiting_editor";
 
@@ -785,32 +824,34 @@ namespace CodingRiver.UPilot
                     _nextEditorHealthObservationAtUtcMs = 0;
                 }
                 var generation = Volatile.Read(ref _statusGeneration);
-                var cancellation = new CancellationTokenSource();
+                var request = new StatusRefreshRequest(generation);
                 _activeStatusRefreshStage = "port_probe";
-                _statusRefreshCancellation = cancellation;
-                _statusRefreshTask = RunBoundedStatusRefreshAsync(httpPort, wsPort, generation, cancellation);
+                _activeStatusRefresh = request;
+                _statusRefreshTask = RunBoundedStatusRefreshAsync(httpPort, wsPort, request);
             }
         }
 
-        private async Task<McpServerStatus> RunBoundedStatusRefreshAsync(int httpPort, int wsPort, int generation,
-            CancellationTokenSource cancellation)
+        private void ReleaseStatusRefresh(StatusRefreshRequest request)
         {
-            var work = Task.Run(() => RefreshStatusAsync(httpPort, wsPort, generation, cancellation.Token));
-            _ = work.ContinueWith(_ =>
+            lock (_statusLock)
             {
-                lock (_statusLock)
-                {
-                    if (ReferenceEquals(_statusRefreshCancellation, cancellation))
-                        _statusRefreshCancellation = null;
-                }
-                cancellation.Dispose();
-            }, TaskScheduler.Default);
+                if (ReferenceEquals(_activeStatusRefresh, request))
+                    _activeStatusRefresh = null;
+            }
+            request.Dispose();
+        }
+
+        private async Task<McpServerStatus> RunBoundedStatusRefreshAsync(int httpPort, int wsPort,
+            StatusRefreshRequest request)
+        {
+            var generation = request.Generation;
+            var work = Task.Run(() => RefreshStatusAsync(httpPort, wsPort, request));
+            _ = work.ContinueWith(_ => ReleaseStatusRefresh(request), TaskScheduler.Default);
             if (await Task.WhenAny(work, Task.Delay(30000)).ConfigureAwait(false) == work)
                 return await work.ConfigureAwait(false);
             lock (_statusLock)
             {
-                if (ReferenceEquals(_statusRefreshCancellation, cancellation))
-                    cancellation.Cancel();
+                request.Cancel("timeout");
                 if (generation == Volatile.Read(ref _statusGeneration))
                 {
                     Interlocked.Increment(ref _statusGeneration);
@@ -832,14 +873,17 @@ namespace CodingRiver.UPilot
                     _activeStatusRefreshStage = stage;
         }
 
-        private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort, int generation,
-            CancellationToken token)
+        private async Task<McpServerStatus> RefreshStatusAsync(int httpPort, int wsPort,
+            StatusRefreshRequest request)
         {
+            var generation = request.Generation;
+            var token = request.Token;
             var status = new McpServerStatus();
             status.StatusGeneration = generation;
             var stage = "port_probe";
             try
             {
+                token.ThrowIfCancellationRequested();
                 var httpTask = IsPortListeningAsync("127.0.0.1", httpPort);
                 var wsTask = IsPortListeningAsync("127.0.0.1", wsPort);
                 token.ThrowIfCancellationRequested();
@@ -888,12 +932,12 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                string reason;
-                lock (_statusLock) reason = _statusInterruptedGeneration == generation ? _statusInterruptReason : "";
+                var reason = request.Reason;
                 bool expected = IsExpectedStatusInterruption(ex, token, reason);
                 status.ErrorMessage = ex.GetType().Name + ": " + ex.Message;
                 status.StatusFailureStage = stage;
-                status.StatusCancellationReason = expected ? reason : ex is OperationCanceledException ? "timeout" : "";
+                status.StatusCancellationReason = ex is OperationCanceledException
+                    ? (string.IsNullOrEmpty(reason) ? "unknown" : reason) : "";
                 if (expected)
                     Debug.LogWarning($"[UPilotMcpServerManager] Expected {reason} status interruption at {stage} (generation {generation}).");
                 else
@@ -923,7 +967,8 @@ namespace CodingRiver.UPilot
 
         internal static bool IsExpectedStatusInterruption(Exception ex, CancellationToken token, string reason) =>
             ex is OperationCanceledException && token.IsCancellationRequested
-            && (reason == "domain_reload" || reason == "editor_exit" || reason == "explicit_stop");
+            && (reason == "domain_reload" || reason == "editor_exit" || reason == "explicit_stop"
+                || reason == "lifecycle_stop");
 
         private void UpdateDiagnosisTracking(ref McpServerStatus status, long nowMs)
         {
@@ -1478,21 +1523,25 @@ namespace CodingRiver.UPilot
 
         public void StopServer() => StopServer(UPilotServerStopOrigin.User);
 
-        internal void StopServer(UPilotServerStopOrigin origin, string requestId = "")
+        internal void StopServer(UPilotServerStopOrigin origin, string requestId = "") =>
+            TryStopServer(origin, requestId);
+
+        private bool TryStopServer(UPilotServerStopOrigin origin, string requestId)
         {
-            if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
+            if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return false;
             var operationId = _restartOperationId;
             var generation = _restartGeneration;
             // Capture verified process handles before ending this restart. A delayed stop must
             // never rediscover and kill a replacement started by another generation.
             using var prepared = PrepareCurrentProjectStop();
-            if (generation != _restartGeneration || operationId != _restartOperationId) return;
+            if (generation != _restartGeneration || operationId != _restartOperationId) return false;
             if (string.IsNullOrEmpty(requestId)) requestId = Guid.NewGuid().ToString("N");
             var target = prepared.Processes.FirstOrDefault();
             CancelPendingRestart(recordCancellation: true, origin, requestId, operationId, generation,
                 target.pid, target.createdAtTicks);
             InvalidateStatusCache(origin == UPilotServerStopOrigin.User ? "explicit_stop" : "lifecycle_stop");
             StopPreparedProcesses(prepared, 0);
+            return true;
         }
 
         private sealed class PreparedProcessStop : IDisposable
@@ -1608,25 +1657,60 @@ namespace CodingRiver.UPilot
 
         internal bool StopServerAndWaitForExit(UPilotServerStopOrigin origin, string requestId = "", int timeoutMs = 3000)
         {
-            StopServer(origin, requestId);
-            var stoppedGeneration = _restartGeneration;
-            var stopwatch = Stopwatch.StartNew();
-            while (stopwatch.ElapsedMilliseconds < timeoutMs)
-            {
-                if (stoppedGeneration != _restartGeneration) return false;
-                if (StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
-                    UPilotPortAllocator.IsPortAvailable(WsPort))
-                {
-                    InvalidateStatusCache();
-                    return true;
-                }
+            var result = StopServerAndObserveExit(origin, requestId, timeoutMs);
+            return result.StopConfirmed && result.PortsAvailable;
+        }
 
+        internal readonly struct ServerStopResult
+        {
+            internal readonly bool StopConfirmed;
+            internal readonly bool PortsAvailable;
+            internal readonly int StatusGeneration;
+            internal readonly int StartGeneration;
+            internal readonly long RestartGeneration;
+
+            internal ServerStopResult(bool stopConfirmed, bool portsAvailable, int statusGeneration,
+                int startGeneration, long restartGeneration)
+            {
+                StopConfirmed = stopConfirmed;
+                PortsAvailable = portsAvailable;
+                StatusGeneration = statusGeneration;
+                StartGeneration = startGeneration;
+                RestartGeneration = restartGeneration;
+            }
+        }
+
+        internal bool IsStopResultCurrent(ServerStopResult result) =>
+            result.StopConfirmed && result.RestartGeneration == _restartGeneration &&
+            result.StartGeneration == _startAttemptGeneration && !_startInProgress && !_restartPending &&
+            !_trackedProcessId.HasValue;
+
+        internal ServerStopResult StopServerAndObserveExit(UPilotServerStopOrigin origin,
+            string requestId = "", int timeoutMs = 3000)
+        {
+            // A skipped stop (maintenance ownership or changed identity) is not success.
+            if (!TryStopServer(origin, requestId)) return default;
+            var stoppedGeneration = _restartGeneration;
+            var stoppedStartGeneration = _startAttemptGeneration;
+            var stopwatch = Stopwatch.StartNew();
+            bool exited;
+            bool portsAvailable;
+            while (true)
+            {
+                if (stoppedGeneration != _restartGeneration || stoppedStartGeneration != _startAttemptGeneration)
+                    return default;
+                exited = StoppedProcessesExited();
+                portsAvailable = UPilotPortAllocator.IsPortAvailable(HttpPort) &&
+                    UPilotPortAllocator.IsPortAvailable(WsPort);
+                if ((exited && portsAvailable) || stopwatch.ElapsedMilliseconds >= timeoutMs) break;
                 System.Threading.Thread.Sleep(50);
             }
 
+            // Preserve separate evidence: stopped processes do not imply bindable ports.
             InvalidateStatusCache();
-            return stoppedGeneration == _restartGeneration && StoppedProcessesExited() && UPilotPortAllocator.IsPortAvailable(HttpPort) &&
-                   UPilotPortAllocator.IsPortAvailable(WsPort);
+            return new ServerStopResult(exited && stoppedGeneration == _restartGeneration &&
+                stoppedStartGeneration == _startAttemptGeneration, portsAvailable,
+                Volatile.Read(ref _statusGeneration), stoppedStartGeneration, stoppedGeneration);
         }
 
         internal string[] GetUpdateOccupancyResourcePaths()

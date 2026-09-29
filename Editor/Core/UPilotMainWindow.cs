@@ -34,6 +34,7 @@ namespace CodingRiver.UPilot
         private bool _updateStopScheduled;
         private bool _updateStopInProgress;
         private bool _updateStopFailed;
+        private UPilotMcpServerManager.ServerStopResult _updateStopResult;
         private bool _runtimeDetailsExpanded;
         private bool _repairInProgress;
         private bool _deploymentDetailsExpanded;
@@ -379,10 +380,12 @@ namespace CodingRiver.UPilot
                 _updateStopScheduled = false;
                 _updateStopInProgress = false;
                 _updateStopFailed = false;
+                _updateStopResult = default;
                 return;
             }
 
-            if (!IsServiceActive(_bridgeStatus, _mcpStatus))
+            if (!ShouldStopServicesForUpdate(_bridgeStatus, _mcpStatus, _updateStopResult,
+                UPilotMcpServerManager.Instance.IsStopResultCurrent(_updateStopResult)))
             {
                 _updateStopScheduled = false;
                 _updateStopInProgress = false;
@@ -417,14 +420,16 @@ namespace CodingRiver.UPilot
             }
 
             var stopped = false;
+            _updateStopResult = default;
             try
             {
                 UPilotBridge.Instance.Stop();
-                var portsReleased = UPilotMcpServerManager.Instance.StopServerAndWaitForExit(UPilotServerStopOrigin.UpdateWindow);
-                UPilotMcpServerManager.Instance.InvalidateStatusCache();
+                var manager = UPilotMcpServerManager.Instance;
+                _updateStopResult = manager.StopServerAndObserveExit(UPilotServerStopOrigin.UpdateWindow);
                 RefreshSnapshot();
-                stopped = !IsServiceActive(_bridgeStatus, _mcpStatus);
-                if (!portsReleased && stopped)
+                stopped = IsUpdateStopConfirmed(_bridgeStatus, _updateStopResult,
+                    manager.IsStopResultCurrent(_updateStopResult));
+                if (!_updateStopResult.PortsAvailable && stopped)
                     Debug.LogWarning("[UPilot] Service was stopped during update, but configured ports are still unavailable.");
             }
             catch (Exception ex)
@@ -456,9 +461,19 @@ namespace CodingRiver.UPilot
                 : status.Message;
         }
 
-        private static bool IsServiceActive(BridgeStatus bridgeStatus, McpServerStatus mcpStatus)
+        internal static bool IsUpdateStopConfirmed(BridgeStatus bridgeStatus,
+            UPilotMcpServerManager.ServerStopResult result, bool resultIsCurrent) =>
+            !bridgeStatus.IsStarted && result.StopConfirmed && resultIsCurrent;
+
+        internal static bool ShouldStopServicesForUpdate(BridgeStatus bridgeStatus, McpServerStatus mcpStatus,
+            UPilotMcpServerManager.ServerStopResult result, bool resultIsCurrent)
         {
-            return bridgeStatus.IsStarted || mcpStatus.IsRunning;
+            if (bridgeStatus.IsStarted) return true;
+            // Ignore only pre-stop cache entries. A fresh running observation or a new start
+            // invalidates this suppression, so a subsequent service restart is not hidden.
+            if (IsUpdateStopConfirmed(bridgeStatus, result, resultIsCurrent) &&
+                mcpStatus.StatusGeneration < result.StatusGeneration) return false;
+            return mcpStatus.IsRunning;
         }
 
         private void RefreshAgentConfigs(bool force)

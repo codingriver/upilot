@@ -30,6 +30,8 @@
 - 本次建议补充：按真实隐藏静态方法/字符串索引器形状定向定位，清楚区分语法预检与运行时绑定保障，保留已执行调用边界；预期减少人工拆分投影及额外查询。通用UPilot/MCP，P1，实施状态以根D02为准；只在规范 `D:\upilot\Tests~\UPilotTest` 验收隐藏静态调用、字符串索引与单次参数求值，本任务未运行包验收。
 - 双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260922-NestedCallBinding`。
 
+- 2026-09-29 更新停止诊断补证：规范 UPilotTest 的有界只读 eval 调用 `typeof(UPilotMcpServerManager).GetMethod("IsExpectedStatusInterruption", BindingFlags.Static | BindingFlags.NonPublic)` 在 bind 阶段返回 `REFLECTION_BIND_FAILED`（req-04c70cb2-a927-4292-a856-c58c5f6688fb），目标判断方法尚未执行，候选中包含 `(String, BindingFlags)`。建议补充枚举按位运算结果到重载参数的最窄绑定回归；根因尚未确认，未修改执行引擎。后续采用直接调用纯判断方法并返回标量取证，不涉及服务停止/启动。
+
 ### D03 / P1：维护 inventory 的来源完整性和主 Editor 活体证据
 
 - 原 ID：`UPilot-20260922-MaintenanceInventory`。状态：Bridge `queue.snapshot`、有界来源明细及 OS Editor 身份核验已实现；2026-09-24 两条 Python 定向用例通过（未跟踪工作、session 漂移），其余行为待验证，Server 新源码加载未核验。
@@ -45,6 +47,15 @@
 
 - 原 ID：`UPilot-20260922-StatusRefreshAbortDiagnostics`。状态：Reload、退出和显式停止的 generation/取消原因归因与 HTTP 异常诊断已实现；2026-09-24 定向测试发现取消已释放 CTS 时的 `ObjectDisposedException`，完成引用匹配修复及超时分支补强，两个原 WriteBatch 均已关联编译通过；第二批后精确 EditMode 用例 1/1 通过，真实 30 秒超时竞态及生命周期中断仍待验证。
 - 剩余关闭条件：验证预期中断降级、普通缓存失效后的真实失败保留 Error、30 秒超时及过期结果不覆盖新状态。
+
+- 2026-09-29 更新停止复核：当前源码 HEAD=3a404b430966666eea6b727bb63787e3fb121fb4 的 `StopServer` 对 UpdateWindow/PackageUpdate/ManagedServerUpdate 等非 User 来源传入 `lifecycle_stop`，但 `IsExpectedStatusInterruption` 仅接受 domain_reload/editor_exit/explicit_stop，遗漏更新取消原因。规范 UPilotTest 的已加载程序集只读探针实测 `lifecycle_stop=False; explicit_stop=True`（req-c57aa787-896b-4723-b397-b9015289c408，包 resolvedPath=D:\upilot，MVID=c4f0c523-fabb-4f4a-ba2b-05f2524f31b6）；现有 `LifecycleCancellationNeverHidesNetworkFailureOrOrdinaryInvalidation` 未覆盖 lifecycle_stop。诊断时状态：确认仍有遗漏，当时未修复，不以历史编译/测试通过结项；后续实施见下方记录。
+- 建议最小修复/直接回归：纳入确有取消 token 的 lifecycle_stop，保留普通网络失败/超时 Error；覆盖 StopPreparedProcesses/StopServerAndWaitForExit 随后的普通 InvalidateStatusCache 不应覆盖仍在退出的 refresh generation 的取消归因。后者是源码竞态风险，未运行真实停止时序复现。
+- 同一更新 UI 的待验证风险：`ForceStopServicesForUpdate` 即使 portsReleased=true，仍由立即 RefreshSnapshot→GetStatus 的缓存 IsRunning 判定 stopped；InvalidateStatusCache 只失效刷新时刻、不清运行快照，后台刷新未完成时可能误显示停止失败。建议用本次已验证停止证据或有界新鲜观察判定，并补充“端口已释放但旧缓存仍 running”的定向回归。用户提供的异常日志本身不能证明进程停止失败；本轮未点击更新、未停止/重启服务，也未运行更新端到端验收。
+- 2026-09-29 实施：取消原因改为每次 StatusRefreshRequest 独立持有且首次原因优先，普通缓存失效不再清除取消归因；纳入 lifecycle_stop 预期中断，timeout/unknown/普通网络失败仍保留 Error，旧请求清理只释放自身。更新窗口使用本次进程退出确认与启动/重启代次证据，不再用停止前 running 缓存否定成功；进程退出与端口可用分开报告，身份/归属保护不变。waiting_editor 旧快照的代次失效后强制完整刷新，避免屏蔽后续真实运行状态。
+- 最终编译：规范工程 D:\upilot\Tests~\UPilotTest；writeBatchId=wb-2aaa2752-86ff-41d1-a895-1be6fc314d79，compileOperationId=e3c50b0062974191b35a4216bf9b4018，createdAt=1790667599757，verifiedAt=1790667614226，terminal/errorsVerified/correlationVerified=true，0 errors；3 条 UAC1009 警告均在未修改的 Editor/Optional/Flow/Schema/UPilot.Flow.Models.cs。关联编译 Console 覆盖为 partial/domain_reload_boundary，不宣称完整历史无错。
+- 最终定向验收：task-699843cc-9d1d-4478-85b9-5d31c84c7a02，runGuid=66800d98-0f5b-46c9-9216-d9f0b1c9cf28，15 passed/0 failed/0 skipped，acceptancePassed/resultAuthoritative/testIdentityVerified/sourceUnchanged/cleanupVerified/cleanupSucceeded=true。覆盖四种生命周期原因的晚完成、首次取消原因、timeout/unknown Error 保留、旧缓存与端口不可用、未知停止/新启动/Bridge running 拒绝、waiting_editor 失效与刷新节奏及进程归属直接回归。关联 Console 完整窗口中存在测试 LogAssert 明确期望的 Error，不是实际服务停止失败。
+- 产物：Tests~/UPilotTest/Log/UPilotAcceptance/1790667853543_req-47a4d4ab-ab58-4660-b12b-c851a9897dd3/summary.json，628864 bytes，SHA256=b9ea4091c7504bf73b0e4be4ec01b292eb23a318deff579c145b10bda2aa76a0。
+- 当前状态：源码修复与定向验收完成；真实点击更新停服端到端、真实 30 秒超时竞态仍未验收，D05 保留剩余关闭条件。未运行全套、未提交/发布，未修改用户日志中的旧 PackageCache @224192ce2a；本地源码包通过不代表旧安装已更新。
 
 ### D06 / P2：通用 Operation 摘要的整体上限
 

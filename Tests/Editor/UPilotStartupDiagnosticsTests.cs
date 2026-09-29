@@ -1,11 +1,169 @@
 using System;
 using System.IO;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Threading.Tasks;
+using UnityEngine;
+using UnityEngine.TestTools;
 using NUnit.Framework;
 
 namespace CodingRiver.UPilot.Tests
 {
     public class UPilotStartupDiagnosticsTests
     {
+        private static UPilotMcpServerManager IsolatedStatusManager()
+        {
+            // Do not construct the singleton, register Editor callbacks, or touch real processes.
+            var manager = (UPilotMcpServerManager)FormatterServices.GetUninitializedObject(typeof(UPilotMcpServerManager));
+            SetManagerField(manager, "_statusLock", new object());
+            return manager;
+        }
+
+        private static void SetManagerField(UPilotMcpServerManager manager, string name, object value) =>
+            typeof(UPilotMcpServerManager).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(manager, value);
+
+        [TestCase("lifecycle_stop")]
+        [TestCase("explicit_stop")]
+        [TestCase("domain_reload")]
+        [TestCase("editor_exit")]
+        public async Task StatusCancellationSurvivesInvalidationAndLateCompletion(string reason)
+        {
+            var manager = IsolatedStatusManager();
+            using var old = new UPilotMcpServerManager.StatusRefreshRequest(0);
+            using var current = new UPilotMcpServerManager.StatusRefreshRequest(3);
+            SetManagerField(manager, "_activeStatusRefresh", old);
+            var release = new TaskCompletionSource<bool>();
+            async Task<McpServerStatus> CompleteLater()
+            {
+                await release.Task;
+                return await (Task<McpServerStatus>)typeof(UPilotMcpServerManager)
+                    .GetMethod("RefreshStatusAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(manager, new object[] { 0, 0, old });
+            }
+            var work = CompleteLater();
+            manager.InvalidateStatusCache(reason);
+            manager.InvalidateStatusCache();
+            manager.InvalidateStatusCache();
+            Assert.That(old.Reason, Is.EqualTo(reason));
+            Assert.That(old.Token.IsCancellationRequested, Is.True);
+            SetManagerField(manager, "_activeStatusRefresh", current);
+            SetManagerField(manager, "_cachedStatus", new McpServerStatus { IsRunning = true, StatusGeneration = 3 });
+            LogAssert.Expect(LogType.Warning,
+                $"[UPilotMcpServerManager] Expected {reason} status interruption at port_probe (generation 0).");
+            release.SetResult(true);
+            var observed = await work;
+            Assert.That(observed.StatusGeneration, Is.EqualTo(3));
+            Assert.That(observed.IsRunning, Is.True, "Old work must not publish into the new cache.");
+            typeof(UPilotMcpServerManager).GetMethod("ReleaseStatusRefresh", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(manager, new object[] { old });
+            manager.InvalidateStatusCache("explicit_stop");
+            Assert.That(current.Reason, Is.EqualTo("explicit_stop"), "Old cleanup must not clear or dispose the newer request.");
+        }
+
+        [Test]
+        public void StatusCancellationFirstCauseWinsAndOrdinaryInvalidationDoesNotCancel()
+        {
+            var manager = IsolatedStatusManager();
+            using var request = new UPilotMcpServerManager.StatusRefreshRequest(0);
+            SetManagerField(manager, "_activeStatusRefresh", request);
+            manager.InvalidateStatusCache();
+            Assert.That(request.Token.IsCancellationRequested, Is.False);
+            request.Cancel("timeout");
+            manager.InvalidateStatusCache("lifecycle_stop");
+            Assert.That(request.Reason, Is.EqualTo("timeout"));
+            Assert.That(UPilotMcpServerManager.IsExpectedStatusInterruption(
+                new OperationCanceledException(), request.Token, request.Reason), Is.False);
+            using var stopped = new UPilotMcpServerManager.StatusRefreshRequest(1);
+            stopped.Cancel("lifecycle_stop");
+            stopped.Cancel("timeout");
+            Assert.That(stopped.Reason, Is.EqualTo("lifecycle_stop"));
+            stopped.Dispose();
+            Assert.DoesNotThrow(() => stopped.Cancel("editor_exit"));
+        }
+
+        [TestCase("timeout")]
+        [TestCase("unknown")]
+        public async Task StatusUnexpectedCancellationRemainsErrorAfterStop(string reason)
+        {
+            var manager = IsolatedStatusManager();
+            using var request = new UPilotMcpServerManager.StatusRefreshRequest(0);
+            SetManagerField(manager, "_activeStatusRefresh", request);
+            request.Cancel(reason);
+            manager.InvalidateStatusCache("lifecycle_stop");
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(
+                @"\[UPilotMcpServerManager\] Status refresh failed at port_probe \(generation 0\): System.OperationCanceledException"));
+            await (Task<McpServerStatus>)typeof(UPilotMcpServerManager)
+                .GetMethod("RefreshStatusAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(manager, new object[] { 0, 0, request });
+            Assert.That(request.Reason, Is.EqualTo(reason));
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void UpdateStopUsesConfirmedExitInsteadOfStaleRunningCache(bool portsAvailable)
+        {
+            var result = new UPilotMcpServerManager.ServerStopResult(true, portsAvailable, 4, 2, 3);
+            var bridge = new BridgeStatus();
+            var stale = new McpServerStatus { IsRunning = true, StatusGeneration = 3 };
+            Assert.That(UPilotMainWindow.IsUpdateStopConfirmed(bridge, result, true), Is.True);
+            Assert.That(result.PortsAvailable, Is.EqualTo(portsAvailable));
+            Assert.That(UPilotMainWindow.ShouldStopServicesForUpdate(bridge, stale, result, true), Is.False);
+            stale.StatusGeneration = 4;
+            Assert.That(UPilotMainWindow.ShouldStopServicesForUpdate(bridge, stale, result, true), Is.True,
+                "A fresh running observation must not be hidden by prior stop evidence.");
+        }
+
+        [Test]
+        public void UpdateStopInvalidationForcesFreshStatusEvenWhenOldEditorObservationWasWaiting()
+        {
+            var stale = new McpServerStatus
+            {
+                IsRunning = true,
+                StatusGeneration = 3,
+                EditorObservationAvailable = true,
+                EditorObservationStatus = "waiting_editor",
+            };
+            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(stale, 3), Is.False);
+            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(stale, 4), Is.True);
+            stale.StatusGeneration = 4;
+            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(stale, 4), Is.False);
+            var stopped = new UPilotMcpServerManager.ServerStopResult(true, true, 4, 0, 0);
+            Assert.That(UPilotMainWindow.ShouldStopServicesForUpdate(default, stale, stopped, true), Is.True,
+                "Fresh evidence of a subsequent start must not be suppressed.");
+        }
+
+        [Test]
+        public void UpdateStopRejectsUnknownFailureChangedGenerationAndRunningBridge()
+        {
+            var manager = IsolatedStatusManager();
+            var result = new UPilotMcpServerManager.ServerStopResult(true, true, 4, 0, 0);
+            var bridge = new BridgeStatus();
+            var stale = new McpServerStatus { IsRunning = true, StatusGeneration = 3 };
+            Assert.That(manager.IsStopResultCurrent(result), Is.True);
+            foreach (var field in new[] { "_startInProgress", "_restartPending" })
+            {
+                SetManagerField(manager, field, true);
+                Assert.That(manager.IsStopResultCurrent(result), Is.False);
+                SetManagerField(manager, field, false);
+            }
+            SetManagerField(manager, "_trackedProcessId", (int?)42);
+            Assert.That(manager.IsStopResultCurrent(result), Is.False);
+            SetManagerField(manager, "_trackedProcessId", null);
+            Assert.That(UPilotMainWindow.IsUpdateStopConfirmed(bridge, default, true), Is.False);
+            Assert.That(UPilotMainWindow.ShouldStopServicesForUpdate(bridge, stale, default, true), Is.True);
+            SetManagerField(manager, "_restartGeneration", 1L);
+            Assert.That(manager.IsStopResultCurrent(result), Is.False);
+            SetManagerField(manager, "_restartGeneration", 0L);
+            SetManagerField(manager, "_startAttemptGeneration", 1);
+            Assert.That(manager.IsStopResultCurrent(result), Is.False);
+            Assert.That(UPilotMainWindow.IsUpdateStopConfirmed(bridge, result, false), Is.False);
+            Assert.That(UPilotMainWindow.ShouldStopServicesForUpdate(bridge, stale, result, false), Is.True);
+            bridge.IsStarted = true;
+            Assert.That(UPilotMainWindow.IsUpdateStopConfirmed(bridge, result, true), Is.False);
+            Assert.That(UPilotMainWindow.ShouldStopServicesForUpdate(bridge, stale, result, true), Is.True);
+        }
+
         [TestCase("mainEditor", true)]
         [TestCase("assetImportWorker", false)]
         [TestCase("batchMode", false)]
