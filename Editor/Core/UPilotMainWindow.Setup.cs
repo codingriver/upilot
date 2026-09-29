@@ -35,6 +35,8 @@ namespace CodingRiver.UPilot
         private string _setupCompletionMessage = "";
         private MessageType _setupCompletionMessageType = MessageType.None;
         private Vector2 _setupScroll;
+        private string _setupRecoveryFailure = "";
+        private bool _showSetupRecoveryFailure;
 
         private string _setupHost = UPilotBridge.DefaultWsHost;
         private int _setupWsPort = UPilotBridge.DefaultWsPort;
@@ -74,14 +76,17 @@ namespace CodingRiver.UPilot
             InitializeSetupState();
             _setupStartAfterSetup = true;
             _setupScroll = Vector2.zero;
-            _setupCompletionMessage = failure;
-            _setupCompletionMessageType = MessageType.Error;
+            _setupRecoveryFailure = failure ?? "";
+            _setupCompletionMessage = "请从网络端口开始重新确认配置。上次修复记录保留在下方，新的服务启动尚未验证。";
+            _setupCompletionMessageType = MessageType.Info;
             EnterSetupView();
         }
 
         private void InitializeSetupState()
         {
             _setupInitialized = true;
+            _setupRecoveryFailure = "";
+            _showSetupRecoveryFailure = false;
             _setupStep = 0;
             _setupRuntimeChoice = UPilotServerRuntimeService.IsSourceUpdateChannel()
                 ? SetupRuntimeChoice.Python
@@ -130,6 +135,14 @@ namespace CodingRiver.UPilot
 
                     if (!string.IsNullOrWhiteSpace(_setupCompletionMessage))
                         EditorGUILayout.HelpBox(_setupCompletionMessage, _setupCompletionMessageType);
+
+                    if (!string.IsNullOrWhiteSpace(_setupRecoveryFailure))
+                    {
+                        _showSetupRecoveryFailure = EditorGUILayout.Foldout(_showSetupRecoveryFailure,
+                            "上次修复记录（历史，不代表本次配置结果）", true);
+                        if (_showSetupRecoveryFailure)
+                            EditorGUILayout.HelpBox(_setupRecoveryFailure, MessageType.None);
+                    }
 
                     if (_setupStep == 0)
                         DrawSetupPortStep();
@@ -211,13 +224,20 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void SaveSetupPorts()
+        internal void SaveSetupPorts(Action<string, int, int> saveEndpoints = null)
         {
             if (string.IsNullOrWhiteSpace(_setupHost))
                 _setupHost = UPilotBridge.DefaultWsHost;
 
-            var bridge = UPilotBridge.Instance;
-            bridge.SetProjectEndpoints(_setupHost, _setupWsPort, _setupHttpPort);
+            // Only a successful commit supersedes old endpoint errors. A failed save must
+            // retain the current failure and its pending dialog, and must not advance setup.
+            if (saveEndpoints != null)
+                saveEndpoints(_setupHost, _setupWsPort, _setupHttpPort);
+            else
+                UPilotBridge.Instance.SetProjectEndpoints(_setupHost, _setupWsPort, _setupHttpPort);
+            UPilotPortRegistration.OnEndpointsConfirmed();
+            _setupCompletionMessage = "";
+            _setupCompletionMessageType = MessageType.None;
         }
 
         private static string FormatSetupBytes(long bytes)

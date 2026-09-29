@@ -67,6 +67,29 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void UnbindablePortIsNotMisreportedAsAnOwningProcessOrAutomaticallyReassigned()
+        {
+            _registry.Commit(_a, Config(8770, 8017));
+            var configPath = UPilotPortRegistry.ConfigPath(_a);
+            var configBefore = File.ReadAllBytes(configPath);
+            var registryBefore = File.ReadAllBytes(_registry.RegistryPath);
+            var restricted = new UPilotPortRegistry(_user, port => port < 8769 || port > 8868);
+
+            var error = Assert.Throws<IOException>(() => restricted.Sync(_a, requireAvailable: true));
+
+            Assert.That(error.Message, Does.Contain("端口 8770 当前不可绑定"));
+            Assert.That(error.Message, Does.Contain("系统保留/权限限制"));
+            Assert.That(error.Message, Does.Not.Contain("已被系统进程占用"));
+            Assert.That(restricted.Recommend(_a, 8770, 8017, 100), Is.EqualTo((8869, 8017)));
+            Assert.That(File.ReadAllBytes(configPath), Is.EqualTo(configBefore));
+            Assert.That(File.ReadAllBytes(_registry.RegistryPath), Is.EqualTo(registryBefore));
+            // No observed listener is a safe stop no-op even though startup cannot bind.
+            Assert.DoesNotThrow(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                new System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<int>>(),
+                true, Array.Empty<int>(), 8017, 8770));
+        }
+
+        [Test]
         public void RecommendationKeepsAvailableWsWhileHttpAdvances()
         {
             var registry = new UPilotPortRegistry(_user, port => port == 18001 || port == 19003);
@@ -373,6 +396,41 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        [UnityTest]
+        public IEnumerator ConfirmedConfigurationSuppressesQueuedOldDialogButNotNewFailures()
+        {
+            var original = UPilotPortRegistration.ShowErrorDialog;
+            var originalError = UPilotPortRegistration.LastError;
+            var generationField = typeof(UPilotPortRegistration).GetField("_configurationGeneration",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var generation = generationField.GetValue(null);
+            var shown = new System.Collections.Generic.List<string>();
+            var message = "stale-port-test-" + Guid.NewGuid().ToString("N");
+            UPilotPortRegistration.ShowErrorDialog = text => shown.Add(text);
+            try
+            {
+                var pattern = new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*" + message);
+                LogAssert.Expect(LogType.Error, pattern);
+                UPilotPortRegistration.Report("test", new IOException(message));
+                UPilotPortRegistration.OnEndpointsConfirmed();
+                Assert.That(UPilotPortRegistration.LastError, Is.Empty);
+                // A new error remains visible; distinguish its text from the stale callback.
+                LogAssert.Expect(LogType.Error, pattern);
+                UPilotPortRegistration.Report("test", new IOException(message + "-current"));
+                var until = UnityEditor.EditorApplication.timeSinceStartup + 5;
+                while (shown.Count == 0 && UnityEditor.EditorApplication.timeSinceStartup < until)
+                    yield return null;
+                Assert.That(shown, Is.EqualTo(new[] { message + "-current" }));
+                Assert.That(UPilotPortRegistration.LastError, Is.EqualTo(message + "-current"));
+            }
+            finally
+            {
+                generationField.SetValue(null, generation);
+                UPilotPortRegistration.ShowErrorDialog = original;
+                UPilotPortRegistration.LastError = originalError;
+            }
+        }
+
         [Test]
         [Platform("Win")]
         public void RealExternalListenerBlocksStartupSyncWithoutChangingConfigOrStoppingOwner()
@@ -406,7 +464,7 @@ namespace CodingRiver.UPilot.Tests
 
                 var error = Assert.Throws<IOException>(() => realRegistry.Sync(_a, requireAvailable: true));
 
-                Assert.That(error.Message, Does.Contain($"端口 {occupiedPort} 已被系统进程占用"));
+                Assert.That(error.Message, Does.Contain($"端口 {occupiedPort} 当前不可绑定"));
                 Assert.That(File.ReadAllBytes(configPath), Is.EqualTo(before));
                 Assert.That(child.HasExited, Is.False, "startup conflict handling terminated the external owner");
                 Assert.That(UPilotPortAllocator.IsPortAvailable(occupiedPort), Is.False);

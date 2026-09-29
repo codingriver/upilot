@@ -1515,14 +1515,8 @@ namespace CodingRiver.UPilot
             try
             {
                 var processes = FindCurrentProjectMcpProcesses(out var portsByPid, out var portQuerySucceeded, stopTargetsOnly: true);
-                if (!portQuerySucceeded)
-                    throw new InvalidOperationException("无法安全停止 Server：监听端口归属查询失败。");
-                var owners = portsByPid.Where(entry => entry.Value.Contains(HttpPort) || entry.Value.Contains(WsPort))
-                    .Select(entry => entry.Key).Distinct().ToArray();
-                if (owners.Length > 1 || owners.Any(pid => !processes.Any(process => process.pid == pid)) ||
-                    (owners.Length == 0 && (!UPilotPortAllocator.IsPortAvailable(HttpPort) ||
-                                            !UPilotPortAllocator.IsPortAvailable(WsPort))))
-                    throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知。");
+                ValidateStopPortOwnership(portsByPid, portQuerySucceeded,
+                    processes.Select(process => process.pid), HttpPort, WsPort);
                 if (expectedProcessId > 0 && (processes.Count != 1 || processes[0].pid != expectedProcessId))
                     throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Expected Server process changed before stop.");
                 foreach (var entry in processes)
@@ -1541,6 +1535,20 @@ namespace CodingRiver.UPilot
                 return prepared;
             }
             catch { prepared.Dispose(); throw; }
+        }
+
+        internal static void ValidateStopPortOwnership(Dictionary<int, List<int>> portsByPid,
+            bool portQuerySucceeded, IEnumerable<int> verifiedProcessIds, int httpPort, int wsPort)
+        {
+            if (!portQuerySucceeded || portsByPid == null || verifiedProcessIds == null)
+                throw new InvalidOperationException("无法安全停止 Server：监听端口归属查询失败。");
+            var owners = portsByPid.Where(entry => entry.Value.Contains(httpPort) || entry.Value.Contains(wsPort))
+                .Select(entry => entry.Key).Distinct().ToArray();
+            if (owners.Length > 1 || owners.Any(pid => !verifiedProcessIds.Contains(pid)))
+                throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知。");
+            // A reserved/permission-denied port can be unbindable without a listener.
+            // Bindability gates startup/restart, not an identity-verified stop (or an empty no-op).
+            // Handles, creation times and a fresh owner query are still checked before termination.
         }
 
         private void StopCurrentProjectProcesses(int expectedProcessId = 0)

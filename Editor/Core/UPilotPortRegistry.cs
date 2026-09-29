@@ -234,7 +234,7 @@ namespace CodingRiver.UPilot
             {
                 var unchanged = existing != null && (existing.mcp.wsPort == port || existing.mcp.httpPort == port);
                 if ((requireAvailable || pairChanged || !unchanged) && !_available(port))
-                    throw new IOException($"端口 {port} 已被系统进程占用，请选择推荐端口。");
+                    throw new IOException($"端口 {port} 当前不可绑定，可能被占用或受系统保留/权限限制；请在设置中确认推荐端口。");
             }
 
             var entry = data.projects.Find(e => NormalizeProject(e.projectPath) == project);
@@ -295,6 +295,13 @@ namespace CodingRiver.UPilot
     {
         internal static string LastError { get; set; } = "";
         private static readonly HashSet<string> PendingDialogs = new HashSet<string>();
+        private static long _configurationGeneration;
+
+        internal static void OnEndpointsConfirmed()
+        {
+            _configurationGeneration++;
+            LastError = "";
+        }
         internal static Action<string> ShowErrorDialog = message =>
             EditorUtility.DisplayDialog("UPilot 端口配置失败",
                 message + "\n\n未自动更改冲突工程。详情请查看 Console。", "确定");
@@ -336,13 +343,20 @@ namespace CodingRiver.UPilot
             Debug.LogError($"[UPilotPorts] operation={operation}; project={UPilotProjectConfig.ProjectRoot}; " +
                            $"config={UPilotProjectConfig.ConfigPath}; userProfile={Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)}; " +
                            $"registry=.upilot/ports.json; error={ex}");
-            if (Application.isBatchMode || !PendingDialogs.Add(ex.Message)) return;
+            var generation = _configurationGeneration;
+            var dialogKey = generation + ":" + ex.Message;
+            if (Application.isBatchMode || !PendingDialogs.Add(dialogKey)) return;
             EditorApplication.CallbackFunction show = null;
             show = () =>
             {
                 EditorApplication.update -= show;
-                try { ShowErrorDialog(ex.Message); }
-                finally { PendingDialogs.Remove(ex.Message); }
+                try
+                {
+                    // Configuration may have been confirmed while this dialog was queued.
+                    // Keep the original Console evidence, but do not display a stale failure.
+                    if (generation == _configurationGeneration) ShowErrorDialog(ex.Message);
+                }
+                finally { PendingDialogs.Remove(dialogKey); }
             };
             EditorApplication.update += show;
         }

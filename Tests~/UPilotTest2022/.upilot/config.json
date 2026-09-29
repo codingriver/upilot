@@ -4,7 +4,7 @@
         "httpHost": "127.0.0.1",
         "httpPort": 8017,
         "wsHost": "127.0.0.1",
-        "wsPort": 8770
+        "wsPort": 8869
     },
     "cache": {
         "contextStaleMs": 2000
@@ -22,7 +22,7 @@
     },
     "safety": {
         "writeAccessApproved": true,
-        "writeAccessApprovedAtUtc": "2026-09-08T03:15:08.7888655+00:00",
+        "writeAccessApprovedAtUtc": "2026-09-29T04:44:19.6812397+00:00",
         "unsavedScenePolicy": "ignore",
         "automationAuthorizationScopes": [
             "editorModeTransition",
@@ -49,6 +49,7 @@
         "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
         "restartTimeoutSeconds": 120
     },
+    "aiQueueCleanupAllowed": true,
     "updates": {
         "manifestUrl": "",
         "channel": "auto"

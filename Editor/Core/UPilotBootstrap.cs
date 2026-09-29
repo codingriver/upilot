@@ -72,6 +72,12 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                if (UPilotQuickStart.IsExplicitlyStopped)
+                {
+                    EditorApplication.update -= TryStartBridge;
+                    return;
+                }
+
                 if (!IsEnabled)
                 {
                     UPilotStartupDiagnostics.RecordBlockingReason(
@@ -115,6 +121,13 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                if (UPilotQuickStart.IsExplicitlyStopped)
+                {
+                    UPilotStartupDiagnostics.MarkServerStartRetryBlocked("user_stopped");
+                    EditorApplication.update -= TryStartMcpServer;
+                    return;
+                }
+
                 if (EditorApplication.isPlayingOrWillChangePlaymode)
                     return;
 

@@ -86,7 +86,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void RecoveryFromFinalStepReturnsToPortsWithStartupEnabledAndFailureVisible()
+        public void RecoveryFromFinalStepReturnsToPortsWithStartupEnabledAndHistoricalFailure()
         {
             var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
             try
@@ -114,8 +114,10 @@ namespace CodingRiver.UPilot.Tests
 
                 Assert.That(dialogShown, Is.True);
                 Assert.That(GetField(window, "_setupStartAfterSetup"), Is.True);
-                Assert.That(GetField(window, "_setupCompletionMessage"), Is.EqualTo(failure));
-                Assert.That(GetField(window, "_setupCompletionMessageType"), Is.EqualTo(MessageType.Error));
+                Assert.That(GetField(window, "_setupRecoveryFailure"), Is.EqualTo(failure));
+                Assert.That(GetField(window, "_showSetupRecoveryFailure"), Is.False);
+                Assert.That(GetField(window, "_setupCompletionMessage").ToString(), Does.Not.Contain(failure));
+                Assert.That(GetField(window, "_setupCompletionMessageType"), Is.EqualTo(MessageType.Info));
                 Assert.That(GetField(window, "_setupScroll"), Is.EqualTo(Vector2.zero));
                 Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(beforeWs));
                 Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(beforeHttp));
@@ -172,6 +174,59 @@ namespace CodingRiver.UPilot.Tests
             {
                 ws.Stop();
                 http.Stop();
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ConfirmedPortsClearOnlyCurrentMessageAndPreserveRepairHistory(bool saveFails)
+        {
+            var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
+            var originalError = UPilotPortRegistration.LastError;
+            var generationField = typeof(UPilotPortRegistration).GetField("_configurationGeneration",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var generation = generationField.GetValue(null);
+            try
+            {
+                const string history = "old restart: WS8770 port_release_timeout";
+                window.EnterSetupRecovery(history);
+                var record = UPilotServerRestartDiagnostics.Current;
+                var config = File.ReadAllBytes(UPilotProjectConfig.ConfigPath);
+                SetField(window, "_setupWsPort", 8869);
+                SetField(window, "_setupHttpPort", 8017);
+                SetField(window, "_setupCompletionMessage", "current save error");
+                SetField(window, "_setupCompletionMessageType", MessageType.Error);
+                UPilotPortRegistration.LastError = "current port error";
+                var calls = 0;
+                Action<string, int, int> save = (host, ws, http) =>
+                {
+                    calls++;
+                    Assert.That(ws, Is.EqualTo(8869));
+                    Assert.That(http, Is.EqualTo(8017));
+                    if (saveFails) throw new IOException("injected save failure");
+                };
+                if (saveFails)
+                    Assert.Throws<IOException>(() => window.SaveSetupPorts(save));
+                else
+                    window.SaveSetupPorts(save);
+                Assert.That(calls, Is.EqualTo(1));
+                Assert.That(GetField(window, "_setupRecoveryFailure"), Is.EqualTo(history));
+                Assert.That(GetField(window, "_setupCompletionMessage"),
+                    Is.EqualTo(saveFails ? "current save error" : ""));
+                Assert.That(GetField(window, "_setupCompletionMessageType"),
+                    Is.EqualTo(saveFails ? MessageType.Error : MessageType.None));
+                Assert.That(UPilotPortRegistration.LastError,
+                    Is.EqualTo(saveFails ? "current port error" : ""));
+                Assert.That((long)generationField.GetValue(null),
+                    Is.EqualTo((long)generation + (saveFails ? 0 : 1)));
+                Assert.That(UPilotServerRestartDiagnostics.Current, Is.SameAs(record));
+                Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(config));
+            }
+            finally
+            {
+                generationField.SetValue(null, generation);
+                UPilotPortRegistration.LastError = originalError;
                 UnityEngine.Object.DestroyImmediate(window);
             }
         }

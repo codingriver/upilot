@@ -26,6 +26,10 @@
 - 本批仅编写最小绑定参数形状 fixture，未运行、未定位根因，不更改反射绑定器。
 - 关闭条件：原表达式和结构化调用的绑定/副作用边界可解释；无需重做已存在的 Type 值区分、闭合泛型、基础数组内联、向量序列化和 params 优先规则。
 
+- 2026-09-29 补证（英雄10001/关卡88881/怪物20008飘字排查）：旧部署0.3.40的 `csharp_validate` 语法预检通过后，`JObject.Parse(text)` 仍报 `REFLECTION_BIND_AMBIGUOUS`（req-b688108e-dcff-4250-9aae-1f0e9156eaa8），前置只读 StateJson 已执行；改用 `JToken.Parse` 后字符串索引 `data["domain"]` 在 IndexExpr 报 FormatException（req-7bec91d8-8e53-4fb4-9195-d4881f758a43）。有界替代 `JToken.Parse(text).SelectToken("domain.sharedCheckpointJson").ToString()` 成功。未重放或修改业务，resourceDiagnostics为空、dropped=0；这是旧部署现场，未验证最新包源码存在同样回归。
+- 本次建议补充：按真实隐藏静态方法/字符串索引器形状定向定位，清楚区分语法预检与运行时绑定保障，保留已执行调用边界；预期减少人工拆分投影及额外查询。通用UPilot/MCP，P1，实施状态以根D02为准；只在规范 `D:\upilot\Tests~\UPilotTest` 验收隐藏静态调用、字符串索引与单次参数求值，本任务未运行包验收。
+- 双向引用：`F:\xclient2\TODO_UPilot.mcd` / `UPilot-20260922-NestedCallBinding`。
+
 ### D03 / P1：维护 inventory 的来源完整性和主 Editor 活体证据
 
 - 原 ID：`UPilot-20260922-MaintenanceInventory`。状态：Bridge `queue.snapshot`、有界来源明细及 OS Editor 身份核验已实现；2026-09-24 两条 Python 定向用例通过（未跟踪工作、session 漂移），其余行为待验证，Server 新源码加载未核验。
@@ -253,6 +257,8 @@
 
 ### D16 / P1：Step 已完成清理但外层 Operation 保留 RecoveryRequired
 
+- 2026-09-29 外部业务现场补证（UPilot 0.3.40；英雄10001/关卡88881/怪物20008伤害排查，不作为当前包源码回归验收）：operation=`op-5036db66-8f3a-4ccc-9073-ba3eede82878` 在 Reload 后保持 RecoveryRequired/StatusCallFailed/COMMAND_RECOVERY_REQUIRED；原 stepRun=`d7942f06cc9941af82371acb2a41db18` 的只读 StateJson 已为 Failed/Completed/STEP_CONSOLE_POLICY_FAILED、terminal=true、cleanupPending=false，12个步骤均 Succeeded，日志恢复、Capture停止及 EditMode 完成。原失败来自6条 string_en.csv 空文本错误；未重放 Start 或更改失败状态。证据：F:\xclient2\Log\UPilotSteps\d7942f06cc9941af82371acb2a41db18\summary.json（SHA256 8746366a1aa8fe35312e9668479b1d8420f647d466ccfd58d2045d9ea1140f75）。沿用 D16 的 P1、归属、验收和根清单实施状态；预期减少已清理作业的重复查询与误重跑。双向引用：D:\upilot\TODO_UPilot.mcd / D16；F:\xclient2\TODO_UPilot.mcd / “2026-09-09 - 通用 Operation 在 Domain Reload 后丢失原身份”。不据旧部署证据宣称最新源码回归。
+
 - 状态：待复现与定位；本次仅记录现场，没有修改产品代码、自动恢复或重放原业务。
 - 触发场景：xclient 战术小队前压/局部追击测试，第八次尝试 Run=`b3a4b5dc522f401ab0f3c1e77487f3da`。外层 Operation 停留 RecoveryRequired；当时两次只读 Step StateJson 显示业务 Failed/Completed，清理、日志恢复、Capture 停止及 EditMode 已完成。失败 summary 保留在 `D:\MA\xclient\Log\UPilotSteps\b3a4b5dc522f401ab0f3c1e77487f3da\summary.json`。
 - 痛点/证据边界：业务失败应保留，但外层无法对齐已经完成的清理，使调用者难以判断是否仍需恢复、是否可以开始新的独立运行。收尾整理时旧 StateJson 未重新取得有效 payload，不能补造旧 operationId 或宣称已定位状态竞态根因。
@@ -444,3 +450,60 @@
 - Unity2022 UTF1.1.33和1.4.6各两轮精确验收、原生确认对话框完整点击链路仍未执行完成。
 - 原API原生对象的销毁来源、清理时自动编译的具体dirty输入仍未查明。保留后续调查，不将猜测作为既定根因。
 - 全仓diff格式检查未宣称通过；未为CRLF/混合行尾批量重写已有改动。未发布、未部署F:\xclient2、未拿当前未知历史任务做破坏性验收。
+
+## UPilot-20260929-StepPlanDirtyScenePreflight：Step plan 启动前提供只读场景环境预检
+- 日期：2026-09-29。
+- 归属：通用 UPilot/MCP；优先级 P2；状态：建议，未实现/未验收。优先级与实施状态以 D:\upilot\TODO_UPilot.mcd 同 ID 条目为准。
+- 场景与痛点：xclient2 排查英雄10001/关卡88881/怪物20008弹道伤害；unity_operation_validate 通过后，operation_start 才在 open_scene 步骤发现 Launch.unity 未保存，返回 STEP_SCENE_UNSAVED；未进入战斗，不能据此判定弹道伤害结果。已有只读 EditMode 测试放行建议与本项不同，本项不要求放宽安全门。
+- 期望能力：保留静态 Validate 契约，增加可选的只读环境预检，明确返回首个场景/模式步骤所需条件、所有阻塞的精确脏场景及处理建议；开始前再次核验，不自动保存、丢弃或变更场景策略。
+- 效率收益：提前发现可预测阻塞，减少一次无效 Operation/Capture 创建与清理及人工状态排查。
+- 可验收标准：在 Tests~/UPilotTest 构造未保存场景，预检零副作用报告阻塞且不创建 Capture；保存后通过；预检后再次变脏时 Start 仍安全拒绝；静态验证通过不被表述为运行环境就绪。
+- 证据/相关工具：unity_operation_validate/start/status、unity_scene_list；op-b0d23d74-8aa9-492f-baa1-29f2fe2b00fb，stepRun=fa6bf38fd7e34bb786c60d5ba9401ae9；F:\xclient2\log\UPilotSteps\fa6bf38fd7e34bb786c60d5ba9401ae9\summary.json，SHA256=72d6455344764d028f5fa265204b3037b54b5abaa58261a9df73334c48b1f0f0。终态 Failed，cleanupTerminal/editorTerminal=true，Capture已释放。
+- 双向引用：D:\upilot\TODO_UPilot.mcd 与 F:\xclient2\TODO_UPilot.mcd 的同 ID 条目。未修改产品实现、场景或战斗配置。
+
+## UPilot-20260929-ReservedPortStop：不可绑定端口与监听进程归属分离
+- 日期：2026-09-29；状态：最小源码修复及默认工程定向验收完成；2022 工程实际改端口/启动与系统排除范围来源仍未验证。
+- 现场证据：UPilotTest2022 配置 WS8770/HTTP8017；Windows IPv4/IPv6 TCP excluded ranges 均含 8769–8868，8770 未见监听/连接，Loopback TcpListener.Start 返回 AccessDenied/10013；当次 8869/8017 可绑定，8017 health 连接被拒绝。未确认排除范围由哪个组件建立，不归因于 Hyper-V/WSL，也不与创建时间精度问题混为一谈。
+- 已定位缺陷：PrepareCurrentProjectStop 将没有监听 owner 但无法绑定误判成未知进程；PortRegistry 把所有绑定失败断言为进程占用；Bootstrap 待执行启动回调未遵守用户显式停止。
+- 已修复：停止门禁只依据成功取得的监听归属及精确验证的项目进程，不以端口可绑定性代替进程证据；查询失败、跨项目/未知 owner、多 owner、PID/创建时间变化及停止前 owner 变化仍拒绝。启动/重启的可绑定性检查保留。
+- 已修复：端口错误明确提示可能占用或系统保留/权限限制，不自动改写配置/端口；两个 Bootstrap 回调在显式停止时先撤下，不增加启动次数，Server retry 标记 user_stopped。
+- 回归：新增 5 个用例，连同 10 个直接回归精确选择共 15 项；覆盖系统不可绑定、真实外部监听者仍存活、配置/注册表字节不变、项目/PID 保护、停止不确定时不重发及启动回调隔离恢复。未调用真实当前服务 Stop，未跑全套。
+- 编译：首批 wb-55de4091-ebc3-416b-869f-052ff9736613 暴露新增测试 NUnit constraint 类型错误；改为集合 Has.No.Member 后，仅登记修正批 wb-2c04d3ea-2bea-4d90-b54b-b3e0f6007f05。其 compileOperationId=b6d6e40519724894ade9ad7a6148e71d、requestId=req-4780de4a-2171-414e-8a3d-47800f5a2815，createdAt=1790654146168，verifiedAt=1790654161364，errorsVerified/correlationVerified=true，0 errors。关联 Console 编译窗口 coverage=partial/console_cleared，不能据此宣称完整 Console 历史无错误；结构化编译结果已验证。
+- 验收工程：D:\upilot\Tests~\UPilotTest，Unity6000.6.0a2，工程依赖 UTF1.7.0；Unity PID43112、Server PID36628、编译后 domainGeneration=30。新增用例发现/执行及关联编译证明当前 Unity C# 修复已加载；本轮未修改 Server Python，也不另行声称其源码加载身份已证明。
+- 连续验收 1：task-1cfbd2b1-5a1e-4f6e-96aa-532443b2dead，runGuid=5a9dfd93-938e-47c2-a5b5-2a773b1a7abe，15/15；summary=Tests~/UPilotTest/Log/UPilotAcceptance/1790654490817_req-a5ac9f3f-1f0f-47c7-bb40-360c7b1b401e/summary.json，SHA256=032b02640272776d55e8c40bc3ddbeafb4996877bf477201d061758a7c244af2（已重读校验）。
+- 连续验收 2：task-fd47cc24-b540-4907-a7e4-e5c1d9c87a4e，runGuid=07778977-351c-4b87-9de0-dd2766daafaf，15/15；summary=Tests~/UPilotTest/Log/UPilotAcceptance/1790654559193_req-efafb05c-4d00-4b45-a358-d3ff4bc0a01c/summary.json，SHA256=a02ceb6bf9fafca116e8da256968be7213e6fc3f2a994fda9cd62364372ad087（已重读校验）。
+- 两轮均 acceptancePassed/sourceUnchanged/testIdentityVerified/cleanupVerified=true，原 runGuid 结果权威，cleanupPending=false、cleanupSucceeded=true、cleanupStatus=completed、cleanupErrors/unresolvedResources=[]、runnerState=inactive、persistenceError 为空；Task completed/terminal=true。两轮关联 Console 窗口完整且无 Error。第二轮没有重启、再次编译或手工清状态。
+- 后续：用户在 2022 工程设置中确认推荐端口（现场候选 WS8869/HTTP8017；保存时重新校验），再核验该工程新代码及真实启动/停止；AI 仅使用 HTTP8017/mcp，WS 为内部端口。未自动修改项目端口、清理/强杀现有进程、删除系统排除范围、部署外部项目或清除历史任务；2022 UTF 兼容矩阵及其他历史未完成项不因本轮通过而改为完成。
+
+
+## UPilot-20260929-GameViewEmptySelector：GameView 空选择器及截图尺寸诊断
+- 日期/场景：2026-09-29，xclient2 英雄10001/关卡88881/怪物20008伤害与血条实战诊断，客户端安装版本0.3.40。
+- 归属：通用 UPilot/MCP；优先级 P2；状态：建议，未定位实现根因、未实现/未验收；根清单状态权威。
+- 当前痛点：unity_snapshot_capture 的 GameView 请求省略或传空 instanceId，返回目标 instanceId="0"，以 GAMEVIEW_SELECTOR_INVALID 拒绝。snapshot-bf24f82d07c4425bbaf89e77adb2e589、snapshot-e8608dd3d7a24978bb25a06b214a2b1b；不自动重试。另一次 Step API 截图成功并标 acceptedAsEvidence，但源 Screen1080x1920、输出1280x720，实际查看出现倒置/裁切，无法证明英雄血条像素；此为相关图像证据局限，尚未确认与选择器问题同源。
+- 期望能力：GameView不适用的空选择器在工具/协议边界保持空，不归一化成对象ID0；继续拒绝真实 Camera/Window 选择器。记录源尺寸、输出映射、纵横比和方向，区分像素来源可信与业务构图充分，避免来源认证被误当视觉验收。
+- 效率收益：减少有效 GameView 请求被误拒及手动检查参数；明确截图构图局限，减少为观察血条重复战斗。
+- 可验收标准：在 D:\upilot\Tests~\UPilotTest 定向覆盖省略/空/显式0/真实非空选择器；合法请求采集Display0、非法请求零副作用拒绝。用非对称测试图验证横竖屏方向及尺寸映射；报告不得把裁切图当成完整画面。
+- 证据路径：F:\xclient2\Log\UPilotSteps\d7942f06cc9941af82371acb2a41db18\snapshots\cbb3b7aac7c5038dc5bad0291e4fcb36bd8185d8ee01ecfb2666d46c70412f3d\game.6ca5cab7.color.png，1280x720、417204字节、SHA256 926a3374f83eb1065778cd9ecf79b80405a2597136261ca5e98eea8b11587c22。
+- 双向引用：D:\upilot\TODO_UPilot.mcd 与 F:\xclient2\TODO_UPilot.mcd 的同ID条目。仅记录问题，不修改包实现、截图约束或战斗配置。
+
+
+## UPilot-20260929-SilentMcpConfigUpdate：MCP 配置静默更新
+- 问题/复现：已有 Codex .codex/config.toml 更新时显示 “Update UPilot MCP config?”，同类确认也存在于 Claude/Cursor/OpenCode，菜单完成后另有成功弹窗，打断配置更新。
+- 改进：UPilotAgentSetup 的 MCP 写入统一取消确认；保留旧 bool 参数兼容已有调用，菜单成功结果仅记日志；继续局部更新 UPilot 条目及保留错误反馈。
+- 直接回归：新增四客户端 × 旧参数 true/false 共 8 项写入测试及非法 OpenCode 配置字节保留测试，连同 3 项已有 JSONC 用例共 12 项。首轮 runGuid=8d1d4213-8a16-4925-ba86-7b056cea1168，8 passed/4 failed，发现 Claude/Cursor 更新时重复累加属性缩进；已在原替换处用 TrimStart 修复，不削弱断言。
+- 状态：实现及默认 Tests~/UPilotTest 定向验证完成。最终代码批次 wb-6251d25b-a51f-48fb-a0e5-4fc82233ef45 为 verified/passed，errorsVerified/correlationVerified=true、0 errors/0 warnings；实现文件 SHA256=413d016aba620e0d67005c89589f43bcb5a5b5b916869f80582e3e1062cebdb0 与编译记录一致。修复后 runGuid=d09b73bd-0fb0-4204-80cc-cf5cc6d9352a，12 passed/0 failed/0 skipped，resultAuthoritative=true，cleanupSucceeded/resourcesReleased=true，Editor ready；关联 Console 完整窗口无 Error。未运行全量测试，不代表 Unity2022 工程现场验收或发布。
+
+## UPilot-20260929-TestFilterSnapshot：旧 testFilter 与选择快照诊断不一致
+- 问题/证据：unity_test_list(testFilter="regex:...") 返回 selectionValid=true 和快照；原样传 testFilter 及 expectedSelectionDomain/expectedSelectionSnapshotId 给 unity_test_run，却在未调用 Runner 时返回 TEST_SELECTION_STALE / No current selection snapshot。请求 req-2142c3e6-83d2-46a8-afce-a69485bbf89e，runnerStartAttempted=false；改为发现结果中的精确 testNames 后同批 12 项正常启动。
+- 建议：统一旧 filter 和数组 selector 的快照绑定路径，或在预检明确拒绝不支持的参数组合；工具描述补充 matchMode 仅 union/intersection、regex: 前缀、testFilter 与 selector 数组互斥，以及参数化 testNames 必须完整叶子名。
+- 验收：同域 list→run 的 regex filter 能使用其快照，域变化仍严格拒绝；误参在无副作用阶段返回清晰操作建议。
+- 状态：已记录，未修改测试执行产品逻辑；本轮以精确 testNames 执行，不扩大到此独立问题。
+
+## UPilot-20260929-SetupRecoveryStaleError：安装向导隔离旧端口失败
+- 问题/原因：restart-d867b429fc6b40bdb9b539cb2cff66a0 的 WS8770 失败被 EnterSetupRecovery 写入当前 completion Error；成功保存新端口没有清除。PortRegistration 延迟弹窗也缺少配置代次检查，可能在新配置保存后显示旧错误。
+- 修复：旧重启原因独立折叠为历史记录；成功保存端口后清当前提示、LastError 并递增配置代次，旧代次待显示弹窗失效；保存失败不前进、不清错误，新代次真实错误仍报告。保留原重启诊断，不修改其失败结果，不停止未知进程。
+- 状态：源码及默认 Tests~/UPilotTest 定向验收完成。最终写批次 wb-1a662dba-240e-47ba-a22a-9433d0c1a517，compileOperationId=1cf14a2de85142518c86274e3078d4aa，关联编译 verified/passed、errorsVerified/correlationVerified=true，0 errors/0 warnings。
+- 连续验收：同一域、不重启、不清状态；runGuid=128af399-ff47-4669-aabd-7fdb1606a301 与 3d155bc9-1ce2-42d3-91b5-171a75d4e4bb，各9 passed/0 failed/0 skipped。两轮 acceptancePassed/sourceUnchanged/resultAuthoritative=true；cleanupPending=false、cleanupSucceeded=true、cleanupStatus=completed，cleanupErrors/unresolvedResources为空。
+- 产物：Tests~/UPilotTest/Log/UPilotAcceptance/1790657859832_req-87ec820c-9861-40ea-bc46-1922412f8d14/summary.json，SHA256=9403b9ba1780062dfa4c7b8d6a17b40b825a7432cfe79c4153a02fd8184902c7；1790657893624_req-089cdd88-69af-4ec9-9df6-1a6197182c13/summary.json，SHA256=4fa70c744d470075211fada2e405a7c2b5ce48a8ce0decf1fdfdbeda6e1126e5（同目录根）。
+- 边界：未执行2022工程原生窗口完整点击及现场服务恢复，不声明原失败重启已成功；编译关联Console窗口存在Domain Reload覆盖缺口，不声称完整无错误历史。
+- 后续观察：首批 wb-56cd634b-cc34-43d6-9947-1065aa281dd7 与 unity_auto 编译发生覆盖身份竞态，返回 recovery_required。建议独立复现自动导入与写批次登记竞争，核验关联证据和后续批次覆盖语义；不通过猜测覆盖或删除旧批次放行。本轮最终批次关联验证已通过，不扩展该独立修复。

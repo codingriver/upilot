@@ -349,6 +349,88 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void StopOwnershipIgnoresOtherPortsAndAcceptsOnlyVerifiedTargetOwners()
+        {
+            var ports = new System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<int>>
+            {
+                [10] = new() { 8765, 8011 },
+            };
+            Assert.DoesNotThrow(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, true, Array.Empty<int>(), 8017, 8770));
+            ports[20] = new() { 8017, 8770 };
+            Assert.DoesNotThrow(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, true, new[] { 20 }, 8017, 8770));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, true, new[] { 10 }, 8017, 8770));
+            ports[20] = new() { 8017 };
+            ports[30] = new() { 8770 };
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, true, new[] { 20, 30 }, 8017, 8770));
+        }
+
+        [Test]
+        public void StopOwnershipQueryFailureNeverMeansAnEmptyQueue()
+        {
+            var ports = new System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<int>>();
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, false, Array.Empty<int>(), 8017, 8770));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                null, true, Array.Empty<int>(), 8017, 8770));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, true, null, 8017, 8770));
+        }
+
+        [TestCase("TryStartBridge")]
+        [TestCase("TryStartMcpServer")]
+        public void ExplicitUserStopRemovesPendingBootstrapCallbackBeforeStarting(string methodName)
+        {
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic |
+                                                       System.Reflection.BindingFlags.Static;
+            var stoppedField = typeof(UPilotQuickStart).GetField("_explicitlyStopped", flags);
+            var recordField = typeof(UPilotStartupDiagnostics).GetField("s_record", flags);
+            var pathField = typeof(UPilotStartupDiagnostics).GetField("s_path", flags);
+            var method = typeof(UPilotBootstrap).GetMethod(methodName, flags);
+            var callback = (UnityEditor.EditorApplication.CallbackFunction)Delegate.CreateDelegate(
+                typeof(UnityEditor.EditorApplication.CallbackFunction), method);
+            var stopped = stoppedField.GetValue(null);
+            var previousRecord = recordField.GetValue(null);
+            var previousPath = pathField.GetValue(null);
+            var previousUpdates = UnityEditor.EditorApplication.update;
+            var record = UPilotStartupDiagnostics.CreateRecordForTests("C:/isolated-bootstrap", 42, 123, 1000);
+            record.serverStartRetryStatus = "observing";
+            record.serverStartAttemptCount = 3;
+            record.nextServerStartAttemptAtUtcMs = 1;
+            try
+            {
+                // Synchronous isolation: no service stop, real settings changes or project journal writes.
+                stoppedField.SetValue(null, true);
+                recordField.SetValue(null, record);
+                pathField.SetValue(null, "");
+                UnityEditor.EditorApplication.update += callback;
+
+                method.Invoke(null, null);
+
+                Assert.That(UPilotQuickStart.IsExplicitlyStopped, Is.True);
+                Assert.That(record.serverStartAttemptCount, Is.EqualTo(3));
+                Assert.That(UnityEditor.EditorApplication.update?.GetInvocationList() ?? Array.Empty<Delegate>(),
+                    Has.No.Member(callback));
+                if (methodName == "TryStartMcpServer")
+                {
+                    Assert.That(record.serverStartRetryStatus, Is.EqualTo("blocked"));
+                    Assert.That(record.lastServerStartReason, Is.EqualTo("user_stopped"));
+                    Assert.That(record.nextServerStartAttemptAtUtcMs, Is.Zero);
+                }
+            }
+            finally
+            {
+                UnityEditor.EditorApplication.update = previousUpdates;
+                stoppedField.SetValue(null, stopped);
+                recordField.SetValue(null, previousRecord);
+                pathField.SetValue(null, previousPath);
+            }
+        }
+
+        [Test]
         public void PreflightFailureDoesNotStopBridgeOrServer()
         {
             var bridgeStops = 0;

@@ -503,25 +503,25 @@ namespace CodingRiver.UPilot
         public static void MenuWriteCodexMcpConfig()
         {
             var result = WriteCodexMcpConfig(promptBeforeOverwrite: true);
-            ReportResult("Codex MCP config", result);
+            Debug.Log("[UPilot] Codex MCP config:\n" + result);
         }
 
         public static void MenuWriteClaudeCodeMcpConfig()
         {
             var result = WriteClaudeCodeMcpConfig(promptBeforeOverwrite: true);
-            ReportResult("Claude Code MCP config", result);
+            Debug.Log("[UPilot] Claude Code MCP config:\n" + result);
         }
 
         public static void MenuWriteCursorMcpConfig()
         {
             var result = WriteCursorMcpConfig(promptBeforeOverwrite: true);
-            ReportResult("Cursor MCP config", result);
+            Debug.Log("[UPilot] Cursor MCP config:\n" + result);
         }
 
         public static void MenuWriteOpenCodeMcpConfig()
         {
             var result = WriteOpenCodeMcpConfig(promptBeforeOverwrite: true);
-            ReportResult("OpenCode MCP config", result);
+            Debug.Log("[UPilot] OpenCode MCP config:\n" + result);
         }
 
         public static string WriteAgentRules(bool overwriteExisting)
@@ -529,6 +529,8 @@ namespace CodingRiver.UPilot
             return IntegrationSummary(SyncAgentIntegrations(true, AgentIntegrationScope.All, "setup"));
         }
 
+        // Keep promptBeforeOverwrite for source compatibility. MCP entry updates are always silent,
+        // including older UI callers that still pass true; unrelated client settings are preserved.
         public static string WriteCodexMcpConfig(bool promptBeforeOverwrite)
         {
             var path = Path.Combine(GetProjectRoot(), ".codex", "config.toml");
@@ -1477,17 +1479,6 @@ namespace CodingRiver.UPilot
                 return "Wrote " + NormalizePathForLog(path);
             }
 
-            if (promptBeforeOverwrite)
-            {
-                var ok = EditorUtility.DisplayDialog(
-                    "Update UPilot MCP config?",
-                    "This will update only the UPilot MCP server entry in:\n\n" + path,
-                    "Update",
-                    "Cancel");
-                if (!ok)
-                    return "Cancelled.";
-            }
-
             var original = File.ReadAllText(path, Encoding.UTF8);
             var updated = UpsertJsonMcpServer(original, includeType);
             File.WriteAllText(path, updated, new UTF8Encoding(false));
@@ -1501,17 +1492,6 @@ namespace CodingRiver.UPilot
                 EnsureParentDirectory(path);
                 File.WriteAllText(path, BuildOpenCodeMcpJson(), new UTF8Encoding(false));
                 return "Wrote " + NormalizePathForLog(path);
-            }
-
-            if (promptBeforeOverwrite)
-            {
-                var ok = EditorUtility.DisplayDialog(
-                    "Update OpenCode UPilot MCP config?",
-                    "This will update only the mcp.upilot entry in:\n\n" + path,
-                    "Update",
-                    "Cancel");
-                if (!ok)
-                    return "Cancelled.";
             }
 
             var original = File.ReadAllText(path, Encoding.UTF8);
@@ -1532,17 +1512,6 @@ namespace CodingRiver.UPilot
                 EnsureParentDirectory(path);
                 File.WriteAllText(path, content, new UTF8Encoding(false));
                 return "Wrote " + NormalizePathForLog(path);
-            }
-
-            if (promptBeforeOverwrite)
-            {
-                var ok = EditorUtility.DisplayDialog(
-                    "Update UPilot MCP config?",
-                    "This will update only the [mcp_servers.upilot] section in:\n\n" + path,
-                    "Update",
-                    "Cancel");
-                if (!ok)
-                    return "Cancelled.";
             }
 
             var original = File.ReadAllText(path, Encoding.UTF8);
@@ -2236,8 +2205,9 @@ namespace CodingRiver.UPilot
             if (upilotObjectClose < 0)
                 return BuildMcpJson(includeType);
 
+            // The prefix already includes the property indentation; do not accumulate it on each update.
             return original.Substring(0, upilotPropertyStart) +
-                   entry +
+                   entry.TrimStart() +
                    original.Substring(upilotObjectClose + 1);
         }
 

@@ -1692,6 +1692,82 @@ namespace CodingRiver.UPilot.Tests
                 Does.Contain(Path.Combine(projectRoot, ".claude", "skills")));
         }
 
+        [TestCase("Codex", true)]
+        [TestCase("Codex", false)]
+        [TestCase("Claude Code", true)]
+        [TestCase("Claude Code", false)]
+        [TestCase("Cursor", true)]
+        [TestCase("Cursor", false)]
+        [TestCase("OpenCode", true)]
+        [TestCase("OpenCode", false)]
+        public void McpConfigWritesSilentlyPreserveOtherSettings(string client, bool legacyPrompt)
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-silent-mcp-" + Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "config");
+            var isToml = client == "Codex";
+            var isOpenCode = client == "OpenCode";
+            var method = typeof(UPilotAgentSetup).GetMethod(
+                isToml ? "WriteTomlMcpConfig" : isOpenCode ? "WriteOpenCodeJsonMcpConfig" : "WriteJsonMcpConfig",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(method, Is.Not.Null);
+            var args = isToml || isOpenCode
+                ? new object[] { path, legacyPrompt }
+                : new object[] { path, client == "Claude Code", legacyPrompt };
+            try
+            {
+                // First install must also work without requiring a pre-existing directory/file.
+                Assert.That((string)method.Invoke(null, args), Does.StartWith("Wrote "));
+                Assert.That(File.ReadAllText(path), Does.Contain(UPilotAgentSetup.McpUrl));
+
+                const string otherUrl = "https://example.com/other-mcp";
+                var original = isToml
+                    ? "model = \"keep-model\"\n\n[mcp_servers.upilot]\nurl = \"http://127.0.0.1:9999/mcp\"\n\n" +
+                      "[mcp_servers.other]\nurl = \"" + otherUrl + "\"\n"
+                    : "{\n  \"model\": \"keep-model\",\n  \"" + (isOpenCode ? "mcp" : "mcpServers") +
+                      "\": {\n    \"upilot\": { \"url\": \"http://127.0.0.1:9999/mcp\" },\n" +
+                      "    \"other\": { \"url\": \"" + otherUrl + "\" }\n  }\n}\n";
+                File.WriteAllText(path, original);
+
+                // In particular, the legacy true argument must not open a modal dialog.
+                Assert.That((string)method.Invoke(null, args), Does.StartWith("Updated UPilot"));
+                var updated = File.ReadAllText(path);
+                Assert.That(updated, Does.Contain("keep-model"));
+                Assert.That(updated, Does.Contain(otherUrl));
+                Assert.That(updated, Does.Contain(UPilotAgentSetup.McpUrl));
+                Assert.That(updated, Does.Not.Contain("127.0.0.1:9999"));
+                method.Invoke(null, args);
+                Assert.That(File.ReadAllText(path), Is.EqualTo(updated), "Repeated updates must be content-idempotent.");
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void SilentOpenCodeConfigWriteRejectsInvalidShapeWithoutChangingFile()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "upilot-silent-mcp-invalid-" + Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "opencode.jsonc");
+            const string original = "{ \"model\": \"keep-model\", \"mcp\": [] }\n";
+            Directory.CreateDirectory(directory);
+            try
+            {
+                File.WriteAllText(path, original);
+                var before = File.ReadAllBytes(path);
+                var method = typeof(UPilotAgentSetup).GetMethod(
+                    "WriteOpenCodeJsonMcpConfig", BindingFlags.NonPublic | BindingFlags.Static);
+                var exception = Assert.Throws<TargetInvocationException>(() =>
+                    method.Invoke(null, new object[] { path, true }));
+                Assert.That(exception.InnerException, Is.TypeOf<InvalidDataException>());
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
         [Test]
         public void OpenCodeJsonUpsertPreservesJsoncCommentsAndOtherSettings()
         {
