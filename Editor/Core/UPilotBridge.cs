@@ -242,6 +242,16 @@ namespace CodingRiver.UPilot
         private string _resetErrors = "";
         internal void EnqueueControl(Action action) => _controlQueue.Enqueue(action);
 
+        private string GetAdmissionErrorCode(string commandName)
+        {
+            if (commandName == "service.restart" || commandName == "queue.snapshot" || commandName == "editor.state")
+                return null;
+            if (_resettingWork) return "UPILOT_RESET_IN_PROGRESS";
+            // Authentication closes admission until the main-thread handshake is applied.
+            // Normal Domain Reload/reconnect is waiting, not a hard stop.
+            return _admissionClosed ? "UPILOT_RECONNECT_PENDING" : null;
+        }
+
         internal string ResetActiveWork()
         {
             if (_resettingWork) return _resetErrors;
@@ -1259,10 +1269,13 @@ namespace CodingRiver.UPilot
 
             try
             {
-                if ((_resettingWork || _admissionClosed) && envelope.name != "service.restart" && envelope.name != "queue.snapshot"
-                    && envelope.name != "editor.state")
+                var admissionError = GetAdmissionErrorCode(envelope.name);
+                if (admissionError != null)
                 {
-                    await SendErrorAsync(id, "UPILOT_RESET_IN_PROGRESS", "UPilot hard stop is in progress.", token, envelope.name);
+                    var message = admissionError == "UPILOT_RESET_IN_PROGRESS"
+                        ? "UPilot hard stop is in progress."
+                        : (_cachedIsCompiling ? "Unity 编译中，等待 Bridge 重连完成。" : "UPilot 等待 Bridge 重连完成。");
+                    await SendErrorAsync(id, admissionError, message, token, envelope.name);
                     return;
                 }
                 if (!await _router.TryHandleAsync(envelope.name, id, json, token))

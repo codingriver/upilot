@@ -403,3 +403,43 @@ def test_historical_steps_are_not_admitted_without_live_lifetime(tmp_path):
         assert not [v for v in response.data["items"] if v["type"] in {"Step", "StepRun"}]
         assert path.read_text() == original, "History must not be rewritten or used to restore occupancy."
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mismatch", ["", "kernel", "session_time", "session_pid", "unverified", "project"])
+def test_inventory_identity_uses_handshake_precision_without_relaxing_identity(tmp_path, monkeypatch, mismatch):
+    import upilot_mcp.domain.queue_service as module
+
+    async def run():
+        service = Service(tmp_path)
+        session = service.server.session_manager.active
+        created = 134350644899879764
+        session.process_created_at = created + (10 if mismatch == "session_time" else 0)
+        if mismatch == "session_pid":
+            session.process_id = 124
+        if mismatch == "unverified":
+            session.identity_verified = False
+        row_project = tmp_path / "other" if mismatch == "project" else tmp_path
+        rows = [{"ProcessId": 123, "ExecutablePath": "C:/Unity/Unity.exe",
+                 "CommandLine": f'"C:/Unity/Unity.exe" -projectPath "{row_project}"',
+                 "ProcessCreatedAt": created // 10 * 10}]
+        monkeypatch.setattr(module, "query_unity_processes", lambda: (rows, {
+            "processQuerySucceeded": True, "processQueryExitCode": 0}))
+        monkeypatch.setattr(module, "process_creation_time", lambda pid: created + (10 if mismatch == "kernel" else 0))
+
+        async def dispatch(request, command, payload, **kwargs):
+            if command == "queue.snapshot":
+                return ok(request, dict(complete=True, activeCount=0, queuedCount=0,
+                    executingCount=0, untrackedCount=0, observedAt=now_ms(),
+                    activeCommands=[], queuedCommands=[], serviceLifecycleId="fixture"))
+            if command == "console.capture.observe":
+                assert payload["activeOnly"] is True
+                return ok(request, dict(activeCount=0, sessions=[]))
+            return await service.dispatch(request, command, payload, **kwargs)
+        service.dispatcher.call = dispatch
+        result = await service.queue_inventory()
+        assert result.ok
+        assert result.data["items"] == []
+        assert result.data["complete"] is (not mismatch)
+        assert ("EDITOR_IDENTITY_UNVERIFIED" in result.data["issues"]) is bool(mismatch)
+        assert result.data["editorIdentity"]["status"] == ("unknown" if mismatch else "present")
+    asyncio.run(run())

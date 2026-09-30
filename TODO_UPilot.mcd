@@ -561,3 +561,28 @@
 - 新发现待修复（队列库存诊断）：unity_queue_cleanup 重启前后都返回 complete=false，issues=[CAPTURE_STATE_UNAVAILABLE,EDITOR_IDENTITY_UNVERIFIED]，但专用capture.list正常且mcp_status身份已验证。建议核对 console.capture.observe 与队列身份字段映射，增加与专用接口一致性的回归；保留未知覆盖标记，不能把本次空items表述为完整全源验收。
 - 新发现待修复（历史WriteBatch状态投影）：旧 wb-56cd634b-cc34-43d6-9947-1065aa281dd7 已不在活动库存，但 unity_write_batch_status 仍输出 recovery_required、terminal=false，并建议观察原编译。建议保留storedStatus等历史证据，将跨服务旧非终态的查询明确标记为已中断/仅历史，不再提供等待恢复指引；增加重启后旧批次查询不会复活且不误导等待的回归。本轮仅重启及记录，不以修改历史数据掩盖问题。
 - 边界：本次验证真实MCP重启与旧占位不恢复，尚未覆盖人工按钮、断连本地入口、自动升级故障注入、所有类型迟到回调现场验证。underlyingExecutionStopped=false为明确物理边界，不宣称任意不响应取消的Unity同步代码已被抢占。原D15失败记录不改写。
+
+
+### 两项重启后诊断修复：2026-09-29（最小补丁与定向验收）
+- 状态：上节两个待修复项已实现并在 canonical Tests~/UPilotTest 的实际 MCP 接口复验。未变更规则模板、授权、场景、PlayMode 或其他项目；保留并行 UPilotTest2022 改动。
+- 队列诊断：queue_service 对 Windows kernel/CIM 创建时间采用与 Bridge handshake 一致的微秒精度比较，仍校验精确 PID、项目、可执行文件和已验证 session；Capture 的 activeOnly 非恢复观察只读当前 s_active，不再审计失效历史产物，保留未解决 SessionState 的未知保护和完整历史审计的严格错误。
+- 历史 WriteBatch：只在 status 响应中将上一服务生命周期的未终态批次投影为 aborted/terminal=true/historical=true/terminalReason=service_restarted。保留 storedStatus、原始错误与编译证据，不重写历史库、不恢复队列、不伪造编译成功、不续等候指引；已经验证成功的历史结果保持 verified/passed。
+- 验证时发现的两个直接阻塞小修正：mark_write_batch 原先两次读时钟导致终态缓存与落库 updatedAt 可差1ms，改为一次取值；自动编译已有子 Task 与旧父 Task 身份检查冲突，改为记录并核验实际编译子 Task，其他 Task 仍拒绝重复派发。未新增状态机/恢复机制。
+- Python：tests/test_queue_cleanup.py + tests/test_editor_execution_state_v2.py + tests/test_write_batch_changes.py，106 passed，2条既有 websockets 弃用 warning。覆盖身份精度与真实身份不匹配、历史未终态/终态保留、重复查询不改库不复活、已验证成功证据保留、终态时间戳一致、合法子 Task 和重复派发拒绝。
+- Unity：新增 Capture 活动/无活动两例及既有 ConsoleCaptureStopFinalizesHistoricalActiveManifest，共3 passed/0 failed，runGuid=1f7e85da-4e1c-4843-be5c-19203d5aa030，resultAuthoritative=true、terminal=true、cleanupSucceeded=true；Console evidence complete、logs=[]。未运行全量套件。
+- 真实部署：在独立维护授权有效时只发起一次重启，maintenanceId=084c1957-52f3-4919-a3e5-f403dbbcb32c，status=succeeded/terminalConfirmed=true，queueReset=true，healthVerified/readOnlyVerified=true，耗时5789ms。Server PID53476 -> 58160，Unity PID43112不变。通过新接口行为验证修复已生效，不声称逐文件加载哈希认证。
+- 最终现场：unity_queue_cleanup 两次 complete=true/issues=[]/items=[]，四个 sources 均 present；Capture activeCount=0。旧 wb-56cd634b-cc34-43d6-9947-1065aa281dd7 返回 aborted/terminal=true/historical=true、storedStatus=recovery_required、outcome=unknown、waitingReason=service_restarted；旧已验证 wb-78742f00-7948-4233-9eab-842e5fa28a4c 仍 verified/passed/correlationVerified=true。重复查询未产生占位。
+- 编译证据边界：初批 wb-f4069e4f-2fad-4cf7-8757-e627e21a017a 因子 Task 身份误判、未派发即中止；修正并重启后新批 wb-491b62a5-561d-4422-92d6-f68b3d3a6c30 实际触发 compileOperationId=14861e56d94b46baa1472a9fbc0a60a2，Unity strict_live 回执同批次 completed/terminal/errorsVerified=true、0 errors/0 warnings、verifiedAt=1790694971425 > createdAt=1790694961284。但 WriteBatch 协调流程受下条新问题影响保持 aborted/correlationVerified=false；不将其宣称为完整 WriteBatch 验收通过，不改写终态、不再次触发编译。关联编译 Console coverage=partial/console_delta_unavailable，不宣称完整 Console 无错。
+
+### 已修复：正常 Domain Reload 重连短暂关闭入口被解释为硬停止失败
+- 状态：2026-09-29 用户单独授权后已按最小范围修复并完成定向验证；以下保留原始失败证据，不改写历史终态。
+- 复现/证据：上述 wb-491b62a5-561d-4422-92d6-f68b3d3a6c30 在正常编译 Domain Reload 后，Server PID58160未重启，Bridge session切换；编译查询返回 UPILOT_RESET_IN_PROGRESS / "UPilot hard stop is in progress."，协调器于1790694971460终结为 aborted，而 Unity 同批次编译终态已于1790694971425验证完成且0错误。
+- 代码线索：UPilotBridge.cs 的 session handshake 暂设 _admissionClosed、等待主线程控制队列处理；命令入口将 (_resettingWork || _admissionClosed) 统一拒绝为硬停止进行中。正常重连窗口与真实硬停止没有区分；完整因果链仍需定向故障注入确认。
+- 建议：最小区分正常重连 admission 暂闭与真实重置，在原期限内继续只观察已有编译，不重派 compile.request，不续期，不把真正硬停止误作可恢复。增加重连窗口读取编译结果、正常 Reload 不误终结、真实硬停止保持终结的一组定向回归。
+- 修复：UPilotBridge.GetAdmissionErrorCode 区分真实 _resettingWork 和握手 _admissionClosed。重连返回 UPILOT_RECONNECT_PENDING，提示“Unity 编译中，等待 Bridge 重连完成。”或“UPilot 等待 Bridge 重连完成。”；真实硬停止仍为 UPILOT_RESET_IN_PROGRESS，原三个控制命令豁免不变，未放开业务派发。
+- 编译观察：已有 resource.editorState 轮询将重连暂闭纳入原期限；最终 compile.errors.get 仅对此明确暂态重查。休眠按剩余预算截断，重复只读查询不重发 compile.request、不续期、不修改历史 aborted、不增加恢复机制。真实硬停止不进入重连重试。
+- Python：新增6例覆盖暂态后成功、硬停止立即返回、状态观察原截止时间、最终查询相同编译身份且仅启动一次、最终查询硬停止不重试、最终查询原截止时间。test_v02_contracts.py -k 'compile_wait or safe_compile' 共13 passed；test_editor_execution_state_v2.py/test_write_batch_changes.py/test_queue_cleanup.py 共106 passed。另扩展 test_p2_wp05_server_contracts.py 为23 passed/2 failed，总计142 passed/2 failed，未运行全量套件。
+- 两条扩展失败已隔离：test_wp05_t02_compile_wait_attention_clears_after_progress、test_wp05_t05_active_automatic_compile_defers_authorized_batch_without_replay 使用 created_at=1000/100，却未固定 StateStore 时钟，被600秒总期限判为 timed_out。将 compile_service 在独立测试进程中替换为 HEAD 原版（不改磁盘文件）后两例仍以完全相同断言失败，未归因本次重连补丁。待单独修正测试时钟，不取消或放宽产品期限/断言。
+- 部署：maintenanceId=2997ca31-2786-4e74-a2f3-30a1b4e55bf8 一次 UPilot Server/Bridge 重启成功，queueReset/readOnlyVerified/healthVerified/terminalConfirmed=true；Server58160->39328，Unity43112不变。先加载 Python 补丁，再登记本轮两份 C# 文件并仅触发一次自动编译，未重启 Unity。
+- 完整 WriteBatch 验收：wb-0669eb0f-2b45-4252-8b49-509de8624e90，createdAt=1790697393585，compileRequestId=req-efeb1b39-c1b7-49c8-80f1-4f383e19eee6，compileOperationId=ae77f2e98cb04e79949f722c2c51d130。status=verified/outcome=passed/terminal=true/errorsVerified=true/correlationVerified=true，verifiedAt=1790697411074；正常 Domain Reload55->56 后 Server39328未变。strict_live编译错误0，3条警告来自未修改的 UPilot.Flow.Models.cs 字典序列化 UAC1009。编译Console无返回Error，但coverage=partial/domain_reload_boundary，不宣称完整Console证据。
+- Unity定向：BridgeAdmissionDistinguishesReconnectFromHardStop 1 passed（4组重置/暂闭状态×6条命令，共24组入口断言，隔离实例，不修改实际Bridge）。runGuid=8aef3cdb-5b23-4589-9604-c5dde59fea24，completed/terminal/resultAuthoritative/cleanupSucceeded=true，Console coverage=complete/logs=[]。未运行全量 EditMode；未改动其他项目、规则模板、授权、场景或模式。

@@ -36,46 +36,16 @@
 
 ## AI Service Maintenance
 
-- The Unity settings section **AI Service Maintenance** contains an independent human
-  grant and a read-only fixed total restart deadline (600 seconds / 10 minutes from acceptance). It applies to all
-  package versions and installation sources. Automatic-disposition select-all,
-  `hangRestart`, and project write permission neither grant nor revoke it.
-- Read `unity_mcp_status.aiServiceMaintenance` (also returned by capabilities). Require
-  `effectiveApproved=true`, valid configuration, stable authoritative EditMode and exact
-  project/component identity. Never use files, reflection, or UI automation to grant
-  yourself approval or change legacy timeout fields. New requests always use 600 seconds; existing journals retain their original accepted deadline. Transient health failures retry only read-only requests (one in flight, two seconds after completion, bounded headers/body timeout), never replay stop/start/install or change ports. Health failure is not evidence of port occupancy. Project relocation requires renewed approval;
-  package upgrades and source/path changes alone do not.
-- Call `unity_service_restart` with a fresh UUID `maintenanceId`, `target=bridge|server`,
-  a short `reason`, and the reported `expectedProjectPath`, `expectedServerProcessId`,
-  `expectedBridgeSessionId`, and `expectedMaintenanceId` (empty only with no prior record).
-  The last field is a compare-and-set guard, not an instruction to resume the prior restart.
-- `bridge` leaves the Server process intact. `server` restarts the current configured
-  Server and re-establishes the Bridge; inspect `affectedComponents`. Neither route exits
-  PlayMode, restarts Unity, compiles C#, builds/downloads/installs a Server, or changes its
-  runtime mode. Changed Bridge C# still needs the correlated compilation workflow.
-- This grant explicitly permits interruption of current-project in-flight work; no idle
-  wait is required. Preserve known task/run/operation identities. The affected command list
-  is bounded and `affectedWorkComplete=false`: it is not proof that all business work was
-  enumerated, stopped or recovered. Never stop another Capture or replay business.
-- `accepted` is not success. Keep the request identity and query `aiServiceMaintenance.latest`
-  after reconnect. The journal is `Library/UPilot/service-maintenance.json`; Unity settings
-  can display failures when the Server cannot answer. A mismatched/missing record requires
-  recovery investigation, not an automatic resend. Same-ID duplicate observation does not
-  execute a second restart; it is not permission to retry a non-idempotent tool.
-- The one deadline begins at durable acceptance and includes all restart phases. Changing
-  settings, phase, session or polling does not extend it. `SERVICE_RESTART_TIMEOUT` with
-  `status=timed_out` preserves prior effects and does not kill the replacement process.
-  Late recovery is current health, not a rewrite of the original timeout as success.
-- `deadline_exceeded_unconfirmed` means the Server sees an overdue journal without a
-  Unity-confirmed terminal result, for example when the Editor is not pumping. HTTP/tool
-  timeout is also distinct from maintenance timeout. Inspect identity and hang diagnostics;
-  never automatically restart Unity or replay the request.
-- Success requires the expected component identities, project, handshake and a real
-  read-only round trip. Refresh the AI client's tool list separately after MCP changes.
-  A new Server PID does not prove arbitrary edited source was loaded; an EXE restart runs
-  the deployed EXE, not changes in a Python checkout.
-- A Server predating this tool needs an initial human-controlled refresh. Do not bypass
-  a missing maintenance endpoint or failed authorization with reflection or shell commands.
+- The independent AI service-maintenance grant applies only to the exact approved project, regardless of package version/source. Automation select-all, hangRestart and write permission do not grant it. Never self-enable it or edit its timeout through files, reflection or UI automation.
+- Read `unity_mcp_status.aiServiceMaintenance`. Explicit restart requires effective approval, valid configuration and exact project/process/Bridge identities. Hard stop bypasses ordinary queue/EditorReady gates and may run during PlayMode or compilation without changing Unity mode.
+- Call `unity_service_restart` with the original exact expected identities and a fresh maintenanceId. Both `target=bridge` and `target=server` now mean complete UPilot reset plus Server/Bridge restart. Neither restarts Unity, compiles, saves scenes, installs updates or deletes history.
+- Human-confirmed **硬停止全部任务并重启 UPilot…** uses the local Unity manager, including when MCP is disconnected; no AI grant is required for that human action. It affects every chat's current-project tasks and skips user Finally/Cleanup. Queue activity is invalidated first; reports are best effort and cannot block reset.
+- Automatic escalation requires the effective service-maintenance grant AND the separate default-off **软停止失败后自动硬停止全部任务并重启 UPilot** setting. Eligible failures are valid-target cooperative-stop failure, exception, cleanup timeout or unsupported stop, not business failure with completed cleanup, missing tasks or validation/permission errors. Multiple failures merge into one reset. A failed hard stop never recursively restarts.
+- The accepted maintenance deadline defaults to 120 seconds, configurable from 30 to 600 seconds in the UI. It covers every phase and cannot be renewed by polling, settings changes or duplicate requests. Transient health probes stay inside that budget; health failure alone is not a port conflict. Do not replay side effects.
+- Accepted is not completion. Observe the original maintenance identity after reconnect; report queue reset and service restart separately. Timeout/failure leaves the old queue invalidated, not recoverable, and does not auto-retry or kill Unity. A new PID is not proof that edited source was loaded.
+- All service startups establish empty active state; retained logs/reports are not recovery input. Ordinary reconnect or normal compile/PlayMode Domain Reload is not a service restart and does not extend existing deadlines.
+- Restarting Server cannot interrupt arbitrary synchronous Unity main-thread code. Physical engine/external busy state must remain visible even when UPilot queues are empty. A fully hung Unity editor may not process its button; this workflow does not add automatic Unity termination.
+- A Server predating this contract needs a separately authorized deployment refresh. Do not bypass unavailable tools or failed authorization with shell/reflection.
 
 ## Profiler Out-of-Process Acceptance
 

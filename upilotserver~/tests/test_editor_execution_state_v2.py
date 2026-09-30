@@ -821,3 +821,133 @@ def test_compile_coordinator_deadline_does_not_join_resistant_work(tmp_path, mon
         assert state.get_write_batch(batch["writeBatchId"])["status"] == "timed_out"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status", ["pending", "deferred", "compiling", "recovery_required", "failed", "canceled", "aborted", "timed_out"])
+def test_historical_batch_query_ends_wait_without_rewriting_evidence(tmp_path, status):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(["A.cs"], created_at=900, files_sha256="abc", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    state.mark_write_batch(identity, status, error="Original diagnostic")
+    original = state.get_write_batch(identity)
+    current = asyncio.run(_ResourceService(tmp_path, state).write_batch_status(identity))
+    assert current.data["status"] == status
+    assert "historical" not in current.data
+
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    service = _ResourceService(tmp_path, restored)
+    with sqlite3.connect(restored._db_path) as db:
+        rows_before = db.execute("SELECT * FROM write_batches").fetchall()
+    for _ in range(2):
+        result = asyncio.run(service.write_batch_status(identity))
+        assert result.ok
+        data = result.data
+        was_terminal = original["terminal"]
+        assert data["status"] == (status if was_terminal else "aborted")
+        assert data["storedStatus"] == status
+        assert data["terminal"] is True
+        assert data["historical"] is True
+        assert data["outcome"] == "unknown"
+        assert data["errorsVerified"] is False
+        assert data["correlationVerified"] is False
+        assert data["error"] == "Original diagnostic"
+        assert data["pendingAgeMs"] == 0
+        assert data["attentionRequired"] is False
+        assert data["waitingReason"] == ("none" if was_terminal else "service_restarted")
+        assert data["lastProgressAt"] == original["updatedAt"]
+        assert not restored.pending_write_batches()
+        assert not restored.pending_write_batch_id
+        assert restored.get_write_batch(identity) == original
+    with sqlite3.connect(restored._db_path) as db:
+        assert db.execute("SELECT * FROM write_batches").fetchall() == rows_before
+    assert service.resume_calls == 0
+
+
+def test_historical_verified_batch_preserves_compile_evidence(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(["A.cs"], created_at=1000, files_sha256="abc", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    assert state.update_editor_execution_state(_snapshot(
+        1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+        observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued"))
+    assert state.update_editor_execution_state(_snapshot(
+        2, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100))
+    original = state.get_write_batch(identity)
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    result = asyncio.run(_ResourceService(tmp_path, restored).write_batch_status(identity))
+    assert result.ok
+    for key, value in original.items():
+        assert result.data[key] == value
+    assert result.data["historical"] is True
+    assert result.data["status"] == "verified"
+    assert result.data["terminal"] is True
+    assert result.data["outcome"] == "passed"
+    assert result.data["errorsVerified"] is True
+    assert result.data["correlationVerified"] is True
+    assert restored.pending_write_batches() == []
+
+
+def test_terminal_batch_uses_one_timestamp_for_memory_and_archive(tmp_path, monkeypatch):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    batch = state.register_write_batch(["A.cs"], created_at=900, files_sha256="abc", compile_when_edit_mode=True)
+    ticks = iter(range(4000, 4100))
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: next(ticks))
+    state.mark_write_batch(batch["writeBatchId"], "aborted", error="stopped")
+    original = state.get_write_batch(batch["writeBatchId"])
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    assert restored.get_write_batch(batch["writeBatchId"]) == original
+
+
+def test_automatic_compile_child_is_authorized_but_other_task_is_rejected(tmp_path, monkeypatch):
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    async def scenario():
+        state = StateStore()
+        state.configure_project(str(tmp_path))
+        batch = state.register_write_batch(["A.cs"], created_at=1000, files_sha256="abc", compile_when_edit_mode=True)
+        identity = batch["writeBatchId"]
+        assert state.update_editor_execution_state(_snapshot(1, observed_at=1100))
+        service = _ResourceService(tmp_path, state)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        child_results = []
+
+        async def compile_child(**kwargs):
+            assert service._write_batch_compile_task is asyncio.current_task()
+            entered.set()
+            await release.wait()
+            # Correlated completion lets the real guard return evidence without
+            # this unit test dispatching Unity commands.
+            assert state.update_editor_execution_state(_snapshot(
+                2, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                observed_at=1200, terminal=False, errors_verified=False, transition="compile_queued"))
+            assert state.update_editor_execution_state(_snapshot(
+                3, write_batch_id=identity, write_batch_created_at=1000, observed_at=1300))
+            result = await CompileDomainService._safe_compile_and_wait(
+                service, write_batch_id=identity, write_batch_created_at=1000, identity={})
+            child_results.append(result)
+            return result
+
+        monkeypatch.setattr(service, "safe_compile_and_wait", compile_child, raising=False)
+        coordinator = asyncio.create_task(service._resume_pending_write_batches())
+        service._write_batch_resume_task = coordinator
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        duplicate = await CompileDomainService._safe_compile_and_wait(
+            service, write_batch_id=identity, write_batch_created_at=1000, identity={})
+        assert not duplicate.ok
+        assert duplicate.error.code == "COMPILE_RECOVERY_REQUIRED"
+        assert duplicate.error.detail["dispatchAttempted"] is False
+        release.set()
+        await asyncio.wait_for(coordinator, timeout=1)
+        assert len(child_results) == 1 and child_results[0].ok
+        assert state.get_write_batch(identity)["status"] == "verified"
+        assert service._write_batch_compile_task is None
+        assert service._write_batch_active_id == ""
+
+    asyncio.run(scenario())

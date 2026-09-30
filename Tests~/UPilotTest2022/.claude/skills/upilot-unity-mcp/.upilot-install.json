@@ -1,13 +1,13 @@
 {
     "schemaVersion": 2,
-    "templateVersion": 58,
-    "templateSha256": "840a6eccfd26d3455d7641af084cee15b0b7bae8c805be461d0f3227abe0f360",
-    "contentSha256": "cda5a035eb22cae3a1e3546e4b2150edb4d2738fdaee0c0d47dbee65cb7ef528",
+    "templateVersion": 59,
+    "templateSha256": "a8ae9e4ce5e629cb50108c58563532a6efa1dc827d186fcfcf7d6759487303d2",
+    "contentSha256": "7de0c9887a6a0d30d34465b1bd8f21c889bc6c34ded0f8ab22406075ef8fdf66",
     "renderContext": {
         "projectPath": "D:\\upilot\\Tests~\\UPilotTest2022",
         "mcpUrl": "http://127.0.0.1:8017/mcp",
         "healthUrl": "http://127.0.0.1:8017/health",
         "upilotPackageVersion": "0.3.42"
     },
-    "renderedAt": "2026-09-29T12:19:44Z"
+    "renderedAt": "2026-09-29T15:11:19Z"
 }

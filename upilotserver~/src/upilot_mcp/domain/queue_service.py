@@ -319,9 +319,11 @@ class QueueDomainService(QueueBulkMixin):
             if len(matches) == 1:
                 match = matches[0]
                 created = await asyncio.to_thread(process_creation_time, match["processId"])
-                if created and created == match["processCreatedAt"] and (
+                # CIM truncates FILETIME to microseconds; use the same identity
+                # precision as the Bridge handshake, retaining exact PID/project checks.
+                if created and created // 10 == match["processCreatedAt"] // 10 and (
                     not session or (session.identity_verified and session.process_id == match["processId"]
-                                    and session.process_created_at == created)):
+                                    and session.process_created_at // 10 == created // 10)):
                     editor_identity.update(status="present", source="os_query_and_session" if session else "os_query",
                                            processId=match["processId"], processCreatedAt=created,
                                            processRole=match["processRole"], queryResult="verified")

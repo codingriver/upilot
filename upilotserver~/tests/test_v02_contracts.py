@@ -2908,3 +2908,139 @@ def test_status_process_existence_handles_missing_current_and_exited_process() -
     process = subprocess.Popen([sys.executable, "-c", "pass"])
     process.wait(timeout=10)
     assert StatusDomainService._process_exists(process.pid) is False
+
+@pytest.mark.parametrize("gate_code", ["UPILOT_RECONNECT_PENDING", "UPILOT_RESET_IN_PROGRESS"])
+def test_compile_wait_distinguishes_reconnect_from_hard_stop(gate_code):
+    from types import SimpleNamespace
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+    state.compile.compile_request_id = "req-original"
+    calls = []
+
+    class Dispatcher:
+        async def call(self, request_id, name, payload):
+            calls.append(name)
+            assert name == "resource.editorState"  # Never dispatch compile.request.
+            if len(calls) == 1:
+                return fail(request_id, gate_code, "compiling / waiting")
+            state.compile.phase = "completed"
+            state.compile.terminal = True
+            state.compile.errors_verified = True
+            return ok(request_id, {"isCompiling": False})
+
+    service = CompileDomainService.__new__(CompileDomainService)
+    service.server = SimpleNamespace(state=state)
+    service.dispatcher = Dispatcher()
+    service._wake_unity_editor = lambda: False
+    result = asyncio.run(service._compile_wait(timeout_s=1, poll_interval_s=0, prefer_events=False))
+    if gate_code == "UPILOT_RECONNECT_PENDING":
+        assert result.ok and result.data["status"] == "ready"
+        assert result.data["reconnectedDuringWait"] is True
+        assert len(calls) == 2
+    else:
+        assert not result.ok and result.error.code == gate_code
+        assert len(calls) == 1
+    assert state.compile.compile_request_id == "req-original"
+
+
+def test_compile_wait_reconnect_keeps_original_deadline(monkeypatch):
+    from types import SimpleNamespace
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+    clock = [100.0]
+    sleeps = []
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    class Dispatcher:
+        async def call(self, request_id, name, payload):
+            assert name == "resource.editorState"
+            return fail(request_id, "UPILOT_RECONNECT_PENDING", "waiting")
+
+    service = CompileDomainService.__new__(CompileDomainService)
+    service.server = SimpleNamespace(state=state)
+    service.dispatcher = Dispatcher()
+    service._wake_unity_editor = lambda: False
+    result = asyncio.run(service._compile_wait(timeout_s=3, poll_interval_s=1, prefer_events=False))
+    assert result.ok and result.data["status"] == "timeout"
+    assert result.data["completed"] is False
+    assert result.data["lastObservationError"] == "UPILOT_RECONNECT_PENDING"
+    assert sleeps == [2, 1]  # Final sleep is clipped, not a renewed timeout.
+    assert clock[0] == 103
+
+
+@pytest.mark.parametrize("gate_code, expires", [
+    ("UPILOT_RECONNECT_PENDING", False),
+    ("UPILOT_RESET_IN_PROGRESS", False),
+    ("UPILOT_RECONNECT_PENDING", True),
+])
+def test_safe_compile_final_query_only_retries_reconnect(gate_code, expires, monkeypatch):
+    from types import SimpleNamespace
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    state = StateStore()
+    _authoritative_editor_state(state)
+    service = CompileDomainService()
+    service.server = SimpleNamespace(state=state, is_ready=lambda: True)
+    starts = []
+    queries = []
+    clock = [100.0]
+    sleeps = []
+    if expires:
+        monkeypatch.setattr("time.monotonic", lambda: clock[0])
+
+        async def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    class Dispatcher:
+        async def call(self, request_id, name, payload):
+            assert name == "resource.editorState"
+            return ok(request_id, {"isCompiling": False})
+
+    service.dispatcher = Dispatcher()
+
+    async def compile_once():
+        starts.append("req-original")
+        state.compile.compile_request_id = "req-original"
+        return ok("req-original", {"compileRequestId": "req-original"})
+
+    async def wait(**kwargs):
+        return ok("wait", {"status": "ready"})
+
+    async def errors(compile_request_id):
+        queries.append(compile_request_id)
+        if expires or len(queries) == 1:
+            return fail("query", gate_code, "waiting")
+        state.compile.phase = "completed"
+        state.compile.terminal = True
+        state.compile.errors_verified = True
+        return ok("query", {"total": 0, "errors": [], "source": "live"})
+
+    service.compile = compile_once
+    service.compile_wait = wait
+    service.compile_errors = errors
+    result = asyncio.run(service.safe_compile_and_wait(timeout_s=3, poll_interval_s=2 if expires else 0, post_compile_delay_s=0))
+    assert starts == ["req-original"]
+    if expires:
+        assert not result.ok and result.error.code == "COMPILE_TIMEOUT"
+        assert queries == ["req-original", "req-original"]
+        assert sleeps == [2, 1]
+        assert clock[0] == 103
+    elif gate_code == "UPILOT_RECONNECT_PENDING":
+        assert result.ok and result.data["errorsVerified"] is True
+        assert queries == ["req-original", "req-original"]
+    else:
+        assert not result.ok and result.error.code == "COMPILE_ERRORS_NOT_VERIFIED"
+        assert queries == ["req-original"]

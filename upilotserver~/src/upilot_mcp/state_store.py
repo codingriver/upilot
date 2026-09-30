@@ -633,12 +633,13 @@ class StateStore:
         previous = self.get_write_batch(write_batch_id)
         if previous and previous.get("terminal"):
             return
+        updated_at = _now_ms()
         terminal = status in {"failed", "canceled", "aborted", "timed_out"}
         candidate = dict(previous or {}, status=status, storedStatus=status, error=error)
         if compile_operation_id:
             candidate["compileOperationId"] = compile_operation_id
         if terminal:
-            candidate.update(terminal=True, updatedAt=_now_ms())
+            candidate.update(terminal=True, updatedAt=updated_at)
             # Release the logical slot before best-effort archival. Disk failure
             # cannot leave an expired batch in the active queue.
             self._write_batch_runtime[write_batch_id] = candidate
@@ -649,7 +650,7 @@ class StateStore:
             with sqlite3.connect(self._db_path) as db:
                 db.execute(
                     "UPDATE write_batches SET status=?,updated_at=?,compile_operation_id=CASE WHEN ?='' THEN compile_operation_id ELSE ? END,error=? WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL AND status NOT IN ('verified','failed','canceled','aborted','timed_out')",
-                    (status, _now_ms(), compile_operation_id, compile_operation_id, error, self._project_path, write_batch_id),
+                    (status, updated_at, compile_operation_id, compile_operation_id, error, self._project_path, write_batch_id),
                 )
         except sqlite3.Error as exc:
             self.persist_failure_count += 1

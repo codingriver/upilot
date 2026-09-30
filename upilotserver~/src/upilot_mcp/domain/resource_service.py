@@ -130,7 +130,9 @@ class ResourceDomainService:
         progress_age_ms = max(0, now - last_progress_at) if last_progress_at and not terminal else 0
         phase = str(execution.get("compilePhase") or "").lower()
 
-        if terminal:
+        if batch.get("terminalReason") == "service_restarted":
+            reason = "service_restarted"
+        elif terminal:
             reason = "none"
         elif str(batch.get("status") or "") == "recovery_required":
             reason = "recovery_required"
@@ -152,6 +154,7 @@ class ResourceDomainService:
             reason = "none"
 
         actions = {
+            "service_restarted": "Historical batch interrupted by UPilot restart; no active work remains. Do not wait for recovery or replay this batch.",
             "playmode": "Leave PlayMode only after user confirmation; UPilot will resume the same authorized batch after authoritative EditMode.",
             "reload": "Wait for the same batch to recover; do not switch PlayMode.",
             "disconnected": "Reconnect the intended Unity project and observe the same batch; do not recompile.",
@@ -163,7 +166,7 @@ class ResourceDomainService:
         return {
             "waitingReason": reason,
             "pendingAgeMs": pending_age_ms,
-            "lastProgressAt": int(execution.get("lastProgressAt") or 0),
+            "lastProgressAt": int(batch.get("updatedAt") or 0) if batch.get("historical") else int(execution.get("lastProgressAt") or 0),
             "attentionRequired": bool(not terminal and progress_age_ms > 30000),
             "waitingNextAction": actions.get(reason, "No compile wait is currently required."),
         }
@@ -218,6 +221,14 @@ class ResourceDomainService:
         batch = self.server.state.get_write_batch(write_batch_id)
         if batch is None:
             return fail(request_id, "WRITE_BATCH_NOT_FOUND", "No batch exists in this project.", {"writeBatchId": write_batch_id})
+        # Project history remains readable, but cannot become a live wait after
+        # service restart. Project the interruption without rewriting stored evidence.
+        if write_batch_id not in self.server.state._current_write_batches:
+            batch = dict(batch, historical=True)
+            if not batch.get("terminal") and batch.get("storedStatus") not in {
+                "verified", "failed", "canceled", "aborted", "timed_out"
+            }:
+                batch.update(status="aborted", terminal=True, terminalReason="service_restarted")
         execution = self._current_execution_state()
         waiting = self._write_batch_waiting_diagnostics(batch, execution)
         return ok(request_id, {
@@ -402,6 +413,7 @@ class ResourceDomainService:
                     write_batch_id=batch_id,
                     write_batch_created_at=int(batch["writeBatchCreatedAt"]),
                 ))
+                self._write_batch_compile_task = work
                 work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
                 done, _ = await asyncio.wait({work}, timeout=remaining)
                 if not done:
@@ -419,6 +431,7 @@ class ResourceDomainService:
                 self.server.state.mark_write_batch(batch_id, "aborted", error=str(exc))
                 continue
             finally:
+                self._write_batch_compile_task = None
                 self._write_batch_active_id = ""
             compile_operation_id = str(self.server.state.compile.compile_operation_id or "")
             result_data = result.data or {}

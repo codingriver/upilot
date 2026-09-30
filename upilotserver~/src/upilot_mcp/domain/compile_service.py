@@ -749,6 +749,7 @@ class CompileDomainService:
                     "CONNECTION_LOST",
                     "DOMAIN_RELOAD_TIMEOUT",
                     "COMMAND_TIMEOUT",
+                    "UPILOT_RECONNECT_PENDING",
                 ):
                     if time.monotonic() >= deadline:
                         observation_timed_out = err_code == "COMMAND_TIMEOUT"
@@ -763,6 +764,8 @@ class CompileDomainService:
                                 "note": (
                                     "Unity state observation timed out; the original compile outcome remains unknown."
                                     if observation_timed_out
+                                    else "Unity is compiling or waiting for Bridge reconnection."
+                                    if err_code == "UPILOT_RECONNECT_PENDING"
                                     else "Unity disconnected (likely domain reload)"
                                 ),
                                 "lastObservationError": err_code,
@@ -773,7 +776,7 @@ class CompileDomainService:
                             },
                         )
                     reconnect_waited = True
-                    await asyncio.sleep(poll_interval_s * 2)
+                    await asyncio.sleep(min(poll_interval_s * 2, max(0.0, deadline - time.monotonic())))
                     continue
                 return r
 
@@ -1069,10 +1072,10 @@ class CompileDomainService:
         workflow_started = time.monotonic()
 
         if write_batch_id:
-            resume_task = getattr(self, "_write_batch_resume_task", None)
+            compile_task = getattr(self, "_write_batch_compile_task", None)
             if (not attach_compile_request_id
                     and getattr(self, "_write_batch_active_id", "") == write_batch_id
-                    and resume_task is not asyncio.current_task()):
+                    and compile_task is not asyncio.current_task()):
                 return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
                             "The original batch is already being dispatched or observed.",
                             {**identity, "dispatchAttempted": False,
@@ -1429,6 +1432,21 @@ class CompileDomainService:
                 "attachedToExistingCompile": attached_to_existing,
                 "reusedVerifiedBatch": True}, context=snapshot)
         errors_r = await self.compile_errors(compile_request_id)
+        # Only repeat the read-only query when the handshake is pending. A real
+        # hard stop remains terminal; neither compile dispatch nor its budget restarts.
+        while (not errors_r.ok and errors_r.error
+               and errors_r.error.code == "UPILOT_RECONNECT_PENDING"):
+            remaining = timeout_s - (time.monotonic() - workflow_started)
+            if remaining <= 0:
+                return fail(request_id, "COMPILE_TIMEOUT", "编译中或等待重连超时。", identity)
+            await asyncio.sleep(min(poll_interval_s, remaining))
+            remaining = timeout_s - (time.monotonic() - workflow_started)
+            if remaining <= 0:
+                return fail(request_id, "COMPILE_TIMEOUT", "编译中或等待重连超时。", identity)
+            try:
+                errors_r = await asyncio.wait_for(self.compile_errors(compile_request_id), remaining)
+            except asyncio.TimeoutError:
+                return fail(request_id, "COMPILE_TIMEOUT", "编译中或等待重连超时。", identity)
         if not errors_r.ok:
             return fail(
                 request_id, "COMPILE_ERRORS_NOT_VERIFIED",

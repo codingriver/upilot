@@ -21,6 +21,31 @@ namespace CodingRiver.UPilot.Tests
     public sealed class UPilotCoreTests
     {
         [Test]
+        public void BridgeAdmissionDistinguishesReconnectFromHardStop()
+        {
+            // Isolated instance: never close admission or reset the running test project's Bridge.
+            var type = typeof(UPilotBridge);
+            var bridge = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var resetting = type.GetField("_resettingWork", flags);
+            var closed = type.GetField("_admissionClosed", flags);
+            var guard = type.GetMethod("GetAdmissionErrorCode", flags);
+            Assert.That(guard, Is.Not.Null);
+            foreach (var isResetting in new[] { false, true })
+            foreach (var isClosed in new[] { false, true })
+            {
+                resetting.SetValue(bridge, isResetting);
+                closed.SetValue(bridge, isClosed);
+                var expected = isResetting ? "UPILOT_RESET_IN_PROGRESS"
+                    : isClosed ? "UPILOT_RECONNECT_PENDING" : null;
+                foreach (var command in new[] { "resource.editorState", "compile.errors.get", "compile.request" })
+                    Assert.That(guard.Invoke(bridge, new object[] { command }), Is.EqualTo(expected), command);
+                foreach (var control in new[] { "service.restart", "queue.snapshot", "editor.state" })
+                    Assert.That(guard.Invoke(bridge, new object[] { control }), Is.Null, control);
+            }
+        }
+
+        [Test]
         public void CommandDescriptorCarriesExecutionMetadata()
         {
             var descriptor = new CommandDescriptor(
@@ -1142,6 +1167,66 @@ namespace CodingRiver.UPilot.Tests
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyWindow(IntPtr window);
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ConsoleCaptureActiveObservationIgnoresHistoricalArtifacts(bool hasActive)
+        {
+            var type = typeof(UPilotConsoleCaptureService);
+            var flags = BindingFlags.NonPublic | BindingFlags.Static;
+            var activeField = type.GetField("s_active", flags);
+            Assert.That(activeField.GetValue(null), Is.Null, "Requires no live capture.");
+            var key = (string)type.GetMethod("ProjectSessionKey", flags).Invoke(null,
+                new object[] { "UPilot.ConsoleCapture.ActiveDirectory" });
+            var previousDirectory = SessionState.GetString(key, string.Empty);
+            var root = (string)type.GetMethod("GetDefaultCaptureRoot", flags).Invoke(null, null);
+            var directory = Path.Combine(root, "test-observe-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "session.json");
+            const string corruptHistory = "not a capture manifest";
+            File.WriteAllText(path, corruptHistory);
+            try
+            {
+                SessionState.EraseString(key);
+                var list = type.GetMethod("ListCaptures", flags);
+                var manifest = new ConsoleCaptureManifest { sessionId = "live-fixture", active = true };
+                if (hasActive)
+                {
+                    var active = Activator.CreateInstance(activeField.FieldType, true);
+                    activeField.FieldType.GetField("Manifest").SetValue(active, manifest);
+                    activeField.SetValue(null, active);
+                }
+                var result = (ConsoleCaptureListResult)list.Invoke(null,
+                    new object[] { new ConsoleCaptureListPayload { activeOnly = true }, false });
+                Assert.That(result.ok, Is.True);
+                Assert.That(result.activeCount, Is.EqualTo(hasActive ? 1 : 0));
+                Assert.That(result.returnedCount, Is.EqualTo(result.activeCount));
+                if (hasActive)
+                {
+                    Assert.That(result.sessions[0].sessionId, Is.EqualTo("live-fixture"));
+                    Assert.That(result.sessions[0], Is.Not.SameAs(manifest));
+                }
+                Assert.That(File.ReadAllText(path), Is.EqualTo(corruptHistory));
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
+                // Historical audit remains strict; active inventory must not hide
+                // unreadable artifacts when a caller actually requests history.
+                Assert.Throws<TargetInvocationException>(() => list.Invoke(null,
+                    new object[] { new ConsoleCaptureListPayload { activeOnly = false }, false }));
+                activeField.SetValue(null, null);
+                SessionState.SetString(key, directory);
+                var unresolved = Assert.Throws<TargetInvocationException>(() => list.Invoke(null,
+                    new object[] { new ConsoleCaptureListPayload { activeOnly = true }, false }));
+                Assert.That(unresolved.InnerException, Is.TypeOf<InvalidOperationException>());
+                Assert.That(SessionState.GetString(key, string.Empty), Is.EqualTo(directory));
+            }
+            finally
+            {
+                activeField.SetValue(null, null);
+                if (string.IsNullOrEmpty(previousDirectory)) SessionState.EraseString(key);
+                else SessionState.SetString(key, previousDirectory);
+                Directory.Delete(directory, true);
+            }
+        }
 
         [Test]
         public void ConsoleCaptureStopFinalizesHistoricalActiveManifest()

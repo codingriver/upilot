@@ -1068,6 +1068,22 @@ namespace CodingRiver.UPilot
             else if (!string.IsNullOrEmpty(SessionState.GetString(ProjectSessionKey(ActiveDirectorySessionKey), string.Empty))
                 && s_active == null)
                 throw new InvalidOperationException("Capture recovery record exists; observation cannot establish the active inventory.");
+            // Active observation is a live inventory, not an audit of historical
+            // manifests. Missing old/custom artifacts cannot occupy today's queue.
+            // The unresolved SessionState guard above still prevents a false empty.
+            if (!recover && payload.activeOnly)
+            {
+                lock (CaptureLock)
+                {
+                    var active = s_active == null ? new List<ConsoleCaptureManifest>()
+                        : new List<ConsoleCaptureManifest> { CloneManifest(s_active.Manifest) };
+                    return new ConsoleCaptureListResult
+                    {
+                        ok = true, action = "ListCaptures", activeCount = active.Count,
+                        returnedCount = active.Count, sessions = active,
+                    };
+                }
+            }
             int count = Math.Max(1, Math.Min(payload.count, 200));
             var manifests = recover ? LoadDefaultRootManifests() : LoadDefaultRootManifestsStrict();
             if (!recover)
