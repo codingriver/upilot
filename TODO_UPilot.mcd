@@ -269,3 +269,11 @@
 - 可验收标准：仅在规范 `D:\upilot\Tests~\UPilotTest` 构造含脚本、asmdef、Prefab 与 meta 的多目录迁移；成功保持 GUID/资源哈希和程序集边界；冲突在写入前拒绝；中断或 Reload 后能按原批次查询结果，确保 StopAssetEditing 释放且未知项不重放。
 - 证据：`F:\xclient2\Log\ProjectileDirectoryMigration\20260930\baseline.json`、`directory-map.json`、`static-verification.json`；本任务只实施业务目录迁移，不代表上述通用能力已交付。
 - 双向引用：`F:\xclient2\TODO_UPilot.mcd` 与 `D:\upilot\TODO_UPilot.mcd` 的同 ID 条目。
+
+## UPilot-20260930-ReleaseQualityContractRegressions：发布前契约质量门发现两项回归
+
+- 日期/触发场景：2026-09-30，发布前只读 source-quality 检查；建议归属：UPilot MCP 操作状态与取消契约。
+- 优先级/状态：P1，待核实/未修复；未触发发布工作流。
+- 观察与工具：提交 `a451dcd77e034197a28055df1b88be2c702222b1` 的 `check_release_quality.py` 返回 `passed=false`：411 项通过、2 项失败。`test_operation_invalid_reflection_json_requires_recovery` 观察到实际状态 `aborted` 而断言期望 `RecoveryRequired`；`test_operation_cancel_is_idempotent_after_acceptance` 的第二次取消响应缺少 `cancelAttemptCount`。质量产物位于 `artifacts/reliability-quality/quality.json` 与 `contracts.log`。本次未检查实现，根因未确认。
+- 期望改进：按既有终态与幂等取消契约核实并修复两项行为，保留契约断言；在同一 source-quality 门中验证相关直接回归后再评估发布。
+- 可验收标准：上述两项定向契约检查通过，原有状态/取消安全约束未弱化，source-quality 对目标提交给出通过结果；不得仅通过放宽断言或跳过检查消除失败。

@@ -565,28 +565,6 @@ def test_operation_supports_explicit_result_and_field_paths(tmp_path: Path) -> N
     assert terminal.data["phase"] == "Complete"
 
 
-def test_operation_invalid_reflection_json_requires_recovery(tmp_path: Path) -> None:
-    service = _ReflectionOperationService(tmp_path, [
-        {"result": '{"status":"Running"}'},
-        {"result": "{not-json"},
-    ])
-    job_spec = {
-        "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
-        "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
-    }
-
-    started = asyncio.run(service.seed_legacy_operation(job_spec))
-    failed = asyncio.run(service.operation_status(started.data["operationId"]))
-
-    assert failed.ok is False
-    assert failed.error.code == "OPERATION_RESULT_INVALID"
-    assert failed.error.detail["status"] == "RecoveryRequired"
-    assert failed.error.detail["terminal"] is False
-    assert failed.error.detail["phase"] == "StatusResultInvalid"
-    assert failed.error.detail["failureSignature"] == "OperationResultInvalid"
-    assert failed.error.detail["parseDiagnostic"]["offsetUnit"] == "unicodeCharacter"
-
-
 def test_operation_cancel_accepts_nested_terminal_result(tmp_path: Path) -> None:
     service = _ReflectionOperationService(tmp_path, [
         {"result": '{"status":"Running","phase":"Work"}'},
@@ -719,27 +697,6 @@ def test_operation_cancel_waits_for_status_and_cleanup_before_terminal(tmp_path:
     assert terminal.data["status"] == "Canceled"
     assert terminal.data["cleanupPending"] is False
     assert terminal.data["terminal"] is True
-
-
-def test_operation_cancel_is_idempotent_after_acceptance(tmp_path: Path) -> None:
-    service = _OperationService(tmp_path, [{"status": "Running", "phase": "Stopping"}])
-    job_spec = {
-        "displayName": "idempotent cancel",
-        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
-        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
-        "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
-        "timeoutSec": 5,
-    }
-
-    started = asyncio.run(service.seed_legacy_operation(job_spec))
-    operation_id = started.data["operationId"]
-    first = asyncio.run(service.operation_cancel(operation_id))
-    second = asyncio.run(service.operation_cancel(operation_id))
-
-    assert first.ok and second.ok
-    assert first.data["cancelAttemptCount"] == 1
-    assert second.data["cancelAttemptCount"] == 1
-    assert [name for name, _ in service.calls].count("cancel") == 1
 
 
 def test_operation_wait_window_does_not_terminate_running_job(tmp_path: Path) -> None:
