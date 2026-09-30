@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import pytest
 from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.protocol import now_ms
-from upilot_mcp.responses import ok
+from upilot_mcp.responses import fail, ok
 from upilot_mcp.state_store import StateStore
 from upilot_mcp.test_job_context import checkpoint
 from upilot_mcp.mcp_tools import test_tools  # noqa: F401
@@ -51,49 +52,46 @@ class Service(TaskDomainService, TestDomainService):
         return ok("cancel", {"cancelAccepted": True, "runGuid": run_guid})
 
 
-def test_background_test_finishes_without_client_poll_and_survives_facade_recreation(tmp_path):
+def test_background_test_finishes_without_poll_but_new_service_starts_empty(tmp_path):
     async def scenario():
         first = Service(tmp_path)
         started = await first.task_start("focused", "unity_test_run", retry_count=0)
         task_id = started.data["taskId"]
         await first._async_task_handles[task_id]
         assert first.start_count == 1
+        # Concurrent observations in the same lifetime neither restart work nor change deadlines.
+        original = dict(first._async_tasks[task_id])
+        responses = await asyncio.gather(*[first.task_status(task_id) for _ in range(3)])
+        assert all(response.data["status"] == "completed" and response.data["terminal"]
+                   and response.data["runGuid"] == "run-persisted" for response in responses)
+        assert first._async_tasks[task_id] == original and first.start_count == 1
+        history = first.server.state.load_test_jobs()
         second = Service(tmp_path)
         status = await second.task_status(task_id)
-        assert status.data["status"] == "completed"
-        assert status.data["terminal"] and status.data["runGuid"] == "run-persisted"
-        assert second.start_count == 0
+        assert not status.ok and status.error.code == "TASK_NOT_FOUND"
+        assert not second._async_task_handles and second.start_count == 0
+        assert first.server.state.load_test_jobs() == history
     asyncio.run(scenario())
 
 
-def test_recovery_observes_known_guid_and_never_replays_start(tmp_path):
+@pytest.mark.parametrize("run_guid", ["run-persisted", ""])
+def test_historical_job_never_recreates_observer_or_replays_start(tmp_path, run_guid):
     async def scenario():
         service = Service(tmp_path)
         service.server.state.save_test_job({
-            "taskId": "task-recover", "taskName": "recover", "toolName": "unity_test_run",
+            "taskId": "task-history", "taskName": "history", "toolName": "unity_test_run",
             "projectPath": str(tmp_path.resolve()), "durable": True, "status": "running",
-            "phase": "observing", "terminal": False, "runGuid": "run-persisted", "startedAt": now_ms(),
+            "phase": "observing", "terminal": False, "runGuid": run_guid, "startedAt": now_ms(),
             "deadlineAt": now_ms() + 60000, "endedAt": 0,
         })
-        service._recover_test_jobs()
-        await service._async_task_handles["task-recover"]
-        assert service._async_tasks["task-recover"]["status"] == "completed"
-        assert service.start_count == 0
-    asyncio.run(scenario())
-
-
-def test_unknown_start_stays_recovery_required_and_blocks_a_second_start(tmp_path):
-    async def scenario():
-        service = Service(tmp_path)
-        service.server.state.save_test_job({
-            "taskId": "task-unknown", "projectPath": str(tmp_path.resolve()), "durable": True,
-            "status": "running", "terminal": False, "runGuid": "", "startedAt": now_ms(), "endedAt": 0,
-        })
-        status = await service.task_status("task-unknown")
-        assert status.data["status"] == "RecoveryRequired"
-        assert not status.data["terminal"] and not service._async_task_handles
-        assert not (await service.task_start("another", "unity_test_run")).ok
-        assert service.start_count == 0
+        history = service.server.state.load_test_jobs()
+        for _ in range(2):
+            service._recover_test_jobs()
+            status = await service.task_status("task-history")
+            assert not status.ok and status.error.code == "TASK_NOT_FOUND"
+        assert not service._async_task_handles and not service._async_tasks
+        assert service.start_count == 0 and service.cancels == []
+        assert service.server.state.load_test_jobs() == history
     asyncio.run(scenario())
 
 
@@ -104,9 +102,15 @@ def test_cancellation_waits_for_underlying_guid_and_cleanup(tmp_path):
         service.cleanup = False
         start = await service.task_start("cancel", "unity_test_run")
         task_id = start.data["taskId"]
-        await asyncio.sleep(0)
+        for _ in range(30):
+            await asyncio.sleep(0)
+            if service._async_tasks[task_id].get("runGuid"):
+                break
+        assert service._async_tasks[task_id]["runGuid"] == "run-persisted"
+        deadline = service._async_tasks[task_id]["deadlineAt"]
         cancelling = await service.task_cancel(task_id)
-        assert cancelling.data["status"] == "cancel_requested"
+        assert cancelling.data["status"] == "ending"
+        assert cancelling.data["phase"] == "cancel_requested"
         assert not cancelling.data["terminal"]
         await asyncio.sleep(1.1)
         assert service.cancels == ["run-persisted"]
@@ -115,7 +119,9 @@ def test_cancellation_waits_for_underlying_guid_and_cleanup(tmp_path):
         await service._async_task_handles[task_id]
         assert service._async_tasks[task_id]["status"] == "cancelled"
         repeated = await service.task_cancel(task_id)
-        assert repeated.data["status"] == "cancelled" and len(service.cancels) == 1
+        assert repeated.ok and repeated.data["status"] == "not_found" and repeated.data["changed"] is False
+        assert service._async_tasks[task_id]["status"] == "cancelled" and len(service.cancels) == 1
+        assert service._async_tasks[task_id]["deadlineAt"] == deadline
     asyncio.run(scenario())
 
 
@@ -230,7 +236,7 @@ def test_public_acceptance_returns_queued_task_before_runner_and_full_remains_av
     asyncio.run(scenario())
 
 
-def test_interrupted_acceptance_reattaches_without_start_and_writes_summary(tmp_path, acceptance_gate):
+def test_interrupted_acceptance_is_archived_without_restarting_or_reattaching(tmp_path, acceptance_gate):
     async def scenario():
         first = AcceptanceService(tmp_path)
         first.hold_result.clear()
@@ -243,13 +249,17 @@ def test_interrupted_acceptance_reattaches_without_start_and_writes_summary(tmp_
         assert first._async_tasks[task_id]["runGuid"] == "run-1", first._async_tasks[task_id].get("error")
         first._async_task_handles[task_id].cancel()
         await asyncio.gather(first._async_task_handles[task_id], return_exceptions=True)
+        state = first._async_tasks[task_id]
+        assert state["status"] == "aborted" and state["terminal"]
+        assert state["runGuid"] == "run-1"
+        history = first.server.state.load_test_jobs()
         second = AcceptanceService(tmp_path)
         second._recover_test_jobs()
-        await second._async_task_handles[task_id]
-        state = second._async_tasks[task_id]
-        assert state["status"] == "completed"
+        status = await second.task_status(task_id)
+        assert not status.ok and status.error.code == "TASK_NOT_FOUND"
+        assert not second._async_task_handles and not second._async_tasks
         assert first.start_count == 1 and second.start_count == 0
-        assert Path(state["artifact"]["path"]).is_file()
+        assert first.server.state.load_test_jobs() == history
     asyncio.run(scenario())
 
 
@@ -383,3 +393,107 @@ def test_preflight_reports_ready_only_from_existing_verified_compile_without_run
     assert result.error.detail["blockingReasons"] == []
     assert result.error.detail["runnerStartAttempted"] is False
     assert service.start_count == 0
+
+
+@pytest.mark.parametrize("damage", ["unknown-run", "wrong-run", "non-authoritative", "cleanup-unverified"])
+def test_active_task_keeps_original_identity_and_deadline_when_result_cannot_be_verified(tmp_path, monkeypatch, damage):
+    async def scenario():
+        clock = {"now": 1000}
+        monkeypatch.setattr("upilot_mcp.domain.task_service.now_ms", lambda: clock["now"])
+        monkeypatch.setattr("upilot_mcp.domain.test_service.now_ms", lambda: clock["now"])
+        service = Service(tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        observed_guids = []
+        original_results = service.test_results
+
+        async def unavailable_result(run_guid=""):
+            observed_guids.append(run_guid)
+            entered.set()
+            await release.wait()
+            if damage == "unknown-run":
+                return fail("original-query", "TEST_RUN_NOT_FOUND", "Original run is unavailable.")
+            result = await original_results(run_guid)
+            if damage == "wrong-run":
+                result.data["runGuid"] = "unrelated-run"
+            elif damage == "non-authoritative":
+                result.data["resultAuthoritative"] = False
+            else:
+                result.data.update(cleanupSucceeded=False, cleanupPending=True,
+                                   cleanupStatus="failed", unresolvedResources=["original-callback"])
+            return result
+
+        service.test_results = unavailable_result
+        started = await service.task_start("observe-original", "unity_test_run", timeout_s=10)
+        assert started.ok
+        task_id = started.data["taskId"]
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        state = service._async_tasks[task_id]
+        deadline = state["deadlineAt"]
+        assert deadline == 11000 and state["runGuid"] == "run-persisted"
+        handle = service._async_task_handles[task_id]
+        responses = await asyncio.gather(*(service.task_status(task_id) for _ in range(3)))
+        assert all(response.ok and response.data["runGuid"] == "run-persisted" for response in responses)
+        assert service._async_task_handles[task_id] is handle
+        assert service.start_count == 1 and service.cancels == []
+        assert state["deadlineAt"] == deadline
+        # Unknown identity cannot trigger a replacement start/cancel after expiry.
+        clock["now"] = deadline
+        release.set()
+        await asyncio.wait_for(handle, timeout=2)
+        assert state["terminal"] and state["status"] == "aborted"
+        assert state["error"]["code"] == "TEST_RECOVERY_REQUIRED"
+        assert not state["cleanupSucceeded"]
+        assert state["deadlineAt"] == deadline and state["runGuid"] == "run-persisted"
+        assert observed_guids == ["run-persisted"] and service.start_count == 1 and service.cancels == []
+        history = service.server.state.load_test_jobs()
+        await asyncio.gather(*(service.task_status(task_id) for _ in range(3)))
+        assert service.server.state.load_test_jobs() == history
+        assert observed_guids == ["run-persisted"]
+        # Current-lifetime discovery is not the durable history API. Compare the
+        # exact persisted row through an independent read-only connection.
+        history_uri = service.server.state._db_path.as_uri() + "?mode=ro"
+        query = "SELECT state_json FROM test_jobs WHERE project_path=? AND task_id=?"
+        identity = (str(tmp_path.resolve()), task_id)
+        with sqlite3.connect(history_uri, uri=True) as db:
+            persisted = db.execute(query, identity).fetchone()
+        assert persisted is not None and json.loads(persisted[0]) == history[0]
+        restarted = Service(tmp_path)
+        restarted._recover_test_jobs()
+        result = await restarted.task_status(task_id)
+        assert not result.ok and result.error.code == "TASK_NOT_FOUND"
+        assert not restarted._async_tasks and not restarted._async_task_handles
+        assert restarted.start_count == 0 and restarted.cancels == []
+        assert restarted.server.state.load_test_jobs() == []
+        assert service.server.state.load_test_jobs() == history
+        with sqlite3.connect(history_uri, uri=True) as db:
+            assert db.execute(query, identity).fetchone() == persisted
+
+    asyncio.run(scenario())
+
+
+def test_unknown_start_response_without_run_guid_is_terminal_and_never_replayed(tmp_path):
+    async def scenario():
+        service = Service(tmp_path)
+
+        async def uncertain_start(name, args):
+            checkpoint("starting", startIntentSent=True, startSendState="sent_unknown")
+            service.start_count += 1
+            return fail("original-start", "COMMAND_RECOVERY_REQUIRED", "Start outcome is unknown.")
+
+        service._dispatch_tool = uncertain_start
+        started = await service.task_start("uncertain-start", "unity_test_run", timeout_s=10)
+        task_id = started.data["taskId"]
+        await service._async_task_handles[task_id]
+        state = service._async_tasks[task_id]
+        assert state["terminal"] and state["status"] == "aborted"
+        assert state["runGuid"] == "" and state["startIntentSent"]
+        assert state["error"]["code"] == "COMMAND_RECOVERY_REQUIRED"
+        assert not state["cleanupSucceeded"]
+        history = service.server.state.load_test_jobs()
+        responses = await asyncio.gather(*(service.task_status(task_id) for _ in range(3)))
+        assert all(response.ok and response.data["status"] == "aborted" for response in responses)
+        assert service.start_count == 1 and service.cancels == []
+        assert service.server.state.load_test_jobs() == history
+
+    asyncio.run(scenario())

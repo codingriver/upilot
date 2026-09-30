@@ -63,8 +63,9 @@ namespace CodingRiver.UPilot.Tests
         {
             var download = CreateDownload();
             var outside = Path.Combine(Application.dataPath, Guid.NewGuid().ToString("N") + ".exe");
-            Assert.ThrowsAsync<ArgumentException>(async () =>
-                await UPilotServerRuntimeService.Instance.BenchmarkDownloadAsync(download, outside, CancellationToken.None));
+            var task = UPilotServerRuntimeService.Instance.BenchmarkDownloadAsync(download, outside, CancellationToken.None);
+            Assert.That(task.IsCompleted, Is.True, "Invalid targets must be rejected before any asynchronous download.");
+            Assert.Throws<ArgumentException>(() => task.GetAwaiter().GetResult());
             Assert.That(File.Exists(outside), Is.False);
         }
 

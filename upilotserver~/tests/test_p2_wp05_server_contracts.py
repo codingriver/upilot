@@ -90,6 +90,8 @@ def test_wp05_waiting_reason_priority_is_identical_for_compile_and_write_batch(
 
 
 def test_wp05_t02_compile_wait_attention_clears_after_progress(tmp_path, monkeypatch) -> None:
+    # Keep the batch deadline on the same synthetic clock as this scenario.
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 32_000)
     store = StateStore()
     store.configure_project(str(tmp_path))
     _authoritative_edit(store)
@@ -203,6 +205,8 @@ def test_wp05_t04_warning_details_require_explicit_request_scoped_origin(tmp_pat
 
 
 def test_wp05_t05_active_automatic_compile_defers_authorized_batch_without_replay(tmp_path, monkeypatch) -> None:
+    # Keep the batch deadline on the same synthetic clock as this scenario.
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 1_000)
     store = StateStore()
     store.configure_project(str(tmp_path))
     _authoritative_edit(store)

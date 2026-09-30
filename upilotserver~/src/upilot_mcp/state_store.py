@@ -691,7 +691,7 @@ class StateStore:
             verified_at = 0
         correlation = bool(
             evidence and evidence.get("errorsVerified") is True and evidence.get("terminal") is True
-            and evidence.get("compilePhase") in {"completed", "failed"}
+            and evidence.get("compilePhase") in ("completed", "failed")
             and (row[4] == "verified" and evidence.get("compilePhase") == "completed"
                  or row[4] == "failed" and evidence.get("compilePhase") == "failed")
             and evidence.get("writeBatchId") == row[0]

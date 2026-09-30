@@ -389,7 +389,8 @@ namespace CodingRiver.UPilot
                 await _bridge.SendErrorAsync(id, "TEST_SELECTORS_INVALID", ex.Message, token, "test.run");
                 return;
             }
-            if (p.testNames != null || p.fixtures != null || p.assemblies != null || p.categories != null || p.matchMode != "union")
+            if (p.testNames != null || p.fixtures != null || p.assemblies != null || p.categories != null || p.matchMode != "union"
+                || HasExpectedSelectionIdentity(p.expectedSelectionDomain, p.expectedSelectionSnapshotId))
             {
                 try
                 {
@@ -464,6 +465,7 @@ namespace CodingRiver.UPilot
                     if (!RunSelectionMatches(selection, p.expectedSelectionDomain, p.expectedSelectionSnapshotId))
                         throw new TestSelectionStaleException(
                             "The selection changed before TestRunnerApi.Execute; TestRunnerApi.Execute was not called.", selection);
+                    ResetRunTracking();
                     _isRunning = true;
                     long startedAt = NowMs();
                     _lastResults = new TestRunResultPayload
@@ -1075,7 +1077,7 @@ namespace CodingRiver.UPilot
                     + root.GetType().Name + ": " + root.Message;
                 _lastResults.cancelBinding = diagnostic;
                 _lastResults.recoveryDiagnostic = diagnostic;
-                _lastResults.nextAction = "Restore the verified Unity Test Framework binding, then retry cancellation for this runGuid.";
+                _lastResults.nextAction = "This task is aborted; no cancel API was invoked. Observe the original run; do not replay start or cancellation. Underlying Unity execution may still be running.";
                 _lastResults.lastProgressAt = NowMs();
                 AddCleanupError("cancel-binding", root);
                 RequireCleanupRecovery(_lastResults.nextAction);
@@ -1866,6 +1868,18 @@ namespace CodingRiver.UPilot
             s_recoveryCallbackAttached = false;
         }
 
+        private void ResetRunTracking()
+        {
+            StopCleanupScheduling();
+            _cleanupOwnershipUnknown = false;
+            _editorCleanupPending = false;
+            _forceStopRequested = false;
+            _activeRunGuid = null;
+            _pendingTerminalStatus = null;
+            _activeApi = null;
+            _activeCallback = null;
+        }
+
         internal void ResetActive()
         {
             StopCleanupScheduling();
@@ -1887,8 +1901,10 @@ namespace CodingRiver.UPilot
         private void RequireCleanupRecovery(string reason)
         {
             StopCleanupScheduling();
+            if (_lastResults.disposition == null) RefreshUnresolvedResources();
             _isRunning = false;
             _activeRunGuid = null;
+            _pendingTerminalStatus = null;
             _lastResults.isRunning = false;
             _lastResults.status = "aborted";
             _lastResults.phase = "aborted";
@@ -1897,8 +1913,9 @@ namespace CodingRiver.UPilot
             _lastResults.cleanupPending = false;
             _lastResults.cleanupSucceeded = false;
             _lastResults.nextAction = reason;
-            if (_lastResults.disposition == null) RefreshUnresolvedResources();
-            PersistSnapshot();
+            _lastResults.terminalReason = reason;
+            _lastResults.endedAt = _lastResults.endedAt > 0 ? _lastResults.endedAt : NowMs();
+            PersistSnapshot(clearActivePointer: true);
         }
 
         private void CleanupActiveRun()
@@ -1978,7 +1995,7 @@ namespace CodingRiver.UPilot
             }
             if (NowMs() >= _lastResults.cleanupAttemptDeadlineAt)
             {
-                RequireCleanupRecovery("Cleanup budget expired; resource release evidence retained for explicit commit retry.");
+                RequireCleanupRecovery("Cleanup budget expired; this task is aborted. Resource release evidence is retained; do not retry cleanup or replay start.");
                 return;
             }
             var candidate = _lastResults.ShallowCopyForPersistence();
@@ -2023,11 +2040,11 @@ namespace CodingRiver.UPilot
 
         private void ScheduleCleanup()
         {
-            if (_cleanupScheduled || _lastResults == null || _lastResults.phase == "recovery_required") return;
+            if (_cleanupScheduled || _lastResults == null || _lastResults.terminal || _lastResults.phase == "recovery_required") return;
             // Only live completion/explicit cleanup creates a first window. Recovery checks before scheduling.
             if (_lastResults.cleanupAttemptDeadlineAt == 0)
                 BeginCleanupAttempt(explicitRequest: false);
-            if (_cleanupScheduled) return;
+            if (_cleanupScheduled || _lastResults.terminal) return;
             _cleanupScheduled = true;
             _cleanupProbeDelayMs = InitialCleanupProbeDelayMs;
             _nextCleanupProbeAt = 0;
@@ -2059,7 +2076,7 @@ namespace CodingRiver.UPilot
             }
             if (!ReleaseOwnedRunnerResources())
             {
-                RequireCleanupRecovery("Resolve the callback/API release error, then explicitly retry the same runGuid.");
+                RequireCleanupRecovery("Callback/API release failed; this task is aborted without retrying resource release.");
                 return false;
             }
             _lastResults.cleanupResourcesReleased = true;
@@ -2192,7 +2209,7 @@ namespace CodingRiver.UPilot
             long now = NowMs();
             if (_lastResults.cleanupAttemptDeadlineAt <= 0 || now >= _lastResults.cleanupAttemptDeadlineAt)
             {
-                RequireCleanupRecovery("Cancellation observation budget expired; observe the original run or explicitly retry cleanup.");
+                RequireCleanupRecovery("Cancellation observation budget expired; this task is aborted. Observe the original run; do not retry cleanup or replay start.");
                 return;
             }
             if (now < _nextCleanupProbeAt) return;
@@ -2304,7 +2321,7 @@ namespace CodingRiver.UPilot
 
         private void RefreshUnresolvedResources()
         {
-            if (_lastResults == null)
+            if (_lastResults == null || _lastResults.terminal)
                 return;
             if (_cleanupOwnershipUnknown && !_lastResults.cleanupResourcesReleased) return;
             _lastResults.unresolvedResources.Clear();
@@ -2332,13 +2349,18 @@ namespace CodingRiver.UPilot
                 return;
 
             _lastResults = LoadPersistedSnapshot(runGuid);
+            RecoverLoadedRun(active);
+        }
+
+        private void RecoverLoadedRun(bool active)
+        {
             if (_lastResults == null || _lastResults.serviceLifecycleId != UPilotServiceLifetime.Id)
             { _lastResults = null; return; }
 
-            _activeRunGuid = active ? runGuid : null;
-            _isRunning = active;
+            _isRunning = active && !_lastResults.terminal;
+            _activeRunGuid = _isRunning ? _lastResults.runGuid : null;
             _lastResults.isRunning = _isRunning;
-            if (active)
+            if (_isRunning)
             {
                 if (_lastResults.disposition != null)
                 {
@@ -2359,9 +2381,8 @@ namespace CodingRiver.UPilot
                     if (_lastResults.phase == "recovery_required" || _cleanupOwnershipUnknown
                         || _lastResults.cleanupAttemptDeadlineAt <= NowMs())
                     {
-                        _lastResults.phase = "recovery_required";
-                        _lastResults.cleanupStatus = "recovery_required";
-                        _lastResults.nextAction = "Original cleanup budget/ownership requires explicit recovery; Reload did not renew it.";
+                        RequireCleanupRecovery("Original cleanup budget expired or callback/API ownership cannot be proven after Reload; "
+                            + "the task is aborted without replay or replacement resources. Underlying Unity execution may still be running.");
                         return;
                     }
                     _lastResults.phase = "cleanup";
@@ -2438,13 +2459,9 @@ namespace CodingRiver.UPilot
 
         private void MarkRecoveredRunOrphaned()
         {
-            _lastResults.status = "running";
-            _lastResults.phase = "recovery_required";
             if (!_lastResults.resultAuthoritative) _lastResults.outcomeStatus = "unknown";
-            _lastResults.terminalReason = "Test Runner callback was not recovered after Domain Reload; assertion outcome is unknown.";
-            _lastResults.nextAction = "Inspect this runGuid and Runner diagnostics; do not replay test start.";
-            _lastResults.isRunning = true;
-            PersistSnapshot();
+            RequireCleanupRecovery("Test Runner callback was not recovered within the Reload observation deadline; "
+                + "the task is aborted and its assertion outcome remains unchanged. Do not replay test start.");
         }
 
         private void RecoveredRunWatchdog()

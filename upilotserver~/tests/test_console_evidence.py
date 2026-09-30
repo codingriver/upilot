@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,7 +11,7 @@ from upilot_mcp.console_evidence import begin_console_evidence, finish_console_e
 from upilot_mcp.domain.compile_service import CompileDomainService
 from upilot_mcp.domain.status_service import StatusDomainService
 from upilot_mcp.domain.test_service import TestDomainService
-from upilot_mcp.responses import ok
+from upilot_mcp.responses import fail, ok
 from upilot_mcp.state_store import StateStore
 
 
@@ -279,3 +282,142 @@ def test_incremental_terminal_test_result_closes_console_evidence(tmp_path: Path
     persisted = state.get_console_evidence("runGuid", "run-incremental")
     assert persisted["coverage"] == "complete"
     assert persisted["endedAt"] > 0
+
+
+@pytest.mark.parametrize("source", ["consoleDelta", "persistentCapture"])
+@pytest.mark.parametrize("include_stack", [False, True])
+@pytest.mark.parametrize("max_length", [0, 8])
+def test_identity_search_projects_only_bounded_logs_and_keeps_saved_evidence(
+    tmp_path, source, include_stack, max_length,
+):
+    evidence = {
+        "source": source, "captureSessionId": "capture-a", "startSequence": 7, "endSequence": 510,
+        "coverage": "partial", "gapReason": "domain_reload_boundary",
+        "logs": [{"type": "Warning", "message": "unmatched warning", "stackTrace": "private warning stack"}] * 500
+                + [{"type": "Error", "message": "selected message " + str(i), "stackTrace": "at Selected"}
+                   for i in range(3)],
+    }
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("compileOperationId", "compile-original", evidence)
+    saved = deepcopy(state.get_console_evidence("compileOperationId", "compile-original"))
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    # Native capture.read owns filtering and its cursor; only response projection belongs here.
+    capture_logs = deepcopy(evidence["logs"][-2:][::-1])
+    async def read(**kwargs):
+        assert kwargs["from_sequence"] == 7 and kwargs["to_sequence"] == 510
+        assert kwargs["count"] == 2 and kwargs["log_type"] == "Error"
+        assert kwargs["include_stack_trace"] is include_stack
+        return ok("read", {"logs": capture_logs, "nextSequence": 510, "scanComplete": True})
+    service.console_capture_read = read
+    response = asyncio.run(service.console_search_logs(
+        compile_operation_id="compile-original", log_type="Error", count=1, max_count=2,
+        include_stack_trace=include_stack, max_message_length=max_length,
+    ))
+    assert response.ok
+    assert len(response.data["logs"]) == 2
+    for record in response.data["logs"]:
+        assert record["type"] == "Error"
+        assert record["stackTrace"] == ("at Selected" if include_stack else "")
+        assert record["message"] == ("selected" if max_length else record["message"])
+    assert response.data["logs"][0]["message"] == ("selected" if max_length else "selected message 2")
+    assert response.data["consoleEvidence"] == {k: v for k, v in saved.items() if k != "logs"}
+    assert response.data["association"] == "observed_during_run_not_causal"
+    if source == "persistentCapture":
+        assert response.data["nextSequence"] == 510
+        assert capture_logs[0]["stackTrace"] == "at Selected"
+        assert capture_logs[0]["message"] == "selected message 2"
+    else:
+        assert response.data["total"] == 3
+    assert state.get_console_evidence("compileOperationId", "compile-original") == saved
+
+
+@pytest.mark.parametrize("source", ["consoleDelta", "persistentCapture"])
+def test_identity_search_zero_matches_does_not_leak_nested_logs(tmp_path, source):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("runGuid", "run-original", {
+        "source": source, "captureSessionId": "capture-a", "startSequence": 2, "endSequence": 503,
+        "coverage": "partial", "gapReason": "domain_reload_boundary",
+        "logs": [{"type": "Warning", "message": "do not leak"}] * 500,
+    })
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    async def read(**kwargs):
+        return ok("read", {"logs": [], "nextSequence": 503, "scanComplete": True})
+    service.console_capture_read = read
+    response = asyncio.run(service.console_search_logs(run_guid="run-original", log_type="Error", count=15))
+    assert response.data["logs"] == []
+    assert "logs" not in response.data["consoleEvidence"]
+    assert response.data["consoleEvidence"]["coverage"] == "partial"
+    assert "do not leak" not in str(response.data)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_compile_wait_projects_evidence_on_success_and_error_without_modifying_storage(tmp_path, failed):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.compile.compile_operation_id = "compile-original"
+    evidence = {"source": "consoleDelta", "coverage": "partial", "gapReason": "domain_reload_boundary",
+                "startSequence": 4, "endSequence": 504, "logs": [{"message": "saved log"}] * 500}
+    state.save_console_evidence("compileOperationId", "compile-original", evidence)
+    service = CompileDomainService()
+    service.server = SimpleNamespace(state=state)
+    async def wait(*args):
+        return fail("wait", "EXPECTED", "original error") if failed else ok("wait", {"terminal": True})
+    service._compile_wait = wait
+    response = asyncio.run(service.compile_wait())
+    payload = response.error.detail if failed else response.data
+    assert payload["consoleEvidence"] == {k: v for k, v in evidence.items() if k != "logs"}
+    assert state.get_console_evidence("compileOperationId", "compile-original") == evidence
+
+
+@pytest.mark.parametrize("route", ["compile", "safe_compile_and_wait"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_compile_entry_points_project_success_and_error_evidence(tmp_path, monkeypatch, route, failed):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.editor.connected = True
+    state.editor.authoritative = True
+    state.editor.play_mode_state = "edit"
+    state.editor.updated_at = 10**15
+    state.compile.compile_operation_id = "compile-original"
+    evidence = {"source": "consoleDelta", "coverage": "partial", "gapReason": "domain_reload_boundary",
+                "startSequence": 4, "endSequence": 504, "logs": [{"message": "saved log"}] * 500}
+
+    async def begin(*args):
+        return deepcopy(evidence)
+
+    async def finish(*args):
+        return deepcopy(evidence)
+
+    monkeypatch.setattr("upilot_mcp.domain.compile_service.begin_console_evidence", begin)
+    monkeypatch.setattr("upilot_mcp.domain.compile_service.finish_console_evidence", finish)
+
+    def result():
+        return (fail("compile", "EXPECTED", "original error", {"compileOperationId": "compile-original"})
+                if failed else ok("compile", {"compileOperationId": "compile-original"}))
+
+    class Dispatcher:
+        async def call(self, request_id, name, payload, timeout_ms=None):
+            if name == "resource.editorState":
+                return ok(request_id, {"isCompiling": False})
+            assert name == "compile.request"
+            return result()
+
+    service = CompileDomainService()
+    service.dispatcher = Dispatcher()
+    service.server = SimpleNamespace(state=state, session_manager=SimpleNamespace(active=None))
+
+    async def observed(*args):
+        return result()
+
+    service._safe_compile_and_wait = observed
+    response = asyncio.run(getattr(service, route)())
+    assert response.ok is not failed
+    if failed:
+        assert response.error.code == "EXPECTED"
+    payload = response.error.detail if failed else response.data
+    assert payload["consoleEvidence"] == {k: v for k, v in evidence.items() if k != "logs"}
+    assert state.get_console_evidence("compileOperationId", "compile-original") == evidence

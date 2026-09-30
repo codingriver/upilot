@@ -1930,6 +1930,8 @@ class TaskDomainService:
     @staticmethod
     def _finalize_summary(value: dict, max_tail_chars: int = 2000) -> dict:
         result = copy.deepcopy(value)
+        if isinstance(result.get("artifacts"), dict):
+            result.setdefault("artifactsTotal", len(result["artifacts"]))
         truncated = set(result.pop("truncatedFields", []) or [])
         text_limit = max(0, min(500, int(max_tail_chars)))
         error_limit = max(0, min(2000, int(max_tail_chars)))
@@ -1969,6 +1971,8 @@ class TaskDomainService:
         result["summaryVersion"] = 1
         for _ in range(24):
             result = trim(result)
+            if isinstance(result.get("artifacts"), dict):
+                result["artifactsReturned"] = len(result["artifacts"])
             result["truncatedFields"] = sorted(truncated)[:32]
             # The count includes its own decimal representation.
             for _ in range(4):
@@ -2120,7 +2124,9 @@ class TaskDomainService:
             if isinstance(safe_status_data.get("domain"), dict): public["domain"] = safe_status_data["domain"]
             public["consoleCapture"] = public_capture
         public["artifacts"] = self._bounded_operation_value(public["artifacts"], max_chars, "artifacts", truncated)
-        if include_raw_state:
+        if include_raw_state and level == "summary":
+            public["rawStateOmitted"] = True
+        elif include_raw_state:
             safe_raw_state = self._redact_operation_secrets(state)
             public["rawState"] = (
                 self._bounded_operation_value(safe_raw_state, max_chars, "rawState", truncated)

@@ -1,6 +1,9 @@
 """Targeted reliability regressions; deliberately not part of this change's run evidence."""
 
 import json
+from copy import deepcopy
+
+import pytest
 
 from upilot_mcp.domain.task_service import TaskDomainService
 
@@ -21,7 +24,11 @@ def test_operation_summary_whitelists_deep_artifacts_and_bounds_utf8():
     assert summary["artifactsTotal"] == 30 and len(summary["artifacts"]) <= 8
     assert summary["artifactsReturned"] == len(summary["artifacts"])
     assert summary["artifacts"]
-    assert all("tail" not in artifact for artifact in summary["artifacts"].values())
+    # The current public contract retains bounded tails (also covered by
+    # test_acceptance_compact_shader), not the original unbounded body.
+    assert all(0 < len(artifact["tail"]) <= 500 for artifact in summary["artifacts"].values())
+    assert all(artifact["sha256"] == "a" * 64 for artifact in summary["artifacts"].values())
+    assert summary["businessResult"]["failureSignature"] == "BUSINESS_FAILURE"
     assert len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode()) <= 16384
     assert summary["responseBytes"] == TaskDomainService._summary_size(summary)
 
@@ -68,3 +75,36 @@ def test_final_collect_projection_cannot_keep_unbounded_attachment_values():
     assert TaskDomainService._summary_size(summary) <= 16384
     assert summary["operationId"] == "op"
     assert summary["truncatedFields"]
+
+
+@pytest.mark.parametrize("level", ["summary", "standard", "full"])
+@pytest.mark.parametrize("include_raw_state", [False, True])
+def test_operation_raw_state_respects_detail_level_without_mutating_history(level, include_raw_state):
+    state = {"operationId": "op-original", "status": "Failed", "error": "first failure",
+             "lastStatusData": {"domain": {"message": "kept"}},
+             "consoleCapture": {"sessionId": "owned", "ownerToken": "secret-value"}}
+    before = deepcopy(state)
+    result = TaskDomainService()._public_operation_state(state, level, include_raw_state=include_raw_state)
+    assert result["rawStateAvailable"] is True
+    assert ("rawState" in result) is (include_raw_state and level != "summary")
+    assert result.get("rawStateOmitted", False) is (include_raw_state and level == "summary")
+    assert "secret-value" not in json.dumps(result)
+    assert result["error"] == "first failure"
+    assert state == before
+
+
+@pytest.mark.parametrize("artifact_count", [0, 1, 30])
+@pytest.mark.parametrize("max_tail_chars", [0, 8, 500])
+def test_final_summary_counts_match_returned_index_without_mutating_evidence(artifact_count, max_tail_chars):
+    payload = {"operationId": "op-counts", "error": "first failure", "artifacts": {
+        str(index): {"path": f"report-{index}.json", "tail": "日志" * 10000,
+                     "exists": True, "actualSha256": "a" * 64, "declaredSha256": "b" * 64}
+        for index in range(artifact_count)}}
+    before = deepcopy(payload)
+    result = TaskDomainService._finalize_summary(payload, max_tail_chars)
+    assert result["artifactsTotal"] == artifact_count
+    assert result["artifactsReturned"] == len(result["artifacts"]) <= 8
+    assert result["responseBytes"] == TaskDomainService._summary_size(result) <= 16384
+    assert all(len(item["tail"]) <= max_tail_chars for item in result["artifacts"].values())
+    assert all(item["exists"] is True for item in result["artifacts"].values())
+    assert payload == before

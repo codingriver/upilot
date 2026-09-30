@@ -5,6 +5,11 @@ from typing import Any
 from .protocol import new_id, now_ms
 
 
+def public_console_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return boundary metadata without duplicating unfiltered persisted records."""
+    return {key: value for key, value in evidence.items() if key != "logs"}
+
+
 def _identity(state) -> dict[str, Any]:
     execution = state.execution_state()
     return {

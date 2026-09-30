@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
+import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from upilot_mcp.dispatcher import CommandDispatcher
 
 from upilot_mcp.models import WsMessage
 from upilot_mcp.server import IDENTITY_CONTRACT_VERSION, WsOrchestratorServer
@@ -306,5 +313,154 @@ def test_stale_socket_cleanup_does_not_disconnect_new_owner(tmp_path: Path) -> N
         assert server._ws is active_socket
         assert server.session_manager.active.session_id == "active"
         assert server.state.editor.connected is True
+
+    asyncio.run(scenario())
+
+
+def _wire_commands(socket):
+    return [message for raw in socket.sent if (message := json.loads(raw))["type"] == "command"]
+
+
+async def _reload_for_dispatch_test(server, project, socket, next_session):
+    old_session = server.session_manager.active.session_id
+    await server._handle_message(WsMessage(
+        id="reload-" + old_session, type="event", name="domain_reload.starting",
+        payload={}, timestamp=2, session_id=old_session,
+    ), [old_session], socket)
+    assert server._domain_reloading
+    server._suspend_or_fail_pending_on_disconnect(old_session)
+    candidate = _Socket()
+    hello = _hello(project, session_id=next_session)
+    server._probe_candidate_identity = lambda _payload: _accepted_probe(hello)
+    server._close_websocket = lambda *_args, **_kwargs: asyncio.sleep(0)
+    auth = [None]
+    await server._handle_message(hello, auth, candidate)
+    assert auth == [next_session] and server._ws is candidate
+    assert not server._suspended and not server._domain_reloading
+    return candidate
+
+
+@pytest.mark.parametrize("name,payload", [
+    ("test.run", {"testMode": "EditMode", "runGuid": "original-run"}),
+    ("compile.request", {"writeBatchId": "original-batch"}),
+    ("console.capture.start", {"sessionId": "original-capture"}),
+    ("console.capture.stop", {"sessionId": "original-capture"}),
+])
+def test_dispatch_reload_rejects_mutation_and_late_result_cannot_complete_successor(tmp_path, name, payload):
+    async def scenario():
+        server = WsOrchestratorServer(expected_project_path=str(tmp_path))
+        socket = _Socket()
+        active = _payload(tmp_path)
+        active.update(identityVerified=True, verificationLevel="test-verified")
+        server.session_manager.on_hello("before", active)
+        server._ws = socket
+        dispatcher = CommandDispatcher(server, server.state)
+        call = asyncio.create_task(dispatcher.call("original-request", name, payload, timeout_ms=2000))
+        await asyncio.sleep(0)
+        sent = _wire_commands(socket)
+        assert len(sent) == 1
+        command_id = sent[0]["id"]
+        original_record = server.state.commands[command_id]
+        identity = (original_record.request_id, original_record.created_at, original_record.sent_at)
+        lifecycle = server.state.lifecycle_id
+        candidate = await _reload_for_dispatch_test(server, tmp_path, socket, "after")
+        result = await call
+        assert not result.ok and result.error.code == "COMMAND_RECOVERY_REQUIRED"
+        assert result.error.detail["commandId"] == command_id
+        assert result.error.detail["replayAttempted"] is False
+        assert _wire_commands(candidate) == []
+        assert server.state.lifecycle_id == lifecycle
+        assert (original_record.request_id, original_record.created_at, original_record.sent_at) == identity
+        assert not server._pending and not server._suspended
+        closed_record = asdict(original_record)
+
+        successor = asyncio.create_task(dispatcher.call("successor-request", "test.status", {}, timeout_ms=2000))
+        await asyncio.sleep(0)
+        successor_id = _wire_commands(candidate)[0]["id"]
+        assert successor_id != command_id
+        await server._handle_message(WsMessage(
+            id=command_id, type="result", name=name, payload={"late": True},
+            timestamp=3, session_id="after",
+        ), ["after"], candidate)
+        assert not successor.done() and not server._pending[successor_id].done()
+        assert asdict(original_record) == closed_record
+        await server._handle_message(WsMessage(
+            id=successor_id, type="result", name="test.status", payload={"runGuid": "successor-run"},
+            timestamp=4, session_id="after",
+        ), ["after"], candidate)
+        successor_result = await successor
+        assert successor_result.ok and successor_result.data["runGuid"] == "successor-run"
+        assert set(server.state.commands) == {command_id, successor_id}
+        assert len(_wire_commands(socket)) == 1 and len(_wire_commands(candidate)) == 1
+        assert not server._pending and not server._suspended
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("name,payload", [
+    ("resource.editorState", {}), ("test.status", {}), ("compile.errors.get", {}),
+    ("test.results", {"runGuid": "original-run"}),
+])
+@pytest.mark.parametrize("ending", ["timeout", "cancel"])
+def test_dispatch_read_only_reload_keeps_original_wait_and_releases_pending(tmp_path, monkeypatch, name, payload, ending):
+    async def scenario():
+        waits = []
+        real_wait_for = asyncio.wait_for
+
+        async def recorded_wait_for(future, timeout):
+            waits.append((future, timeout))
+            return await real_wait_for(future, timeout)
+
+        # Only the dispatcher's asyncio reference is replaced; actual asyncio
+        # Future/timer/cancellation semantics and the server remain unchanged.
+        monkeypatch.setattr("upilot_mcp.dispatcher.asyncio", SimpleNamespace(
+            wait_for=recorded_wait_for, TimeoutError=asyncio.TimeoutError,
+            CancelledError=asyncio.CancelledError,
+        ))
+        server = WsOrchestratorServer(expected_project_path=str(tmp_path))
+        socket = _Socket()
+        active = _payload(tmp_path)
+        active.update(identityVerified=True, verificationLevel="test-verified")
+        server.session_manager.on_hello("before", active)
+        server._ws = socket
+        dispatcher = CommandDispatcher(server, server.state)
+        call = asyncio.create_task(dispatcher.call("original-request", name, payload, timeout_ms=1000))
+        await asyncio.sleep(0)
+        sent = _wire_commands(socket)
+        assert len(sent) == 1 and len(waits) == 1
+        command_id = sent[0]["id"]
+        future = server._pending[command_id]
+        original_wait = list(waits)
+        record = server.state.commands[command_id]
+        identity = (record.request_id, record.created_at, record.sent_at)
+        first = await _reload_for_dispatch_test(server, tmp_path, socket, "after-one")
+        second = await _reload_for_dispatch_test(server, tmp_path, first, "after-two")
+        for reconnected in (first, second):
+            resent = _wire_commands(reconnected)
+            assert len(resent) == 1
+            assert (resent[0]["id"], resent[0]["name"], resent[0]["payload"]) == (command_id, name, payload)
+        assert waits == original_wait == [(future, 1.0)]
+        assert server._pending[command_id] is future
+        assert (record.request_id, record.created_at, record.sent_at) == identity
+        if ending == "cancel":
+            call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            assert record.error["code"] == "CANCELLED"
+        else:
+            result = await real_wait_for(call, timeout=2)
+            assert not result.ok and result.error.code == "COMMAND_TIMEOUT"
+            assert result.error.detail["commandId"] == command_id
+        assert future.done() and not server._pending and not server._suspended
+        terminal_record = asdict(record)
+        await server._handle_message(WsMessage(
+            id=command_id, type="result", name=name, payload={"late": True},
+            timestamp=5, session_id="after-two",
+        ), ["after-two"], second)
+        third = await _reload_for_dispatch_test(server, tmp_path, second, "after-terminal")
+        assert _wire_commands(third) == []
+        assert asdict(record) == terminal_record
+        assert set(server.state.commands) == {command_id}
+        assert waits == original_wait and not server._pending and not server._suspended
 
     asyncio.run(scenario())

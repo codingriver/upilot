@@ -951,3 +951,221 @@ def test_automatic_compile_child_is_authorized_but_other_task_is_rejected(tmp_pa
         assert service._write_batch_active_id == ""
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("damage", [
+    "malformed_json", "array_root", "missing_snapshot", "wrong_batch", "wrong_operation",
+    "wrong_request", "stale_verification", "wrong_created_at", "nonterminal",
+    "unverified_errors", "wrong_phase", "array_phase", "object_phase",
+])
+def test_corrupt_historical_batch_never_verifies_or_dispatches(tmp_path, damage):
+    import json
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                       observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued")
+    queued["compileRequestId"] = "request-a"
+    assert store.update_editor_execution_state(queued)
+    terminal = _snapshot(2, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
+    terminal["compileRequestId"] = "request-a"
+    assert store.update_editor_execution_state(terminal)
+    assert store.get_write_batch(identity)["correlationVerified"] is True
+    changes = {
+        "wrong_batch": ("writeBatchId", "foreign"),
+        "wrong_operation": ("compileOperationId", "foreign"),
+        "wrong_request": ("compileRequestId", "foreign"),
+        "stale_verification": ("lastCompileVerifiedAt", 999),
+        "wrong_created_at": ("writeBatchCreatedAt", 999),
+        "nonterminal": ("terminal", False),
+        "unverified_errors": ("errorsVerified", False),
+        "wrong_phase": ("compilePhase", "failed"),
+        "array_phase": ("compilePhase", ["completed"]),
+        "object_phase": ("compilePhase", {"phase": "completed"}),
+    }
+    if damage in changes:
+        key, value = changes[damage]
+        terminal[key] = value
+    raw = {"malformed_json": "{", "array_root": "[]", "missing_snapshot": None}.get(damage, json.dumps(terminal))
+    with sqlite3.connect(store._db_path) as db:
+        db.execute("UPDATE write_batches SET terminal_snapshot_json=? WHERE write_batch_id=?", (raw, identity))
+        before = db.execute("SELECT * FROM write_batches").fetchall()
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    result = asyncio.run(_ResourceService(tmp_path, restored).write_batch_status(identity))
+    assert result.ok and result.data["historical"] is True
+    assert result.data["correlationVerified"] is False
+    assert result.data["errorsVerified"] is False
+    assert result.data["outcome"] == "unknown"
+    assert result.data["status"] == "recovery_required"
+
+    service = CompileDomainService()
+    service.server = _Server(tmp_path, restored)
+    starts = []
+    async def unexpected_start(*args, **kwargs):
+        starts.append(kwargs)
+        raise AssertionError("Damaged historical evidence cannot authorize a replacement compile.")
+    service.compile = unexpected_start
+    response = asyncio.run(service.safe_compile_and_wait(write_batch_id=identity, write_batch_created_at=1000))
+    assert not response.ok and response.error.code == "COMPILE_CORRELATION_NOT_VERIFIED"
+    assert starts == [] and restored.pending_write_batches() == []
+    with sqlite3.connect(restored._db_path) as db:
+        assert db.execute("SELECT * FROM write_batches").fetchall() == before
+
+
+@pytest.mark.parametrize("damage", ["missing_operation", "missing_request", "wrong_request"])
+def test_attach_without_exact_persisted_request_never_dispatches(tmp_path, damage):
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    operation = "" if damage == "missing_operation" else "compile-a"
+    request = "" if damage == "missing_request" else "request-a"
+    with sqlite3.connect(store._db_path) as db:
+        db.execute("UPDATE write_batches SET status='compiling',compile_operation_id=?,compile_request_id=? WHERE write_batch_id=?",
+                   (operation, request, identity))
+        before = db.execute("SELECT * FROM write_batches").fetchall()
+    service = CompileDomainService()
+    service.server = _Server(tmp_path, store)
+    starts = []
+    async def unexpected_start(*args, **kwargs):
+        starts.append(kwargs)
+        raise AssertionError("Unknown attachment identity cannot authorize another compile.")
+    service.compile = unexpected_start
+    result = asyncio.run(service.safe_compile_and_wait(
+        write_batch_id=identity, write_batch_created_at=1000,
+        attach_compile_request_id="foreign" if damage == "wrong_request" else "request-a"))
+    assert not result.ok
+    assert result.error.code == ("COMPILE_OPERATION_MISMATCH" if damage == "wrong_request" else "COMPILE_RECOVERY_REQUIRED")
+    assert starts == []
+    with sqlite3.connect(store._db_path) as db:
+        assert db.execute("SELECT * FROM write_batches").fetchall() == before
+
+
+def test_concurrent_public_safe_wait_reserves_batch_before_first_await(tmp_path, monkeypatch):
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    async def scenario():
+        store = StateStore()
+        store.configure_project(str(tmp_path))
+        batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+        identity = batch["writeBatchId"]
+        service = CompileDomainService()
+        service.server = _Server(tmp_path, store)
+        service.dispatcher = object()
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def begin(*args):
+            entered.set()
+            await release.wait()
+            return {}
+        async def finish(*args):
+            return {}
+        async def workflow(*args):
+            calls.append(args)
+            return ok("observed", {"writeBatchId": identity})
+        monkeypatch.setattr("upilot_mcp.domain.compile_service.begin_console_evidence", begin)
+        monkeypatch.setattr("upilot_mcp.domain.compile_service.finish_console_evidence", finish)
+        monkeypatch.setattr(service, "_safe_compile_and_wait", workflow)
+        first = asyncio.create_task(service.safe_compile_and_wait(write_batch_id=identity))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            duplicate = await service.safe_compile_and_wait(write_batch_id=identity)
+            assert not duplicate.ok and duplicate.error.code == "COMPILE_RECOVERY_REQUIRED"
+            assert duplicate.error.detail["dispatchAttempted"] is False
+            assert calls == []
+            release.set()
+            assert (await asyncio.wait_for(first, 1)).ok
+            assert len(calls) == 1
+            assert service._write_batch_safe_waits == set()
+        finally:
+            release.set()
+            if not first.done():
+                first.cancel()
+                await asyncio.gather(first, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("first_status", ["verified", "failed", "aborted", "timed_out"])
+@pytest.mark.parametrize("late_phase", ["completed", "failed"])
+def test_late_terminal_cannot_rewrite_closed_batch_or_complete_successor(tmp_path, first_status, late_phase):
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    first = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = first["writeBatchId"]
+    assert store.update_editor_execution_state(_snapshot(
+        1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+        observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued"))
+    if first_status in {"verified", "failed"}:
+        assert store.update_editor_execution_state(_snapshot(
+            2, phase="completed" if first_status == "verified" else "failed",
+            write_batch_id=identity, write_batch_created_at=1000, observed_at=1100))
+    else:
+        store.mark_write_batch(identity, first_status, error="Original terminal reason")
+    original = store.get_write_batch(identity)
+    assert original["status"] == first_status and original["terminal"] is True
+    successor = store.register_write_batch(["B.cs"], created_at=1200, files_sha256="b", compile_when_edit_mode=True)
+    successor_id = successor["writeBatchId"]
+    assert successor_id != identity
+    with sqlite3.connect(store._db_path) as db:
+        original_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+    # A fresh producer sequence carrying an old operation's late terminal is not a new outcome.
+    assert store.update_editor_execution_state(_snapshot(
+        3, phase=late_phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1300))
+    assert store.get_write_batch(identity) == original
+    assert store.pending_write_batch_id == successor_id
+    assert store.get_write_batch(successor_id)["correlationVerified"] is False
+    assert store.get_write_batch(successor_id)["terminalSnapshot"] is None
+    assert store.update_editor_execution_state(_snapshot(
+        4, phase="queued", operation_id="compile-b", write_batch_id=successor_id, write_batch_created_at=1200,
+        observed_at=1310, terminal=False, errors_verified=False, transition="compile_queued"))
+    assert store.update_editor_execution_state(_snapshot(
+        5, operation_id="compile-b", write_batch_id=successor_id, write_batch_created_at=1200, observed_at=1400))
+    assert store.get_write_batch(successor_id)["outcome"] == "passed"
+    assert store.get_write_batch(identity) == original
+    with sqlite3.connect(store._db_path) as db:
+        assert db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone() == original_row
+
+
+@pytest.mark.parametrize("phase", ["completed", "failed"])
+def test_rejected_terminal_write_rolls_back_status_and_snapshot(tmp_path, phase):
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                       observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued")
+    queued["compileRequestId"] = "request-a"
+    assert store.update_editor_execution_state(queued)
+    original = store.get_write_batch(identity)
+    with sqlite3.connect(store._db_path) as db:
+        original_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        # Fail after SQLite applies the UPDATE, exercising real statement rollback
+        # rather than replacing the persistence method with a successful mock.
+        db.execute("CREATE TRIGGER reject_terminal_evidence AFTER UPDATE OF terminal_snapshot_json "
+                   "ON write_batches WHEN NEW.terminal_snapshot_json IS NOT NULL "
+                   "BEGIN SELECT RAISE(ABORT, 'injected terminal evidence rejection'); END")
+    terminal = _snapshot(2, phase=phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
+    terminal["compileRequestId"] = "request-a"
+    with pytest.raises(sqlite3.IntegrityError, match="injected terminal evidence rejection"):
+        store.update_editor_execution_state(terminal)
+    assert store.get_write_batch(identity) == original
+    assert store.pending_write_batch_id == identity
+    assert not store.execution_state()["correlationVerified"]
+    assert not store.execution_state()["ready"]
+    with sqlite3.connect(store._db_path) as db:
+        assert db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone() == original_row
+        db.execute("DROP TRIGGER reject_terminal_evidence")
+    # A later authoritative snapshot may persist evidence; no compile is started.
+    terminal["sequence"] = 3
+    terminal["snapshotId"] = "epoch-a:0:3"
+    assert store.update_editor_execution_state(terminal)
+    result = store.get_write_batch(identity)
+    assert result["status"] == ("verified" if phase == "completed" else "failed")
+    assert result["correlationVerified"] and result["terminalSnapshot"] == terminal
+    assert store.pending_write_batch_id == ""

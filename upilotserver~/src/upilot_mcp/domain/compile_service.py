@@ -20,7 +20,7 @@ from ..dispatcher import CommandDispatcher
 from ..env import getenv
 from ..models import ToolResponse
 from ..protocol import new_id, now_ms
-from ..console_evidence import begin_console_evidence, finish_console_evidence
+from ..console_evidence import begin_console_evidence, finish_console_evidence, public_console_evidence
 from ..responses import fail, ok
 from ..tool_registry import REGISTRY, REGISTRY_VERSION, dispatch_public_tool
 
@@ -335,9 +335,9 @@ class CompileDomainService:
                     "compileOperationId", operation_id, console_evidence
                 )
             if response.data is not None:
-                response.data["consoleEvidence"] = console_evidence
+                response.data["consoleEvidence"] = public_console_evidence(console_evidence)
             elif response.error is not None:
-                response.error.detail["consoleEvidence"] = console_evidence
+                response.error.detail["consoleEvidence"] = public_console_evidence(console_evidence)
             return response
         result = await self.dispatcher.call(
             request_id,
@@ -710,9 +710,9 @@ class CompileDomainService:
                 }
             self.server.state.save_console_evidence("compileOperationId", operation_id, evidence)
         if response.data is not None:
-            response.data["consoleEvidence"] = evidence
+            response.data["consoleEvidence"] = public_console_evidence(evidence)
         elif response.error is not None:
-            response.error.detail["consoleEvidence"] = evidence
+            response.error.detail["consoleEvidence"] = public_console_evidence(evidence)
         return response
 
     async def _compile_wait(
@@ -1036,9 +1036,9 @@ class CompileDomainService:
         if resolved_operation_id:
             self.server.state.save_console_evidence("compileOperationId", resolved_operation_id, console_evidence)
         if response.data is not None:
-            response.data["consoleEvidence"] = console_evidence
+            response.data["consoleEvidence"] = public_console_evidence(console_evidence)
         elif response.error is not None:
-            response.error.detail["consoleEvidence"] = console_evidence
+            response.error.detail["consoleEvidence"] = public_console_evidence(console_evidence)
         return response
 
     async def _safe_compile_and_wait(

@@ -25,6 +25,7 @@ from ..service_maintenance import read_summary as read_maintenance_summary, same
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
 from ..models import ToolResponse
+from ..console_evidence import public_console_evidence
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
 from ..tool_registry import (
@@ -2188,6 +2189,15 @@ class StatusDomainService:
         identity_kind = "runGuid" if run_guid else "compileOperationId" if compile_operation_id else ""
         identity_value = run_guid or compile_operation_id
         if identity_kind:
+            def project_record(record: dict) -> dict:
+                projected = dict(record)
+                if not include_stack_trace:
+                    projected["stackTrace"] = ""
+                message = projected.get("message")
+                if max_message_length > 0 and isinstance(message, str):
+                    projected["message"] = message[:max_message_length]
+                return projected
+
             evidence = self.server.state.get_console_evidence(identity_kind, identity_value)
             if evidence is None:
                 return fail(
@@ -2213,7 +2223,10 @@ class StatusDomainService:
                     newest_first=newest_first,
                 )
                 if response.data is not None:
-                    response.data["consoleEvidence"] = evidence
+                    response.data = dict(response.data)
+                    if isinstance(response.data.get("logs"), list):
+                        response.data["logs"] = [project_record(item) for item in response.data["logs"]]
+                    response.data["consoleEvidence"] = public_console_evidence(evidence)
                     response.data["association"] = "observed_during_run_not_causal"
                     response.data[identity_kind] = identity_value
                 return response
@@ -2237,9 +2250,9 @@ class StatusDomainService:
             if newest_first:
                 filtered.reverse()
             return ok(request_id, {
-                "logs": filtered[:max(1, min(effective_count, 5000))],
+                "logs": [project_record(item) for item in filtered[:max(1, min(effective_count, 5000))]],
                 "total": len(filtered),
-                "consoleEvidence": evidence,
+                "consoleEvidence": public_console_evidence(evidence),
                 "association": "observed_during_run_not_causal",
                 identity_kind: identity_value,
             })

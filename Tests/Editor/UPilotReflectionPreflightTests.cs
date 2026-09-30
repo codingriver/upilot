@@ -50,8 +50,9 @@ namespace CodingRiver.UPilot.Tests
             if (invalid == "arguments") p.argumentsJson = "{\"items\":[{\"direction\":\"wrong\"}]}";
             int queued = 0;
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(p, CancellationToken.None, action => { queued++; action(); }));
+            var task = service.ExecuteCallAsync(p, CancellationToken.None, action => { queued++; action(); });
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
             Assert.That(queued, Is.Zero);
             Assert.That(Calls, Is.Zero);
@@ -74,8 +75,9 @@ namespace CodingRiver.UPilot.Tests
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
             var p = Payload(method);
             p.awaitTimeoutMs = 1;
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(p, CancellationToken.None, action => action()));
+            var task = service.ExecuteCallAsync(p, CancellationToken.None, action => action());
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.True);
             Assert.That(Calls, Is.EqualTo(1));
         }
@@ -84,8 +86,9 @@ namespace CodingRiver.UPilot.Tests
         public void TargetFailurePreservesOriginalEvidenceAcrossRepeatedWrapping()
         {
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(Payload("MutateThenThrow"), CancellationToken.None, action => action()));
+            var task = service.ExecuteCallAsync(Payload("MutateThenThrow"), CancellationToken.None, action => action());
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             var wrappedAgain = UPilotReflectionService.CallError(error, false);
             var wire = UPilotExecutionService.ToErrorDetail(wrappedAgain, "cmd-p0-target", "reflection.call");
 
@@ -118,8 +121,9 @@ namespace CodingRiver.UPilot.Tests
         public void CancellationBeforeDispatchHasNoSideEffects()
         {
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(Payload(), new CancellationToken(true), action => action()));
+            var task = service.ExecuteCallAsync(Payload(), new CancellationToken(true), action => action());
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
             Assert.That(Calls, Is.Zero);
         }
@@ -151,8 +155,9 @@ namespace CodingRiver.UPilot.Tests
                 + typeof(ThrowingSummary).FullName + "\",\"valueJson\":\"{}\"}},{\"value\":{\"kind\":\""
                 + kind + "\",\"typeName\":\"" + typeName + "\"}}]}";
             var service = new UPilotReflectionService(null, execution);
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(p, CancellationToken.None, action => action()));
+            var task = service.ExecuteCallAsync(p, CancellationToken.None, action => action());
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
             Assert.That(Calls, Is.Zero);
             Assert.That(GetterCalls, Is.Zero);
@@ -166,8 +171,9 @@ namespace CodingRiver.UPilot.Tests
                 + typeof(ThrowingSummary).FullName
                 + "[]\",\"items\":[{\"kind\":\"literal\",\"typeName\":\"System.String\",\"valueJson\":\"\\\"invalid-object\\\"\"}]}}]}";
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(p, CancellationToken.None, action => action()));
+            var task = service.ExecuteCallAsync(p, CancellationToken.None, action => action());
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
             Assert.That(Calls, Is.Zero);
             Assert.That(GetterCalls, Is.Zero);
@@ -182,8 +188,9 @@ namespace CodingRiver.UPilot.Tests
                 + "\",\"value\":{\"kind\":\"literal\",\"typeName\":\"" + typeof(ThrowingSummary).FullName
                 + "\",\"valueJson\":\"\\\"invalid-object\\\"\"}}]}";
             var service = new UPilotReflectionService(null, new UPilotExecutionService(null));
-            var error = Assert.ThrowsAsync<ExecutionContractException>(async () =>
-                await service.ExecuteCallAsync(p, CancellationToken.None, action => action()));
+            var task = service.ExecuteCallAsync(p, CancellationToken.None, action => action());
+            Assert.That(task.IsCompleted, Is.True, "Inline fixture must complete without blocking the Editor.");
+            var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
             Assert.That(error.Code, Is.EqualTo("REFLECTION_BIND_FAILED"));
             Assert.That(error.Detail["sideEffectsMayHaveOccurred"], Is.False);
             Assert.That(Calls, Is.Zero);

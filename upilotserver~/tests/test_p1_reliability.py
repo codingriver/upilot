@@ -32,22 +32,36 @@ def test_explicit_identity_clear_and_new_operation_do_not_inherit_evidence(tmp_p
     assert store.compile.last_compile_verified_at == 0
 
 
-def test_pending_write_batch_distinguishes_missing_field_from_explicit_clear(tmp_path):
+def test_pending_write_batch_accepts_only_server_authorized_lifetime(tmp_path):
     store = StateStore()
     store.configure_project(str(tmp_path))
     first = _snapshot(1, operation_id="compile-a", terminal=False, errors_verified=False)
-    first["pendingWriteBatchId"] = "batch-a"
-    store.update_editor_execution_state(first)
-    assert store.pending_write_batch_id == "batch-a"
+    first["pendingWriteBatchId"] = "unregistered-batch"
+    assert store.update_editor_execution_state(first)
+    assert store.pending_write_batch_id == ""
 
+    batch = store.register_write_batch(["A.cs"], created_at=100, files_sha256="a", compile_when_edit_mode=True)
+    batch_id = batch["writeBatchId"]
     missing = _snapshot(2, operation_id="compile-a", terminal=False, errors_verified=False)
-    missing.pop("pendingWriteBatchId", None)
-    store.update_editor_execution_state(missing)
-    assert store.pending_write_batch_id == "batch-a"
+    assert "pendingWriteBatchId" not in missing
+    assert store.update_editor_execution_state(missing)
+    assert store.pending_write_batch_id == batch_id
 
     cleared = _snapshot(3, operation_id="compile-a", terminal=False, errors_verified=False)
     cleared["pendingWriteBatchId"] = ""
-    store.update_editor_execution_state(cleared)
+    assert store.update_editor_execution_state(cleared)
+    # Unity cannot revoke the Server's still-active write authorization.
+    assert store.pending_write_batch_id == batch_id
+
+    terminal = _snapshot(4, write_batch_id=batch_id, write_batch_created_at=100)
+    assert store.update_editor_execution_state(terminal)
+    assert store.get_write_batch(batch_id)["outcome"] == "passed"
+    assert store.update_editor_execution_state(dict(terminal, sequence=5))
+    assert store.pending_write_batch_id == ""
+    assert store.update_editor_execution_state(dict(terminal, sequence=6, pendingWriteBatchId=""))
+    assert store.pending_write_batch_id == ""
+    # A later Unity snapshot cannot restore a terminal batch as pending.
+    assert store.update_editor_execution_state(dict(terminal, sequence=7, pendingWriteBatchId=batch_id))
     assert store.pending_write_batch_id == ""
 
 
@@ -103,6 +117,7 @@ def test_write_batch_wait_reason_distinguishes_playmode_from_stale_context(tmp_p
     service = ResourceDomainService()
     service.server = SimpleNamespace(state=store)
     monkeypatch.setattr("upilot_mcp.domain.resource_service.now_ms", lambda: 40000)
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 40000)
 
     store.editor.connected = True
     store.editor.authoritative = True
@@ -165,6 +180,7 @@ def test_write_batch_attention_clears_when_the_same_batch_makes_progress(tmp_pat
     store.editor.play_mode_state = "edit"
     store.compile.phase = "compiling"
     monkeypatch.setattr("upilot_mcp.domain.resource_service.now_ms", lambda: 32_000)
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 32_000)
 
     store.compile.last_progress_at = 1_000
     stalled = asyncio.run(service.write_batch_status(batch["writeBatchId"]))
@@ -237,7 +253,9 @@ def test_manual_compile_status_does_not_claim_automatic_reuse_decision(tmp_path)
     assert "inputCoverageVerified" not in result.data
 
 
-def test_inflight_batch_request_survives_restart_and_rejects_conflicting_terminal(tmp_path):
+@pytest.mark.parametrize("restart", [False, True], ids=["same-lifetime-reload", "service-restart"])
+def test_inflight_batch_request_rejects_conflicts_and_restart_resurrection(tmp_path, monkeypatch, restart):
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 3000)
     store = StateStore()
     store.configure_project(str(tmp_path))
     batch = store.register_write_batch(["A.cs"], created_at=100, files_sha256="a", compile_when_edit_mode=True)
@@ -245,18 +263,31 @@ def test_inflight_batch_request_survives_restart_and_rejects_conflicting_termina
                       write_batch_id=batch["writeBatchId"], write_batch_created_at=100)
     first["compileRequestId"] = "original-request"
     assert store.update_editor_execution_state(first)
-    restored = StateStore()
-    restored.configure_project(str(tmp_path))
-    assert restored.get_write_batch(batch["writeBatchId"])["compileRequestId"] == "original-request"
-    terminal = _snapshot(2, write_batch_id=batch["writeBatchId"], write_batch_created_at=100)
+    # A new StateStore is a service restart, not an ordinary Bridge reconnect/Reload.
+    observer = StateStore() if restart else store
+    if restart:
+        observer.configure_project(str(tmp_path))
+        assert observer.pending_write_batches() == []
+        assert observer.pending_write_batch_id == ""
+    original = observer.get_write_batch(batch["writeBatchId"])
+    assert original["compileRequestId"] == "original-request"
+    terminal = _snapshot(2, domain=1, write_batch_id=batch["writeBatchId"], write_batch_created_at=100)
     terminal["compileRequestId"] = "other-request"
-    assert restored.update_editor_execution_state(terminal)
-    result = restored.get_write_batch(batch["writeBatchId"])
+    assert observer.update_editor_execution_state(terminal)
+    result = observer.get_write_batch(batch["writeBatchId"])
     assert result["terminalSnapshot"] is None
-    assert result["outcome"] == "unknown" and not restored.correlation_verified
+    assert result["outcome"] == "unknown" and not observer.correlation_verified
     terminal.update(sequence=3, compileRequestId="original-request")
-    assert restored.update_editor_execution_state(terminal)
-    assert restored.get_write_batch(batch["writeBatchId"])["outcome"] == "passed"
+    assert observer.update_editor_execution_state(terminal)
+    result = observer.get_write_batch(batch["writeBatchId"])
+    if restart:
+        assert result == original
+        assert result["outcome"] == "unknown" and not observer.correlation_verified
+        assert observer.pending_write_batches() == []
+        assert observer.pending_write_batch_id == ""
+    else:
+        assert result["outcome"] == "passed" and observer.correlation_verified
+        assert result["terminalSnapshot"]["compileRequestId"] == "original-request"
 
 
 def test_historical_verified_without_snapshot_does_not_prove_pass(tmp_path):

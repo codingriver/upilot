@@ -1183,11 +1183,26 @@ namespace CodingRiver.UPilot.Execution
             if (target is Array array) return context.Invoke(() => array.GetValue(indexValues.Select(value => Convert.ToInt32(value, CultureInfo.InvariantCulture)).ToArray()));
             if (indexValues.Length != 1) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Only CLR arrays support multiple indices.");
             object index = indexValues[0];
-            if (target is IList list) return context.Invoke(() => list[Convert.ToInt32(index, CultureInfo.InvariantCulture)]);
-            if (target is IDictionary dictionary) return context.Invoke(() => dictionary[index]);
-            var property = target?.GetType().GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
+            var property = FindStringIndexer(target, index);
+            if (property == null && target is IList list) return context.Invoke(() => list[Convert.ToInt32(index, CultureInfo.InvariantCulture)]);
+            if (property == null && target is IDictionary dictionary) return context.Invoke(() => dictionary[index]);
+            property = property ?? target?.GetType().GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
             if (property == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Target has no supported indexer.");
             return context.Invoke(() => property.GetValue(target, new[] { RuntimeConvert.ChangeType(index, property.GetIndexParameters()[0].ParameterType) }));
+        }
+        private static PropertyInfo FindStringIndexer(object target, object index)
+        {
+            if (!(index is string)) return null;
+            for (var type = target?.GetType(); type != null; type = type.BaseType)
+            {
+                foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                {
+                    var parameters = property.GetIndexParameters();
+                    if (property.Name == "Item" && parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
+                        return property;
+                }
+            }
+            return null;
         }
         internal override AssignmentReference ResolveAssignmentReference(CSharpEvaluationContext context)
         {
@@ -1210,18 +1225,19 @@ namespace CodingRiver.UPilot.Execution
             }
             if (indexValues.Length != 1) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Only CLR arrays support multiple indices.");
             object index = indexValues[0];
-            if (target is IList list)
+            var property = FindStringIndexer(target, index);
+            if (property == null && target is IList list)
             {
                 int listIndex = Convert.ToInt32(index, CultureInfo.InvariantCulture);
                 return new AssignmentReference(
                     () => context.Invoke(() => list[listIndex]),
                     value => { context.Invoke(() => { list[listIndex] = value; return null; }); context.SideEffectsMayHaveOccurred = true; });
             }
-            if (target is IDictionary dictionary)
+            if (property == null && target is IDictionary dictionary)
                 return new AssignmentReference(
                     () => context.Invoke(() => dictionary[index]),
                     value => { context.Invoke(() => { dictionary[index] = value; return null; }); context.SideEffectsMayHaveOccurred = true; });
-            var property = target?.GetType().GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
+            property = property ?? target?.GetType().GetProperty("Item", BindingFlags.Public | BindingFlags.Instance);
             if (property == null) throw new ExecutionContractException("CSHARP_BIND_ERROR", "Target has no supported indexer.");
             object convertedIndex = RuntimeConvert.ChangeType(index, property.GetIndexParameters()[0].ParameterType);
             return new AssignmentReference(
@@ -1360,6 +1376,23 @@ namespace CodingRiver.UPilot.Execution
 
             if (TryApplyUnityVectorOperator(op, left, right, context, out var vectorResult))
                 return vectorResult;
+
+            if ((op == "&" || op == "|" || op == "^") && left != null &&
+                left.GetType().IsEnum && right?.GetType() == left.GetType())
+            {
+                var enumType = left.GetType();
+                var underlying = Enum.GetUnderlyingType(enumType);
+                if (underlying == typeof(byte) || underlying == typeof(ushort) ||
+                    underlying == typeof(uint) || underlying == typeof(ulong))
+                {
+                    ulong a = Convert.ToUInt64(left, CultureInfo.InvariantCulture);
+                    ulong b = Convert.ToUInt64(right, CultureInfo.InvariantCulture);
+                    return Enum.ToObject(enumType, op == "&" ? a & b : op == "|" ? a | b : a ^ b);
+                }
+                long signedA = Convert.ToInt64(left, CultureInfo.InvariantCulture);
+                long signedB = Convert.ToInt64(right, CultureInfo.InvariantCulture);
+                return Enum.ToObject(enumType, op == "&" ? signedA & signedB : op == "|" ? signedA | signedB : signedA ^ signedB);
+            }
 
             bool floating = RuntimeConvert.IsFloating(left) || RuntimeConvert.IsFloating(right);
             if (floating)

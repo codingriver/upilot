@@ -1405,6 +1405,8 @@ namespace CodingRiver.UPilot.Execution
             int fewestOptionalDefaults = best.Min(c => c.OptionalDefaults);
             best = best.Where(c => c.OptionalDefaults == fewestOptionalDefaults).ToList();
             best = SelectMostSpecificNullCandidate(best);
+            best = best.Where(candidate => !best.Any(other =>
+                HidesSameStaticSignature(other.Method, candidate.Method))).ToList();
             if (best.Count != 1)
                 throw new ExecutionContractException(
                     "REFLECTION_BIND_AMBIGUOUS",
@@ -1424,6 +1426,20 @@ namespace CodingRiver.UPilot.Execution
                 Parameters = selected.Method.GetParameters(),
                 SourceArguments = selectedSources,
             };
+        }
+
+        private static bool HidesSameStaticSignature(MethodInfo derived, MethodInfo inherited)
+        {
+            if (!derived.IsStatic || !inherited.IsStatic || derived.Name != inherited.Name ||
+                derived.DeclaringType == inherited.DeclaringType ||
+                !derived.DeclaringType.IsSubclassOf(inherited.DeclaringType) ||
+                derived.GetGenericArguments().Length != inherited.GetGenericArguments().Length)
+                return false;
+            // Compare definitions, not coincidentally identical closed generic overloads.
+            if (derived.IsGenericMethod) derived = derived.GetGenericMethodDefinition();
+            if (inherited.IsGenericMethod) inherited = inherited.GetGenericMethodDefinition();
+            return derived.GetParameters().Select(parameter => parameter.ParameterType)
+                .SequenceEqual(inherited.GetParameters().Select(parameter => parameter.ParameterType));
         }
 
         private static IReadOnlyList<Type> InferGenericArguments(MethodInfo method, IReadOnlyList<ExecutionValue> supplied)

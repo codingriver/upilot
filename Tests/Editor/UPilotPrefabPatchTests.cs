@@ -112,6 +112,60 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(numeric.sha256Before, Is.EqualTo(numeric.sha256After));
         }
 
+        [TestCase("m_directMode", "Second")]
+        [TestCase("m_inheritedMode", "Second")]
+        [TestCase("m_directSpeed", "6.25")]
+        [TestCase("m_inheritedSpeed", "6.25")]
+        public void ManagedPrefixedFieldsPersistWithoutChangingAdjacentFields(string propertyPath, string value)
+        {
+            byte[] before = System.IO.File.ReadAllBytes(Path);
+            byte[] meta = System.IO.File.ReadAllBytes(Path + ".meta");
+            var request = Request();
+            request.componentType = typeof(UPilotPrefabPatchProbe).FullName;
+            request.properties = new List<SerializedPropertyWrite> { new() { propertyPath = propertyPath, value = value } };
+            var preview = UPilotPrefabPatchService.Patch(request);
+            Assert.That(preview.error, Is.Empty);
+            Assert.That(preview.modifiedCount, Is.EqualTo(1));
+            Assert.That(System.IO.File.ReadAllBytes(Path), Is.EqualTo(before));
+            request.dryRun = false;
+            request.confirmToken = preview.confirmToken;
+            var applied = UPilotPrefabPatchService.Patch(request);
+            Assert.That(applied.error, Is.Empty);
+            Assert.That(applied.applied && applied.persistenceVerified, Is.True);
+            Assert.That(System.IO.File.ReadAllBytes(Path + ".meta"), Is.EqualTo(meta));
+            var root = PrefabUtility.LoadPrefabContents(Path);
+            try
+            {
+                var probe = root.GetComponentInChildren<UPilotPrefabPatchProbe>();
+                Assert.That(probe.DirectMode, Is.EqualTo(propertyPath == "m_directMode"
+                    ? UPilotPrefabPatchProbe.Mode.Second : UPilotPrefabPatchProbe.Mode.First));
+                Assert.That(probe.InheritedMode, Is.EqualTo(propertyPath == "m_inheritedMode"
+                    ? UPilotPrefabPatchProbe.Mode.Second : UPilotPrefabPatchProbe.Mode.First));
+                Assert.That(probe.DirectSpeed, Is.EqualTo(propertyPath == "m_directSpeed" ? 6.25f : 2.5f));
+                Assert.That(probe.InheritedSpeed, Is.EqualTo(propertyPath == "m_inheritedSpeed" ? 6.25f : 1.25f));
+                Assert.That(probe.nested.adjacent, Is.EqualTo(UPilotPrefabPatchProbe.Mode.Second));
+                Assert.That(probe.values, Is.EqualTo(new[] { 1, 2, 3 }));
+            }
+            finally { PrefabUtility.UnloadPrefabContents(root); }
+        }
+
+        [TestCase("m_ObjectHideFlags", "1", "Structural/native")]
+        [TestCase("m_Script", "null", "Structural/native")]
+        [TestCase("values.Array.size", "4", "Array structure")]
+        public void ManagedFieldAllowanceNeverOpensNativeOrArrayStructure(string propertyPath, string value, string error)
+        {
+            byte[] before = System.IO.File.ReadAllBytes(Path);
+            byte[] meta = System.IO.File.ReadAllBytes(Path + ".meta");
+            var request = Request();
+            request.componentType = typeof(UPilotPrefabPatchProbe).FullName;
+            request.properties = new List<SerializedPropertyWrite> { new() { propertyPath = propertyPath, value = value } };
+            var rejected = UPilotPrefabPatchService.Patch(request);
+            Assert.That(rejected.applied, Is.False);
+            Assert.That(rejected.error, Does.Contain(error));
+            Assert.That(System.IO.File.ReadAllBytes(Path), Is.EqualTo(before));
+            Assert.That(System.IO.File.ReadAllBytes(Path + ".meta"), Is.EqualTo(meta));
+        }
+
         [Test]
         public void CallbackChangedValueFailsVerificationAndConditionallyRestoresBackup()
         {

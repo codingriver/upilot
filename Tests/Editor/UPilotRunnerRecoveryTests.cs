@@ -170,31 +170,56 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void CancelBindingFailureKeepsRunNonTerminalAndUncalled()
+        public void CancelBindingFailureAbortsWithoutCallingOrRetryingCancel()
         {
+            long deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
             var service = DetachedService(new TestRunResultPayload
             {
+                runGuid = "binding-failure-run", outcomeStatus = "running",
                 status = "running", phase = "running", isRunning = true, runnerState = "active",
+                cleanupAttemptDeadlineAt = deadline,
             });
             SetField(service, "_activeRunGuid", "binding-failure-run");
             ProbeWithoutCancelApi.m_testJobDataHolder.Active = true;
-            service.SnapshotSaverForTests = (_, __, ___) => { };
+            int saves = 0;
+            service.SnapshotSaverForTests = (_, __, ___) => { saves++; };
             service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(ProbeWithoutCancelApi));
 
-            var invocation = Assert.Throws<TargetInvocationException>(() =>
-                typeof(UPilotTestService).GetMethod("RequestCancel", BindingFlags.NonPublic | BindingFlags.Instance)
-                    .Invoke(service, new object[] { false }));
+            var cancel = typeof(UPilotTestService).GetMethod("RequestCancel", BindingFlags.NonPublic | BindingFlags.Instance);
+            var invocation = Assert.Throws<TargetInvocationException>(() => cancel.Invoke(service, new object[] { false }));
             Assert.That(invocation.InnerException, Is.TypeOf<InvalidOperationException>());
             var status = service.GetStatusSnapshot();
-            Assert.That(status.status, Is.EqualTo("cleanup"));
-            Assert.That(status.phase, Is.EqualTo("recovery_required"));
+            Assert.That(status.status, Is.EqualTo("aborted"));
+            Assert.That(status.phase, Is.EqualTo("aborted"));
+            Assert.That(status.terminal, Is.True);
+            Assert.That(status.cleanupPending, Is.False);
+            Assert.That(status.cleanupSucceeded, Is.False);
             Assert.That(status.cleanupErrors.Single(), Does.StartWith("cancel-binding:"));
-            Assert.That(status.isRunning, Is.True);
+            Assert.That(status.isRunning, Is.False);
             Assert.That(status.cancelRequested, Is.False);
             Assert.That(status.cancelAttemptCount, Is.Zero);
             Assert.That(status.runnerState, Is.EqualTo("active"));
+            Assert.That(status.runGuid, Is.EqualTo("binding-failure-run"));
+            Assert.That(status.outcomeStatus, Is.EqualTo("running"));
+            Assert.That(status.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
             Assert.That(status.recoveryDiagnostic, Does.Contain("no cancel API was invoked"));
             Assert.That(status.recoveryDiagnostic, Does.Contain("TEST_CANCEL_BINDING_UNAVAILABLE"));
+            Assert.That(status.nextAction, Does.Contain("do not replay start or cancellation"));
+            Assert.That(status.nextAction, Does.Contain("Underlying Unity execution may still be running"));
+            long endedAt = status.endedAt;
+            int savesAtTerminal = saves;
+            Assert.That(endedAt, Is.GreaterThan(0));
+            Assert.That(savesAtTerminal, Is.GreaterThan(0));
+
+            cancel.Invoke(service, new object[] { false });
+            cancel.Invoke(service, new object[] { true });
+            var repeated = service.GetStatusSnapshot();
+            Assert.That(repeated.status, Is.EqualTo("aborted"));
+            Assert.That(repeated.endedAt, Is.EqualTo(endedAt));
+            Assert.That(repeated.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+            Assert.That(repeated.cancelAttemptCount, Is.Zero);
+            Assert.That(repeated.cleanupErrors.Single(), Does.StartWith("cancel-binding:"));
+            Assert.That(saves, Is.EqualTo(savesAtTerminal));
         }
 
         [Test]
@@ -266,7 +291,23 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(runner, Is.Null);
             var active = UPilotTestService.Instance.GetStatusSnapshot().runGuid;
             Assert.That(adapter.Probe(active, out runner, out diagnostic), Is.EqualTo("active"), diagnostic);
-            Assert.That(runner, Is.Not.Null);
+            var holderType = type.Assembly.GetType("UnityEditor.TestTools.TestRunner.TestRun.TestJobDataHolder");
+            Assert.That(holderType, Is.Not.Null);
+            if (holderType.GetMethod("GetRunner", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new[] { typeof(string) }, null) != null)
+            {
+                Assert.That(runner, Is.Not.Null, "UTF with GetRunner must return the actual active Runner.");
+            }
+            else
+            {
+                // UTF 1.1.x exposes serialized jobs, not Runner objects. Verify the exact live job independently.
+                Assert.That(runner, Is.Null);
+                var singleton = holderType.GetProperty("instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.FlattenHierarchy);
+                Assert.That(singleton, Is.Not.Null);
+                var runs = (IEnumerable)holderType.GetField("TestRuns").GetValue(singleton.GetValue(null));
+                var job = runs.Cast<object>().Single(value => (string)value.GetType().GetField("guid").GetValue(value) == active);
+                Assert.That(job.GetType().GetField("isRunning").GetValue(job), Is.EqualTo(true));
+            }
         }
 
         [Test]
@@ -367,17 +408,27 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void RecoveryDeadlineDoesNotInventAbortedOrForgetIdentity()
+        public void RecoveryDeadlineAbortsWithoutInventingOutcomeOrForgettingIdentity()
         {
-            var service = (UPilotTestService)FormatterServices.GetUninitializedObject(typeof(UPilotTestService));
-            var snapshot = new TestRunResultPayload { runGuid = "", resultAuthoritative = false, status = "running" };
-            typeof(UPilotTestService).GetField("_lastResults", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(service, snapshot);
-            typeof(UPilotTestService).GetMethod("MarkRecoveredRunOrphaned", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(service, null);
-            Assert.That(snapshot.status, Is.EqualTo("running"));
-            Assert.That(snapshot.phase, Is.EqualTo("recovery_required"));
+            var snapshot = new TestRunResultPayload { runGuid = "orphaned-run", resultAuthoritative = false,
+                status = "running", runnerState = "unknown" };
+            var service = DetachedService(snapshot);
+            SetField(service, "_activeRunGuid", snapshot.runGuid);
+            service.SnapshotSaverForTests = (_, active, clear) =>
+            {
+                Assert.That(active, Is.False);
+                Assert.That(clear, Is.True);
+            };
+            typeof(UPilotTestService).GetMethod("MarkRecoveredRunOrphaned", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(service, null);
+            Assert.That(snapshot.runGuid, Is.EqualTo("orphaned-run"));
+            Assert.That(snapshot.status, Is.EqualTo("aborted"));
+            Assert.That(snapshot.terminal, Is.True);
             Assert.That(snapshot.outcomeStatus, Is.EqualTo("unknown"));
             Assert.That(snapshot.resultAuthoritative, Is.False);
-            Assert.That(snapshot.endedAt, Is.Zero);
+            Assert.That(snapshot.cleanupSucceeded, Is.False);
+            Assert.That(snapshot.endedAt, Is.GreaterThan(0));
+            Assert.That(service.IsRunning, Is.False);
         }
 
         [Test]
@@ -481,7 +532,7 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void CleanupReleaseFailureStopsUntilExplicitRetryAndArchivesOnlyResolvedStage()
+        public void CleanupReleaseFailureAbortsWithoutRetryOrFalseReleaseEvidence()
         {
             var snapshot = new TestRunResultPayload
             {
@@ -495,28 +546,31 @@ namespace CodingRiver.UPilot.Tests
             ProbeWithoutCancelApi.m_testJobDataHolder.Active = false;
             service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(ProbeWithoutCancelApi));
             int attempts = 0, saves = 0;
-            service.SnapshotSaverForTests = (_, __, ___) => saves++;
+            service.SnapshotSaverForTests = (_, active, clear) =>
+            {
+                saves++;
+                Assert.That(active, Is.False);
+                Assert.That(clear, Is.True);
+            };
             service.ApiDestroyerForTests = _ => { attempts++; throw new IOException("injected release failure"); };
             try
             {
                 InvokeCleanup(service);
-                Assert.That(service.GetStatusSnapshot().phase, Is.EqualTo("recovery_required"));
-                Assert.That(service.IsRunning, Is.True);
+                Assert.That(snapshot.phase, Is.EqualTo("aborted"));
+                Assert.That(snapshot.terminal, Is.True);
+                Assert.That(service.IsRunning, Is.False);
                 int saved = saves;
                 for (int i = 0; i < 10; i++) { service.GetStatusSnapshot(); InvokeCleanup(service); }
-                Assert.That(attempts, Is.EqualTo(1));
-                Assert.That(saves, Is.EqualTo(saved));
-                Assert.That(service.GetStatusSnapshot().cleanupErrors, Has.Count.EqualTo(1));
-                service.ApiDestroyerForTests = owned => { attempts++; UnityEngine.Object.DestroyImmediate(owned); };
                 service.ForceCleanupActiveRun(snapshot.runGuid);
                 InvokeCleanup(service);
-                var completed = service.GetStatusSnapshot();
-                Assert.That(service.IsRunning, Is.False);
-                Assert.That(attempts, Is.EqualTo(2));
-                Assert.That(completed.status, Is.EqualTo("failed"));
-                Assert.That(completed.cleanupSucceeded, Is.True);
-                Assert.That(completed.cleanupErrors, Is.Empty);
-                Assert.That(completed.cleanupErrorHistory.Single(), Does.Contain("api-release:"));
+                Assert.That(attempts, Is.EqualTo(1));
+                Assert.That(saves, Is.EqualTo(saved));
+                Assert.That(snapshot.outcomeStatus, Is.EqualTo("failed"));
+                Assert.That(snapshot.resultAuthoritative, Is.True);
+                Assert.That(snapshot.cleanupSucceeded, Is.False);
+                Assert.That(snapshot.cleanupResourcesReleased, Is.False);
+                Assert.That(snapshot.cleanupErrors.Single(), Does.StartWith("api-release:"));
+                Assert.That(snapshot.unresolvedResources, Does.Contain("test-runner-api"));
             }
             finally { DetachCleanup(service); if (api != null) UnityEngine.Object.DestroyImmediate(api); }
         }
@@ -530,11 +584,52 @@ namespace CodingRiver.UPilot.Tests
             SetField(service, "_activeRunGuid", snapshot.runGuid);
             service.SnapshotSaverForTests = (_, __, ___) => { };
             InvokeCleanup(service);
-            Assert.That(service.GetStatusSnapshot().phase, Is.EqualTo("recovery_required"));
+            Assert.That(service.GetStatusSnapshot().phase, Is.EqualTo("aborted"));
             for (int i = 0; i < 5; i++) { service.GetStatusSnapshot(); InvokeCleanup(service); }
             Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(1));
             Assert.That(snapshot.cleanupResourcesReleased, Is.False);
-            Assert.That(service.IsRunning, Is.True);
+            Assert.That(service.IsRunning, Is.False);
+            Assert.That(snapshot.terminal, Is.True);
+            Assert.That(snapshot.cleanupSucceeded, Is.False);
+            Assert.That(snapshot.outcomeStatus, Is.EqualTo("completed"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ExpiredCleanupGuidanceDoesNotOfferAdministrativeRetry(bool expireAfterRelease)
+        {
+            var snapshot = new TestRunResultPayload { runGuid = "expired-guidance", status = "cleanup", phase = "cleanup",
+                resultAuthoritative = true, outcomeStatus = "failed",
+                cleanupAttemptDeadlineAt = expireAfterRelease ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000 : 1 };
+            var service = DetachedService(snapshot);
+            int saves = 0;
+            service.SnapshotSaverForTests = (_, __, ___) =>
+            {
+                saves++;
+                // Model expiry during the original release-evidence write, without sleeping or a new clock abstraction.
+                if (expireAfterRelease && snapshot.cleanupResourcesReleased) snapshot.cleanupAttemptDeadlineAt = 1;
+            };
+            try
+            {
+                if (expireAfterRelease) InvokeCleanup(service);
+                else typeof(UPilotTestService).GetMethod("ForceStopTick", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(service, null);
+                Assert.That(snapshot.terminal, Is.True);
+                Assert.That(snapshot.status, Is.EqualTo("aborted"));
+                Assert.That(snapshot.cleanupSucceeded, Is.False);
+                Assert.That(snapshot.cleanupResourcesReleased, Is.EqualTo(expireAfterRelease));
+                Assert.That(snapshot.resultAuthoritative, Is.True);
+                Assert.That(snapshot.outcomeStatus, Is.EqualTo("failed"));
+                Assert.That(snapshot.nextAction, Does.Contain("do not retry cleanup or replay start"));
+                Assert.That(snapshot.terminalReason, Is.EqualTo(snapshot.nextAction));
+                int terminalSaves = saves;
+                InvokeCleanup(service);
+                service.CancelActiveRun(snapshot.runGuid);
+                Assert.That(saves, Is.EqualTo(terminalSaves));
+                Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(1));
+                Assert.That(snapshot.cancelAttemptCount, Is.Zero);
+            }
+            finally { DetachCleanup(service); }
         }
 
         [Test]
@@ -564,11 +659,12 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void TerminalCommitFailureRetainsOwnershipAndRetriesOnlyPersistence()
+        public void TerminalCommitFailureAbortsAndRetainsEvidenceWithoutRetry()
         {
-            var snapshot = new TestRunResultPayload { runGuid = "commit-retry", status = "cleanup", phase = "cleanup",
-                resultAuthoritative = true, outcomeStatus = "failed",
-                cleanupAttemptDeadlineAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000 };
+            long deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
+            var snapshot = new TestRunResultPayload { runGuid = "commit-failure", status = "cleanup", phase = "cleanup",
+                resultAuthoritative = true, outcomeStatus = "failed", failed = 1,
+                cleanupAttemptDeadlineAt = deadline };
             var service = DetachedService(snapshot);
             SetField(service, "_activeRunGuid", snapshot.runGuid);
             var api = ScriptableObject.CreateInstance<ReleaseApiStub>();
@@ -576,26 +672,45 @@ namespace CodingRiver.UPilot.Tests
             ProbeWithoutCancelApi.m_testJobDataHolder.Active = false;
             service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(ProbeWithoutCancelApi));
             int releases = 0;
+            int saves = 0;
             service.ApiDestroyerForTests = owned => { releases++; UnityEngine.Object.DestroyImmediate(owned); };
-            service.SnapshotSaverForTests = (_, __, clear) => { if (clear) throw new IOException("pointer failure"); };
+            service.SnapshotSaverForTests = (_, __, clear) => { saves++; if (clear) throw new IOException("pointer failure"); };
             try
             {
                 InvokeCleanup(service);
-                Assert.That(service.IsRunning, Is.True);
-                Assert.That(service.GetStatusSnapshot().cleanupSucceeded, Is.False);
-                Assert.That(snapshot.cleanupResourcesReleased, Is.True);
-                Assert.That(snapshot.cleanupErrors, Has.Count.EqualTo(1));
-                service.SnapshotSaverForTests = (_, __, ___) => { };
-                typeof(UPilotTestService).GetMethod("PersistSnapshot", BindingFlags.NonPublic | BindingFlags.Instance)
-                    .Invoke(service, new object[] { false });
-                Assert.That(snapshot.cleanupErrors.Single(), Does.StartWith("persistence-commit:"));
-                Assert.That(snapshot.cleanupErrorHistory, Is.Empty, "Nonterminal writes cannot resolve a commit failure.");
+                var result = service.GetStatusSnapshot();
+                Assert.That(service.IsRunning, Is.False);
+                Assert.That(result.status, Is.EqualTo("aborted"));
+                Assert.That(result.phase, Is.EqualTo("aborted"));
+                Assert.That(result.terminal, Is.True);
+                Assert.That(result.cleanupPending, Is.False);
+                Assert.That(result.cleanupSucceeded, Is.False);
+                Assert.That(result.cleanupResourcesReleased, Is.True);
+                Assert.That(result.cleanupErrors.Any(error => error.StartsWith("persistence-commit:")), Is.True);
+                Assert.That(result.cleanupErrors.Any(error => error.StartsWith("persistence:")), Is.True);
+                Assert.That(result.persistenceError, Does.Contain("pointer failure"));
+                Assert.That(result.terminalReason, Does.Contain("Terminal result persistence failed"));
+                Assert.That(result.runGuid, Is.EqualTo("commit-failure"));
+                Assert.That(result.outcomeStatus, Is.EqualTo("failed"));
+                Assert.That(result.resultAuthoritative, Is.True);
+                Assert.That(result.failed, Is.EqualTo(1));
+                Assert.That(result.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                Assert.That(result.endedAt, Is.GreaterThan(0));
+                Assert.That(GetField(service, "_activeRunGuid"), Is.Null);
+                Assert.That(GetField(service, "_cleanupScheduled"), Is.False);
+                Assert.That(releases, Is.EqualTo(1));
+                Assert.That(saves, Is.GreaterThan(0));
+
+                string frozen = JsonUtility.ToJson(result);
+                int terminalSaves = saves;
+                service.SnapshotSaverForTests = (_, __, ___) => { saves++; };
+                service.CancelActiveRun(result.runGuid);
+                service.ForceCleanupActiveRun(result.runGuid);
                 SetField(service, "_nextCleanupProbeAt", 0L);
                 InvokeCleanup(service);
-                Assert.That(releases, Is.EqualTo(1));
-                Assert.That(service.IsRunning, Is.False);
-                Assert.That(service.GetStatusSnapshot().cleanupErrorHistory.Single(), Does.Contain("pointer failure"));
-                Assert.That(service.GetStatusSnapshot().cleanupErrors, Is.Empty);
+                Assert.That(JsonUtility.ToJson(service.GetStatusSnapshot()), Is.EqualTo(frozen));
+                Assert.That(saves, Is.EqualTo(terminalSaves), "Terminal queries and duplicate stops cannot retry persistence.");
+                Assert.That(releases, Is.EqualTo(1), "Already released resources cannot be released twice.");
             }
             finally { DetachCleanup(service); if (api != null) UnityEngine.Object.DestroyImmediate(api); }
         }
@@ -696,7 +811,7 @@ namespace CodingRiver.UPilot.Tests
             int releases = 0;
             service.SnapshotSaverForTests = (value, _, clear) =>
             {
-                Assert.That(clear, Is.False);
+                if (clear) Assert.That(failure, Is.EqualTo("destroy").Or.EqualTo("expired"));
                 if (failure == "intent" || (failure == "release-evidence" && value.cleanupResourcesReleased))
                     throw new System.IO.IOException("injected snapshot failure");
             };
@@ -709,17 +824,19 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 InvokeRunFinished(service);
-                Assert.That(service.IsRunning, Is.True);
+                bool waitingForPersistence = failure == "intent" || failure == "release-evidence";
+                Assert.That(service.IsRunning, Is.EqualTo(waitingForPersistence));
+                Assert.That(snapshot.terminal, Is.EqualTo(!waitingForPersistence));
                 Assert.That(snapshot.cleanupSucceeded, Is.False);
-                Assert.That(snapshot.cleanupPending, Is.True);
+                Assert.That(snapshot.cleanupPending, Is.EqualTo(waitingForPersistence));
                 Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
                 Assert.That(releases, Is.EqualTo(failure == "destroy" || failure == "release-evidence" ? 1 : 0));
                 // The duplicate result cannot retry an uncertain release or renew the window.
                 InvokeRunFinished(service);
                 Assert.That(releases, Is.EqualTo(failure == "destroy" || failure == "release-evidence" ? 1 : 0));
-                if (failure == "destroy")
+                if (!waitingForPersistence)
                 {
-                    Assert.That(snapshot.phase, Is.EqualTo("recovery_required"));
+                    Assert.That(snapshot.phase, Is.EqualTo("aborted"));
                     Assert.That(GetField(service, "_cleanupScheduled"), Is.False);
                     Assert.That(snapshot.cleanupResourcesReleased, Is.False);
                 }
@@ -877,9 +994,11 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 InvokeCleanup(service);
-                Assert.That(snapshot.phase, Is.EqualTo("recovery_required"));
+                Assert.That(snapshot.phase, Is.EqualTo("aborted"));
                 Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.Zero);
                 Assert.That(snapshot.cleanupResourcesReleased, Is.False);
+                Assert.That(snapshot.terminal, Is.True);
+                Assert.That(service.IsRunning, Is.False);
             }
             finally { DetachCleanup(service); }
         }
@@ -904,7 +1023,7 @@ namespace CodingRiver.UPilot.Tests
 
         [TestCase(false)]
         [TestCase(true)]
-        public void PostReloadDispositionPreservesEvidenceAndRequiresFinalCommit(bool failCommit)
+        public void HistoricalDispositionPreservesEvidenceAndCannotRenewExpiredCommit(bool failCommit)
         {
             string directory = Path.Combine(Path.GetTempPath(), "upilot-disposition-" + Guid.NewGuid().ToString("N"));
             var snapshot = new TestRunResultPayload { runGuid = "disposition-original", phase = "recovery_required",
@@ -920,7 +1039,15 @@ namespace CodingRiver.UPilot.Tests
             int commits = 0;
             service.SnapshotSaverForTests = (value, active, clear) =>
             {
-                Assert.That(GetField(service, "_isRunning"), Is.True, "Must retain slot until commit returns");
+                if (value.status == "aborted")
+                {
+                    Assert.That(GetField(service, "_isRunning"), Is.False);
+                    Assert.That(value.terminal, Is.True);
+                    Assert.That(active, Is.False);
+                    Assert.That(clear, Is.True);
+                }
+                else
+                    Assert.That(GetField(service, "_isRunning"), Is.True, "A successful legacy commit publishes only after persistence.");
                 if (clear) { commits++; if (failCommit) throw new IOException("injected pointer failure"); }
             };
             try
@@ -943,15 +1070,37 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(commits, Is.EqualTo(1), "Duplicate request must not repeat commit actions");
                 if (failCommit)
                 {
-                    // Explicit cleanup renews only the commit attempt, never cancel or unregister.
+                    // Historical disposition data cannot renew an expired cleanup budget.
+                    byte[] backup = File.ReadAllBytes(result.disposition.backupPath);
                     result.phase = "recovery_required";
                     result.cleanupAttemptDeadlineAt = 1;
                     failCommit = false;
                     service.ForceCleanupActiveRun(snapshot.runGuid);
                     result = (TestRunResultPayload)GetField(service, "_lastResults");
                     Assert.That(result.terminal, Is.True);
-                    Assert.That(result.status, Is.EqualTo("Released"));
+                    Assert.That(result.status, Is.EqualTo("aborted"));
+                    Assert.That(result.phase, Is.EqualTo("aborted"));
+                    Assert.That(service.IsRunning, Is.False);
+                    Assert.That(result.cleanupPending, Is.False);
                     Assert.That(result.cleanupSucceeded, Is.False);
+                    Assert.That(result.cleanupResourcesReleased, Is.False);
+                    Assert.That(result.cleanupAttemptDeadlineAt, Is.EqualTo(1));
+                    Assert.That(result.runGuid, Is.EqualTo(snapshot.runGuid));
+                    Assert.That(result.outcomeStatus, Is.EqualTo("failed"));
+                    Assert.That(result.resultAuthoritative, Is.True);
+                    Assert.That(result.failed, Is.EqualTo(1));
+                    Assert.That(result.unresolvedResources, Has.Count.EqualTo(1));
+                    Assert.That(result.unresolvedResources[0], Is.EqualTo("original callback release unverified"));
+                    Assert.That(File.ReadAllBytes(result.disposition.backupPath), Is.EqualTo(backup));
+                    Assert.That(result.endedAt, Is.GreaterThan(0));
+                    Assert.That(GetField(service, "_activeRunGuid"), Is.Null);
+                    Assert.That(commits, Is.EqualTo(2), "Only the failed legacy commit and final abort may clear the pointer.");
+                    string frozen = JsonUtility.ToJson(result);
+                    service.ForceCleanupActiveRun(snapshot.runGuid);
+                    service.AbandonReloadedRun(request);
+                    InvokeCleanup(service);
+                    Assert.That(JsonUtility.ToJson(service.GetStatusSnapshot()), Is.EqualTo(frozen));
+                    Assert.That(commits, Is.EqualTo(2));
                 }
             }
             finally { DetachCleanup(service); if (Directory.Exists(directory)) Directory.Delete(directory, true); }
@@ -1020,6 +1169,144 @@ namespace CodingRiver.UPilot.Tests
             }
             finally { Directory.Delete(directory, true); }
         }
+
+        [TestCase("cancelled")]
+        [TestCase("expired")]
+        [TestCase("missing-deadline")]
+        [TestCase("legacy-recovery")]
+        public void ReloadCleanupFailureAbortsOnceWithoutRenewingOrInventingRelease(string scenario)
+        {
+            long deadline = scenario == "expired" ? 1 : scenario == "missing-deadline" ? 0
+                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
+            var snapshot = new TestRunResultPayload { runGuid = "reload-" + scenario,
+                serviceLifecycleId = UPilotServiceLifetime.Id, status = "cleanup",
+                phase = scenario == "legacy-recovery" ? "recovery_required" : "cleanup",
+                cleanupPending = true, cleanupAttemptDeadlineAt = deadline,
+                cancelRequested = true, cancelAttemptCount = 1, runnerState = "active",
+                cleanupResourcesReleased = scenario != "cancelled",
+                unresolvedResources = new System.Collections.Generic.List<string> { "test-callback", "test-runner-job" } };
+            var service = DetachedService(snapshot);
+            int saves = 0;
+            service.SnapshotSaverForTests = (_, active, clear) =>
+            {
+                saves++;
+                Assert.That(active, Is.False);
+                Assert.That(clear, Is.True);
+            };
+            service.ApiDestroyerForTests = _ => Assert.Fail("Reload must not create or destroy a replacement API.");
+            try
+            {
+                RecoverLoaded(service, true);
+                Assert.That(snapshot.status, Is.EqualTo("aborted"));
+                Assert.That(snapshot.terminal, Is.True);
+                Assert.That(snapshot.cleanupPending, Is.False);
+                Assert.That(snapshot.cleanupSucceeded, Is.False);
+                Assert.That(snapshot.resultAuthoritative, Is.False);
+                Assert.That(snapshot.runnerState, Is.EqualTo("active"), "Task termination is not Runner termination.");
+                Assert.That(service.IsRunning, Is.False);
+                Assert.That(GetField(service, "_activeRunGuid"), Is.Null);
+                Assert.That(GetField(service, "_cleanupScheduled"), Is.False);
+                if (scenario == "cancelled")
+                    Assert.That(snapshot.unresolvedResources, Does.Contain("test-callback"));
+                for (int i = 0; i < 3; i++)
+                {
+                    InvokeRunFinished(service);
+                    service.CancelActiveRun(snapshot.runGuid);
+                    service.GetStatusSnapshot();
+                    InvokeCleanup(service);
+                    RecoverLoaded(service, true); // Even a stale active pointer cannot resurrect a terminal snapshot.
+                }
+                Assert.That(saves, Is.EqualTo(1));
+                Assert.That(snapshot.cancelAttemptCount, Is.EqualTo(1));
+                Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                Assert.That(snapshot.resultAuthoritative, Is.False);
+                Assert.That(snapshot.cleanupResourcesReleased, Is.EqualTo(scenario != "cancelled"));
+            }
+            finally { DetachCleanup(service); }
+        }
+
+        [Test]
+        public void ReloadWithDurableReleaseUsesOriginalDeadlineAndDoesNotReleaseAgain()
+        {
+            long deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
+            var snapshot = new TestRunResultPayload { runGuid = "reload-released", serviceLifecycleId = UPilotServiceLifetime.Id,
+                status = "cleanup", phase = "cleanup", cleanupPending = true, cleanupResourcesReleased = true,
+                cleanupAttemptDeadlineAt = deadline, resultAuthoritative = true, outcomeStatus = "completed" };
+            var service = DetachedService(snapshot);
+            ProbeWithoutCancelApi.m_testJobDataHolder.Active = false;
+            service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(ProbeWithoutCancelApi));
+            service.SnapshotSaverForTests = (_, active, clear) =>
+            {
+                Assert.That(active, Is.False);
+                Assert.That(clear, Is.True);
+            };
+            service.ApiDestroyerForTests = _ => Assert.Fail("The original domain already released its API.");
+            try
+            {
+                RecoverLoaded(service, true);
+                Assert.That(service.IsRunning, Is.True);
+                Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                InvokeCleanup(service);
+                var result = service.GetStatusSnapshot();
+                Assert.That(result.status, Is.EqualTo("completed"));
+                Assert.That(result.terminal, Is.True);
+                Assert.That(result.cleanupSucceeded, Is.True);
+                Assert.That(result.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                Assert.That(result.cancelAttemptCount, Is.Zero);
+            }
+            finally { DetachCleanup(service); }
+        }
+
+        [Test]
+        public void TerminalCleanupCannotRescheduleOrRenewBudget()
+        {
+            var snapshot = new TestRunResultPayload { runGuid = "terminal-cleanup", status = "cleanup",
+                cleanupAttemptDeadlineAt = 1 };
+            var service = DetachedService(snapshot);
+            service.SnapshotSaverForTests = (_, __, ___) => { };
+            try
+            {
+                InvokeCleanup(service);
+                typeof(UPilotTestService).GetMethod("ScheduleCleanup", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(service, null);
+                Assert.That(snapshot.terminal, Is.True);
+                Assert.That(GetField(service, "_cleanupScheduled"), Is.False);
+                Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(1));
+            }
+            finally { DetachCleanup(service); }
+        }
+
+        [Test]
+        public void NewRunTrackingDoesNotInheritAbortedRunOwnershipOrChangeHistory()
+        {
+            var snapshot = new TestRunResultPayload { runGuid = "previous-aborted", status = "aborted", terminal = true,
+                cleanupAttemptDeadlineAt = 1, cleanupSucceeded = false, resultAuthoritative = false,
+                unresolvedResources = new List<string> { "test-callback" } };
+            var service = DetachedService(snapshot);
+            SetField(service, "_isRunning", false);
+            SetField(service, "_cleanupOwnershipUnknown", true);
+            SetField(service, "_editorCleanupPending", true);
+            SetField(service, "_forceStopRequested", true);
+            SetField(service, "_activeCallback", new object());
+            SetField(service, "_pendingTerminalStatus", "failed");
+            service.ApiDestroyerForTests = _ => Assert.Fail("Starting another run is not permission to release unknown resources.");
+            service.SnapshotSaverForTests = (_, __, ___) => Assert.Fail("Previous run evidence must not change.");
+            typeof(UPilotTestService).GetMethod("ResetRunTracking", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(service, null);
+            Assert.That(GetField(service, "_cleanupOwnershipUnknown"), Is.False);
+            Assert.That(GetField(service, "_editorCleanupPending"), Is.False);
+            Assert.That(GetField(service, "_forceStopRequested"), Is.False);
+            Assert.That(GetField(service, "_activeCallback"), Is.Null);
+            Assert.That(GetField(service, "_pendingTerminalStatus"), Is.Null);
+            Assert.That(snapshot.status, Is.EqualTo("aborted"));
+            Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(1));
+            Assert.That(snapshot.cleanupSucceeded, Is.False);
+            Assert.That(snapshot.unresolvedResources.Single(), Is.EqualTo("test-callback"));
+        }
+
+        private static void RecoverLoaded(UPilotTestService service, bool active) =>
+            typeof(UPilotTestService).GetMethod("RecoverLoadedRun", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(service, new object[] { active });
 
         private static void InvokeCleanup(UPilotTestService service) =>
             typeof(UPilotTestService).GetMethod("CleanupActiveRun", BindingFlags.NonPublic | BindingFlags.Instance)

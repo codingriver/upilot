@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEditor;
@@ -99,7 +100,8 @@ namespace CodingRiver.UPilot
                     var property = serialized.FindProperty(write.propertyPath);
                     if (property == null) throw new InvalidOperationException("Property not found: " + write.propertyPath);
                     if (property.propertyPath.StartsWith("m_", StringComparison.Ordinal)
-                        && property.propertyPath != "m_Enabled")
+                        && property.propertyPath != "m_Enabled"
+                        && !IsUserSerializedField(component.GetType(), property.propertyPath))
                         throw new InvalidOperationException("Structural/native fields are excluded: " + write.propertyPath);
                     if (property.propertyType == SerializedPropertyType.ArraySize || (property.isArray && property.propertyType != SerializedPropertyType.String))
                         throw new InvalidOperationException("Array structure changes are excluded: " + write.propertyPath);
@@ -213,6 +215,23 @@ namespace CodingRiver.UPilot
                 finally { ActiveAssets.Remove(absolute); }
             }
             return receipt;
+        }
+
+        private static bool IsUserSerializedField(Type componentType, string propertyPath)
+        {
+            if (!typeof(MonoBehaviour).IsAssignableFrom(componentType)) return false;
+            int separator = propertyPath.IndexOf('.');
+            string name = separator < 0 ? propertyPath : propertyPath.Substring(0, separator);
+            for (var type = componentType; type != null && type != typeof(MonoBehaviour); type = type.BaseType)
+            {
+                var field = type.GetField(name, BindingFlags.Instance | BindingFlags.Public
+                    | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (field == null) continue;
+                return !field.IsInitOnly && !field.IsDefined(typeof(NonSerializedAttribute), false)
+                    && (field.IsPublic || field.IsDefined(typeof(SerializeField), false)
+                        || field.IsDefined(typeof(SerializeReference), false));
+            }
+            return false;
         }
 
         private static Component ResolveComponent(GameObject root, PrefabPatchPayload request)

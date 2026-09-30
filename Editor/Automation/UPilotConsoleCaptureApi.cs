@@ -131,7 +131,7 @@ namespace CodingRiver.UPilot.Automation
                     if (string.IsNullOrEmpty(manifest.directory)
                         || !string.Equals(Path.GetFullPath(manifest.manifestPath), Path.Combine(root, "session.json"), StringComparison.OrdinalIgnoreCase)
                         || !string.Equals(Path.GetFullPath(manifest.summaryPath), Path.Combine(root, "summary.json"), StringComparison.OrdinalIgnoreCase)
-                        || !string.Equals(Path.GetFullPath(manifest.jsonlPath), Path.Combine(root, "console.jsonl"), StringComparison.OrdinalIgnoreCase))
+                        || !string.Equals(Path.GetDirectoryName(Path.GetFullPath(manifest.jsonlPath)), root, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidDataException("CONSOLE_CAPTURE_PATH_MISMATCH");
                     AutomationRunCapture.VerifyStoppedFiles(manifest, expectedJson,
                         (kind, path) => CaptureMetadata(root, kind, path), null, cancellationToken);

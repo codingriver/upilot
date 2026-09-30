@@ -163,6 +163,23 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotTestService.SelectionSnapshotMatches(null, "", ""), Is.False);
         }
 
+        [TestCase("Demo.First.One")]
+        [TestCase(@"regex:^Demo\.First\.One$")]
+        public void LegacyFilterDiscoveryProducesTheExpectedRunSnapshot(string filter)
+        {
+            var listed = UPilotTestService.ResolveTestSelection(Tree(), "EditMode", filter);
+            var current = UPilotTestService.ResolveTestSelection(Tree(), "EditMode", filter);
+            Assert.That(listed.matchedCount, Is.EqualTo(1));
+            Assert.That(UPilotTestService.RunSelectionMatches(current,
+                listed.selectionDomain, listed.selectionSnapshotId), Is.True);
+            Assert.That(UPilotTestService.RunSelectionMatches(current,
+                "old-domain", listed.selectionSnapshotId), Is.False);
+            Assert.That(UPilotTestService.RunSelectionMatches(current,
+                listed.selectionDomain, "old-snapshot"), Is.False);
+            Assert.That(UPilotTestService.ResolveTestSelection(Tree(), "EditMode", "regex:^Missing$").matchedCount,
+                Is.Zero, "A legacy zero-match filter must not become an unfiltered run.");
+        }
+
         [Test]
         public void UnfilteredRunDoesNotRequireASelectionSnapshot()
         {

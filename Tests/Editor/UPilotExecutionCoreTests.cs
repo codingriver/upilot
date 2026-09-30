@@ -70,6 +70,60 @@ namespace CodingRiver.UPilot.Tests
 
     public sealed class ExecutionInheritedStaticDerivedFixture : ExecutionInheritedStaticBaseFixture { }
 
+
+    public class ExecutionHiddenStaticBaseFixture
+    {
+        public static int BaseCalls;
+        public static ExecutionHiddenStaticBaseFixture Parse(string value) { BaseCalls++; return new ExecutionHiddenStaticBaseFixture(); }
+        public static string Distinct(IComparable value) => "base";
+    }
+    public sealed class ExecutionHiddenStaticDerivedFixture : ExecutionHiddenStaticBaseFixture
+    {
+        public static int DerivedCalls, ArgumentCalls;
+        public static string GetText() { ArgumentCalls++; return "text"; }
+        public new static ExecutionHiddenStaticDerivedFixture Parse(string value)
+        {
+            DerivedCalls++;
+            if (value == "throw") throw new InvalidOperationException("hidden-static failure");
+            return new ExecutionHiddenStaticDerivedFixture();
+        }
+        public static string Distinct(IFormattable value) => "derived";
+    }
+    public class ExecutionStringIndexFixture : ArrayList
+    {
+        public int Value = 4;
+        public int Gets, Sets;
+        public bool ThrowOnGet, ThrowOnSet, UsedDerived;
+        public int this[string key]
+        {
+            get { Gets++; if (ThrowOnGet) throw new InvalidOperationException("index-get failure"); return Value; }
+            set { Sets++; if (ThrowOnSet) throw new InvalidOperationException("index-set failure"); Value = value; }
+        }
+    }
+    public sealed class ExecutionDerivedStringIndexFixture : ExecutionStringIndexFixture
+    {
+        public new int this[string key]
+        {
+            get { UsedDerived = true; return base[key]; }
+            set { UsedDerived = true; base[key] = value; }
+        }
+    }
+    public sealed class ExecutionStringIndexSource
+    {
+        public ExecutionStringIndexFixture Target;
+        public int ReceiverCalls, IndexCalls;
+        public ExecutionStringIndexFixture GetTarget() { ReceiverCalls++; return Target; }
+        public string GetKey() { IndexCalls++; return "domain"; }
+    }
+    [Flags] public enum ExecutionSByteFlags : sbyte { Low = 1, High = sbyte.MinValue }
+    [Flags] public enum ExecutionByteFlags : byte { Low = 1, High = 128 }
+    [Flags] public enum ExecutionInt16Flags : short { Low = 1, High = short.MinValue }
+    [Flags] public enum ExecutionUInt16Flags : ushort { Low = 1, High = 32768 }
+    [Flags] public enum ExecutionInt32Flags : int { Low = 1, High = int.MinValue }
+    [Flags] public enum ExecutionUInt32Flags : uint { Low = 1, High = 2147483648U }
+    [Flags] public enum ExecutionInt64Flags : long { Low = 1, High = long.MinValue }
+    [Flags] public enum ExecutionUInt64Flags : ulong { Low = 1, High = 9223372036854775808UL }
+
     public static class ExecutionGenericStaticFixture<T>
     {
         public static string TypeName => typeof(T).Name;
@@ -190,8 +244,67 @@ namespace CodingRiver.UPilot.Tests
         public void Dispose() { Disposed = true; }
     }
 
+    // Only this test owns these windows; no SceneView or user window is a docking target.
+    public sealed class ExecutionGetWindowProbe : EditorWindow { }
+
     public sealed class UPilotExecutionCoreTests
     {
+        [TestCase(false, -1)]
+        [TestCase(false, 0)]
+        [TestCase(false, 1)]
+        [TestCase(true, -1)]
+        [TestCase(true, 0)]
+        [TestCase(true, 1)]
+        public void EditorWindowGenericOverloadsBindAndInvokeOnce(bool emit, int arrayLength)
+        {
+            Assert.That(Resources.FindObjectsOfTypeAll<ExecutionGetWindowProbe>(), Is.Empty,
+                "Do not take ownership of a pre-existing window.");
+            var types = arrayLength <= 0 ? new Type[0] : new[] { typeof(ExecutionGetWindowProbe) };
+            var args = arrayLength < 0 ? new ExecutionValue[0]
+                : new[] { new ExecutionValue { Value = types } };
+            var bound = MethodBinder.Bind(typeof(EditorWindow), "GetWindow", true, args,
+                genericTypeArguments: new[] { typeof(ExecutionGetWindowProbe) });
+            Assert.That(bound.Method.DeclaringType, Is.EqualTo(typeof(EditorWindow)));
+            Assert.That(bound.Method.GetGenericArguments(), Is.EqualTo(new[] { typeof(ExecutionGetWindowProbe) }));
+            Assert.That(bound.Parameters.Length, Is.EqualTo(arrayLength < 0 ? 0 : 1));
+            if (arrayLength >= 0)
+            {
+                Assert.That(bound.Parameters[0].ParameterType, Is.EqualTo(typeof(Type[])));
+                Assert.That(bound.Arguments[0], Is.SameAs(types), "Explicit params arrays must not be repacked.");
+            }
+
+            // Pre-create a test-owned instance: GetWindow may show it but cannot dock into user windows.
+            var owned = ScriptableObject.CreateInstance<ExecutionGetWindowProbe>();
+            try
+            {
+                owned.ShowUtility();
+                int invocations = 0;
+                var context = new CSharpEvaluationContext(invocationScheduler: action =>
+                {
+                    invocations++;
+                    return action();
+                });
+                string argument = arrayLength < 0 ? "" : arrayLength == 0 ? "new System.Type[0]"
+                    : "new System.Type[] { typeof(CodingRiver.UPilot.Tests.ExecutionGetWindowProbe) }";
+                string code = "return UnityEditor.EditorWindow.GetWindow<CodingRiver.UPilot.Tests.ExecutionGetWindowProbe>("
+                    + argument + ");";
+                object result = emit
+                    ? CSharpEmitBackend.Compile(CSharpEmitBackend.CacheKey(code, "statements", new[] { "System" }),
+                        code, "statements")(context).Value
+                    : CSharpSubsetEngine.Evaluate(code, "statements", context).Value;
+                Assert.That(result, Is.SameAs(owned));
+                Assert.That(invocations, Is.EqualTo(1), "Exactly one target invocation crosses the scheduler.");
+                Assert.That(context.Diagnostics.MethodCallCount, Is.EqualTo(1));
+                Assert.That(Resources.FindObjectsOfTypeAll<ExecutionGetWindowProbe>(), Is.EqualTo(new[] { owned }));
+            }
+            finally
+            {
+                try { if (owned != null) owned.Close(); }
+                finally { if (owned != null) UnityEngine.Object.DestroyImmediate(owned); }
+            }
+            Assert.That(Resources.FindObjectsOfTypeAll<ExecutionGetWindowProbe>(), Is.Empty);
+        }
+
         [Test]
         public void ExecutionCapabilitiesAdvertiseStructuredRecoveryAndCallbackIsolation()
         {
@@ -220,6 +333,145 @@ namespace CodingRiver.UPilot.Tests
             CollectionAssert.AreEqual(
                 new[] { "close", "ttl", "playModeInvalidation" },
                 capabilities.eventSubscriptionCleanup);
+        }
+
+        [Test]
+        public void D02HiddenStaticBindingOnlyEliminatesIdenticalBaseSignature()
+        {
+            ExecutionHiddenStaticBaseFixture.BaseCalls = 0;
+            ExecutionHiddenStaticDerivedFixture.DerivedCalls = 0;
+            var bound = MethodBinder.Bind(typeof(ExecutionHiddenStaticDerivedFixture), "Parse", true,
+                new[] { new ExecutionValue { Value = "text" } });
+            Assert.That(bound.Method.DeclaringType, Is.EqualTo(typeof(ExecutionHiddenStaticDerivedFixture)));
+            Assert.That(bound.Method.Invoke(null, bound.Arguments), Is.TypeOf<ExecutionHiddenStaticDerivedFixture>());
+            Assert.That(ExecutionHiddenStaticBaseFixture.BaseCalls, Is.Zero);
+            Assert.That(ExecutionHiddenStaticDerivedFixture.DerivedCalls, Is.EqualTo(1));
+            var ambiguous = Assert.Throws<ExecutionContractException>(() => MethodBinder.Bind(
+                typeof(ExecutionHiddenStaticDerivedFixture), "Distinct", true,
+                new[] { new ExecutionValue { Value = null } }));
+            Assert.That(ambiguous.Code, Is.EqualTo("REFLECTION_BIND_AMBIGUOUS"));
+        }
+
+        private static object EvaluateD02(string code, bool emit, Dictionary<string, object> variables = null)
+        {
+            var context = new CSharpEvaluationContext(variables);
+            return emit
+                ? CSharpEmitBackend.Compile(CSharpEmitBackend.CacheKey(code, "statements", new[] { "System" }),
+                    code, "statements")(context).Value
+                : CSharpSubsetEngine.Evaluate(code, "statements", context).Value;
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void D02HiddenStaticNestedCallEvaluatesOnceAndNeverRetries(bool emit)
+        {
+            ExecutionHiddenStaticBaseFixture.BaseCalls = 0;
+            ExecutionHiddenStaticDerivedFixture.DerivedCalls = 0;
+            ExecutionHiddenStaticDerivedFixture.ArgumentCalls = 0;
+            const string type = "CodingRiver.UPilot.Tests.ExecutionHiddenStaticDerivedFixture";
+            Assert.That(EvaluateD02("return " + type + ".Parse(" + type + ".GetText());", emit),
+                Is.TypeOf<ExecutionHiddenStaticDerivedFixture>());
+            Assert.That(ExecutionHiddenStaticDerivedFixture.ArgumentCalls, Is.EqualTo(1));
+            Assert.That(ExecutionHiddenStaticDerivedFixture.DerivedCalls, Is.EqualTo(1));
+            Assert.That(ExecutionHiddenStaticBaseFixture.BaseCalls, Is.Zero);
+            Assert.Catch(() => EvaluateD02("return " + type + ".Parse(\"throw\");", emit));
+            Assert.That(ExecutionHiddenStaticDerivedFixture.DerivedCalls, Is.EqualTo(2));
+            Assert.That(ExecutionHiddenStaticBaseFixture.BaseCalls, Is.Zero);
+        }
+
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void D02StringIndexerPrecedesIListForReadWriteAndCompound(bool emit, bool derived)
+        {
+            var target = derived ? new ExecutionDerivedStringIndexFixture() : new ExecutionStringIndexFixture();
+            target.Add(99);
+            var source = new ExecutionStringIndexSource { Target = target };
+            var variables = new Dictionary<string, object> { { "source", source } };
+            Assert.That(EvaluateD02("return source.GetTarget()[source.GetKey()];", emit, variables), Is.EqualTo(4));
+            Assert.That(target.Gets, Is.EqualTo(1));
+            EvaluateD02("source.GetTarget()[source.GetKey()] = 8;", emit, variables);
+            Assert.That(target.Value, Is.EqualTo(8));
+            EvaluateD02("source.GetTarget()[source.GetKey()] += 3;", emit, variables);
+            Assert.That(target.Value, Is.EqualTo(11));
+            Assert.That(target.Gets, Is.EqualTo(2));
+            Assert.That(target.Sets, Is.EqualTo(2));
+            Assert.That(source.ReceiverCalls, Is.EqualTo(3));
+            Assert.That(source.IndexCalls, Is.EqualTo(3));
+            Assert.That(target.UsedDerived, Is.EqualTo(derived));
+            Assert.That(((IList)target)[0], Is.EqualTo(99));
+        }
+
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void D02StringIndexerExceptionsDoNotFallbackOrReevaluate(bool emit, bool setter)
+        {
+            var target = new ExecutionStringIndexFixture { ThrowOnGet = !setter, ThrowOnSet = setter };
+            target.Add(99);
+            var source = new ExecutionStringIndexSource { Target = target };
+            var variables = new Dictionary<string, object> { { "source", source } };
+            Assert.Catch(() => EvaluateD02(setter
+                ? "source.GetTarget()[source.GetKey()] = 8;"
+                : "return source.GetTarget()[source.GetKey()];", emit, variables));
+            Assert.That(source.ReceiverCalls, Is.EqualTo(1));
+            Assert.That(source.IndexCalls, Is.EqualTo(1));
+            Assert.That(target.Gets, Is.EqualTo(setter ? 0 : 1));
+            Assert.That(target.Sets, Is.EqualTo(setter ? 1 : 0));
+            Assert.That(target.Value, Is.EqualTo(4));
+            Assert.That(((IList)target)[0], Is.EqualTo(99));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void D02ExistingArrayListAndDictionaryIndexingIsPreserved(bool emit)
+        {
+            var variables = new Dictionary<string, object>
+            {
+                { "array", new[] { 1 } }, { "list", new ArrayList { 2 } },
+                { "map", new Hashtable { { "domain", 3 } } },
+            };
+            Assert.That(EvaluateD02("array[0] += 1; list[0] += 1; map[\"domain\"] += 1; return array[0] + list[0] + map[\"domain\"];",
+                emit, variables), Is.EqualTo(9));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void D02SameEnumBitwisePreservesEveryUnderlyingWidth(bool emit)
+        {
+            foreach (var type in new[] { typeof(ExecutionSByteFlags), typeof(ExecutionByteFlags),
+                typeof(ExecutionInt16Flags), typeof(ExecutionUInt16Flags), typeof(ExecutionInt32Flags),
+                typeof(ExecutionUInt32Flags), typeof(ExecutionInt64Flags), typeof(ExecutionUInt64Flags) })
+            {
+                var variables = new Dictionary<string, object>
+                {
+                    { "left", Enum.Parse(type, "Low") }, { "right", Enum.Parse(type, "High") },
+                };
+                foreach (var op in new[] { "|", "&", "^" })
+                {
+                    var result = EvaluateD02("return left " + op + " right;", emit, variables);
+                    Assert.That(result.GetType(), Is.EqualTo(type), type.Name + " " + op);
+                    Assert.That(result, Is.EqualTo(op == "&" ? Enum.ToObject(type, 0) : Enum.Parse(type, "Low, High")));
+                }
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void D02BindingFlagsResultBindsWithoutEnablingIntegerEnumCoercion(bool emit)
+        {
+            var variables = new Dictionary<string, object> { { "type", typeof(ExecutionHiddenStaticDerivedFixture) } };
+            Assert.That(EvaluateD02("return type.GetMethod(\"GetText\", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static).Name;",
+                emit, variables), Is.EqualTo("GetText"));
+            Assert.That(EvaluateD02("return 1 | 2;", emit), Is.TypeOf<long>());
+            variables["left"] = ExecutionInt32Flags.Low;
+            variables["right"] = ExecutionUInt32Flags.Low;
+            Assert.That(EvaluateD02("return left | right;", emit, variables), Is.TypeOf<long>());
+            var error = Assert.Throws<ExecutionContractException>(() => MethodBinder.Bind(typeof(Type), "GetMethod", false,
+                new[] { new ExecutionValue { Value = "GetText" }, new ExecutionValue { Value = 24 } }));
+            Assert.That(error.Code, Is.EqualTo("REFLECTION_BIND_FAILED"));
         }
 
         [Test]
