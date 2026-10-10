@@ -632,3 +632,10 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 观察/复现：本次合并复验的九文件重复执行中，`test_command_observation.py::test_reload_blocked_socket_uses_remaining_budget_and_preserves_first_terminal[success-wins]` 在真实 monotonic 30ms 预算下未进入阻塞 socket，`socket.cancelled` 为 false；首次九文件 314 项通过，随后重复检查 313 passed / 1 failed，所属文件独立复跑 41 项通过。
 - 影响/建议：准备阶段磁盘状态持久化或系统调度是否消耗预算尚未确认；后续独立定位，并考虑让单元夹具用可控时钟/事件验证剩余预算和首终态冻结，不延长生产期限、不弱化不重发/不续期断言，不将合理的预算前拒绝误判为 socket 内取消失败。
 - 证据/状态：`.git/codex-conflict-backups/20261010T143436/validation-repeat-final.*` 与 `validation-command-observation-isolated.*` 保留失败和独立复跑记录。待定位，未更改该测试、Server 或检查策略；不归因于本次冲突修复。
+
+
+## UPilot-20261010-WalCommitFixtureLifetime：提交边界夹具依赖 SQLite 连接回收时序（已修复，待 CI 确认）
+
+- 观察/证据：v0.3.44 下游构建 run 38032634044 在 Gate packaged source 出现 2 failed / 480 passed；提交前 completed/failed 两叶均因 WAL 文件为零字节失败。保持同一产品代码，在子进程每次连接前主动 gc.collect()，稳定复现两叶 exit=71、WAL=0；这属于夹具连接生命周期假设，不是产品事务失效的证据。
+- 影响/改进：V03 WriteBatch 提交边界回归和发布门禁不应依赖临时连接偶然存活。仅测试夹具显式持有 WAL 连接到自有子进程 os._exit，并在每次创建连接前主动回收临时连接；保留非空 WAL、真实 COMMIT 边界、完整原始行、历史终态、新生命周期不恢复活动及不重放断言。未改产品代码、检查策略或版本文件。
+- 验证/状态：定向提交失败/进程退出 6/6 通过；既有发布质量门禁 482 passed / 2 既有弃用 warning，Skill 和工具清单通过，sourceUnchanged=true。docs.registry/docs.todo-id 仍默认跳过，外部安装与本地历史文档证据 unknown 不冒充通过；未运行 Unity 编译或 EditMode。证据保存于临时目录 upilot-v0344-wal-fixture-fix；推送后由原 UPilot Contract Quality 验证跨平台结果。

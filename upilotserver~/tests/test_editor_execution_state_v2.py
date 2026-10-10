@@ -1257,14 +1257,28 @@ def test_deferred_constraint_commit_failure_does_not_publish_verified_write_batc
 
 def _exit_during_write_batch_commit(project, phase, boundary):
     """Run only in a test-owned child: exit without closing the real WAL connection."""
+    import gc
     import json
     import os
     import upilot_mcp.state_store as state_module
 
+    connect = sqlite3.connect
+
+    def collect_connect(*args, **kwargs):
+        # Make temporary-connection cleanup deterministic instead of depending
+        # on interpreter/runner GC timing to leave committed WAL frames behind.
+        gc.collect()
+        return connect(*args, **kwargs)
+
+    sqlite3.connect = collect_connect
     state_module._now_ms = lambda: 3000
     project = Path(project)
     store = StateStore()
     store.configure_project(str(project))
+    # Keep the database open until os._exit: closing the last WAL connection
+    # may checkpoint prior commits before we reach the injected COMMIT boundary.
+    wal_guard = sqlite3.connect(store._db_path)
+    assert wal_guard.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
     identity = batch["writeBatchId"]
     queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
@@ -1273,8 +1287,7 @@ def _exit_during_write_batch_commit(project, phase, boundary):
     assert store.update_editor_execution_state(queued)
     terminal = _snapshot(2, phase=phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
     terminal["compileRequestId"] = "request-a"
-    connect = sqlite3.connect
-    with connect(store._db_path) as db:
+    with sqlite3.connect(store._db_path) as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         db.row_factory = sqlite3.Row
         original = dict(db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone())
@@ -1310,7 +1323,7 @@ def _exit_during_write_batch_commit(project, phase, boundary):
             return result
 
     def exit_connect(*args, **kwargs):
-        return connect(*args, factory=ExitConnection, **kwargs)
+        return collect_connect(*args, factory=ExitConnection, **kwargs)
 
     sqlite3.connect = exit_connect
     store.update_editor_execution_state(terminal)
