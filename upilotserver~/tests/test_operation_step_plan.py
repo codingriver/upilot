@@ -233,6 +233,8 @@ def test_real_step_identity_mismatch_is_not_treated_as_initialization(tmp_path):
         svc = service(tmp_path)
         started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
+        state = svc._operations[operation_id]
+        original_window = (state["startedAt"], state["timeoutSec"])
         previous = svc.dispatcher.call
 
         async def call(request_id, route, payload, **kwargs):
@@ -243,13 +245,20 @@ def test_real_step_identity_mismatch_is_not_treated_as_initialization(tmp_path):
 
         svc.dispatcher.call = call
         failed = await svc.operation_status(operation_id)
-        assert not failed.ok
-        assert failed.error.detail["status"] == "RecoveryRequired"
-        count = len(svc.bridge_calls)
+        assert not failed.ok and failed.error.code == "OPERATION_STATUS_FAILED"
+        assert failed.error.detail["status"] == "aborted"
+        assert failed.error.detail["terminal"] and state["endedAt"]
+        assert state["cleanupSucceeded"] is False
+        assert state["error"] == "STEP_RUN_IDENTITY_MISMATCH"
+        count, ended_at = len(svc.bridge_calls), state["endedAt"]
         retained = await svc.operation_status(operation_id)
-        assert retained.data["status"] == "RecoveryRequired"
-        assert len(svc.bridge_calls) == count
-        assert svc._operations[operation_id]["startAttemptCount"] == 1
+        assert retained.ok and retained.data["status"] == "aborted"
+        assert retained.data["terminal"] and not retained.data["cleanupPending"]
+        assert retained.data["error"] == "STEP_RUN_IDENTITY_MISMATCH"
+        assert len(svc.bridge_calls) == count and state["endedAt"] == ended_at
+        assert state["startAttemptCount"] == 1 and state["cancelAttemptCount"] == 0
+        assert (state["startedAt"], state["timeoutSec"]) == original_window
+        assert svc.calls == []  # No Capture or other tool dispatch on abort/poll.
     asyncio.run(run())
 
 
@@ -258,9 +267,12 @@ def test_editor_restart_recovery_is_not_cleared_after_initialization(tmp_path):
         svc = service(tmp_path)
         started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
+        state = svc._operations[operation_id]
+        original_window = (state["startedAt"], state["timeoutSec"])
 
         async def call(request_id, route, payload, **kwargs):
             assert route == "automation.steps.state"
+            svc.bridge_calls.append((route, payload))
             return ok(request_id, {
                 "status": "RecoveryRequired", "runId": "step-run", "operationId": operation_id,
                 "phase": "Executing", "error": "STEP_EDITOR_RESTARTED",
@@ -269,11 +281,21 @@ def test_editor_restart_recovery_is_not_cleared_after_initialization(tmp_path):
 
         svc.dispatcher.call = call
         observed = await svc.operation_status(operation_id)
-        assert observed.ok and observed.data["status"] == "RecoveryRequired"
+        assert observed.ok and observed.data["status"] == "aborted"
         assert observed.data["error"] == "STEP_EDITOR_RESTARTED"
-        assert observed.data["cleanupPending"] and not observed.data["terminal"]
-        assert svc._operations[operation_id]["startAttemptCount"] == 1
-        assert svc._operations[operation_id]["cancelAttemptCount"] == 0
+        assert observed.data["failureSignature"] == "STEP_EDITOR_RESTARTED"
+        assert not observed.data["cleanupPending"] and observed.data["terminal"]
+        assert state["cleanupSucceeded"] is False and state["endedAt"]
+        assert state["lastStatusData"]["cleanupPending"] is True
+        assert state["lastStatusData"]["terminal"] is False
+        count, ended_at = len(svc.bridge_calls), state["endedAt"]
+        retained = await svc.operation_status(operation_id)
+        assert retained.ok and retained.data["status"] == "aborted"
+        assert retained.data["error"] == "STEP_EDITOR_RESTARTED"
+        assert len(svc.bridge_calls) == count and state["endedAt"] == ended_at
+        assert state["startAttemptCount"] == 1 and state["cancelAttemptCount"] == 0
+        assert (state["startedAt"], state["timeoutSec"]) == original_window
+        assert svc.calls == []
     asyncio.run(run())
 
 
@@ -282,14 +304,29 @@ def test_initialization_error_does_not_relax_unrelated_status_routes(tmp_path):
         svc = service(tmp_path)
         started = await svc.seed_legacy_operation(spec())
         operation_id = started.data["operationId"]
-        svc._operations[operation_id]["resolvedStatusCall"]["route"] = "another.state"
+        state = svc._operations[operation_id]
+        original_window = (state["startedAt"], state["timeoutSec"])
+        state["resolvedStatusCall"]["route"] = "another.state"
 
         async def call(request_id, route, payload, **kwargs):
             assert route == "another.state"
+            svc.bridge_calls.append((route, payload))
             return fail(request_id, "STEP_SERVICE_INITIALIZING", "Unrelated service failure.")
 
         svc.dispatcher.call = call
         failed = await svc.operation_status(operation_id)
-        assert not failed.ok
-        assert failed.error.detail["status"] == "RecoveryRequired"
+        assert not failed.ok and failed.error.code == "OPERATION_STATUS_FAILED"
+        assert failed.error.detail["status"] == "aborted"
+        assert failed.error.detail["terminal"] and state["endedAt"]
+        assert state["cleanupSucceeded"] is False
+        assert state["failureSignature"] == "STEP_SERVICE_INITIALIZING"
+        assert state["error"] == "Unrelated service failure."
+        count, ended_at = len(svc.bridge_calls), state["endedAt"]
+        retained = await svc.operation_status(operation_id)
+        assert retained.ok and retained.data["status"] == "aborted"
+        assert retained.data["error"] == "Unrelated service failure."
+        assert len(svc.bridge_calls) == count and state["endedAt"] == ended_at
+        assert state["startAttemptCount"] == 1 and state["cancelAttemptCount"] == 0
+        assert (state["startedAt"], state["timeoutSec"]) == original_window
+        assert svc.calls == []
     asyncio.run(run())
