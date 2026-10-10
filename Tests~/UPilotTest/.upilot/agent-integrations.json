@@ -3,27 +3,27 @@
     "rules": [
         {
             "relativePath": "AGENTS.md",
-            "normalizedManagedSha256": "f9f85723f6555d0777f5dc853d0e2f2cbd969ed23a779afe7b50ad39beaf1c2f",
+            "normalizedManagedSha256": "cfd402967eba2e0f15a9a21f6a889b67f44271cad09039a2e676c5aff11f4dad",
             "templateSha256": "a3d004cc07d12cbf7a4cecddc9252abe85f7821a977ba818f40791a0a57b8e4a",
             "templateVersion": 56,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
                 "mcpUrl": "http://127.0.0.1:8011/mcp",
                 "healthUrl": "http://127.0.0.1:8011/health",
-                "upilotPackageVersion": "0.3.42",
+                "upilotPackageVersion": "0.3.43",
                 "parentAgentRulesPath": "../../AGENTS.md"
             }
         },
         {
             "relativePath": ".cursor/rules/upilot-unity-mcp.mdc",
-            "normalizedManagedSha256": "f9f85723f6555d0777f5dc853d0e2f2cbd969ed23a779afe7b50ad39beaf1c2f",
+            "normalizedManagedSha256": "cfd402967eba2e0f15a9a21f6a889b67f44271cad09039a2e676c5aff11f4dad",
             "templateSha256": "a3d004cc07d12cbf7a4cecddc9252abe85f7821a977ba818f40791a0a57b8e4a",
             "templateVersion": 56,
             "renderContext": {
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
                 "mcpUrl": "http://127.0.0.1:8011/mcp",
                 "healthUrl": "http://127.0.0.1:8011/health",
-                "upilotPackageVersion": "0.3.42",
+                "upilotPackageVersion": "0.3.43",
                 "parentAgentRulesPath": "../../AGENTS.md"
             }
         },
@@ -36,7 +36,7 @@
                 "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
                 "mcpUrl": "http://127.0.0.1:8011/mcp",
                 "healthUrl": "http://127.0.0.1:8011/health",
-                "upilotPackageVersion": "0.3.42",
+                "upilotPackageVersion": "0.3.43",
                 "parentAgentRulesPath": "../../AGENTS.md"
             }
         }
