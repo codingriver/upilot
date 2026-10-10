@@ -136,21 +136,105 @@ namespace CodingRiver.UPilot.Tests
             StringAssert.Contains("resourceDiagnostics", JsonUtility.ToJson(detail));
         }
 
-        [Test]
-        public void WarmupFailureIsWarningAndDoesNotReplayBusiness()
+        [TestCase("REFLECTION_EMIT_UNAVAILABLE")]
+        [TestCase("CSHARP_EMIT_COMPILE_FAILED")]
+        public void AutoPreparationFallbackPrecedesBusinessAndKeepsBoundedCause(string code)
         {
             var notices = new ExecutionResourceDiagnostics();
-            int businessCalls = 0, warmupCalls = 0;
-            int result = ++businessCalls;
-            UPilotExecutionService.WarmEmitCache(() =>
+            int businessCalls = 0, prepareCalls = 0;
+            var prepared = UPilotExecutionService.PrepareAutoEmit<Func<int>>(() =>
             {
-                warmupCalls++;
-                throw new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", "fixture");
+                prepareCalls++;
+                Assert.That(businessCalls, Is.Zero);
+                throw new ExecutionContractException(code, "original-prepare-cause:" + new string('x', 2000));
             }, notices);
-            Assert.That(result, Is.EqualTo(1));
+            Assert.That(prepared, Is.Null);
+            Assert.That(businessCalls, Is.Zero);
+            Func<int> interpreter = () => ++businessCalls;
+            Assert.That((prepared ?? interpreter)(), Is.EqualTo(1));
             Assert.That(businessCalls, Is.EqualTo(1));
-            Assert.That(warmupCalls, Is.EqualTo(1));
-            Assert.That(notices.Snapshot().Single().code, Is.EqualTo("EVAL_CACHE_WARMUP_FAILED"));
+            Assert.That(prepareCalls, Is.EqualTo(1));
+            var notice = notices.Snapshot().Single();
+            Assert.That(notice.code, Is.EqualTo("EVAL_BACKEND_FALLBACK"));
+            Assert.That(notice.action, Is.EqualTo("fallback_interpreter"));
+            Assert.That(notice.nextAction, Does.Contain(code).And.Contain("original-prepare-cause").And.Contain("[truncated]"));
+            Assert.That(notice.nextAction.Length, Is.LessThan(800));
+            Assert.That(notice.nextAction, Does.Not.Contain("already succeeded"));
+        }
+
+        [TestCase("EXECUTION_CANCELLED")]
+        [TestCase("EXECUTION_BUDGET_EXCEEDED")]
+        [TestCase("EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED")]
+        [TestCase("CSHARP_PARSE_ERROR")]
+        public void AutoPreparationDoesNotFallbackOnUnrelatedContractErrors(string code)
+        {
+            var notices = new ExecutionResourceDiagnostics();
+            var original = new ExecutionContractException(code, "must preserve");
+            var error = Assert.Throws<ExecutionContractException>(() => UPilotExecutionService.PrepareAutoEmit<Func<int>>(
+                () => { throw original; }, notices));
+            Assert.That(error, Is.SameAs(original));
+            Assert.That(notices.Snapshot(), Is.Empty);
+        }
+
+        [Test]
+        public void AutoPreparationDoesNotFallbackOnCancellationOrMemoryFailure()
+        {
+            var notices = new ExecutionResourceDiagnostics();
+            var cancel = new OperationCanceledException("fixture");
+            Assert.That(Assert.Throws<OperationCanceledException>(() => UPilotExecutionService.PrepareAutoEmit<Func<int>>(
+                () => { throw cancel; }, notices)), Is.SameAs(cancel));
+            var memory = new OutOfMemoryException("fixture; no allocation pressure");
+            Assert.That(Assert.Throws<OutOfMemoryException>(() => UPilotExecutionService.PrepareAutoEmit<Func<int>>(
+                () => { throw memory; }, notices)), Is.SameAs(memory));
+            Assert.That(notices.Snapshot(), Is.Empty);
+        }
+
+        [Test]
+        public void AutoPreparationNeverCatchesBusinessErrorsOrReplaysDelegate()
+        {
+            var notices = new ExecutionResourceDiagnostics();
+            int businessCalls = 0;
+            var original = new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", "business threw an eligible-looking code");
+            var prepared = UPilotExecutionService.PrepareAutoEmit<Func<int>>(
+                () => () => { businessCalls++; throw original; }, notices);
+            Assert.That(businessCalls, Is.Zero);
+            Assert.That(Assert.Throws<ExecutionContractException>(() => prepared()), Is.SameAs(original));
+            Assert.That(businessCalls, Is.EqualTo(1));
+            Assert.That(notices.Snapshot(), Is.Empty);
+        }
+
+        [Test]
+        public void AutoFallbackInterpreterPreparationFailurePreservesBothErrorsWithoutEffects()
+        {
+            var context = new CSharpEvaluationContext();
+            int businessCalls = 0;
+            context.DeclareVariable("business", (Func<int>)(() => ++businessCalls));
+            var prepared = UPilotExecutionService.PrepareAutoEmit<Func<CSharpEvaluationContext, CSharpEvaluationResult>>(
+                () => { throw new ExecutionContractException("REFLECTION_EMIT_UNAVAILABLE", "native unavailable"); }, context.ResourceDiagnostics);
+            Assert.That(prepared, Is.Null);
+            var error = Assert.Throws<ExecutionContractException>(() => CSharpSubsetEngine.Evaluate("business(); return (;", "statements", context));
+            var wrapped = context.ResourceDiagnostics.Attach(error);
+            Assert.That(wrapped.Code, Is.EqualTo(error.Code));
+            Assert.That(wrapped.Code, Is.Not.EqualTo("REFLECTION_EMIT_UNAVAILABLE"));
+            Assert.That(((ExecutionResourceDiagnostic[])wrapped.Detail["resourceDiagnostics"]).Single().nextAction,
+                Does.Contain("REFLECTION_EMIT_UNAVAILABLE").And.Contain("native unavailable"));
+            Assert.That(businessCalls, Is.Zero);
+        }
+
+        [Test]
+        public void AutoFallbackAsyncInterpreterRunsOnceAndKeepsPreparationCause()
+        {
+            var context = new CSharpEvaluationContext();
+            int businessCalls = 0;
+            context.DeclareVariable("business", (Func<Task<int>>)(() => Task.FromResult(++businessCalls)));
+            var prepared = UPilotExecutionService.PrepareAutoEmit<Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>>>(
+                () => { throw new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", "async preparation failure"); }, context.ResourceDiagnostics);
+            Assert.That(businessCalls, Is.Zero);
+            var program = CSharpSubsetEngine.Parse("return await business();", "statements");
+            var execute = prepared ?? program.ExecuteAsync;
+            Assert.That(execute(context).GetAwaiter().GetResult().Value, Is.EqualTo(1));
+            Assert.That(businessCalls, Is.EqualTo(1));
+            Assert.That(context.ResourceDiagnostics.Snapshot().Single().nextAction, Does.Contain("async preparation failure"));
         }
 
         [Test]

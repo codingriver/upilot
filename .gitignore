@@ -83,3 +83,4 @@ Documentation~/Unity-Startup-Focus-Analysis-*.md
 !.gitignore
 !.uiflow.json
 /Tests~/MonoHook2022Acceptance
+/Tests~/UPilotTest/.upilot/diagnostic-modules

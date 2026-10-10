@@ -185,6 +185,19 @@ namespace CodingRiver.UPilot
         public int targetDisplay;
         public int screenWidth;
         public int screenHeight;
+        public int requestedWidth;
+        public int requestedHeight;
+        public int outputWidth;
+        public int outputHeight;
+        public long capturedAt;
+        public string sourceLayout;
+        public string outputLayout;
+        public bool aspectRatioMatches;
+        public string aspectWarning;
+        public string readbackPath = "RenderTexture->Texture2D.ReadPixels->EncodeToPNG (no explicit flip)";
+        public string contentOrientation = "unverified";
+        public string compositionComplete = "unverified";
+        public string internalCrop = "unknown";
         public bool playMode;
         public bool runInBackgroundForced;
     }
@@ -467,7 +480,7 @@ namespace CodingRiver.UPilot
                 {
                     EditorApplication.update -= scheduled;
                     lock (_gate) _scheduledJobs.Remove(job.snapshotId);
-                    ExecuteJob(job, request);
+                    _ = ExecuteJob(job, request);
                 };
                 EditorApplication.update += scheduled;
             }
@@ -525,7 +538,7 @@ namespace CodingRiver.UPilot
             return created;
         }
 
-        private async void ExecuteJob(SnapshotJobPayload job, SnapshotCapturePayload request)
+        private async Task ExecuteJob(SnapshotJobPayload job, SnapshotCapturePayload request)
         {
             try
             {
@@ -596,6 +609,8 @@ namespace CodingRiver.UPilot
                             await new SceneViewEditorCompletion(captureTask);
                         else
                             await captureTask;
+                        // Reset/maintenance may have frozen the job while capture awaited.
+                        if (job.terminal) return;
                         if (frame < 0 && (item.kind == "gameview" || singleSceneView))
                         {
                             frame = Time.frameCount;
@@ -605,6 +620,7 @@ namespace CodingRiver.UPilot
                     }
                     catch (Exception ex)
                     {
+                        if (job.terminal) return;
                         var code = CaptureFailureCode(ex);
                         RecordTargetFailure(job, item.request, code, ex.Message, "rendering");
                         if (ex is EditorWindowCaptureException captureError)
@@ -615,6 +631,14 @@ namespace CodingRiver.UPilot
                             FinishJob(job, "failed", false);
                             return;
                         }
+                    }
+                    // Cancellation can arrive while the final target awaits a repaint/readback.
+                    // Do not publish success (or advance to another target) after that wait.
+                    if (job.cancelRequested)
+                    {
+                        RejectArtifacts(job);
+                        FinishJob(job, "cancelled", false);
+                        return;
                     }
                     if (frame >= 0 && Time.frameCount != frame)
                     {
@@ -649,6 +673,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                if (job.terminal) return;
                 job.failures.Add(new SnapshotFailurePayload
                 {
                     targetId = string.Empty,
@@ -689,6 +714,9 @@ namespace CodingRiver.UPilot
                     return CaptureSceneViewTargetAsync(job, target.request, target.sceneView, defaultChannels, capturePolicy);
                 case "gameview":
                     return CaptureGameViewTargetAsync(job, target.request, defaultChannels, capturePolicy);
+                case "tooltip":
+                    CaptureEditorWindowTarget(job, target.request, target.tooltip, defaultChannels, capturePolicy);
+                    return Task.CompletedTask;
                 case "editorwindow":
                     CaptureEditorWindowTarget(job, target.request, target.editorWindow, defaultChannels, capturePolicy);
                     return Task.CompletedTask;
@@ -843,6 +871,8 @@ namespace CodingRiver.UPilot
                 completion,
                 allowCameraFallback: false);
             await new SceneViewEditorCompletion(completion.Task);
+            // A late native capture may finish, but must not publish or write new artifacts.
+            if (job.terminal) return;
             var capture = completion.Task.GetAwaiter().GetResult();
             if (capture == null || capture.Bytes == null || capture.Bytes.Length == 0)
                 throw new SnapshotRequestException("SNAPSHOT_SCENEVIEW_CAPTURE_UNAVAILABLE", "The exact SceneView did not produce verified EditorWindow pixels.");
@@ -930,6 +960,7 @@ namespace CodingRiver.UPilot
             var width = ClampDimension(requested.width, Screen.width > 0 ? Screen.width : 1280);
             var height = ClampDimension(requested.height, Screen.height > 0 ? Screen.height : 720);
             var capture = await GameViewCaptureRunner.CaptureAsync(width, height, 10.0);
+            if (job.terminal) return;
             if (capture == null || capture.bytes == null || capture.bytes.Length == 0)
                 throw new SnapshotRequestException("SNAPSHOT_GAMEVIEW_CAPTURE_FAILED", "ScreenCapture did not return a GameView composite.");
 
@@ -969,8 +1000,18 @@ namespace CodingRiver.UPilot
                 gameView = new SnapshotGameViewEvidencePayload
                 {
                     targetDisplay = 0,
-                    screenWidth = Screen.width,
-                    screenHeight = Screen.height,
+                    screenWidth = capture.screenWidth,
+                    screenHeight = capture.screenHeight,
+                    requestedWidth = requested.width,
+                    requestedHeight = requested.height,
+                    outputWidth = capture.width,
+                    outputHeight = capture.height,
+                    capturedAt = capture.capturedAt,
+                    sourceLayout = ImageLayout(capture.screenWidth, capture.screenHeight),
+                    outputLayout = ImageLayout(capture.width, capture.height),
+                    aspectRatioMatches = AspectMatches(capture.screenWidth, capture.screenHeight, capture.width, capture.height),
+                    aspectWarning = AspectMatches(capture.screenWidth, capture.screenHeight, capture.width, capture.height)
+                        ? "" : "SOURCE_OUTPUT_ASPECT_MISMATCH: content orientation/composition/crop remain unverified",
                     playMode = true,
                     runInBackgroundForced = capture.runInBackgroundForced,
                 },
@@ -983,10 +1024,13 @@ namespace CodingRiver.UPilot
         private void CaptureEditorWindowTarget(
             SnapshotJobPayload job,
             SnapshotTargetRequestPayload requested,
-            EditorWindow window,
+            UnityEngine.Object window,
             string[] defaultChannels,
             SnapshotCapturePolicyPayload capturePolicy)
         {
+            var editorWindow = window as EditorWindow;
+            bool tooltip = requested.kind.Equals("tooltip", StringComparison.OrdinalIgnoreCase);
+            long windowHandle = 0;
             var channelValues = requested.channels != null && requested.channels.Length > 0
                 ? requested.channels
                 : defaultChannels;
@@ -995,10 +1039,11 @@ namespace CodingRiver.UPilot
                 throw new SnapshotRequestException("SNAPSHOT_EDITORWINDOW_CHANNEL_UNSUPPORTED", "EditorWindow Snapshot v1 supports only the color channel.");
             if (UPilotWindowDiagnostics.TryGetUnityEditorMinimized(out var editorMinimized, out var editorHandle) && editorMinimized)
                 throw new SnapshotRequestException("SNAPSHOT_EDITOR_MINIMIZED", "EditorWindow capture requires a non-minimized Unity Editor window.");
-            if (UPilotWindowDiagnostics.TryGetEditorWindowMinimized(window, out var windowMinimized, out var windowHandle) && windowMinimized)
+            if (editorWindow != null && UPilotWindowDiagnostics.TryGetEditorWindowMinimized(editorWindow, out var windowMinimized, out windowHandle) && windowMinimized)
                 throw new SnapshotRequestException("SNAPSHOT_EDITOR_MINIMIZED", "The requested EditorWindow is minimized.");
 
-            var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(window, capturePolicy.allowFallback);
+            var capture = tooltip ? UPilotWindowDiagnostics.CaptureNativeTooltip(window, requested.domainGeneration)
+                : UPilotWindowDiagnostics.CaptureEditorWindowPixels(editorWindow, capturePolicy.allowFallback);
             if (capture == null || string.IsNullOrWhiteSpace(capture.imageData))
                 throw new SnapshotRequestException("SNAPSHOT_EDITORWINDOW_CAPTURE_UNAVAILABLE", "The exact EditorWindow did not produce pixels.");
             if (requested.requireContentRect && !capture.contentRectVerified)
@@ -1028,7 +1073,7 @@ namespace CodingRiver.UPilot
                 cropRect = WindowRect(capture.cropLeft, capture.cropTop, capture.cropRight, capture.cropBottom),
             };
             ValidateEvidencePolicy(provenance, capturePolicy);
-            var rect = window.position;
+            var rect = editorWindow != null ? editorWindow.position : new Rect(capture.contentLeft / capture.pixelsPerPoint, capture.contentTop / capture.pixelsPerPoint, capture.width / capture.pixelsPerPoint, capture.height / capture.pixelsPerPoint);
             var safeTargetId = SafeFileName(requested.targetId) + "." + ShortHash(requested.targetId);
             var artifactId = AddArtifact(
                 job,
@@ -1047,7 +1092,7 @@ namespace CodingRiver.UPilot
             job.targets.Add(new SnapshotTargetResultPayload
             {
                 targetId = requested.targetId,
-                kind = "editorWindow",
+                kind = tooltip ? "tooltip" : "editorWindow",
                 status = "completed",
                 success = true,
                 requested = requested,
@@ -1055,9 +1100,9 @@ namespace CodingRiver.UPilot
                 {
                     instanceId = WireId(window),
                     domainGeneration = CurrentWindowDomainGeneration(),
-                    title = window.titleContent?.text ?? string.Empty,
+                    title = editorWindow?.titleContent?.text ?? string.Empty,
                     fullTypeName = window.GetType().FullName,
-                    focused = EditorWindow.focusedWindow == window,
+                    focused = editorWindow != null && EditorWindow.focusedWindow == editorWindow,
                     x = rect.x,
                     y = rect.y,
                     width = rect.width,
@@ -1550,6 +1595,13 @@ namespace CodingRiver.UPilot
                             ValidateGameViewSelector(target);
                             result.targets.Add(new ResolvedSnapshotTarget { request = target, kind = kind });
                             break;
+                        case "tooltip":
+                            try {
+                                var tooltip = UPilotWindowDiagnostics.ResolveNativeTooltip(target.instanceId, target.domainGeneration);
+                                result.targets.Add(new ResolvedSnapshotTarget { request = target, kind = kind, tooltip = tooltip });
+                            }
+                            catch (Exception ex) { throw new SnapshotRequestException("SNAPSHOT_TOOLTIP_UNAVAILABLE", ex.Message); }
+                            break;
                         case "editorwindow":
                             result.targets.Add(new ResolvedSnapshotTarget
                             {
@@ -1705,7 +1757,7 @@ namespace CodingRiver.UPilot
                 if (target == null) continue;
                 var targetKind = (target.kind ?? string.Empty).Trim().Replace("_", string.Empty).Replace("-", string.Empty).ToLowerInvariant();
                 if (targetKind == "gameview") gameViewCount++;
-                if (targetKind == "sceneview" || targetKind == "editorwindow") hasEditorPixelTarget = true;
+                if (targetKind == "sceneview" || targetKind == "editorwindow" || targetKind == "tooltip") hasEditorPixelTarget = true;
                 var channels = target.channels != null && target.channels.Length > 0
                     ? NormalizeChannels(target.channels)
                     : defaultChannels;
@@ -2454,11 +2506,22 @@ namespace CodingRiver.UPilot
             public Camera camera;
             public SceneView sceneView;
             public EditorWindow editorWindow;
+            public UnityEngine.Object tooltip;
         }
+
+        internal static string ImageLayout(int width, int height) => width <= 0 || height <= 0 ? "unknown"
+            : width == height ? "square" : width > height ? "landscape" : "portrait";
+
+        internal static bool AspectMatches(int sourceWidth, int sourceHeight, int width, int height) =>
+            sourceWidth > 0 && sourceHeight > 0 && width > 0 && height > 0
+            && (long)sourceWidth * height == (long)width * sourceHeight;
 
         private sealed class SnapshotGameViewCapture
         {
             public byte[] bytes;
+            public int screenWidth;
+            public int screenHeight;
+            public long capturedAt;
             public int width;
             public int height;
             public bool runInBackgroundForced;
@@ -2511,11 +2574,16 @@ namespace CodingRiver.UPilot
                     target.Create();
                     if (!target.IsCreated())
                         throw new InvalidOperationException("Failed to allocate the GameView composite render target.");
+                    int sourceWidth = Screen.width, sourceHeight = Screen.height;
+                    long capturedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     ScreenCapture.CaptureScreenshotIntoRenderTexture(target);
                     var bytes = ReadColorPng(target, width, height);
                     Complete(new SnapshotGameViewCapture
                     {
                         bytes = bytes,
+                        screenWidth = sourceWidth,
+                        screenHeight = sourceHeight,
+                        capturedAt = capturedAt,
                         width = width,
                         height = height,
                         runInBackgroundForced = _runInBackgroundForced,

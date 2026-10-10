@@ -47,7 +47,7 @@ async def execution_session(
     ))
 
 
-@mcp.tool(description="执行 UPilot 自有 C# 子集 V2。支持 try/catch/finally/throw、引用捕获 closure、block/async lambda、Task/ValueTask await、实用级泛型推断、??/??=/typeof/nameof/default(T)、隐式数组及 rank 1–4 多维数组。逃逸 closure/async delegate 和事件订阅必须使用 persistent session；禁止 async void。源码不支持 named/ref/out 参数；这类调用使用结构化 unity_reflection_call。\n\n后端：interpret 执行完整 V2 AST；emit 是兼容 DynamicMethod 入口缓存且仍执行 AST；compiled 将可静态绑定的同步有限子集 lowering 为 Expression Tree delegate，不支持时执行前失败且不回退；auto 保持首次解释/后续 emit-cache 的兼容行为，不自动选择 compiled。\n\n默认 import 命名空间：System、UnityEngine、UnityEditor。\n\n完整预算字段（默认值/硬上限）：timeoutMs(3000/30000)、maxStatements(10000/100000)、maxLoopIterations(10000/100000)、maxCalls(1000/100000)、maxAllocations(1000/100000)、maxRecursion(64/256)、maxResultBytes(1048576/1048576)、maxAwaits(1000/100000)、maxArrayElements(100000/1000000)。\n\n错误恢复结构：error.detail 含 stage（parse/bind/policy/runtime/budget/cancelled）、sourceSpan、candidates、sideEffectsMayHaveOccurred、nextAction、cleanupDiagnostics。取消与预算失败不回滚且不得自动重试。cancel 后 finally 获得 100ms/256-statement 清理预算。\n\n固定 LRU：emit 256 键、compiled 128 键。成功响应 resourceDiagnostics 中 EVAL_CACHE_EVICTED / EVAL_CACHE_WARMUP_FAILED 是 warning，保留成功结果且无需重试；失败时诊断在 error.detail.resourceDiagnostics，不覆盖原始错误。resourceDiagnosticsDroppedCount 报告截断。unity_capabilities_get.execution.resources 返回实时统计。\n\nauto 后端缓存 key 包含 code、mode、imports，变更任一组件即改变缓存键。不依赖 Roslyn、DLL 加载或 Unity 编译 API。")
+@mcp.tool(description="执行 UPilot 自有 C# 子集 V2。支持 try/catch/finally/throw、引用捕获 closure、block/async lambda、Task/ValueTask await、实用级泛型推断、??/??=/typeof/nameof/default(T)、隐式数组及 rank 1–4 多维数组。逃逸 closure/async delegate 和事件订阅必须使用 persistent session；禁止 async void。源码不支持 named/ref/out 参数；这类调用使用结构化 unity_reflection_call。\n\n后端：interpret 执行完整 V2 AST；emit 是兼容 DynamicMethod 入口缓存且仍执行 AST；compiled 将可静态绑定的同步有限子集 lowering 为 Expression Tree delegate，不支持时执行前失败且不回退；auto 在业务执行前准备 Emit，仅准备不可用/失败时回到语义等价解释器；语法、取消、资源拒绝不降级，开始执行后绝不切换后端或重放，不自动选择 compiled。显式 emit/compiled 保持严格。\n\n默认 import 命名空间：System、UnityEngine、UnityEditor。\n\n完整预算字段（默认值/硬上限）：timeoutMs(3000/30000)、maxStatements(10000/100000)、maxLoopIterations(10000/100000)、maxCalls(1000/100000)、maxAllocations(1000/100000)、maxRecursion(64/256)、maxResultBytes(1048576/1048576)、maxAwaits(1000/100000)、maxArrayElements(100000/1000000)。\n\n错误恢复结构：error.detail 含 stage（parse/bind/policy/runtime/budget/cancelled）、sourceSpan、candidates、sideEffectsMayHaveOccurred、nextAction、cleanupDiagnostics。取消与预算失败不回滚且不得自动重试。cancel 后 finally 获得 100ms/256-statement 清理预算。\n\n固定 LRU：emit 256 键、compiled 128 键。resourceDiagnostics 中 EVAL_BACKEND_FALLBACK 记录执行前准备失败的有界原始原因，须读取实际 backendUsed 与结果/错误；EVAL_CACHE_EVICTED 和旧 Bridge 的 EVAL_CACHE_WARMUP_FAILED 仍是 warning，均不授权重放；失败时诊断在 error.detail.resourceDiagnostics，不覆盖原始错误。resourceDiagnosticsDroppedCount 报告截断。unity_capabilities_get.execution.resources 返回实时统计。\n\nauto 后端缓存 key 包含 code、mode、imports，变更任一组件即改变缓存键。不依赖 Roslyn、DLL 加载或 Unity 编译 API。")
 async def csharp_eval(
     code: Annotated[str, Field(description="要执行的一条表达式或受支持的 C# 子集语句块。")],
     mode: Annotated[str, Field(description="解析模式：auto、expression 或 statements。")] = "auto",
@@ -123,7 +123,31 @@ async def csharp_object_dump(
     ))
 
 
-for _name in ("execution_session", "csharp_validate", "csharp_eval", "reflection_emit_type", "csharp_object_dump"):
+@mcp.tool(description="显式 opt-in 的完整 C# 临时诊断模块；与受限 Eval/Emit 分开。通过 Unity 自带 AssemblyBuilder 编译单个完整源码，在 .upilot 非导入目录保存。固定入口 public static string 或 Task<string> Run(DiagnosticModuleContext, string argsJson)。compile 返回原编译身份，status 只观察，run 仅调用一次，close 收尾；不重发。必须复用精确 session、project/domain/play-session。无新增依赖，不安装编译器；配置了 Analyzer/Generator 或缺既有元数据读取能力时明确拒绝。旧 DLL 驻留至 Domain Reload，不承诺沙箱、物理卸载、回滚或强制停止同步/异步代码。只有登记到 context 的资源保证由此入口收尾。首次实际支持仍须现场验收。")
+async def diagnostic_module(
+    action: Annotated[str, Field(description="compile、run、status 或 close；默认 status 不编译、不加载、不运行。")] = "status",
+    sessionId: Annotated[str, Field(description="精确 owning execution_session ID。")] = "",
+    moduleId: Annotated[str, Field(description="1-64 字符逻辑模块 ID；新 revision 只替换该模块入口。")] = "",
+    source: Annotated[str, Field(description="一个完整普通 C# 源码，最多 1 MiB；仅 compile 使用。")] = "",
+    entryType: Annotated[str, Field(description="候选 Assembly 内入口类型的精确全名；不使用全局类型缓存。")] = "",
+    argsJson: Annotated[str, Field(description="传给 Run 的有限 JSON 文本，最多 1 MiB。")] = "{}",
+    expectedProjectPath: Annotated[str, Field(description="status 返回的精确当前工程路径。")] = "",
+    expectedDomainGeneration: Annotated[str, Field(description="status 返回的 execution session 域身份字符串，不是心跳的整数 domainGeneration。")] = "",
+    expectedPlaySessionId: Annotated[str, Field(description="status 返回的 PlayMode 现场身份；模式退出/切换后旧入口失效。")] = "",
+    referenceTypeNames: Annotated[list[str] | None, Field(description="最多 32 个已加载引用类型的精确全名；不接受外部 DLL 路径、不自动解析依赖图。")] = None,
+    allowFullCSharp: Annotated[bool, Field(description="修改动作必须显式 true；运行的是可信代码，不是真正安全沙箱。")] = False,
+):
+    args = locals().copy()
+    return await _run("diagnostic_module", args, lambda: _get_facade().diagnostic_module(
+        action=action, session_id=sessionId, module_id=moduleId, source=source,
+        entry_type=entryType, args_json=argsJson, expected_project_path=expectedProjectPath,
+        expected_domain_generation=expectedDomainGeneration,
+        expected_play_session_id=expectedPlaySessionId, reference_type_names=referenceTypeNames,
+        allow_full_csharp=allowFullCSharp,
+    ))
+
+
+for _name in ("execution_session", "csharp_validate", "csharp_eval", "reflection_emit_type", "csharp_object_dump", "diagnostic_module"):
     register_public_tool(
         _name,
         public_handler=globals()[_name],

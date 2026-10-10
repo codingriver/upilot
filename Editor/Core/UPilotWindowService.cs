@@ -31,6 +31,7 @@ namespace CodingRiver.UPilot
         public bool hasFocus;
         public bool docked;
         public bool hasUIToolkit;
+        public bool nativeTooltip;
     }
 
     public class EditorWindowResolveResult
@@ -64,6 +65,7 @@ namespace CodingRiver.UPilot
     {
         public string typeFilter;
         public string titleFilter;
+        public bool includeNativeTooltips;
     }
 
     public sealed class UPilotWindowService
@@ -133,6 +135,10 @@ namespace CodingRiver.UPilot
                 result.windows.Add(BuildWindowInfo(w));
             }
 
+            if (filter.includeNativeTooltips)
+                foreach (var info in UPilotWindowDiagnostics.ListNativeTooltips())
+                    if ((string.IsNullOrEmpty(filter.typeFilter) || info.fullTypeName.IndexOf(filter.typeFilter, StringComparison.OrdinalIgnoreCase) >= 0)
+                        && string.IsNullOrEmpty(filter.titleFilter)) result.windows.Add(info);
             result.total = result.windows.Count;
             return result;
         }

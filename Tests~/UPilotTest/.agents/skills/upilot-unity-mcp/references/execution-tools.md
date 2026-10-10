@@ -155,7 +155,7 @@ Backend selection is explicit and stable:
 - `interpret` executes the complete V2 AST.
 - `emit` generates/caches a DynamicMethod entry that still calls the parsed `CSharpProgram`; it avoids repeated parse/entry setup but is not direct C# or per-node IL compilation.
 - `compiled` statically binds and lowers the supported synchronous AST to an Expression Tree delegate. It supports typed locals/inputs, operators, assignment, `if`/`while`/`for`, members, calls, explicit generic calls, constructors, casts, one-dimensional arrays/indexers, `??`, and type intrinsics. Unsupported nodes fail before execution with `CSHARP_COMPILED_UNSUPPORTED_NODE`; there is no interpreter fallback.
-- `auto` preserves compatibility: it interprets the first successful AST and may reuse the old emit-cache on later identical calls. It does not auto-select `compiled`, and no backend switch occurs after execution begins.
+- Older Bridges interpret cold `auto` keys first, then warm/reuse Emit; `EVAL_CACHE_WARMUP_FAILED` is a post-success cache warning. Newer Bridges prepare Emit before business execution and may report `EVAL_BACKEND_FALLBACK` when unavailable/failed preparation selects the equivalent interpreter. Syntax, cancellation and resource refusals remain errors. Inspect deployed behavior, actual backend and result/error; do not infer a runtime upgrade from these templates. Explicit `emit`/`compiled` stay strict. Never auto-select `compiled`, switch backend after execution starts or replay for cache/fallback warnings, including `EVAL_CACHE_EVICTED`.
 
 Use `compiled` for repeatedly invoked synchronous snippets whose variable types are stable. Use `interpret` for `try/catch/finally`, `foreach`, lambda/closure, await, inferred generics, supported optional/params method calls, multidimensional arrays, and other full-V2 nodes. Named/ref/out source arguments are not supported by the Eval parser: use structured `unity_reflection_call` arguments instead. Member access and calls in a compiled delegate still pass through the execution context so Unity main-thread scheduling, policy, budgets, diagnostics, and side-effect evidence remain intact.
 
@@ -170,7 +170,8 @@ Read the response's `resourceDiagnostics` on success and `error.detail.resourceD
 | Code | Meaning and action |
 | --- | --- |
 | `EVAL_CACHE_EVICTED` | Warning: an older program was evicted. Keep a successful result; no replay is needed. |
-| `EVAL_CACHE_WARMUP_FAILED` | Warning: auto execution succeeded but cache warmup failed. Keep the result; do not replay execution. |
+| `EVAL_BACKEND_FALLBACK` | Newer-Bridge warning: Emit preparation failed before execution; the equivalent interpreter is selected for preparation. Read the actual backend and result/error. No replay. |
+| `EVAL_CACHE_WARMUP_FAILED` | Legacy warning from older Bridges: auto execution succeeded but later cache warmup failed. Keep that result; do not replay execution. |
 | `EMIT_DOMAIN_TYPE_LIMIT_EXCEEDED` | Error: new generation was refused. Reuse an existing type or Eval; a future Reload requires user authorization. |
 | `SESSION_LIMIT_EXCEEDED` | Error: session handle/type capacity was refused before generation. Inspect the named resource and session state. |
 | `EMIT_GENERATION_SLOT_CONSUMED` | Supplemental warning on failure: the slot cannot be reclaimed; the primary error is still authoritative. |

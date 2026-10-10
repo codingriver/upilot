@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 
+import pytest
+
 from upilot_mcp.domain.execution_service import (
     ExecutionDomainService,
     normalize_arguments,
@@ -34,8 +36,8 @@ def _service():
     return service
 
 
-def test_execution_registry_v6_explicit_tools_are_write_gated_non_idempotent():
-    assert REGISTRY_VERSION == 7
+def test_execution_registry_v8_explicit_tools_are_write_gated_non_idempotent():
+    assert REGISTRY_VERSION == 8
     for name in ("execution_session", "csharp_eval", "reflection_emit_type"):
         descriptor = REGISTRY.resolve(name)
         assert descriptor is not None
@@ -74,6 +76,9 @@ def test_execution_tool_schemas_explain_routes_and_complex_parameters():
     csharp = tools["csharp_eval"]
     assert "C# 子集 V2" in csharp.description
     assert "async void" in csharp.description
+    assert "EVAL_BACKEND_FALLBACK" in csharp.description
+    assert "backendUsed" in csharp.description
+    assert "EVAL_CACHE_WARMUP_FAILED" in csharp.description
     for name in ("code", "mode", "sessionId", "variables", "executionBackend", "limits", "resultMode"):
         assert csharp.inputSchema["properties"][name]["description"]
 
@@ -325,15 +330,16 @@ def test_resource_errors_keep_original_failure_and_nested_evidence():
     assert len(service.dispatcher.calls) == 1
 
 
-def test_mcp_success_warning_does_not_set_is_error_or_retry(monkeypatch):
+@pytest.mark.parametrize("code,action", [("EVAL_CACHE_WARMUP_FAILED", "skip"), ("EVAL_BACKEND_FALLBACK", "fallback_interpreter")])
+def test_mcp_success_warning_does_not_set_is_error_or_retry(monkeypatch, code, action):
     calls = []
 
     class Facade:
         async def csharp_eval(self, **kwargs):
             calls.append(kwargs)
             return ok("req", {"status": "Succeeded", "result": "42", "resourceDiagnostics": [{
-                "code": "EVAL_CACHE_WARMUP_FAILED", "severity": "warning", "resource": "emitCache",
-                "action": "skip", "count": 1, "limit": 256, "used": 0, "nextAction": "Keep the result.",
+                "code": code, "severity": "warning", "resource": "emitCache",
+                "action": action, "count": 1, "limit": 256, "used": 0, "nextAction": "Keep the result.",
             }], "resourceDiagnosticsDroppedCount": 0})
 
     monkeypatch.setattr(execution_tools, "_get_facade", lambda: Facade())
@@ -341,7 +347,8 @@ def test_mcp_success_warning_does_not_set_is_error_or_retry(monkeypatch):
     result = asyncio.run(execution_tools.csharp_eval("return 42;"))
     assert result.isError is False
     assert len(calls) == 1
-    assert "EVAL_CACHE_WARMUP_FAILED" in str(result)
+    assert code in str(result)
+    assert action in str(result)
 
 
 def _reflection_service():

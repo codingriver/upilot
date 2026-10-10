@@ -22,6 +22,18 @@ class CommandRecord:
     created_at: int = 0
     sent_at: int = 0
     completed_at: int = 0
+    # Response wait only: sending, inner awaitables and outer operations have
+    # separate lifetimes. Zero/None means that no fact was recorded.
+    response_wait_started_at: int = 0
+    response_wait_deadline_at: int = 0
+    response_wait_timeout_ms: int | None = None
+    send_attempts: int | None = None
+    # Fixed observation budget for ready + send + response, not a Unity execution deadline.
+    call_started_at: int = 0
+    call_deadline_at: int = 0
+    call_timeout_ms: int | None = None
+    # Same live-process monotonic budget as Dispatcher; never serialized as a wall-clock fact.
+    call_deadline_monotonic: float = 0.0
 
 
 @dataclass(slots=True)
@@ -62,6 +74,8 @@ class CompileSnapshot:
 class EditorSnapshot:
     connected: bool = False
     is_compiling: bool = False
+    is_updating: bool | None = None
+    maintenance_initialization: dict | None = None
     play_mode_state: str = "unknown"
     active_scene: str = ""
     updated_at: int = 0
@@ -1040,6 +1054,9 @@ class StateStore:
         if self.pending_write_batch_id and not self.compile_deferred_reason and self.editor.play_mode_state in ("play", "pause"):
             self.compile_deferred_reason = "PlayMode"
         self.editor.is_compiling = bool(payload.get("isCompiling", False))
+        self.editor.is_updating = payload.get("isUpdating") if isinstance(payload.get("isUpdating"), bool) else None
+        initialization = payload.get("maintenanceInitialization")
+        self.editor.maintenance_initialization = dict(initialization) if isinstance(initialization, dict) else None
         self.editor.active_scene = str(payload.get("activeScene") or self.editor.active_scene)
         self.editor.last_main_thread_pump_at = int(payload.get("lastMainThreadPumpAt") or self.editor.last_main_thread_pump_at)
         self.editor.main_thread_queue_depth = int(payload.get("mainThreadQueueDepth") or 0)
@@ -1143,15 +1160,26 @@ class StateStore:
         return True
 
     def update_editor_context(self, payload: dict[str, Any]) -> bool:
-        """Apply legacy context, or only refresh liveness for the current v2 snapshot."""
+        """Apply legacy context; unordered contexts cannot refresh v2 evidence."""
         if not self.producer_epoch:
             return self.update_editor_state(payload)
         incoming_snapshot_id = str(payload.get("snapshotId") or "")
-        if incoming_snapshot_id != self.snapshot_id:
+        incoming_session_id = str(payload.get("sessionId") or "")
+        if incoming_snapshot_id != self.snapshot_id or (
+            incoming_session_id and incoming_session_id != self.editor.session_id
+        ):
             return False
-        self.editor.connected = bool(payload.get("connected", True))
-        self.editor.updated_at = _now_ms()
-        self.received_at = self.editor.updated_at
+        incoming_mode = str(payload.get("playModeState") or "").strip().lower()
+        if incoming_mode and incoming_mode != self.editor.play_mode_state:
+            # A current identity carrying different mode facts is not a new
+            # ordered observation. Keep its facts/clock, but refuse readiness
+            # until Unity publishes a newer snapshot.
+            self.editor.authoritative = False
+            self.editor.source = "editor-context-conflict"
+            return False
+        if payload.get("authoritative") is False or payload.get("isStale") is True:
+            self.editor.authoritative = False
+            return False
         return True
 
     def create_command(self, command_id: str, request_id: str, name: str, payload: dict[str, Any]) -> CommandRecord:
@@ -1163,13 +1191,40 @@ class StateStore:
             status="sent",
             created_at=_now_ms(),
             sent_at=_now_ms(),
+            send_attempts=0,
         )
         self.commands[command_id] = record
         return record
 
+    def command_observation(self, command_id: str) -> dict[str, Any]:
+        """Bounded server facts; never include payloads, results or ownership secrets."""
+        observation = {
+            "source": "server_command_record",
+            "scope": "current-service-lifetime; call-budget-ready-send-response; send-attempts-not-execution-count",
+            "commandId": command_id,
+            "serviceLifecycleId": self.lifecycle_id,
+            "status": "unknown",
+        }
+        record = self.commands.get(command_id)
+        if record is None:
+            observation["reason"] = "command_record_not_in_current_service_lifetime"
+            return observation
+        observation.update(
+            status="observed", requestId=record.request_id, commandName=record.name,
+            recordStatus=record.status, createdAt=record.created_at,
+            completedAt=record.completed_at, sendAttempts=record.send_attempts,
+            responseWaitStartedAt=record.response_wait_started_at or None,
+            responseWaitDeadlineAt=record.response_wait_deadline_at or None,
+            responseWaitTimeoutMs=record.response_wait_timeout_ms,
+            callStartedAt=record.call_started_at or None,
+            callDeadlineAt=record.call_deadline_at or None,
+            callTimeoutMs=record.call_timeout_ms,
+        )
+        return observation
+
     def mark_success(self, command_id: str, payload: dict[str, Any]) -> None:
         cmd = self.commands.get(command_id)
-        if not cmd:
+        if not cmd or cmd.status in {"success", "failed"}:
             return
         cmd.status = "success"
         cmd.result = payload
@@ -1177,7 +1232,7 @@ class StateStore:
 
     def mark_failed(self, command_id: str, error: dict[str, Any]) -> None:
         cmd = self.commands.get(command_id)
-        if not cmd:
+        if not cmd or cmd.status in {"success", "failed"}:
             return
         cmd.status = "failed"
         cmd.error = error
@@ -1414,6 +1469,9 @@ class StateStore:
             play_mode_state = "unknown"
         if play_mode_state:
             self.editor.play_mode_state = play_mode_state
+        self.editor.is_updating = payload.get("isUpdating") if isinstance(payload.get("isUpdating"), bool) else None
+        initialization = payload.get("maintenanceInitialization")
+        self.editor.maintenance_initialization = dict(initialization) if isinstance(initialization, dict) else None
         self.editor.active_scene = str(payload.get("activeScene", self.editor.active_scene))
         self.editor.updated_at = incoming_updated_at
         self.editor.authoritative = bool(payload.get("authoritative", self.editor.authoritative))
@@ -1581,9 +1639,11 @@ class StateStore:
             "ageMs": age_ms,
             "isStale": is_stale,
             "playModeState": play_state,
-            "isPlaying": play_state == "play",
+            "isPlaying": play_state in ("play", "pause"),
             "isPaused": play_state == "pause",
             "isCompiling": is_compiling,
+            "isUpdating": self.editor.is_updating if authoritative and not is_stale else None,
+            "maintenanceInitialization": self.editor.maintenance_initialization if authoritative and not is_stale else None,
             "compileStatus": self.compile.status,
             "compilePhase": compile_phase,
             "compileRequestId": self.compile.compile_request_id,

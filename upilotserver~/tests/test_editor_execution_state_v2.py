@@ -4,10 +4,13 @@ import asyncio
 import inspect
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from upilot_mcp.config import CONFIG
+from upilot_mcp.dispatcher import CommandDispatcher
+from upilot_mcp.domain.status_service import StatusDomainService
 from upilot_mcp.domain.resource_service import ResourceDomainService
 from upilot_mcp.models import WsMessage
 from upilot_mcp.responses import fail, ok
@@ -1169,3 +1172,781 @@ def test_rejected_terminal_write_rolls_back_status_and_snapshot(tmp_path, phase)
     assert result["status"] == ("verified" if phase == "completed" else "failed")
     assert result["correlationVerified"] and result["terminalSnapshot"] == terminal
     assert store.pending_write_batch_id == ""
+
+
+def test_initialization_and_import_facts_follow_authoritative_snapshot_not_disk(tmp_path, monkeypatch):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.reset_editor_session("session-new", 7)
+    snapshot = _snapshot(1)
+    snapshot.update(sessionId="session-new", isUpdating=True,
+                    maintenanceInitialization={"recoveryChecked": True, "checkedAt": 900, "storageError": "", "source": "unity-maintenance-initialization"})
+    assert state.update_editor_execution_state(snapshot)
+    observed = state.execution_state()
+    assert observed["isUpdating"] is True
+    assert observed["maintenanceInitialization"]["checkedAt"] == 900
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 4000)
+    assert state.execution_state(stale_after_ms=250)["maintenanceInitialization"] is None
+    legacy = _snapshot(2)
+    legacy["sessionId"] = "session-new"
+    assert state.update_editor_execution_state(legacy)
+    assert state.execution_state()["maintenanceInitialization"] is None
+    assert state.execution_state()["isUpdating"] is None
+
+
+@pytest.mark.parametrize("phase", ["completed", "failed"])
+def test_deferred_constraint_commit_failure_does_not_publish_verified_write_batch(tmp_path, monkeypatch, phase):
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                       observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued")
+    queued["compileRequestId"] = "request-a"
+    assert store.update_editor_execution_state(queued)
+    original = store.get_write_batch(identity)
+    connect = sqlite3.connect
+    with connect(store._db_path) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        original_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        # Keep the real WAL mode. The test-only deferred foreign key permits the
+        # UPDATE statement and fails at COMMIT, not at execute()/a mocked save.
+        db.execute("CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY)")
+        db.execute("CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) "
+                   "DEFERRABLE INITIALLY DEFERRED)")
+        db.execute("CREATE TRIGGER inject_commit_failure AFTER UPDATE OF terminal_snapshot_json "
+                   "ON write_batches WHEN NEW.terminal_snapshot_json IS NOT NULL "
+                   "BEGIN INSERT INTO commit_fault_child VALUES(1); END")
+    traces = []
+    def traced_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        db.execute("PRAGMA foreign_keys=ON")
+        db.set_trace_callback(traces.append)
+        return db
+    terminal = _snapshot(2, phase=phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
+    terminal["compileRequestId"] = "request-a"
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", traced_connect)
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY constraint failed"):
+            store.update_editor_execution_state(terminal)
+    statements = [statement.strip().upper() for statement in traces]
+    update_index = next(index for index, statement in enumerate(statements)
+                        if statement.startswith("UPDATE WRITE_BATCHES") and "TERMINAL_SNAPSHOT_JSON" in statement)
+    commit_index = statements.index("COMMIT", update_index)
+    assert statements.index("ROLLBACK", commit_index) > commit_index
+    assert store.get_write_batch(identity) == original
+    assert store.pending_write_batch_id == identity
+    assert not store.execution_state()["correlationVerified"]
+    assert not store.execution_state()["ready"]
+    with connect(store._db_path) as db:
+        assert db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone() == original_row
+        assert db.execute("SELECT COUNT(*) FROM commit_fault_child").fetchone()[0] == 0
+        db.execute("DROP TRIGGER inject_commit_failure")
+    # Observe fresh evidence for the original identity; never register/start another compile.
+    terminal["sequence"] = 3
+    terminal["snapshotId"] = "epoch-a:0:3"
+    assert store.update_editor_execution_state(terminal)
+    result = store.get_write_batch(identity)
+    assert result["status"] == ("verified" if phase == "completed" else "failed")
+    assert result["outcome"] == ("passed" if phase == "completed" else "failed")
+    assert result["correlationVerified"] and result["terminalSnapshot"] == terminal
+    assert result["writeBatchCreatedAt"] == 1000 and result["compileRequestId"] == "request-a"
+    assert store.pending_write_batch_id == ""
+
+
+
+def _exit_during_write_batch_commit(project, phase, boundary):
+    """Run only in a test-owned child: exit without closing the real WAL connection."""
+    import json
+    import os
+    import upilot_mcp.state_store as state_module
+
+    state_module._now_ms = lambda: 3000
+    project = Path(project)
+    store = StateStore()
+    store.configure_project(str(project))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                       observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued")
+    queued["compileRequestId"] = "request-a"
+    assert store.update_editor_execution_state(queued)
+    terminal = _snapshot(2, phase=phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
+    terminal["compileRequestId"] = "request-a"
+    connect = sqlite3.connect
+    with connect(store._db_path) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        db.row_factory = sqlite3.Row
+        original = dict(db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone())
+        snapshot = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
+    (project / "before-exit.json").write_text(json.dumps({
+        "identity": identity, "originalRow": original, "queuedSnapshot": snapshot,
+        "terminal": terminal, "lifecycleId": store.lifecycle_id,
+    }), encoding="utf-8")
+
+    def exit_at_boundary(db, stage, code):
+        print(json.dumps({"stage": stage, "inTransaction": db.in_transaction,
+                          "pending": store.pending_write_batch_id,
+                          "correlationVerified": store.correlation_verified}), flush=True)
+        os._exit(code)
+
+    class ExitConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.evidence_transaction = False
+            self.set_trace_callback(self.trace)
+
+        def trace(self, statement):
+            sql = statement.strip().upper()
+            if sql.startswith("UPDATE WRITE_BATCHES SET STATUS=") and "TERMINAL_SNAPSHOT_JSON=" in sql:
+                self.evidence_transaction = True
+            if sql == "COMMIT" and self.evidence_transaction and boundary == "before_commit":
+                exit_at_boundary(self, boundary, 71)
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            result = super().__exit__(exc_type, exc_value, traceback)
+            if exc_type is None and self.evidence_transaction and boundary == "after_commit":
+                exit_at_boundary(self, boundary, 72)
+            return result
+
+    def exit_connect(*args, **kwargs):
+        return connect(*args, factory=ExitConnection, **kwargs)
+
+    sqlite3.connect = exit_connect
+    store.update_editor_execution_state(terminal)
+    raise AssertionError("The child did not reach its requested COMMIT exit boundary.")
+
+
+@pytest.mark.parametrize("phase", ["completed", "failed"])
+@pytest.mark.parametrize("boundary", ["before_commit", "after_commit"])
+def test_process_exit_at_write_batch_commit_preserves_history_without_replay(tmp_path, phase, boundary):
+    import json
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    child = subprocess.run([
+        sys.executable, "-c",
+        "import sys; sys.path[:0] = sys.argv[1:3]; "
+        "from test_editor_execution_state_v2 import _exit_during_write_batch_commit; "
+        "_exit_during_write_batch_commit(*sys.argv[3:])",
+        str(root / "src"), str(root / "tests"), str(tmp_path), phase, boundary,
+    ], capture_output=True, text=True, timeout=30,
+       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert child.returncode == (71 if boundary == "before_commit" else 72), (child.stdout, child.stderr)
+    before = json.loads((tmp_path / "before-exit.json").read_text(encoding="utf-8"))
+    identity = before["identity"]
+    marker = json.loads(child.stdout.strip())
+    assert marker == {"stage": boundary, "inTransaction": boundary == "before_commit",
+                      "pending": identity, "correlationVerified": False}
+    db_path = tmp_path / "Library/UPilot/ServerState/state-v2.sqlite3"
+    assert Path(str(db_path) + "-wal").stat().st_size > 0
+    # Inspect recovered WAL bytes before StateStore can restore/project history.
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        db.row_factory = sqlite3.Row
+        row = dict(db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone())
+        assert db.execute("SELECT COUNT(*) FROM write_batches").fetchone()[0] == 1
+        assert db.execute("SELECT snapshot_json FROM project_state").fetchone()[0] == before["queuedSnapshot"]
+    expected_row = dict(before["originalRow"])
+    if boundary == "after_commit":
+        expected_row.update(status="verified" if phase == "completed" else "failed", updated_at=3000,
+                            terminal_snapshot_json=json.dumps(before["terminal"], ensure_ascii=False), error="")
+    assert row == expected_row
+
+    restored = StateStore()
+    restored.configure_project(str(tmp_path))
+    assert restored.lifecycle_id != before["lifecycleId"]
+    assert restored.pending_write_batches() == [] and restored.pending_write_batch_id == ""
+    assert restored._current_write_batches == set()
+    assert not restored.execution_state()["ready"]
+    assert not restored.execution_state()["authoritative"]
+    service = _ResourceService(tmp_path, restored)
+    original = restored.get_write_batch(identity)
+    for _ in range(2):
+        response = asyncio.run(service.write_batch_status(identity))
+        assert response.ok and response.data["historical"] and response.data["terminal"]
+        assert response.data["writeBatchId"] == identity
+        assert response.data["compileRequestId"] == "request-a"
+        assert response.data["writeBatchCreatedAt"] == 1000
+        if boundary == "before_commit":
+            assert response.data["status"] == "aborted"
+            assert response.data["outcome"] == "unknown"
+            assert not response.data["errorsVerified"] and not response.data["correlationVerified"]
+        else:
+            assert response.data["status"] == ("verified" if phase == "completed" else "failed")
+            assert response.data["outcome"] == ("passed" if phase == "completed" else "failed")
+            assert response.data["errorsVerified"] and response.data["correlationVerified"]
+            assert response.data["terminalSnapshot"] == before["terminal"]
+    assert service.resume_calls == 0
+    assert restored.get_write_batch(identity) == original
+    assert restored.pending_write_batches() == []
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        assert dict(db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()) == row
+
+    # A later explicitly registered batch is independent; old terminal evidence
+    # cannot turn historical unverified work into an active/verified batch.
+    successor = restored.register_write_batch(["B.cs"], created_at=2000, files_sha256="b", compile_when_edit_mode=True)
+    assert successor["writeBatchId"] != identity
+    assert restored.update_editor_execution_state(before["terminal"])
+    assert restored.pending_write_batch_id == successor["writeBatchId"]
+    assert [item["writeBatchId"] for item in restored.pending_write_batches()] == [successor["writeBatchId"]]
+    assert not restored.execution_state()["ready"]
+    assert not restored.execution_state()["correlationVerified"]
+    assert restored.get_write_batch(identity) == original
+    assert service.resume_calls == 0
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        assert dict(db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()) == row
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Requires actual Windows file sharing denial")
+@pytest.mark.parametrize("phase", ["completed", "failed"])
+@pytest.mark.parametrize("observation", ["fresh_snapshot", "new_lifecycle"])
+def test_windows_file_sharing_denial_never_confirms_write_batch(tmp_path, phase, observation):
+    """Exercise the real OS/SQLite failure, without replacing sqlite.connect or touching live state."""
+    import ctypes
+    from ctypes import wintypes
+    import gc
+    import json
+
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                       observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued")
+    assert store.update_editor_execution_state(queued)
+    original = store.get_write_batch(identity)
+    db_path = Path(store._db_path).resolve()
+    assert db_path.is_relative_to(tmp_path.resolve())
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        before_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        before_snapshot = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
+    db.close()
+    # SQLite connection context managers commit/rollback but do not close. Drop
+    # test-owned unreachable connections before opening our exclusive write guard.
+    gc.collect()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    invalid = ctypes.c_void_p(-1).value
+    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING. Readers remain allowed;
+    # SQLite's read/write open is denied by Windows, not a monkeypatched error.
+    guard = kernel.CreateFileW(str(db_path), 0x80000000, 1, None, 3, 0, None)
+    assert guard != invalid, ctypes.WinError(ctypes.get_last_error())
+    terminal = _snapshot(2, phase=phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
+    try:
+        probe = kernel.CreateFileW(str(db_path), 0xC0000000, 7, None, 3, 0, None)
+        native_error = ctypes.get_last_error()
+        if probe != invalid:
+            kernel.CloseHandle(probe)
+        assert probe == invalid and native_error == 32  # ERROR_SHARING_VIOLATION
+        with pytest.raises(sqlite3.Error) as failure:
+            store.update_editor_execution_state(terminal)
+        sqlite_code = failure.value.sqlite_errorcode
+        sqlite_name = failure.value.sqlite_errorname
+        assert sqlite_code == sqlite3.SQLITE_READONLY
+        failure_frames = []
+        frame = failure.value.__traceback__
+        while frame is not None:
+            failure_frames.append(frame.tb_frame.f_code.co_name)
+            frame = frame.tb_next
+        assert "_persist_batch_evidence" in failure_frames
+        failed_view = store.get_write_batch(identity)
+        assert not failed_view["terminal"] and not failed_view["evidenceAvailable"]
+        assert not failed_view["correlationVerified"] and failed_view["terminalSnapshot"] is None
+        assert store.pending_write_batch_id == identity
+        assert not store.execution_state()["ready"] and not store.execution_state()["correlationVerified"]
+    finally:
+        assert kernel.CloseHandle(guard), ctypes.WinError(ctypes.get_last_error())
+        gc.collect()
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        after_failure_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        assert after_failure_row == before_row
+        assert db.execute("SELECT snapshot_json FROM project_state").fetchone()[0] == before_snapshot
+        assert db.execute("SELECT COUNT(*) FROM write_batches").fetchone()[0] == 1
+    db.close()
+    assert store.get_write_batch(identity) == original
+    if observation == "fresh_snapshot":
+        # Only a new authoritative observation of the original operation; no
+        # registration, compile dispatch, or extension of its original deadline.
+        terminal.update(sequence=3, snapshotId="epoch-a:0:3")
+        assert store.update_editor_execution_state(terminal)
+        final = store.get_write_batch(identity)
+        assert final["status"] == ("verified" if phase == "completed" else "failed")
+        assert final["outcome"] == ("passed" if phase == "completed" else "failed")
+        assert final["terminalSnapshot"] == terminal and final["correlationVerified"]
+        assert final["writeBatchCreatedAt"] == 1000 and store.pending_write_batch_id == ""
+        service = _ResourceService(tmp_path, store)
+        response = asyncio.run(service.write_batch_status(identity))
+        assert response.ok and response.data["terminal"] and response.data["outcome"] == final["outcome"]
+    else:
+        restored = StateStore()
+        restored.configure_project(str(tmp_path))
+        assert restored.lifecycle_id != store.lifecycle_id
+        assert restored.pending_write_batches() == [] and restored.pending_write_batch_id == ""
+        assert not restored.execution_state()["ready"]
+        service = _ResourceService(tmp_path, restored)
+        for _ in range(2):
+            response = asyncio.run(service.write_batch_status(identity))
+            assert response.ok and response.data["historical"] and response.data["terminal"]
+            assert response.data["status"] == "aborted" and response.data["outcome"] == "unknown"
+            assert not response.data["errorsVerified"] and not response.data["correlationVerified"]
+            assert response.data["writeBatchCreatedAt"] == 1000
+        final = response.data
+        assert restored._current_write_batches == set()
+    assert service.resume_calls == 0
+    (tmp_path / "sharing-fault-receipt.json").write_text(json.dumps({
+        "phase": phase, "observation": observation, "dbPath": str(db_path),
+        "win32Error": native_error, "sqliteErrorCode": sqlite_code, "sqliteErrorName": sqlite_name,
+        "failureFrames": failure_frames, "beforeRow": before_row, "afterFailureRow": after_failure_row,
+        "queuedSnapshot": json.loads(before_snapshot),
+        "writeBatchId": identity, "writeBatchCreatedAt": 1000,
+        "guardClosed": True, "originalRowsUnchangedAfterFailure": True,
+        "pendingAtFailure": identity, "terminalAtFailure": failed_view["terminal"],
+        "finalStatus": final["status"], "finalOutcome": final["outcome"],
+        "compileRequests": service.resume_calls,
+    }, indent=2), encoding="utf-8")
+
+
+def test_v2_same_identity_mode_conflict_cannot_refresh_liveness(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    paused = _snapshot(1)
+    paused.update(sessionId="session-a", playModeState="pause")
+    assert state.update_editor_execution_state(paused)
+    original_received_at = state.received_at
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 4500)
+    accepted = state.update_editor_context({
+        "snapshotId": paused["snapshotId"], "sessionId": "session-a",
+        "connected": True, "authoritative": True, "updatedAt": 4000,
+        "playModeState": "play", "isPlaying": True, "isPaused": False,
+    })
+    assert not accepted
+    assert state.received_at == original_received_at
+    execution = state.execution_state()
+    assert execution["authoritative"] is False and execution["isStale"] is True
+    assert execution["snapshotId"] == paused["snapshotId"]
+    assert execution["playModeState"] == "pause"  # Do not invent a new ordered observation.
+
+
+def test_d20_real_dispatcher_resource_query_cannot_publish_fresh_conflicting_modes(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    paused = _snapshot(1)
+    paused.update(sessionId="session-a", playModeState="pause")
+    assert state.update_editor_execution_state(paused)
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 4500)
+    raw = {
+        "authoritative": True, "isStale": False, "updatedAt": 4000,
+        "sessionId": "session-a", "isPlaying": True, "isPaused": False,
+        "isCompiling": False, "activeSceneName": "TestScene",
+    }
+    context = {
+        "snapshotId": paused["snapshotId"], "sessionId": "session-a",
+        "connected": True, "authoritative": True, "updatedAt": 4000,
+        "playModeState": "play", "isPlaying": True, "isPaused": False,
+    }
+    class Transport:
+        def __init__(self):
+            self.calls = []
+        def is_ready(self):
+            return True
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+        async def send_command(self, *, command_id, name, payload):
+            self.calls.append(name)
+            self.future.set_result({"type": "result", "payload": raw, "context": context})
+
+    transport = Transport()
+    service = StatusDomainService()
+    service.dispatcher = CommandDispatcher(transport, state)
+    service.server = SimpleNamespace(
+        state=state, is_ready=transport.is_ready,
+        session_manager=SimpleNamespace(active=SimpleNamespace(session_id="session-a", process_id=7)),
+    )
+    response = asyncio.run(service.editor_state())
+    assert response.ok
+    execution = state.execution_state()
+    assert transport.calls == ["resource.editorState"]
+    assert response.data["playModeState"] == execution["playModeState"]
+    assert not execution["authoritative"] and execution["isStale"]
+    assert not response.data["authoritative"] and response.data["isStale"]
+
+
+def test_d20_coherent_context_does_not_refresh_snapshot_age(tmp_path: Path, monkeypatch) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    snapshot = _snapshot(1)
+    snapshot.update(sessionId="session-a", playModeState="play")
+    assert state.update_editor_execution_state(snapshot)
+    before = (state.received_at, state.editor.updated_at)
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 12000)
+    assert state.update_editor_context({
+        "snapshotId": snapshot["snapshotId"], "sessionId": "session-a",
+        "playModeState": "play", "authoritative": True, "updatedAt": 12000,
+    })
+    assert (state.received_at, state.editor.updated_at) == before
+    assert state.execution_state()["isStale"] is True
+
+
+@pytest.mark.parametrize("snapshot_id,session_id", [
+    ("epoch-a:0:0", "session-a"), ("epoch-a:0:1", "old-session"),
+    ("epoch-a:0:1", "session-a"),
+])
+def test_d20_old_context_cannot_downgrade_new_domain(tmp_path: Path, snapshot_id, session_id) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    current = _snapshot(2, domain=1)
+    current.update(sessionId="session-a", playModeState="play")
+    assert state.update_editor_execution_state(current)
+    before = state.execution_state()
+    assert not state.update_editor_context({
+        "snapshotId": snapshot_id, "sessionId": session_id,
+        "playModeState": "pause", "authoritative": False, "isStale": True,
+        "updatedAt": 9999,
+    })
+    assert state.execution_state() == before
+
+
+def test_d20_only_new_ordered_snapshot_restores_conflict_authority(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    paused = _snapshot(1)
+    paused.update(sessionId="session-a", playModeState="pause")
+    assert state.update_editor_execution_state(paused)
+    assert not state.update_editor_context({
+        "snapshotId": paused["snapshotId"], "sessionId": "session-a", "playModeState": "play",
+    })
+    assert state.update_editor_context({
+        "snapshotId": paused["snapshotId"], "sessionId": "session-a",
+        "playModeState": "pause", "authoritative": True,
+    })
+    assert not state.execution_state()["authoritative"]
+    assert not state.update_editor_execution_state(paused)
+    resumed = _snapshot(2, observed_at=2000, transition="heartbeat")
+    resumed.update(sessionId="session-a", playModeState="play")
+    assert state.update_editor_execution_state(resumed)
+    restored = state.execution_state()
+    assert restored["authoritative"] and not restored["isStale"]
+    assert restored["playModeState"] == "play" and restored["sequence"] == 2
+
+
+def _d20_real_dispatcher_service(state, reply):
+    class Transport:
+        def __init__(self):
+            self.calls = []
+        def is_ready(self):
+            return True
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+        async def send_command(self, *, command_id, name, payload):
+            self.calls.append((name, payload))
+            self.future.set_result(reply(name, payload))
+    transport = Transport()
+    service = StatusDomainService()
+    service.dispatcher = CommandDispatcher(transport, state)
+    service.server = SimpleNamespace(
+        state=state, is_ready=transport.is_ready,
+        session_manager=SimpleNamespace(
+            active=SimpleNamespace(session_id="session-a", process_id=7), is_connected=lambda: True,
+        ),
+    )
+    return service, transport
+
+
+def test_d20_new_snapshot_wins_over_late_paused_resource_reply(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    paused = _snapshot(1)
+    paused.update(sessionId="session-a", playModeState="pause")
+    assert state.update_editor_execution_state(paused)
+    def reply(name, payload):
+        resumed = _snapshot(2, observed_at=2000, transition="pause_state_changed")
+        resumed.update(sessionId="session-a", playModeState="play")
+        assert state.update_editor_execution_state(resumed)
+        return {"type": "result", "context": paused, "payload": {
+            "isPlaying": True, "isPaused": True, "isCompiling": False,
+            "authoritative": True, "isStale": False, "updatedAt": 1000,
+        }}
+    service, transport = _d20_real_dispatcher_service(state, reply)
+    response = asyncio.run(service.editor_state())
+    assert response.ok and len(transport.calls) == 1
+    execution = state.execution_state()
+    assert response.data["playModeState"] == execution["playModeState"] == "play"
+    assert response.data["authoritative"] and not response.data["isStale"]
+    assert execution["sequence"] == 2
+
+
+def test_d20_legacy_resource_projection_keeps_accepted_newer_state(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    service, _ = _d20_real_dispatcher_service(state, lambda *_: None)
+    raw = {"connected": True, "sessionId": "session-a", "authoritative": True,
+           "isPlaying": True, "isPaused": False, "updatedAt": 2500}
+    assert service._update_editor_cache_from_resource_state(raw)["playModeState"] == "play"
+    assert not state.producer_epoch
+    older = dict(raw, isPaused=True, updatedAt=2000)
+    assert service._update_editor_cache_from_resource_state(older)["playModeState"] == "play"
+    assert state.editor.updated_at == 2500
+
+
+def test_d20_compile_refresh_observes_ordered_phase_not_old_raw(tmp_path: Path) -> None:
+    from upilot_mcp.domain.compile_service import CompileDomainService
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    initial = _snapshot(1)
+    initial.update(sessionId="session-a", playModeState="play")
+    assert state.update_editor_execution_state(initial)
+    def reply(name, payload):
+        queued = _snapshot(2, phase="queued", observed_at=2000, terminal=False, errors_verified=False)
+        queued.update(sessionId="session-a", playModeState="edit")
+        assert state.update_editor_execution_state(queued)
+        return {"type": "result", "context": initial, "payload": {
+            "authoritative": True, "isStale": False, "isCompiling": False,
+            "isPlaying": True, "isPaused": False, "compilePhase": "completed",
+        }}
+    status, transport = _d20_real_dispatcher_service(state, reply)
+    service = CompileDomainService()
+    service.server, service.dispatcher = status.server, status.dispatcher
+    result, execution = asyncio.run(service._refresh_execution_state())
+    assert result.ok and execution["compilePhase"] == "queued"
+    assert execution["isCompiling"] and not execution["terminal"]
+    assert execution["playModeState"] == "edit"
+    assert transport.calls == [("resource.editorState", {})]
+
+
+def test_d20_repeated_resume_does_not_dispatch_or_write(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    playing = _snapshot(1)
+    playing.update(sessionId="session-a", playModeState="play")
+    assert state.update_editor_execution_state(playing)
+    def reply(name, payload):
+        raise AssertionError("A confirmed no-op must not dispatch a command or a resource query.")
+    service, transport = _d20_real_dispatcher_service(state, reply)
+    result = asyncio.run(service._set_pause_state(False, wait=True, timeout_ms=1000))
+    assert result.ok and result.data["confirmed"]
+    assert not result.data["changed"] and result.data["writeCount"] == 0
+    assert result.data["commandSubmitted"] is False
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("paused", [True, False])
+def test_d20_pause_resume_dispatches_once_and_confirms_new_snapshot(tmp_path: Path, paused: bool) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    initial = _snapshot(1)
+    initial.update(sessionId="session-a", playModeState="play" if paused else "pause")
+    assert state.update_editor_execution_state(initial)
+    observed = _snapshot(2, observed_at=2000, transition="pause_state_changed")
+    observed.update(sessionId="session-a", playModeState="pause" if paused else "play",
+                    isPlaying=True, isPaused=paused)
+    def reply(name, payload):
+        if name == "playmode.set":
+            assert set(payload) == {"action", "requestId", "operationId", "toolName"}
+            assert payload["action"] == ("pause" if paused else "resume")
+            assert payload["toolName"] == ("unity_playmode_pause" if paused else "unity_playmode_resume")
+            assert payload["requestId"].startswith("req-") and payload["operationId"] == ""
+            assert state.update_editor_execution_state(observed)
+            body = {"changed": True, "writeCount": 1, "observedState": {"isPaused": paused}}
+        else:
+            assert name == "resource.editorState" and payload == {}
+            body = {"authoritative": True, "isStale": False, "isPlaying": True, "isPaused": paused}
+        return {"type": "result", "context": observed, "payload": body}
+    service, transport = _d20_real_dispatcher_service(state, reply)
+    result = asyncio.run(service._set_pause_state(paused, wait=True, timeout_ms=1000))
+    assert result.ok and result.data["confirmed"] and result.data["terminal"]
+    assert result.data["changed"] and result.data["writeCount"] == 1
+    assert result.data["commandSubmitted"] is True
+    assert result.data["editorState"]["playModeState"] == observed["playModeState"]
+    assert result.data["editorState"]["isPlaying"] is result.context["isPlaying"] is True
+    assert result.data["editorState"]["isPaused"] is result.context["isPaused"] is paused
+    assert result.context["snapshotId"] == state.execution_state()["snapshotId"] == observed["snapshotId"]
+    assert [name for name, _ in transport.calls] == ["playmode.set", "resource.editorState"]
+    repeated = asyncio.run(service._set_pause_state(paused, wait=True, timeout_ms=1000))
+    assert repeated.ok and repeated.data["confirmed"]
+    assert not repeated.data["changed"] and repeated.data["writeCount"] == 0
+    assert repeated.data["commandSubmitted"] is False
+    assert repeated.data["editorState"]["isPlaying"] is True
+    assert repeated.data["editorState"]["isPaused"] is paused
+    assert len(transport.calls) == 2  # The repeated action cannot resubmit either command.
+
+
+@pytest.mark.parametrize("phase", ["completed", "failed"])
+@pytest.mark.parametrize("observation", ["fresh_snapshot", "new_lifecycle"])
+def test_sqlite_capacity_full_never_confirms_write_batch(tmp_path, monkeypatch, phase, observation):
+    """Real SQLITE_FULL at a private database page cap, not a filled system disk."""
+    import json
+
+    store = StateStore()
+    store.configure_project(str(tmp_path))
+    batch = store.register_write_batch(["A.cs"], created_at=1000, files_sha256="a", compile_when_edit_mode=True)
+    identity = batch["writeBatchId"]
+    queued = _snapshot(1, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                       observed_at=1010, terminal=False, errors_verified=False, transition="compile_queued")
+    assert store.update_editor_execution_state(queued)
+    original = store.get_write_batch(identity)
+    db_path = Path(store._db_path).resolve()
+    assert db_path.is_relative_to(tmp_path.resolve())
+    connect = sqlite3.connect
+    with connect(db_path) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        page_count = db.execute("PRAGMA page_count").fetchone()[0]
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        before_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        before_snapshot = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
+    db.close()
+    limits = []
+    traces = []
+    def capacity_limited_connect(*args, **kwargs):
+        # max_page_count is connection-local. Configure the actual production
+        # connection; do not replace its statements/commit or synthesize errors.
+        assert Path(args[0]).resolve() == db_path
+        db = connect(*args, **kwargs)
+        try:
+            actual_limit = db.execute(f"PRAGMA max_page_count={page_count}").fetchone()[0]
+            assert actual_limit == page_count
+            limits.append(actual_limit)
+            db.set_trace_callback(lambda sql: traces.append(sql.split(None, 1)[0].upper()))
+            return db
+        except BaseException:
+            db.close()
+            raise
+    terminal = _snapshot(2, phase=phase, write_batch_id=identity, write_batch_created_at=1000, observed_at=1100)
+    # Explicit fixture-only payload forces overflow-page allocation even when
+    # existing rows have free space. It is never sent to an online endpoint.
+    terminal["capacityProbePadding"] = "x" * (4 * page_size)
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", capacity_limited_connect)
+        with pytest.raises(sqlite3.OperationalError) as failure:
+            store.update_editor_execution_state(terminal)
+        sqlite_code = failure.value.sqlite_errorcode
+        sqlite_name = failure.value.sqlite_errorname
+        assert sqlite_code == sqlite3.SQLITE_FULL and sqlite_name == "SQLITE_FULL"
+        failure_frames = []
+        frame = failure.value.__traceback__
+        while frame is not None:
+            failure_frames.append(frame.tb_frame.f_code.co_name)
+            frame = frame.tb_next
+        assert "_persist_batch_evidence" in failure_frames
+        failed_view = store.get_write_batch(identity)
+        assert failed_view == original
+        assert not failed_view["terminal"] and not failed_view["evidenceAvailable"]
+        assert not failed_view["correlationVerified"] and failed_view["terminalSnapshot"] is None
+        assert store.pending_write_batch_id == identity
+        assert not store.execution_state()["ready"] and not store.execution_state()["correlationVerified"]
+    assert limits and all(limit == page_count for limit in limits)
+    assert "UPDATE" in traces
+    # SQLITE_FULL may automatically roll back before Python exits the context;
+    # the complete row and queued snapshot are the authoritative rollback proof.
+    with connect(db_path) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        after_failure_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        after_failure_snapshot = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
+        assert after_failure_row == before_row and after_failure_snapshot == before_snapshot
+        assert db.execute("PRAGMA page_count").fetchone()[0] == page_count
+        assert db.execute("SELECT COUNT(*) FROM write_batches").fetchone()[0] == 1
+    db.close()
+    if observation == "fresh_snapshot":
+        # A new observation, not a new batch or compile; retain creation/deadline.
+        terminal.update(sequence=3, snapshotId="epoch-a:0:3")
+        assert store.update_editor_execution_state(terminal)
+        final = store.get_write_batch(identity)
+        assert final["status"] == ("verified" if phase == "completed" else "failed")
+        assert final["outcome"] == ("passed" if phase == "completed" else "failed")
+        assert final["terminalSnapshot"] == terminal and final["correlationVerified"]
+        assert final["writeBatchCreatedAt"] == 1000 and store.pending_write_batch_id == ""
+        service = _ResourceService(tmp_path, store)
+        response = asyncio.run(service.write_batch_status(identity))
+        assert response.ok and response.data["terminal"] and response.data["outcome"] == final["outcome"]
+    else:
+        restored = StateStore()
+        restored.configure_project(str(tmp_path))
+        assert restored.lifecycle_id != store.lifecycle_id
+        assert restored.pending_write_batches() == [] and restored.pending_write_batch_id == ""
+        assert not restored.execution_state()["ready"]
+        service = _ResourceService(tmp_path, restored)
+        for _ in range(2):
+            response = asyncio.run(service.write_batch_status(identity))
+            assert response.ok and response.data["historical"] and response.data["terminal"]
+            assert response.data["status"] == "aborted" and response.data["outcome"] == "unknown"
+            assert not response.data["errorsVerified"] and not response.data["correlationVerified"]
+            assert response.data["writeBatchCreatedAt"] == 1000
+        final = response.data
+        assert restored._current_write_batches == set()
+    assert service.resume_calls == 0
+    with connect(db_path) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        final_row = db.execute("SELECT * FROM write_batches WHERE write_batch_id=?", (identity,)).fetchone()
+        final_snapshot = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
+        final_page_count = db.execute("PRAGMA page_count").fetchone()[0]
+    db.close()
+    (tmp_path / "capacity-fault-receipt.json").write_text(json.dumps({
+        "phase": phase, "observation": observation, "dbPath": str(db_path),
+        "sqliteErrorCode": sqlite_code, "sqliteErrorName": sqlite_name, "failureFrames": failure_frames,
+        "pageCountBefore": page_count, "pageSize": page_size, "connectionPageLimits": limits,
+        "fixturePaddingBytes": len(terminal["capacityProbePadding"]), "statementKinds": traces,
+        "beforeRow": before_row, "afterFailureRow": after_failure_row, "finalRow": final_row,
+        "queuedSnapshot": json.loads(before_snapshot), "afterFailureSnapshot": json.loads(after_failure_snapshot),
+        "finalSnapshot": json.loads(final_snapshot), "finalPageCount": final_page_count,
+        "writeBatchId": identity, "writeBatchCreatedAt": 1000,
+        "pendingAtFailure": identity, "terminalAtFailure": failed_view["terminal"],
+        "finalStatus": final["status"], "finalOutcome": final["outcome"],
+        "finalPublicView": response.data, "compileRequests": service.resume_calls, "liveDatabaseTouched": False,
+        "physicalDiskFullCovered": False,
+    }, indent=2), encoding="utf-8")
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["fresh", "stale"])
+@pytest.mark.parametrize("play_state, expected_playing, expected_paused", [
+    ("edit", False, False),
+    ("play", True, False),
+    ("pause", True, True),
+    ("unknown", False, False),
+])
+def test_d20_execution_projection_pause_is_still_playmode(
+    tmp_path: Path, monkeypatch, stale: bool, play_state: str, expected_playing: bool, expected_paused: bool,
+) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    observed = _snapshot(1)
+    observed.update(sessionId="session-a", playModeState=play_state,
+                    isPlaying=expected_playing, isPaused=expected_paused)
+    original = dict(observed)
+    assert state.update_editor_execution_state(observed)
+    with sqlite3.connect(state._db_path) as db:
+        persisted = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
+    # Freshness is based on receipt time; advance the controlled clock, not observedAt.
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: 3300 if stale else 3000)
+    stale_after_ms = 250 if stale else 5000
+    for projection in (state.execution_state(stale_after_ms=stale_after_ms),
+                       state.response_context(stale_after_ms=stale_after_ms)):
+        assert projection["playModeState"] == play_state
+        assert projection["isPlaying"] is expected_playing
+        assert projection["isPaused"] is expected_paused
+        assert projection["ageMs"] == (300 if stale else 0)
+        assert projection["isStale"] is stale
+        assert projection["authoritative"] is (not stale)
+        assert projection["ready"] is (not stale and play_state == "edit")
+        expected_blocker = "EditorContextStale" if stale else (
+            "PlayMode" if play_state in ("play", "pause") else (
+                "EditorModeUnknown" if play_state == "unknown" else ""
+            )
+        )
+        assert projection["blockedReason"] == expected_blocker
+        assert projection["snapshotId"] == observed["snapshotId"]
+        assert projection["acceptedSnapshotCount"] == 1
+    assert observed == original
+    with sqlite3.connect(state._db_path) as db:
+        assert db.execute("SELECT snapshot_json FROM project_state").fetchone()[0] == persisted

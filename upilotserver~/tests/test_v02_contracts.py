@@ -2395,7 +2395,7 @@ def test_test_domain_service_forwards_staged_stop_commands() -> None:
     asyncio.run(service.upilot_flow_force_cleanup("flow-123"))
 
     assert service.dispatcher.calls == [
-        ("test.results", {"runGuid": "run-123"}, None),
+        ("test.results", {"acceptCompressed": True, "runGuid": "run-123"}, None),
         ("test.cancel", {"runGuid": "run-123"}, 30000),
         ("test.force_cleanup", {"runGuid": "run-123"}, 30000),
         ("test.force_reset", {}, 30000),
@@ -2450,7 +2450,7 @@ def test_test_results_without_cursor_preserves_legacy_bridge_payload() -> None:
     service.dispatcher = Dispatcher()
     result = asyncio.run(service.test_results("run-123"))
     assert result.ok
-    assert service.dispatcher.calls == [("test.results", {"runGuid": "run-123"}, None)]
+    assert service.dispatcher.calls == [("test.results", {"acceptCompressed": True, "runGuid": "run-123"}, None)]
 
 
 def test_test_results_incremental_not_found_does_not_issue_cursor() -> None:
@@ -3044,3 +3044,79 @@ def test_safe_compile_final_query_only_retries_reconnect(gate_code, expires, mon
     else:
         assert not result.ok and result.error.code == "COMPILE_ERRORS_NOT_VERIFIED"
         assert queries == ["req-original"]
+
+
+@pytest.mark.parametrize("required_mode,play_state,expected", [
+    ("any", "play", True), ("any", "pause", True),
+    ("managed", "play", True), ("managed", "pause", True),
+    ("play", "play", True), ("play", "pause", False),
+    ("edit", "play", False), ("edit", "pause", False),
+])
+def test_ensure_ready_mode_aware_completed_compile(required_mode, play_state, expected):
+    result, calls = _mode_aware_ready_result(required_mode, {"playModeState": play_state})
+    assert result.ok and result.data["ready"] is expected
+    assert calls == ["resource.editorState", "resource.editorState"]
+    # The compile-only observer remains blocked in PlayMode; do not rewrite it.
+    assert result.data["compileWait"]["status"] == "blocked"
+    assert result.data["compileWait"]["blockedReason"] == "PlayMode"
+    if expected:
+        assert result.data["compileStatus"] == "ready"
+        assert result.data["blocked"] is False
+        assert result.data["blockedReason"] == result.data["nextAction"] == ""
+        assert result.data["executionState"]["blockedReason"] == "PlayMode"
+
+
+@pytest.mark.parametrize("change", [
+    {"compilePhase": phase} for phase in
+    ("idle", "unknown", "queued", "compiling", "compiler_finished", "domain_reload", "verifying", "failed")
+] + [
+    {"terminal": False}, {"terminal": None}, {"errorsVerified": False},
+    {"errorsVerified": None}, {"verificationPending": True},
+    {"compileErrorCount": 1}, {"compileErrorCount": None},
+    {"isCompiling": True}, {"authoritative": False}, {"isStale": True},
+    {"pendingWriteBatchId": "wb-waiting"}, {"correlationVerified": False},
+    {"correlationVerified": None}, {"playModeState": "unknown"},
+])
+def test_ensure_ready_mode_aware_rejects_incomplete_compile(change):
+    result, calls = _mode_aware_ready_result("any", change)
+    assert result.ok and result.data["ready"] is False
+    assert calls == ["resource.editorState", "resource.editorState"]
+
+
+def _mode_aware_ready_result(required_mode, changes):
+    from upilot_mcp.domain.compile_service import CompileDomainService
+
+    execution = {
+        "authoritative": True, "isStale": False, "isCompiling": False,
+        "playModeState": "play", "blocked": True, "blockedReason": "PlayMode",
+        "nextAction": "Exit PlayMode after user confirmation, then retry the operation.",
+        "compilePhase": "completed", "terminal": True, "errorsVerified": True,
+        "verificationPending": False, "compileErrorCount": 0,
+        "pendingWriteBatchId": "", "writeBatchId": "wb-verified", "correlationVerified": True,
+    }
+    execution.update(changes)
+    calls = []
+
+    class _Dispatcher:
+        async def call(self, request_id, name, payload):
+            calls.append(name)
+            assert name == "resource.editorState"  # No play/sync/compile mutation.
+            return ok(request_id, {"isCompiling": execution["isCompiling"]})
+
+    class _Service(TaskDomainService, CompileDomainService):
+        pass
+
+    service = _Service()
+    service.server = types.SimpleNamespace(
+        session_manager=types.SimpleNamespace(is_connected=lambda: True),
+        state=types.SimpleNamespace(
+            execution_state=lambda **kwargs: dict(execution),
+            compile=types.SimpleNamespace(compile_operation_id=""),
+        ),
+    )
+    service.dispatcher = _Dispatcher()
+    service._wake_unity_editor = lambda: False
+    service._compile_diagnostics = lambda: {"phase": execution["compilePhase"]}
+    result = asyncio.run(service.ensure_ready(
+        timeout_s=1, required_editor_mode=required_mode, editor_mode_control="observe"))
+    return result, calls

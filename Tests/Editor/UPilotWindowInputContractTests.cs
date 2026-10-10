@@ -1,8 +1,11 @@
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -16,9 +19,10 @@ namespace CodingRiver.UPilot.Tests
     {
         public int First;
         public int Second;
+        internal Color Background = Color.magenta;
         private void OnGUI()
         {
-            EditorGUI.DrawRect(new Rect(0, 0, position.width, position.height), Color.magenta);
+            EditorGUI.DrawRect(new Rect(0, 0, position.width, position.height), Background);
             var first = new Rect(15, 30, 120, 25);
             var second = new Rect(15, 65, 120, 25);
             if (GUI.Button(first, "Stop")) First++;
@@ -66,6 +70,23 @@ namespace CodingRiver.UPilot.Tests
     public sealed class UPilotWindowInputContractTests
     {
         [Test]
+        public void MouseReceiptAndPendingModalRetainConcreteWireFields()
+        {
+            var receipt = new GenericOkPayload { ok = true, input = new WindowInputEvidence
+                { dispatched = true, businessEffectVerified = false, dispatchRoute = "uitoolkit" } };
+            var json = JsonUtility.ToJson(new ResultMessage<GenericOkPayload> { payload = receipt });
+            var restored = JsonUtility.FromJson<ResultMessage<GenericOkPayload>>(json);
+            Assert.That(restored.payload.input.dispatched, Is.True);
+            Assert.That(restored.payload.input.businessEffectVerified, Is.False);
+            Assert.That(restored.payload.input.dispatchRoute, Is.EqualTo("uitoolkit"));
+            var modalJson = JsonUtility.ToJson(new ResultMessage<ModalObservationPayload>
+                { payload = new ModalObservationPayload { commandId = "mouse-probe", waitingForModalUi = true } });
+            var modal = JsonUtility.FromJson<ResultMessage<ModalObservationPayload>>(modalJson);
+            Assert.That(modal.payload.commandId, Is.EqualTo("mouse-probe"));
+            Assert.That(modal.payload.waitingForModalUi, Is.True);
+        }
+
+        [Test]
         public void AuthoritativeSnapshotCarriesTheLedgerTransition()
         {
             var method = typeof(UPilotBridge).GetMethod("BuildExecutionStatePayload",
@@ -74,6 +95,76 @@ namespace CodingRiver.UPilot.Tests
                 new object[] { "test_transition_contract" });
             Assert.That(snapshot.playModeTransition, Is.SameAs(UPilotPlayModeTransitions.Latest),
                 "The ordered authoritative snapshot must retain the producer's ledger record.");
+        }
+
+        private static UPilotBridge CreateIsolatedModeBridge()
+        {
+            // Constructors restore shared state and subscribe live callbacks; do neither here.
+            var bridge = (UPilotBridge)FormatterServices.GetUninitializedObject(typeof(UPilotBridge));
+            var compile = (UPilotCompileService)FormatterServices.GetUninitializedObject(typeof(UPilotCompileService));
+            typeof(UPilotCompileService).GetField("_lastErrors", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(compile, new List<CompileErrorItemPayload>());
+            SetIsolatedModeField(bridge, "_compileService", compile);
+            SetIsolatedModeField(bridge, "_mainThreadQueue", new ConcurrentQueue<Action>());
+            SetIsolatedModeField(bridge, "_producerEpoch", "isolated-mode-test");
+            SetIsolatedModeField(bridge, "_domainGeneration", 7L);
+            SetIsolatedModeField(bridge, "_stateSequence", 100L);
+            SetIsolatedModeField(bridge, "_lastMainThreadPumpAt", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            return bridge;
+        }
+
+        private static void SetIsolatedModeField(UPilotBridge bridge, string name, object value) =>
+            typeof(UPilotBridge).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(bridge, value);
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void OrderedPauseResumeSnapshotsRetainIdentityAndMode(bool initiallyPaused)
+        {
+            var bridge = CreateIsolatedModeBridge();
+            var build = typeof(UPilotBridge).GetMethod("BuildExecutionStatePayload",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            SetIsolatedModeField(bridge, "_cachedIsPlaying", true);
+            SetIsolatedModeField(bridge, "_cachedIsPaused", initiallyPaused);
+            SetIsolatedModeField(bridge, "_cachedPlayModeState", initiallyPaused ? "pause" : "play");
+            var before = (EditorExecutionStatePayload)build.Invoke(bridge, new object[] { "before_pause_change" });
+            SetIsolatedModeField(bridge, "_cachedIsPaused", !initiallyPaused);
+            SetIsolatedModeField(bridge, "_cachedPlayModeState", initiallyPaused ? "play" : "pause");
+            var after = (EditorExecutionStatePayload)build.Invoke(bridge, new object[] { "pause_state_changed" });
+            var restored = JsonUtility.FromJson<EditorExecutionStatePayload>(JsonUtility.ToJson(after));
+
+            Assert.That(before.snapshotId, Is.EqualTo("isolated-mode-test:7:101"));
+            Assert.That(before.playModeState, Is.EqualTo(initiallyPaused ? "pause" : "play"));
+            Assert.That(before.isPaused, Is.EqualTo(initiallyPaused));
+            Assert.That(restored.snapshotId, Is.EqualTo("isolated-mode-test:7:102"));
+            Assert.That(restored.sequence, Is.EqualTo(before.sequence + 1));
+            Assert.That(restored.producerEpoch, Is.EqualTo(before.producerEpoch));
+            Assert.That(restored.domainGeneration, Is.EqualTo(before.domainGeneration));
+            Assert.That(restored.playModeState, Is.EqualTo(initiallyPaused ? "play" : "pause"));
+            Assert.That(restored.isPaused, Is.EqualTo(!initiallyPaused));
+            Assert.That(restored.isPlaying, Is.True);
+            Assert.That(restored.transition, Is.EqualTo("pause_state_changed"));
+        }
+
+        [TestCase(PauseState.Paused)]
+        [TestCase(PauseState.Unpaused)]
+        public void InactivePauseCallbackObservesEditorInsteadOfRequestedState(PauseState notification)
+        {
+            var bridge = CreateIsolatedModeBridge();
+            SetIsolatedModeField(bridge, "_cachedIsPlaying", !EditorApplication.isPlaying);
+            SetIsolatedModeField(bridge, "_cachedIsPaused", !EditorApplication.isPaused);
+            SetIsolatedModeField(bridge, "_cachedPlayModeState", "unknown");
+            typeof(UPilotBridge).GetMethod("OnPauseStateChanged", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(bridge, new object[] { notification });
+            var context = bridge.GetEditorExecutionContext("isolated_pause_callback");
+
+            Assert.That(context.isPlaying, Is.EqualTo(EditorApplication.isPlaying));
+            Assert.That(context.isPaused, Is.EqualTo(EditorApplication.isPaused));
+            Assert.That(context.playModeState, Is.EqualTo(EditorApplication.isPaused ? "pause" :
+                (EditorApplication.isPlaying ? "play" : "edit")));
+            Assert.That(context.sequence, Is.EqualTo(100), "An inactive Bridge must not publish or persist a snapshot.");
+            Assert.That(context.connected, Is.False);
+            Assert.That(context.updatedAt, Is.GreaterThan(0));
         }
 
         [Test]
@@ -239,27 +330,105 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        public sealed class MixedInputProbe : EditorWindow
+        {
+            public int ToolkitClicks;
+            public int ImguiClicks;
+            public void CreateGUI()
+            {
+                var button = new UnityEngine.UIElements.Button(() => ToolkitClicks++) { name = "toolkit", text = "Toolkit" };
+                button.style.height = 40;
+                rootVisualElement.Add(button);
+                var imgui = new UnityEngine.UIElements.IMGUIContainer(() =>
+                {
+                    if (GUILayout.Button("IMGUI", GUILayout.Height(40))) ImguiClicks++;
+                }) { name = "imgui" };
+                imgui.style.height = 60;
+                rootVisualElement.Add(imgui);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator CoordinateMouseUsesActualHitAndOnlyOneRoute()
+        {
+            var window = ScriptableObject.CreateInstance<MixedInputProbe>();
+            try
+            {
+                window.ShowUtility();
+                window.position = new Rect(150, 150, 320, 220);
+                for (var i = 0; i < 3; i++) { window.Repaint(); yield return null; }
+                var input = new UPilotPlayInputService();
+                foreach (var y in new[] { 20f, 60f })
+                {
+                    var result = input.HandleMouseEvent(new MouseEventPayload
+                    {
+                        action = "click", button = "left", x = 100, y = y, elementIndex = -1,
+                        windowInstanceId = UPilotEntityIds.ToWireId(window).ToString(),
+                    });
+                    Assert.That(result.ok, Is.True, result.state);
+                    Assert.That(result.input.dispatched, Is.True);
+                    Assert.That(result.input.hitVerified, Is.True);
+                    Assert.That(result.input.enabled, Is.True);
+                    Assert.That(result.input.dispatchRoute, Is.EqualTo(y == 20 ? "uitoolkit" : "imgui"));
+                    Assert.That(result.input.businessEffectVerified, Is.False);
+                    yield return null;
+                }
+                Assert.That(window.ToolkitClicks, Is.EqualTo(1));
+                Assert.That(window.ImguiClicks, Is.EqualTo(1));
+                window.rootVisualElement[0].SetEnabled(false);
+                var disabled = input.HandleMouseEvent(new MouseEventPayload {
+                    action = "click", button = "left", x = 100, y = 20, elementIndex = -1,
+                    windowInstanceId = UPilotEntityIds.ToWireId(window).ToString(),
+                });
+                Assert.That(disabled.ok, Is.False);
+                Assert.That(disabled.input.enabled, Is.False);
+                Assert.That(disabled.input.dispatched, Is.False);
+                Assert.That(window.ToolkitClicks, Is.EqualTo(1));
+            }
+            finally { if (window != null) window.Close(); }
+        }
+
         [UnityTest]
         public IEnumerator NativeCaptureMatchesWindowPixelsAcrossMoves()
         {
             var window = ScriptableObject.CreateInstance<UPilotInputProbeWindow>();
             var overlap = ScriptableObject.CreateInstance<UPilotInputProbeWindow>();
+            var previousFocus = EditorWindow.focusedWindow;
+            var evidenceDirectory = Path.Combine(Directory.GetParent(Application.dataPath).FullName,
+                "Log", "Stage4", "WindowOcclusion", Guid.NewGuid().ToString("N"));
             try
             {
                 window.titleContent = overlap.titleContent = new GUIContent("UPilot same-name capture probe");
+                overlap.Background = Color.green;
                 window.ShowUtility(); overlap.ShowUtility();
                 window.position = new Rect(100, 100, 320, 220);
-                overlap.position = new Rect(250, 200, 320, 220);
+                overlap.position = new Rect(160, 160, 320, 220);
                 for (int i = 0; i < 20; i++)
                 {
-                    window.position = new Rect(100 + i * 2, 100, 320, 220);
-                    window.Repaint(); overlap.Repaint();
+                    window.position = new Rect(100 + i * 2, 100, 320 + i * 2, 220 + i);
+                    window.Repaint(); overlap.Repaint(); overlap.Focus();
                     yield return null;
                     var capture = UPilotWindowDiagnostics.CaptureEditorWindowPixels(window, false);
                     Assert.That(capture.pixelSourceVerified, Is.True);
+                    Assert.That(capture.contentRectVerified, Is.True);
+                    Assert.That(capture.cropComplete, Is.True);
+                    Assert.That(capture.foreground, Is.False, "The target must actually be behind the owned occluder.");
+                    Assert.That(capture.width, Is.EqualTo(Mathf.RoundToInt(window.position.width * capture.pixelsPerPoint)));
+                    Assert.That(capture.height, Is.EqualTo(Mathf.RoundToInt(window.position.height * capture.pixelsPerPoint)));
                     Assert.That(capture.occlusionSensitive, Is.False);
                     Assert.That(capture.instanceId, Is.EqualTo(UPilotEntityIds.ToWireId(window)));
                     Assert.That(capture.windowHandle, Is.Not.Zero);
+                    if (i == 0 || i == 19)
+                    {
+                        var occluder = UPilotWindowDiagnostics.CaptureEditorWindowPixels(overlap, false);
+                        Assert.That(occluder.foreground, Is.True, "The owned green window must be the native foreground window.");
+                        Assert.That(occluder.windowHandle, Is.Not.EqualTo(capture.windowHandle));
+                        Directory.CreateDirectory(evidenceDirectory);
+                        File.WriteAllBytes(Path.Combine(evidenceDirectory, $"target-{i}.png"), Convert.FromBase64String(capture.imageData));
+                        File.WriteAllBytes(Path.Combine(evidenceDirectory, $"occluder-{i}.png"), Convert.FromBase64String(occluder.imageData));
+                        occluder.imageData = null;
+                        File.WriteAllText(Path.Combine(evidenceDirectory, $"occluder-{i}.json"), JsonUtility.ToJson(occluder, true));
+                    }
                     var texture = new Texture2D(2, 2);
                     try
                     {
@@ -270,12 +439,18 @@ namespace CodingRiver.UPilot.Tests
                         Assert.That(pixel.g, Is.LessThan(.1f));
                     }
                     finally { UnityEngine.Object.DestroyImmediate(texture); }
+                    if (i == 0 || i == 19)
+                    {
+                        capture.imageData = null;
+                        File.WriteAllText(Path.Combine(evidenceDirectory, $"target-{i}.json"), JsonUtility.ToJson(capture, true));
+                    }
                 }
             }
             finally
             {
                 if (overlap != null) overlap.Close();
                 if (window != null) window.Close();
+                if (previousFocus != null) previousFocus.Focus();
             }
         }
 

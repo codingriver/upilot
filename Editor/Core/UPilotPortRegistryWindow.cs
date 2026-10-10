@@ -35,7 +35,7 @@ namespace CodingRiver.UPilot
                 _states.Clear();
                 foreach (var entry in _entries)
                 {
-                    var state = entry.pendingPorts.Length > 0 ? "待提交，旧端口仍保留" : "已预留";
+                    var state = entry.pendingPorts.Length > 0 ? "旧参考记录包含待提交端口" : "已登记（仅供参考）";
                     try
                     {
                         var config = UPilotPortRegistry.ReadConfig(entry.projectPath).mcp;
@@ -89,7 +89,7 @@ namespace CodingRiver.UPilot
                     }
                 }
             }
-            if (!string.IsNullOrEmpty(_error)) EditorGUILayout.HelpBox(_error, MessageType.Error);
+            if (!string.IsNullOrEmpty(_error)) EditorGUILayout.HelpBox(_error, MessageType.Warning);
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
             foreach (var entry in _entries.ToArray())
             {
@@ -105,7 +105,7 @@ namespace CodingRiver.UPilot
                     if (GUILayout.Button("释放预留", GUILayout.Width(100)) &&
                         EditorUtility.DisplayDialog("确认释放端口预留？",
                             $"{entry.projectPath}\nWS {entry.wsPort} / HTTP {entry.httpPort}\n" +
-                            "该工程配置不会被删除；其他工程将可以分配这些端口，该工程再次打开时可能冲突。",
+                            "仅移除参考登记，不修改该工程配置，不停止监听；实际端口可用性仍以绑定检测为准。",
                             "释放", "取消"))
                     {
                         try

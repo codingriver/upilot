@@ -256,7 +256,7 @@ namespace CodingRiver.UPilot
     {
         private static ServiceMaintenanceJournal _journal;
         private static bool _executing, _probeRunning, _recoveryChecked;
-        private static long _dispatchAfter, _nextProbe;
+        private static long _dispatchAfter, _nextProbe, _recoveryCheckedAt;
         private static CancellationTokenSource _probeCancellation;
         private static string _storageError = "";
         internal static string RecordPath => Path.Combine(UPilotProjectConfig.ProjectRoot, "Library", "UPilot", "service-maintenance.json");
@@ -266,6 +266,16 @@ namespace CodingRiver.UPilot
         internal static bool IsActive => Current?.Active == true;
         internal static bool IsExecuting => _executing;
         internal static string StorageError => _storageError.Length > 0 ? _storageError : Journal.LoadError ?? "";
+
+        // Pure projection: never touch the lazy Journal getter or invoke Recover here.
+        internal static MaintenanceInitializationPayload Initialization => new MaintenanceInitializationPayload
+        {
+            recoveryChecked = _recoveryChecked,
+            checkedAt = _recoveryCheckedAt,
+            storageError = ((_storageError.Length > 0 ? _storageError : _journal?.LoadError) ?? "").Substring(0,
+                Math.Min(512, ((_storageError.Length > 0 ? _storageError : _journal?.LoadError) ?? "").Length)),
+            source = "unity-maintenance-initialization",
+        };
 
         static UPilotServiceMaintenance()
         {
@@ -404,7 +414,7 @@ namespace CodingRiver.UPilot
                     Fail("SERVICE_RESTART_RECOVERY_REQUIRED", "Replacement restart identity is missing; inspect original evidence.");
             }
             catch (Exception ex) { _storageError = ex.Message; }
-            finally { _recoveryChecked = true; }
+            finally { _recoveryCheckedAt = Now; _recoveryChecked = true; }
         }
 
         // This check must also work while the Bridge is intentionally disconnected.

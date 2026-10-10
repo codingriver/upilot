@@ -7,7 +7,10 @@ from .protocol import new_id, now_ms
 
 def public_console_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     """Return boundary metadata without duplicating unfiltered persisted records."""
-    return {key: value for key, value in evidence.items() if key != "logs"}
+    result = {key: value for key, value in evidence.items() if key != "logs"}
+    if isinstance(result.get("phases"), list):
+        result["phases"] = [{k: v for k, v in p.items() if k != "logs"} for p in result["phases"] if isinstance(p, dict)]
+    return result
 
 
 def _identity(state) -> dict[str, Any]:

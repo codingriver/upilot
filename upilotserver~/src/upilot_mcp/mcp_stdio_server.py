@@ -38,6 +38,7 @@ from .tool_registry import (
 )
 from .version import version_payload
 from .wire_ids import stringify_wire_ids
+from .operation_context import REQUEST_ORIGIN, request_origin_from_context
 
 logger = logging.getLogger("upilot.mcp")
 stdio_logger = logging.getLogger("upilot.stdio")
@@ -1327,26 +1328,30 @@ async def _call_tool_with_strict_arguments(
     context=None,
     convert_result: bool = False,
 ):
-    original_arguments = dict(arguments or {})
+    origin_token = REQUEST_ORIGIN.set(request_origin_from_context(context))
     try:
-        tool = mcp._tool_manager.get_tool(name)
-        if tool is not None:
-            arguments, argument_error = normalize_public_mcp_arguments(
-                name, arguments or {}, tool.parameters
+        original_arguments = dict(arguments or {})
+        try:
+            tool = mcp._tool_manager.get_tool(name)
+            if tool is not None:
+                arguments, argument_error = normalize_public_mcp_arguments(
+                    name, arguments or {}, tool.parameters
+                )
+                if argument_error:
+                    raise ValueError(json.dumps(argument_error, ensure_ascii=False))
+            result = await _original_tool_manager_call_tool(
+                name, arguments, context=context, convert_result=convert_result
             )
-            if argument_error:
-                raise ValueError(json.dumps(argument_error, ensure_ascii=False))
-        result = await _original_tool_manager_call_tool(
-            name, arguments, context=context, convert_result=convert_result
-        )
-    except asyncio.CancelledError as ex:
-        _write_mcp_tool_call_log(name, original_arguments, error=ex)
-        raise
-    except Exception as ex:
-        _write_mcp_tool_call_log(name, original_arguments, error=ex)
-        raise
-    _write_mcp_tool_call_log(name, original_arguments, result=result)
-    return result
+        except asyncio.CancelledError as ex:
+            _write_mcp_tool_call_log(name, original_arguments, error=ex)
+            raise
+        except Exception as ex:
+            _write_mcp_tool_call_log(name, original_arguments, error=ex)
+            raise
+        _write_mcp_tool_call_log(name, original_arguments, result=result)
+        return result
+    finally:
+        REQUEST_ORIGIN.reset(origin_token)
 
 
 mcp._tool_manager.call_tool = _call_tool_with_strict_arguments

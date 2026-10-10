@@ -28,7 +28,7 @@ from ..responses import fail, ok
 from ..tool_registry import (REGISTRY, REGISTRY_VERSION, dispatch_public_tool, _normalize_proxy_arguments,
                              generic_orchestration_disabled, disabled_orchestration_target)
 from ..test_job_context import TEST_JOB_CONTEXT, TestJobCancelledBeforeStart
-from ..operation_context import OPERATION_ID, TASK_TOOL
+from ..operation_context import OPERATION_ID, TASK_TOOL, REQUEST_ORIGIN, normalize_request_origin
 from ..queue_audit import AUDIT, QUEUE_GUARD, audited, observe, safe_text
 
 logger = logging.getLogger("upilot.mcp")
@@ -537,7 +537,15 @@ class TaskDomainService:
 
     async def operation_get(self, command_id: str) -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(request_id, "operation.get", {"commandId": command_id})
+        result = await self.dispatcher.call(request_id, "operation.get", {"commandId": command_id})
+        observation = self.server.state.command_observation(command_id)
+        # Keep Unity's own result/error, including a missing tracker entry after
+        # Reload. Server facts cannot turn that outcome into a successful query.
+        if result.ok and isinstance(result.data, dict):
+            result.data = {**result.data, "serverCommandObservation": observation}
+        elif result.error is not None:
+            result.error.detail = {**result.error.detail, "serverCommandObservation": observation}
+        return result
 
     def _project_root(self) -> Path:
         session_manager = getattr(getattr(self, "server", None), "session_manager", None)
@@ -783,15 +791,343 @@ class TaskDomainService:
         return ok(new_id("req"), data)
 
     async def operation_validate(
-        self, job_spec: dict | None, inspect_reflection: bool = True,
-        strict_tool_registry: bool = True,
+        self, job_spec: dict | None, inspect_reflection: bool = True, strict_tool_registry: bool = True,
     ) -> ToolResponse:
-        """Compatibility endpoint: never validate project callbacks for a paused feature."""
-        return generic_orchestration_disabled(new_id("req"))
+        # Only the official Step plan contract is reopened. Handwritten callback
+        # Operations remain suspended, including malformed/no-plan requests.
+        if not isinstance(job_spec, dict) or "stepPlan" not in job_spec:
+            return generic_orchestration_disabled(new_id("req"))
+        request_id = new_id("req")
+        errors: list[dict] = []
+        warnings: list[dict] = []
+        job_spec = copy.deepcopy(job_spec)
+        normalized = dict(job_spec)
+        step_plan = job_spec.get("stepPlan")
+        has_step_plan = "stepPlan" in job_spec
+        step_budget = 0.0
+        capture = job_spec.get("consoleCapture", {})
+        if not isinstance(capture, dict):
+            errors.append({"path": "consoleCapture", "code": "type", "message": "Expected an object."})
+        else:
+            for field in ("enabled", "includeStackTrace", "excludeUPilot", "clearUnityConsole"):
+                if field in capture and not isinstance(capture[field], bool):
+                    errors.append({"path": "consoleCapture." + field, "code": "type", "message": "Expected a boolean."})
+        if has_step_plan:
+            if any(field in job_spec for field in ("startCall", "statusCall", "cancelCall")):
+                errors.append({"path": "stepPlan", "code": "STEP_PLAN_CALLS_CONFLICT",
+                               "message": "stepPlan and handwritten calls are mutually exclusive."})
+            if not isinstance(step_plan, dict):
+                errors.append({"path": "stepPlan", "code": "STEP_PLAN_INVALID", "message": "Expected a version 1 plan object."})
+            else:
+                capture = job_spec.get("consoleCapture")
+                items = step_plan.get("steps")
+                plan_capture = isinstance(items, list) and any(
+                    isinstance(item, dict) and item.get("stepId") == "upilot.console_capture_start" for item in items)
+                operation_capture = isinstance(capture, dict) and capture.get("enabled") is True
+                if plan_capture and (not isinstance(capture, dict) or capture.get("enabled") is not False):
+                    errors.append({"path": "consoleCapture.enabled", "code": "STEP_CAPTURE_OWNERSHIP_CONFLICT",
+                                   "message": "Plan-owned Capture requires consoleCapture.enabled=false."})
+                if step_plan.get("logPolicy") and not operation_capture and not plan_capture:
+                    errors.append({"path": "consoleCapture.enabled", "code": "STEP_CAPTURE_REQUIRED",
+                                   "message": "A step logPolicy requires one plan-owned or Operation-owned Capture."})
+                # Unity owns discovery and per-step argument validation. Never create Capture here.
+                try:
+                    plan_json = json.dumps(step_plan, ensure_ascii=False, allow_nan=False)
+                except (TypeError, ValueError):
+                    return fail(request_id, "INVALID_JOB_SPEC", "stepPlan must contain finite JSON data.", {
+                        "valid": False, "errors": errors + [{"path": "stepPlan", "code": "STEP_PLAN_INVALID",
+                                                          "message": "Non-finite or non-JSON values are unsupported."}]
+                    })
+                if errors:
+                    return fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", {
+                        "valid": False, "errors": errors, "warnings": warnings,
+                    })
+                response = await self.dispatcher.call(request_id, "automation.steps.validate",
+                                                      {"planJson": plan_json})
+                data = response.data if isinstance(response.data, dict) else {}
+                if not response.ok:
+                    errors.append({"path": "stepPlan", "code": response.error.code if response.error else "STEP_VALIDATION_FAILED",
+                                   "message": response.error.message if response.error else "Step validation failed."})
+                elif data.get("ok") is not True:
+                    errors.extend({"path": f"stepPlan.steps[{item.get('index', -1)}]",
+                                   "code": item.get("code", "STEP_PLAN_INVALID"), "message": item.get("message", "")}
+                                  for item in data.get("diagnostics", []) if item.get("severity", "error") == "error")
+                    if not errors:
+                        errors.append({"path": "stepPlan", "code": "STEP_PLAN_INVALID", "message": "Plan validation failed."})
+                else:
+                    budget = data.get("budgetSeconds")
+                    step_budget = float(budget) if isinstance(budget, (int, float)) and not isinstance(budget, bool) else 0.0
+                    if not math.isfinite(step_budget) or step_budget <= 0:
+                        errors.append({"path": "stepPlan", "code": "STEP_BUDGET_INVALID", "message": "Bridge returned no valid plan budget."})
+        if not isinstance(job_spec.get("failOnUnexpectedPlayModeExit", False), bool):
+            errors.append({"path": "failOnUnexpectedPlayModeExit", "code": "type", "message": "Expected a boolean."})
+        normalized["displayName"] = str(job_spec.get("displayName") or "Unity operation")
+        normalized["timeoutSec"] = job_spec.get("timeoutSec", max(300, step_budget))
+        normalized["pollIntervalSec"] = job_spec.get("pollIntervalSec", 3)
+        cleanup = job_spec.get("cleanup", {})
+        if not isinstance(cleanup, dict):
+            errors.append({"path": "cleanup", "code": "type", "message": "Expected an object."})
+        else:
+            cleanup = dict(cleanup)
+            cleanup.setdefault("requireEditMode", False)
+            cleanup.setdefault("timeoutSec", 30)
+            if not isinstance(cleanup["requireEditMode"], bool):
+                errors.append({"path": "cleanup.requireEditMode", "code": "type", "message": "Expected a boolean."})
+            value = cleanup["timeoutSec"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                errors.append({"path": "cleanup.timeoutSec", "code": "range", "message": "Expected a finite positive number."})
+            normalized["cleanup"] = cleanup
+            if cleanup.get("requireEditMode") is True:
+                normalized["_editorVerificationExpected"] = (
+                    "After business terminal, cleanup verifies authoritative "
+                    "EditMode readiness before declaring editorTerminal=true."
+                )
+        for field in ("timeoutSec", "pollIntervalSec"):
+            value = normalized[field]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                errors.append({"path": field, "code": "range", "message": "Expected a finite positive number."})
+            elif field == "timeoutSec" and has_step_plan and value < step_budget:
+                errors.append({"path": field, "code": "STEP_BUDGET_TOO_SMALL",
+                               "message": f"Operation timeout must cover the plan, cleanup and evidence budget ({step_budget} seconds)."})
+
+        mapping = job_spec.get("terminalStatusMapping")
+        if mapping is not None and not isinstance(mapping, dict):
+            errors.append({"path": "terminalStatusMapping", "code": "type", "message": "terminalStatusMapping must be an object."})
+        elif isinstance(mapping, dict):
+            for key, value in mapping.items():
+                if not isinstance(value, (str, list, tuple)):
+                    errors.append({"path": f"terminalStatusMapping.{key}", "code": "type", "message": "Status mapping values must be a string or array."})
+
+        rules = job_spec.get("artifactRules")
+        if rules is not None and not isinstance(rules, dict):
+            errors.append({"path": "artifactRules", "code": "type", "message": "artifactRules must be an object."})
+        elif isinstance(rules, dict):
+            fields = rules.get("fromStatusFields")
+            if fields is not None and (not isinstance(fields, list) or not all(isinstance(item, str) for item in fields)):
+                errors.append({"path": "artifactRules.fromStatusFields", "code": "type", "message": "fromStatusFields must be an array of field names."})
+            field_kinds = rules.get("fieldKinds")
+            if field_kinds is not None and (not isinstance(field_kinds, dict) or not all(
+                    isinstance(key, str) and str(value).lower() in {"file", "metadata", "sha256", "bytes"}
+                    for key, value in field_kinds.items())):
+                errors.append({"path": "artifactRules.fieldKinds", "code": "type", "message": "fieldKinds must map field names to file, metadata, sha256, or bytes."})
+            elif field_kinds is None:
+                rules = dict(rules)
+                rules["_fieldKindsDefault"] = "file for absolute/relative paths, metadata otherwise"
+                normalized["artifactRules"] = rules
+
+        for field in ("resultPath", "statusPath", "phasePath", "errorPath", "detailPath", "progressPath", "failureSignaturePath", "artifactsPath"):
+            value = job_spec.get(field)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                errors.append({"path": field, "code": "type", "message": f"{field} must be a non-empty path string."})
+
+        valid = not errors
+        data = {
+            "valid": valid,
+            "normalizedJobSpec": normalized,
+            "errors": errors,
+            "warnings": warnings,
+            "nextAction": "Call unity_operation_start with normalizedJobSpec." if valid else "Fix the reported jobSpec fields and validate again.",
+        }
+        return ok(request_id, data) if valid else fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", data)
 
     async def operation_start(self, job_spec: dict | None) -> ToolResponse:
-        """Reject before recovery, persistence, Capture creation or business dispatch."""
-        return generic_orchestration_disabled(new_id("req"))
+        if not isinstance(job_spec, dict) or "stepPlan" not in job_spec:
+            return generic_orchestration_disabled(new_id("req"))
+        refresh_config_if_changed()
+        if not CONFIG.write_access_approved:
+            return fail(new_id("req"), "WRITE_ACCESS_NOT_APPROVED", "Step execution requires project write access.")
+        self._recover_operations()
+        request_id = new_id("req")
+        validation = await self.operation_validate(
+            job_spec, inspect_reflection=False, strict_tool_registry=False,
+        )
+        if not validation.ok:
+            detail = validation.error.detail if validation.error else {}
+            return fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", detail)
+        job_spec = dict((validation.data or {}).get("normalizedJobSpec") or job_spec or {})
+        if "stepPlan" in job_spec:
+            # Materialize only after validation. JSON text is opaque to placeholder expansion.
+            job_spec["startCall"] = {"kind": "bridge", "route": "automation.steps.start", "payload": {
+                "planJson": json.dumps(job_spec["stepPlan"], ensure_ascii=False, allow_nan=False),
+                "operationId": "${operation.operationId}",
+            }}
+            for field, route in (("statusCall", "state"), ("cancelCall", "cancel")):
+                job_spec[field] = {"kind": "bridge", "route": "automation.steps." + route, "payload": {
+                    "operationId": "${operation.operationId}", "runId": "${start.runId}",
+                }}
+            job_spec["terminalStatusMapping"] = {
+                "success": ["Succeeded", "SucceededWithWarnings"],
+                "failure": ["Failed"], "canceled": ["Canceled"], "timeout": ["TimedOut"],
+            }
+        start_call = job_spec["startCall"]
+
+        operation_id = new_id("op")
+        now = now_ms()
+        timeout_sec = float(job_spec.get("timeoutSec") or 300)
+        state = {
+            "projectPath": str(self._project_root()),
+            "durable": True,
+            "operationId": operation_id,
+            "displayName": str(job_spec.get("displayName") or operation_id),
+            "jobSpec": job_spec,
+            "status": "Starting",
+            "phase": "Starting",
+            "error": "",
+            "detail": "",
+            "progress": 0,
+            "failureSignature": "",
+            "repeatFailure": False,
+            "startAttemptCount": 0,
+            "cancelRequested": False,
+            "cancelAccepted": False,
+            "cancelRequestedAt": 0,
+            "cancelAttemptCount": 0,
+            "cleanupPending": False,
+            "editorVerification": "not_requested",
+            "startedAt": now,
+            "updatedAt": now,
+            "endedAt": 0,
+            "timeoutSec": timeout_sec,
+            "pollIntervalSec": float(job_spec.get("pollIntervalSec") or 3),
+            "lastStatusData": {},
+            "lastStatusAt": 0,
+            "changes": [],
+            "milestones": [],
+            "artifacts": {},
+            "consoleCapture": {},
+            "timing": {
+                "totalWallMs": 0,
+                "mcpQueueMs": 0,
+                "bridgeMs": 0,
+                "unityMainThreadMs": 0,
+                "projectElapsedMs": 0,
+                "agentPollGapMs": 0,
+                "artifactReadMs": 0,
+            },
+            "_startedMono": time.monotonic(),
+            "_lastPollMono": 0.0,
+        }
+        self._operations[operation_id] = state
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+
+        capture = job_spec.get("consoleCapture") if isinstance(job_spec.get("consoleCapture"), dict) else {}
+        if capture.get("enabled"):
+            state["consoleCapture"].update({
+                "ownerId": operation_id,
+                "ownerToken": secrets.token_urlsafe(32),
+                "requestKey": operation_id,
+            })
+            state["captureIntentSent"] = True
+            if not self._save_operation(state):
+                return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+            try:
+                capture_result = await self._start_owned_operation_capture(
+                    state,
+                    title=str(capture.get("title") or state["displayName"]),
+                    path=str(capture.get("path") or ""),
+                    include_stack_trace=bool(capture.get("includeStackTrace", True)),
+                    exclude_upilot=bool(capture.get("excludeUPilot", True)),
+                    clear_unity_console=bool(capture.get("clearUnityConsole", False)),
+                )
+            except Exception as exc:
+                state.update(status="RecoveryRequired", phase="capture_identity_unknown",
+                             error=str(exc), cleanupPending=True,
+                             nextAction="Inspect capture sessions for the original start intent; business was not started. Do not replay capture start.")
+                self._save_operation(state)
+                return fail(request_id, "OPERATION_CAPTURE_START_UNKNOWN", str(exc), self._public_operation_state(state))
+            state["consoleCapture"]["start"] = self._tool_response_summary(capture_result)
+            if capture_result.ok and isinstance(capture_result.data, dict):
+                session_data = capture_result.data.get("session") if isinstance(capture_result.data.get("session"), dict) else {}
+                session_data = self._redact_operation_secrets(session_data)
+                state["consoleCapture"]["sessionId"] = str(
+                    capture_result.data.get("sessionId") or session_data.get("sessionId") or ""
+                )
+                state["consoleCapture"]["nextSequence"] = int(
+                    capture_result.data.get("nextSequence") or session_data.get("nextSequence") or -1
+                )
+                state["consoleCapture"]["session"] = session_data
+            if not capture_result.ok or not state["consoleCapture"].get("sessionId"):
+                state.update(status="RecoveryRequired", phase="capture_identity_unknown", cleanupPending=True,
+                             error="Required console capture did not establish a session; business was not started.",
+                             failureSignature="OperationCaptureStartFailed",
+                             nextAction="Inspect original capture intent and active sessions; do not replay capture start.")
+                self._save_operation(state)
+                return fail(request_id, "OPERATION_CAPTURE_START_FAILED", state["error"], self._public_operation_state(state))
+
+        if "stepPlan" in job_spec:
+            start_call["payload"]["captureSessionId"] = state["consoleCapture"].get("sessionId", "")
+        state["startIntentSent"] = True
+        state["startAttemptCount"] = int(state.get("startAttemptCount") or 0) + 1
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        try:
+            start_result = await self._operation_invoke(self._resolve_operation_call(start_call, state), operation_id)
+        except Exception as exc:
+            state.update(status="RecoveryRequired", phase="start_result_unknown", error=str(exc),
+                         nextAction="Inspect original operation evidence; start was not replayed.")
+            self._save_operation(state)
+            return fail(request_id, "OPERATION_START_UNKNOWN", str(exc), self._public_operation_state(state))
+        self._accumulate_timing(state, start_result)
+        state["startResult"] = self._tool_response_summary(start_result)
+        if not start_result.ok:
+            state.update(status="RecoveryRequired", phase="start_result_unknown",
+                         error=start_result.error.message if start_result.error else "startCall failed",
+                         nextAction="A failed tool response does not prove that business never started. Inspect original start evidence; do not replay.")
+            self._save_operation(state)
+            return fail(request_id, "OPERATION_START_UNKNOWN", state["error"], self._public_operation_state(state))
+
+        payload, payload_error, payload_diagnostic = self._operation_adapt_payload(start_result, start_call, job_spec)
+        if payload_error:
+            state["parseDiagnostic"] = payload_diagnostic
+            state["status"] = "RecoveryRequired"
+            state["phase"] = "StartResultInvalid"
+            state["error"] = payload_error
+            state["failureSignature"] = "OperationResultInvalid"
+            state["nextAction"] = "Inspect the original start response; business may have started. Do not replay start."
+            self._finalize_operation_timing(state)
+            self._save_operation(state)
+            return fail(request_id, "OPERATION_RESULT_INVALID", payload_error, self._public_operation_state(state))
+        if payload:
+            state["startData"] = payload
+            self._merge_operation_status(state, payload)
+        state["resolvedStatusCall"] = self._resolve_operation_call(job_spec["statusCall"], state)
+        status_spec = json.dumps(job_spec["statusCall"], sort_keys=True)
+        state["recoveryIdentityEstablished"] = bool(
+            "${start." in status_spec or "${operation.operationId}" in status_spec
+        ) and "${" not in json.dumps(state["resolvedStatusCall"], sort_keys=True)
+        state["startEstablished"] = True
+        if self._operation_call_has_missing_identity(job_spec["statusCall"], state["resolvedStatusCall"]):
+            state.update(status="RecoveryRequired", phase="status_identity_unknown", endedAt=0,
+                         nextAction="The original start did not resolve status identity. Inspect its response; do not replay start or query an unspecified job.")
+            self._save_operation(state)
+            return ok(request_id, self._public_operation_state(state))
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        mapping = job_spec.get("terminalStatusMapping")
+        if _is_terminal_status(str(state["status"]), mapping):
+            state["businessCleanupPending"] = _operation_cleanup_pending(payload)
+            if _is_success_status(str(state["status"]), mapping):
+                state["status"] = "Succeeded"
+            elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
+                state["status"] = "Canceled"
+            elif str(state["status"]).strip().lower() in {"timeout", "timedout"}:
+                state["status"] = "Timeout"
+            else:
+                state["status"] = "Failed"
+            state["endedAt"] = now_ms()
+            self._mark_repeat_failure(state)
+            await self._operation_stop_console_capture(state)
+            await self.operation_collect_artifacts(operation_id)
+        else:
+            state["status"] = "Running"
+            state["phase"] = state.get("phase") or "Running"
+        state["updatedAt"] = now_ms()
+        self._finalize_operation_timing(state)
+        if not self._save_operation(state):
+            return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
+        self._resume_operation_observer(state)
+        return ok(request_id, self._public_operation_state(state))
 
     @_serialized_operation
     async def operation_status(
@@ -1950,6 +2286,8 @@ class TaskDomainService:
                 if len(node) > 8: truncated.add(path)
                 return [trim(item, f"{path}[{index}]") for index, item in enumerate(node[:8])]
             if isinstance(node, dict):
+                if path == "requestOrigin":
+                    return normalize_request_origin(node)
                 required = {"result", "result.result", "businessResult", "error", "tests", "compile", "consoleCapture",
                             "disposition", "disposition.unity", "disposition.testEvidence", "originalTestResult"}
                 # Limit the artifact index, but retain the evidence fields of
@@ -2054,6 +2392,7 @@ class TaskDomainService:
             "recoveryDiagnostics": state.get("recoveryDiagnostics", []),
             "nextAction": state.get("nextAction", ""),
             "operationId": state.get("operationId"),
+            "requestOrigin": normalize_request_origin(state.get("requestOrigin")),
             "displayName": state.get("displayName"),
             "status": state.get("status"),
             "phase": state.get("phase"),
@@ -2221,6 +2560,33 @@ class TaskDomainService:
             checks["contextStale"] = True
             checks["blocked"] = True
             checks["blockedReason"] = "EditorContextUnknown"
+
+        # compile_wait deliberately requires EditMode. A mode-aware preflight may
+        # accept PlayMode only from fresh, fully verified compile evidence, not
+        # from isCompiling=false or the PlayMode blocker alone. Keep the raw
+        # compileWait/executionState observations intact for diagnostics.
+        execution = checks.get("executionState") or {}
+        play_mode_matches = (
+            required_editor_mode in {"any", "managed"}
+            and execution.get("playModeState") in {"play", "pause"}
+        ) or (required_editor_mode == "play" and execution.get("playModeState") == "play")
+        if (
+            play_mode_matches
+            and checks.get("compileStatus") == "blocked"
+            and (checks.get("compileWait") or {}).get("blockedReason") == "PlayMode"
+            and execution.get("blockedReason") == "PlayMode"
+            and execution.get("authoritative") is True
+            and execution.get("isStale") is False
+            and execution.get("compilePhase") == "completed"
+            and execution.get("terminal") is True
+            and execution.get("errorsVerified") is True
+            and execution.get("verificationPending") is False
+            and execution.get("compileErrorCount") == 0
+            and execution.get("isCompiling") is False
+            and not execution.get("pendingWriteBatchId")
+            and (not execution.get("writeBatchId") or execution.get("correlationVerified") is True)
+        ):
+            checks.update(compileStatus="ready", blocked=False, blockedReason="", nextAction="")
 
         checks["ready"] = (
             checks["connected"]
@@ -2483,15 +2849,22 @@ class TaskDomainService:
                     return fail(request_id, "UPILOT_ACCEPTANCE_PROJECT_MISMATCH", "Connected Unity project is not a supported repository acceptance project.")
                 timeout_s = min(timeout_s, budget)
                 tool_args = normalized
-            if any(
-                value.get("durable") and value.get("projectPath") == store._project_path
+            blocker = next((
+                (identity, value) for identity, value in self._async_tasks.items()
+                if value.get("durable") and value.get("projectPath") == store._project_path
                 and value.get("status") in {"queued", "running", "cancel_requested", "RecoveryRequired"}
-                for value in self._async_tasks.values()
-            ):
-                return fail(request_id, "TEST_TASK_ALREADY_ACTIVE", "Resolve the existing test/acceptance task before starting another.")
+            ), None)
+            if blocker is not None:
+                identity, value = blocker
+                return fail(request_id, "TEST_TASK_ALREADY_ACTIVE", "Resolve the existing test/acceptance task before starting another.", {
+                    "blocker": {"type": "Task", "id": str(identity), "status": str(value.get("status") or "unknown"),
+                                "requestOrigin": normalize_request_origin(value.get("requestOrigin")), "action": "cancel"},
+                    "nextAction": "Inspect this exact task with unity_task_status; cancel with unity_task_cancel only if authorized. Do not replay start.",
+                })
         task_id = new_id("task")
         state = {
             "taskId": task_id,
+            "requestOrigin": normalize_request_origin(REQUEST_ORIGIN.get()),
             "taskName": task_name,
             "toolName": tool_name,
             "status": "queued",
@@ -2520,7 +2893,7 @@ class TaskDomainService:
                 return fail(request_id, "TEST_TASK_PERSIST_FAILED", str(exc))
             self._async_tasks[task_id] = state
             self._async_task_handles[task_id] = asyncio.create_task(self._run_test_task(state), name=task_id)
-            return ok(request_id, state.copy())
+            return ok(request_id, self._public_task_state(state, "full"))
         self._async_tasks[task_id] = state
 
         async def run() -> None:
@@ -2560,7 +2933,7 @@ class TaskDomainService:
                     state.update(terminal=True, phase=state["status"], endedAt=now_ms(), updatedAt=now_ms())
 
         self._async_task_handles[task_id] = asyncio.create_task(run(), name=task_id)
-        return ok(request_id, state.copy())
+        return ok(request_id, self._public_task_state(state, "full"))
 
     async def task_status(self, task_id: str, detail_level: str = "summary") -> ToolResponse:
         self._recover_test_jobs()
@@ -2570,8 +2943,10 @@ class TaskDomainService:
         if state.get("durable") and state.get("projectPath") != self.server.state._project_path:
             return fail(new_id("req"), "TASK_PROJECT_MISMATCH", "Task belongs to another Unity project.", {"taskId": task_id})
         self._resume_test_observer(state)
-        result = self._public_task_state(state, detail_level)
-        result["elapsedMs"] = max(0, (result["endedAt"] or now_ms()) - result["startedAt"])
+        # Include observation timing in the final budget without modifying history.
+        public_state = state.copy()
+        public_state["elapsedMs"] = max(0, (state["endedAt"] or now_ms()) - state["startedAt"])
+        result = self._public_task_state(public_state, detail_level)
         return ok(new_id("req"), result)
 
     @audited("Task", "cancel", "task_id")
@@ -2613,14 +2988,15 @@ class TaskDomainService:
     @staticmethod
     def _public_task_state(state: dict, detail_level: str = "summary") -> dict:
         if not state.get("durable") or detail_level == "full":
-            return state.copy()
+            return {**state, "requestOrigin": normalize_request_origin(state.get("requestOrigin"))}
         fields = ("taskId", "projectPath", "durable", "status", "phase", "terminal", "runGuid",
-                  "deadlineAt", "createdAt", "startedAt", "updatedAt", "endedAt", "nextAction",
+                  "deadlineAt", "createdAt", "startedAt", "updatedAt", "endedAt", "elapsedMs", "nextAction",
                   "startSendState", "cancelSendState", "cleanupError", "cleanupFailureSignature",
                   "cleanupSucceeded", "cleanupPending", "cleanupStatus", "cancelRequested",
                   "lastRecoveryObservationAt", "nextRecoveryObservationAt", "recoveryObservationFailures",
                   "lastObservationError", "disposition", "originalTerminal", "outcome", "businessTerminal", "originalTestResult")
         result = {key: state[key] for key in fields if key in state}
+        result["requestOrigin"] = normalize_request_origin(state.get("requestOrigin"))
         report = state.get("acceptanceReport") or {}
         if report:
             result["result"] = {"result": {key: report[key] for key in (

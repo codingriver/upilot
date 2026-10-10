@@ -228,6 +228,50 @@ def normalize_execution_error(response: ToolResponse) -> ToolResponse:
 
 
 class ExecutionDomainService:
+    async def diagnostic_module(
+        self, *, action: str = "status", session_id: str = "", module_id: str = "",
+        source: str = "", entry_type: str = "", args_json: str = "{}",
+        expected_project_path: str = "", expected_domain_generation: str = "",
+        expected_play_session_id: str = "", reference_type_names: list[str] | None = None,
+        allow_full_csharp: bool = False,
+    ) -> ToolResponse:
+        request_id = new_id("req")
+        if not isinstance(action, str) or action not in {"compile", "run", "status", "close"}:
+            return fail(request_id, "INVALID_MODULE_ACTION", "action must be compile, run, status or close.")
+        if action != "status" and allow_full_csharp is not True:
+            return fail(request_id, "MODULE_OPT_IN_REQUIRED", "Full-source diagnostics require explicit allowFullCSharp=true; not a sandbox.")
+        text_fields = (session_id, module_id, source, entry_type, args_json, expected_project_path,
+                       expected_domain_generation, expected_play_session_id)
+        if not all(isinstance(value, str) for value in text_fields):
+            return fail(request_id, "INVALID_MODULE_INPUT", "Module text and identity fields must be strings.")
+        if action != "status" and not all((session_id, module_id, expected_project_path,
+                                          expected_domain_generation, expected_play_session_id)):
+            return fail(request_id, "MODULE_IDENTITY_REQUIRED", "Use exact owning session and project/domain/play-session identities from status.")
+        try:
+            oversized = len(source.encode("utf-8")) > 1024 * 1024 or len(args_json.encode("utf-8")) > 1024 * 1024
+        except UnicodeError:
+            return fail(request_id, "INVALID_MODULE_INPUT", "Module source and argsJson must be valid UTF-8 text.")
+        if oversized:
+            return fail(request_id, "MODULE_INPUT_LIMIT", "source and argsJson are each limited to 1 MiB.")
+        references = reference_type_names if reference_type_names is not None else []
+        if not isinstance(references, list) or len(references) > 32 or any(not isinstance(v, str) or not v.strip() for v in references):
+            return fail(request_id, "MODULE_REFERENCE_LIMIT", "Supply at most 32 exact already-loaded reference type names.")
+        if action == "compile" and (not source.strip() or not entry_type.strip()):
+            return fail(request_id, "INVALID_MODULE_SOURCE", "compile requires source and exact entryType.")
+        if action == "run":
+            try:
+                validate_finite_values(json.loads(args_json), "argsJson")
+            except (ValueError, TypeError, RecursionError):
+                return fail(request_id, "INVALID_MODULE_ARGUMENTS", "argsJson must be valid finite JSON.")
+        return normalize_execution_error(await self.dispatcher.call(request_id, "execution.diagnosticModule", {
+            "action": action, "sessionId": session_id, "moduleId": module_id,
+            "source": source, "entryType": entry_type, "argsJson": args_json,
+            "expectedProjectPath": expected_project_path,
+            "expectedDomainGeneration": expected_domain_generation,
+            "expectedPlaySessionId": expected_play_session_id,
+            "referenceTypeNames": references, "allowFullCSharp": allow_full_csharp,
+        }, timeout_ms=35000))
+
     async def execution_session(
         self,
         action: str,

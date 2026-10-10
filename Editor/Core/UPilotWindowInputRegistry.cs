@@ -19,6 +19,12 @@ namespace CodingRiver.UPilot
         public bool enabled;
         public string matchSource;
         public long layoutSequence;
+        public Vector2 position;
+        public string dispatchRoute;
+        public bool hitVerified;
+        public string hitType;
+        public string hitName;
+        public string eventConsumption;
         public bool dispatched;
         public bool businessEffectVerified;
     }

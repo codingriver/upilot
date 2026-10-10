@@ -6,6 +6,32 @@ namespace CodingRiver.UPilot.Tests
 {
     public class UPilotModalObserverTests
     {
+        [TestCase(true)]
+        [TestCase(false)]
+        public void MenuReceiptRetainsConcreteWireFields(bool executed)
+        {
+            var receipt = new MenuExecuteResultPayload { menuPath = "Fixture/Menu", executed = executed };
+            var json = UnityEngine.JsonUtility.ToJson(new ResultMessage<MenuExecuteResultPayload> { payload = receipt });
+            var restored = UnityEngine.JsonUtility.FromJson<ResultMessage<MenuExecuteResultPayload>>(json);
+            Assert.That(restored.payload.menuPath, Is.EqualTo(receipt.menuPath));
+            Assert.That(restored.payload.executed, Is.EqualTo(executed));
+            Assert.That(json, Does.Contain("\"executed\":"));
+        }
+
+        [Test]
+        public void PendingMenuObservationRetainsIdentityAndWaitState()
+        {
+            var json = UnityEngine.JsonUtility.ToJson(new ResultMessage<ModalObservationPayload>
+            {
+                payload = new ModalObservationPayload
+                { commandId = "menu-pending", waitingForModalUi = true, terminal = false },
+            });
+            var restored = UnityEngine.JsonUtility.FromJson<ResultMessage<ModalObservationPayload>>(json);
+            Assert.That(restored.payload.commandId, Is.EqualTo("menu-pending"));
+            Assert.That(restored.payload.waitingForModalUi, Is.True);
+            Assert.That(restored.payload.terminal, Is.False);
+        }
+
         [Test]
         public void OnlyExactDeclaredTitleAndCompleteButtonSetCanMatch()
         {

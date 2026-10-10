@@ -1,5 +1,14 @@
 # `csharp_eval`、Reflection.Emit 与执行 Session
 
+## 2026-10-08 auto 执行前路由更新
+
+当前 `auto` 在业务副作用前准备 Emit，冷键成功报告 `emit`，缓存键报告 `emit-cache`；只有准备阶段 `REFLECTION_EMIT_UNAVAILABLE` / `CSHARP_EMIT_COMPILE_FAILED` 才回到执行同一 V2 AST 的解释器。不自动选择有限子集 `compiled`。显式 `interpret` / `emit` / `compiled` 保持原有严格契约，不增加参数或第三方依赖。
+
+`EVAL_BACKEND_FALLBACK` 是请求级 warning，action=`fallback_interpreter`，nextAction 保留原始准备错误码和最多512字符的消息（另附截断标记）。它不代表业务已成功；解析/执行失败仍返回原错误并附带该诊断。语法、取消、配额拒绝不降级；业务开始后任何异常都不触发其他后端重放。Emit底层准备不会把取消或内存耗尽包装为可降级编译错误。
+
+下方2026-09-22段落是历史契约：`EVAL_CACHE_WARMUP_FAILED` 仅为旧Bridge的执行成功后预热失败通知，新auto不再采用该时序。调用方仍须兼容该旧warning且不得重放。
+
+
 ## 2026-09-22 边界修正、固定容量与请求级通知
 
 本轮保持 Eval/Emit-first 能力范围，不新增源码语法、DLL、类型卸载、热替换入口或设置界面。

@@ -802,6 +802,26 @@ namespace CodingRiver.UPilot
                 summary.samples.Add(entry);
         }
 
+        internal static int MarkSequence()
+        {
+            var method = GetLogEntriesType()?.GetMethod("GetCount", BindingFlags.Public | BindingFlags.Static);
+            if (method == null) throw new NotSupportedException("Console cursor unavailable");
+            return (int)method.Invoke(null, null);
+        }
+
+        internal static List<ConsoleLogEntry> ReadPhaseRange(int start, int end)
+        {
+            var logs = new List<ConsoleLogEntry>();
+            var payload = new ConsoleLogsTailPayload { includeStackTrace = true, excludeUPilot = true, maxMessageLength = 8192 };
+            WithLogEntries((type, method, entry, message, mode) =>
+            {
+                int excluded = 0;
+                for (int i = Math.Max(0, start); i <= end && i < start + 500; i++)
+                    TryAddLogEntry(logs, i, payload, method, entry, message, mode, ref excluded);
+            });
+            return logs;
+        }
+
         private static int GetLogEntryCount()
         {
             var logEntriesType = GetLogEntriesType();

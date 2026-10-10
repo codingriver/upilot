@@ -1,5 +1,7 @@
 import asyncio
 import json
+
+import pytest
 import os
 from pathlib import Path
 
@@ -29,7 +31,7 @@ def test_direct_tool_json_parse_failure_has_unicode_diagnostic_on_start_and_is_p
 
         assert not result.ok and result.error.code == "OPERATION_RESULT_INVALID"
         diagnostic = result.error.detail["parseDiagnostic"]
-        with __import__("pytest").raises(json.JSONDecodeError) as expected:
+        with pytest.raises(json.JSONDecodeError) as expected:
             json.loads(malformed)
         assert diagnostic["offset"] == expected.value.pos
         assert diagnostic["offsetUnit"] == "unicodeCharacter"
@@ -69,7 +71,7 @@ def test_parse_diagnostic_keeps_unicode_offset_and_bounds_a_long_snippet() -> No
     malformed = '{"前缀":"' + ("值" * 300)
     _payload, error, diagnostic = _operation_parse_object(malformed)
 
-    with __import__("pytest").raises(json.JSONDecodeError) as expected:
+    with pytest.raises(json.JSONDecodeError) as expected:
         json.loads(malformed)
     assert error
     assert diagnostic["offset"] == expected.value.pos
@@ -150,7 +152,7 @@ def test_canceling_artifact_collection_keeps_last_persisted_snapshot_and_busines
         collecting = asyncio.create_task(service.operation_collect_artifacts(operation_id))
         await entered.wait()
         collecting.cancel()
-        with __import__("pytest").raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
             await collecting
 
         state = service._operations[operation_id]
@@ -272,3 +274,20 @@ def test_status_artifact_scalars_are_not_reinterpreted_as_project_paths(tmp_path
         }
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("malformed", [
+    '{"value":}', '{"value":', '{"value":"\\q"}',
+    ' \r\n{\r\n"中文😀": }', '{"value":"' + '中文😀' * 400,
+])
+def test_invalid_json_matrix_preserves_original_unicode_coordinates(malformed):
+    with pytest.raises(json.JSONDecodeError) as expected:
+        json.loads(malformed)
+    value, error, diagnostic = _operation_parse_object(malformed)
+    assert value == {} and error
+    assert diagnostic["offset"] == expected.value.pos
+    assert diagnostic["line"] == expected.value.lineno
+    assert diagnostic["column"] == expected.value.colno
+    assert diagnostic["offsetUnit"] == "unicodeCharacter"
+    assert diagnostic["path"] is None
+    assert len(diagnostic["snippet"]) <= 256

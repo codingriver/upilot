@@ -284,9 +284,14 @@ namespace CodingRiver.UPilot
         public ExecutionSessionRegistry Sessions => _sessions;
         public ExecutionCapabilityPayload Capabilities { get; }
 
+        private readonly UPilotDiagnosticModuleService _diagnosticModules;
+
+        internal void HardCloseModules() => _diagnosticModules.HardClose();
+
         public UPilotExecutionService(UPilotBridge bridge)
         {
             _bridge = bridge;
+            _diagnosticModules = new UPilotDiagnosticModuleService(_sessions);
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             _emitCapability = _emit.Probe();
             Capabilities = new ExecutionCapabilityPayload
@@ -301,6 +306,7 @@ namespace CodingRiver.UPilot
         public void RegisterCommands()
         {
             _bridge.Router.Register("execution.session", HandleSessionAsync);
+            _bridge.Router.Register("execution.diagnosticModule", HandleDiagnosticModuleAsync);
             _bridge.Router.Register("csharp.validate", HandleCSharpValidateAsync);
             _bridge.Router.Register("csharp.eval", HandleCSharpEvalAsync);
             _bridge.Router.Register("reflection.emitType", HandleReflectionEmitAsync);
@@ -310,10 +316,27 @@ namespace CodingRiver.UPilot
 
         public void OnPlayModeStateChanged(PlayModeStateChange change)
         {
+            _diagnosticModules.OnPlayModeChanged(change);
             if (change != PlayModeStateChange.ExitingEditMode && change != PlayModeStateChange.ExitingPlayMode) return;
             _sessions.Invalidate(
                 value => value is UnityEngine.Object obj && obj != null && !AssetDatabase.Contains(obj),
                 "Unity scene object handle expired during a PlayMode transition.");
+        }
+
+        private async Task HandleDiagnosticModuleAsync(string id, string json, CancellationToken token)
+        {
+            var tcs = new TaskCompletionSource<DiagnosticModuleResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _bridge.EnqueueTracked(id, () =>
+            {
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    var payload = JsonUtility.FromJson<DiagnosticModuleMessage>(json)?.payload ?? new DiagnosticModulePayload();
+                    tcs.TrySetResult(_diagnosticModules.Execute(payload));
+                }
+                catch (Exception ex) { tcs.TrySetException(ex); }
+            });
+            await SendTaskResult(id, "execution.diagnosticModule", tcs.Task, token);
         }
 
         private async Task HandleCapabilitiesAsync(string id, string json, CancellationToken token)
@@ -717,14 +740,16 @@ namespace CodingRiver.UPilot
             }
             if (backend == "emit")
                 return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics)(context), BackendUsed = "emit" };
-            if (backend == "auto" && CSharpEmitBackend.IsCached(cacheKey))
-                return new EvaluationWorkerResult { Result = CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics)(context), BackendUsed = "emit-cache" };
-            var result = CSharpSubsetEngine.Evaluate(payload.code, payload.mode, context);
             if (backend == "auto")
             {
-                WarmEmitCache(() => CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics), context.ResourceDiagnostics);
+                bool cached = CSharpEmitBackend.IsCached(cacheKey);
+                var prepared = PrepareAutoEmit(
+                    () => CSharpEmitBackend.Compile(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics), context.ResourceDiagnostics);
+                // Only preparation can fall back. Never catch/replay an executing delegate.
+                if (prepared != null)
+                    return new EvaluationWorkerResult { Result = prepared(context), BackendUsed = cached ? "emit-cache" : "emit" };
             }
-            return new EvaluationWorkerResult { Result = result, BackendUsed = "interpreter" };
+            return new EvaluationWorkerResult { Result = CSharpSubsetEngine.Evaluate(payload.code, payload.mode, context), BackendUsed = "interpreter" };
         }
 
         private static async Task<EvaluationWorkerResult> ExecuteEvaluationWorkerAsync(
@@ -768,32 +793,39 @@ namespace CodingRiver.UPilot
                 };
             }
 
-            if (backend == "auto" && CSharpEmitBackend.IsCached(cacheKey))
-            {
-                var cached = CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics);
-                return new EvaluationWorkerResult
-                {
-                    Result = await cached(context).ConfigureAwait(false),
-                    BackendUsed = "emit-cache",
-                };
-            }
-
-            var result = await CSharpSubsetEngine.EvaluateAsync(payload.code, payload.mode, context).ConfigureAwait(false);
             if (backend == "auto")
             {
-                WarmEmitCache(() => CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics), context.ResourceDiagnostics);
+                bool cached = CSharpEmitBackend.IsCached(cacheKey);
+                var prepared = PrepareAutoEmit(
+                    () => CSharpEmitBackend.CompileAsync(cacheKey, payload.code, payload.mode, context.ResourceDiagnostics), context.ResourceDiagnostics);
+                if (prepared != null)
+                    return new EvaluationWorkerResult
+                    {
+                        Result = await prepared(context).ConfigureAwait(false),
+                        BackendUsed = cached ? "emit-cache" : "emit",
+                    };
             }
-            return new EvaluationWorkerResult { Result = result, BackendUsed = "interpreter" };
+            return new EvaluationWorkerResult
+            {
+                Result = await CSharpSubsetEngine.EvaluateAsync(payload.code, payload.mode, context).ConfigureAwait(false),
+                BackendUsed = "interpreter",
+            };
         }
 
-        internal static void WarmEmitCache(Action warm, ExecutionResourceDiagnostics resources)
+        // Emit entries execute the same V2 AST as the interpreter. This helper prepares
+        // delegates only: syntax, cancellation and resource refusals must remain errors.
+        internal static T PrepareAutoEmit<T>(Func<T> prepare, ExecutionResourceDiagnostics resources) where T : class
         {
-            try { warm(); }
-            catch (ExecutionContractException ex)
+            try { return prepare(); }
+            catch (ExecutionContractException ex) when (ex.Code == "REFLECTION_EMIT_UNAVAILABLE" || ex.Code == "CSHARP_EMIT_COMPILE_FAILED")
             {
                 var state = CSharpEmitBackend.Snapshot();
-                resources.Add("EVAL_CACHE_WARMUP_FAILED", "warning", "emitCache", "skip", state.capacity, state.count,
-                    "Execution already succeeded. Keep the result and do not retry this request; only cache warmup failed: " + ex.Code);
+                string message = ex.Message ?? "";
+                if (message.Length > 512) message = message.Substring(0, 512) + " [truncated]";
+                resources.Add("EVAL_BACKEND_FALLBACK", "warning", "emitCache", "fallback_interpreter", state.capacity, state.count,
+                    "Emit preparation failed before execution: " + ex.Code + ": " + message +
+                    ". Preparing the equivalent interpreter; inspect this call's result/error and do not replay it.");
+                return null;
             }
         }
 

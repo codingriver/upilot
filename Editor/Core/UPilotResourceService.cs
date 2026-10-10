@@ -413,6 +413,9 @@ namespace CodingRiver.UPilot
             try
             {
                 var payload = await tcs.Task;
+                // A fresh resource reply must first publish the ordered mode/compile facts.
+                if (!await _bridge.PublishExecutionStateAsync("editor_state_requested", token))
+                    throw new InvalidOperationException("Could not persist the requested Editor execution state.");
                 await _bridge.SendResultAsync(id, "resource.editorState", payload, token);
             }
             catch (Exception ex)

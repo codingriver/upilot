@@ -421,11 +421,31 @@ namespace CodingRiver.UPilot
                 Application.logMessageReceivedThreaded += OnLogMessageReceived;
             }
 
+            // Pending records live only in this managed domain. Persist them before
+            // Unity unloads it; recovery keeps the same manifest, owner and sequence.
+            AssemblyReloadEvents.beforeAssemblyReload -= FlushBeforeAssemblyReload;
+            AssemblyReloadEvents.beforeAssemblyReload += FlushBeforeAssemblyReload;
+
             if (!s_updateSubscribed)
             {
                 s_updateSubscribed = true;
                 EditorApplication.update -= FlushOnEditorUpdate;
                 EditorApplication.update += FlushOnEditorUpdate;
+            }
+        }
+
+        private static void FlushBeforeAssemblyReload()
+        {
+            try { FlushActiveCapture(true); }
+            catch (Exception ex)
+            {
+                // A failed manifest write must not prevent other Reload handlers.
+                // Do not log into the Capture we are flushing, stop it, or retry.
+                lock (CaptureLock)
+                {
+                    if (s_active != null)
+                        s_active.Manifest.lastError = "Reload flush failed: " + ex.GetType().Name;
+                }
             }
         }
 
@@ -734,6 +754,26 @@ namespace CodingRiver.UPilot
             ConsoleCaptureReadPayload payload,
             CancellationToken token)
         {
+            try
+            {
+                return ReadCaptureFilesCore(manifest, payload, token);
+            }
+            catch (IOException ex) when (ex is FileNotFoundException || ex is DirectoryNotFoundException)
+            {
+                // A required segment can disappear after the initial check, while
+                // indexing or opening the next file. Do not leak a partial page.
+                // If the gap is no longer observable, preserve the original error.
+                var missing = CheckRequiredReadSegments(manifest, token);
+                if (missing == null) throw;
+                return missing;
+            }
+        }
+
+        private static ConsoleCaptureReadResult ReadCaptureFilesCore(
+            ConsoleCaptureManifest manifest,
+            ConsoleCaptureReadPayload payload,
+            CancellationToken token)
+        {
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             long managedMemoryBeforeBytes = GC.GetTotalMemory(false);
             long processWorkingSetBeforeBytes = ReadProcessWorkingSetBytes(out string processWorkingSetSourceBefore);
@@ -785,6 +825,9 @@ namespace CodingRiver.UPilot
             long scannedFrom = -1;
             long scannedTo = -1;
             bool countAllMatches = cursor == null;
+
+            var segmentFailure = CheckRequiredReadSegments(manifest, token);
+            if (segmentFailure != null) return segmentFailure;
 
             string indexPath = Path.Combine(manifest.directory, SparseIndexFileName);
             bool indexCreated;
@@ -864,6 +907,11 @@ namespace CodingRiver.UPilot
                 matches = newestMatches.ToList();
                 matches.Reverse();
             }
+
+            // A segment may disappear while scanning. Never publish a complete page
+            // (or a continuation token) when the recorded Capture is incomplete.
+            segmentFailure = CheckRequiredReadSegments(manifest, token);
+            if (segmentFailure != null) return segmentFailure;
 
             long consumedMatches = (cursor?.consumedMatchCount ?? 0) + matches.Count;
             bool hasMore = consumedMatches < totalMatches;
@@ -1361,6 +1409,31 @@ namespace CodingRiver.UPilot
                 if (hit) any = true;
             }
             return payload.containsAll || any;
+        }
+
+        private static ConsoleCaptureReadResult CheckRequiredReadSegments(
+            ConsoleCaptureManifest manifest,
+            CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var files = new HashSet<string>(GetSegmentFiles(manifest.directory), StringComparer.OrdinalIgnoreCase);
+            // Stop at the first gap: even a corrupt huge count takes at most
+            // files.Count + 1 checks, rather than trusting it as a loop budget.
+            int expectedCount = Math.Max(1, manifest.segmentCount);
+            for (int index = 0; index < expectedCount; index++)
+            {
+                token.ThrowIfCancellationRequested();
+                string name = index == 0 ? "console.jsonl" : $"console.{index:000}.jsonl";
+                if (files.Contains(Path.Combine(manifest.directory, name))) continue;
+                return new ConsoleCaptureReadResult
+                {
+                    ok = false,
+                    action = "ReadCapture",
+                    sessionId = manifest.sessionId,
+                    error = "CONSOLE_CAPTURE_SEGMENT_MISSING: " + name,
+                };
+            }
+            return null;
         }
 
         private static ConsoleCaptureSparseIndex LoadOrBuildSparseIndex(

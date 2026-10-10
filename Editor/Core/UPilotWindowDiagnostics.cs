@@ -70,6 +70,93 @@ namespace CodingRiver.UPilot
     {
         internal static Func<EditorWindow, bool> RejectNativeCaptureForTesting;
         internal static Action<EditorWindow> AfterNativeCaptureForTesting;
+        internal static UnityEngine.Object ResolveNativeTooltip(string instanceId, string domain)
+        {
+            if (string.IsNullOrWhiteSpace(domain) || domain != DomainReloadEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                throw new InvalidOperationException("TOOLTIP_DOMAIN_MISMATCH");
+            if (!ulong.TryParse(instanceId, out var id) || id == 0)
+                throw new InvalidOperationException("TOOLTIP_INSTANCE_ID_REQUIRED");
+            var tooltip = UPilotEntityIds.ObjectFromWireId(id);
+            if (tooltip == null || tooltip.GetType().FullName != "UnityEditor.TooltipView")
+                throw new InvalidOperationException("TOOLTIP_NOT_FOUND_OR_WRONG_TYPE");
+            return tooltip;
+        }
+
+        internal static IEnumerable<EditorWindowInfo> ListNativeTooltips()
+        {
+#if UNITY_EDITOR_WIN
+            var type = typeof(EditorWindow).Assembly.GetType("UnityEditor.TooltipView");
+            if (type == null) yield break;
+            foreach (var tooltip in Resources.FindObjectsOfTypeAll(type))
+            {
+                if (!TryGetTooltipGeometry(tooltip, out var rect, out var scale, out _)) continue;
+                var handle = FindMappedUnityView(tooltip, rect, out _);
+                if (handle == IntPtr.Zero) continue;
+                yield return new EditorWindowInfo {
+                    instanceId = UPilotEntityIds.ToWireId(tooltip), domainGeneration = DomainReloadEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    typeName = "TooltipView", fullTypeName = type.FullName, title = "", nativeTooltip = true,
+                    windowHandle = handle.ToInt64().ToString(), posX = rect.Left / scale, posY = rect.Top / scale,
+                    width = (rect.Right - rect.Left) / scale, height = (rect.Bottom - rect.Top) / scale,
+                };
+            }
+#else
+            yield break;
+#endif
+        }
+
+        internal static EditorWindowPixelCapture CaptureNativeTooltip(UnityEngine.Object tooltip, string domain)
+        {
+#if UNITY_EDITOR_WIN
+            var id = tooltip == null ? "" : UPilotEntityIds.ToWireId(tooltip).ToString();
+            ResolveNativeTooltip(id, domain);
+            if (!TryGetTooltipGeometry(tooltip, out var rect, out var scale, out var container))
+                throw new InvalidOperationException("TOOLTIP_GEOMETRY_UNVERIFIED");
+            var hwnd = FindMappedUnityView(tooltip, rect, out var mapping);
+            if (hwnd == IntPtr.Zero) throw new InvalidOperationException("TOOLTIP_HOST_UNVERIFIED");
+            if (!TryPrintWindowCrop(hwnd, rect, out var png, out var width, out var height,
+                out var host, out _, out var crop, out var verified, out var error))
+                throw new InvalidOperationException("TOOLTIP_CAPTURE_FAILED: " + error);
+            if (!verified || tooltip == null || ResolveNativeTooltip(id, domain) != tooltip
+                || !TryGetTooltipGeometry(tooltip, out var after, out var afterScale, out var afterContainer)
+                || !SameRect(rect, after) || scale != afterScale || !ReferenceEquals(container, afterContainer)
+                || FindMappedUnityView(tooltip, after, out _) != hwnd
+                || !GetWindowRect(hwnd, out var afterHost) || !SameRect(host, afterHost))
+                throw new InvalidOperationException("TOOLTIP_CHANGED_DURING_CAPTURE");
+            return new EditorWindowPixelCapture {
+                imageData = Convert.ToBase64String(png), width = width, height = height,
+                instanceId = UPilotEntityIds.ToWireId(tooltip), windowHandle = hwnd.ToInt64(),
+                unityProcessId = Process.GetCurrentProcess().Id, pixelsPerPoint = scale,
+                captureApi = "Win32.PrintWindow(PW_RENDERFULLCONTENT)", pixelSourceVerified = true,
+                contentRectVerified = true, cropComplete = width == rect.Right - rect.Left && height == rect.Bottom - rect.Top,
+                foreground = GetForegroundWindow() == hwnd, mappingEvidence = mapping,
+                capturedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                geometrySource = "TooltipView.screenPosition+GUIView.GetBackingScaleFactor;Win32.clientContainment",
+                windowLeft = host.Left, windowTop = host.Top, windowRight = host.Right, windowBottom = host.Bottom,
+                contentLeft = rect.Left, contentTop = rect.Top, contentRight = rect.Right, contentBottom = rect.Bottom,
+                cropLeft = crop.Left, cropTop = crop.Top, cropRight = crop.Right, cropBottom = crop.Bottom,
+            };
+#else
+            throw new NotSupportedException("TOOLTIP_PLATFORM_UNSUPPORTED");
+#endif
+        }
+
+#if UNITY_EDITOR_WIN
+        private static bool TryGetTooltipGeometry(UnityEngine.Object tooltip, out NativeRect rect, out float scale, out object container)
+        {
+            rect = default; scale = 0; container = null;
+            if (tooltip == null || tooltip.GetType().FullName != "UnityEditor.TooltipView") return false;
+            container = ReadWindowMember(tooltip, "window");
+            if (container == null || !(ReadWindowMember(tooltip, "screenPosition") is Rect bounds)) return false;
+            var method = tooltip.GetType().GetMethod("GetBackingScaleFactor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (method == null) return false;
+            scale = Convert.ToSingle(method.Invoke(tooltip, null));
+            if (scale <= 0 || float.IsNaN(scale) || float.IsInfinity(scale) || bounds.width <= 0 || bounds.height <= 0) return false;
+            rect = new NativeRect { Left = Mathf.RoundToInt(bounds.x * scale), Top = Mathf.RoundToInt(bounds.y * scale),
+                Right = Mathf.RoundToInt(bounds.xMax * scale), Bottom = Mathf.RoundToInt(bounds.yMax * scale) };
+            return true;
+        }
+#endif
+
         private const string DomainReloadTsKey = "UPilot.DomainReloadTimestamp";
 
         static UPilotWindowDiagnostics()
@@ -191,18 +278,7 @@ namespace CodingRiver.UPilot
             minimized = false;
             windowHandle = 0;
 #if UNITY_EDITOR_WIN
-            if (window == null) return false;
-            var pos = window.position;
-            float scale = Mathf.Max(1f, EditorGUIUtility.pixelsPerPoint);
-            var target = new NativeRect
-            {
-                Left = Mathf.RoundToInt(pos.x * scale),
-                Top = Mathf.RoundToInt(pos.y * scale),
-                Right = Mathf.RoundToInt((pos.x + pos.width) * scale),
-                Bottom = Mathf.RoundToInt((pos.y + pos.height) * scale),
-            };
-            var hwnd = FindBestUnityWindow(target, Process.GetCurrentProcess().Id, includeMinimized: true);
-            if (hwnd == IntPtr.Zero) return false;
+            if (!TryGetMappedWindowHandleCore(window, false, true, out var hwnd, out _)) return false;
             windowHandle = hwnd.ToInt64();
             minimized = IsIconic(hwnd);
             return true;
@@ -260,14 +336,9 @@ namespace CodingRiver.UPilot
                 win.Repaint();
 
                 var pos = win.position;
-                float scale = Mathf.Max(1f, EditorGUIUtility.pixelsPerPoint);
-                var target = new NativeRect
-                {
-                    Left = Mathf.RoundToInt(pos.x * scale),
-                    Top = Mathf.RoundToInt(pos.y * scale),
-                    Right = Mathf.RoundToInt((pos.x + pos.width) * scale),
-                    Bottom = Mathf.RoundToInt((pos.y + pos.height) * scale),
-                };
+                if (!TryGetContentGeometry(win, out var target, out float scale, out var view, out var container))
+                    throw new EditorWindowCaptureException("Cannot verify the host content geometry.", new EditorWindowPixelCapture
+                    { originalError = "WINDOW_CONTENT_RECT_UNVERIFIED", geometrySource = "GUIView/HostView unavailable" });
 
                 IntPtr hwnd = FindMappedUnityWindow(win, target, out var mappingEvidence);
                 string nativeError = hwnd == IntPtr.Zero ? "WINDOW_MAPPING_UNVERIFIED" : "PRINT_WINDOW_FAILURE_INJECTED";
@@ -277,7 +348,12 @@ namespace CodingRiver.UPilot
                         out nativeError))
                 {
                     AfterNativeCaptureForTesting?.Invoke(win);
-                    if (win == null || win.position != pos || FindMappedUnityWindow(win, target, out _) != hwnd)
+                    if (win == null || win.position != pos
+                        || !TryGetContentGeometry(win, out var afterRect, out var afterScale, out var afterView, out var afterContainer)
+                        || !SameRect(target, afterRect) || scale != afterScale
+                        || !ReferenceEquals(view, afterView) || !ReferenceEquals(container, afterContainer)
+                        || FindMappedUnityWindow(win, target, out _) != hwnd
+                        || !GetWindowRect(hwnd, out var afterHost) || !SameRect(hwndRect, afterHost))
                         throw new EditorWindowCaptureException("Window identity or geometry changed during capture.", new EditorWindowPixelCapture
                         {
                             windowHandle = hwnd.ToInt64(),
@@ -315,18 +391,18 @@ namespace CodingRiver.UPilot
                         instanceId = UPilotEntityIds.ToWireId(win),
                         pixelsPerPoint = scale,
                         mappingEvidence = mappingEvidence,
-                        contentLeft = clientRect.Left,
-                        contentTop = clientRect.Top,
-                        contentRight = clientRect.Right,
-                        contentBottom = clientRect.Bottom,
+                        contentLeft = target.Left,
+                        contentTop = target.Top,
+                        contentRight = target.Right,
+                        contentBottom = target.Bottom,
                         cropLeft = cropRect.Left,
                         cropTop = cropRect.Top,
                         cropRight = cropRect.Right,
                         cropBottom = cropRect.Bottom,
                         contentRectVerified = contentRectVerified,
-                        cropComplete = contentRectVerified,
+                        cropComplete = width == target.Right - target.Left && height == target.Bottom - target.Top,
                         includesDecorations = SameRect(cropRect, hwndRect),
-                        geometrySource = "Win32.GetWindowRect+GetClientRect+ClientToScreen",
+                        geometrySource = "GUIView.screenPosition+HostView.borderSize+GUIView.GetBackingScaleFactor;Win32.clientContainment",
                     };
                 }
 
@@ -451,22 +527,58 @@ namespace CodingRiver.UPilot
         [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
 
-        private static IntPtr FindBestUnityWindow(NativeRect target, int processId, bool includeMinimized = false)
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeWindowPlacement
         {
-            IntPtr best = IntPtr.Zero;
-            long bestArea = long.MaxValue;
-            int cx = target.Left + Math.Max(1, target.Right - target.Left) / 2;
-            int cy = target.Top + Math.Max(1, target.Bottom - target.Top) / 2;
-            EnumWindows((hwnd, _) =>
+            public uint Length, Flags, ShowCommand;
+            public NativePoint MinPosition, MaxPosition;
+            public NativeRect NormalPosition;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMonitorInfo
+        {
+            public uint Size;
+            public NativeRect Monitor, Work;
+            public uint Flags;
+        }
+
+        [DllImport("user32.dll")] private static extern bool GetWindowPlacement(IntPtr handle, ref NativeWindowPlacement placement);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr handle, int index);
+        [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr handle, uint flags);
+        [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor, ref NativeMonitorInfo info);
+        [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr handle);
+        [DllImport("user32.dll")] private static extern IntPtr GetMenu(IntPtr handle);
+        [DllImport("user32.dll")] private static extern bool AdjustWindowRectExForDpi(ref NativeRect rect, uint style, bool menu, uint extendedStyle, uint dpi);
+
+        private static bool TryGetRestoredWindowRects(IntPtr handle, out NativeRect outer, out NativeRect client)
+        {
+            outer = client = default;
+            try
             {
-                GetWindowThreadProcessId(hwnd, out uint owner);
-                if (owner != (uint)processId || (!includeMinimized && !IsWindowVisible(hwnd)) || !GetWindowRect(hwnd, out NativeRect rect)) return true;
-                if (cx < rect.Left || cx >= rect.Right || cy < rect.Top || cy >= rect.Bottom) return true;
-                long area = Math.Max(1, rect.Right - rect.Left) * (long)Math.Max(1, rect.Bottom - rect.Top);
-                if (area < bestArea) { best = hwnd; bestArea = area; }
-                return true;
-            }, IntPtr.Zero);
-            return best;
+                var placement = new NativeWindowPlacement { Length = (uint)Marshal.SizeOf<NativeWindowPlacement>() };
+                if (!GetWindowPlacement(handle, ref placement)) return false;
+                outer = placement.NormalPosition;
+                uint extendedStyle = unchecked((uint)GetWindowLong(handle, -20)); // GWL_EXSTYLE
+                // Non-tool WINDOWPLACEMENT rectangles use workspace coordinates, not screen coordinates.
+                if ((extendedStyle & 0x80u) == 0) // WS_EX_TOOLWINDOW
+                {
+                    var monitor = MonitorFromWindow(handle, 2); // MONITOR_DEFAULTTONEAREST
+                    var info = new NativeMonitorInfo { Size = (uint)Marshal.SizeOf<NativeMonitorInfo>() };
+                    if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info)) return false;
+                    int x = info.Work.Left - info.Monitor.Left, y = info.Work.Top - info.Monitor.Top;
+                    outer.Left += x; outer.Right += x; outer.Top += y; outer.Bottom += y;
+                }
+                uint dpi = GetDpiForWindow(handle);
+                uint style = unchecked((uint)GetWindowLong(handle, -16)) & ~0x20000000u; // GWL_STYLE, without WS_MINIMIZE
+                var frame = new NativeRect();
+                if (dpi == 0 || style == 0 || !AdjustWindowRectExForDpi(ref frame, style, GetMenu(handle) != IntPtr.Zero, extendedStyle, dpi)) return false;
+                client = new NativeRect { Left = outer.Left - frame.Left, Top = outer.Top - frame.Top,
+                    Right = outer.Right - frame.Right, Bottom = outer.Bottom - frame.Bottom };
+                return client.Right > client.Left && client.Bottom > client.Top && Contains(outer, client);
+            }
+            catch (EntryPointNotFoundException) { return false; }
+            catch (DllNotFoundException) { return false; }
         }
 
         private static object ReadWindowMember(object target, string name)
@@ -482,16 +594,48 @@ namespace CodingRiver.UPilot
             return null;
         }
 
-        private static IntPtr FindMappedUnityWindow(EditorWindow window, NativeRect target, out string evidence)
+        private static bool TryGetContentGeometry(EditorWindow window, out NativeRect target, out float scale,
+            out object view, out object container)
+        {
+            target = default; scale = 0;
+            view = ReadWindowMember(window, "m_Parent");
+            container = ReadWindowMember(view, "window");
+            if (view == null || container == null || ReadWindowMember(view, "actualView") != (object)window
+                || !(ReadWindowMember(view, "screenPosition") is Rect host)
+                || !(ReadWindowMember(view, "borderSize") is RectOffset border)) return false;
+            var method = view.GetType().GetMethod("GetBackingScaleFactor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (method == null) return false;
+            scale = Convert.ToSingle(method.Invoke(view, null));
+            if (float.IsNaN(scale) || float.IsInfinity(scale) || scale <= 0) return false;
+            var content = border.Remove(host);
+            if (content.width <= 0 || content.height <= 0) return false;
+            target = new NativeRect
+            {
+                Left = Mathf.RoundToInt(content.x * scale), Top = Mathf.RoundToInt(content.y * scale),
+                Right = Mathf.RoundToInt(content.xMax * scale), Bottom = Mathf.RoundToInt(content.yMax * scale),
+            };
+            return true;
+        }
+
+        private static IntPtr FindMappedUnityWindow(EditorWindow window, NativeRect target, out string evidence, bool includeMinimized = false)
         {
             evidence = "Unity GUIView/ContainerWindow mapping unavailable";
             // Bind to the owning Unity container, not the smallest OS rectangle under the target's center.
             var view = ReadWindowMember(window, "m_Parent");
             var actualView = ReadWindowMember(view, "actualView") as EditorWindow;
             if (actualView != null && actualView != window) return IntPtr.Zero;
+            return FindMappedUnityView(view, target, out evidence, includeMinimized);
+        }
+
+        private static IntPtr FindMappedUnityView(object view, NativeRect target, out string evidence, bool includeMinimized = false)
+        {
+            evidence = "Unity GUIView/ContainerWindow mapping unavailable";
             var container = ReadWindowMember(view, "window");
-            if (!(ReadWindowMember(container, "position") is Rect position)) return IntPtr.Zero;
-            float scale = Mathf.Max(1f, EditorGUIUtility.pixelsPerPoint);
+            if (view == null || !(ReadWindowMember(container, "position") is Rect position)) return IntPtr.Zero;
+            var scaleMethod = view.GetType().GetMethod("GetBackingScaleFactor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (scaleMethod == null) return IntPtr.Zero;
+            float scale = Convert.ToSingle(scaleMethod.Invoke(view, null));
+            if (scale <= 0 || float.IsNaN(scale) || float.IsInfinity(scale)) return IntPtr.Zero;
             var expected = new NativeRect
             {
                 Left = Mathf.RoundToInt(position.x * scale), Top = Mathf.RoundToInt(position.y * scale),
@@ -503,13 +647,22 @@ namespace CodingRiver.UPilot
             EnumWindows((handle, _) =>
             {
                 GetWindowThreadProcessId(handle, out uint owner);
-                if (owner != (uint)Process.GetCurrentProcess().Id || !IsWindowVisible(handle) || IsIconic(handle)
-                    || !GetWindowRect(handle, out var outer)) return true;
-                var origin = new NativePoint();
-                if (!GetClientRect(handle, out var client) || !ClientToScreen(handle, ref origin)) return true;
-                client.Right += origin.X; client.Bottom += origin.Y; client.Left = origin.X; client.Top = origin.Y;
+                if (owner != (uint)Process.GetCurrentProcess().Id || !IsWindowVisible(handle)) return true;
+                bool iconic = IsIconic(handle);
+                NativeRect outer, client;
+                if (iconic)
+                {
+                    if (!includeMinimized || !TryGetRestoredWindowRects(handle, out outer, out client)) return true;
+                }
+                else
+                {
+                    if (!GetWindowRect(handle, out outer)) return true;
+                    var origin = new NativePoint();
+                    if (!GetClientRect(handle, out client) || !ClientToScreen(handle, ref origin)) return true;
+                    client.Right += origin.X; client.Bottom += origin.Y; client.Left = origin.X; client.Top = origin.Y;
+                }
                 if (candidates.Count < 16)
-                    candidates.Add(handle.ToInt64() + ":outer=" + RectText(outer) + ",client=" + RectText(client));
+                    candidates.Add(handle.ToInt64() + ":iconic=" + iconic + ",outer=" + RectText(outer) + ",client=" + RectText(client));
                 if (!Contains(outer, target)) return true;
                 if (!SameRect(expected, outer) && !SameRect(expected, client)) return true;
                 match = handle;
@@ -522,6 +675,10 @@ namespace CodingRiver.UPilot
         }
 
         public static bool TryGetMappedWindowHandle(EditorWindow window, bool requireExclusive, out IntPtr handle, out string evidence)
+            => TryGetMappedWindowHandleCore(window, requireExclusive, false, out handle, out evidence);
+
+        private static bool TryGetMappedWindowHandleCore(EditorWindow window, bool requireExclusive, bool includeMinimized,
+            out IntPtr handle, out string evidence)
         {
             handle = IntPtr.Zero;
             evidence = "WINDOW_MAPPING_UNAVAILABLE";
@@ -534,14 +691,18 @@ namespace CodingRiver.UPilot
                 evidence = "WINDOW_CONTAINER_NOT_EXCLUSIVE";
                 return false;
             }
+            var view = ReadWindowMember(window, "m_Parent");
+            var scaleMethod = view?.GetType().GetMethod("GetBackingScaleFactor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (scaleMethod == null) return false;
+            float scale = Convert.ToSingle(scaleMethod.Invoke(view, null));
+            if (scale <= 0 || float.IsNaN(scale) || float.IsInfinity(scale)) return false;
             var position = window.position;
-            float scale = Mathf.Max(1f, EditorGUIUtility.pixelsPerPoint);
             var target = new NativeRect
             {
                 Left = Mathf.RoundToInt(position.x * scale), Top = Mathf.RoundToInt(position.y * scale),
                 Right = Mathf.RoundToInt(position.xMax * scale), Bottom = Mathf.RoundToInt(position.yMax * scale),
             };
-            handle = FindMappedUnityWindow(window, target, out evidence);
+            handle = FindMappedUnityWindow(window, target, out evidence, includeMinimized);
             return handle != IntPtr.Zero;
         }
 
@@ -583,7 +744,9 @@ namespace CodingRiver.UPilot
             clientRect.Top += clientOrigin.Y;
             clientRect.Right += clientOrigin.X;
             clientRect.Bottom += clientOrigin.Y;
-            contentRectVerified = SameRect(target, clientRect);
+            // Geometry provenance is checked by the caller. Client containment is not equality:
+            // a docked content view occupies only part of its native container.
+            contentRectVerified = Contains(clientRect, target);
             int width = Math.Max(1, hwndRect.Right - hwndRect.Left);
             int height = Math.Max(1, hwndRect.Bottom - hwndRect.Top);
             var info = new BitmapInfo

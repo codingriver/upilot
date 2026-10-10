@@ -178,10 +178,12 @@ C# 热加载不等于 Python 已更新。需用户更新/重启 Server、刷新 
 再验证 `/queue` 与 `unity_queue_cleanup` 的在线可用性；本任务未绕过授权进行 shell 重启。
 因此上述测试证明源码及 C# 定向行为，不代表旧 Server 已运行新清理工具或窗口数据接口。
 
-## 通用编排暂停后的边界
+## 正式 Step 准入与旧通用编排边界
 
-新的 Operation（手写回调和全部 stepPlan）及公开 Step Start/Validate 固定暂停，返回 `GENERIC_ORCHESTRATION_DISABLED`；不创建 Run、Capture 或业务请求。专用测试、验收、编译、构建、Capture 和 Snapshot 不受这项门禁影响。不能借 Task、反射或临时脚本绕过。
+正式 MCP `unity_operation_validate/start` 仅接收完整 `jobSpec.stepPlan`；公开 C# `UPilotAutomationStepService.ValidateJson/StartJson` 与 Bridge 共用计划校验和同一执行器。预检不创建 Run、Capture 或执行业务 Step，Start 重新验证计划并仅启动一次。权限、精确项目、就绪、预算和 Capture 所有权检查仍适用。
 
-历史查询、产物和已有安全清理能力仍保留。`operation_wait` 遇到 `RecoveryRequired` 立即返回 `recoveryBlocked=true`、`terminal=false`，不自动取消、重启、重置期限或重放 Start。停用新启动不代表历史资源释放，也不把未知结果改为成功、失败或 Released。
+手写 start/status/cancel 回调及 Task 包装继续返回 `GENERIC_ORCHESTRATION_DISABLED`。旧部署仍可能禁用全部新启动：规则同步、工具注册和健康检查不证明运行时准入；必须验证实际部署，不得借反射、临时脚本或逐个执行 Step 绕过阻塞。专用测试、验收、编译、构建、Capture 和 Snapshot 使用各自入口。
 
-“批量清理可安全处理项”保留原 `force_clear_all/force_clear_status` 参数以兼容客户端，仍要求预览、token、项目核验和独立授权。必须分别展示可处理、不支持、仍在清理和库存未知项；`dispatchComplete` 不等于 `allCleared`，`allCleared=false` 不能宣称全部清理完成。
+历史查询、产物及现行有界清理能力仍保留。结果未知时按既有有限生命周期终结为 `aborted`，不宣称成功或物理资源已释放；保留原 operation/run、启动次数及期限，不重放 Start、不续期、不从历史恢复活动任务。停用旧路径不代表其历史资源已经释放。
+
+“批量软停止”使用现行 `force_clear_all/force_clear_status` 参数，仍要求预览、confirmToken、精确项目核验和独立软停止授权。必须分别展示不支持、清理失败、库存未知、逻辑队列终态与实际资源状态；accepted/dispatchComplete 不等于全部停止，服务硬停止另需独立维护授权。

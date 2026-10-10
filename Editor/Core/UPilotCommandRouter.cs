@@ -51,6 +51,8 @@ namespace CodingRiver.UPilot
 
             try
             {
+                ctx?.RecordDispatch();
+                ctx?.RecordHandlerExecution();
                 await handler(id, json, token);
 
                 if (ctx != null)

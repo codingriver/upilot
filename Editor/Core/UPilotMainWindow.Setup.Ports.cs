@@ -11,6 +11,8 @@ namespace CodingRiver.UPilot
 {
     public sealed partial class UPilotMainWindow
     {
+        private double _nextSetupPortCheckAt;
+
         private void DrawSetupPortStep()
         {
             RefreshSetupPortsForRunningService();
@@ -59,7 +61,7 @@ namespace CodingRiver.UPilot
 
         private void RefreshSetupPortsForRunningService()
         {
-            if (_setupPortsReady)
+            if (_setupPortsReady || EditorApplication.timeSinceStartup < _nextSetupPortCheckAt)
                 return;
 
             var manager = UPilotMcpServerManager.Instance;
@@ -71,19 +73,21 @@ namespace CodingRiver.UPilot
                 EvaluateSetupPorts();
         }
 
-        private void EvaluateSetupPorts()
+        internal void EvaluateSetupPorts(UPilotPortRegistry registry = null)
         {
-            try { EvaluateSetupPortsCore(); }
+            // Reuse the normal redraw; do not block every OnGUI event or add a retry timer.
+            _nextSetupPortCheckAt = EditorApplication.timeSinceStartup + 2d;
+            try { EvaluateSetupPortsCore(registry); }
             catch (Exception ex)
             {
                 _setupPortsReady = false;
                 _setupPortMessage = ex.Message;
                 _setupPortMessageType = MessageType.Error;
-                UPilotPortRegistration.Report("检查设置端口", ex);
+                Debug.LogError($"[UPilotPorts] 检查设置端口失败：{ex}");
             }
         }
 
-        private void EvaluateSetupPortsCore()
+        private void EvaluateSetupPortsCore(UPilotPortRegistry registry)
         {
             _setupPortsReady = false;
             _recommendedWsPort = 0;
@@ -107,15 +111,15 @@ namespace CodingRiver.UPilot
 
             var manager = UPilotMcpServerManager.Instance;
             var serviceStatus = manager.GetStatus();
-            var conflict = UPilotPortRegistry.ForUser().Check(
-                UPilotProjectConfig.ProjectRoot, _setupWsPort, _setupHttpPort);
-            if (!string.IsNullOrEmpty(conflict))
+            // Reference information only; a failed probe or stale entry cannot block setup.
+            try
             {
-                _setupPortMessage = conflict;
-                _setupPortMessageType = MessageType.Error;
-                FindRecommendedSetupPorts();
-                return;
+                var conflict = (registry ?? UPilotPortRegistry.ForUser()).Check(
+                    UPilotProjectConfig.ProjectRoot, _setupWsPort, _setupHttpPort);
+                if (!string.IsNullOrEmpty(conflict))
+                    UPilotPortRegistration.Report("参考端口登记", new System.IO.IOException(conflict));
             }
+            catch (Exception ex) { UPilotPortRegistration.Report("读取参考端口登记", ex); }
             var owned = serviceStatus.ProcessOwnership == McpProcessOwnership.CurrentUPilot;
             var wsAvailable = UPilotPortAllocator.IsPortAvailable(_setupWsPort) ||
                               (owned && _setupWsPort == manager.WsPort && serviceStatus.WsPortListening);
@@ -166,7 +170,7 @@ namespace CodingRiver.UPilot
                 _recommendedWsPort = _recommendedHttpPort = 0;
                 _setupPortMessage = FormatSetupPortMessage(_setupPortMessage, 0, 0, ex.Message);
                 _setupPortMessageType = MessageType.Error;
-                UPilotPortRegistration.Report("推荐端口", ex);
+                Debug.LogError($"[UPilotPorts] 推荐可绑定端口失败：{ex}");
             }
         }
 

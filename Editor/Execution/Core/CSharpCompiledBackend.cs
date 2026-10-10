@@ -797,7 +797,8 @@ namespace CodingRiver.UPilot.Execution
                     return op == "&&" ? Expression.AndAlso(left, right) : Expression.OrElse(left, right);
                 }
                 if (op == "+" && (left.Type == typeof(string) || right.Type == typeof(string)))
-                    return Expression.Call(typeof(string).GetMethod(nameof(string.Concat), new[] { typeof(object), typeof(object) }), Box(left), Box(right));
+                    return Expression.Call(typeof(BinaryExpr).GetMethod(nameof(BinaryExpr.ConcatStrings)),
+                        Box(left), Box(right), _context, Expression.Constant(false));
                 if (op == "<<" || op == ">>")
                 {
                     left = PromoteUnaryNumeric(left, node);

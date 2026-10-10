@@ -47,7 +47,8 @@
         "approved": true,
         "approvedAtUtc": "2026-09-22T09:17:37.1887819+00:00",
         "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
-        "restartTimeoutSeconds": 120
+        "restartTimeoutSeconds": 600,
+        "autoHardStopOnSoftFailure": true
     },
     "aiQueueCleanupAllowed": true,
     "updates": {

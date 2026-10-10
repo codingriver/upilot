@@ -11,6 +11,7 @@ import time
 
 from .queue_bulk import QueueBulkMixin
 from ..protocol import new_id
+from ..operation_context import normalize_request_origin
 from ..process_identity import classify_unity_process, process_creation_time, query_unity_processes
 from ..queue_audit import AUDIT, QUEUE_GUARD, notice, outcome, safe_text
 from ..responses import fail, ok
@@ -45,7 +46,8 @@ def item(kind, identity, value, action="", unsupported=""):
     return dict(type=kind, id=str(identity), name=safe_text(value.get("taskName") or value.get("displayName")
                 or value.get("title") or identity), status=str(value.get("status") or value.get("phase") or "unknown"),
                 lastProgress=str(value.get("updatedAt") or value.get("lastProgressAt") or value.get("stage") or value.get("phase") or "unknown"),
-                blockingReason=safe_text(error), action=action, unsupportedReason=unsupported)
+                blockingReason=safe_text(error), action=action, unsupportedReason=unsupported,
+                requestOrigin=normalize_request_origin(value.get("requestOrigin")))
 
 
 class QueueDomainService(QueueBulkMixin):
@@ -242,19 +244,46 @@ class QueueDomainService(QueueBulkMixin):
                         entry.update(operationId=step.get("operationId", ""), source="persisted")
                         entries.append(entry)
                 source_details["bridgeCommands"] = {key: snapshot.get(key) for key in required}
-                bridge_values = (snapshot.get("activeCommands") or []) + (snapshot.get("queuedCommands") or [])
-                source_details["bridgeCommands"].update(totalCount=snapshot["activeCount"] + snapshot["queuedCount"],
-                    returnedCount=min(200, len(bridge_values)), truncated=bool(snapshot.get("truncated")) or len(bridge_values) > 200,
-                    queryResult="verified" if snapshot["complete"] else "incomplete")
-                source_status["bridgeCommands"] = "present" if snapshot["complete"] else "unknown"
-                if not snapshot["complete"] or len(bridge_values) > 200:
-                    issues.append("BRIDGE_QUEUE_INCOMPLETE")
                 active_values = snapshot.get("activeCommands") or []
+                queued_values = snapshot.get("queuedCommands") or []
+                bridge_values = active_values + queued_values
+                # An executing callback may outlive its tracker entry. Preserve its
+                # independent identity; excludeId legitimately leaves an ID with count=0.
+                executing_id = snapshot.get("executingCommandId")
+                executing_valid = (snapshot["executingCount"] == 0 or
+                    snapshot["executingCount"] == 1 and isinstance(executing_id, str) and bool(executing_id))
+                executing_values = []
+                if snapshot["executingCount"] == 1 and isinstance(executing_id, str) and executing_id:
+                    if not any(isinstance(value, dict) and value.get("commandId") == executing_id
+                               for value in bridge_values):
+                        executing_values.append({"commandId": executing_id})
+                bridge_values += executing_values
+                source_details["bridgeCommands"]["executingCommandId"] = executing_id
+                # A producer flag cannot override visible gaps or our own output cap.
+                bridge_complete = bool(
+                    snapshot["complete"] is True and not snapshot.get("truncated")
+                    and all(type(snapshot[key]) is int and snapshot[key] >= 0
+                            for key in ("activeCount", "queuedCount", "executingCount", "untrackedCount"))
+                    and snapshot["untrackedCount"] == 0 and executing_valid
+                    and snapshot["activeCount"] == len(active_values)
+                    and snapshot["queuedCount"] == len(queued_values)
+                    and len(bridge_values) <= 200
+                    and all(isinstance(value, dict) and value.get("commandId") for value in bridge_values)
+                )
+                source_details["bridgeCommands"].update(complete=bridge_complete,
+                    totalCount=snapshot["activeCount"] + snapshot["queuedCount"] + len(executing_values),
+                    returnedCount=sum(1 for value in bridge_values[:200] if isinstance(value, dict) and value.get("commandId")),
+                    truncated=bool(snapshot.get("truncated")) or len(bridge_values) > 200,
+                    queryResult="verified" if bridge_complete else "incomplete")
+                source_status["bridgeCommands"] = "present" if bridge_complete else "unknown"
+                if not bridge_complete:
+                    issues.append("BRIDGE_QUEUE_INCOMPLETE")
                 for index, value in enumerate(bridge_values[:200]):
-                    if value.get("commandId"):
+                    if isinstance(value, dict) and value.get("commandId"):
                         entries.append(item("BridgeCommand", value["commandId"], {
                             "displayName": value.get("commandName"),
-                            "status": "active" if index < len(active_values) else "queued"},
+                            "status": ("active" if index < len(active_values) else
+                                       "queued" if index < len(active_values) + len(queued_values) else "executing")},
                             unsupported="No generic Bridge command revocation in v1."))
             except (Exception, asyncio.CancelledError) as exc:
                 source_details["bridgeCommands"] = {"queryResult": "unknown", "reason": type(exc).__name__}

@@ -337,8 +337,9 @@ namespace CodingRiver.UPilot
         }
 
         // Called when compilation starts (both auto and request-scoped)
-        private void OnCompilationStarted(object _)
+        private void OnCompilationStarted(object context)
         {
+            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
             if (!IsRequestCompileActive || string.IsNullOrEmpty(_compileOperationId))
             {
                 _lastRequestId = string.Empty;
@@ -385,6 +386,7 @@ namespace CodingRiver.UPilot
         // Called on main thread for each assembly as it finishes (both auto and request-scoped)
         private void OnAssemblyCompilationFinished(string assembly, CompilerMessage[] messages)
         {
+            if (UPilotDiagnosticModuleService.IsCompilationPath(assembly)) return;
             bool hadError = false;
             foreach (var msg in messages)
             {
@@ -426,8 +428,9 @@ namespace CodingRiver.UPilot
         }
 
         // Called on main thread when all assemblies are done (both auto and request-scoped)
-        private void OnCompilationFinished(object _)
+        private void OnCompilationFinished(object context)
         {
+            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
             CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             LastProgressAt = CompileFinishedAt;
             IsCompiling = false;

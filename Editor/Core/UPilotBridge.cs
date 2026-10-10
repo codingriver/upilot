@@ -273,6 +273,7 @@ namespace CodingRiver.UPilot
             Reset(() => _editorDelayService?.ResetActive());
             Reset(() => _flowService?.GetType().GetMethod("ResetActive")?.Invoke(_flowService, null));
             Reset(UPilotRuntimeDiagnosticsService.ResetActive);
+            Reset(() => _executionService?.HardCloseModules());
             Reset(() => _executionService?.Sessions.CloseAll());
             Reset(UPilotConsoleCaptureService.ResetActive);
             _resetErrors = string.Join("; ", errors);
@@ -312,6 +313,8 @@ namespace CodingRiver.UPilot
         private bool                 _cachedIsPlaying;
         private bool                 _cachedIsPaused;
         private bool                 _cachedIsCompiling;
+        private bool                 _cachedIsUpdating;
+        private MaintenanceInitializationPayload _maintenanceInitialization;
         private long                 _pipelineCompileStartUtcMs;
         private string               _pipelineCompileStatusRequestId = string.Empty;
         private bool                 _pipelineCompileFromMcp;
@@ -435,7 +438,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                UPilotPortRegistration.Report("读取工程端口配置", ex);
+                Debug.LogError($"[UPilotPorts] 读取工程端口配置失败：{ex}");
                 throw;
             }
             config.mcp ??= new UPilotMcpConfig();
@@ -548,6 +551,7 @@ namespace CodingRiver.UPilot
             _sessionId = Guid.NewGuid().ToString("N");
             _cts = new CancellationTokenSource();
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            EditorApplication.pauseStateChanged += OnPauseStateChanged;
             EditorApplication.update += ProcessMainThreadQueue;
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
@@ -573,6 +577,7 @@ namespace CodingRiver.UPilot
             finally
             {
                 EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+                EditorApplication.pauseStateChanged -= OnPauseStateChanged;
                 EditorApplication.update -= ProcessMainThreadQueue;
                 CompilationPipeline.compilationStarted -= OnCompilationStarted;
                 CompilationPipeline.compilationFinished -= OnCompilationFinished;
@@ -663,6 +668,8 @@ namespace CodingRiver.UPilot
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _activeSceneName = SceneManager.GetActiveScene().name;
             _cachedIsCompiling = CurrentIsCompiling();
+            _cachedIsUpdating = EditorApplication.isUpdating;
+            _maintenanceInitialization = UPilotServiceMaintenance.Initialization;
             _cachedIsPlaying = EditorApplication.isPlaying;
             _cachedIsPaused = EditorApplication.isPaused;
             _cachedPlayModeState = _cachedIsPaused ? "pause" : (_cachedIsPlaying ? "play" : "edit");
@@ -724,12 +731,15 @@ namespace CodingRiver.UPilot
             if (_resettingWork) throw new InvalidOperationException("UPILOT_RESET_IN_PROGRESS");
             var lifetime = UPilotServiceLifetime.Id;
             var ctx = UPilotOperationTracker.Instance.GetContext(commandId);
+            ctx?.SetPhase("queued");
             ctx?.Step("排队等待主线程");
 
             Action tracked = () =>
             {
                 if (lifetime != UPilotServiceLifetime.Id) return;
                 _lastDequeuedCommandId = commandId ?? string.Empty;
+                ctx?.RecordMainThreadAction();
+                ctx?.SetPhase("executing");
                 ctx?.Step("主线程执行中");
                 try
                 {
@@ -1804,7 +1814,14 @@ namespace CodingRiver.UPilot
                 () => _playInputService.HandleMouseEvent(mousePayload),
                 escapeGenericMenu: mousePayload.escapeGenericMenu,
                 target: () => UPilotWindowInputRegistry.Resolve(mousePayload.windowInstanceId, mousePayload.targetWindow));
-            await SendResultAsync(id, "mouse.event", mouseResult, token);
+            // The observer returns object (receipt or pending modal). JsonUtility would
+            // serialize ResultMessage<object>.payload as {}, so retain the concrete wire type.
+            if (mouseResult is GenericOkPayload receipt)
+                await SendResultAsync(id, "mouse.event", receipt, token);
+            else if (mouseResult is ModalObservationPayload modal)
+                await SendResultAsync(id, "mouse.event", modal, token);
+            else
+                throw new InvalidOperationException("Unexpected mouse observation result type.");
         }
 
         private async Task HandleEditorStateAsync(string id, string json, CancellationToken token)
@@ -1939,7 +1956,7 @@ namespace CodingRiver.UPilot
         private static int ResponseBytes(string value) => Encoding.UTF8.GetByteCount(value);
 
         private async Task SendBoundedErrorAsync(string id, string commandName, string code,
-            string message, long actualBytes, CancellationToken token)
+            string message, long actualBytes, CancellationToken token, bool resultWasProduced = false)
         {
             var error = new ErrorMessage
             {
@@ -1958,6 +1975,10 @@ namespace CodingRiver.UPilot
                         actualBytes = actualBytes,
                         limitBytes = MaxBridgeResponseBytes,
                         outcome = "unknown",
+                        // A produced result cannot prove absence of business side effects.
+                        commandSubmitted = resultWasProduced,
+                        sideEffectsMayHaveOccurred = resultWasProduced,
+                        stage = resultWasProduced ? "response_serialization" : "",
                         replayAttempted = false,
                         responseTruncated = true,
                         nextAction = "Observe the original command or operation identity; do not replay its start.",
@@ -1996,7 +2017,7 @@ namespace CodingRiver.UPilot
                 RecordOversize("tool result", size);
                 UPilotOperationTracker.Instance.GetContext(id)?.Fail("BRIDGE_RESPONSE_TOO_LARGE", "Result exceeds Bridge message limit.");
                 await SendBoundedErrorAsync(id, name, "BRIDGE_RESPONSE_TOO_LARGE",
-                    "Result exceeds Bridge message limit; outcome unknown.", size, token);
+                    "Result exceeds Bridge message limit; outcome unknown.", size, token, resultWasProduced: true);
                 return;
             }
             await SendJsonAsync(json, token);
@@ -2152,6 +2173,8 @@ namespace CodingRiver.UPilot
                 isPlaying = _cachedIsPlaying,
                 isPaused = _cachedIsPaused,
                 isCompiling = isCompiling,
+                isUpdating = _cachedIsUpdating,
+                maintenanceInitialization = _maintenanceInitialization,
                 compileStatus = _compileService.Status,
                 compilePhase = compilePhase,
                 compileRequestId = _compileService.LastRequestId,
@@ -2254,6 +2277,8 @@ namespace CodingRiver.UPilot
                 isPlaying = context.isPlaying,
                 isPaused = context.isPaused,
                 isCompiling = context.isCompiling,
+                isUpdating = context.isUpdating,
+                maintenanceInitialization = context.maintenanceInitialization,
                 compileStatus = context.compileStatus,
                 compilePhase = context.compilePhase,
                 compileRequestId = context.compileRequestId,
@@ -2364,7 +2389,7 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task<bool> PublishExecutionStateAsync(string transition, CancellationToken token)
+        internal async Task<bool> PublishExecutionStateAsync(string transition, CancellationToken token)
         {
             if (!TryBuildAndPersistExecutionState(transition, out var payload)) return false;
             if (_ws?.State != WebSocketState.Open || !_isAuthenticated) return true;
@@ -2410,6 +2435,8 @@ namespace CodingRiver.UPilot
                 sessionId = context.sessionId,
                 updatedAt = context.updatedAt,
                 isCompiling = context.isCompiling,
+                isUpdating = context.isUpdating,
+                maintenanceInitialization = context.maintenanceInitialization,
                 compileStatus = context.compileStatus,
                 compilePhase = context.compilePhase,
                 playModeState = context.playModeState,
@@ -2471,6 +2498,17 @@ namespace CodingRiver.UPilot
                 "playmode.changed",
                 payload ?? CachedPlayModeChangedPayload(),
                 token);
+        }
+
+        private void OnPauseStateChanged(PauseState change)
+        {
+            // Read actual Editor facts; the notification/request is not a state source.
+            _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _cachedIsPlaying = EditorApplication.isPlaying;
+            _cachedIsPaused = EditorApplication.isPaused;
+            _cachedPlayModeState = _cachedIsPaused ? "pause" : (_cachedIsPlaying ? "play" : "edit");
+            if (_cts == null || _cts.IsCancellationRequested) return;
+            _ = PublishExecutionStateAsync("pause_state_changed", _cts.Token);
         }
 
         private void OnPlayModeStateChanged(PlayModeStateChange change)
@@ -2586,8 +2624,9 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void OnCompilationStarted(object _)
+        private void OnCompilationStarted(object context)
         {
+            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
             _pipelineCompileStartUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _pipelineCompileFromMcp = _compileService.IsRequestCompileActive && !string.IsNullOrEmpty(_compileService.LastRequestId);
             _pipelineCompileStatusRequestId = _pipelineCompileFromMcp
@@ -2656,8 +2695,9 @@ namespace CodingRiver.UPilot
             await SendEditorStateOnlyAsync(token);
         }
 
-        private void OnCompilationFinished(object _)
+        private void OnCompilationFinished(object context)
         {
+            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var duration = now - _pipelineCompileStartUtcMs;
             if (duration < 0) duration = 0;

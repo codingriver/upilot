@@ -339,13 +339,17 @@ def test_preflight_only_does_not_treat_a_historical_compile_as_current_import_ev
 
 
 def test_task_cancel_persist_failure_does_not_dispatch_or_retry():
+    from unittest.mock import AsyncMock, Mock
+
     class FailingStore:
         _project_path = "project"
+        save_attempts = 0
 
         def load_test_jobs(self):
             return []
 
         def save_test_job(self, _state):
+            self.save_attempts += 1
             raise OSError("disk unavailable")
 
     service = TaskDomainService()
@@ -357,8 +361,28 @@ def test_task_cancel_persist_failure_does_not_dispatch_or_retry():
         }
     }
     service._async_task_handles = {}
+    service.dispatcher = SimpleNamespace(call=AsyncMock())
+    service._resume_test_observer = Mock()
     result = asyncio.run(service.task_cancel("task-1"))
 
     assert not result.ok and result.error.code == "TEST_TASK_PERSIST_FAILED"
-    assert service._async_tasks["task-1"]["status"] == "RecoveryRequired"
-    assert service._async_tasks["task-1"].get("cancelSendState", "not_sent") == "not_sent"
+    state = service._async_tasks["task-1"]
+    # The current finite-task contract ends unknown work once; it does not
+    # resurrect a RecoveryRequired observer or claim the underlying run stopped.
+    assert state["status"] == "aborted"
+    assert state["phase"] == "cancel_intent_persist_failed"
+    assert state["terminal"] is True and state["endedAt"] > 0
+    assert state["runGuid"] == "run-a"
+    assert state.get("cleanupSucceeded") is not True
+    assert state["error"]["code"] == "TEST_TASK_PERSIST_FAILED"
+    assert state.get("cancelSendState", "not_sent") == "not_sent"
+    assert result.error.detail["status"] == "aborted"
+    assert result.error.detail["terminal"] is True
+    frozen = state.copy()
+    duplicate = asyncio.run(service.task_cancel("task-1"))
+    assert duplicate.ok and duplicate.data["status"] == "not_found"
+    assert duplicate.data["changed"] is False
+    assert state == frozen
+    assert service.server.state.save_attempts == 1
+    service._resume_test_observer.assert_not_called()
+    service.dispatcher.call.assert_not_called()

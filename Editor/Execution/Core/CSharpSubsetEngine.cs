@@ -1362,7 +1362,7 @@ namespace CodingRiver.UPilot.Execution
         {
             if (ReferenceEquals(left, ConditionalAccessNull.Instance)) left = null;
             if (ReferenceEquals(right, ConditionalAccessNull.Instance)) right = null;
-            if (op == "+" && (left is string || right is string)) return Convert.ToString(left, CultureInfo.InvariantCulture) + Convert.ToString(right, CultureInfo.InvariantCulture);
+            if (op == "+" && (left is string || right is string)) return ConcatStrings(left, right, context, true);
             if (op == "==") return EqualsNormalized(left, right);
             if (op == "!=") return !EqualsNormalized(left, right);
             if (op == "&&") return RuntimeConvert.ToBool(left) && RuntimeConvert.ToBool(right);
@@ -1477,6 +1477,36 @@ namespace CodingRiver.UPilot.Execution
                 throw new ExecutionContractException("CSHARP_BIND_ERROR", "Unity vector operator was not found: " + methodName);
             result = InvokeOperator(method, new[] { left, right }, context);
             return true;
+        }
+
+        // Preserve each backend's existing CLR conversion, but marshal Unity's implicit
+        // ToString through the same invocation boundary as explicit member calls.
+        public static string ConcatStrings(object left, object right, CSharpEvaluationContext context, bool invariantCulture)
+        {
+            return StringOperand(left, context, invariantCulture) + StringOperand(right, context, invariantCulture);
+        }
+
+        private static string StringOperand(object value, CSharpEvaluationContext context, bool invariantCulture)
+        {
+            Func<object> convert = () => invariantCulture
+                ? Convert.ToString(value, CultureInfo.InvariantCulture) : value?.ToString();
+            // Type matching deliberately includes destroyed Unity objects; overloaded ==
+            // must not skip their conversion or silently treat them as managed null.
+            if (context != null && IsUnityObject(value))
+            {
+                context.Policy.EnsureMemberAllowed(value.GetType().GetMethod("ToString", Type.EmptyTypes));
+                context.Diagnostics.CountMethod();
+                return (string)context.Diagnostics.MeasureInvoke(() => context.Invoke(convert));
+            }
+            return (string)convert();
+        }
+
+        private static bool IsUnityObject(object value)
+        {
+            // This assembly intentionally has no Unity engine references.
+            for (Type type = value?.GetType(); type != null; type = type.BaseType)
+                if (type.FullName == "UnityEngine.Object") return true;
+            return false;
         }
 
         private static object InvokeOperator(MethodInfo method, object[] arguments, CSharpEvaluationContext context)

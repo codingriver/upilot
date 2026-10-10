@@ -8,6 +8,8 @@ import threading
 from types import SimpleNamespace
 import importlib.util
 
+import pytest
+
 from upilot_mcp.domain.task_service import TaskDomainService, _operation_parse_object, _read_stable_artifact
 from upilot_mcp.config import CONFIG
 from upilot_mcp.responses import ok
@@ -332,6 +334,59 @@ def test_operation_artifact_rejects_outside_and_marks_bare_hash_ambiguous(tmp_pa
         assert result.data["artifacts"]["link"]["error"] == "ARTIFACT_PATH_OUTSIDE_PROJECT"
 
 
+@pytest.mark.parametrize("link_kind", ["symlink", "junction"])
+@pytest.mark.parametrize("outside", [False, True])
+def test_operation_artifact_real_link_boundaries(tmp_path: Path, link_kind, outside) -> None:
+    """Actual filesystem links, isolated legacy fixture; never dispatches generic Start."""
+    import os
+    import subprocess
+
+    project = tmp_path / "project"
+    project.mkdir()
+    target = (tmp_path / "outside") if outside else (project / "inside")
+    target.mkdir()
+    payload = target / "payload.txt"
+    payload.write_bytes(b"owned-link-payload")
+    link = project / "owned-link"
+    if link_kind == "junction":
+        if os.name != "nt":
+            pytest.skip("Windows junction coverage requires Windows")
+        result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                                capture_output=True, timeout=5,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode != 0:
+            pytest.skip("Cannot create owned directory junction; this boundary is unverified")
+    else:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:
+            pytest.skip("Cannot create owned directory symlink; this boundary is unverified")
+    try:
+        service = _OperationService(project, [])
+        started = asyncio.run(service.seed_legacy_operation({
+            "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+            "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+            "artifactRules": {"fieldKinds": {"linked": "file"}},
+        }))
+        state = service._operations[started.data["operationId"]]
+        state["lastStatusData"] = {"artifacts": {"linked": "owned-link/payload.txt"}}
+        response = asyncio.run(service.operation_collect_artifacts(started.data["operationId"]))
+        assert response.ok
+        actual = response.data["artifacts"]["linked"]
+        if outside:
+            assert actual["error"] == "ARTIFACT_PATH_OUTSIDE_PROJECT"
+        else:
+            assert actual["sha256"] == hashlib.sha256(b"owned-link-payload").hexdigest()
+            assert actual["bytes"] == len(b"owned-link-payload")
+        assert payload.read_bytes() == b"owned-link-payload"
+    finally:
+        # Remove only the owned link, never recursively traverse its target.
+        if link_kind == "junction":
+            os.rmdir(link)
+        else:
+            link.unlink()
+
+
 def test_operation_artifact_late_collection_cannot_overwrite_newer_snapshot(tmp_path: Path, monkeypatch) -> None:
     service = _OperationService(tmp_path, [])
     started = asyncio.run(service.seed_legacy_operation({
@@ -563,6 +618,73 @@ def test_operation_supports_explicit_result_and_field_paths(tmp_path: Path) -> N
     assert terminal.ok
     assert terminal.data["status"] == "Succeeded"
     assert terminal.data["phase"] == "Complete"
+
+
+def test_operation_invalid_reflection_json_aborts_without_replay(tmp_path: Path) -> None:
+    service = _ReflectionOperationService(tmp_path, [
+        {"result": '{"status":"Running"}'},
+        {"result": "{not-json"},
+    ])
+    calls = []
+    original = service.reflection_call
+
+    async def tracked(**kwargs):
+        calls.append(kwargs)
+        return await original(**kwargs)
+
+    service.reflection_call = tracked
+    started = asyncio.run(service.seed_legacy_operation({
+        "startCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Start"},
+        "statusCall": {"kind": "reflection", "typeName": "Fixture", "methodName": "Status"},
+    }))
+    operation_id = started.data["operationId"]
+    failed = asyncio.run(service.operation_status(operation_id))
+
+    assert not failed.ok
+    assert failed.error.code == "OPERATION_RESULT_INVALID"
+    detail = failed.error.detail
+    assert detail["status"] == "aborted"
+    assert detail["terminal"] is True
+    assert detail["editorVerification"] == "not_requested"
+    assert service._operations[operation_id]["cleanupSucceeded"] is False
+    assert detail["failureSignature"] == "OperationResultInvalid"
+    assert detail["parseDiagnostic"]["offsetUnit"] == "unicodeCharacter"
+    assert detail["error"]
+    dispatched = list(calls)
+    assert len(dispatched) == 2
+    # Observing/cancelling a terminal identity never invokes the business again.
+    asyncio.run(service.operation_status(operation_id))
+    duplicate = asyncio.run(service.operation_cancel(operation_id))
+    assert duplicate.ok and duplicate.data["changed"] is False
+    assert duplicate.data["status"] == "not_found"
+    assert calls == dispatched
+    restored = _ReflectionOperationService(tmp_path, [])
+    historical = asyncio.run(restored.operation_status(operation_id))
+    assert not historical.ok and historical.error.code == "OPERATION_NOT_FOUND"
+
+
+def test_operation_cancel_is_idempotent_after_acceptance(tmp_path: Path) -> None:
+    service = _OperationService(tmp_path, [{"status": "Running", "phase": "Stopping"}])
+    started = asyncio.run(service.seed_legacy_operation({
+        "displayName": "idempotent cancel",
+        "startCall": {"kind": "tool", "toolName": "start", "toolArgs": {}},
+        "statusCall": {"kind": "tool", "toolName": "status", "toolArgs": {}},
+        "cancelCall": {"kind": "tool", "toolName": "cancel", "toolArgs": {}},
+        "timeoutSec": 5,
+    }))
+    operation_id = started.data["operationId"]
+    first = asyncio.run(service.operation_cancel(operation_id))
+    state_before = dict(service._operations[operation_id])
+    second = asyncio.run(service.operation_cancel(operation_id))
+
+    assert first.ok and second.ok
+    assert first.data["cancelAttemptCount"] == 1
+    assert second.data["operationId"] == operation_id
+    assert second.data["changed"] is False
+    assert second.data["status"] == "ending"
+    assert service._operations[operation_id] == state_before
+    assert [name for name, _ in service.calls].count("cancel") == 1
+    assert [name for name, _ in service.calls].count("start") == 1
 
 
 def test_operation_cancel_accepts_nested_terminal_result(tmp_path: Path) -> None:

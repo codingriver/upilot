@@ -100,48 +100,104 @@ namespace CodingRiver.UPilot.Tests.Automation
             public SuspensionProbe() { Constructed++; }
             public override string Validate(string runId, string instanceId, string contextJson, string arguments)
             { Validated++; return "{\"ok\":true}"; }
-            public override void Execute(string runId, string instanceId, string contextJson, string arguments) { Executed++; }
+            public override void Execute(string runId, string instanceId, string contextJson, string arguments) { Executed++; Succeed(); }
         }
         private static string StoredRun() => File.Exists("Library/UPilot/step-run.json")
             ? File.ReadAllText("Library/UPilot/step-run.json") : null;
 
         [TestCase(null)] [TestCase("not-json")]
-        [TestCase("{\"steps\":[{\"instanceId\":\"probe\",\"stepId\":\"upilot.test.suspension_probe\"}]}")]
-        [TestCase("{\"steps\":[{\"instanceId\":\"wait\",\"stepId\":\"upilot.wait_seconds\",\"arguments\":\"0\"}]}")]
-        public void PublicEntryPointsRejectWithoutValidationOrRunWrites(string plan)
+        [TestCase("{\"steps\":[{\"instanceId\":\"missing\",\"stepId\":\"missing.step\"}]}")]
+        public void InvalidPublicPlansDoNotExecuteOrWriteRuns(string plan)
         {
             var before = StoredRun();
-            var constructed = SuspensionProbe.Constructed;
-            var validated = SuspensionProbe.Validated;
             var executed = SuspensionProbe.Executed;
             var result = AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(plan));
             Assert.That(result.ok, Is.False);
-            Assert.That(result.diagnostics.Single().code, Is.EqualTo("GENERIC_ORCHESTRATION_DISABLED"));
-            // Use the same public method resolution as a generic reflection caller.
-            var method = typeof(UPilotAutomationStepService).GetMethod("StartJson");
-            var error = Assert.Throws<TargetInvocationException>(() => method.Invoke(null, new object[] { "never-start", "", plan }));
-            Assert.That(error.InnerException.Message, Does.StartWith("GENERIC_ORCHESTRATION_DISABLED:"));
+            Assert.That(result.diagnostics.Any(x => x.code == "GENERIC_ORCHESTRATION_DISABLED"), Is.False);
+            Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.StartJson("never-start", "", plan));
             Assert.That(StoredRun(), Is.EqualTo(before));
-            Assert.That(SuspensionProbe.Constructed, Is.EqualTo(constructed));
-            Assert.That(SuspensionProbe.Validated, Is.EqualTo(validated));
             Assert.That(SuspensionProbe.Executed, Is.EqualTo(executed));
         }
 
-        [TestCase("start")] [TestCase("validate")]
-        public async Task BridgeRejectsBeforeParsingOrQueueing(string action)
+        [Test]
+        public void PublicValidationInvokesValidatorButNeverExecutesOrWritesRun()
         {
-            // A uniquely named rejection reply is the only traffic. Never starts or changes the real executor.
-            var bridge = UPilotBridge.Instance;
             var before = StoredRun();
-            var count = bridge.MainThreadQueue.Count;
-            var service = new UPilotAutomationStepService(bridge);
-            var handle = typeof(UPilotAutomationStepService).GetMethod("Handle", BindingFlags.Instance | BindingFlags.NonPublic);
-            var pending = (Task)handle.Invoke(service, new object[] {
-                "automation.steps." + action, action, "suspension-test-" + Guid.NewGuid().ToString("N"),
-                "deliberately invalid json", CancellationToken.None });
-            await pending;
-            Assert.That(bridge.MainThreadQueue.Count, Is.EqualTo(count));
+            var validated = SuspensionProbe.Validated;
+            var executed = SuspensionProbe.Executed;
+            var json = UPilotAutomationStepService.ValidateJson(
+                "{\"version\":1,\"steps\":[{\"instanceId\":\"probe\",\"stepId\":\"upilot.test.suspension_probe\"}]}");
+            var result = AutomationStepJsonCodec.Validation(json);
+            Assert.That(result.ok, Is.True);
+            // Callback validation codec intentionally reads only ok/diagnostics; inspect the plan facade budget separately.
+            Assert.That(UnityEngine.JsonUtility.FromJson<AutomationStepValidation>(json).budgetSeconds, Is.GreaterThan(0));
+            Assert.That(SuspensionProbe.Validated, Is.GreaterThan(validated));
+            Assert.That(SuspensionProbe.Executed, Is.EqualTo(executed));
             Assert.That(StoredRun(), Is.EqualTo(before));
+        }
+
+        [Test]
+        public void CSharpAndBridgeShareStartAdmissionExecutorAndBusyGuard()
+        {
+            // Isolated framework unit test, not a second business Step runner.
+            var executorField = typeof(UPilotAutomationStepService).GetField("s_executor", BindingFlags.Static | BindingFlags.NonPublic);
+            var registryField = typeof(UPilotAutomationStepService).GetField("s_registry", BindingFlags.Static | BindingFlags.NonPublic);
+            var originalExecutor = (AutomationStepExecutor)executorField.GetValue(null);
+            var originalRegistry = registryField.GetValue(null);
+            Assert.That(originalExecutor?.Busy ?? false, Is.False, "Do not replace an active official run.");
+            var registry = Registry(Entry<SuspensionProbe>("upilot.test.suspension_probe"));
+            var directory = Path.Combine("Library/UPilot/step-facade-tests", Guid.NewGuid().ToString("N"));
+            using var executor = new AutomationStepExecutor(registry, Path.Combine(directory, "run.json"));
+            var plan = "{\"version\":1,\"steps\":[{\"instanceId\":\"probe\",\"stepId\":\"upilot.test.suspension_probe\"}]}";
+            var operationId = "facade-unit-" + Guid.NewGuid().ToString("N");
+            var executed = SuspensionProbe.Executed;
+            try
+            {
+                executorField.SetValue(null, executor);
+                registryField.SetValue(null, registry);
+                Assert.That(AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(plan)).ok, Is.True);
+                Assert.That(executor.State, Is.Null);
+                Assert.That(UPilotAutomationStepService.StartJson(operationId, "", plan), Does.Contain(operationId));
+                var runId = executor.State.runId;
+                Assert.That(executor.Busy, Is.True);
+                var busy = Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.StartPlan("second", "", plan));
+                Assert.That(busy.Message, Is.EqualTo("STEP_EXECUTOR_BUSY"));
+                Assert.That(executor.State.runId, Is.EqualTo(runId));
+                // Unit-test the existing executor, not manual Step callbacks.
+                for (int i = 0; i < 30 && !executor.State.terminal; i++) executor.Tick();
+                Assert.That(executor.State.terminal, Is.True);
+                Assert.That(executor.State.status, Is.EqualTo("Succeeded"));
+                Assert.That(SuspensionProbe.Executed - executed, Is.EqualTo(1));
+                Assert.That(UPilotAutomationStepService.StateJson(runId), Does.Contain(operationId));
+                Assert.That(UPilotAutomationStepService.ArtifactsJson(runId), Does.Contain("sha256"));
+                var second = UPilotAutomationStepService.StartPlan("bridge-" + operationId, "", plan);
+                Assert.That(second.runId, Is.Not.EqualTo(runId));
+                Assert.That(UPilotAutomationStepService.CancelJson(second.runId), Does.Contain("ending"));
+                for (int i = 0; i < 30 && !executor.State.terminal; i++) executor.Tick();
+                Assert.That(executor.State.terminal, Is.True);
+                Assert.That(executor.State.status, Is.EqualTo("Canceled"));
+                Assert.That(SuspensionProbe.Executed - executed, Is.EqualTo(1));
+            }
+            finally
+            {
+                executorField.SetValue(null, originalExecutor);
+                registryField.SetValue(null, originalRegistry);
+            }
+        }
+
+        [Test]
+        public void PublicPreflightRequiresUnityMainThreadBeforeParsing()
+        {
+            Exception error = null;
+            var thread = new Thread(() =>
+            {
+                try { UPilotAutomationStepService.ValidateJson("not-json"); }
+                catch (Exception ex) { error = ex; }
+            });
+            thread.Start();
+            Assert.That(thread.Join(2000), Is.True);
+            Assert.That(error, Is.TypeOf<InvalidOperationException>());
+            Assert.That(error.Message, Is.EqualTo("STEP_MAIN_THREAD_REQUIRED"));
         }
 
         [TestCase("catalog")] [TestCase("state")] [TestCase("cancel")]

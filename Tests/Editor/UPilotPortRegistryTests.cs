@@ -16,10 +16,13 @@ namespace CodingRiver.UPilot.Tests
         private string _a;
         private string _b;
         private UPilotPortRegistry _registry;
+        private string _originalError;
 
         [SetUp]
         public void SetUp()
         {
+            _originalError = UPilotPortRegistration.LastError;
+            UPilotPortRegistration.LastError = "";
             _root = Path.Combine(Path.GetTempPath(), "UPilot-port-tests-" + Guid.NewGuid().ToString("N"));
             _user = Path.Combine(_root, "user", ".upilot");
             _a = Path.Combine(_root, "project-a");
@@ -33,6 +36,7 @@ namespace CodingRiver.UPilot.Tests
             var prefix = Path.Combine(Path.GetTempPath(), "UPilot-port-tests-");
             Assert.That(Path.GetFullPath(_root).StartsWith(prefix, StringComparison.OrdinalIgnoreCase), Is.True);
             if (Directory.Exists(_root)) Directory.Delete(_root, true);
+            UPilotPortRegistration.LastError = _originalError;
         }
 
         private static UPilotProjectConfigData Config(int ws, int http) =>
@@ -42,12 +46,12 @@ namespace CodingRiver.UPilot.Tests
             UPilotPortRegistry.AtomicWrite(UPilotPortRegistry.ConfigPath(project), JsonUtility.ToJson(Config(ws, http)));
 
         [Test]
-        public void OfflineReservationSurvivesRestartAndCrossProtocolConflict()
+        public void OfflineReferenceSurvivesRestartWithoutBlockingRecommendation()
         {
             _registry.Commit(_a, Config(18001, 19001));
             var second = new UPilotPortRegistry(_user, _ => true);
             Assert.That(second.Check(_b, 19001, 20001), Does.Contain(UPilotPortRegistry.NormalizeProject(_a)));
-            Assert.That(second.Recommend(_b, 18001, 19001, 20), Is.EqualTo((18002, 19002)));
+            Assert.That(second.Recommend(_b, 18001, 19001, 20), Is.EqualTo((18001, 19001)));
             Assert.That(second.Snapshot().Single().pendingPorts, Is.Empty);
         }
 
@@ -141,16 +145,12 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void IndependentRecommendationStillHonorsCrossProtocolReservations()
+        public void RecommendationIgnoresStaleCrossProtocolReservations()
         {
             _registry.Commit(_a, Config(18001, 19001));
             var before = File.ReadAllBytes(_registry.RegistryPath);
-            var registry = new UPilotPortRegistry(_user, port =>
-            {
-                Assert.That(port, Is.Not.EqualTo(18001).And.Not.EqualTo(19001));
-                return true;
-            });
-            Assert.That(registry.Recommend(_b, 19001, 18001, 3), Is.EqualTo((19002, 18002)));
+            var registry = new UPilotPortRegistry(_user, _ => true);
+            Assert.That(registry.Recommend(_b, 19001, 18001, 3), Is.EqualTo((19001, 18001)));
             Assert.That(File.ReadAllBytes(_registry.RegistryPath), Is.EqualTo(before));
         }
 
@@ -158,7 +158,7 @@ namespace CodingRiver.UPilot.Tests
         public void SetupRecommendationFailurePreservesProblemAndUnderlyingError()
         {
             const string problem = "端口不可监听：WS 8770。";
-            const string error = "未找到未预留且可监听的 HTTP/WS 端口对";
+            const string error = "未找到可监听的 HTTP/WS 端口对";
             var message = UPilotMainWindow.FormatSetupPortMessage(problem, 0, 0, error);
             Assert.That(message, Is.EqualTo(problem + "\n" + error));
             Assert.That(message, Does.Not.Contain("WS 0").And.Not.Contain("HTTP 0"));
@@ -189,9 +189,10 @@ namespace CodingRiver.UPilot.Tests
             _registry.Sync(_a);
             Assert.That(_registry.Check(_b, 18001, 19001), Is.Empty);
             var bytes = File.ReadAllBytes(UPilotPortRegistry.ConfigPath(_a));
-            Assert.Throws<IOException>(() => _registry.Commit(_b, Config(19002, 20001)));
+            LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*参考端口登记"));
+            Assert.DoesNotThrow(() => _registry.Commit(_b, Config(19002, 20001)));
             Assert.That(File.ReadAllBytes(UPilotPortRegistry.ConfigPath(_a)), Is.EqualTo(bytes));
-            Assert.That(File.Exists(UPilotPortRegistry.ConfigPath(_b)), Is.False);
+            Assert.That(UPilotPortRegistry.ReadConfig(_b).mcp.wsPort, Is.EqualTo(19002));
         }
 
         [Test]
@@ -206,13 +207,16 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void CorruptRegistryAndUnavailablePortsFailClosed()
+        public void CorruptReferenceOnlyWarnsButUnavailablePortsStillBlock()
         {
             Directory.CreateDirectory(_user);
             File.WriteAllText(_registry.RegistryPath, "{}");
-            Assert.Throws<InvalidDataException>(() => _registry.Commit(_a, Config(18001, 19001)));
+            LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*端口登记表损坏"));
+            Assert.DoesNotThrow(() => _registry.Commit(_a, Config(18001, 19001)));
+            Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18001));
             Assert.That(File.ReadAllText(_registry.RegistryPath), Is.EqualTo("{}"));
             File.Delete(_registry.RegistryPath);
+            File.Delete(UPilotPortRegistry.ConfigPath(_a));
             var occupied = new UPilotPortRegistry(_user, _ => false);
             Assert.Throws<IOException>(() => occupied.Recommend(_a, 18001, 19001, 3));
             Assert.Throws<IOException>(() => occupied.Commit(_a, Config(18001, 19001)));
@@ -220,50 +224,47 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void ConcurrentCommitsHaveOnlyOneWinner()
+        public void ConcurrentReferenceUpdatesDoNotRejectEitherProjectConfig()
         {
-            Func<string, bool> commit = project =>
-            {
-                try { new UPilotPortRegistry(_user, _ => true, 2000).Commit(project, Config(18001, 19001)); return true; }
-                catch (IOException) { return false; }
-            };
-            var first = Task.Run(() => commit(_a));
-            var second = Task.Run(() => commit(_b));
+            var first = Task.Run(() => new UPilotPortRegistry(_user, _ => true, 2000).Commit(_a, Config(18001, 19001)));
+            var second = Task.Run(() => new UPilotPortRegistry(_user, _ => true, 2000).Commit(_b, Config(18001, 19001)));
             Assert.That(Task.WaitAll(new Task[] { first, second }, 5000), Is.True);
-            Assert.That(new[] { first.Result, second.Result }.Count(x => x), Is.EqualTo(1));
-            Assert.That(_registry.Snapshot(), Has.Count.EqualTo(1));
+            Assert.That(_registry.Snapshot(), Has.Count.EqualTo(2));
+            Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18001));
+            Assert.That(UPilotPortRegistry.ReadConfig(_b).mcp.wsPort, Is.EqualTo(18001));
         }
 
         [Test]
-        public void InterruptedConfigWriteRetainsBothPairsUntilReconciled()
+        public void FailedAuthoritativeConfigWritePreservesConfigAndReference()
         {
             _registry.Commit(_a, Config(18001, 19001));
+            var before = File.ReadAllBytes(_registry.RegistryPath);
             var failing = new UPilotPortRegistry(_user, _ => true, write: (path, text) =>
             {
                 if (Path.GetFileName(path) == "config.json") throw new IOException("injected config write failure");
                 UPilotPortRegistry.AtomicWrite(path, text);
             });
             Assert.Throws<IOException>(() => failing.Commit(_a, Config(18002, 19002)));
-            Assert.That(_registry.Check(_b, 18001, 19001), Is.Not.Empty);
-            Assert.That(_registry.Check(_b, 18002, 19002), Is.Not.Empty);
             Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18001));
-            _registry.Sync(_a);
+            Assert.That(File.ReadAllBytes(_registry.RegistryPath), Is.EqualTo(before));
             Assert.That(_registry.Check(_b, 18002, 19002), Is.Empty);
         }
 
         [Test]
-        public void InterruptedFinalRegistryWriteRecoversFromNewProjectConfig()
+        public void ReferenceWriteFailureRecoversFromSavedProjectConfig()
         {
             _registry.Commit(_a, Config(18001, 19001));
+            var before = File.ReadAllBytes(_registry.RegistryPath);
             var writes = 0;
             var failing = new UPilotPortRegistry(_user, _ => true, write: (path, text) =>
             {
-                if (++writes == 3) throw new IOException("injected final registry write failure");
+                if (++writes == 2) throw new IOException("injected registry write failure");
                 UPilotPortRegistry.AtomicWrite(path, text);
             });
-            Assert.Throws<IOException>(() => failing.Commit(_a, Config(18002, 19002)));
-            Assert.That(_registry.Check(_b, 18001, 19001), Is.Not.Empty);
-            Assert.That(_registry.Check(_b, 18002, 19002), Is.Not.Empty);
+            LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*injected registry write failure"));
+            Assert.DoesNotThrow(() => failing.Commit(_a, Config(18002, 19002)));
+            Assert.That(writes, Is.EqualTo(2), "Only one best-effort registry write follows the config write.");
+            Assert.That(File.ReadAllBytes(_registry.RegistryPath), Is.EqualTo(before));
             Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18002));
             _registry.Sync(_a);
             Assert.That(_registry.Check(_b, 18001, 19001), Is.Empty);
@@ -271,14 +272,17 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void RegistryWriteFailureDoesNotTouchProject()
+        public void RegistryWriteFailureDoesNotPreventFirstProjectSave()
         {
-            _registry.Commit(_a, Config(18001, 19001));
-            var bytes = File.ReadAllBytes(UPilotPortRegistry.ConfigPath(_a));
-            var failing = new UPilotPortRegistry(_user, _ => true,
-                write: (_, __) => throw new IOException("injected registry failure"));
-            Assert.Throws<IOException>(() => failing.Commit(_a, Config(18002, 19002)));
-            Assert.That(File.ReadAllBytes(UPilotPortRegistry.ConfigPath(_a)), Is.EqualTo(bytes));
+            var failing = new UPilotPortRegistry(_user, _ => true, write: (path, text) =>
+            {
+                if (Path.GetFileName(path) == "ports.json") throw new UnauthorizedAccessException("injected registry permission failure");
+                UPilotPortRegistry.AtomicWrite(path, text);
+            });
+            LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*injected registry permission failure"));
+            Assert.DoesNotThrow(() => failing.Commit(_a, Config(18001, 19001)));
+            Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18001));
+            Assert.That(File.Exists(_registry.RegistryPath), Is.False);
         }
 
         [Test]
@@ -342,7 +346,7 @@ namespace CodingRiver.UPilot.Tests
 
         [Test]
         [Platform("Win")]
-        public void LockedConfigPreservesOriginalBytesAndBothReservations()
+        public void LockedConfigPreservesOriginalBytesAndReference()
         {
             _registry.Commit(_a, Config(18001, 19001));
             var path = UPilotPortRegistry.ConfigPath(_a);
@@ -353,82 +357,51 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
             }
             Assert.That(_registry.Check(_b, 18001, 19001), Is.Not.Empty);
-            Assert.That(_registry.Check(_b, 18002, 19002), Is.Not.Empty);
+            Assert.That(_registry.Check(_b, 18002, 19002), Is.Empty);
             _registry.Sync(_a);
             Assert.That(_registry.Snapshot().Single().pendingPorts, Is.Empty);
         }
 
         [UnityTest]
-        public IEnumerator FailureLogsContextAndSchedulesOnlyOneMainThreadDialog()
+        public IEnumerator ReferenceFailureOnlyWarnsOnceWithoutModalInfrastructure()
         {
-            var original = UPilotPortRegistration.ShowErrorDialog;
-            var originalError = UPilotPortRegistration.LastError;
-            var mainThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
-            var shown = 0;
-            var shownThread = -1;
             var message = "port-test-" + Guid.NewGuid().ToString("N");
-            UPilotPortRegistration.ShowErrorDialog = text =>
+            var warnings = 0;
+            Application.LogCallback listener = (text, stack, type) =>
             {
-                Assert.That(text, Is.EqualTo(message));
-                shown++;
-                shownThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
+                if (text.Contains(message) && type == LogType.Warning) warnings++;
             };
+            Application.logMessageReceived += listener;
             try
             {
-                var pattern = new System.Text.RegularExpressions.Regex(
-                    @"\[UPilotPorts\] operation=test; project=.*config=.*registry=.*error=.*" + message);
-                LogAssert.Expect(LogType.Error, pattern);
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(
+                    @"\[UPilotPorts\] operation=test; project=.*registry=.*error=.*" + message));
                 UPilotPortRegistration.Report("test", new IOException(message));
-                LogAssert.Expect(LogType.Error, pattern);
                 UPilotPortRegistration.Report("test", new IOException(message));
-                Assert.That(shown, Is.Zero);
-                var until = UnityEditor.EditorApplication.timeSinceStartup + 5;
-                while (shown == 0 && UnityEditor.EditorApplication.timeSinceStartup < until)
-                    yield return null;
-                Assert.That(shown, Is.EqualTo(1));
-                Assert.That(shownThread, Is.EqualTo(mainThread));
+                yield return null;
+                yield return null;
+                Assert.That(warnings, Is.EqualTo(1));
                 Assert.That(UPilotPortRegistration.LastError, Is.EqualTo(message));
+                var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+                Assert.That(typeof(UPilotPortRegistration).GetField("ShowErrorDialog", flags), Is.Null);
+                Assert.That(typeof(UPilotPortRegistration).GetField("PendingDialogs", flags), Is.Null);
             }
-            finally
-            {
-                UPilotPortRegistration.ShowErrorDialog = original;
-                UPilotPortRegistration.LastError = originalError;
-            }
+            finally { Application.logMessageReceived -= listener; }
         }
 
         [UnityTest]
-        public IEnumerator ConfirmedConfigurationSuppressesQueuedOldDialogButNotNewFailures()
+        public IEnumerator ConfirmedConfigurationClearsWarningWithoutSchedulingAnyDialog()
         {
-            var original = UPilotPortRegistration.ShowErrorDialog;
-            var originalError = UPilotPortRegistration.LastError;
-            var generationField = typeof(UPilotPortRegistration).GetField("_configurationGeneration",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-            var generation = generationField.GetValue(null);
-            var shown = new System.Collections.Generic.List<string>();
-            var message = "stale-port-test-" + Guid.NewGuid().ToString("N");
-            UPilotPortRegistration.ShowErrorDialog = text => shown.Add(text);
-            try
-            {
-                var pattern = new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*" + message);
-                LogAssert.Expect(LogType.Error, pattern);
-                UPilotPortRegistration.Report("test", new IOException(message));
-                UPilotPortRegistration.OnEndpointsConfirmed();
-                Assert.That(UPilotPortRegistration.LastError, Is.Empty);
-                // A new error remains visible; distinguish its text from the stale callback.
-                LogAssert.Expect(LogType.Error, pattern);
-                UPilotPortRegistration.Report("test", new IOException(message + "-current"));
-                var until = UnityEditor.EditorApplication.timeSinceStartup + 5;
-                while (shown.Count == 0 && UnityEditor.EditorApplication.timeSinceStartup < until)
-                    yield return null;
-                Assert.That(shown, Is.EqualTo(new[] { message + "-current" }));
-                Assert.That(UPilotPortRegistration.LastError, Is.EqualTo(message + "-current"));
-            }
-            finally
-            {
-                generationField.SetValue(null, generation);
-                UPilotPortRegistration.ShowErrorDialog = original;
-                UPilotPortRegistration.LastError = originalError;
-            }
+            var message = "confirmed-port-test-" + Guid.NewGuid().ToString("N");
+            var pattern = new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*" + message);
+            LogAssert.Expect(LogType.Warning, pattern);
+            UPilotPortRegistration.Report("test", new IOException(message));
+            UPilotPortRegistration.OnEndpointsConfirmed();
+            Assert.That(UPilotPortRegistration.LastError, Is.Empty);
+            LogAssert.Expect(LogType.Warning, pattern);
+            UPilotPortRegistration.Report("test", new IOException(message));
+            yield return null;
+            Assert.That(UPilotPortRegistration.LastError, Is.EqualTo(message));
         }
 
         [Test]
@@ -484,6 +457,91 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void BusyReferenceDoesNotBlockSavingSyncOrRecommendation()
+        {
+            Directory.CreateDirectory(_user);
+            var registry = new UPilotPortRegistry(_user, _ => true, 0);
+            using (var held = new FileStream(registry.LockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*端口登记暂时繁忙"));
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                Assert.DoesNotThrow(() => registry.Commit(_a, Config(18001, 19001), requireAvailable: true));
+                Assert.That(timer.ElapsedMilliseconds, Is.LessThan(500));
+                Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18001));
+                Assert.DoesNotThrow(() => registry.Sync(_a, requireAvailable: true));
+                Assert.That(registry.Recommend(_b, 18001, 19001, 3), Is.EqualTo((18001, 19001)));
+                Assert.That(File.Exists(registry.RegistryPath), Is.False);
+            }
+            Assert.That(File.Exists(registry.LockPath), Is.True);
+            registry.Sync(_a);
+            Assert.That(registry.Snapshot().Single().wsPort, Is.EqualTo(18001));
+        }
+
+        [Test]
+        [Platform("Win")]
+        public void InaccessibleReferenceLockDoesNotBlockProjectSave()
+        {
+            Directory.CreateDirectory(_registry.LockPath);
+            LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*"));
+            Assert.DoesNotThrow(() => _registry.Commit(_a, Config(18001, 19001)));
+            Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.httpPort, Is.EqualTo(19001));
+            Assert.That(Directory.Exists(_registry.LockPath), Is.True);
+        }
+
+        [TestCase(32, true)]
+        [TestCase(33, true)]
+        [TestCase(5, false)]
+        [TestCase(3, false)]
+        [TestCase(112, false)]
+        public void OnlySharingAndLockViolationsAreRetriedAsContention(int code, bool busy)
+        {
+            Assert.That(UPilotPortRegistry.IsLockContention(new IOException("test", unchecked((int)0x80070000) | code)),
+                Is.EqualTo(busy));
+        }
+
+        [Test]
+        [Platform("Win")]
+        public void InaccessibleLockIsNotMisclassifiedAsContentionAndRecovers()
+        {
+            Directory.CreateDirectory(_registry.LockPath); // Isolated test path, not the user's registry.
+            var error = Assert.Throws<UnauthorizedAccessException>(() => _registry.Snapshot());
+            Assert.That(error, Is.Not.InstanceOf<UPilotPortRegistryBusyException>());
+            Directory.Delete(_registry.LockPath);
+            Assert.DoesNotThrow(() => _registry.Snapshot());
+        }
+
+        [UnityTest]
+        public IEnumerator BusyRegistryAndWrappedBusyErrorOnlyWarn()
+        {
+            var busy = new UPilotPortRegistryBusyException(_registry.LockPath, new IOException("sharing violation"));
+            foreach (var error in new Exception[] { busy, new IOException("wrapped-" + busy.Message, busy) })
+            {
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*"));
+                UPilotPortRegistration.Report("test-busy", error);
+                UPilotPortRegistration.Report("test-busy", error);
+                Assert.That(UPilotPortRegistration.LastError, Is.EqualTo(error.Message));
+            }
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator ReferenceStorageFailuresOnlyWarn()
+        {
+            foreach (var error in new Exception[]
+            {
+                new IOException("registry-write-failure"),
+                new UnauthorizedAccessException("registry-permission-failure"),
+                new InvalidDataException("registry-corrupt-data")
+            })
+            {
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*" + error.Message));
+                UPilotPortRegistration.Report("reference-read-write", error);
+                Assert.That(UPilotPortRegistration.LastError, Is.EqualTo(error.Message));
+            }
+            yield return null;
+        }
+
+        [Test]
         [Platform("Win")]
         public void CrossProcessLockTimesOutAndRecoversWithoutDeletingLockFile()
         {
@@ -505,8 +563,13 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(ready.Wait(5000), Is.True);
                 Assert.That(ready.Result, Is.EqualTo("locked"));
                 var waiting = new UPilotPortRegistry(_user, _ => true, 75);
-                Assert.Throws<IOException>(() => waiting.Snapshot());
+                var error = Assert.Throws<UPilotPortRegistryBusyException>(() => waiting.Snapshot());
+                Assert.That(error.InnerException, Is.InstanceOf<IOException>());
+                Assert.That(error.Message, Does.Contain("不代表端口冲突"));
                 Assert.That(File.Exists(_registry.LockPath), Is.True);
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\].*端口登记暂时繁忙"));
+                Assert.DoesNotThrow(() => waiting.Commit(_a, Config(18001, 19001), requireAvailable: true));
+                Assert.That(UPilotPortRegistry.ReadConfig(_a).mcp.wsPort, Is.EqualTo(18001));
             }
             finally
             {

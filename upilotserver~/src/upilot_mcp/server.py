@@ -57,8 +57,8 @@ def _log_ws_message(direction: str, raw: str, *, session_id: str | None = None, 
 class WsOrchestratorServer(WsTransport):
     """WebSocket server with unified disconnect handling.
 
-    - Domain reloads suspend pending command futures and resend them after the
-      new Unity domain announces ``session.hello``.
+    - Domain reloads suspend pending futures; only allowlisted read-only queries
+      may resume after ``session.hello``, within their original observation budget.
     - Ordinary disconnects fail pending commands. Replaying an arbitrary command
       after a socket timeout can duplicate writes or revive a timed-out request.
     - **domain_reload.starting**: optional extra grace (``UPILOT_DOMAIN_RELOAD_BONUS_S``).
@@ -203,6 +203,9 @@ class WsOrchestratorServer(WsTransport):
         self._listening_event.clear()
         self._server = await websockets.serve(
             self._handle, self.host, self.port, max_size=_MAX_BRIDGE_MESSAGE_BYTES,
+            # Unity's ClientWebSocket doesn't use compression. Declining it also
+            # keeps the byte limit independent of compressed continuation frames.
+            compression=None,
         )
         self._listening_event.set()
         logger.info("WebSocket server listening on %s:%s", self.host, self.port)
@@ -644,6 +647,17 @@ class WsOrchestratorServer(WsTransport):
         _log_ws_message("SEND", raw, session_id=session_id, message_type=msg["type"], name=msg["name"])
         if websocket is not self._ws or self.session_manager.active is not active:
             raise ConnectionError("Editor session changed before command dispatch")
+        record = self.state.commands.get(command_id)
+        if record is not None:
+            if record.status in {"success", "failed"}:
+                raise ConnectionError("Command is already terminal; no redispatch was attempted")
+            deadline = getattr(record, "call_deadline_monotonic", 0.0)
+            if deadline > 0 and time.monotonic() >= deadline:
+                raise asyncio.TimeoutError("Original command observation budget expired before socket send")
+            if record.send_attempts is not None:
+                # Count the actual socket send entry, even when it raises. This
+                # does not prove delivery, Unity dispatch or business execution.
+                record.send_attempts += 1
         await websocket.send(raw)
 
     @staticmethod
@@ -661,6 +675,11 @@ class WsOrchestratorServer(WsTransport):
                 continue
             if future.done():
                 self._pending.pop(cmd_id, None)
+                continue
+            if rec is not None and getattr(rec, "status", "") in {"success", "failed"}:
+                self._pending.pop(cmd_id, None)
+                future.set_result({"id": cmd_id, "type": "error" if rec.status == "failed" else "result",
+                                   "name": rec.name, "payload": rec.error if rec.status == "failed" else rec.result})
                 continue
             if rec is None or not self._reload_query_can_replay(rec.name, rec.payload):
                 self._pending.pop(cmd_id, None)
@@ -684,8 +703,30 @@ class WsOrchestratorServer(WsTransport):
                 if rec is not None:
                     self.state.mark_failed(cmd_id, error)
                 continue
+            send_attempts_before = getattr(rec, "send_attempts", None)
             try:
-                await self.send_command(cmd_id, rec.name, rec.payload)
+                deadline = getattr(rec, "call_deadline_monotonic", 0.0)
+                if deadline > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError("Original command observation budget expired before reload recovery")
+                    await asyncio.wait_for(self.send_command(cmd_id, rec.name, rec.payload), timeout=remaining)
+                else:
+                    # Legacy records have no monotonic fact; do not fabricate a new deadline.
+                    await self.send_command(cmd_id, rec.name, rec.payload)
+            except asyncio.TimeoutError:
+                self._pending.pop(cmd_id, None)
+                send_attempts_after = getattr(rec, "send_attempts", None)
+                replay_attempted = (send_attempts_after > send_attempts_before
+                                    if send_attempts_before is not None and send_attempts_after is not None else None)
+                error = {"code": "COMMAND_TIMEOUT", "message": "Original command observation budget expired",
+                         "detail": {"command": rec.name, "commandId": cmd_id, "waitPhase": "reload_recovery",
+                                    "outcome": "unknown", "replayAttempted": replay_attempted,
+                                    "nextAction": "Observe the original operation identity; timeout does not stop Unity execution."}}
+                self.state.mark_failed(cmd_id, error)
+                if not future.done():
+                    future.set_result({"id": cmd_id, "type": "error" if rec.status == "failed" else "result",
+                                       "name": rec.name, "payload": rec.error if rec.status == "failed" else rec.result})
             except Exception as ex:
                 logger.warning("resend failed cmd=%s: %s", cmd_id[:16], ex)
 
@@ -926,14 +967,20 @@ class WsOrchestratorServer(WsTransport):
                         candidate_timeout_task.cancel()
                         heartbeat_task = asyncio.create_task(self._heartbeat_loop(websocket, auth_box[0]))
             except (ConnectionClosed, ConnectionResetError, OSError) as ex:
-                close_code = getattr(ex, "code", None)
-                if close_code == 1009:
-                    logger.error("Bridge frame exceeded 4 MiB session=%s at=%s commandId=unknown limitBytes=%s",
-                                 auth_box[0] or "unknown", now_ms(), _MAX_BRIDGE_MESSAGE_BYTES)
+                received_close_code = getattr(getattr(ex, "rcvd", None), "code", None)
+                sent_close_code = getattr(getattr(ex, "sent", None), "code", None)
+                close_code = received_close_code if received_close_code is not None else getattr(websocket, "close_code", None)
+                # A locally rejected frame may send 1009 without receiving a close
+                # response. ConnectionClosed.code would then report only 1006.
+                if 1009 in (received_close_code, sent_close_code):
+                    logger.error("Bridge size-limit close observed session=%s at=%s commandId=unknown limitBytes=%s sentCloseCode=%s receivedCloseCode=%s",
+                                 auth_box[0] or "unknown", now_ms(), _MAX_BRIDGE_MESSAGE_BYTES,
+                                 sent_close_code, received_close_code)
                     self._oversize_count = getattr(self, "_oversize_count", 0) + 1
                     self._oversize_observations = (getattr(self, "_oversize_observations", []) + [
                         {"sessionId": auth_box[0], "sourceEvent": "unknown", "observedAt": now_ms(),
-                         "limitBytes": _MAX_BRIDGE_MESSAGE_BYTES, "commandId": "unknown", "closeCode": 1009}])[-8:]
+                         "limitBytes": _MAX_BRIDGE_MESSAGE_BYTES, "commandId": "unknown", "closeCode": 1009,
+                         "sentCloseCode": sent_close_code, "receivedCloseCode": received_close_code}])[-8:]
                 if self._shutting_down:
                     logger.debug("WebSocket closed during shutdown from %s: %s", remote, ex)
                 else:
@@ -1094,7 +1141,7 @@ class WsOrchestratorServer(WsTransport):
                     )
             elif self._pending:
                 logger.info(
-                    "[%s] session.hello with %d in-flight pending — latest connection wins, will resend",
+                    "[%s] session.hello with %d in-flight pending — latest connection wins; no arbitrary replay",
                     message.session_id[:12],
                     len(self._pending),
                 )

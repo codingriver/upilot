@@ -35,6 +35,15 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    public class MaintenanceInitializationPayload
+    {
+        public bool recoveryChecked;
+        public long checkedAt;
+        public string storageError;
+        public string source;
+    }
+
+    [Serializable]
     public class HeartbeatPayload
     {
         public PlayModeTransitionRecord playModeTransition;
@@ -61,6 +70,8 @@ namespace CodingRiver.UPilot
         public bool isPlaying;
         public bool isPaused;
         public bool isCompiling;
+        public bool isUpdating;
+        public MaintenanceInitializationPayload maintenanceInitialization;
         public string compileStatus;
         public string compilePhase;
         public string compileRequestId;
@@ -286,6 +297,8 @@ namespace CodingRiver.UPilot
     {
         public string phase; // "starting" or "completed"
         public bool isCompiling;
+        public bool isUpdating;
+        public MaintenanceInitializationPayload maintenanceInitialization;
         public string playModeState;
         public string compilePhase;
         public string compileRequestId;
@@ -717,6 +730,8 @@ namespace CodingRiver.UPilot
         public string sessionId;
         public long updatedAt;
         public bool isCompiling;
+        public bool isUpdating;
+        public MaintenanceInitializationPayload maintenanceInitialization;
         public string compileStatus;
         public string compilePhase;
         public string playModeState;

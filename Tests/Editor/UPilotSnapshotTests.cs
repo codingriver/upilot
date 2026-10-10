@@ -16,6 +16,28 @@ using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
+    // An asymmetric final-composite fixture: the test records pixels, never corrects orientation.
+    public sealed class UPilotGameViewOrientationProbe : MonoBehaviour
+    {
+        private void OnGUI()
+        {
+            GUI.depth = -10000;
+            var original = GUI.color;
+            var colors = new[] { Color.red, Color.green, Color.blue, Color.yellow };
+            for (int i = 0; i < colors.Length; i++)
+            {
+                GUI.color = colors[i];
+                GUI.DrawTexture(new Rect((i % 2) * Screen.width / 2f, (i / 2) * Screen.height / 2f,
+                    Screen.width / 2f, Screen.height / 2f), Texture2D.whiteTexture);
+            }
+            GUI.color = Color.white;
+            var style = new GUIStyle(GUI.skin.label) { fontSize = 28, alignment = TextAnchor.MiddleCenter };
+            GUI.Label(new Rect(0, 8, Screen.width, 44), "TOP / UP 123", style);
+            GUI.Label(new Rect(0, Screen.height - 52, Screen.width, 44), "BOTTOM / DOWN 789", style);
+            GUI.color = original;
+        }
+    }
+
     public sealed class UPilotSnapshotTests
     {
         private static readonly MethodInfo CreateJob = typeof(UPilotSnapshotService).GetMethod(
@@ -27,6 +49,48 @@ namespace CodingRiver.UPilot.Tests
         private static readonly MethodInfo CreateAndSchedule = typeof(UPilotSnapshotService).GetMethod(
             "CreateAndSchedule",
             BindingFlags.NonPublic | BindingFlags.Instance);
+
+        [Test]
+        public void NativeTooltipRequiresExactIdentityAndCurrentDomain()
+        {
+            string domain = UPilotWindowDiagnostics.DomainReloadEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            Assert.That(() => UPilotWindowDiagnostics.ResolveNativeTooltip("1", ""), Throws.InvalidOperationException.With.Message.EqualTo("TOOLTIP_DOMAIN_MISMATCH"));
+            Assert.That(() => UPilotWindowDiagnostics.ResolveNativeTooltip("1", "old-domain"), Throws.InvalidOperationException.With.Message.EqualTo("TOOLTIP_DOMAIN_MISMATCH"));
+            Assert.That(() => UPilotWindowDiagnostics.ResolveNativeTooltip("0", domain), Throws.InvalidOperationException.With.Message.EqualTo("TOOLTIP_INSTANCE_ID_REQUIRED"));
+            var unrelated = ScriptableObject.CreateInstance<EditorWindow>();
+            try
+            {
+                Assert.That(() => UPilotWindowDiagnostics.ResolveNativeTooltip(UPilotEntityIds.ToWireId(unrelated).ToString(), domain),
+                    Throws.InvalidOperationException.With.Message.EqualTo("TOOLTIP_NOT_FOUND_OR_WRONG_TYPE"));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(unrelated); }
+        }
+
+        [Test]
+        public void SnapshotRecoveryDoesNotAdoptAnotherServiceLifetime()
+        {
+            var job = PersistenceJob("snapshot-old-lifetime-" + Guid.NewGuid().ToString("N"), 0, true, "completed");
+            job.serviceLifecycleId = "another-service";
+            try
+            {
+                new UPilotSnapshotService(null).PersistJobForTests(job);
+                Assert.That(new UPilotSnapshotService(null).ReadFromApi(job.snapshotId), Is.Null);
+            }
+            finally { Cleanup(job); }
+        }
+
+        [TestCase(1920, 1080, 960, 540, true, "landscape")]
+        [TestCase(1920, 1080, 540, 960, false, "portrait")]
+        [TestCase(0, 0, 32, 32, false, "square")]
+        public void GameViewDiagnosticsDoNotAssertContentOrientation(int sw, int sh, int w, int h, bool matches, string layout)
+        {
+            Assert.That(UPilotSnapshotService.AspectMatches(sw, sh, w, h), Is.EqualTo(matches));
+            Assert.That(UPilotSnapshotService.ImageLayout(w, h), Is.EqualTo(layout));
+            var evidence = new SnapshotGameViewEvidencePayload();
+            Assert.That(evidence.contentOrientation, Is.EqualTo("unverified"));
+            Assert.That(evidence.compositionComplete, Is.EqualTo("unverified"));
+            Assert.That(evidence.internalCrop, Is.EqualTo("unknown"));
+        }
 
         [Test]
         public void NewerTerminalManifestWinsOverOlderNonterminalState()
@@ -445,13 +509,15 @@ namespace CodingRiver.UPilot.Tests
                     var path = ProjectAbsolute(artifact.path);
                     Assert.That(File.Exists(path), Is.True, path);
                     Assert.That(new FileInfo(path).Length, Is.EqualTo(artifact.bytes));
+                    Assert.That(Hash(File.ReadAllBytes(path)), Is.EqualTo(artifact.sha256));
                 }
                 Assert.That(File.Exists(ProjectAbsolute(job.manifestPath)), Is.True);
                 Assert.That(job.manifestSha256, Has.Length.EqualTo(64));
                 Assert.That(job.persistenceSchemaVersion, Is.EqualTo(2));
                 Assert.That(job.snapshotSequence, Is.GreaterThan(0));
                 Assert.That(job.persistenceStatus, Is.EqualTo("verified"));
-                Assert.That(job.manifestBytes, Is.GreaterThan(0));
+                Assert.That(job.manifestBytes, Is.EqualTo(new FileInfo(ProjectAbsolute(job.manifestPath)).Length));
+                Assert.That(job.manifestSha256, Is.EqualTo(Hash(File.ReadAllBytes(ProjectAbsolute(job.manifestPath)))));
                 var manifest = JsonUtility.FromJson<SnapshotJobPayload>(File.ReadAllText(ProjectAbsolute(job.manifestPath)));
                 Assert.That(manifest.manifestSha256, Is.Empty);
                 Assert.That(manifest.manifestBytes, Is.Zero);
@@ -790,6 +856,181 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [UnityTest]
+        public IEnumerator CancellationDuringLastSceneViewRepaintDoesNotPublishSuccess() =>
+            VerifyCancellationDuringSceneViewRepaint("allOrNothing", false);
+
+        [UnityTest]
+        public IEnumerator BestEffortCancellationDuringLastSceneViewRepaintDoesNotPublishSuccess() =>
+            VerifyCancellationDuringSceneViewRepaint("bestEffort", false);
+
+        [UnityTest]
+        public IEnumerator CancellationDuringSceneViewRepaintDoesNotCaptureNextTarget() =>
+            VerifyCancellationDuringSceneViewRepaint("allOrNothing", true);
+
+        private static IEnumerator VerifyCancellationDuringSceneViewRepaint(string completionPolicy, bool includeNext)
+        {
+            var sceneView = ScriptableObject.CreateInstance<SceneView>();
+            SnapshotJobPayload job = null;
+            try
+            {
+                sceneView.Show();
+                sceneView.Repaint();
+                yield return null;
+                var service = new UPilotSnapshotService(UPilotBridge.Instance);
+                var target = new SnapshotTargetRequestPayload
+                {
+                    targetId = "cancel-last-scene",
+                    kind = "sceneView",
+                    instanceId = UPilotEntityIds.ToWireId(sceneView).ToString(),
+                    width = 320,
+                    height = 180,
+                };
+                var nextTarget = new SnapshotTargetRequestPayload
+                {
+                    targetId = "must-not-capture",
+                    kind = "sceneView",
+                    instanceId = target.instanceId,
+                    width = 320,
+                    height = 180,
+                };
+                job = Start(service, new SnapshotCapturePayload
+                {
+                    outputDirectory = "Log/Stage4/SnapshotCancellation/" + Guid.NewGuid().ToString("N"),
+                    completionPolicy = completionPolicy,
+                    targets = includeNext ? new[] { target, nextTarget } : new[] { target },
+                });
+                Assert.That(job.terminal, Is.False, "The cancellation must occur during the real repaint wait.");
+                Assert.That(job.phase, Is.EqualTo("rendering"));
+                Assert.That(service.CancelJob(job.snapshotId), Is.SameAs(job));
+                Assert.That(job.cancelRequested, Is.True);
+                var deadline = EditorApplication.timeSinceStartup + 20.0;
+                while (!job.terminal && EditorApplication.timeSinceStartup < deadline)
+                    yield return null;
+
+                File.WriteAllText(ProjectAbsolute(job.outputDirectory + "/observed-state.json"),
+                    JsonUtility.ToJson(job, true));
+                Assert.That(job.terminal, Is.True, "The in-flight capture must finish within its existing timeout.");
+                Assert.That(job.targets.Count, Is.EqualTo(1), "Cancellation must not dispatch the next target.");
+                Assert.That(job.targets.Single().provenance.repaintSequence, Is.GreaterThan(0),
+                    "This scenario requires real captured pixels, not an early validation failure.");
+                Assert.That(job.status, Is.EqualTo("cancelled"));
+                Assert.That(job.success, Is.False);
+                Assert.That(job.artifacts.All(value => !value.acceptedAsEvidence), Is.True);
+                Assert.That(job.persistenceStatus, Is.EqualTo("verified"));
+                var manifest = File.ReadAllBytes(ProjectAbsolute(job.manifestPath));
+                Assert.That(job.manifestBytes, Is.EqualTo(manifest.LongLength));
+                Assert.That(job.manifestSha256, Is.EqualTo(Hash(manifest)));
+                var frozen = JsonUtility.ToJson(job);
+                for (var i = 0; i < 5; i++) yield return null;
+                Assert.That(JsonUtility.ToJson(service.ReadFromApi(job.snapshotId)), Is.EqualTo(frozen));
+                Assert.That(File.ReadAllBytes(ProjectAbsolute(job.manifestPath)), Is.EqualTo(manifest));
+            }
+            finally
+            {
+                sceneView.Close();
+                // Keep only this test's captured PNG/manifest/observation as acceptance evidence.
+                Cleanup(job);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator ExternalTerminalFreezesLateSceneViewCompletion() =>
+            VerifyExternalTerminalDuringSceneViewRepaint("allOrNothing", false);
+
+        [UnityTest]
+        public IEnumerator ExternalTerminalFreezesLateSceneViewFailure() =>
+            VerifyExternalTerminalDuringSceneViewRepaint("allOrNothing", true);
+
+        [UnityTest]
+        public IEnumerator BestEffortExternalTerminalFreezesLateSceneViewCompletion() =>
+            VerifyExternalTerminalDuringSceneViewRepaint("bestEffort", false);
+
+        [UnityTest]
+        public IEnumerator BestEffortExternalTerminalFreezesLateSceneViewFailure() =>
+            VerifyExternalTerminalDuringSceneViewRepaint("bestEffort", true);
+
+        private static IEnumerator VerifyExternalTerminalDuringSceneViewRepaint(string policy, bool closeDuringCapture)
+        {
+            var sceneView = ScriptableObject.CreateInstance<SceneView>();
+            SnapshotJobPayload job = null;
+            try
+            {
+                sceneView.Show();
+                sceneView.Repaint();
+                yield return null;
+                // Never reset the Bridge's registered service or another task's Snapshot.
+                var service = new UPilotSnapshotService(UPilotBridge.Instance);
+                var request = new SnapshotCapturePayload
+                {
+                    outputDirectory = "Log/Stage4/SnapshotLateCompletion/" + Guid.NewGuid().ToString("N"),
+                    completionPolicy = policy,
+                    channels = new[] { "color" },
+                    targets = new[]
+                    {
+                        new SnapshotTargetRequestPayload
+                        {
+                            targetId = "late-scene", kind = "sceneView",
+                            instanceId = UPilotEntityIds.ToWireId(sceneView).ToString(),
+                            width = 320, height = 180,
+                        },
+                        new SnapshotTargetRequestPayload
+                        {
+                            targetId = "must-not-start", kind = "sceneView",
+                            instanceId = UPilotEntityIds.ToWireId(sceneView).ToString(),
+                            width = 320, height = 180,
+                        },
+                    },
+                };
+                job = (SnapshotJobPayload)CreateJob.Invoke(service, new object[] { request });
+                var execution = (System.Threading.Tasks.Task)ExecuteJob.Invoke(service, new object[] { job, request });
+                Assert.That(execution, Is.Not.Null);
+                Assert.That(execution.IsCompleted, Is.False, "Require an actual pending repaint, not an early validation failure.");
+                Assert.That(job.phase, Is.EqualTo("rendering"));
+                Assert.That(job.terminal, Is.False);
+                service.ResetActive();
+                Assert.That(job.status, Is.EqualTo("aborted"));
+                Assert.That(job.terminal, Is.True);
+                Assert.That(job.success, Is.False);
+                Assert.That(job.persistenceStatus, Is.EqualTo("verified"));
+                var frozen = JsonUtility.ToJson(job);
+                var output = ProjectAbsolute(job.outputDirectory);
+                var manifest = File.ReadAllBytes(ProjectAbsolute(job.manifestPath));
+                var state = File.ReadAllBytes(StatePath(job.snapshotId));
+                File.WriteAllText(Path.Combine(output, "frozen-job.json"), frozen);
+                File.WriteAllBytes(Path.Combine(output, "frozen-state.json"), state);
+                File.WriteAllBytes(Path.Combine(output, "frozen-manifest.json"), manifest);
+                Assert.That(job.manifestBytes, Is.EqualTo(manifest.LongLength));
+                Assert.That(job.manifestSha256, Is.EqualTo(Hash(manifest)));
+                if (closeDuringCapture) sceneView.Close();
+                else sceneView.Repaint();
+                var deadline = EditorApplication.timeSinceStartup + 20;
+                while (!execution.IsCompleted && EditorApplication.timeSinceStartup < deadline)
+                    yield return null;
+                File.WriteAllText(Path.Combine(output, "after-job.json"), JsonUtility.ToJson(job));
+                File.WriteAllBytes(Path.Combine(output, "after-state.json"), File.ReadAllBytes(StatePath(job.snapshotId)));
+                File.WriteAllText(Path.Combine(output, "execution.txt"),
+                    "policy=" + policy + "\nclosed=" + closeDuringCapture + "\nstatus=" + execution.Status
+                    + "\nexception=" + execution.Exception);
+                Assert.That(execution.IsCompleted, Is.True, "Observe the original continuation; a fixed frame delay is insufficient.");
+                Assert.That(execution.IsFaulted, Is.False, execution.Exception?.ToString());
+                Assert.That(job.targets, Is.Empty, "Late success/failure must not append targets or dispatch the second target.");
+                Assert.That(job.artifacts, Is.Empty, "No artifact may be accepted after external termination.");
+                Assert.That(job.failures, Is.Empty, "Late failure must not replace the frozen external outcome.");
+                Assert.That(Directory.GetFiles(output, "*.png", SearchOption.AllDirectories), Is.Empty,
+                    "Late callbacks must not leave unregistered PNG files.");
+                Assert.That(JsonUtility.ToJson(job), Is.EqualTo(frozen));
+                Assert.That(File.ReadAllBytes(ProjectAbsolute(job.manifestPath)), Is.EqualTo(manifest));
+                Assert.That(File.ReadAllBytes(StatePath(job.snapshotId)), Is.EqualTo(state));
+                Assert.That(service.ReadFromApi(job.snapshotId), Is.Null, "Late work must not reinsert reset activity.");
+            }
+            finally
+            {
+                if (sceneView != null) sceneView.Close();
+                Cleanup(job);
+            }
+        }
+
+        [UnityTest]
         public IEnumerator SceneViewCaptureProducesVerifiedRepaintEvidence()
         {
             var suffix = Guid.NewGuid().ToString("N");
@@ -943,6 +1184,566 @@ namespace CodingRiver.UPilot.Tests
             yield return new ExitPlayMode();
         }
 
+        [UnityTest]
+        public IEnumerator GameViewCancellationWhileWaitingForFrameDoesNotPublishSuccess() =>
+            RunGameViewLifecycleCase("allOrNothing", "cancel", false);
+
+        [UnityTest]
+        public IEnumerator BestEffortGameViewCancellationWhileWaitingForFrameDoesNotPublishSuccess() =>
+            RunGameViewLifecycleCase("bestEffort", "cancel", false);
+
+        [UnityTest]
+        public IEnumerator GameViewCancellationDoesNotCaptureNextTarget() =>
+            RunGameViewLifecycleCase("allOrNothing", "cancel", true);
+
+        [UnityTest]
+        public IEnumerator ExternalTerminalFreezesLateGameViewCompletion() =>
+            RunGameViewLifecycleCase("allOrNothing", "abort", true);
+
+        [UnityTest]
+        public IEnumerator BestEffortExternalTerminalFreezesLateGameViewCompletion() =>
+            RunGameViewLifecycleCase("bestEffort", "abort", true);
+
+        [UnityTest]
+        public IEnumerator ExternalTerminalFreezesLateGameViewFailure() =>
+            RunGameViewLifecycleCase("allOrNothing", "abortDestroy", true);
+
+        [UnityTest]
+        public IEnumerator BestEffortExternalTerminalFreezesLateGameViewFailure() =>
+            RunGameViewLifecycleCase("bestEffort", "abortDestroy", true);
+
+        private static IEnumerator RunGameViewLifecycleCase(string policy, string action, bool includeNext)
+        {
+            yield return new EnterPlayMode();
+            Exception failure = null;
+            var scenario = VerifyGameViewLifecycle(policy, action, includeNext);
+            try
+            {
+                // The scenario only yields frames. Capture assertion failures so ExitPlayMode
+                // still runs before rethrowing; do not leave the user's Editor in PlayMode.
+                while (true)
+                {
+                    bool more;
+                    object current;
+                    try { more = scenario.MoveNext(); current = more ? scenario.Current : null; }
+                    catch (Exception ex) { failure = ex; break; }
+                    if (!more) break;
+                    yield return current;
+                }
+            }
+            finally { (scenario as IDisposable)?.Dispose(); }
+            if (EditorApplication.isPlaying) yield return new ExitPlayMode();
+            if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        private static IEnumerator VerifyGameViewLifecycle(string policy, string action, bool includeNext)
+        {
+            var runnerType = typeof(UPilotSnapshotService).GetNestedType("GameViewCaptureRunner", BindingFlags.NonPublic);
+            Assert.That(runnerType, Is.Not.Null);
+            var existingRunners = Resources.FindObjectsOfTypeAll(runnerType);
+            Assert.That(existingRunners, Is.Empty, "Do not overlap or destroy another task's GameView capture.");
+            var previousBackground = Application.runInBackground;
+            var outputRoot = "Log/Stage4/GameViewLifecycle/" + Guid.NewGuid().ToString("N");
+            var root = new GameObject("UPilotGameViewLifecycleProbe");
+            Component ownedRunner = null;
+            SnapshotJobPayload job = null;
+            try
+            {
+                var camera = root.AddComponent<Camera>();
+                camera.clearFlags = CameraClearFlags.SolidColor;
+                camera.backgroundColor = Color.red;
+                camera.cullingMask = 0;
+                camera.depth = 1000;
+                camera.targetDisplay = 0;
+                yield return null;
+                var target = new SnapshotTargetRequestPayload
+                {
+                    targetId = "game", kind = "gameView", targetDisplay = 0, width = 320, height = 180,
+                };
+                var next = new SnapshotTargetRequestPayload
+                {
+                    targetId = "must-not-start", kind = "camera", exactName = root.name, width = 320, height = 180,
+                };
+                var request = new SnapshotCapturePayload
+                {
+                    outputDirectory = outputRoot + "/snapshot",
+                    completionPolicy = policy,
+                    channels = new[] { "color" },
+                    targets = includeNext ? new[] { target, next } : new[] { target },
+                };
+                var service = new UPilotSnapshotService(UPilotBridge.Instance);
+                job = (SnapshotJobPayload)CreateJob.Invoke(service, new object[] { request });
+                var execution = (System.Threading.Tasks.Task)ExecuteJob.Invoke(service, new object[] { job, request });
+                Assert.That(job.terminal, Is.False);
+                Assert.That(job.phase, Is.EqualTo("rendering"));
+                Assert.That(execution.IsCompleted, Is.False, "Require actual pending end-of-frame work.");
+                // Synchronous creation since the last yield identifies this test's exact runner.
+                ownedRunner = Resources.FindObjectsOfTypeAll(runnerType).Cast<Component>().Single();
+                var ownedRunnerId = UPilotEntityIds.ToWireId(ownedRunner);
+                var completion = runnerType.GetField("_completion", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(ownedRunner);
+                var rawTask = (System.Threading.Tasks.Task)completion.GetType().GetProperty("Task").GetValue(completion);
+                Assert.That(rawTask.IsCompleted, Is.False);
+                var output = ProjectAbsolute(outputRoot);
+                Directory.CreateDirectory(output);
+                File.WriteAllText(Path.Combine(output, "before-job.json"), JsonUtility.ToJson(job));
+                string frozen = null;
+                byte[] frozenManifest = null, frozenState = null;
+                if (action == "cancel")
+                {
+                    service.CancelJob(job.snapshotId);
+                    Assert.That(job.cancelRequested, Is.True);
+                    Assert.That(job.terminal, Is.False, "Cancellation must await the existing capture.");
+                }
+                else
+                {
+                    service.ResetActive(); // Isolated service, never the Bridge's global service.
+                    Assert.That(job.status, Is.EqualTo("aborted"));
+                    Assert.That(job.terminal, Is.True);
+                    frozen = JsonUtility.ToJson(job);
+                    frozenManifest = File.ReadAllBytes(ProjectAbsolute(job.manifestPath));
+                    frozenState = File.ReadAllBytes(StatePath(job.snapshotId));
+                    File.WriteAllText(Path.Combine(output, "frozen-job.json"), frozen);
+                    File.WriteAllBytes(Path.Combine(output, "frozen-manifest.json"), frozenManifest);
+                    File.WriteAllBytes(Path.Combine(output, "frozen-state.json"), frozenState);
+                    if (action == "abortDestroy") UnityEngine.Object.DestroyImmediate(ownedRunner.gameObject);
+                }
+                var deadline = EditorApplication.timeSinceStartup + 20;
+                while ((!execution.IsCompleted || ownedRunner != null) && EditorApplication.timeSinceStartup < deadline)
+                    yield return null;
+                File.WriteAllText(Path.Combine(output, "after-job.json"), JsonUtility.ToJson(job));
+                File.WriteAllBytes(Path.Combine(output, "after-state.json"), File.ReadAllBytes(StatePath(job.snapshotId)));
+                var rawError = rawTask.Exception?.GetBaseException();
+                File.WriteAllText(Path.Combine(output, "execution.txt"),
+                    "policy=" + policy + "\naction=" + action + "\nincludeNext=" + includeNext
+                    + "\nexecution=" + execution.Status + "\nrawCapture=" + rawTask.Status
+                    + "\nrawError=" + rawError?.GetType().FullName
+                    + "\nrunnerId=" + ownedRunnerId + "\nrunnerDestroyed=" + (ownedRunner == null)
+                    + "\nbackgroundBefore=" + previousBackground + "\nbackgroundAfter=" + Application.runInBackground);
+                Assert.That(execution.Status, Is.EqualTo(System.Threading.Tasks.TaskStatus.RanToCompletion));
+                Assert.That(ownedRunner == null, Is.True, "The exact owned runner must be destroyed.");
+                Assert.That(Application.runInBackground, Is.EqualTo(previousBackground));
+                Assert.That(job.terminal, Is.True);
+                Assert.That(job.success, Is.False);
+                Assert.That(job.persistenceStatus, Is.EqualTo("verified"));
+                var manifest = File.ReadAllBytes(ProjectAbsolute(job.manifestPath));
+                Assert.That(job.manifestBytes, Is.EqualTo(manifest.LongLength));
+                Assert.That(job.manifestSha256, Is.EqualTo(Hash(manifest)));
+                if (action == "abortDestroy")
+                {
+                    Assert.That(rawTask.IsFaulted, Is.True);
+                    Assert.That(rawError, Is.TypeOf<OperationCanceledException>());
+                }
+                else
+                {
+                    Assert.That(rawTask.Status, Is.EqualTo(System.Threading.Tasks.TaskStatus.RanToCompletion), rawError?.ToString());
+                    var raw = rawTask.GetType().GetProperty("Result").GetValue(rawTask);
+                    var bytes = (byte[])raw.GetType().GetField("bytes").GetValue(raw);
+                    Assert.That(bytes, Is.Not.Empty);
+                    // Test-owned witness outside the job directory: NOT a product artifact.
+                    File.WriteAllBytes(Path.Combine(output, "witness-readback.png"), bytes);
+                    var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    try
+                    {
+                        Assert.That(texture.LoadImage(bytes), Is.True);
+                        Assert.That(texture.width, Is.EqualTo(320));
+                        Assert.That(texture.height, Is.EqualTo(180));
+                        var center = texture.GetPixel(160, 90);
+                        Assert.That(center.r, Is.GreaterThan(center.b + 0.25f), "Require the real owned camera's composite.");
+                    }
+                    finally { UnityEngine.Object.DestroyImmediate(texture); }
+                    if (action == "cancel")
+                    {
+                        Assert.That(job.status, Is.EqualTo("cancelled"));
+                        Assert.That(job.targets.Count, Is.EqualTo(1));
+                        Assert.That(job.targets.Single().provenance.pixelSourceVerified, Is.True);
+                        Assert.That(job.targets.Single().gameView.playMode, Is.True);
+                        var artifact = job.artifacts.Single();
+                        Assert.That(artifact.acceptedAsEvidence, Is.False);
+                        Assert.That(File.ReadAllBytes(ProjectAbsolute(artifact.path)), Is.EqualTo(bytes));
+                        Assert.That(artifact.sha256, Is.EqualTo(Hash(bytes)));
+                    }
+                }
+                Assert.That(job.failures, Is.Empty);
+                if (action != "cancel")
+                {
+                    Assert.That(JsonUtility.ToJson(job), Is.EqualTo(frozen));
+                    Assert.That(job.targets, Is.Empty);
+                    Assert.That(job.artifacts, Is.Empty);
+                    Assert.That(Directory.GetFiles(ProjectAbsolute(job.outputDirectory), "*.png", SearchOption.AllDirectories), Is.Empty);
+                    Assert.That(manifest, Is.EqualTo(frozenManifest));
+                    Assert.That(File.ReadAllBytes(StatePath(job.snapshotId)), Is.EqualTo(frozenState));
+                    Assert.That(service.ReadFromApi(job.snapshotId), Is.Null);
+                }
+                else
+                {
+                    var terminal = JsonUtility.ToJson(job);
+                    var state = File.ReadAllBytes(StatePath(job.snapshotId));
+                    service.CancelJob(job.snapshotId);
+                    yield return null;
+                    Assert.That(JsonUtility.ToJson(job), Is.EqualTo(terminal));
+                    Assert.That(File.ReadAllBytes(ProjectAbsolute(job.manifestPath)), Is.EqualTo(manifest));
+                    Assert.That(File.ReadAllBytes(StatePath(job.snapshotId)), Is.EqualTo(state));
+                }
+            }
+            finally
+            {
+                // Only the runner created synchronously by this test is an owned cleanup target.
+                if (ownedRunner != null) UnityEngine.Object.DestroyImmediate(ownedRunner.gameObject);
+                UnityEngine.Object.Destroy(root);
+                Cleanup(job);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator AsymmetricGameViewReportsNativeScaledAndMismatchedOutputWithoutCorrection()
+        {
+            yield return new EnterPlayMode();
+            var root = new GameObject("UPilotGameViewOrientationProbe");
+            root.AddComponent<UPilotGameViewOrientationProbe>();
+            var directory = "Log/Stage4/AsymmetricGameView/" + Guid.NewGuid().ToString("N");
+            try
+            {
+                yield return null;
+                int sw = Screen.width, sh = Screen.height;
+                Assert.That(sw, Is.GreaterThan(0));
+                Assert.That(sh, Is.GreaterThan(0));
+                var sizes = new[] { new Vector2Int(sw, sh), new Vector2Int(sw * 2, sh * 2),
+                    new Vector2Int(sh == sw ? sh / 2 : sh, sw) };
+                for (int index = 0; index < sizes.Length; index++)
+                {
+                    var size = sizes[index];
+                    var service = new UPilotSnapshotService(UPilotBridge.Instance);
+                    var job = Start(service, new SnapshotCapturePayload
+                    {
+                        outputDirectory = directory + "/" + index,
+                        targets = new[] { new SnapshotTargetRequestPayload {
+                            kind = "gameView", targetId = "asymmetric-" + index, targetDisplay = 0,
+                            width = size.x, height = size.y } },
+                    });
+                    double deadline = EditorApplication.timeSinceStartup + 30;
+                    while (!job.terminal && EditorApplication.timeSinceStartup < deadline) yield return null;
+                    Assert.That(job.terminal, Is.True, "Observe the original job; do not recapture on timeout.");
+                    Assert.That(job.status, Is.EqualTo("completed"), JsonUtility.ToJson(job));
+                    var target = job.targets.Single();
+                    Assert.That(target.provenance.pixelSourceVerified, Is.True);
+                    var diagnostic = target.gameView;
+                    Assert.That(diagnostic.screenWidth, Is.EqualTo(sw));
+                    Assert.That(diagnostic.screenHeight, Is.EqualTo(sh));
+                    Assert.That(diagnostic.requestedWidth, Is.EqualTo(size.x));
+                    Assert.That(diagnostic.requestedHeight, Is.EqualTo(size.y));
+                    Assert.That(diagnostic.outputWidth, Is.EqualTo(size.x));
+                    Assert.That(diagnostic.outputHeight, Is.EqualTo(size.y));
+                    Assert.That(diagnostic.capturedAt, Is.GreaterThan(0));
+                    Assert.That(diagnostic.aspectRatioMatches, Is.EqualTo(index != 2));
+                    Assert.That(string.IsNullOrEmpty(diagnostic.aspectWarning), Is.EqualTo(index != 2));
+                    Assert.That(diagnostic.contentOrientation, Is.EqualTo("unverified"));
+                    Assert.That(diagnostic.compositionComplete, Is.EqualTo("unverified"));
+                    Assert.That(diagnostic.internalCrop, Is.EqualTo("unknown"));
+                    var png = job.artifacts.Single(a => a.path.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+                    var texture = new Texture2D(2, 2);
+                    try
+                    {
+                        Assert.That(texture.LoadImage(File.ReadAllBytes(ProjectAbsolute(png.path))), Is.True);
+                        Assert.That(texture.width, Is.EqualTo(size.x));
+                        Assert.That(texture.height, Is.EqualTo(size.y));
+                    }
+                    finally { UnityEngine.Object.DestroyImmediate(texture); }
+                    // Keep these self-owned manifests/PNGs for visual orientation and hash inspection.
+                    File.WriteAllText(ProjectAbsolute(directory + "/" + index + "/observed-state.json"),
+                        JsonUtility.ToJson(job, true));
+                }
+            }
+            finally { UnityEngine.Object.Destroy(root); }
+            yield return new ExitPlayMode();
+        }
+
+#if UNITY_EDITOR_WIN
+        [UnityTest]
+        public IEnumerator NativeWindowSnapshotSurvivesRepeatedMinimizeRestore() => VerifyNativeWindowLifecycle(false);
+
+        [UnityTest]
+        public IEnumerator NativeWindowSnapshotFailureCleansUpAndAllowsFollowingCapture() => VerifyNativeWindowLifecycle(true);
+
+        [UnityTest]
+        public IEnumerator FloatingWindowSnapshotSurvivesRepeatedMinimizeRestore() => VerifyNativeWindowLifecycle(false, true);
+
+        [UnityTest]
+        public IEnumerator FloatingWindowSnapshotFailureCleansUpAndAllowsFollowingCapture() => VerifyNativeWindowLifecycle(true, true);
+
+        [Test]
+        public void NativeWindowMinimizedProbeRejectsUnshownWindow()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotWindowGeometryMarkerProbe>();
+            try
+            {
+                Assert.That(UPilotWindowDiagnostics.TryGetEditorWindowMinimized(window, out var minimized, out var handle), Is.False);
+                Assert.That(minimized, Is.False);
+                Assert.That(handle, Is.Zero);
+                Assert.That(UPilotWindowDiagnostics.TryGetMappedWindowHandle(window, true, out var mapped, out _), Is.False);
+                Assert.That(mapped, Is.EqualTo(IntPtr.Zero));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(window); }
+        }
+
+        private EditorWindow nativeLifecycleWindow;
+        private string nativeLifecycleDirectory;
+        private NativeWindowLifecycleObservation nativeLifecycleCleanup;
+
+        [UnityTearDown]
+        public IEnumerator SettleNativeWindowLifecycleCleanup()
+        {
+            if (nativeLifecycleDirectory == null) yield break;
+            try
+            {
+                var cleanup = nativeLifecycleCleanup;
+                var handle = new IntPtr(cleanup.windowHandle);
+                var main = new IntPtr(cleanup.mainWindowHandle);
+                if (nativeLifecycleWindow != null) nativeLifecycleWindow.Close();
+                double started = EditorApplication.timeSinceStartup;
+                int frames = 0;
+                while (handle != IntPtr.Zero && IsWindow(handle) && EditorApplication.timeSinceStartup - started < 3)
+                {
+                    yield return null;
+                    frames++;
+                }
+                cleanup.stage = "cleanup-settled";
+                cleanup.observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                cleanup.waitFrames = frames;
+                cleanup.waitMs = (EditorApplication.timeSinceStartup - started) * 1000;
+                cleanup.exists = handle != IntPtr.Zero && IsWindow(handle);
+                cleanup.windowReleased = nativeLifecycleWindow == null;
+                cleanup.mainIconic = IsIconic(main);
+                cleanup.seamsRestored = UPilotWindowDiagnostics.RejectNativeCaptureForTesting == null
+                    && UPilotWindowDiagnostics.AfterNativeCaptureForTesting == null;
+                File.WriteAllText(Path.Combine(nativeLifecycleDirectory, "cleanup-settled.json"), JsonUtility.ToJson(cleanup, true));
+                Assert.That(cleanup.windowReleased, Is.True);
+                Assert.That(cleanup.exists, Is.False, "The original test HWND must disappear within the bounded frame wait.");
+                Assert.That(cleanup.seamsRestored, Is.True);
+                Assert.That(cleanup.mainIconic, Is.False);
+            }
+            finally
+            {
+                nativeLifecycleWindow = null;
+                nativeLifecycleDirectory = null;
+                nativeLifecycleCleanup = null;
+            }
+        }
+
+        [Serializable]
+        private sealed class NativeWindowLifecycleObservation
+        {
+            public string stage, domain, instanceId;
+            public long observedAt, windowHandle, mainWindowHandle, minimizedProbeHandle;
+            public uint processId;
+            public int waitFrames;
+            public double waitMs;
+            public bool exists, iconic, mainIconic, minimizedProbeFound, minimizedProbeValue, windowReleased, seamsRestored;
+            public Rect position;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr handle);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr handle);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr handle, int command);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetAncestor(IntPtr handle, uint flags);
+
+        private IEnumerator VerifyNativeWindowLifecycle(bool injectFailure, bool floating = false)
+        {
+            Assert.That(UPilotSnapshotApiV1.Capabilities().available, Is.True);
+            var reject = UPilotWindowDiagnostics.RejectNativeCaptureForTesting;
+            var after = UPilotWindowDiagnostics.AfterNativeCaptureForTesting;
+            Assert.That(reject, Is.Null, "Do not replace another test's native capture seam.");
+            Assert.That(after, Is.Null, "Do not replace another test's native capture seam.");
+            var directory = ProjectAbsolute("Log/Stage4/WindowLifecycle/" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var processId = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            var main = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+            Assert.That(main, Is.Not.EqualTo(IntPtr.Zero));
+            Assert.That(IsIconic(main), Is.False, "The test must not restore or minimize the main Editor.");
+            var window = ScriptableObject.CreateInstance<UPilotWindowGeometryMarkerProbe>();
+            IntPtr handle = IntPtr.Zero;
+            var jobs = new System.Collections.Generic.List<SnapshotJobPayload>();
+            Assert.That(nativeLifecycleDirectory, Is.Null);
+            nativeLifecycleDirectory = directory;
+            nativeLifecycleWindow = window;
+            nativeLifecycleCleanup = new NativeWindowLifecycleObservation { mainWindowHandle = main.ToInt64(), processId = processId };
+            try
+            {
+                window.titleContent = new GUIContent("UPilot V17 " + Guid.NewGuid().ToString("N"));
+                window.position = new Rect(160, 160, 320, 220);
+                if (floating) window.Show();
+                else window.ShowUtility();
+                window.Repaint();
+                yield return null;
+                yield return null;
+                Assert.That(UPilotWindowDiagnostics.TryGetMappedWindowHandle(window, true, out handle, out var mapping), Is.True, mapping);
+                AssertOwnedNativeWindow(handle, main, processId);
+                nativeLifecycleCleanup.windowHandle = handle.ToInt64();
+                for (int cycle = 0; cycle < 3; cycle++)
+                {
+                    var prefix = cycle.ToString("D2");
+                    SnapshotJobPayload job = null;
+                    RecordNativeWindowState(directory, prefix + "-normal", window, handle, main);
+                    yield return CaptureLifecycleWindow(window, directory, prefix + "-normal", value => { job = value; jobs.Add(value); });
+                    VerifyLifecycleWindowPixels(job, handle);
+                    if (injectFailure)
+                    {
+                        if (cycle == 1)
+                            UPilotWindowDiagnostics.AfterNativeCaptureForTesting = target =>
+                            { if (target == window) target.position = new Rect(target.position.x + 12, target.position.y + 9, target.position.width, target.position.height); };
+                        else UPilotWindowDiagnostics.RejectNativeCaptureForTesting = target => target == window;
+                    }
+                    else
+                    {
+                        AssertOwnedNativeWindow(handle, main, processId);
+                        ShowWindow(handle, 6); // SW_MINIMIZE: only this verified, exclusive test HWND.
+                        yield return null;
+                        Assert.That(IsIconic(handle), Is.True);
+                    }
+                    RecordNativeWindowState(directory, prefix + "-failure", window, handle, main);
+                    yield return CaptureLifecycleWindow(window, directory, prefix + "-failure", value => { job = value; jobs.Add(value); });
+                    Assert.That(job.status, Is.EqualTo("failed"));
+                    Assert.That(job.success, Is.False);
+                    Assert.That(job.failures.Count, Is.EqualTo(1));
+                    Assert.That(job.failures[0].code, Is.EqualTo(!injectFailure ? "SNAPSHOT_EDITOR_MINIMIZED"
+                        : cycle == 1 ? "WINDOW_CHANGED_DURING_CAPTURE" : "SNAPSHOT_TARGET_CAPTURE_FAILED"));
+                    Assert.That(job.artifacts.Any(a => a.path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)), Is.False);
+                    UPilotWindowDiagnostics.RejectNativeCaptureForTesting = reject;
+                    UPilotWindowDiagnostics.AfterNativeCaptureForTesting = after;
+                    if (!injectFailure)
+                    {
+                        AssertOwnedNativeWindow(handle, main, processId);
+                        ShowWindow(handle, 4); // SW_SHOWNOACTIVATE: restore without focusing the main Editor.
+                        yield return null;
+                        Assert.That(IsIconic(handle), Is.False);
+                    }
+                    window.Repaint();
+                    yield return null;
+                    RecordNativeWindowState(directory, prefix + "-restored", window, handle, main);
+                    yield return CaptureLifecycleWindow(window, directory, prefix + "-restored", value => { job = value; jobs.Add(value); });
+                    VerifyLifecycleWindowPixels(job, handle);
+                    foreach (var completed in jobs)
+                    {
+                        var observed = UPilotSnapshotApiV1.Collect(completed.snapshotId);
+                        Assert.That(observed.ok, Is.True, observed.errorMessage);
+                        Assert.That(JsonUtility.ToJson(observed.job), Is.EqualTo(JsonUtility.ToJson(completed)), "Later work must not mutate an earlier terminal job.");
+                    }
+                }
+            }
+            finally
+            {
+                UPilotWindowDiagnostics.RejectNativeCaptureForTesting = reject;
+                UPilotWindowDiagnostics.AfterNativeCaptureForTesting = after;
+                foreach (var job in jobs.Where(value => !value.terminal)) UPilotSnapshotApiV1.Cancel(job.snapshotId);
+                if (handle != IntPtr.Zero && IsWindow(handle) && IsIconic(handle))
+                {
+                    GetWindowThreadProcessId(handle, out var owner);
+                    if (owner == processId && handle != main) ShowWindow(handle, 4);
+                }
+                if (window != null) window.Close();
+                var cleanup = nativeLifecycleCleanup = new NativeWindowLifecycleObservation
+                {
+                    stage = "cleanup", observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    windowHandle = handle.ToInt64(), mainWindowHandle = main.ToInt64(), processId = processId,
+                    exists = handle != IntPtr.Zero && IsWindow(handle), mainIconic = IsIconic(main),
+                    windowReleased = window == null, seamsRestored = UPilotWindowDiagnostics.RejectNativeCaptureForTesting == reject
+                        && UPilotWindowDiagnostics.AfterNativeCaptureForTesting == after,
+                };
+                File.WriteAllText(Path.Combine(directory, "cleanup.json"), JsonUtility.ToJson(cleanup, true));
+            }
+            Assert.That(window == null, Is.True);
+            Assert.That(IsIconic(main), Is.False);
+        }
+
+        private static void AssertOwnedNativeWindow(IntPtr handle, IntPtr main, uint processId)
+        {
+            Assert.That(IsWindow(handle), Is.True);
+            Assert.That(handle, Is.Not.EqualTo(main), "Never operate on the main Editor HWND.");
+            GetWindowThreadProcessId(handle, out var owner);
+            Assert.That(owner, Is.EqualTo(processId));
+            Assert.That(GetAncestor(handle, 2), Is.EqualTo(handle)); // GA_ROOT
+        }
+
+        private static void RecordNativeWindowState(string directory, string stage, EditorWindow window, IntPtr handle, IntPtr main)
+        {
+            GetWindowThreadProcessId(handle, out var owner);
+            var found = UPilotWindowDiagnostics.TryGetEditorWindowMinimized(window, out var minimized, out var probeHandle);
+            File.WriteAllText(Path.Combine(directory, stage + "-native.json"), JsonUtility.ToJson(new NativeWindowLifecycleObservation
+            {
+                stage = stage, observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                domain = UPilotWindowDiagnostics.DomainReloadEpoch.ToString(), instanceId = UPilotEntityIds.ToWireId(window).ToString(),
+                position = window.position, processId = owner, windowHandle = handle.ToInt64(), mainWindowHandle = main.ToInt64(),
+                exists = IsWindow(handle), iconic = IsIconic(handle), mainIconic = IsIconic(main),
+                minimizedProbeFound = found, minimizedProbeValue = minimized, minimizedProbeHandle = probeHandle,
+            }, true));
+            Assert.That(found, Is.True, "An exact mapping to the test's original HWND is required.");
+            Assert.That(probeHandle, Is.EqualTo(handle.ToInt64()));
+            Assert.That(minimized, Is.EqualTo(IsIconic(handle)));
+            Assert.That(IsIconic(main), Is.False);
+        }
+
+        private static IEnumerator CaptureLifecycleWindow(EditorWindow window, string directory, string stage, Action<SnapshotJobPayload> observe)
+        {
+            var response = UPilotSnapshotApiV1.Start(new SnapshotCapturePayload
+            {
+                targets = new[] { new SnapshotTargetRequestPayload { targetId = "window", kind = "editorWindow",
+                    instanceId = UPilotEntityIds.ToWireId(window).ToString(), requireContentRect = true } },
+                outputDirectory = Path.Combine(directory, stage), requestKey = Guid.NewGuid().ToString("N"),
+            });
+            Assert.That(response.ok, Is.True, response.errorCode + ":" + response.errorMessage);
+            File.WriteAllText(Path.Combine(directory, stage + "-start.json"), JsonUtility.ToJson(response, true));
+            var deadline = EditorApplication.timeSinceStartup + 12;
+            while (!response.job.terminal && EditorApplication.timeSinceStartup < deadline)
+            {
+                yield return null;
+                response = UPilotSnapshotApiV1.Status(response.snapshotId);
+                Assert.That(response.ok, Is.True, response.errorMessage);
+            }
+            observe(response.job);
+            File.WriteAllText(Path.Combine(directory, stage + "-observed.json"), JsonUtility.ToJson(response, true));
+            Assert.That(response.job.terminal, Is.True, "Observe the original Snapshot, never restart it.");
+            Assert.That(response.job.persistenceStatus, Is.EqualTo("verified"));
+            var bytes = File.ReadAllBytes(ProjectAbsolute(response.job.manifestPath));
+            Assert.That(bytes.LongLength, Is.EqualTo(response.job.manifestBytes));
+            Assert.That(Hash(bytes), Is.EqualTo(response.job.manifestSha256));
+        }
+
+        private static void VerifyLifecycleWindowPixels(SnapshotJobPayload job, IntPtr handle)
+        {
+            Assert.That(job.status, Is.EqualTo("completed"));
+            Assert.That(job.success, Is.True);
+            var provenance = job.targets.Single().provenance;
+            Assert.That(provenance.windowHandle, Is.EqualTo(handle.ToInt64()));
+            Assert.That(provenance.pixelSourceVerified && provenance.contentRectVerified && provenance.cropComplete, Is.True);
+            var artifact = job.artifacts.Single(a => a.path.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+            var bytes = File.ReadAllBytes(ProjectAbsolute(artifact.path));
+            Assert.That(artifact.acceptedAsEvidence, Is.True);
+            Assert.That(bytes.LongLength, Is.EqualTo(artifact.bytes));
+            Assert.That(Hash(bytes), Is.EqualTo(artifact.sha256));
+            var texture = new Texture2D(2, 2);
+            try
+            {
+                Assert.That(texture.LoadImage(bytes), Is.True);
+                Assert.That(texture.width, Is.EqualTo(artifact.width));
+                Assert.That(texture.height, Is.EqualTo(artifact.height));
+                var inset = Mathf.Max(1, Mathf.RoundToInt(UPilotWindowGeometryMarkerProbe.MarkerThickness * provenance.pixelsPerPoint / 2f));
+                var left = texture.GetPixel(inset, texture.height / 2);
+                var right = texture.GetPixel(texture.width - 1 - inset, texture.height / 2);
+                var top = texture.GetPixel(texture.width / 2, inset);
+                var bottom = texture.GetPixel(texture.width / 2, texture.height - 1 - inset);
+                Assert.That(left.r > .8f && left.g < .2f && right.g > .8f && right.r < .2f, Is.True);
+                Assert.That((top.b > .8f && bottom.r > .8f && bottom.g > .8f)
+                    || (bottom.b > .8f && top.r > .8f && top.g > .8f), Is.True);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(texture); }
+        }
+#endif
+
         private static Camera ConfigureCamera(GameObject gameObject, Color background)
         {
             var camera = gameObject.AddComponent<Camera>();
@@ -976,6 +1777,7 @@ namespace CodingRiver.UPilot.Tests
             new SnapshotJobPayload
             {
                 persistenceSchemaVersion = 2,
+                serviceLifecycleId = UPilotServiceLifetime.Id,
                 snapshotId = snapshotId,
                 requestKey = "request-" + snapshotId,
                 requestHash = "hash-" + snapshotId,

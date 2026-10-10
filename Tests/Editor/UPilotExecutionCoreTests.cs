@@ -13,6 +13,32 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot.Tests
 {
+    public sealed class ExecutionStringUnityFixture : ScriptableObject
+    {
+        public int Calls;
+        public int ThreadId;
+        public bool Throw;
+        public override string ToString()
+        {
+            Calls++;
+            ThreadId = Thread.CurrentThread.ManagedThreadId;
+            if (Throw) throw new InvalidOperationException("string-conversion-sentinel");
+            return base.ToString();
+        }
+    }
+
+    public sealed class ExecutionStringClrFixture
+    {
+        public int Calls;
+        public bool Throw;
+        public override string ToString()
+        {
+            Calls++;
+            if (Throw) throw new InvalidOperationException("clr-conversion-sentinel");
+            return "clr";
+        }
+    }
+
     public interface IExecutionEmitFixture
     {
         int Increment(int value);
@@ -1591,12 +1617,69 @@ namespace CodingRiver.UPilot.Tests
                 executionBackend = "auto",
             };
             worker.Invoke(null, new object[] { autoPayload, new CSharpEvaluationContext() });
-            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1), "auto must not replay after post-execution emit-cache validation fails");
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1), "auto prepares a route before executing the validated lambda AST once");
 
             ExecutionReflectionFixture.InvocationCount = 0;
             autoPayload.executionBackend = "emit";
             worker.Invoke(null, new object[] { autoPayload, new CSharpEvaluationContext() });
             Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1), "V2 emit-cache executes the validated lambda AST once");
+        }
+
+        [TestCase("auto", false)]
+        [TestCase("auto", true)]
+        [TestCase("emit", false)]
+        [TestCase("emit", true)]
+        [TestCase("interpret", false)]
+        [TestCase("interpret", true)]
+        [TestCase("compiled", false)]
+        public void EvaluationRoutesBeforeEffectsAndReportsActualBackend(string backend, bool asyncEntry)
+        {
+            var code = "CodingRiver.UPilot.Tests.ExecutionReflectionFixture.CountInvocation(); return 42; // " + Guid.NewGuid().ToString("N");
+            var payload = new CSharpEvalPayload { code = code, mode = "statements", executionBackend = backend };
+            ExecutionReflectionFixture.InvocationCount = 0;
+            var context = new CSharpEvaluationContext();
+            string method = asyncEntry ? "ExecuteEvaluationWorkerAsync" : "ExecuteEvaluationWorker";
+            var worker = typeof(UPilotExecutionService).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static);
+            object result = worker.Invoke(null, new object[] { payload, context });
+            if (asyncEntry)
+            {
+                var task = (Task)result;
+                task.GetAwaiter().GetResult();
+                result = task.GetType().GetProperty("Result").GetValue(task);
+            }
+            var actual = (string)result.GetType().GetField("BackendUsed").GetValue(result);
+            Assert.That(actual, Is.EqualTo(backend == "auto" ? "emit" : backend == "interpret" ? "interpreter" : backend));
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1));
+            Assert.That(context.ResourceDiagnostics.Snapshot().Any(x => x.code == "EVAL_BACKEND_FALLBACK"), Is.False);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AutoWorkerBusinessFailureDoesNotSwitchBackendOrReplay(bool asyncEntry)
+        {
+            ExecutionReflectionFixture.InvocationCount = 0;
+            var context = new CSharpEvaluationContext();
+            var payload = new CSharpEvalPayload
+            {
+                code = "CodingRiver.UPilot.Tests.ExecutionReflectionFixture.CountInvocation(); CodingRiver.UPilot.Tests.ExecutionReflectionFixture.ThrowNow(); // " + Guid.NewGuid().ToString("N"),
+                mode = "statements", executionBackend = "auto",
+            };
+            var worker = typeof(UPilotExecutionService).GetMethod(asyncEntry ? "ExecuteEvaluationWorkerAsync" : "ExecuteEvaluationWorker",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (asyncEntry)
+            {
+                var task = (Task)worker.Invoke(null, new object[] { payload, context });
+                var error = Assert.Throws<ExecutionContractException>(() => task.GetAwaiter().GetResult());
+                Assert.That(error.Message, Does.Contain("fixture runtime failure"));
+            }
+            else
+            {
+                var error = Assert.Throws<TargetInvocationException>(() => worker.Invoke(null, new object[] { payload, context }));
+                Assert.That(error.InnerException, Is.TypeOf<ExecutionContractException>());
+                Assert.That(error.InnerException.Message, Does.Contain("fixture runtime failure"));
+            }
+            Assert.That(ExecutionReflectionFixture.InvocationCount, Is.EqualTo(1));
+            Assert.That(context.ResourceDiagnostics.Snapshot().Any(x => x.code == "EVAL_BACKEND_FALLBACK"), Is.False);
         }
 
         [Test]
@@ -1700,6 +1783,100 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(closed.cleanupErrors, Has.Length.EqualTo(1));
             Assert.That(callbackCleanupRan, Is.True, "subscription cleanup failure must not block callback cleanup");
             Assert.That(cleanupSession.SubscriptionCount, Is.EqualTo(0));
+        }
+
+        private static object EvaluateStringBackend(string backend, string code, CSharpEvaluationContext context)
+        {
+            if (backend == "emit")
+                return CSharpEmitBackend.Compile(CSharpEmitBackend.CacheKey(code, "statements", context.Imports), code, "statements")(context).Value;
+            if (backend == "compiled")
+                return CSharpCompiledBackend.Compile(CSharpCompiledBackend.CacheKey(code, "statements", context.Imports,
+                    context.SnapshotVariables()), code, "statements", context)(context).Value;
+            return CSharpSubsetEngine.Evaluate(code, "statements", context).Value;
+        }
+
+        [Test]
+        public void ImplicitUnityStringConversionUsesMainThreadOnce(
+            [Values("interpret", "emit", "compiled")] string backend,
+            [Values("alive", "destroyed", "throw")] string state,
+            [Values(false, true)] bool prefix)
+        {
+            var owned = ScriptableObject.CreateInstance<ExecutionStringUnityFixture>();
+            owned.name = "UPilot implicit string fixture";
+            if (state == "destroyed") UnityEngine.Object.DestroyImmediate(owned);
+            string expected = state == "throw" ? null : owned.ToString();
+            owned.Calls = 0;
+            owned.Throw = state == "throw";
+            int mainThread = Thread.CurrentThread.ManagedThreadId;
+            int scheduledCalls = 0;
+            Func<object> action = null;
+            object result = null;
+            Exception error = null;
+            Task<object> worker = null;
+            using (var scheduled = new ManualResetEventSlim(false))
+            using (var released = new ManualResetEventSlim(false))
+            {
+                try
+                {
+                    var context = new CSharpEvaluationContext(new Dictionary<string, object> { { "target", owned } },
+                        invocationScheduler: invoke =>
+                        {
+                            Interlocked.Increment(ref scheduledCalls);
+                            action = invoke;
+                            scheduled.Set();
+                            if (!released.Wait(5000)) throw new TimeoutException("String conversion scheduler was not released.");
+                            if (error != null) throw error;
+                            return result;
+                        });
+                    string code = prefix ? "return \"prefix\" + target;" : "return target + \"suffix\";";
+                    worker = Task.Run(() => EvaluateStringBackend(backend, code, context));
+                    Assert.That(scheduled.Wait(5000), Is.True, "Implicit Unity conversion must reach the invocation boundary.");
+                    try { result = action(); }
+                    catch (Exception ex) { error = ex; }
+                    finally { released.Set(); }
+                    if (state == "throw")
+                    {
+                        var failure = Assert.Catch(() => worker.GetAwaiter().GetResult());
+                        Assert.That(failure.ToString(), Does.Contain("string-conversion-sentinel"));
+                    }
+                    else
+                        Assert.That(worker.GetAwaiter().GetResult(), Is.EqualTo(prefix ? "prefix" + expected : expected + "suffix"));
+                    Assert.That(owned.ThreadId, Is.EqualTo(mainThread));
+                    Assert.That(owned.Calls, Is.EqualTo(1));
+                    Assert.That(scheduledCalls, Is.EqualTo(1));
+                    Assert.That(context.Diagnostics.MethodCallCount, Is.EqualTo(1));
+                    Assert.That(context.SideEffectsMayHaveOccurred, Is.True);
+                }
+                finally
+                {
+                    released.Set();
+                    if (worker != null) { try { worker.GetAwaiter().GetResult(); } catch { } }
+                    if (owned != null) UnityEngine.Object.DestroyImmediate(owned);
+                }
+            }
+        }
+
+        [Test]
+        public void ImplicitClrStringConversionRemainsLocalAndSingle(
+            [Values("interpret", "emit", "compiled")] string backend,
+            [Values(false, true)] bool throws)
+        {
+            var target = new ExecutionStringClrFixture { Throw = throws };
+            int scheduledCalls = 0;
+            var context = new CSharpEvaluationContext(new Dictionary<string, object> { { "target", target } },
+                invocationScheduler: action => { scheduledCalls++; return action(); });
+            const string code = "return \"prefix\" + target + \"suffix\";";
+            if (throws)
+            {
+                var failure = Assert.Catch(() => EvaluateStringBackend(backend, code, context));
+                Assert.That(failure.ToString(), Does.Contain("clr-conversion-sentinel"));
+            }
+            else
+                Assert.That(EvaluateStringBackend(backend, code, context), Is.EqualTo("prefixclrsuffix"));
+            Assert.That(target.Calls, Is.EqualTo(1));
+            Assert.That(scheduledCalls, Is.Zero);
+            Assert.That(EvaluateStringBackend(backend, "return \"prefix\" + null + \"suffix\";", new CSharpEvaluationContext()),
+                Is.EqualTo("prefixsuffix"));
         }
 
         [Test]

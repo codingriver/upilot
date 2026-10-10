@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot.Automation
 {
-    /// <summary>Historical Step control. New generic orchestration is suspended at every public entry.</summary>
+    /// <summary>Official Step plan validation and execution; lifecycle and ownership remain executor-controlled.</summary>
     [InitializeOnLoad]
     public sealed class UPilotAutomationStepService
     {
@@ -136,14 +136,30 @@ namespace CodingRiver.UPilot.Automation
             return JsonUtility.ToJson(new CatalogResult { steps = registry.Catalog(),
                 diagnostics = System.Linq.Enumerable.ToArray(registry.Diagnostics) });
         }
-        internal const string OrchestrationDisabledCode = "GENERIC_ORCHESTRATION_DISABLED";
-        internal const string OrchestrationDisabledReason = "通用编排新启动已暂停；请使用测试、验收、编译、Capture、Snapshot 或构建专用工具。";
         internal static bool IsNewRunAction(string action) => action == "start" || action == "validate";
-        public static string ValidateJson(string planJson) => JsonUtility.ToJson(
-            AutomationStepValidation.Invalid(OrchestrationDisabledCode, OrchestrationDisabledReason));
-        /// <summary>Fixed product suspension; no validation, allocation, persistence or test bypass.</summary>
+        public static string ValidateJson(string planJson) => JsonUtility.ToJson(ValidatePlanJson(planJson, out _));
+        private static AutomationStepValidation ValidatePlanJson(string planJson, out AutomationStepPlan plan)
+        {
+            RequireMainThread();
+            var parsed = AutomationStepPlanValidator.Parse(planJson, out plan);
+            if (plan == null) return parsed;
+            var validation = AutomationStepPlanValidator.Validate(plan, Registry);
+            parsed.diagnostics.AddRange(validation.diagnostics);
+            parsed.ok &= validation.ok;
+            parsed.budgetSeconds = validation.budgetSeconds;
+            return parsed;
+        }
+        /// <summary>Start once after full preflight; the caller retains any supplied Capture ownership.</summary>
         public static string StartJson(string operationId, string captureSessionId, string planJson) =>
-            throw new InvalidOperationException(OrchestrationDisabledCode + ": " + OrchestrationDisabledReason);
+            JsonUtility.ToJson(StartPlan(operationId, captureSessionId, planJson));
+        // Both the public C# facade and Bridge use this admission path and the same executor.
+        internal static StateResult StartPlan(string operationId, string captureSessionId, string planJson)
+        {
+            var validation = ValidatePlanJson(planJson, out var plan);
+            if (!validation.ok) throw new InvalidOperationException("STEP_PLAN_INVALID: " + JsonUtility.ToJson(validation));
+            Initialize();
+            return Public(s_executor.Start(plan, operationId, captureSessionId));
+        }
         private static AutomationStepRun State(string runId)
         {
             RequireMainThread();
@@ -192,12 +208,6 @@ namespace CodingRiver.UPilot.Automation
         }
         private async Task Handle(string route, string action, string id, string json, CancellationToken token)
         {
-            // Reject even malformed plans before parsing, enqueueing or invoking project callbacks.
-            if (IsNewRunAction(action))
-            {
-                await _bridge.SendErrorAsync(id, OrchestrationDisabledCode, OrchestrationDisabledReason, token, route);
-                return;
-            }
             var request = JsonUtility.FromJson<Message>(json)?.payload ?? new Request();
             var completion = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
@@ -208,6 +218,12 @@ namespace CodingRiver.UPilot.Automation
                     {
                         completion.SetResult(new CatalogResult { steps = Registry.Catalog(),
                             diagnostics = System.Linq.Enumerable.ToArray(Registry.Diagnostics) }); return;
+                    }
+                    if (IsNewRunAction(action))
+                    {
+                        if (action == "validate") completion.SetResult(ValidatePlanJson(request.planJson, out _));
+                        else completion.SetResult(StartPlan(request.operationId, request.captureSessionId, request.planJson));
+                        return;
                     }
                     if (action == "cancel") { completion.SetResult(Stop(request.runId)); return; }
                     if (action == "recover" || action == "release" || action == "release_preview")

@@ -490,6 +490,14 @@ namespace CodingRiver.UPilot.Tests
     {
         private const string EvidenceKey = "UPilot.P1.NativeModal.Evidence";
 
+        [MenuItem("Window/UPilot P1/Receipt Counter")]
+        private static void ReceiptCounter()
+        {
+            SessionState.SetInt(EvidenceKey + ".ReceiptCalls", SessionState.GetInt(EvidenceKey + ".ReceiptCalls", 0) + 1);
+        }
+
+        public static int ReceiptCalls() => SessionState.GetInt(EvidenceKey + ".ReceiptCalls", 0);
+
         [MenuItem("Window/UPilot P1/Expected Modal")]
         private static void ExpectedModal()
         {
@@ -745,5 +753,134 @@ namespace CodingRiver.UPilot.Tests
                 $"{{\"armed\":false,\"startedAt\":{startedAt},\"endedAt\":{endedAt},\"durationMs\":{s_durationMs}}}");
             s_armed = false;
         }
+    }
+
+    /// <summary>Test-only observation of one owned pending Snapshot; never requests Reload or capture.</summary>
+    public static class UPilotSnapshotReloadWitness
+    {
+        private const string Project = @"D:\upilot\Tests~\UPilotTest";
+        private const string HostName = "UPilot Snapshot GameView Capture";
+        private static Witness s_armed;
+
+        [Serializable] private sealed class Witness
+        {
+            public string nonce, directory, stage, error;
+            public long armedAtUtcMs, observedAtUtcMs;
+            public bool isPlaying, isPaused;
+            public int hostCount;
+            public SnapshotJobPayload job;
+        }
+
+        private static string OwnedDirectory(string nonce)
+        {
+            if (!Guid.TryParseExact(nonce, "N", out _))
+                throw new ArgumentException("A fresh N-format nonce is required.", nameof(nonce));
+            string root = Directory.GetParent(Application.dataPath).FullName;
+            if (Application.platform != RuntimePlatform.WindowsEditor ||
+                !string.Equals(Path.GetFullPath(root), Project, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Snapshot witness is restricted to the canonical Windows project.");
+            string directory = Path.Combine(root, "Log", "P0P1", "v09-inflight-" + nonce, "boundary");
+            for (var current = new DirectoryInfo(directory); current != null; current = current.Parent)
+            {
+                if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Snapshot witness does not follow reparse directories.");
+                if (string.Equals(current.FullName, Project, StringComparison.OrdinalIgnoreCase)) break;
+            }
+            return directory;
+        }
+
+        private static int HostCount() => Resources.FindObjectsOfTypeAll<GameObject>()
+            .Count(value => value != null && value.name == HostName);
+
+        private static SnapshotJobPayload ReadOwned(string snapshotId, string nonce)
+        {
+            var result = UPilotSnapshotApiV1.Status(snapshotId);
+            var job = result.job;
+            if (!result.ok || job == null || job.snapshotId != snapshotId ||
+                job.requestKey != "v09-inflight-" + nonce ||
+                job.outputDirectory != "Log/P0P1/v09-inflight-" + nonce + "/gameview-inflight-reload" ||
+                job.request == null || job.request.targets == null || job.request.targets.Length != 1 ||
+                job.request.targets[0].targetId != "gameview-inflight-reload" ||
+                job.request.targets[0].kind != "gameview")
+                throw new InvalidOperationException("The exact owned Snapshot request is unverified.");
+            return job;
+        }
+
+        private static void Save(Witness value, string name)
+        {
+            byte[] bytes = new UTF8Encoding(false).GetBytes(JsonUtility.ToJson(value, true));
+            using var output = new FileStream(Path.Combine(value.directory, name), FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            output.Write(bytes, 0, bytes.Length);
+        }
+
+        public static string Arm(string snapshotId, string nonce)
+        {
+            string directory = OwnedDirectory(nonce);
+            if (s_armed != null || Directory.Exists(directory))
+                throw new InvalidOperationException("A witness is armed or this nonce was used; do not replay.");
+            if (!EditorApplication.isPlaying || !EditorApplication.isPaused ||
+                EditorApplication.isCompiling || EditorApplication.isUpdating)
+                throw new InvalidOperationException("Witness requires stable owned paused PlayMode.");
+            var job = ReadOwned(snapshotId, nonce);
+            int hosts = HostCount();
+            if (job.terminal || job.cancelRequested || job.status != "running" || job.phase != "rendering" || hosts != 1)
+                throw new InvalidOperationException("Snapshot must actually be rendering with one capture host.");
+            var value = new Witness { nonce = nonce, directory = directory, stage = "armed", job = job,
+                armedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isPlaying = true, isPaused = true,
+                hostCount = hosts, error = "" };
+            Directory.CreateDirectory(directory);
+            Save(value, "armed.json");
+            s_armed = value;
+            AssemblyReloadEvents.beforeAssemblyReload += BeforeReload;
+            return JsonUtility.ToJson(value);
+        }
+
+        private static void BeforeReload()
+        {
+            AssemblyReloadEvents.beforeAssemblyReload -= BeforeReload;
+            var value = s_armed;
+            s_armed = null;
+            if (value == null) return;
+            try
+            {
+                value.stage = "beforeAssemblyReload";
+                value.observedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                value.isPlaying = EditorApplication.isPlaying;
+                value.isPaused = EditorApplication.isPaused;
+                value.hostCount = HostCount();
+                value.job = ReadOwned(value.job.snapshotId, value.nonce);
+                if (value.observedAtUtcMs - value.armedAtUtcMs > 10000)
+                    value.error = "Witness observation exceeded its original ten-second boundary budget.";
+                Save(value, "before-reload.json");
+            }
+            catch (Exception ex)
+            {
+                // Do not let a test observer prevent Unity's Reload; missing/error evidence cannot pass.
+                value.error = ex.GetType().FullName;
+                try { Save(value, "boundary-error.json"); } catch { }
+            }
+        }
+
+        public static bool Disarm(string nonce)
+        {
+            if (s_armed == null) return false;
+            if (s_armed.nonce != nonce)
+                throw new InvalidOperationException("Do not disarm another witness.");
+            AssemblyReloadEvents.beforeAssemblyReload -= BeforeReload;
+            s_armed = null;
+            return true;
+        }
+    }
+
+    public class UPilotSnapshotReloadWitnessGuardTests
+    {
+        [TestCase("")]
+        [TestCase("../outside")]
+        [TestCase("not-a-nonce")]
+        public void InvalidNonceCannotArmOrWrite(string nonce) =>
+            Assert.Throws<ArgumentException>(() => UPilotSnapshotReloadWitness.Arm("snapshot-invalid", nonce));
+
+        [Test]
+        public void UnarmedDisarmIsANoOp() => Assert.That(UPilotSnapshotReloadWitness.Disarm("unused"), Is.False);
     }
 }

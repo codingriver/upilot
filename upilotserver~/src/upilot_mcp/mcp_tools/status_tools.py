@@ -155,15 +155,16 @@ async def unity_playmode_resume(
     description=(
         "列出 Unity 编辑器中打开的窗口（可按类型/标题过滤）。"
         "每项含 instanceId、标题、位置、docked、closable、closeDeniedReason（M27）等。"
+        "includeNativeTooltips=true 时额外枚举 Windows 已显示的原生 Tooltip；仅用于精确截图，不授权移动或关闭。"
     ),
 )
-async def unity_editor_windows_list(typeFilter: str = "", titleFilter: str = ""):
+async def unity_editor_windows_list(typeFilter: str = "", titleFilter: str = "", includeNativeTooltips: bool = False):
     _log_tool_call(
         "unity_editor_windows_list",
-        {"typeFilter": typeFilter, "titleFilter": titleFilter},
+        {"typeFilter": typeFilter, "titleFilter": titleFilter, "includeNativeTooltips": includeNativeTooltips},
     )
     r = await _get_facade().editor_windows_list(
-        type_filter=typeFilter, title_filter=titleFilter
+        type_filter=typeFilter, title_filter=titleFilter, include_native_tooltips=includeNativeTooltips
     )
     return _log_tool_result("unity_editor_windows_list", _payload(r))
 
@@ -511,6 +512,7 @@ async def unity_console_tail_logs(
         "搜索 Unity 控制台全量日志，支持关键词/正则和日志类型过滤。"
         "默认不返回堆栈并排除 upilot/MCP 自身日志；返回 excludedUPilotCount 说明排除数量。"
         "可用互斥的 runGuid 或 compileOperationId 查询持久化运行边界；关联仅表示在该运行期间观察到，不表示因果归属。"
+        "phase 仅与 runGuid 配合，支持 testExecution/cleanup/sceneRestore；边界缺失返回缺口，不借用整个运行范围。"
     )
 )
 async def unity_console_search_logs(
@@ -527,6 +529,7 @@ async def unity_console_search_logs(
     maxMessageLength: int = 0,
     runGuid: str = "",
     compileOperationId: str = "",
+    phase: str = "",
 ):
     _log_tool_call(
         "unity_console_search_logs",
@@ -543,6 +546,7 @@ async def unity_console_search_logs(
             "maxMessageLength": maxMessageLength,
             "runGuid": runGuid,
             "compileOperationId": compileOperationId,
+            "phase": phase,
         },
     )
     normalized_contains = [contains] if isinstance(contains, str) else contains
@@ -559,6 +563,7 @@ async def unity_console_search_logs(
         max_message_length=maxMessageLength,
         run_guid=runGuid,
         compile_operation_id=compileOperationId,
+        phase=phase,
     )
     return _log_tool_result("unity_console_search_logs", _payload(r))
 

@@ -235,6 +235,7 @@ class ResourceDomainService:
             **batch,
             **waiting,
             "nextAction": waiting["waitingNextAction"],
+            "queuedDiagnostics": self._queued_editor_diagnostics(execution) if hasattr(self, "_queued_editor_diagnostics") else {"isUpdating": execution.get("isUpdating"), "hints": ["insufficient_evidence"]},
             "executionState": execution,
         }, context=execution)
 

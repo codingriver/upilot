@@ -69,6 +69,61 @@ namespace CodingRiver.UPilot.Tests
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         [Test]
+        public void MaterialTextureReferencesDoNotPromoteUnreferencedEditorSubassetToObjectReachability()
+        {
+            string folder = "Assets/UPilotP2MaterialReferences-" + Guid.NewGuid().ToString("N");
+            string materialPath = folder + "/Material.mat";
+            string texturePath = folder + "/Texture.asset";
+            string unusedPath = folder + "/UnusedEditorTexture.asset";
+            string prefabPath = folder + "/Root.prefab";
+            GameObject root = null;
+            try
+            {
+                Assert.That(AssetDatabase.IsValidFolder(folder), Is.False);
+                AssetDatabase.CreateFolder("Assets", Path.GetFileName(folder));
+                var texture = new Texture2D(2, 2);
+                var unused = new Texture2D(2, 2);
+                AssetDatabase.CreateAsset(texture, texturePath);
+                AssetDatabase.CreateAsset(unused, unusedPath);
+                var shader = Shader.Find("Unlit/Texture");
+                Assert.That(shader, Is.Not.Null, "This fixture requires Unity's built-in Unlit/Texture shader.");
+                var material = new Material(shader) { mainTexture = texture };
+                AssetDatabase.CreateAsset(material, materialPath);
+                var editorOnly = ScriptableObject.CreateInstance<PrefabReferenceQueryAsset>();
+                editorOnly.name = "UnreferencedEditorSubasset";
+                editorOnly.objectTarget = unused;
+                AssetDatabase.AddObjectToAsset(editorOnly, materialPath);
+                EditorUtility.SetDirty(editorOnly);
+                root = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                root.GetComponent<Renderer>().sharedMaterial = material;
+                PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+                AssetDatabase.SaveAssets();
+                string absolute = Path.Combine(Directory.GetParent(Application.dataPath).FullName, folder);
+                var before = Directory.GetFiles(absolute).ToDictionary(path => path, File.ReadAllBytes);
+                var fileDependencies = AssetDatabase.GetDependencies(prefabPath, true);
+                Assert.That(fileDependencies, Does.Contain(unusedPath), "File metadata includes the unreferenced subasset's dependency.");
+                var objects = UPilotAssetService.BuildObjectAssetDependenciesWithCancellation(
+                    new AssetDependenciesPayload { assetPath = prefabPath, evidenceMode = "object", maxNodes = 500, timeBudgetMs = 5000 },
+                    CancellationToken.None);
+                Assert.That(objects.coverageComplete, Is.True);
+                Assert.That(objects.readOnly && !objects.changedEditorState, Is.True);
+                Assert.That(objects.dependencies.Any(item => item.assetPath == materialPath), Is.True);
+                var textureEvidence = objects.dependencies.First(item => item.assetPath == texturePath);
+                Assert.That(textureEvidence.evidenceKind, Is.EqualTo("objectReference"));
+                Assert.That(textureEvidence.propertyPath, Does.Contain("m_TexEnvs"));
+                Assert.That(textureEvidence.referenceChain, Is.Not.Empty);
+                Assert.That(objects.dependencies.Any(item => item.assetPath == unusedPath), Is.False);
+                foreach (var file in before) Assert.That(File.ReadAllBytes(file.Key), Is.EqualTo(file.Value), file.Key);
+            }
+            finally
+            {
+                if (root != null) UnityEngine.Object.DestroyImmediate(root);
+                // Only the unique folder created by this fixture, never a shared test directory.
+                if (AssetDatabase.IsValidFolder(folder)) AssetDatabase.DeleteAsset(folder);
+            }
+        }
+
+        [Test]
         public void ReferenceOptionsRejectDepthWhenTraversalIsDisabled()
         {
             Assert.That(TryValidatePrefabReferenceQuery, Is.Not.Null);

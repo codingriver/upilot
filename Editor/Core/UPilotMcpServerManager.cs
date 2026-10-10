@@ -1183,7 +1183,12 @@ namespace CodingRiver.UPilot
         {
             var parts = new List<string>();
             for (var e = error; e != null && parts.Count < 5; e = e.InnerException)
-                parts.Add(e.GetType().Name + ": " + e.Message);
+            {
+                var codes = " HResult=0x" + e.HResult.ToString("X8");
+                if (e is System.Net.Sockets.SocketException socket)
+                    codes += " SocketError=" + socket.SocketErrorCode + " NativeError=" + socket.NativeErrorCode;
+                parts.Add(e.GetType().Name + codes + ": " + e.Message);
+            }
             // Do not include response payloads or credentials in diagnostic evidence.
             var text = string.Join(" -> ", parts);
             text = System.Text.RegularExpressions.Regex.Replace(text,
@@ -1834,8 +1839,10 @@ namespace CodingRiver.UPilot
             // HTTP runs off the Editor synchronization context; no callback is allowed to restart the Server.
             var json = Task.Run(async () =>
             {
-                using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMilliseconds(remaining) };
-                using var response = await client.GetAsync($"http://127.0.0.1:{HttpPort}/health").ConfigureAwait(false);
+                using var client = CreateLoopbackStatusClient();
+                client.Timeout = TimeSpan.FromMilliseconds(remaining);
+                using var request = CreateLoopbackStatusRequest($"http://127.0.0.1:{HttpPort}/health");
+                using var response = await client.SendAsync(request).ConfigureAwait(false);
                 response.EnsureSuccessStatusCode();
                 return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             }).GetAwaiter().GetResult();

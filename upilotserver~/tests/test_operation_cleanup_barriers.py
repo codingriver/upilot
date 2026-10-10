@@ -323,3 +323,187 @@ def test_project_switch_clears_previous_transition(tmp_path):
     store.playmode_transition = {"transitionId": "previous-project"}
     store.configure_project(str(tmp_path / "second"))
     assert store.playmode_transition == {}
+
+
+def test_failed_business_with_verified_cleanup_keeps_first_error_and_terminal(tmp_path):
+    """Isolated historical fixture only; never enables generic production Start."""
+    import copy
+    async def run():
+        service = _OperationService(tmp_path, [{"status": "Failed", "phase": "BusinessFailed",
+                                               "error": "original business error", "failureSignature": "OwnedBusinessError",
+                                               "cleanupPending": False}])
+        content = b"owned log\n"
+        (tmp_path / "console.jsonl").write_bytes(content)
+        session = dict(sessionId="owned-failed-capture", active=False, finishedAtUtcMs=1, segmentCount=1,
+                       jsonlPath="console.jsonl", summaryPath="summary.json", fileBytes=len(content),
+                       sha256=hashlib.sha256(content).hexdigest())
+        (tmp_path / "summary.json").write_text(json.dumps(session))
+        stops = []
+        async def stop(**kwargs):
+            assert kwargs == {"session_id": session["sessionId"], "owner_token": "owned-token"}
+            stops.append(1)
+            return ok("stop", {"session": session})
+        async def editor(**_):
+            return ok("editor", {"executionState": dict(ready=True, authoritative=True, isStale=False,
+                        playModeState="edit", observedAt=9999999999999)})
+        service.console_capture_stop = stop
+        service.mcp_status = editor
+        started = await service.seed_legacy_operation(spec(cleanup={"requireEditMode": True}))
+        state = service._operations[started.data["operationId"]]
+        state["consoleCapture"] = {"sessionId": session["sessionId"], "ownerToken": "owned-token"}
+        result = await service.operation_status(state["operationId"])
+        assert result.ok and result.data["terminal"] and result.data["status"] == "Failed"
+        assert result.data["error"] == "original business error"
+        assert result.data["failureSignature"] == "OwnedBusinessError"
+        assert result.data["cleanupPending"] is False and result.data["editorVerification"] == "verified"
+        assert state["consoleCapture"]["stopped"] and state["consoleCapture"]["artifactsVerified"]
+        frozen = {key: copy.deepcopy(state.get(key)) for key in
+                  ("status", "phase", "error", "failureSignature", "businessResult", "endedAt", "cleanupEndedAt")}
+        for _ in range(2):
+            late = await service.operation_status(state["operationId"])
+            assert late.data["terminal"] and late.data["status"] == "Failed"
+        assert {key: state.get(key) for key in frozen} == frozen
+        assert len(stops) == 1 and [name for name, _ in service.calls] == ["start", "status"]
+        persisted = service.server.state.load_operations()[0]
+        # Historical storage freezes endedAt; public terminal is projected from it.
+        assert persisted["endedAt"] == result.data["endedAt"] and persisted["status"] == "Failed"
+        assert persisted["cleanupPending"] is False and persisted["editorVerification"] == "verified"
+        assert persisted["consoleCapture"]["artifactsVerified"] is True
+        assert persisted["error"] == "original business error"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("gap", [
+    "capture_owner_unknown", "capture_wrong_session", "capture_still_active",
+    "capture_file_missing", "capture_summary_stale", "editor_stale",
+    "editor_not_authoritative", "editor_old_sample", "editor_still_playing",
+    "business_cleanup_missing", "business_cleanup_wrong_identity",
+    "business_cleanup_read_failed",
+])
+def test_failed_business_with_unverified_cleanup_ends_once_without_claiming_success(tmp_path, monkeypatch, gap):
+    """D16 negative matrix on isolated history, with real owned artifact files."""
+    import copy
+    from upilot_mcp.domain import task_service
+    from test_persistent_operations import stop_observers
+
+    async def run():
+        business_gap = gap.startswith("business_cleanup_")
+        business = {"status": "Failed", "phase": "BusinessFailed",
+                    "error": "original business error", "failureSignature": "OwnedBusinessError",
+                    "cleanupPending": business_gap}
+        service = _OperationService(tmp_path, [business])
+        started = await service.seed_legacy_operation(spec(cleanup={"requireEditMode": True, "timeoutSec": 1}))
+        assert started.ok
+        await stop_observers(service)
+        state = service._operations[started.data["operationId"]]
+        clock = [state["startedAt"] + 1]
+        monkeypatch.setattr(task_service, "now_ms", lambda: clock[0])
+
+        content = b"owned log\n"
+        session = dict(sessionId="owned-negative-capture", active=False, finishedAtUtcMs=1, segmentCount=1,
+                       jsonlPath="console.jsonl", summaryPath="summary.json", fileBytes=len(content),
+                       sha256=hashlib.sha256(content).hexdigest())
+        if gap != "capture_file_missing":
+            (tmp_path / "console.jsonl").write_bytes(content)
+        summary = {**session, "active": True} if gap == "capture_summary_stale" else session
+        (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        response_session = dict(session)
+        if gap == "capture_wrong_session":
+            response_session["sessionId"] = "another-capture"
+        elif gap == "capture_still_active":
+            response_session["active"] = True
+        state["consoleCapture"] = {"sessionId": session["sessionId"]}
+        if gap != "capture_owner_unknown":
+            state["consoleCapture"]["ownerToken"] = "owned-token"
+
+        stops, observations, editor_reads = [], [], []
+        async def stop(**kwargs):
+            assert kwargs == {"session_id": session["sessionId"], "owner_token": "owned-token"}
+            stops.append(1)
+            return ok("stop", {"session": response_session})
+        async def capture_status(**kwargs):
+            assert kwargs == {"session_id": session["sessionId"]}
+            observations.append(1)
+            return ok("capture-status", {"session": response_session})
+        async def editor(**_):
+            editor_reads.append(1)
+            sample = dict(ready=True, authoritative=True, isStale=False, playModeState="edit",
+                          observedAt=clock[0] + 1)
+            if gap == "editor_stale":
+                sample["isStale"] = True
+            elif gap == "editor_not_authoritative":
+                sample["authoritative"] = False
+            elif gap == "editor_old_sample":
+                sample["observedAt"] = state["businessEndedAt"]
+            elif gap == "editor_still_playing":
+                sample.update(ready=False, playModeState="play")
+            return ok("editor", {"executionState": sample})
+        service.console_capture_stop = stop
+        service.console_capture_status = capture_status
+        service.mcp_status = editor
+
+        if business_gap:
+            followup = {"status": "Failed", "error": "later observation", "cleanupPending": False}
+            if gap == "business_cleanup_missing":
+                followup.pop("cleanupPending")
+            elif gap == "business_cleanup_wrong_identity":
+                # Reject a mismatched identity actually established by Start.
+                # This tool fixture returns captureId, not a business operationId.
+                assert state["startData"]["captureId"] == "capture-123"
+                followup["captureId"] = "another-business-capture"
+            service._statuses.append(followup)
+            if gap == "business_cleanup_read_failed":
+                dispatch = service._dispatch_tool
+                async def failing_followup(name, args):
+                    result = await dispatch(name, args)
+                    if name == "status" and sum(call[0] == "status" for call in service.calls) > 1:
+                        return fail("status", "READ_FAILED", "cleanup observation unavailable")
+                    return result
+                service._dispatch_tool = failing_followup
+
+        try:
+            first = await service.operation_status(state["operationId"], detail_level="full")
+            assert first.ok and first.data["businessTerminal"]
+            assert first.data["businessResult"] == {key: business[key] for key in
+                                                    ("status", "phase", "error", "failureSignature")}
+            deadline = state["cleanupDeadlineAt"]
+            assert deadline == state["businessEndedAt"] + 1000
+            if gap == "capture_owner_unknown":
+                assert first.data["terminal"] and first.data["status"] == "aborted"
+                assert first.data["phase"] == "capture_owner_token_unknown"
+                assert stops == observations == editor_reads == []
+            else:
+                assert not first.data["terminal"] and first.data["cleanupPending"]
+                unresolved = ("businessCleanup" if business_gap else "authoritativeEditMode"
+                              if gap.startswith("editor_") else "consoleCapture:" + session["sessionId"])
+                assert unresolved in first.data["unresolvedResources"]
+                # Expire the original budget; do not renew it or wait in real time.
+                clock[0] = deadline + 1
+                final = await service.operation_status(state["operationId"], detail_level="full")
+                assert final.ok and final.data["terminal"] and final.data["status"] == "timed_out"
+                assert not final.data["cleanupPending"]
+                assert final.data["cleanupFailureSignature"] == "OperationCleanupTimeout"
+                assert final.data["cleanupError"] and final.data["cleanupError"] != business["error"]
+                assert len(stops) == 1
+            assert state["cleanupSucceeded"] is False
+            assert state["error"] == business["error"] and state["failureSignature"] == business["failureSignature"]
+            assert state["cleanupDeadlineAt"] == deadline
+            keys = ("status", "phase", "error", "failureSignature", "businessResult", "endedAt",
+                    "cleanupDeadlineAt", "cleanupError", "cleanupFailureSignature", "consoleCapture")
+            frozen = {key: copy.deepcopy(state.get(key)) for key in keys}
+            counts = (len(stops), len(observations), len(editor_reads), len(service.calls))
+            for _ in range(2):
+                late = await service.operation_status(state["operationId"], detail_level="full")
+                assert late.ok and late.data["terminal"] and late.data["status"] == frozen["status"]
+                assert "owned-token" not in json.dumps(late.data)
+            assert {key: state.get(key) for key in keys} == frozen
+            assert counts == (len(stops), len(observations), len(editor_reads), len(service.calls))
+            assert [name for name, _ in service.calls].count("start") == 1
+            assert [name for name, _ in service.calls].count("status") == (2 if business_gap else 1)
+            persisted = service.server.state.load_operations()[0]
+            for key in ("status", "error", "failureSignature", "businessResult", "endedAt", "cleanupDeadlineAt"):
+                assert persisted[key] == state[key]
+            assert persisted["cleanupSucceeded"] is False
+        finally:
+            await stop_observers(service)
+    asyncio.run(run())

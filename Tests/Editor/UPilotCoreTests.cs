@@ -323,6 +323,31 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(restored.afterActiveObject.instanceId, Is.Zero);
         }
 
+        [TestCase(true)]
+        [TestCase(false)]
+        public void DeleteSceneFinalizationMarksOnlyPersistentEditModeScenes(bool isPlaying)
+        {
+            // Preview scenes isolate this branch test from the Test Runner's untitled scene.
+            // No saved scene or asset is needed to verify the valid-Scene/PlayMode guard.
+            var scene = UnityEditor.SceneManagement.EditorSceneManager.NewPreviewScene();
+            try
+            {
+                Assert.That(scene.IsValid(), Is.True);
+                Assert.That(scene.isDirty, Is.False);
+                var saveRequired = UPilotGameObjectService.MarkSceneDirtyAfterDelete(scene, isPlaying);
+                Assert.That(saveRequired, Is.EqualTo(!isPlaying));
+                Assert.That(scene.isDirty, Is.EqualTo(!isPlaying));
+            }
+            finally { UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(scene); }
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void DeleteSceneFinalizationDoesNotMarkInvalidScene(bool isPlaying)
+        {
+            Assert.That(UPilotGameObjectService.MarkSceneDirtyAfterDelete(default(UnityEngine.SceneManagement.Scene), isPlaying), Is.False);
+        }
+
         [Test]
         public void GameObjectDeleteReceiptPreservesTargetPersistenceAndSideEffectEvidence()
         {
@@ -1108,6 +1133,63 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(recovered.observationLimit, Is.EqualTo(512));
         }
 
+        [Serializable]
+        private sealed class WindowSamplingMeasurement
+        {
+            public string unityVersion;
+            public string projectPath;
+            public string profileMode = "caller_must_confirm_non_deep_profile";
+            public ulong[] windowIds;
+            public double[] elapsedMs;
+            public long[] allocatedBytes;
+            public double medianMs;
+            public double p95Ms;
+            public string interpretation = "measurement_only_not_a_historical_AB_comparison";
+        }
+
+        [Test, Explicit("D12: bounded sampling measurement; run manually without Deep Profile, not a performance pass gate.")]
+        public void WindowHistorySamplingRecordsWarmedBoundedMeasurements()
+        {
+            var probe = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
+            try
+            {
+                probe.ShowUtility();
+                for (int i = 0; i < 8; ++i) UPilotWindowHistory.SampleForTests();
+                var report = new WindowSamplingMeasurement
+                {
+                    unityVersion = Application.unityVersion,
+                    projectPath = Directory.GetParent(Application.dataPath).FullName,
+                    windowIds = Resources.FindObjectsOfTypeAll<EditorWindow>().Select(w => UPilotEntityIds.ToWireId(w)).OrderBy(id => id).ToArray(),
+                    elapsedMs = new double[64], allocatedBytes = new long[64],
+                };
+                for (int i = 0; i < report.elapsedMs.Length; ++i)
+                {
+                    long allocated = GC.GetAllocatedBytesForCurrentThread();
+                    long start = System.Diagnostics.Stopwatch.GetTimestamp();
+                    UPilotWindowHistory.SampleForTests();
+                    long end = System.Diagnostics.Stopwatch.GetTimestamp();
+                    report.allocatedBytes[i] = GC.GetAllocatedBytesForCurrentThread() - allocated;
+                    report.elapsedMs[i] = (end - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                }
+                var afterIds = Resources.FindObjectsOfTypeAll<EditorWindow>().Select(w => UPilotEntityIds.ToWireId(w)).OrderBy(id => id).ToArray();
+                Assert.That(afterIds, Is.EqualTo(report.windowIds), "Do not compare samples from different window sets.");
+                Assert.That(report.elapsedMs.All(ms => ms >= 0), Is.True);
+                Assert.That(report.allocatedBytes.All(bytes => bytes >= 0), Is.True);
+                var sorted = report.elapsedMs.OrderBy(ms => ms).ToArray();
+                report.medianMs = (sorted[31] + sorted[32]) / 2;
+                report.p95Ms = sorted[(int)Math.Ceiling(sorted.Length * 0.95) - 1];
+                string output = Path.Combine(report.projectPath, "Artifacts", "P2", "D12",
+                    DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N") + ".json");
+                Directory.CreateDirectory(Path.GetDirectoryName(output));
+                File.WriteAllText(output, JsonUtility.ToJson(report, true), new UTF8Encoding(false));
+                TestContext.Progress.WriteLine(output);
+            }
+            finally
+            {
+                if (probe != null) probe.Close();
+            }
+        }
+
         [Test]
         public void EditorWindowHistoryQueryDoesNotSampleOrPersist()
         {
@@ -1310,6 +1392,133 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        [Serializable]
+        private sealed class CaptureWriteFailureEvidence
+        {
+            public string sessionId, lockedArtifact, failureMessage, firstCaptureError;
+            public int nativeError;
+            public bool stopThrew, ownershipRetainedAfterFailure, ownershipReleased, repeatedStopUnchanged;
+            public long droppedCount, finishedAtUtcMs;
+            public string jsonlSha256, manifestSha256, summarySha256;
+        }
+
+        [TestCase("jsonl")]
+        [TestCase("manifest")]
+        [TestCase("summary")]
+        public void ConsoleCaptureOwnedWriteSharingFailureIsObservableAndFinalizesAfterUnlock(string artifact)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("Real Windows sharing violations require Windows.");
+            var type = typeof(UPilotConsoleCaptureService);
+            const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Static;
+            var activeField = type.GetField("s_active", flags);
+            var key = (string)type.GetMethod("ProjectSessionKey", flags).Invoke(null,
+                new object[] { "UPilot.ConsoleCapture.ActiveDirectory" });
+            Assert.That(activeField.GetValue(null), Is.Null, "Never replace another Capture.");
+            Assert.That(SessionState.GetString(key, string.Empty), Is.Empty, "Never clear a recovery pointer.");
+            var root = (string)type.GetMethod("GetDefaultCaptureRoot", flags).Invoke(null, null);
+            var directory = Path.GetFullPath(Path.Combine(root, "test-write-sharing-" + artifact + "-" + Guid.NewGuid().ToString("N")));
+            string ownerToken = Guid.NewGuid().ToString("N"); // Never written into evidence.
+            ConsoleCaptureManifest owned = null;
+            FileStream held = null;
+            try
+            {
+                var started = UPilotConsoleCaptureService.StartCapture(new ConsoleCaptureStartPayload
+                {
+                    path = directory, title = "owned-write-sharing", ownerToken = ownerToken,
+                    excludeUPilot = true, flushIntervalMs = 60000,
+                });
+                Assert.That(started.ok, Is.True, started.error);
+                owned = started.session;
+                var lockedPath = artifact == "jsonl" ? owned.jsonlPath :
+                    artifact == "manifest" ? owned.manifestPath : owned.summaryPath;
+                if (artifact == "summary") File.WriteAllText(lockedPath, "owned-summary-before-stop");
+                var beforeBytes = File.ReadAllBytes(lockedPath);
+                var evidence = new CaptureWriteFailureEvidence { sessionId = owned.sessionId, lockedArtifact = artifact };
+                held = new FileStream(lockedPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var nativeFailure = Assert.Throws<IOException>(() =>
+                {
+                    using var denied = new FileStream(lockedPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                });
+                evidence.nativeError = nativeFailure.HResult & 0xffff;
+                Assert.That(evidence.nativeError, Is.EqualTo(32), "Must hit a real sharing violation, not a simulated failure.");
+                evidence.failureMessage = nativeFailure.Message;
+                if (artifact == "jsonl")
+                {
+                    type.GetMethod("OnLogMessageReceived", flags).Invoke(null,
+                        new object[] { "owned-record-denied-by-sharing", string.Empty, LogType.Log });
+                    type.GetMethod("FlushActiveCapture", flags).Invoke(null, new object[] { true });
+                    var failed = UPilotConsoleCaptureService.GetStatus(owned.sessionId).session;
+                    Assert.That(failed.active, Is.True);
+                    Assert.That(failed.droppedCount, Is.EqualTo(1));
+                    Assert.That(failed.lastError, Is.Not.Empty);
+                    evidence.firstCaptureError = failed.lastError;
+                }
+                else
+                {
+                    var failed = Assert.Throws<IOException>(() =>
+                        UPilotConsoleCaptureService.StopCapture(owned.sessionId, ownerToken, false));
+                    Assert.That(failed.HResult & 0xffff, Is.EqualTo(32));
+                    evidence.stopThrew = true;
+                    evidence.failureMessage = failed.Message;
+                    // No success receipt was returned and ownership is not yet released.
+                    Assert.That(UPilotConsoleCaptureService.GetStatus(owned.sessionId).session.active, Is.False);
+                }
+                Assert.That(File.ReadAllBytes(lockedPath), Is.EqualTo(beforeBytes));
+                evidence.ownershipRetainedAfterFailure = activeField.GetValue(null) != null &&
+                    SessionState.GetString(key, string.Empty) == directory;
+                Assert.That(evidence.ownershipRetainedAfterFailure, Is.True);
+                held.Dispose();
+                held = null;
+                // A known, synchronous failure is followed by one deliberate stop of
+                // this owned session after unlocking, never an uncertain public replay.
+                var stopped = UPilotConsoleCaptureService.StopCapture(owned.sessionId, ownerToken, false);
+                Assert.That(stopped.ok, Is.True, stopped.error);
+                Assert.That(stopped.session.active, Is.False);
+                Assert.That(stopped.session.finishedAtUtcMs, Is.GreaterThan(0));
+                evidence.droppedCount = stopped.session.droppedCount;
+                evidence.finishedAtUtcMs = stopped.session.finishedAtUtcMs;
+                if (artifact == "jsonl")
+                {
+                    Assert.That(stopped.session.lastError, Is.EqualTo(evidence.firstCaptureError));
+                    Assert.That(evidence.droppedCount, Is.EqualTo(1));
+                    Assert.That(new FileInfo(owned.jsonlPath).Length, Is.Zero);
+                }
+                else Assert.That(evidence.droppedCount, Is.Zero);
+                evidence.ownershipReleased = activeField.GetValue(null) == null &&
+                    SessionState.GetString(key, string.Empty) == string.Empty;
+                Assert.That(evidence.ownershipReleased, Is.True);
+                var manifestBytes = File.ReadAllBytes(owned.manifestPath);
+                var summaryBytes = File.ReadAllBytes(owned.summaryPath);
+                Assert.That(summaryBytes, Is.EqualTo(manifestBytes));
+                var repeated = UPilotConsoleCaptureService.StopCapture(owned.sessionId, ownerToken, false);
+                evidence.repeatedStopUnchanged = repeated.ok &&
+                    repeated.session.finishedAtUtcMs == evidence.finishedAtUtcMs &&
+                    File.ReadAllBytes(owned.manifestPath).SequenceEqual(manifestBytes) &&
+                    File.ReadAllBytes(owned.summaryPath).SequenceEqual(summaryBytes);
+                Assert.That(evidence.repeatedStopUnchanged, Is.True);
+                using var sha = SHA256.Create();
+                evidence.jsonlSha256 = BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(owned.jsonlPath))).Replace("-", "").ToLowerInvariant();
+                evidence.manifestSha256 = BitConverter.ToString(sha.ComputeHash(manifestBytes)).Replace("-", "").ToLowerInvariant();
+                evidence.summarySha256 = BitConverter.ToString(sha.ComputeHash(summaryBytes)).Replace("-", "").ToLowerInvariant();
+                File.WriteAllText(Path.Combine(directory, "write-failure-evidence.json"),
+                    JsonUtility.ToJson(evidence, true), new UTF8Encoding(false));
+            }
+            finally
+            {
+                held?.Dispose();
+                // Never reset the global Capture or stop a session with unknown ownership.
+                if (owned != null && activeField.GetValue(null) != null)
+                {
+                    var current = UPilotConsoleCaptureService.GetStatus(owned.sessionId).session;
+                    Assert.That(current.sessionId, Is.EqualTo(owned.sessionId));
+                    Assert.That(UPilotConsoleCaptureService.StopCapture(owned.sessionId, ownerToken, false).ok, Is.True);
+                }
+                Assert.That(activeField.GetValue(null), Is.Null);
+                Assert.That(SessionState.GetString(key, string.Empty), Is.Empty);
+            }
+        }
+
         [Test]
         public void ConsoleSummaryUsesSharedClassificationAndBoundedSamples()
         {
@@ -1360,6 +1569,408 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 UPilotConsoleService.IsUPilotOwnedLog("[UPilot Flow] infrastructure", string.Empty),
                 Is.True);
+        }
+
+        [TestCase(0, false)]
+        [TestCase(1, false)]
+        [TestCase(2, false)]
+        [TestCase(0, true)]
+        [TestCase(1, true)]
+        [TestCase(2, true)]
+        public void ConsoleCaptureReadRejectsMissingSegmentsWithoutChangingIndex(int missingIndex, bool continuation)
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-missing-read-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var paths = new[] { "console.jsonl", "console.001.jsonl", "console.002.jsonl" }
+                .Select(name => Path.Combine(directory, name)).ToArray();
+            var missingPath = paths[missingIndex];
+            var backupPath = missingPath + ".owned-backup";
+            try
+            {
+                for (int index = 0; index < paths.Length; index++)
+                    File.WriteAllText(paths[index], JsonUtility.ToJson(new ConsoleCaptureRecord
+                    {
+                        sequence = index, message = "owned-marker " + index, logType = "Log",
+                    }) + "\n");
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_missing_read", directory = directory,
+                    segmentCount = paths.Length, nextSequence = paths.Length,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles", BindingFlags.NonPublic | BindingFlags.Static);
+                var first = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload { count = 1, regex = "owned-marker" }, CancellationToken.None,
+                });
+                Assert.That(first.ok, Is.True, first.error);
+                Assert.That(first.continuationToken, Is.Not.Empty);
+                byte[] indexBefore = File.ReadAllBytes(first.indexPath);
+                File.Move(missingPath, backupPath);
+                var failure = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload
+                    {
+                        count = 1, contains = continuation ? null : new[] { "no-matching-log" },
+                        continuationToken = continuation ? first.continuationToken : string.Empty,
+                    }, CancellationToken.None,
+                });
+                Assert.That(failure.ok, Is.False);
+                Assert.That(failure.error, Is.EqualTo("CONSOLE_CAPTURE_SEGMENT_MISSING: " + Path.GetFileName(missingPath)));
+                Assert.That(failure.sessionId, Is.EqualTo(manifest.sessionId));
+                Assert.That(failure.scanComplete, Is.False);
+                Assert.That(failure.logs, Is.Empty);
+                Assert.That(failure.continuationToken, Is.Null.Or.Empty);
+                Assert.That(File.ReadAllBytes(first.indexPath), Is.EqualTo(indexBefore));
+                Assert.That(manifest.segmentCount, Is.EqualTo(3));
+                Assert.That(manifest.nextSequence, Is.EqualTo(3));
+                File.Move(backupPath, missingPath);
+                var restored = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload { count = 10 }, CancellationToken.None,
+                });
+                Assert.That(restored.ok, Is.True, restored.error);
+                Assert.That(restored.logs.Select(item => item.sequence), Is.EqualTo(new long[] { 0, 1, 2 }));
+                Assert.That(restored.scanComplete, Is.True);
+            }
+            finally
+            {
+                if (File.Exists(backupPath) && !File.Exists(missingPath)) File.Move(backupPath, missingPath);
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ConsoleCaptureReadRejectsSegmentRemovedDuringScan(bool continuation)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("This fixture passively observes Windows file owners during a real scan.");
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            if (!string.Equals(root.TrimEnd(Path.DirectorySeparatorChar), @"D:\upilot\Tests~\UPilotTest", StringComparison.OrdinalIgnoreCase))
+                Assert.Ignore("Use the exact canonical acceptance project for this controlled file race.");
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-scan-gap-" + Guid.NewGuid().ToString("N"));
+            var firstPath = Path.Combine(directory, "console.jsonl");
+            var missingPath = Path.Combine(directory, "console.001.jsonl");
+            var backupPath = missingPath + ".owned-backup";
+            var stop = new ManualResetEventSlim(false);
+            var ready = new ManualResetEventSlim(false);
+            Thread mover = null;
+            Exception moveError = null;
+            bool scanObserved = false;
+            bool calibrationObserved = false;
+            int ownerQueries = 0;
+            long queryTicks = 0, maxQueryTicks = 0;
+            long readStartedTicks = -1, readFinishedTicks = -1, movedTicks = -1;
+            var observationClock = System.Diagnostics.Stopwatch.StartNew();
+            Func<long, double> milliseconds = ticks => ticks < 0 ? -1d :
+                ticks * 1000d / System.Diagnostics.Stopwatch.Frequency;
+            Func<string> observationDetails = () => string.Format(
+                "Capture scan observer: continuation={0}, calibrated={1}, ownerQueries={2}, " +
+                "queryTotalMs={3:F3}, queryMaxMs={4:F3}, readStartMs={5:F3}, readEndMs={6:F3}, movedMs={7:F3}",
+                continuation, calibrationObserved, ownerQueries, milliseconds(queryTicks), milliseconds(maxQueryTicks),
+                milliseconds(readStartedTicks), milliseconds(readFinishedTicks), milliseconds(movedTicks));
+            try
+            {
+                Directory.CreateDirectory(directory);
+                using (var writer = new StreamWriter(firstPath, false, new UTF8Encoding(false)))
+                {
+                    string message = "owned scan marker " + new string('x', 65536);
+                    for (int index = 0; index < 128; index++)
+                        writer.WriteLine(JsonUtility.ToJson(new ConsoleCaptureRecord
+                        {
+                            sequence = index, message = message, logType = "Log",
+                        }));
+                }
+                File.WriteAllText(missingPath, JsonUtility.ToJson(new ConsoleCaptureRecord
+                {
+                    sequence = 128, message = "owned final marker", logType = "Log",
+                }) + Environment.NewLine);
+                byte[] expectedSegment = File.ReadAllBytes(missingPath);
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_scan_gap", directory = directory, segmentCount = 2, nextSequence = 129,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles", BindingFlags.NonPublic | BindingFlags.Static);
+                var warm = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload { count = 1, newestFirst = true }, CancellationToken.None,
+                });
+                Assert.That(warm.ok, Is.True, warm.error);
+                Assert.That(warm.continuationToken, Is.Not.Empty);
+                byte[] indexBefore = File.ReadAllBytes(warm.indexPath);
+                // Reuse only the existing resource-scoped native owner query.
+                // Calibrate a held read handle before claiming this observes a short scan;
+                // query latency is measured rather than assumed to explain a missed race.
+                const BindingFlags nativeFlags = BindingFlags.NonPublic | BindingFlags.Static;
+                var observerType = typeof(UPilotProcessOccupancyService);
+                var startSession = observerType.GetMethod("RmStartSession", nativeFlags);
+                var register = observerType.GetMethod("RmRegisterResources", nativeFlags);
+                var getList = observerType.GetMethod("RmGetList", nativeFlags);
+                var endSession = observerType.GetMethod("RmEndSession", nativeFlags);
+                Assert.That(startSession, Is.Not.Null);
+                Assert.That(register, Is.Not.Null);
+                Assert.That(getList, Is.Not.Null);
+                Assert.That(endSession, Is.Not.Null);
+                var entryType = getList.GetParameters()[3].ParameterType.GetElementType();
+                var processField = entryType.GetField("Process");
+                var pidField = processField.FieldType.GetField("dwProcessId");
+                int editorPid;
+                using (var editor = System.Diagnostics.Process.GetCurrentProcess()) editorPid = editor.Id;
+                mover = new Thread(() =>
+                {
+                    uint session = 0;
+                    bool sessionOpened = false;
+                    try
+                    {
+                        var startArguments = new object[] { 0u, 0, new StringBuilder(33) };
+                        int status = (int)startSession.Invoke(null, startArguments);
+                        if (status != 0) throw new InvalidOperationException("RmStartSession: " + status);
+                        session = (uint)startArguments[0];
+                        sessionOpened = true;
+                        status = (int)register.Invoke(null, new object[]
+                        {
+                            session, 1u, new[] { firstPath }, 0u, null, 0u, null,
+                        });
+                        if (status != 0) throw new InvalidOperationException("RmRegisterResources: " + status);
+                        var entries = Array.CreateInstance(entryType, 16);
+                        Func<bool> editorOwnsFirstSegment = () =>
+                        {
+                            long queryStartedTicks = observationClock.ElapsedTicks;
+                            try
+                            {
+                                var arguments = new object[] { session, 0u, (uint)entries.Length, entries, 0u };
+                                int query = (int)getList.Invoke(null, arguments);
+                                if (query == 234)
+                                {
+                                    uint needed = (uint)arguments[1];
+                                    if (needed > 256) throw new InvalidOperationException("File owner list exceeds fixture bound.");
+                                    entries = Array.CreateInstance(entryType, (int)needed);
+                                    arguments[2] = needed;
+                                    arguments[3] = entries;
+                                    query = (int)getList.Invoke(null, arguments);
+                                }
+                                if (query != 0) throw new InvalidOperationException("RmGetList: " + query);
+                                for (int index = 0; index < (uint)arguments[2]; index++)
+                                    if ((int)pidField.GetValue(processField.GetValue(entries.GetValue(index))) == editorPid)
+                                        return true;
+                                return false;
+                            }
+                            finally
+                            {
+                                long elapsedTicks = observationClock.ElapsedTicks - queryStartedTicks;
+                                ownerQueries++;
+                                queryTicks += elapsedTicks;
+                                maxQueryTicks = Math.Max(maxQueryTicks, elapsedTicks);
+                            }
+                        };
+                        if (editorOwnsFirstSegment())
+                            throw new InvalidOperationException("Unexpected editor ownership before the read.");
+                        // Same flags as the real scan, held only for observer calibration.
+                        // The handle is disposed before readiness; it cannot block the scan.
+                        using (new FileStream(firstPath, FileMode.Open, FileAccess.Read,
+                            FileShare.ReadWrite, 64 * 1024, FileOptions.SequentialScan))
+                        {
+                            calibrationObserved = editorOwnsFirstSegment();
+                            if (!calibrationObserved)
+                                throw new InvalidOperationException(
+                                    "Observer calibration failed: the held owned read handle was not observed; no race coverage.");
+                        }
+                        // The previous acceptance observed owner retention after disposal.
+                        // End calibration before starting an independent scan observation;
+                        // a fresh session must not attribute that old handle to the scan.
+                        status = (int)endSession.Invoke(null, new object[] { session });
+                        if (status != 0) throw new InvalidOperationException("RmEndSession calibration: " + status);
+                        sessionOpened = false;
+                        startArguments = new object[] { 0u, 0, new StringBuilder(33) };
+                        status = (int)startSession.Invoke(null, startArguments);
+                        if (status != 0) throw new InvalidOperationException("RmStartSession scan: " + status);
+                        session = (uint)startArguments[0];
+                        sessionOpened = true;
+                        status = (int)register.Invoke(null, new object[]
+                        {
+                            session, 1u, new[] { firstPath }, 0u, null, 0u, null,
+                        });
+                        if (status != 0) throw new InvalidOperationException("RmRegisterResources scan: " + status);
+                        if (editorOwnsFirstSegment())
+                            throw new InvalidOperationException("Fresh scan observer reports ownership before the read; no race coverage.");
+                        ready.Set();
+                        var budget = System.Diagnostics.Stopwatch.StartNew();
+                        while (!stop.IsSet && budget.ElapsedMilliseconds < 5000)
+                        {
+                            if (editorOwnsFirstSegment() && !stop.IsSet)
+                            {
+                                // Only our stopped fixture is touched; no open probe,
+                                // process termination, shared Capture or product hook.
+                                File.Move(missingPath, backupPath);
+                                movedTicks = observationClock.ElapsedTicks;
+                                scanObserved = true;
+                                return;
+                            }
+                            Thread.Sleep(1);
+                        }
+                    }
+                    catch (Exception ex) { moveError = ex; }
+                    finally
+                    {
+                        if (sessionOpened)
+                        {
+                            try
+                            {
+                                int status = (int)endSession.Invoke(null, new object[] { session });
+                                if (status != 0 && moveError == null)
+                                    moveError = new InvalidOperationException("RmEndSession: " + status);
+                            }
+                            catch (Exception ex) { if (moveError == null) moveError = ex; }
+                        }
+                        ready.Set();
+                    }
+                }) { IsBackground = true, Name = "UPilot-owned-Capture-scan-gap" };
+                mover.Start();
+                Assert.That(ready.Wait(5000), Is.True, "File race worker did not become ready.");
+                if (moveError != null)
+                {
+                    Assert.That(mover.Join(5000), Is.True, "Failed observer must finish before reading diagnostics.");
+                    Assert.That(moveError, Is.Null, observationDetails());
+                }
+                ConsoleCaptureReadResult result;
+                readStartedTicks = observationClock.ElapsedTicks;
+                try
+                {
+                    result = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                    {
+                        manifest, new ConsoleCaptureReadPayload
+                        {
+                            count = 1, newestFirst = true,
+                            continuationToken = continuation ? warm.continuationToken : string.Empty,
+                        }, CancellationToken.None,
+                    });
+                }
+                finally
+                {
+                    readFinishedTicks = observationClock.ElapsedTicks;
+                    stop.Set();
+                }
+                Assert.That(mover.Join(5000), Is.True, "File race worker must finish before restoration.");
+                Assert.That(moveError, Is.Null, observationDetails());
+                Assert.That(scanObserved, Is.True,
+                    "No concurrent removal observed: this is not race coverage. " + observationDetails());
+                Assert.That(movedTicks, Is.InRange(readStartedTicks, readFinishedTicks),
+                    "The owned segment must be removed during the actual read. " + observationDetails());
+                Assert.That(result.ok, Is.False);
+                Assert.That(result.sessionId, Is.EqualTo(manifest.sessionId));
+                Assert.That(result.error, Is.EqualTo("CONSOLE_CAPTURE_SEGMENT_MISSING: console.001.jsonl"));
+                Assert.That(result.scanComplete, Is.False);
+                Assert.That(result.logs, Is.Empty);
+                Assert.That(result.continuationToken, Is.Null.Or.Empty);
+                Assert.That(File.ReadAllBytes(warm.indexPath), Is.EqualTo(indexBefore));
+                File.Move(backupPath, missingPath);
+                Assert.That(File.ReadAllBytes(missingPath), Is.EqualTo(expectedSegment));
+                var recovered = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload
+                    {
+                        count = 1, newestFirst = true, continuationToken = warm.continuationToken,
+                    }, CancellationToken.None,
+                });
+                Assert.That(recovered.ok, Is.True, recovered.error);
+                Assert.That(recovered.logs.Single().sequence, Is.EqualTo(127));
+            }
+            finally
+            {
+                stop.Set();
+                bool joined = mover == null || mover.Join(5000);
+                if (joined)
+                {
+                    // Worker-owned facts are read only after join, including calibration failures.
+                    TestContext.Out.WriteLine(observationDetails());
+                    if (File.Exists(backupPath) && !File.Exists(missingPath)) File.Move(backupPath, missingPath);
+                    if (Directory.Exists(directory)) Directory.Delete(directory, true);
+                    ready.Dispose();
+                    stop.Dispose();
+                }
+                Assert.That(joined, Is.True, "Worker still running: retain the owned directory instead of racing cleanup.");
+            }
+        }
+
+        [Test]
+        public void ConsoleCaptureReadPreservesSharingFailureForAnExistingSegment()
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("This fixture requires Windows file-sharing semantics.");
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-read-sharing-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(directory);
+                var file = Path.Combine(directory, "console.jsonl");
+                File.WriteAllText(file, "owned segment");
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_read_sharing", directory = directory, segmentCount = 1,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles", BindingFlags.NonPublic | BindingFlags.Static);
+                using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    var error = Assert.Throws<TargetInvocationException>(() => read.Invoke(null, new object[]
+                    {
+                        manifest, new ConsoleCaptureReadPayload(), CancellationToken.None,
+                    }));
+                    Assert.That(error.InnerException, Is.TypeOf<IOException>());
+                    Assert.That(error.InnerException.HResult & 0xffff, Is.EqualTo(32));
+                    Assert.That(File.Exists(file), Is.True);
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ConsoleCaptureReadDistinguishesEmptyFileFromMissingDirectory(bool missingDirectory)
+        {
+            var root = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var directory = Path.Combine(root, "Log", "UPilotConsole", "test-zero-read-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                if (!missingDirectory)
+                {
+                    Directory.CreateDirectory(directory);
+                    File.WriteAllBytes(Path.Combine(directory, "console.jsonl"), Array.Empty<byte>());
+                }
+                var manifest = new ConsoleCaptureManifest
+                {
+                    sessionId = "console_test_zero_read", directory = directory,
+                    segmentCount = missingDirectory ? int.MaxValue : 1, nextSequence = 0,
+                };
+                var read = typeof(UPilotConsoleCaptureService).GetMethod(
+                    "ReadCaptureFiles", BindingFlags.NonPublic | BindingFlags.Static);
+                var result = (ConsoleCaptureReadResult)read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload(), CancellationToken.None,
+                });
+                Assert.That(result.ok, Is.EqualTo(!missingDirectory));
+                Assert.That(result.scanComplete, Is.EqualTo(!missingDirectory));
+                Assert.That(result.logs, Is.Empty);
+                if (missingDirectory)
+                    Assert.That(result.error, Is.EqualTo("CONSOLE_CAPTURE_SEGMENT_MISSING: console.jsonl"));
+                using var cancelled = new CancellationTokenSource();
+                cancelled.Cancel();
+                var error = Assert.Throws<TargetInvocationException>(() => read.Invoke(null, new object[]
+                {
+                    manifest, new ConsoleCaptureReadPayload(), cancelled.Token,
+                }));
+                Assert.That(error.InnerException, Is.TypeOf<OperationCanceledException>());
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
         }
 
         [Test]
@@ -3774,6 +4385,102 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(
                 UPilotProcessOccupancyService.IsUPilotServerCommandLine("python tools/build.py"),
                 Is.False);
+        }
+
+        [TestCase("missingCreation")]
+        [TestCase("changedCreation")]
+        [TestCase("missingExecutable")]
+        [TestCase("changedExecutable")]
+        [TestCase("notTerminable")]
+        [TestCase("valid")]
+        public void OccupancyTerminationRevalidatesOwnedProcessIdentity(string identityCase)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor)
+                Assert.Ignore("Uses one owned Windows child; never stops a shared process.");
+            var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "WindowsPowerShell", "v1.0", "powershell.exe");
+            Assert.That(File.Exists(executable), Is.True, "Owned-process executable is absent.");
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = "-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 30\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            Assert.That(process, Is.Not.Null);
+            try
+            {
+                var create = typeof(UPilotProcessOccupancyService).GetMethod("GetOrCreate",
+                    BindingFlags.NonPublic | BindingFlags.Static);
+                Assert.That(create, Is.Not.Null);
+                UPilotOccupyingProcess occupant;
+                var startupBudget = System.Diagnostics.Stopwatch.StartNew();
+                do
+                {
+                    occupant = (UPilotOccupyingProcess)create.Invoke(null, new object[]
+                    {
+                        new Dictionary<int, UPilotOccupyingProcess>(), process.Id,
+                        Path.GetFileNameWithoutExtension(executable), "owned occupancy identity fixture",
+                    });
+                    if (occupant.CanTerminate || process.HasExited || startupBudget.ElapsedMilliseconds >= 5000)
+                        break;
+                    System.Threading.Thread.Sleep(20);
+                } while (true);
+                Assert.That(occupant.CanTerminate, Is.True, occupant.CannotTerminateReason);
+                process.Refresh();
+                Assert.That(occupant.CreatedAtTicks, Is.EqualTo(process.StartTime.ToUniversalTime().Ticks));
+                Assert.That(occupant.ExecutablePath, Is.EqualTo(process.MainModule.FileName));
+                if (identityCase == "missingCreation") occupant.CreatedAtTicks = 0;
+                if (identityCase == "changedCreation") occupant.CreatedAtTicks++;
+                if (identityCase == "missingExecutable") occupant.ExecutablePath = "";
+                if (identityCase == "changedExecutable") occupant.ExecutablePath += ".not-the-owned-executable";
+                if (identityCase == "notTerminable") occupant.CanTerminate = false;
+                var scan = new UPilotOccupancyScanResult();
+                scan.Processes.Add(occupant);
+                var stopped = UPilotProcessOccupancyService.TerminateAll(scan);
+                if (identityCase == "notTerminable")
+                {
+                    Assert.That(stopped.Succeeded, Is.Empty);
+                    Assert.That(stopped.Failed, Is.Empty);
+                    Assert.That(process.HasExited, Is.False);
+                }
+                else if (identityCase != "valid")
+                {
+                    Assert.That(stopped.Succeeded, Is.Empty);
+                    Assert.That(stopped.Failed.Count, Is.EqualTo(1));
+                    Assert.That(stopped.Failed.Single(), Does.Contain("拒绝结束"));
+                    Assert.That(process.HasExited, Is.False, "Identity rejection must leave the owned child alive.");
+                }
+                else
+                {
+                    Assert.That(stopped.Failed, Is.Empty);
+                    Assert.That(stopped.Succeeded.Count, Is.EqualTo(1));
+                    Assert.That(process.HasExited, Is.True, "Success requires original-process exit.");
+                }
+            }
+            finally
+            {
+                if (!process.HasExited) process.Kill();
+                Assert.That(process.WaitForExit(5000), Is.True, "Owned child must exit before completion.");
+            }
+        }
+
+        [TestCase(0)]
+        [TestCase(4)]
+        [TestCase(-1)]
+        public void OccupancyTerminationIdentityRejectsProtectedTargets(int processId)
+        {
+            using var editor = System.Diagnostics.Process.GetCurrentProcess();
+            var occupant = new UPilotOccupyingProcess
+            {
+                ProcessId = processId < 0 ? editor.Id : processId,
+                CanTerminate = true,
+                CreatedAtTicks = editor.StartTime.ToUniversalTime().Ticks,
+                ExecutablePath = editor.MainModule.FileName,
+            };
+            Assert.That(UPilotProcessOccupancyService.ValidateTerminationIdentity(occupant, editor, out var error),
+                Is.False);
+            Assert.That(error, Does.Contain("不能结束"));
         }
 
         [Test]

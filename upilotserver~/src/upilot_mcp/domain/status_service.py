@@ -28,6 +28,7 @@ from ..models import ToolResponse
 from ..console_evidence import public_console_evidence
 from ..protocol import new_id, now_ms
 from ..responses import fail, ok
+from ..source_identity import SELECTED_CODE_SCOPE, selected_entry_code_evidence
 from ..tool_registry import (
     REGISTRY,
     REGISTRY_VERSION,
@@ -341,6 +342,9 @@ class StatusDomainService:
                     "unityEditor": unity_runtime_identity,
                     "mcpServer": {
                         "processId": os.getpid(),
+                        "loadedSource": selected_entry_code_evidence() if force_fresh else {
+                            "status": "not_requested", "scope": SELECTED_CODE_SCOPE,
+                        },
                     },
                     "managedDomain": {
                         "producerEpoch": str(execution.get("producerEpoch") or ""),
@@ -355,7 +359,9 @@ class StatusDomainService:
                 ),
                 "startup": self._read_startup_summary(startup_root, process_identity),
                 "serverRestart": self._read_server_restart_summary(startup_root, session),
-                "aiServiceMaintenance": read_maintenance_summary(startup_root, session),
+                "aiServiceMaintenance": {**read_maintenance_summary(startup_root, session),
+                    "initialization": execution.get("maintenanceInitialization"),
+                    "initializationStatus": "observed" if execution.get("maintenanceInitialization") is not None else "unknown"},
                 "timeouts": self.dispatcher.timeout_policy_snapshot(),
                 "mcp": {
                     "label": self.server.mcp_label,
@@ -669,13 +675,17 @@ class StatusDomainService:
         user32.GetWindowTextW.restype = ctypes.c_int
         user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
         user32.GetClassNameW.restype = ctypes.c_int
+        user32.IsWindowEnabled.argtypes = [wintypes.HWND]
+        user32.IsWindowEnabled.restype = wintypes.BOOL
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
         windows: list[dict] = []
         def callback(hwnd, _lparam):
             owner_pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
             if owner_pid.value != pid:
                 return True
-            title_length = max(0, user32.GetWindowTextLengthW(hwnd))
+            title_length = min(512, max(0, user32.GetWindowTextLengthW(hwnd)))
             title_buffer = ctypes.create_unicode_buffer(title_length + 1)
             user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
             class_buffer = ctypes.create_unicode_buffer(256)
@@ -685,6 +695,8 @@ class StatusDomainService:
                 "title": title_buffer.value,
                 "className": class_buffer.value,
                 "visible": bool(user32.IsWindowVisible(hwnd)),
+                "enabled": bool(user32.IsWindowEnabled(hwnd)),
+                "ownerHwnd": int(user32.GetWindow(hwnd, 4) or 0),
             })
             return True
 
@@ -891,6 +903,49 @@ class StatusDomainService:
                 target,
             )
 
+    def _queued_editor_diagnostics(self, execution: dict) -> dict:
+        """Read-only, on-demand observations; never focus, close or dispatch a compile."""
+        window = {"status": "unknown", "reason": "unverified"}
+        try:
+            target = self._resolve_verified_unity_window()
+            if not target.get("ok"):
+                window["reason"] = target.get("reason", "identity_unverified")
+            else:
+                valid, reason = self._revalidate_window_target(target)
+                if not valid:
+                    window["reason"] = reason
+                else:
+                    pid, hwnd = int(target["targetPid"]), int(target["hwnd"])
+                    windows = self._enumerate_windows_for_pid(pid)
+                    main = next((item for item in windows if item["hwnd"] == hwnd), None)
+                    candidates = [item for item in windows if item.get("visible") and
+                                  item.get("ownerHwnd") == hwnd and item["hwnd"] != hwnd]
+                    valid, reason = self._revalidate_window_target(target)
+                    if not valid or main is None:
+                        window["reason"] = reason or "main_window_disappeared"
+                    else:
+                        window = {"status": "observed", "processId": pid, "mainHwnd": hwnd,
+                                  "mainWindowEnabled": main.get("enabled"),
+                                  "unityFocused": self._window_process_id(self._foreground_window()) == pid,
+                                  "possibleModalWindows": candidates[:8], "candidatesTruncated": len(candidates) > 8}
+        except Exception as exc:
+            window = {"status": "unknown", "reason": "window_query_failed", "error": str(exc)[:512]}
+        hints = []
+        if execution.get("lastMainThreadPumpAt") and (execution.get("editorPumpAgeMs") or 0) > 10000:
+            hints.append("main_thread_not_advancing")
+        elif execution.get("authoritative") and not execution.get("isStale"):
+            if execution.get("isUpdating") is True:
+                hints.append("asset_import_in_progress")
+            if execution.get("compilePhase") == "queued":
+                hints.append("queued_with_main_thread_pumping")
+        if window.get("status") == "observed":
+            if window.get("unityFocused") is False:
+                hints.append("editor_in_background")
+            if window.get("mainWindowEnabled") is False or window.get("possibleModalWindows"):
+                hints.append("possible_modal_window")
+        return {"isUpdating": execution.get("isUpdating"), "windowObservation": window,
+                "hints": hints or ["insufficient_evidence"], "causalAttribution": "unverified"}
+
     async def editor_focus_state(self) -> ToolResponse:
         """查询 Unity Editor 窗口的焦点状态（Windows 平台）。
 
@@ -926,6 +981,7 @@ class StatusDomainService:
             return ok(
                 request_id,
                 {
+                    "queuedDiagnostics": self._queued_editor_diagnostics(self.server.state.execution_state()),
                     "unityFocused": foreground_pid == int(target["targetPid"]),
                     "unityHwnd": hwnd,
                     "unityTitle": target["title"],
@@ -1174,7 +1230,18 @@ class StatusDomainService:
         active_scene = str(data.get("activeSceneName", ""))
         is_compiling = bool(data.get("isCompiling", False))
         session = self.server.session_manager.active
-        self.server.state.update_editor_state(
+        # V2 mode/compile facts belong to the ordered Unity snapshot. Resource
+        # replies (and their contexts) may race a newer event; never mix them.
+        if getattr(self.server.state, "producer_epoch", ""):
+            execution = self.server.state.execution_state()
+            return {
+                "isPlaying": execution["isPlaying"],
+                "isPaused": execution["isPaused"],
+                "playModeState": execution["playModeState"],
+                "activeScene": execution["activeScene"],
+                "isCompiling": execution["isCompiling"],
+            }
+        accepted = self.server.state.update_editor_state(
             {
                 "connected": True,
                 "isCompiling": is_compiling,
@@ -1189,6 +1256,11 @@ class StatusDomainService:
                 "processId": int(data.get("processId") or (session.process_id if session else 0)),
             }
         )
+        if not accepted:
+            execution = self.server.state.execution_state()
+            return {key: execution[key] for key in (
+                "isPlaying", "isPaused", "playModeState", "activeScene", "isCompiling"
+            )}
         return {
             "isPlaying": is_playing,
             "isPaused": is_paused,
@@ -1404,7 +1476,12 @@ class StatusDomainService:
                     state = self._update_editor_cache_from_resource_state(
                         state_result.data
                     )
-                    if state.get("playModeState") == target_state:
+                    execution = self.server.state.execution_state()
+                    if (
+                        state.get("playModeState") == target_state
+                        and execution.get("authoritative") is True
+                        and execution.get("isStale") is False
+                    ):
                         return state, state_result.context
             await asyncio.sleep(0.25)
         return None
@@ -1621,7 +1698,7 @@ class StatusDomainService:
         return await self.dispatcher.call(request_id, "keyboard.event", payload)
 
     async def editor_windows_list(
-        self, type_filter: str = "", title_filter: str = ""
+        self, type_filter: str = "", title_filter: str = "", include_native_tooltips: bool = False
     ) -> ToolResponse:
         request_id = new_id("req")
         payload: dict = {}
@@ -1629,6 +1706,8 @@ class StatusDomainService:
             payload["typeFilter"] = type_filter
         if title_filter:
             payload["titleFilter"] = title_filter
+        if include_native_tooltips:
+            payload["includeNativeTooltips"] = True
         return await self.dispatcher.call(request_id, "editor.windows.list", payload)
 
     async def editor_window_close(
@@ -2174,8 +2253,11 @@ class StatusDomainService:
         max_count: int = 0,
         run_guid: str = "",
         compile_operation_id: str = "",
+        phase: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
+        if phase and (not run_guid or compile_operation_id or phase not in {"testExecution", "cleanup", "sceneRestore"}):
+            return fail(request_id, "CONSOLE_PHASE_INVALID", "phase requires runGuid and a supported phase name.", {"dispatchAttempted": False})
         if run_guid and compile_operation_id:
             return fail(
                 request_id,
@@ -2206,6 +2288,62 @@ class StatusDomainService:
                     "No persisted Console evidence boundary exists for the requested run identity.",
                     {identity_kind: identity_value, "dispatchAttempted": False},
                 )
+            if phase:
+                phases = [p for p in evidence.get("phases", []) if isinstance(p, dict) and p.get("phase") == phase]
+                # Read only frozen callback intervals. Partial scene observations remain partial.
+                logs = []
+                gaps = []
+                remaining = max(1, min(effective_count, 5000))
+                ordered = list(reversed(phases)) if newest_first else phases
+                for boundary in ordered[:32]:
+                    reason = str(boundary.get("gapReason") or "")
+                    if not boundary.get("endedAt") or reason == "capture_switch_reload_or_cursor_reset":
+                        gaps.append(reason or "phase_boundary_not_closed")
+                        continue
+                    if boundary.get("source") == "consoleDelta":
+                        records = boundary.get("logs") or []
+                        logs.extend(reversed(records) if newest_first else records)
+                    elif boundary.get("source") == "persistentCapture" and boundary.get("captureSessionId"):
+                        lo, hi = int(boundary.get("startSequence", 0)), int(boundary.get("endSequence", -1))
+                        if hi >= lo and remaining > 0:
+                            part = await self.console_capture_read(
+                                session_id=boundary["captureSessionId"], from_sequence=lo, to_sequence=hi,
+                                count=remaining, log_type=log_type, include_stack_trace=include_stack_trace,
+                                contains=list(contains or []) + ([query] if query else []) or None,
+                                contains_all=contains_all, regex=regex, newest_first=newest_first)
+                            if not part.ok or (part.data or {}).get("ok") is False:
+                                gaps.append("phase_capture_read_failed")
+                                continue
+                            read_data = part.data or {}
+                            # A frozen sequence boundary can extend beyond the disk snapshot.
+                            # Missing observations stay unknown; do not wait, flush or widen the range.
+                            disk_next = read_data.get("diskSnapshotNextSequence")
+                            if disk_next is None:
+                                gaps.append("phase_disk_coverage_unverified")
+                            elif int(disk_next) <= hi:
+                                gaps.append("phase_records_not_flushed")
+                            if read_data.get("scanComplete") is not True:
+                                gaps.append("phase_scan_incomplete_or_unverified")
+                            if (evidence.get("source") == "persistentCapture"
+                                    and evidence.get("captureSessionId") == boundary["captureSessionId"]
+                                    and evidence.get("coverage") != "complete"):
+                                gaps.append(evidence.get("gapReason") or "capture_coverage_unverified")
+                            records = read_data.get("logs", read_data.get("records", []))
+                            logs.extend(records)
+                            remaining -= len(records)
+                            if (part.data or {}).get("continuationToken") or (part.data or {}).get("truncated"):
+                                gaps.append("phase_result_truncated")
+                        elif hi >= lo:
+                            gaps.append("phase_result_truncated")
+                    else:
+                        gaps.append("phase_source_unavailable")
+                    if boundary.get("coverage") != "complete":
+                        gaps.append(reason or "phase_coverage_unverified")
+                    if reason: gaps.append(reason)
+                if len(phases) > 32: gaps.append("phase_range_limit_32")
+                if not phases: gaps.append("phase_boundary_missing")
+                evidence = {**evidence, "source": "phaseRecords", "logs": logs, "phases": phases,
+                            "coverage": "partial" if gaps else "complete", "gapReason": ";".join(dict.fromkeys(gaps))}
             if evidence.get("source") == "persistentCapture":
                 requested_contains = list(contains or [])
                 if query:
@@ -2247,7 +2385,7 @@ class StatusDomainService:
                         return False
                 return True
             filtered = [item for item in logs if matches(item)]
-            if newest_first:
+            if newest_first and not phase:
                 filtered.reverse()
             return ok(request_id, {
                 "logs": [project_record(item) for item in filtered[:max(1, min(effective_count, 5000))]],

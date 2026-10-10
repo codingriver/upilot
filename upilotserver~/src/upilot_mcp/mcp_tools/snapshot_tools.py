@@ -135,7 +135,7 @@ async def unity_camera_list():
     return _log_tool_result("unity_camera_list", _payload(result))
 
 
-@mcp.tool(description="启动统一 Unity Snapshot 作业。支持多目标同帧采集、严格像素来源策略和项目内证据落盘；waitMs 只控制本次等待窗口，不是作业超时。")
+@mcp.tool(description="启动统一 Unity Snapshot 作业。支持多目标同帧采集、严格像素来源策略和项目内证据落盘；waitMs 只控制本次等待窗口，不是作业超时。kind=tooltip 仅支持 Windows 已显示的原生 Tooltip，要求精确 instanceId+domainGeneration，仅 color/原生尺寸，不悬停或创建提示。")
 async def unity_snapshot_capture(
     targets: list[_SnapshotTargetInput],
     channels: list[StrictStr] | None = None,

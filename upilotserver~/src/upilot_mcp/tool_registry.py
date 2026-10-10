@@ -15,15 +15,15 @@ from .config import CONFIG, refresh_config_if_changed
 
 ToolHandler = Callable[..., Awaitable[ToolResponse]]
 WriteAccessPredicate = Callable[[dict[str, Any]], bool]
-REGISTRY_VERSION = 8
+REGISTRY_VERSION = 9
 _PUBLIC_TOOL_HANDLERS: dict[str, Any] = {}
 
-# Fixed product suspension, not a configurable feature flag or a Flow capability.
+# Official Step plans are enabled; arbitrary callback Operations and Task wrappers remain suspended.
 GENERIC_ORCHESTRATION_DISABLED = "GENERIC_ORCHESTRATION_DISABLED"
-GENERIC_ORCHESTRATION_REASON = "通用编排新启动已暂停"
+GENERIC_ORCHESTRATION_REASON = "仅允许 UPilot 正式 Step 计划；旧通用回调编排及 Task 包装入口仍暂停"
 GENERIC_ORCHESTRATION_NEXT_ACTION = (
-    "Use the dedicated test, acceptance, compile, Capture, Snapshot or build tool. "
-    "Existing operations remain observable; do not wrap or replay a new generic start."
+    "Submit jobSpec.stepPlan through unity_operation_validate/start. "
+    "Do not use handwritten callbacks or Task wrappers; standalone jobs use dedicated tools."
 )
 _PAUSED_ORCHESTRATION_METHODS = frozenset({"operation_start", "operation_validate"})
 
@@ -36,17 +36,20 @@ def generic_orchestration_disabled(request_id: str) -> ToolResponse:
 def disabled_orchestration_target(public_name: str, args: dict | None = None) -> bool:
     """Resolve only known structured wrappers. Never inspect user code or invoke it."""
     seen: set[int] = set()
+    task_wrapper = False
     while True:
         descriptor = REGISTRY.resolve(public_name) if isinstance(public_name, str) else None
         if descriptor is None:
             return False
         if descriptor.facade_method in _PAUSED_ORCHESTRATION_METHODS:
-            return True
+            job = args.get("jobSpec", args.get("job_spec")) if isinstance(args, dict) else None
+            return task_wrapper or not isinstance(job, dict) or "stepPlan" not in job
         if descriptor.facade_method not in {"tool_call", "task_start", "task_execute"} or not isinstance(args, dict):
             return False
         if id(args) in seen:
             return False
         seen.add(id(args))
+        task_wrapper |= descriptor.facade_method in {"task_start", "task_execute"}
         public_name = args.get("toolName", args.get("tool_name"))
         args = args.get("args") if descriptor.facade_method == "tool_call" else args.get("toolArgs", args.get("tool_args"))
 
@@ -126,11 +129,6 @@ class ToolRegistry:
             if not available and item.feature == "flow":
                 unavailable_reason = "FEATURE_DISABLED"
                 next_action = "Enable UPilot Flow in project configuration, then restart the MCP client."
-
-            if item.facade_method in _PAUSED_ORCHESTRATION_METHODS:
-                available = callable_now = False
-                unavailable_reason = GENERIC_ORCHESTRATION_REASON
-                next_action = GENERIC_ORCHESTRATION_NEXT_ACTION
 
             if available and item.requires_unity_connection:
                 connected_now = bool(connected)
@@ -263,6 +261,9 @@ def register_public_tool(
     capability_requirements: tuple[str, ...] = (),
     aliases: tuple[str, ...] = (),
 ) -> None:
+    if name == "unity_operation_start":
+        # Reopened Step admission starts work exactly once and is never retryable.
+        destructive, idempotent, requires_write_access = True, False, True
     if required_editor_mode == "any":
         # Metadata is advisory to clients; the execution coordinator remains the
         # authoritative enforcement point. Tests own their temporary runtime.

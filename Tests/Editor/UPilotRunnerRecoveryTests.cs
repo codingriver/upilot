@@ -497,24 +497,55 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(JsonUtility.ToJson(snapshot), Is.EqualTo(before));
         }
 
-        private interface CallbackShape { void RunStarted(object test); }
+        private interface CallbackShape
+        {
+            void RunStarted(object test);
+            void TestStarted(object test);
+            void TestFinished(object result);
+            void RunFinished(object result);
+        }
 
-        [TestCase(true)]
-        [TestCase(false)]
-        public void CallbackFromAnotherRunOrDomainIsIgnored(bool wrongDomain)
+        private sealed class RejectedCallbackArgument
+        {
+            public int Reads;
+            public bool IsSuite { get { Reads++; return false; } }
+            public string UniqueName { get { Reads++; return "rejected-callback"; } }
+            public object Test { get { Reads++; return this; } }
+            public object[] Children { get { Reads++; return Array.Empty<object>(); } }
+        }
+
+        [TestCase(true, "RunStarted")]
+        [TestCase(false, "RunStarted")]
+        [TestCase(true, "TestStarted")]
+        [TestCase(false, "TestStarted")]
+        [TestCase(true, "TestFinished")]
+        [TestCase(false, "TestFinished")]
+        [TestCase(true, "RunFinished")]
+        [TestCase(false, "RunFinished")]
+        public void CallbackFromAnotherRunOrDomainIsIgnored(bool wrongDomain, string method)
         {
             var owner = UPilotTestService.Instance;
+            if (owner?.IsRunning != true)
+                Assert.Ignore("Requires an UPilot-started run to verify live callback isolation.");
             string before = JsonUtility.ToJson(owner.GetStatusSnapshot());
+            var resultsField = typeof(UPilotTestService).GetField("_lastResults",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            string resultsBefore = JsonUtility.ToJson(resultsField.GetValue(owner));
             var active = owner.GetStatusSnapshot().runGuid;
+            Assert.That(active, Is.Not.Null.And.Not.Empty);
             var domain = (string)typeof(UPilotTestService).GetField("CallbackDomain",
                 BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
             var proxy = new UPilotTestService.TestCallbackProxy();
             proxy.Initialize(owner, wrongDomain ? active : Guid.NewGuid().ToString(),
                 wrongDomain ? "expired-domain" : domain);
+            var argument = new RejectedCallbackArgument();
             typeof(UPilotTestService.TestCallbackProxy).GetMethod("Invoke",
                 BindingFlags.NonPublic | BindingFlags.Instance).Invoke(proxy,
-                new object[] { typeof(CallbackShape).GetMethod("RunStarted"), new object[] { null } });
+                new object[] { typeof(CallbackShape).GetMethod(method), new object[] { argument } });
+            Assert.That(argument.Reads, Is.Zero, "Reject identity before inspecting callback payload.");
             Assert.That(JsonUtility.ToJson(owner.GetStatusSnapshot()), Is.EqualTo(before));
+            Assert.That(JsonUtility.ToJson(resultsField.GetValue(owner)), Is.EqualTo(resultsBefore),
+                "Rejected callbacks must not change leaf history, events, or diagnostics.");
         }
 
         [Test]
@@ -1225,20 +1256,51 @@ namespace CodingRiver.UPilot.Tests
             finally { DetachCleanup(service); }
         }
 
-        [Test]
-        public void ReloadWithDurableReleaseUsesOriginalDeadlineAndDoesNotReleaseAgain()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ResultReloadProbeRejectsUnownedOrNonDedicatedRunWithoutSideEffects(bool foreignRun)
         {
+            var before = UPilotTestService.Instance.GetStatusSnapshot();
+            string frozen = JsonUtility.ToJson(before);
+            Assert.Throws<InvalidOperationException>(() => UPilotResultReloadProbe.Arm(
+                foreignRun ? Guid.NewGuid().ToString() : before.runGuid));
+            Assert.That(JsonUtility.ToJson(UPilotTestService.Instance.GetStatusSnapshot()), Is.EqualTo(frozen));
+            foreach (string field in new[] { "_callback", "_cancelCallback" })
+                Assert.That(typeof(UPilotResultReloadProbe).GetField(field,
+                    BindingFlags.NonPublic | BindingFlags.Static).GetValue(null), Is.Null, field);
+        }
+
+        [TestCase("completed")]
+        [TestCase("failed")]
+        [TestCase("aborted")] // Current cancellation outcome; legacy "cancelled" remains a preservation case.
+        [TestCase("cancelled")]
+        public void ReloadWithDurableReleaseUsesOriginalDeadlineAndDoesNotReleaseAgain(string outcome)
+        {
+            bool cancelled = outcome == "aborted" || outcome == "cancelled";
             long deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
-            var snapshot = new TestRunResultPayload { runGuid = "reload-released", serviceLifecycleId = UPilotServiceLifetime.Id,
+            var persisted = new TestRunResultPayload { runGuid = "reload-released-" + outcome,
+                serviceLifecycleId = UPilotServiceLifetime.Id,
                 status = "cleanup", phase = "cleanup", cleanupPending = true, cleanupResourcesReleased = true,
-                cleanupAttemptDeadlineAt = deadline, resultAuthoritative = true, outcomeStatus = "completed" };
+                cleanupAttemptDeadlineAt = deadline, resultAuthoritative = true, outcomeStatus = outcome,
+                cancelRequested = cancelled, cancelAttemptCount = cancelled ? 1 : 0,
+                total = 1, failed = outcome == "failed" ? 1 : 0,
+                passed = outcome == "completed" ? 1 : 0, skipped = cancelled ? 1 : 0,
+                results = new List<TestResultItemPayload> { new TestResultItemPayload {
+                    testName = "owned-leaf", testStatus = outcome == "failed" ? "Failed"
+                        : outcome == "completed" ? "Passed" : "Skipped" } } };
+            // Exercise the persisted representation, not retained references from the original service.
+            var snapshot = JsonUtility.FromJson<TestRunResultPayload>(JsonUtility.ToJson(persisted));
             var service = DetachedService(snapshot);
+            int saves = 0;
             ProbeWithoutCancelApi.m_testJobDataHolder.Active = false;
             service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(ProbeWithoutCancelApi));
-            service.SnapshotSaverForTests = (_, active, clear) =>
+            service.SnapshotSaverForTests = (candidate, active, clear) =>
             {
+                saves++;
                 Assert.That(active, Is.False);
                 Assert.That(clear, Is.True);
+                Assert.That(candidate.status, Is.EqualTo(outcome));
+                Assert.That(candidate.terminal && candidate.cleanupSucceeded, Is.True);
             };
             service.ApiDestroyerForTests = _ => Assert.Fail("The original domain already released its API.");
             try
@@ -1248,11 +1310,99 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
                 InvokeCleanup(service);
                 var result = service.GetStatusSnapshot();
-                Assert.That(result.status, Is.EqualTo("completed"));
-                Assert.That(result.terminal, Is.True);
-                Assert.That(result.cleanupSucceeded, Is.True);
-                Assert.That(result.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
-                Assert.That(result.cancelAttemptCount, Is.Zero);
+                foreach (var projection in new[] { result, UPilotTestService.CreateStatusSummary(result),
+                    UPilotTestService.CreateIncrementalResult(result, 0, 1) })
+                {
+                    Assert.That(projection.runGuid, Is.EqualTo(persisted.runGuid));
+                    Assert.That(projection.status, Is.EqualTo(outcome));
+                    Assert.That(projection.phase, Is.EqualTo(outcome));
+                    Assert.That(projection.outcomeStatus, Is.EqualTo(outcome));
+                    Assert.That(projection.terminal && projection.resultAuthoritative, Is.True);
+                    Assert.That(projection.cleanupSucceeded && projection.cleanupResourcesReleased, Is.True);
+                    Assert.That(projection.cleanupPending || projection.isRunning, Is.False);
+                    Assert.That(projection.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                    Assert.That(projection.cancelRequested, Is.EqualTo(persisted.cancelRequested));
+                    Assert.That(projection.cancelAttemptCount, Is.EqualTo(persisted.cancelAttemptCount));
+                    Assert.That(projection.failed, Is.EqualTo(persisted.failed));
+                    Assert.That(projection.unresolvedResources, Is.Empty);
+                }
+                Assert.That(result.results, Has.Count.EqualTo(1));
+                string frozen = JsonUtility.ToJson(result);
+                for (int i = 0; i < 3; i++)
+                {
+                    InvokeRunFinished(service);
+                    service.CancelActiveRun(result.runGuid);
+                    InvokeCleanup(service);
+                    RecoverLoaded(service, true); // A stale active pointer cannot resurrect the completed task.
+                    Assert.That(JsonUtility.ToJson(service.GetStatusSnapshot()), Is.EqualTo(frozen));
+                }
+                Assert.That(saves, Is.EqualTo(1));
+                Assert.That(service.IsRunning, Is.False);
+                Assert.That(GetField(service, "_activeRunGuid"), Is.Null);
+                Assert.That(GetField(service, "_cleanupScheduled"), Is.False);
+                Assert.That(GetField(service, "_activeApi"), Is.Null);
+                Assert.That(GetField(service, "_activeCallback"), Is.Null);
+            }
+            finally { DetachCleanup(service); }
+        }
+
+        [TestCase("pending", true)]
+        [TestCase("unknown", true)]
+        [TestCase("completed", false)]
+        [TestCase("cancelled", false)]
+        public void ReloadWithDurableReleaseCannotInventAuthoritativeOutcome(string outcome, bool authoritative)
+        {
+            long deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
+            var persisted = new TestRunResultPayload { runGuid = "reload-unknown-" + outcome,
+                serviceLifecycleId = UPilotServiceLifetime.Id, status = "cleanup", phase = "cleanup",
+                cleanupPending = true, cleanupResourcesReleased = true, cleanupAttemptDeadlineAt = deadline,
+                resultAuthoritative = authoritative, outcomeStatus = outcome, cancelRequested = true,
+                cancelAttemptCount = 1 };
+            var snapshot = JsonUtility.FromJson<TestRunResultPayload>(JsonUtility.ToJson(persisted));
+            var service = DetachedService(snapshot);
+            int saves = 0;
+            ProbeWithoutCancelApi.m_testJobDataHolder.Active = false;
+            service.RunnerAdapterResolverForTests = _ => UPilotTestRunnerAdapter.Get(typeof(ProbeWithoutCancelApi));
+            service.ApiDestroyerForTests = _ => Assert.Fail("Durable release is not permission to create replacement resources.");
+            service.SnapshotSaverForTests = (candidate, active, clear) =>
+            {
+                saves++;
+                Assert.That(active, Is.False);
+                Assert.That(clear, Is.True);
+                Assert.That(candidate.status, Is.EqualTo("aborted"));
+                Assert.That(candidate.cleanupSucceeded, Is.False);
+            };
+            try
+            {
+                RecoverLoaded(service, true);
+                InvokeCleanup(service);
+                var result = service.GetStatusSnapshot();
+                foreach (var projection in new[] { result, UPilotTestService.CreateStatusSummary(result),
+                    UPilotTestService.CreateIncrementalResult(result, 0, 1) })
+                {
+                    Assert.That(projection.status, Is.EqualTo("aborted"));
+                    Assert.That(projection.terminal, Is.True);
+                    Assert.That(projection.cleanupSucceeded || projection.cleanupPending || projection.isRunning, Is.False);
+                    Assert.That(projection.cleanupResourcesReleased, Is.True);
+                    Assert.That(projection.outcomeStatus, Is.EqualTo(outcome));
+                    Assert.That(projection.resultAuthoritative, Is.EqualTo(authoritative));
+                    Assert.That(projection.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                    Assert.That(projection.cancelAttemptCount, Is.EqualTo(1));
+                    Assert.That(projection.terminalReason, Does.Contain("business outcome remains unknown"));
+                }
+                string frozen = JsonUtility.ToJson(result);
+                for (int i = 0; i < 3; i++)
+                {
+                    InvokeRunFinished(service);
+                    service.CancelActiveRun(result.runGuid);
+                    InvokeCleanup(service);
+                    RecoverLoaded(service, true);
+                    Assert.That(JsonUtility.ToJson(service.GetStatusSnapshot()), Is.EqualTo(frozen));
+                }
+                Assert.That(saves, Is.EqualTo(1));
+                Assert.That(GetField(service, "_activeApi"), Is.Null);
+                Assert.That(GetField(service, "_activeCallback"), Is.Null);
+                Assert.That(GetField(service, "_cleanupScheduled"), Is.False);
             }
             finally { DetachCleanup(service); }
         }
@@ -1448,6 +1598,13 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(6 * 7, Is.EqualTo(42));
         }
 
+        [Test, Explicit("Cancel only this run at its public result callback, then Reload after durable release.")]
+        public void CancelAtResultBoundaryBeforeReload()
+        {
+            UPilotResultReloadProbe.Arm(UPilotTestService.Instance.GetStatusSnapshot().runGuid);
+            Assert.That(6 * 7, Is.EqualTo(42));
+        }
+
         [Test, Explicit("Expected failure detail must survive immediate post-result Reload.")]
         public void FailImmediatelyBeforeReload()
         {
@@ -1459,6 +1616,7 @@ namespace CodingRiver.UPilot.Tests
     public static class UPilotResultReloadProbe
     {
         private static object _callback;
+        private static object _cancelCallback;
         private static Type _callbacksType;
         private static Type _apiType;
         private static string _directory;
@@ -1480,6 +1638,10 @@ namespace CodingRiver.UPilot.Tests
             public int foreignCallbacks;
             public bool callbacksPreservedResult;
             public bool observerReleased;
+            public bool cancelAtResult;
+            public int cancelCallbacks;
+            public TestRunResultPayload cancelBefore;
+            public TestRunResultPayload cancelAfter;
             public TestRunResultPayload persistedResult;
             public TestRunResultPayload beforeReload;
             public string error = "";
@@ -1493,12 +1655,13 @@ namespace CodingRiver.UPilot.Tests
                 throw new InvalidOperationException("Result Reload probe requires an exact authorized project.");
             var status = UPilotTestService.Instance.GetStatusSnapshot();
             if (!Guid.TryParse(runGuid, out _) || status?.runGuid != runGuid || !status.isRunning
-                || status.resultAuthoritative || _callback != null)
+                || status.resultAuthoritative || _callback != null || _cancelCallback != null)
                 throw new InvalidOperationException("Result Reload probe requires the exact active run.");
             string prefix = typeof(UPilotRunnerReloadAcceptance).FullName + ".";
             if (status.selectedLeafIdentities.Length != 1
                 || (status.currentTest != prefix + "PassImmediatelyBeforeReload"
-                    && status.currentTest != prefix + "FailImmediatelyBeforeReload"))
+                    && status.currentTest != prefix + "FailImmediatelyBeforeReload"
+                    && status.currentTest != prefix + "CancelAtResultBoundaryBeforeReload"))
                 throw new InvalidOperationException("Result Reload probe requires one exact dedicated test.");
             _apiType = AppDomain.CurrentDomain.GetAssemblies()
                 .Select(assembly => assembly.GetType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi"))
@@ -1513,6 +1676,7 @@ namespace CodingRiver.UPilot.Tests
             _witness = new ResultWitness
             {
                 runGuid = runGuid, projectPath = project, testName = status.currentTest, domain = status.callbackDomain,
+                cancelAtResult = status.currentTest == prefix + "CancelAtResultBoundaryBeforeReload",
             };
             try
             {
@@ -1523,6 +1687,12 @@ namespace CodingRiver.UPilot.Tests
                     writer.Write(JsonUtility.ToJson(_witness));
                     writer.Flush();
                     stream.Flush(true);
+                }
+                if (_witness.cancelAtResult)
+                {
+                    _cancelCallback = create.MakeGenericMethod(_callbacksType, typeof(CancelCallback)).Invoke(null, null);
+                    // Public callback priority: record official cancellation before UPilot's priority-0 result callback.
+                    register.MakeGenericMethod(_callbacksType).Invoke(null, new[] { _cancelCallback, (object)100 });
                 }
                 register.MakeGenericMethod(_callbacksType).Invoke(null, new[] { _callback, (object)(-100) });
                 _deadline = EditorApplication.timeSinceStartup + 30;
@@ -1535,11 +1705,43 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        public class CancelCallback : DispatchProxy
+        {
+            protected override object Invoke(MethodInfo method, object[] args)
+            {
+                if (method.Name != "RunFinished" || _witness == null || !_witness.cancelAtResult
+                    || _witness.cancelCallbacks != 0 || !string.IsNullOrEmpty(_witness.error)) return null;
+                var service = UPilotTestService.Instance;
+                var status = service.GetStatusSnapshot();
+                if (status?.runGuid != _witness.runGuid || status.callbackDomain != _witness.domain) return null;
+                try
+                {
+                    _witness.cancelCallbacks++;
+                    _witness.cancelBefore = JsonUtility.FromJson<TestRunResultPayload>(JsonUtility.ToJson(status));
+                    if (status.resultAuthoritative || status.terminal || !status.isRunning)
+                        throw new InvalidOperationException("Cancellation boundary is no longer active and pre-result.");
+                    _witness.cancelAfter = JsonUtility.FromJson<TestRunResultPayload>(
+                        JsonUtility.ToJson(service.CancelActiveRun(_witness.runGuid)));
+                    SaveWitness("cancel-observed.json");
+                    if (!_witness.cancelAfter.cancelAccepted || _witness.cancelAfter.cancelAttemptCount != 1)
+                        throw new InvalidOperationException("Official cancellation was not accepted exactly once.");
+                }
+                catch (Exception ex)
+                {
+                    _witness.error = ex.ToString();
+                    ReleaseObserver();
+                    EditorApplication.update -= CheckDeadline;
+                    SaveWitness("probe-error.json");
+                }
+                return null;
+            }
+        }
+
         public class ResultCallback : DispatchProxy
         {
             protected override object Invoke(MethodInfo method, object[] args)
             {
-                if (method.Name != "RunFinished") return null;
+                if (method.Name != "RunFinished" || _witness == null || !string.IsNullOrEmpty(_witness.error)) return null;
                 var service = UPilotTestService.Instance;
                 var status = service.GetStatusSnapshot();
                 if (status?.runGuid != _witness?.runGuid || status.callbackDomain != _witness.domain) return null;
@@ -1552,6 +1754,11 @@ namespace CodingRiver.UPilot.Tests
                     if (!_witness.persistedResult.resultAuthoritative || _witness.persistedResult.total != 1
                         || _witness.persistedResult.runGuid != _witness.runGuid || !string.IsNullOrEmpty(status.persistenceError))
                         throw new InvalidOperationException("RunFinished did not persist an authoritative matching result.");
+                    if (_witness.cancelAtResult && (_witness.cancelCallbacks != 1
+                        || !_witness.persistedResult.cancelAccepted || _witness.persistedResult.cancelAttemptCount != 1
+                        || _witness.persistedResult.outcomeStatus != "aborted"
+                        || !_witness.persistedResult.cleanupResourcesReleased || _witness.persistedResult.terminal))
+                        throw new InvalidOperationException("Cancelled outcome and original resource release were not durably recorded before Reload.");
 
                     string before = JsonUtility.ToJson(status);
                     var invoke = typeof(UPilotTestService.TestCallbackProxy).GetMethod("Invoke",
@@ -1592,12 +1799,21 @@ namespace CodingRiver.UPilot.Tests
 
         private static void ReleaseObserver()
         {
-            if (_callback == null) return;
-            // This observer uses static RegisterTestCallback, not a service-owned instance.
-            _apiType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+            if (_callback == null && _cancelCallback == null) return;
+            // Remove only these two public observers, never service-owned or foreign callbacks.
+            var unregister = _apiType.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .Single(method => method.Name == "UnregisterTestCallback" && method.IsGenericMethodDefinition)
-                .MakeGenericMethod(_callbacksType).Invoke(null, new[] { _callback });
-            _callback = null;
+                .MakeGenericMethod(_callbacksType);
+            if (_cancelCallback != null)
+            {
+                unregister.Invoke(null, new[] { _cancelCallback });
+                _cancelCallback = null;
+            }
+            if (_callback != null)
+            {
+                unregister.Invoke(null, new[] { _callback });
+                _callback = null;
+            }
             _witness.observerReleased = true;
         }
 

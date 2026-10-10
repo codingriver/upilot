@@ -20,6 +20,22 @@ namespace CodingRiver.UPilot.Tests
             _journal = new ServiceMaintenanceJournal(_path, () => _now);
         }
 
+        [Test]
+        public void InitializationProjectionDoesNotLoadJournalOrRecover()
+        {
+            WithIsolatedRecovery((type, flags) =>
+            {
+                type.GetField("_journal", flags).SetValue(null, null);
+                type.GetField("_recoveryChecked", flags).SetValue(null, false);
+                type.GetField("_recoveryCheckedAt", flags).SetValue(null, 0L);
+                var value = UPilotServiceMaintenance.Initialization;
+                Assert.That(value.recoveryChecked, Is.False);
+                Assert.That(value.checkedAt, Is.Zero);
+                Assert.That(type.GetField("_journal", flags).GetValue(null), Is.Null);
+                Assert.That(File.Exists(_path), Is.False);
+            });
+        }
+
         [TearDown]
         public void TearDown()
         {
@@ -33,7 +49,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotServiceMaintenance.IsActive, Is.False, "Do not isolate an active maintenance request.");
             var type = typeof(UPilotServiceMaintenance);
             const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
-            var names = new[] { "_journal", "_recoveryChecked", "_storageError" };
+            var names = new[] { "_journal", "_recoveryChecked", "_storageError", "_recoveryCheckedAt" };
             var previous = new object[names.Length];
             for (var i = 0; i < names.Length; i++) previous[i] = type.GetField(names[i], flags).GetValue(null);
             try
@@ -89,9 +105,56 @@ namespace CodingRiver.UPilot.Tests
                 type.GetMethod("Update", flags).Invoke(null, null);
                 Assert.That(type.GetField("_recoveryChecked", flags).GetValue(null), Is.True);
                 Assert.That(UPilotServiceMaintenance.StorageError, Is.Not.Empty);
+                var initialization = UPilotServiceMaintenance.Initialization;
+                Assert.That(initialization.recoveryChecked, Is.True);
+                Assert.That(initialization.checkedAt, Is.GreaterThan(0));
+                Assert.That(initialization.storageError, Is.Not.Empty);
+                Assert.That(initialization.source, Is.EqualTo("unity-maintenance-initialization"));
                 Assert.That(File.ReadAllText(_path), Is.EqualTo("{"));
                 Assert.That(Assert.Throws<ServiceMaintenanceException>(() =>
                     _journal.Accept(Request(), 120, 456, null)).Code, Is.EqualTo("SERVICE_RESTART_RECOVERY_REQUIRED"));
+            });
+        }
+
+        [Test]
+        public void InitializationReportsIsolatedJournalReadFailureWithoutWriting()
+        {
+            Directory.CreateDirectory(_root);
+            File.WriteAllText(_path, "isolated read failure fixture");
+            var original = File.ReadAllBytes(_path);
+            using (var held = new FileStream(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                _journal = new ServiceMaintenanceJournal(_path, () => _now);
+                Assert.That(_journal.LoadError, Is.Not.Empty, "The isolated file lock must cause a real read failure.");
+                WithIsolatedRecovery((type, flags) =>
+                {
+                    type.GetField("_recoveryCheckedAt", flags).SetValue(null, 0L);
+                    var before = UPilotServiceMaintenance.Initialization;
+                    Assert.That(before.recoveryChecked, Is.False);
+                    Assert.That(before.checkedAt, Is.Zero);
+                    Assert.That(before.storageError, Is.Not.Empty);
+                    type.GetMethod("Update", flags).Invoke(null, null);
+                    var after = UPilotServiceMaintenance.Initialization;
+                    Assert.That(after.recoveryChecked, Is.True);
+                    Assert.That(after.checkedAt, Is.GreaterThan(0));
+                    Assert.That(after.storageError, Is.EqualTo(before.storageError));
+                    Assert.That(_journal.Current, Is.Null, "No maintenance request may be created.");
+                });
+            }
+            Assert.That(File.ReadAllBytes(_path), Is.EqualTo(original));
+        }
+
+        [Test]
+        public void InitializationBoundsErrorWithoutChangingStoredDiagnostic()
+        {
+            WithIsolatedRecovery((type, flags) =>
+            {
+                var message = new string('x', 700);
+                type.GetField("_storageError", flags).SetValue(null, message);
+                var value = UPilotServiceMaintenance.Initialization;
+                Assert.That(value.storageError, Is.EqualTo(message.Substring(0, 512)));
+                Assert.That(type.GetField("_storageError", flags).GetValue(null), Is.EqualTo(message));
+                Assert.That(File.Exists(_path), Is.False);
             });
         }
 

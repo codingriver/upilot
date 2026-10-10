@@ -91,7 +91,7 @@ namespace CodingRiver.UPilot
 
         /// <summary>
         /// Injects a mouse event into the specified editor window.
-        /// Auto-routes to UIToolkit synthetic events when the window has a rootVisualElement.
+        /// Chooses one route from the actual panel hit; dispatch is not business-effect verification.
         /// Must be called from the main thread.
         /// </summary>
         public GenericOkPayload HandleMouseEvent(MouseEventPayload payload)
@@ -170,16 +170,27 @@ namespace CodingRiver.UPilot
 
             var mods = ParseModifiers(payload.modifiers);
 
-            // Auto-route: if window has UIToolkit rootVisualElement, use synthetic UIToolkit events
-            if (!imguiMatched && uiRoot != null && uiRoot.childCount > 0)
+            // Resolve before dispatch. Merely having a visual tree does not identify the hit.
+            var pickedElement = uiRoot?.panel?.Pick(pos);
+            bool pickedIMGUI = false;
+            for (var ancestor = pickedElement; ancestor != null; ancestor = ancestor.parent)
+                if (ancestor is IMGUIContainer) { pickedIMGUI = true; break; }
+            evidence.position = pos;
+            evidence.hitVerified = matchedElement != null || imguiMatched || pickedElement != null;
+            evidence.hitType = pickedElement?.GetType().FullName ?? (imguiMatched ? "registered-imgui-control" : "unknown");
+            evidence.hitName = pickedElement?.name ?? evidence.text ?? "";
+            evidence.eventConsumption = "unobserved";
+            if (pickedElement != null && !imguiMatched) evidence.enabled = pickedElement.enabledInHierarchy;
+            if (!imguiMatched && !pickedIMGUI && pickedElement != null)
             {
-                var sent = SendUIToolkitMouseEvent(matchedElement ?? uiRoot, payload.action, pos, button, mods, payload.scrollDeltaX, payload.scrollDeltaY);
-                if (sent)
-                {
-                    evidence.dispatched = true;
-                    return new GenericOkPayload { ok = true, state = $"{payload.action}:{payload.targetWindow}:uitoolkit", input = evidence };
-                }
+                evidence.dispatchRoute = "uitoolkit";
+                if (!pickedElement.enabledInHierarchy)
+                    return new GenericOkPayload { ok = false, state = "ELEMENT_NOT_INTERACTABLE", input = evidence };
+                var sent = SendUIToolkitMouseEvent(matchedElement ?? pickedElement, payload.action, pos, button, mods, payload.scrollDeltaX, payload.scrollDeltaY);
+                evidence.dispatched = sent;
+                return new GenericOkPayload { ok = sent, state = sent ? $"{payload.action}:{payload.targetWindow}:uitoolkit" : $"unknown_action:{payload.action}", input = evidence };
             }
+            evidence.dispatchRoute = "imgui";
 
             // Fallback: IMGUI SendEvent
             switch (payload.action)
@@ -224,29 +235,29 @@ namespace CodingRiver.UPilot
             {
                 case "down":
                     imguiBase.type = EventType.MouseDown;
-                    using (var evt = MouseDownEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
+                    using (var evt = PointerDownEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
                     return true;
                 case "up":
                     imguiBase.type = EventType.MouseUp;
-                    using (var evt = MouseUpEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
+                    using (var evt = PointerUpEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
                     return true;
                 case "drag":
                 case "move":
                     imguiBase.type = EventType.MouseMove;
-                    using (var evt = MouseMoveEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
+                    using (var evt = PointerMoveEvent.GetPooled(imguiBase)) { root.SendEvent(evt); }
                     return true;
                 case "click":
                     imguiBase.type = EventType.MouseDown;
-                    using (var down = MouseDownEvent.GetPooled(imguiBase)) { root.SendEvent(down); }
+                    using (var down = PointerDownEvent.GetPooled(imguiBase)) { root.SendEvent(down); }
                     imguiBase.type = EventType.MouseUp;
-                    using (var up = MouseUpEvent.GetPooled(imguiBase)) { root.SendEvent(up); }
+                    using (var up = PointerUpEvent.GetPooled(imguiBase)) { root.SendEvent(up); }
                     return true;
                 case "doubleclick":
                     imguiBase.type = EventType.MouseDown;
                     imguiBase.clickCount = 2;
-                    using (var down = MouseDownEvent.GetPooled(imguiBase)) { root.SendEvent(down); }
+                    using (var down = PointerDownEvent.GetPooled(imguiBase)) { root.SendEvent(down); }
                     imguiBase.type = EventType.MouseUp;
-                    using (var up = MouseUpEvent.GetPooled(imguiBase)) { root.SendEvent(up); }
+                    using (var up = PointerUpEvent.GetPooled(imguiBase)) { root.SendEvent(up); }
                     return true;
                 case "scroll":
                     imguiBase.type = EventType.ScrollWheel;

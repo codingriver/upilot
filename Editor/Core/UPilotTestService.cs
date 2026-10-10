@@ -7,6 +7,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -91,9 +92,19 @@ namespace CodingRiver.UPilot
         public string runGuid = "";
         // The Server validates its opaque cursor before passing these bounded values to Unity.
         public bool incremental;
+        // Server-only negotiation; public full results remain uncompressed JSON.
+        public bool acceptCompressed;
         public long afterEventSequence;
         public int expectedResultStreamVersion;
         public int eventCount = 100;
+    }
+
+    [Serializable]
+    internal class TestResultTransferPayload
+    {
+        public string resultEncoding = "gzip+base64";
+        public int uncompressedBytes;
+        public string compressedResult;
     }
 
     [Serializable]
@@ -119,6 +130,23 @@ namespace CodingRiver.UPilot
         public string testName;
         public string testStatus;
         public long observedAt;
+    }
+
+    [Serializable]
+    public sealed class TestConsolePhasePayload
+    {
+        public string phase;
+        public string source;
+        public string captureSessionId;
+        public string domain;
+        public long startSequence;
+        public long endSequence = -1; // inclusive; empty interval is start-1
+        public long startedAt;
+        public long endedAt;
+        public string coverage = "pending";
+        public string gapReason = "";
+        public List<ConsoleLogEntry> logs = new List<ConsoleLogEntry>();
+        public TestConsolePhasePayload Copy() => (TestConsolePhasePayload)MemberwiseClone();
     }
 
     [Serializable]
@@ -201,8 +229,9 @@ namespace CodingRiver.UPilot
         public string runnerState = "unknown";
         public string recoveryDiagnostic;
         public string callbackDomain;
+        public List<TestConsolePhasePayload> consolePhases = new List<TestConsolePhasePayload>();
         public TestRunDisposition disposition;
-        public bool terminal; // Administrative disposition only; ordinary consumers retain existing contract.
+        public bool terminal; // Published only after cleanup and durable finalization (or a no-run result).
         public string[] selectedLeafIdentities;
         public List<TestResultItemPayload> results = new List<TestResultItemPayload>();
 
@@ -215,6 +244,7 @@ namespace CodingRiver.UPilot
         internal TestRunResultPayload ShallowCopyForPersistence()
         {
             var copy = (TestRunResultPayload)MemberwiseClone();
+            copy.consolePhases = (consolePhases ?? new List<TestConsolePhasePayload>()).Select(p => p.Copy()).ToList();
             copy.cleanupErrors = new List<string>(cleanupErrors ?? new List<string>());
             copy.cleanupErrorHistory = new List<string>(cleanupErrorHistory ?? new List<string>());
             copy.unresolvedResources = new List<string>(unresolvedResources ?? new List<string>());
@@ -232,6 +262,9 @@ namespace CodingRiver.UPilot
         public string selectionDomain;
         public string selectionSnapshotId;
         public List<TestLeafIdentityPayload> selectedTests = new List<TestLeafIdentityPayload>();
+        // Discovery-local optimization only. Persisted/wire selections retain exact leaves.
+        [NonSerialized] internal Dictionary<string, string[]> runnerTestNames;
+        [NonSerialized] internal string runnerSelectionSnapshotId;
         public string testMode;
         public string requestedFilter;
         public string discoveryStatus;
@@ -421,7 +454,7 @@ namespace CodingRiver.UPilot
                 {
                     await _bridge.SendResultAsync(id, "test.run", new TestRunResultPayload
                     {
-                        status = "no_tests", phase = "no_tests", testMode = mode, noTests = true,
+                        status = "no_tests", phase = "no_tests", testMode = mode, noTests = true, terminal = true,
                         discoveryStatus = selection.discoveryStatus, selectors = selection.selectors,
                         discoveredCount = selection.discoveredCount, matchedCount = 0,
                         cleanupStatus = "completed", cleanupSucceeded = true,
@@ -864,7 +897,11 @@ namespace CodingRiver.UPilot
                 }
                 result = CreateIncrementalResult(result, payload.afterEventSequence, payload.eventCount);
             }
-            await _bridge.SendResultAsync(id, "test.results", result, token);
+            var transfer = CreateCompressedResult(result, payload.acceptCompressed && !payload.incremental);
+            if (transfer != null)
+                await _bridge.SendResultAsync(id, "test.results", transfer, token);
+            else
+                await _bridge.SendResultAsync(id, "test.results", result, token);
         }
 
         // ── test.list ───────────────────────────────────────────────────────────
@@ -980,10 +1017,35 @@ namespace CodingRiver.UPilot
             return _lastResults;
         }
 
+        internal static TestResultTransferPayload CreateCompressedResult(TestRunResultPayload source,
+            bool acceptCompressed)
+        {
+            if (!acceptCompressed || source == null) return null;
+            // Only this read-only projection opts in. Do not modify snapshots,
+            // silently drop fields, or change the Bridge's 4 MiB frame budget.
+            var json = JsonUtility.ToJson(source);
+            int size = Encoding.UTF8.GetByteCount(json);
+            if (size < 2 * 1024 * 1024 || size > 64 * 1024 * 1024) return null;
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            using (var output = new MemoryStream())
+            {
+                using (var gzip = new GZipStream(output, System.IO.Compression.CompressionLevel.Fastest, true))
+                    gzip.Write(bytes, 0, bytes.Length);
+                string encoded = Convert.ToBase64String(output.ToArray());
+                if (encoded.Length >= size) return null;
+                return new TestResultTransferPayload
+                {
+                    uncompressedBytes = size,
+                    compressedResult = encoded,
+                };
+            }
+        }
+
         internal static TestRunResultPayload CreateIncrementalResult(TestRunResultPayload source,
             long afterEventSequence, int eventCount)
         {
             var copy = JsonUtility.FromJson<TestRunResultPayload>(JsonUtility.ToJson(source ?? new TestRunResultPayload()));
+            copy.results = new List<TestResultItemPayload>();
             copy.events ??= new List<TestRunEventPayload>();
             copy.earliestEventSequence = GetEarliestEventSequence(copy);
             int boundedCount = Math.Max(1, Math.Min(eventCount, 1000));
@@ -1143,8 +1205,19 @@ namespace CodingRiver.UPilot
                 + apiType?.Assembly.FullName + "; type=" + apiType?.FullName + "; candidates=" + candidates);
         }
 
+        private sealed class CompleteMethodSelection
+        {
+            internal string assembly;
+            internal string fullName;
+            internal List<TestLeafIdentityPayload> leaves;
+        }
+
+        private static string SelectionNodeKey(string assembly, string fullName) =>
+            NormalizeAssemblyName(assembly).ToUpperInvariant() + "\n" + fullName;
+
         private static void CollectDiscoveredLeafTests(
             object node, List<TestLeafIdentityPayload> tests, HashSet<string> assemblies,
+            List<CompleteMethodSelection> methods, Dictionary<string, int> nodeNameCounts,
             string fixtureName = "", string assemblyName = "", string[] inheritedCategories = null)
         {
             if (node == null)
@@ -1171,13 +1244,35 @@ namespace CodingRiver.UPilot
             bool isSuite = (bool)(nodeType.GetProperty("IsSuite")?.GetValue(node) ?? false);
             var children = nodeType.GetProperty("Children")?.GetValue(node) as IEnumerable;
             bool hasChildren = false;
+            int firstLeaf = tests.Count;
+            int childCount = 0;
+            bool runnableLeavesOnly = true;
+            string nodeName = Convert.ToString(GetProperty(node, "FullName"));
             if (children != null)
             {
                 foreach (object child in children)
                 {
                     hasChildren = true;
-                    CollectDiscoveredLeafTests(child, tests, assemblies, fixtureName, assemblyName, categories.ToArray());
+                    childCount++;
+                    runnableLeavesOnly &= GetProperty(child, "IsSuite") is bool childIsSuite && !childIsSuite
+                        && GetProperty(child, "HasChildren") is bool childHasChildren && !childHasChildren
+                        && string.Equals(Convert.ToString(GetProperty(child, "RunState")), "Runnable", StringComparison.Ordinal);
+                    CollectDiscoveredLeafTests(child, tests, assemblies, methods, nodeNameCounts,
+                        fixtureName, assemblyName, categories.ToArray());
                 }
+            }
+
+            // A complete method is not a complete fixture: selecting a fixture can skip an
+            // Explicit method. Explicit/unknown child leaves also need exact leaf selectors.
+            string runState = Convert.ToString(GetProperty(node, "RunState"));
+            if (isSuite && !isTestAssembly && childCount > 1 && runnableLeavesOnly
+                && tests.Count - firstLeaf == childCount
+                && GetProperty(node, "TestCaseCount") is int caseCount && caseCount == childCount
+                && GetProperty(node, "Method") != null && !string.IsNullOrEmpty(nodeName)
+                && !string.IsNullOrEmpty(assemblyName) && (runState == "Runnable" || runState == "Explicit"))
+            {
+                methods.Add(new CompleteMethodSelection { assembly = NormalizeAssemblyName(assemblyName),
+                    fullName = nodeName, leaves = tests.GetRange(firstLeaf, childCount) });
             }
 
             if (!isSuite && !hasChildren)
@@ -1201,6 +1296,12 @@ namespace CodingRiver.UPilot
                         id = Convert.ToString(GetProperty(node, "Id")),
                         categories = categories.OrderBy(value => value, StringComparer.Ordinal).ToArray(),
                     });
+            }
+            if (!string.IsNullOrEmpty(nodeName))
+            {
+                string key = SelectionNodeKey(assemblyName, nodeName);
+                nodeNameCounts.TryGetValue(key, out int count);
+                nodeNameCounts[key] = count + 1;
             }
         }
 
@@ -1341,7 +1442,9 @@ namespace CodingRiver.UPilot
             matchMode = matchMode.ToLowerInvariant();
             var allTests = new List<TestLeafIdentityPayload>();
             var discoveredAssemblies = new HashSet<string>(StringComparer.Ordinal);
-            CollectDiscoveredLeafTests(root, allTests, discoveredAssemblies);
+            var methods = new List<CompleteMethodSelection>();
+            var nodeNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            CollectDiscoveredLeafTests(root, allTests, discoveredAssemblies, methods, nodeNameCounts);
             var result = new TestListResultPayload
             {
                 testMode = mode, requestedFilter = testFilter, matchMode = matchMode,
@@ -1384,7 +1487,7 @@ namespace CodingRiver.UPilot
                             selector = selector,
                             matchedCount = matches.Count,
                             candidates = matches.Count == 0
-                                ? SelectorCandidates(allTests, index)
+                                ? SelectorCandidates(allTests, index, selector)
                                 : new List<string>(),
                         };
                         result.selectors.Add(selectorMatch);
@@ -1405,6 +1508,17 @@ namespace CodingRiver.UPilot
             result.selectionValid = result.unmatchedSelectors.Count == 0;
             result.discoveryStatus = result.discoveredCount == 0 ? "no_tests" : (result.matchedCount == 0 ? "filter_no_match" : "tests_discovered");
             result.selectionSnapshotId = CreateSelectionSnapshotId(result);
+            var completeMethods = methods.Where(method => method.leaves.All(selected.Contains)
+                && nodeNameCounts[SelectionNodeKey(method.assembly, method.fullName)] == 1).ToArray();
+            if (completeMethods.Length > 0)
+            {
+                var covered = new HashSet<TestLeafIdentityPayload>(completeMethods.SelectMany(method => method.leaves));
+                result.runnerTestNames = result.selectedTests.GroupBy(test => NormalizeAssemblyName(test.assembly), StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Where(test => !covered.Contains(test)).Select(test => test.fullName)
+                        .Concat(completeMethods.Where(method => method.assembly == group.Key).Select(method => method.fullName))
+                        .OrderBy(name => name, StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
+                result.runnerSelectionSnapshotId = result.selectionSnapshotId;
+            }
             return result;
         }
 
@@ -1415,7 +1529,7 @@ namespace CodingRiver.UPilot
         }
 
         private static List<string> SelectorCandidates(
-            IEnumerable<TestLeafIdentityPayload> tests, int selectorKindIndex)
+            IEnumerable<TestLeafIdentityPayload> tests, int selectorKindIndex, string selector)
         {
             var testList = tests?.ToList() ?? new List<TestLeafIdentityPayload>();
             if (selectorKindIndex == 0)
@@ -1433,11 +1547,14 @@ namespace CodingRiver.UPilot
                     StringComparer.Ordinal);
                 return testList
                     .Where(item => !string.IsNullOrWhiteSpace(item.fullName))
+                    // Diagnostics only: a base method is not silently expanded into leaves.
+                    .OrderBy(item => item.fullName.StartsWith((selector ?? string.Empty) + "(", StringComparison.Ordinal) ? 0 : 1)
+                    .ThenBy(item => item.fullName, StringComparer.Ordinal)
+                    .ThenBy(item => NormalizeAssemblyName(item.assembly), StringComparer.Ordinal)
                     .Select(item => duplicatedAcrossAssemblies.Contains(item.fullName)
                         ? NormalizeAssemblyName(item.assembly) + "::" + item.fullName
                         : item.fullName)
                     .Distinct(StringComparer.Ordinal)
-                    .OrderBy(value => value, StringComparer.Ordinal)
                     .Take(10)
                     .ToList();
             }
@@ -1468,6 +1585,9 @@ namespace CodingRiver.UPilot
             var modeField = filterType.GetField("testMode");
             if (namesField == null || assembliesField == null || modeField == null || testModeType == null)
                 throw new InvalidOperationException("Runner cannot represent exact assembly-isolated selectors.");
+            bool useCompleteMethods = selection.runnerTestNames != null
+                && selection.runnerSelectionSnapshotId == selection.selectionSnapshotId
+                && SelectionSnapshotMatches(selection, "", "");
             var groups = selection.selectedTests.GroupBy(item => NormalizeAssemblyName(item.assembly), StringComparer.Ordinal).ToArray();
             var filters = Array.CreateInstance(filterType, groups.Length);
             for (int index = 0; index < groups.Length; index++)
@@ -1476,7 +1596,8 @@ namespace CodingRiver.UPilot
                     throw new InvalidOperationException("Selected test has no verified assembly identity.");
                 var filter = Activator.CreateInstance(filterType);
                 modeField.SetValue(filter, Enum.Parse(testModeType, selection.testMode));
-                namesField.SetValue(filter, groups[index].Select(item => item.fullName).ToArray());
+                namesField.SetValue(filter, useCompleteMethods && selection.runnerTestNames.TryGetValue(groups[index].Key, out var names)
+                    ? names : groups[index].Select(item => item.fullName).ToArray());
                 assembliesField.SetValue(filter, new[] { groups[index].Key });
                 filters.SetValue(filter, index);
             }
@@ -1547,11 +1668,67 @@ namespace CodingRiver.UPilot
             register.Invoke(api, args);
         }
 
+        private static TestConsolePhasePayload NewConsolePhase(string phase)
+        {
+            var result = new TestConsolePhasePayload { phase = phase, startedAt = NowMs(), domain = CallbackDomain };
+            try
+            {
+                if (UPilotConsoleCaptureService.TryGetActiveSequenceBoundary(out var session, out var next))
+                { result.source = "persistentCapture"; result.captureSessionId = session; result.startSequence = next; }
+                else
+                { result.source = "consoleDelta"; result.startSequence = UPilotConsoleService.MarkSequence(); }
+            }
+            catch (Exception ex) { result.source = "unavailable"; result.gapReason = ex.GetType().Name; }
+            return result;
+        }
+
+        internal static void EndConsolePhase(TestConsolePhasePayload phase)
+        {
+            if (phase == null || phase.endedAt != 0) return;
+            var end = NewConsolePhase(phase.phase);
+            phase.endedAt = end.startedAt;
+            phase.endSequence = end.startSequence - 1;
+            bool same = phase.domain == end.domain && phase.source == end.source
+                && phase.captureSessionId == end.captureSessionId && phase.startSequence <= end.startSequence;
+            phase.coverage = same && phase.source == "persistentCapture" ? "complete" : "partial";
+            phase.gapReason = !same ? "capture_switch_reload_or_cursor_reset" : phase.source != "persistentCapture"
+                ? "console_cursor_clear_or_reload_not_detectable" : "";
+            if (same && phase.source == "consoleDelta")
+            {
+                try { phase.logs = UPilotConsoleService.ReadPhaseRange((int)phase.startSequence, (int)phase.endSequence); }
+                catch (Exception ex) { phase.gapReason = "console_read_failed:" + ex.GetType().Name; }
+                if (phase.endSequence - phase.startSequence >= 500) phase.gapReason += ";record_limit_500";
+            }
+            if (phase.phase == "sceneRestore" && same)
+            { phase.coverage = "partial"; phase.gapReason = "public_scene_events_only_not_full_restore_boundary"; }
+        }
+
+        private void OnSceneOpening(string path, UnityEditor.SceneManagement.OpenSceneMode mode)
+        {
+            if (_lastResults == null || !_lastResults.cleanupPending) return;
+            if (_lastResults.consolePhases.Count(p => p.phase == "sceneRestore") >= 32) return;
+            _lastResults.consolePhases.Add(NewConsolePhase("sceneRestore"));
+            PersistSnapshot();
+        }
+
+        private void OnSceneOpened(UnityEngine.SceneManagement.Scene scene, UnityEditor.SceneManagement.OpenSceneMode mode)
+        {
+            var phase = _lastResults?.consolePhases.LastOrDefault(p => p.phase == "sceneRestore" && p.endedAt == 0);
+            EndConsolePhase(phase);
+            if (phase != null) PersistSnapshot();
+        }
+
         private void OnRunStarted()
         {
             if (!_isRunning || _cleanupScheduled || _lastResults?.resultAuthoritative == true) return;
             if (_lastResults != null)
             {
+                if (!_lastResults.consolePhases.Any(p => p.phase == "testExecution"))
+                {
+                    _lastResults.consolePhases.Add(NewConsolePhase("testExecution"));
+                    UnityEditor.SceneManagement.EditorSceneManager.sceneOpening += OnSceneOpening;
+                    UnityEditor.SceneManagement.EditorSceneManager.sceneOpened += OnSceneOpened;
+                }
                 MarkFirstProgressObserved();
                 _lastResults.status = "running";
                 _lastResults.phase = "running";
@@ -1613,6 +1790,9 @@ namespace CodingRiver.UPilot
         private void OnRunFinished(object rootResult)
         {
             if (!_isRunning || _lastResults == null || _lastResults.resultAuthoritative) return;
+            EndConsolePhase(_lastResults.consolePhases.LastOrDefault(p => p.phase == "testExecution"));
+            if (!_lastResults.consolePhases.Any(p => p.phase == "cleanup"))
+                _lastResults.consolePhases.Add(NewConsolePhase("cleanup"));
             bool recoveryBlocked = _lastResults.phase == "recovery_required";
             // UTF's PlayMode RunFinished callback precedes its ExitPlayModeTask.
             // Do not invent a new exit intent if an exit is already in progress.
@@ -1703,8 +1883,13 @@ namespace CodingRiver.UPilot
             if (target == null) return false;
             leafKey = string.IsNullOrWhiteSpace(leafKey) ? testName ?? string.Empty : leafKey;
             target.events ??= new List<TestRunEventPayload>();
-            if (target.events.Any(item => item.kind == "leaf_completed"
-                && string.Equals(item.leafKey, leafKey, StringComparison.Ordinal)))
+            // Results retain completed identities after the bounded event window
+            // evicts their callbacks. Keep the event check for older event-only snapshots.
+            if (target.results?.Any(item => item != null
+                    && string.Equals(item.leafKey, leafKey, StringComparison.Ordinal)) == true
+                || target.events.Any(item => item != null
+                    && (item.kind == "leaf_completed" || item.kind == "leaf_corrected")
+                    && string.Equals(item.leafKey, leafKey, StringComparison.Ordinal)))
                 return false;
             AppendEvent(target, "leaf_completed", testName, testStatus, leafKey);
             UpsertLeafResult(target, new TestResultItemPayload
@@ -1736,20 +1921,22 @@ namespace CodingRiver.UPilot
         {
             if (target == null || item == null) return;
             item.leafKey = string.IsNullOrWhiteSpace(item.leafKey) ? item.testName ?? string.Empty : item.leafKey;
+            // Read the complete leaf table before replacing its metadata. Event
+            // eviction (including an evicted correction) must not invent completion.
+            var previousResult = target.results?.FirstOrDefault(existing => existing != null
+                && string.Equals(existing.leafKey, item.leafKey, StringComparison.Ordinal));
+            var previousEvent = previousResult == null
+                ? target.events?.LastOrDefault(eventItem => eventItem != null
+                    && (eventItem.kind == "leaf_completed" || eventItem.kind == "leaf_corrected")
+                    && string.Equals(eventItem.leafKey, item.leafKey, StringComparison.Ordinal))
+                : null;
+            string previousStatus = previousResult?.testStatus ?? previousEvent?.testStatus;
+            bool previouslyCompleted = previousResult != null || previousEvent != null;
             UpsertLeafResult(target, item);
-            // UTF can deliver the final result callback more than once while a
-            // run is being recovered.  Compare with this leaf's latest event,
-            // including an earlier correction, so the same correction is not
-            // appended repeatedly to the persisted cursor stream.
-            var previous = target.events?.LastOrDefault(eventItem =>
-                string.Equals(eventItem.leafKey, item.leafKey, StringComparison.Ordinal));
-            if (previous == null)
-            {
+            if (!previouslyCompleted)
                 AppendEvent(target, "leaf_completed", item.testName, item.testStatus, item.leafKey);
-                return;
-            }
-            if (!string.Equals(previous.testStatus, item.testStatus, StringComparison.Ordinal))
-                AppendEvent(target, "leaf_corrected", item.testName, item.testStatus, previous.leafKey);
+            else if (!string.Equals(previousStatus, item.testStatus, StringComparison.Ordinal))
+                AppendEvent(target, "leaf_corrected", item.testName, item.testStatus, item.leafKey);
         }
 
         private static void UpsertLeafResult(TestRunResultPayload target, TestResultItemPayload item)
@@ -1858,6 +2045,8 @@ namespace CodingRiver.UPilot
 
         private void StopCleanupScheduling()
         {
+            UnityEditor.SceneManagement.EditorSceneManager.sceneOpening -= OnSceneOpening;
+            UnityEditor.SceneManagement.EditorSceneManager.sceneOpened -= OnSceneOpened;
             EditorApplication.update -= ForceStopTick;
             EditorApplication.update -= CleanupActiveRunFromUpdate;
             EditorApplication.update -= ReattachPersistedRun;
@@ -2012,6 +2201,7 @@ namespace CodingRiver.UPilot
             candidate.cleanupSucceeded = true;
             candidate.terminal = true;
             candidate.cleanupStatus = "completed";
+            foreach (var phase in candidate.consolePhases) EndConsolePhase(phase);
             candidate.unresolvedResources.Clear();
             candidate.nextAction = "";
             candidate.recoveryDiagnostic = "";

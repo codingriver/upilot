@@ -151,6 +151,7 @@ class CompileDomainService:
         )
         return {
             "executionState": execution,
+            "queuedDiagnostics": self._queued_editor_diagnostics(execution) if hasattr(self, "_queued_editor_diagnostics") else {"isUpdating": execution.get("isUpdating"), "hints": ["insufficient_evidence"]},
             "status": compile_state.status,
             "phase": execution["compilePhase"],
             "compileRequestId": compile_state.compile_request_id,

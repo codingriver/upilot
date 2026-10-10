@@ -37,6 +37,11 @@ namespace CodingRiver.UPilot
         public string   ErrorMessage;
         public bool     ResultReported;
         public bool     IsStuck;
+        // Per retained invocation in the current domain. -1 is unobserved, not zero.
+        // Handler entry is not a business-effect count; one handler can queue several actions.
+        public int      DispatchCount = -1;
+        public int      ExecutionCount = -1;
+        public int      MainThreadActionCount = -1;
         public readonly List<OperationStepRecord> Steps = new();
 
         public void AddStep(string step, string detail = null)
@@ -61,6 +66,43 @@ namespace CodingRiver.UPilot
 
         public string CommandId   => _entry.CommandId;
         public string CommandName => _entry.CommandName;
+
+        // Phase is set by the dispatch boundary, never inferred from a display step.
+        internal void SetPhase(string phase)
+        {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.Phase = phase;
+            }
+        }
+
+        internal void RecordDispatch()
+        {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.DispatchCount++;
+            }
+        }
+
+        internal void RecordHandlerExecution()
+        {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.ExecutionCount++;
+            }
+        }
+
+        internal void RecordMainThreadAction()
+        {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                _entry.MainThreadActionCount++;
+            }
+        }
 
         public void Step(string step, string detail = null)
         {
@@ -224,6 +266,9 @@ namespace CodingRiver.UPilot
                 Description = desc,
                 ReceivedAt  = DateTime.Now,
                 Phase       = "received",
+                DispatchCount = 0,
+                ExecutionCount = 0,
+                MainThreadActionCount = 0,
                 CurrentStep = "收到命令",
             };
             entry.AddStep("收到命令");
@@ -398,34 +443,38 @@ namespace CodingRiver.UPilot
                 var id = kvp.Key;
                 OperationLogEntry entry;
                 lock (_listLock) { entry = _entries.LastOrDefault(e => e.CommandId == id); }
-                if (entry == null || entry.CompletedAt.HasValue) continue;
-
-                var elapsed = (long)(now - entry.ReceivedAt).TotalMilliseconds;
-                bool shouldWarn = false;
-
-                switch (entry.Phase)
+                if (entry == null) continue;
+                lock (entry)
                 {
-                    case "queued":
-                        shouldWarn = elapsed > WatchdogQueuedThresholdMs;
-                        break;
-                    case "executing":
-                        shouldWarn = elapsed > WatchdogExecThresholdMs;
-                        break;
-                    case "waiting":
-                        shouldWarn = elapsed > WatchdogWaitingThresholdMs;
-                        break;
-                    default:
-                        shouldWarn = elapsed > WatchdogAbsoluteThresholdMs;
-                        break;
-                }
-
-                if (shouldWarn && !entry.IsStuck)
-                {
-                    entry.IsStuck = true;
-                    entry.AddStep($"⚠ 卡住检测: {entry.CurrentStep}, 已{elapsed / 1000}s");
-                    WriteLogLine("WARN", "WATCHDOG",
-                        $"STUCK {entry.CommandName} id={entry.CommandId} | 卡住: {entry.CurrentStep}, 已{elapsed}ms, phase={entry.Phase}");
-                    stuckCommands.Add(entry.CommandName);
+                    if (entry.CompletedAt.HasValue) continue;
+    
+                    var elapsed = (long)(now - entry.ReceivedAt).TotalMilliseconds;
+                    bool shouldWarn = false;
+    
+                    switch (entry.Phase)
+                    {
+                        case "queued":
+                            shouldWarn = elapsed > WatchdogQueuedThresholdMs;
+                            break;
+                        case "executing":
+                            shouldWarn = elapsed > WatchdogExecThresholdMs;
+                            break;
+                        case "waiting":
+                            shouldWarn = elapsed > WatchdogWaitingThresholdMs;
+                            break;
+                        default:
+                            shouldWarn = elapsed > WatchdogAbsoluteThresholdMs;
+                            break;
+                    }
+    
+                    if (shouldWarn && !entry.IsStuck)
+                    {
+                        entry.IsStuck = true;
+                        entry.AddStep($"⚠ 卡住检测: {entry.CurrentStep}, 已{elapsed / 1000}s");
+                        WriteLogLine("WARN", "WATCHDOG",
+                            $"STUCK {entry.CommandName} id={entry.CommandId} | 卡住: {entry.CurrentStep}, 已{elapsed}ms, phase={entry.Phase}");
+                        stuckCommands.Add(entry.CommandName);
+                    }
                 }
             }
 
@@ -441,10 +490,14 @@ namespace CodingRiver.UPilot
             {
                 OperationLogEntry entry;
                 lock (_listLock) { entry = _entries.LastOrDefault(e => e.CommandId == kvp.Key); }
-                if (entry == null || entry.CompletedAt.HasValue) continue;
-                var elapsed = (long)(now - entry.ReceivedAt).TotalMilliseconds;
-                if (elapsed > WatchdogAbsoluteThresholdMs)
-                    result.Add(kvp.Key);
+                if (entry == null) continue;
+                lock (entry)
+                {
+                    if (entry.CompletedAt.HasValue) continue;
+                    var elapsed = (long)(now - entry.ReceivedAt).TotalMilliseconds;
+                    if (elapsed > WatchdogAbsoluteThresholdMs)
+                        result.Add(kvp.Key);
+                }
             }
             return result;
         }

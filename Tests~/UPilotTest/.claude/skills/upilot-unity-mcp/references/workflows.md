@@ -70,13 +70,13 @@ Do not trigger another compile when no C# or assembly file changed. Never infer 
 
 ## Tests And Builds
 
-1. Use the dedicated `unity_test_run`, `unity_upilot_acceptance_run` or `unity_build_start`, not a generic Operation wrapper.
+1. For standalone NUnit tests, package acceptance or builds, use the dedicated `unity_test_run`, `unity_upilot_acceptance_run` or `unity_build_start`, not a generic Operation wrapper. Step workflows use only the official UPilot MCP validation/start path below; do not launch them through NUnit or an acceptance Task as a substitute executor.
 2. Keep the returned test `runGuid`; for PlayMode/Domain Reload query `unity_test_results(runGuid=...)` after reconnect.
 3. Poll the result/status tool to a terminal state.
 4. For long operations, report only phase changes, errors, or suspected-stuck state.
 5. Read Console errors and artifacts before declaring success.
 
-New generic Operation/Step starts and public validation return `GENERIC_ORCHESTRATION_DISABLED`. Do not wrap them in Task, reflection or temporary scripts. Historical status/artifacts and supported safe cleanup remain available; unknown outcomes end aborted within the original deadline, without recovery/release procedures. Service restart starts empty; historical reports never recreate active work.
+UPilot Step is the default testing framework, not mandatory for every business test. Preserve an established non-Step approach; business needs may justify another with a brief reason. Before authoring, modifying, validating or running Step tests, load `references/automation-steps.md`. Step plans must follow official validation, one start, original-ID observation and executor-owned Finally/cleanup/reporting. Skills compose and call, never execute Steps. MCP `unity_operation_validate/start`, official C# `UPilotAutomationStepService.ValidateJson/StartJson` and existing same-executor integrations are allowed under their applicable authorization/readiness checks. Prefer semantic MCP for Agent-driven Editor work. Never run Step callbacks individually or rebuild their lifecycle in another runner, wrapper or test framework. Isolated framework unit tests and genuine non-Step tests retain their own tools. New Operations require `jobSpec.stepPlan`; handwritten callbacks and Task-wrapped launches remain unsupported. If admission is unavailable or denied, report the blocker instead of switching to manual Step execution or bypassing it through another entry. Explain any genuine non-Step alternative and its coverage; do not call it Step acceptance. Preserve original IDs and fixed deadlines; historical reports never restore active work.
 
 `status=no_tests` is a distinct cleaned terminal state with `total=0`; do not represent it as a fake failed test. If tests are required, fail the acceptance criterion explicitly.
 

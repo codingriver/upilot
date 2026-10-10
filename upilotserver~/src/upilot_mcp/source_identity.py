@@ -89,3 +89,106 @@ def diff_acceptance_import_inputs(before: dict, after: dict, limit: int = 200) -
             continue
         changes.append({"path": path, "beforeSha256": before_hash, "afterSha256": after_hash})
     return {"changed": changes[:limit], "changeCount": len(changes), "changesTruncated": len(changes) > limit}
+
+
+# Deliberately limited to this reliability batch, not proof of every loaded module.
+# Discovery uses sys.modules only: diagnostics must not import tool registration.
+SELECTED_CODE_ENTRIES = (
+    ("upilot_mcp.server", "WsOrchestratorServer._handle_message"),
+    ("upilot_mcp.server", "WsOrchestratorServer._suspend_or_fail_pending_on_disconnect"),
+    ("upilot_mcp.server", "WsOrchestratorServer._resend_pending_commands"),
+    ("upilot_mcp.server", "WsOrchestratorServer.send_command"),
+    ("upilot_mcp.dispatcher", "CommandDispatcher.call"),
+    ("upilot_mcp.domain.execution_service", "ExecutionDomainService.diagnostic_module"),
+    ("upilot_mcp.mcp_tools.execution_tools", "diagnostic_module"),
+    ("upilot_mcp.domain.task_service", "TaskDomainService.task_start"),
+    ("upilot_mcp.domain.task_service", "TaskDomainService.operation_get"),
+    ("upilot_mcp.domain.task_service", "TaskDomainService._run_test_task"),
+    ("upilot_mcp.domain.queue_service", "QueueDomainService.queue_inventory"),
+    ("upilot_mcp.state_store", "StateStore.save_test_job"),
+    ("upilot_mcp.state_store", "StateStore.command_observation"),
+    ("upilot_mcp.mcp_stdio_server", "_call_tool_with_strict_arguments"),
+    ("upilot_mcp.operation_context", "request_origin_from_context"),
+)
+SELECTED_CODE_SCOPE = "selected-entry-code-only; not globals, closure values, dependencies or all modules"
+
+
+def selected_entry_code_evidence() -> dict:
+    """Compare selected live Python code to current source without executing it.
+
+    Code equivalence is not whole-module deployment proof. Missing/frozen source
+    remains unknown; ordinary status queries do not invoke this on-demand check.
+    """
+    import sys
+    import types
+
+    entries = []
+    sources = {}
+    for module_name, member in SELECTED_CODE_ENTRIES:
+        entry = {"module": module_name, "entry": member, "status": "unknown", "layers": []}
+        entries.append(entry)
+        module = sys.modules.get(module_name)
+        target = module
+        for part in member.split("."):
+            if not isinstance(target, (types.ModuleType, type)):
+                target = None
+                break
+            target = vars(target).get(part)
+            if isinstance(target, (staticmethod, classmethod)):
+                target = target.__func__
+        if not isinstance(target, types.FunctionType):
+            entry["reason"] = "entry_not_loaded_or_not_python_function"
+            continue
+        seen = set()
+        for _ in range(4):
+            if not isinstance(target, types.FunctionType) or id(target) in seen:
+                entry["reason"] = "wrapper_chain_unverifiable"
+                break
+            seen.add(id(target))
+            code = target.__code__
+            layer = {"function": code.co_qualname, "path": code.co_filename, "status": "unknown"}
+            entry["layers"].append(layer)
+            # Decorators may copy __module__/__name__; the actual code filename
+            # and globals identify the wrapper's source, not the copied labels.
+            key = code.co_filename
+            if key not in sources:
+                try:
+                    path = Path(key)
+                    if getattr(sys, "frozen", False) or not path.is_absolute() or path.suffix != ".py":
+                        raise ValueError("source_unavailable")
+                    with path.open("rb") as stream:
+                        raw = stream.read(2 * 1024 * 1024 + 1)
+                    if len(raw) > 2 * 1024 * 1024:
+                        raise ValueError("source_over_budget")
+                    root = compile(raw, key, "exec", dont_inherit=True, optimize=sys.flags.optimize)
+                    codes = {}
+                    pending = [root]
+                    while pending:
+                        current = pending.pop()
+                        codes.setdefault(current.co_qualname, []).append(current)
+                        pending.extend(c for c in current.co_consts if isinstance(c, types.CodeType))
+                    sources[key] = (hashlib.sha256(raw).hexdigest(), codes, "")
+                except (OSError, ValueError, SyntaxError, RecursionError, MemoryError) as ex:
+                    # Do not expose arbitrary filesystem/exception payloads.
+                    sources[key] = ("", {}, type(ex).__name__)
+            digest, codes, error = sources[key]
+            layer["sourceSha256"] = digest
+            references = codes.get(code.co_qualname, [])
+            if error or len(references) != 1:
+                layer["reason"] = "source_unavailable_or_ambiguous"
+            else:
+                layer["status"] = "equivalent" if code == references[0] else "different"
+            wrapped = vars(target).get("__wrapped__")
+            if wrapped is None:
+                break
+            target = wrapped
+        else:
+            entry["reason"] = "wrapper_chain_over_budget"
+        statuses = [layer["status"] for layer in entry["layers"]]
+        if "different" in statuses:
+            entry["status"] = "different"
+        elif statuses and all(status == "equivalent" for status in statuses) and not entry.get("reason"):
+            entry["status"] = "equivalent"
+    statuses = [entry["status"] for entry in entries]
+    status = "different" if "different" in statuses else "equivalent" if statuses and all(s == "equivalent" for s in statuses) else "unknown"
+    return {"status": status, "scope": SELECTED_CODE_SCOPE, "entries": entries}

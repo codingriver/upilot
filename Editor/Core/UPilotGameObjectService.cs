@@ -428,6 +428,14 @@ namespace CodingRiver.UPilot
 
         // ── gameobject.delete ────────────────────────────────────────────────
 
+        internal static bool MarkSceneDirtyAfterDelete(UnityEngine.SceneManagement.Scene scene, bool isPlaying)
+        {
+            // PlayMode deletions are runtime-only; MarkSceneDirty throws after the object is already gone.
+            if (isPlaying || !scene.IsValid()) return false;
+            EditorSceneManager.MarkSceneDirty(scene);
+            return scene.isDirty;
+        }
+
         private async Task HandleDeleteAsync(string id, string json, CancellationToken token)
         {
             var msg = JsonUtility.FromJson<GameObjectDeleteMessage>(json);
@@ -463,7 +471,7 @@ namespace CodingRiver.UPilot
                     };
                     mutationStarted = true;
                     Undo.DestroyObjectImmediate(go);
-                    if (scene.IsValid()) EditorSceneManager.MarkSceneDirty(scene);
+                    var saveRequired = MarkSceneDirtyAfterDelete(scene, EditorApplication.isPlaying);
                     var afterExists = FindByInstanceId(p.instanceId) != null;
                     tcs.TrySetResult(new GameObjectDeleteResultPayload
                     {
@@ -474,7 +482,7 @@ namespace CodingRiver.UPilot
                         afterExists = afterExists,
                         businessEffectVerified = !afterExists,
                         sceneDirty = scene.IsValid() && scene.isDirty,
-                        saveRequired = scene.IsValid() && scene.isDirty,
+                        saveRequired = saveRequired,
                         sideEffectsMayHaveOccurred = true,
                     });
                 }

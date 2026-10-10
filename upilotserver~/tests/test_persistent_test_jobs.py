@@ -95,6 +95,145 @@ def test_historical_job_never_recreates_observer_or_replays_start(tmp_path, run_
     asyncio.run(scenario())
 
 
+
+@pytest.mark.parametrize("late_outcome", ["completed", "failed", "exception"])
+def test_late_background_result_cannot_mutate_ended_task_or_running_successor(tmp_path, late_outcome):
+    # Exercise real task_start/_run_test_task/_wait_for_test_result, not just a
+    # direct checkpoint or persistence call. No service/process restart occurs.
+    from upilot_mcp.operation_context import REQUEST_ORIGIN
+    from upilot_mcp.test_job_context import TEST_JOB_CONTEXT
+
+    async def scenario():
+        original_entered = asyncio.Event()
+        original_cancelled = asyncio.Event()
+        original_release = asyncio.Event()
+        successor_entered = asyncio.Event()
+        successor_release = asyncio.Event()
+        observed_guids = []
+        work_handles = {}
+
+        class DelayedService(Service):
+            async def _dispatch_tool(self, name, args):
+                checkpoint("starting", startIntentSent=True)
+                self.start_count += 1
+                guid = f"run-delayed-{self.start_count}"
+                checkpoint("observing", runGuid=guid)
+                return ok("start", {"status": "running", "runGuid": guid})
+
+            async def test_results(self, run_guid=""):
+                observed_guids.append(run_guid)
+                work_handles[run_guid] = asyncio.current_task()
+                if run_guid == "run-delayed-1":
+                    original_entered.set()
+                    try:
+                        await original_release.wait()
+                    except asyncio.CancelledError:
+                        # A transport/underlying callback may outlive its observer.
+                        original_cancelled.set()
+                        await original_release.wait()
+                    with pytest.raises(asyncio.CancelledError):
+                        checkpoint("observing", runGuid="late-unrelated-run")
+                    if late_outcome == "exception":
+                        raise RuntimeError("Original callback failed after its observer ended.")
+                else:
+                    assert run_guid == "run-delayed-2"
+                    successor_entered.set()
+                    await successor_release.wait()
+                result = await super().test_results(run_guid)
+                if run_guid == "run-delayed-1" and late_outcome == "failed":
+                    result.data.update(status="failed", failed=1, passed=0)
+                return result
+
+        service = DelayedService(tmp_path)
+        handles = []
+        context_before = TEST_JOB_CONTEXT.get()
+        origin_before = REQUEST_ORIGIN.get()
+
+        async def start_with_origin(name, client):
+            token = REQUEST_ORIGIN.set({"clientId": client, "chatId": name})
+            try:
+                response = await service.task_start(name, "unity_test_run", retry_count=0)
+            finally:
+                REQUEST_ORIGIN.reset(token)
+            assert response.ok
+            identity = response.data["taskId"]
+            handle = service._async_task_handles[identity]
+            handles.append(handle)
+            return identity, handle
+
+        try:
+            original_id, original_handle = await start_with_origin("original", "client-a")
+            await asyncio.wait_for(original_entered.wait(), timeout=5)
+            original = service._async_tasks[original_id]
+            original_deadline = original["deadlineAt"]
+            original_handle.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(original_handle, timeout=5)
+            await asyncio.wait_for(original_cancelled.wait(), timeout=5)
+            assert original["terminal"] and original["status"] == "aborted" and original["endedAt"]
+            assert original["deadlineAt"] == original_deadline
+            original_frozen = json.loads(json.dumps(original))
+
+            successor_id, successor_handle = await start_with_origin("successor", "client-b")
+            await asyncio.wait_for(successor_entered.wait(), timeout=5)
+            successor = service._async_tasks[successor_id]
+            successor_frozen = json.loads(json.dumps(successor))
+            assert successor_id != original_id
+            assert not successor["terminal"] and not successor_handle.done()
+            assert successor["runGuid"] == "run-delayed-2"
+            assert original["requestOrigin"]["clientId"] == "client-a"
+            assert successor["requestOrigin"]["clientId"] == "client-b"
+
+            uri = service.server.state._db_path.as_uri() + "?mode=ro"
+            query = "SELECT task_id, state_json FROM test_jobs WHERE project_path=? ORDER BY task_id"
+            with sqlite3.connect(uri, uri=True) as db:
+                frozen_rows = db.execute(query, (str(tmp_path.resolve()),)).fetchall()
+            assert len(frozen_rows) == 2
+
+            original_release.set()
+            original_work = work_handles["run-delayed-1"]
+            if late_outcome == "exception":
+                with pytest.raises(RuntimeError, match="Original callback failed"):
+                    await asyncio.wait_for(original_work, timeout=5)
+            else:
+                late_result = await asyncio.wait_for(original_work, timeout=5)
+                assert late_result.ok and late_result.data["status"] == late_outcome
+            assert original == original_frozen
+            assert successor == successor_frozen and not successor_handle.done()
+            with sqlite3.connect(uri, uri=True) as db:
+                assert db.execute(query, (str(tmp_path.resolve()),)).fetchall() == frozen_rows
+            assert service.start_count == 2 and service.cancels == []
+            assert observed_guids == ["run-delayed-1", "run-delayed-2"]
+            assert TEST_JOB_CONTEXT.get() is context_before
+            assert REQUEST_ORIGIN.get() is origin_before
+
+            successor_release.set()
+            await asyncio.wait_for(successor_handle, timeout=5)
+            assert successor["terminal"] and successor["status"] == "completed"
+            assert successor["runGuid"] == successor_frozen["runGuid"]
+            assert successor["deadlineAt"] == successor_frozen["deadlineAt"]
+            assert successor["requestOrigin"] == successor_frozen["requestOrigin"]
+            assert original == original_frozen
+            with sqlite3.connect(uri, uri=True) as db:
+                rows = dict(db.execute(query, (str(tmp_path.resolve()),)).fetchall())
+            assert rows[original_id] == dict(frozen_rows)[original_id]
+            assert json.loads(rows[successor_id])["terminal"] is True
+            repeated = await service.task_cancel(original_id)
+            assert repeated.ok and repeated.data["status"] == "not_found"
+            assert repeated.data["changed"] is False and service.cancels == []
+            assert original == original_frozen
+        finally:
+            original_release.set()
+            successor_release.set()
+            all_handles = set(handles) | set(work_handles.values())
+            for handle in all_handles:
+                if not handle.done():
+                    handle.cancel()
+            await asyncio.gather(*all_handles, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_cancellation_waits_for_underlying_guid_and_cleanup(tmp_path):
     async def scenario():
         service = Service(tmp_path)
@@ -496,4 +635,101 @@ def test_unknown_start_response_without_run_guid_is_terminal_and_never_replayed(
         assert service.start_count == 1 and service.cancels == []
         assert service.server.state.load_test_jobs() == history
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("detail_level", ["summary", "standard", "full"])
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_task_status_summary_counts_elapsed_before_budget(tmp_path, detail_level, status):
+    from copy import deepcopy
+
+    async def scenario():
+        service = Service(tmp_path)
+        passed = status == "completed"
+        state = {
+            "taskId": "task-summary", "projectPath": service.server.state.project_path,
+            "durable": True, "status": status, "phase": status, "terminal": True,
+            "runGuid": "run-original", "startedAt": 100, "updatedAt": 1234567,
+            "endedAt": 1234567, "deadlineAt": 1234600,
+            "cleanupSucceeded": True, "cleanupPending": False,
+            "acceptanceReport": {
+                "acceptancePassed": passed, "runGuid": "run-original",
+                "cleanupVerified": True, "testIdentityVerified": True,
+                "sourceUnchanged": True, "failureCode": None if passed else "FIRST",
+                "testNames": ["Fixture.Test"],
+                "artifact": {"path": "summary.json", "bytes": 42, "sha256": "a" * 64},
+                "steps": {
+                    "compile": {"data": {"compileOperationId": "compile-original",
+                        "compileRequestId": "request-original", "writeBatchId": "batch-original",
+                        "errorsVerified": True}},
+                    "testStatus": {"data": {"status": "completed", "total": 1,
+                        "passed": int(passed), "failed": int(not passed), "skipped": 0,
+                        "cleanupSucceeded": True, "resultAuthoritative": True,
+                        "results": [{"output": "不应内联" * 10000}]}},
+                },
+            },
+        }
+        if not passed:
+            state["error"] = {"code": "FIRST", "message": "原始业务失败"}
+        service._async_tasks[state["taskId"]] = state
+        before = deepcopy(state)
+        history_before = service.server.state.load_test_jobs()
+        response = await service.task_status(state["taskId"], detail_level)
+        result = response.data
+        assert response.ok and result["terminal"] is True
+        assert result["elapsedMs"] == 1234467
+        assert result["taskId"] == state["taskId"] and result["runGuid"] == state["runGuid"]
+        if detail_level == "full":
+            assert result["acceptanceReport"] == state["acceptanceReport"]
+            assert "summaryVersion" not in result
+        else:
+            assert "acceptanceReport" not in result
+            assert result["responseBytes"] == TaskDomainService._summary_size(result) <= 16384
+            report = result["result"]["result"]
+            assert report["acceptancePassed"] is passed
+            assert report["artifact"] == state["acceptanceReport"]["artifact"]
+            assert report["compile"]["compileOperationId"] == "compile-original"
+            assert report["compile"]["errorsVerified"] is True
+            assert result["tests"]["failed"] == int(not passed)
+            assert result["recoveryDiagnosticsDroppedCount"] is None
+            assert result["recoveryDiagnosticsHistoryComplete"] is False
+        if not passed:
+            assert result["error"]["code"] == "FIRST"
+        assert state == before
+        assert service.server.state.load_test_jobs() == history_before
+        assert service.start_count == 0 and not service._async_task_handles
+    asyncio.run(scenario())
+
+
+def test_task_status_elapsed_cannot_overflow_exact_summary_budget(tmp_path):
+    from copy import deepcopy
+
+    async def scenario():
+        service = Service(tmp_path)
+        state = {
+            "taskId": "task-budget", "projectPath": service.server.state.project_path,
+            "durable": True, "status": "failed", "terminal": True,
+            "runGuid": "run-budget", "startedAt": 100, "updatedAt": 1234567,
+            "endedAt": 1234567, "deadlineAt": 1234600,
+            "cleanupError": "清" * 600, "lastObservationError": "错" * 600,
+            "error": {"code": "FIRST", "message": "因" * 600},
+            "nextAction": "a" * 500, "cleanupFailureSignature": "",
+            "originalTestResult": {str(i): "b" * 500 for i in range(8)},
+            "businessTerminal": {str(i): "c" * 500 for i in range(8)},
+        }
+        base = TaskDomainService._public_task_state(state)
+        padding = 16384 - TaskDomainService._summary_size(base)
+        assert 0 < padding <= 2000
+        state["cleanupFailureSignature"] = "d" * padding
+        projection = TaskDomainService._public_task_state(state)
+        assert projection["responseBytes"] == TaskDomainService._summary_size(projection) == 16384
+        service._async_tasks[state["taskId"]] = state
+        before = deepcopy(state)
+        result = (await service.task_status(state["taskId"])).data
+        assert result["responseBytes"] == TaskDomainService._summary_size(result) <= 16384
+        assert result["elapsedMs"] == 1234467
+        assert result["error"]["code"] == "FIRST"
+        assert result["taskId"] == "task-budget" and result["runGuid"] == "run-budget"
+        assert result["truncatedFields"]
+        assert state == before and service.start_count == 0
     asyncio.run(scenario())

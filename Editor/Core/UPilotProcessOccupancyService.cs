@@ -18,6 +18,8 @@ namespace CodingRiver.UPilot
         public int ProcessId;
         public string ProcessName = "";
         public string CommandLine = "";
+        public long CreatedAtTicks;
+        public string ExecutablePath = "";
         public readonly List<string> Resources = new();
         public bool CanTerminate;
         public string CannotTerminateReason = "";
@@ -113,7 +115,7 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
-                    if (TerminateProcessTree(occupant.ProcessId, out var error))
+                    if (TerminateProcessTree(occupant, out var error))
                         result.Succeeded.Add($"{occupant.DisplayName} (PID {occupant.ProcessId})");
                     else
                         result.Failed.Add($"{occupant.DisplayName} (PID {occupant.ProcessId}): {error}");
@@ -229,15 +231,19 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static bool TerminateProcessTree(int processId, out string error)
+        private static bool TerminateProcessTree(UPilotOccupyingProcess occupant, out string error)
         {
             error = "";
             try
             {
+                using var target = Process.GetProcessById(occupant.ProcessId);
+                if (!ValidateTerminationIdentity(occupant, target, out error)) return false;
+                // Keep the validated target handle alive across the existing tree-stop call.
+                var budget = Stopwatch.StartNew();
                 var info = new ProcessStartInfo
                 {
                     FileName = "taskkill",
-                    Arguments = $"/PID {processId} /T /F",
+                    Arguments = $"/PID {occupant.ProcessId} /T /F",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -256,7 +262,12 @@ namespace CodingRiver.UPilot
                     return false;
                 }
                 if (process.ExitCode == 0)
-                    return true;
+                {
+                    if (target.WaitForExit(Math.Max(0, 5000 - (int)budget.ElapsedMilliseconds)))
+                        return true;
+                    error = "目标进程未在原结束预算内退出";
+                    return false;
+                }
                 error = process.StandardError.ReadToEnd().Trim();
                 if (string.IsNullOrWhiteSpace(error))
                     error = process.StandardOutput.ReadToEnd().Trim();
@@ -317,7 +328,7 @@ namespace CodingRiver.UPilot
             public bool Restartable;
         }
 #else
-        private static bool TerminateProcessTree(int processId, out string error)
+        private static bool TerminateProcessTree(UPilotOccupyingProcess occupant, out string error)
         {
             error = "当前平台不支持进程树结束。";
             return false;
@@ -338,16 +349,21 @@ namespace CodingRiver.UPilot
                 ProcessId = processId,
                 ProcessName = string.IsNullOrWhiteSpace(processName) ? GetProcessName(processId) : processName,
                 CommandLine = commandLine ?? "",
-                CanTerminate = CanTerminate(processId, out var reason),
+                CanTerminate = CanTerminate(processId, out var reason, out var createdAtTicks, out var executablePath),
                 CannotTerminateReason = reason,
+                CreatedAtTicks = createdAtTicks,
+                ExecutablePath = executablePath,
             };
             processes.Add(processId, occupant);
             return occupant;
         }
 
-        private static bool CanTerminate(int processId, out string reason)
+        private static bool CanTerminate(int processId, out string reason,
+            out long createdAtTicks, out string executablePath)
         {
             reason = "";
+            createdAtTicks = 0;
+            executablePath = "";
             if (processId == Process.GetCurrentProcess().Id)
             {
                 reason = "当前 Unity Editor 进程不能结束";
@@ -366,11 +382,55 @@ namespace CodingRiver.UPilot
                     reason = "进程已退出";
                     return false;
                 }
+                _ = process.Handle;
+                createdAtTicks = process.StartTime.ToUniversalTime().Ticks;
+                executablePath = process.MainModule?.FileName ?? "";
+                if (createdAtTicks <= 0 || string.IsNullOrWhiteSpace(executablePath))
+                {
+                    reason = "进程创建时间或可执行路径无法验证";
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)
             {
                 reason = "无法访问进程：" + ex.Message;
+                return false;
+            }
+        }
+
+        internal static bool ValidateTerminationIdentity(UPilotOccupyingProcess occupant,
+            Process process, out string error)
+        {
+            error = "";
+            if (occupant == null || occupant.ProcessId <= 4 ||
+                occupant.ProcessId == Process.GetCurrentProcess().Id)
+            {
+                error = "当前 Unity Editor 或系统进程不能结束";
+                return false;
+            }
+            if (!occupant.CanTerminate || occupant.CreatedAtTicks <= 0 ||
+                string.IsNullOrWhiteSpace(occupant.ExecutablePath))
+            {
+                error = "占用进程身份未验证，拒绝结束";
+                return false;
+            }
+            try
+            {
+                _ = process.Handle;
+                if (process.Id != occupant.ProcessId || process.HasExited ||
+                    process.StartTime.ToUniversalTime().Ticks != occupant.CreatedAtTicks ||
+                    !string.Equals(process.MainModule?.FileName, occupant.ExecutablePath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "占用进程身份已改变或已退出，拒绝结束";
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = "无法复核占用进程身份：" + ex.Message;
                 return false;
             }
         }

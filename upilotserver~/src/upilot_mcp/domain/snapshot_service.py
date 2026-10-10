@@ -115,6 +115,10 @@ class SnapshotDomainService:
         for t in targets:
             kind = str(t.get("kind") or "").lower()
             target = dict(t)
+            # The public model supplies an empty optional ID. Preserve omitted
+            # Camera/GameView selectors instead of sending an explicit wire ID 0.
+            if kind in ("camera", "gameview") and target.get("instanceId") == "":
+                target.pop("instanceId")
             if kind in ("sceneview", "editorwindow"):
                 target.setdefault("requireContentRect", True)
                 if t.get("docked") and not t.get("requireContentRect"):
@@ -155,7 +159,9 @@ class SnapshotDomainService:
                 {"targetCount": len(targets), "maxTargets": 16},
             )
 
-        if any(str(t.get("kind", "")).lower() == "sceneview" for t in targets) and not TASK_TOOL.get():
+        # Non-waiting callers need the Snapshot identity immediately to cancel
+        # an in-flight repaint; a Task handle exposes it only after completion.
+        if wait_ms > 0 and any(str(t.get("kind", "")).lower() == "sceneview" for t in targets) and not TASK_TOOL.get():
             return await self._bounded_snapshot_task("unity_snapshot_capture", {
                 "targets": targets, "channels": channels, "syncMode": sync_mode, "completionPolicy": completion_policy,
                 "capturePolicy": capture_policy, "outputDirectory": output_directory, "waitMs": 30000,

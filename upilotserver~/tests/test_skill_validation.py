@@ -204,3 +204,28 @@ def test_renderer_custom_port_updates_both_generated_artifacts():
     assert "http://127.0.0.1:8021/mcp" in outputs[SOURCE / "SKILL.md"]
     assert "http://127.0.0.1:8021/health" in outputs[SOURCE / "SKILL.md"]
     assert "http://127.0.0.1:8021/mcp" in outputs[SOURCE / "agents/openai.yaml"]
+
+
+@pytest.mark.parametrize("relative", ["AGENTS.md.template", "SKILL.md.template",
+    "references/automation-steps.md", "references/workflows.md", "references/tool-boundaries.md"])
+def test_step_policy_defaults_without_forcing_non_step_tests_and_uses_official_executor(relative):
+    text = (SOURCE / relative).read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    assert "UPilot Step is the default testing framework, not mandatory for every business test" in normalized
+    assert "non-Step" in normalized and "brief reason" in normalized
+    assert "isolated" in normalized.lower() and "unit tests" in normalized.lower()
+    assert "UPilotAutomationStepService.ValidateJson/StartJson" in normalized
+    assert "before authoring, modifying, validating or running step tests" in normalized.lower()
+    assert "Finally" in normalized and "executor" in normalized
+    assert "only through official UPilot MCP" not in text
+    assert "direct `ValidateJson`/`StartJson` or Step `Execute`" not in text
+    assert "alternative Agent preflight/start entry points" not in text
+
+
+def test_step_workflow_reference_is_shared_not_a_new_agent_role():
+    for name in ("AGENTS.md.template", "SKILL.md.template"):
+        text = (SOURCE / name).read_text(encoding="utf-8")
+        assert "references/automation-steps.md" in text
+        assert "does not require spawning a sub-agent or creating another rules file" in text
+        assert "without an extra framework-choice approval requirement" in text
+        assert "Thin adapters to official APIs are allowed" in text

@@ -1264,6 +1264,18 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void ProbeErrorsIncludeSocketAndNativeCodesWithoutCredentials()
+        {
+            var socket = new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused);
+            var text = UPilotMcpServerManager.DescribeProbeException(new IOException("password=fixture", socket));
+            Assert.That(text, Does.Contain("SocketException"));
+            Assert.That(text, Does.Contain("SocketError=ConnectionRefused"));
+            Assert.That(text, Does.Contain("NativeError=" + socket.NativeErrorCode));
+            Assert.That(text, Does.Contain("HResult=0x"));
+            Assert.That(text, Does.Not.Contain("password=fixture"));
+        }
+
+        [Test]
         public void ProbeErrorsKeepBoundedRedactedInnerExceptionEvidence()
         {
             var text = UPilotMcpServerManager.DescribeProbeException(new IOException("token=secret fixture",

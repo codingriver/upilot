@@ -62,6 +62,10 @@ namespace CodingRiver.UPilot
         public int progress;
         public bool isStuck;
         public bool resultReported;
+        public string countScope = "current-domain-retained-invocation; handler-entry-not-business-effect";
+        public int dispatchCount = -1;
+        public int executionCount = -1;
+        public int mainThreadActionCount = -1;
         public string errorCode;
         public string errorMessage;
         public List<OperationStepPayload> steps = new();
@@ -232,6 +236,12 @@ namespace CodingRiver.UPilot
                 errorCode = entry.ErrorCode,
                 errorMessage = entry.ErrorMessage,
             };
+            lock (entry)
+            {
+                payload.dispatchCount = entry.DispatchCount;
+                payload.executionCount = entry.ExecutionCount;
+                payload.mainThreadActionCount = entry.MainThreadActionCount;
+            }
             payload.terminal = payload.modal != null ? payload.modal.terminal : entry.CompletedAt.HasValue;
             payload.waitingForModalUi = payload.modal?.waitingForModalUi ?? false;
             if (payload.modal != null)

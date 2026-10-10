@@ -421,3 +421,142 @@ def test_compile_entry_points_project_success_and_error_evidence(tmp_path, monke
     payload = response.error.detail if failed else response.data
     assert payload["consoleEvidence"] == {k: v for k, v in evidence.items() if k != "logs"}
     assert state.get_console_evidence("compileOperationId", "compile-original") == evidence
+
+@pytest.mark.parametrize("phase", ["testExecution", "cleanup", "sceneRestore"])
+def test_phase_search_uses_only_frozen_ranges(tmp_path, phase):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("runGuid", "run-phase", {
+        "source": "persistentCapture", "captureSessionId": "whole", "startSequence": 0, "endSequence": 999,
+        "phases": [{"phase": phase, "source": "persistentCapture", "captureSessionId": "owned",
+                    "startSequence": 7, "endSequence": 11, "endedAt": 20,
+                    "coverage": "partial" if phase == "sceneRestore" else "complete",
+                    "gapReason": "public_scene_events_only_not_full_restore_boundary" if phase == "sceneRestore" else ""}]})
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    calls = []
+    async def read(**kwargs):
+        calls.append(kwargs)
+        return ok("read", {"logs": [{"sequence": 8, "message": "inside"}],
+                           "diskSnapshotNextSequence": 12, "scanComplete": True})
+    service.console_capture_read = read
+    result = asyncio.run(service.console_search_logs(run_guid="run-phase", phase=phase))
+    assert result.ok and result.data["logs"][0]["message"] == "inside"
+    assert [(c["session_id"], c["from_sequence"], c["to_sequence"]) for c in calls] == [("owned", 7, 11)]
+    assert result.data["consoleEvidence"]["coverage"] == ("partial" if phase == "sceneRestore" else "complete")
+
+
+def test_phase_missing_or_switched_never_falls_back_to_whole_run(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    for phases in ([], [{"phase": "cleanup", "source": "persistentCapture", "endedAt": 5,
+                         "gapReason": "capture_switch_reload_or_cursor_reset"}]):
+        state.save_console_evidence("runGuid", "old", {"logs": [{"message": "unrelated"}], "phases": phases})
+        result = asyncio.run(service.console_search_logs(run_guid="old", phase="cleanup"))
+        assert result.ok and result.data["logs"] == []
+        assert result.data["consoleEvidence"]["coverage"] == "partial"
+    assert not asyncio.run(service.console_search_logs(phase="cleanup")).ok
+
+
+def test_phase_frozen_console_records_are_filtered_without_nested_leak(tmp_path):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("runGuid", "delta", {"phases": [{
+        "phase": "cleanup", "source": "consoleDelta", "endedAt": 10, "coverage": "partial",
+        "gapReason": "console_cursor_clear_or_reload_not_detectable",
+        "logs": [{"message": "cleanup", "logType": "Warning"}, {"message": "hidden", "logType": "Log"}]}]})
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    result = asyncio.run(service.console_search_logs(run_guid="delta", phase="cleanup", log_type="Warning"))
+    assert [x["message"] for x in result.data["logs"]] == ["cleanup"]
+    assert "logs" not in result.data["consoleEvidence"]["phases"][0]
+
+@pytest.mark.parametrize("newest", [True, False])
+def test_phase_fallback_order_and_unknown_coverage_stay_explicit(tmp_path, newest):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("runGuid", "order", {"phases": [{
+        "phase": "cleanup", "source": "consoleDelta", "endedAt": 10,
+        "coverage": "partial", "logs": [{"message": "first"}, {"message": "last"}]}]})
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    result = asyncio.run(service.console_search_logs(run_guid="order", phase="cleanup", newest_first=newest))
+    assert [x["message"] for x in result.data["logs"]] == (["last", "first"] if newest else ["first", "last"])
+    assert result.data["consoleEvidence"]["coverage"] == "partial"
+    assert result.data["consoleEvidence"]["gapReason"] == "phase_coverage_unverified"
+
+
+@pytest.mark.parametrize("read_data,reason", [
+    ({"ok": False, "error": "capture_missing"}, "phase_capture_read_failed"),
+    ({"logs": [], "diskSnapshotNextSequence": 7, "scanComplete": True}, "phase_records_not_flushed"),
+    ({"logs": [], "diskSnapshotNextSequence": 12, "scanComplete": False}, "phase_scan_incomplete_or_unverified"),
+    ({"logs": []}, "phase_disk_coverage_unverified"),
+])
+def test_phase_capture_unflushed_or_unavailable_is_not_complete(tmp_path, read_data, reason):
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("runGuid", "buffered", {"phases": [{
+        "phase": "cleanup", "source": "persistentCapture", "captureSessionId": "owned",
+        "startSequence": 7, "endSequence": 11, "endedAt": 20, "coverage": "complete"}]})
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state)
+    async def read(**kwargs):
+        assert kwargs["from_sequence"] == 7 and kwargs["to_sequence"] == 11
+        return ok("read", read_data)
+    service.console_capture_read = read
+    result = asyncio.run(service.console_search_logs(run_guid="buffered", phase="cleanup"))
+    assert result.ok and result.data["logs"] == []
+    assert result.data["consoleEvidence"]["coverage"] == "partial"
+    assert reason in result.data["consoleEvidence"]["gapReason"]
+
+
+@pytest.mark.parametrize("phase", ["testExecution", "cleanup", "sceneRestore"])
+@pytest.mark.parametrize("reopen_store", [False, True], ids=["same-store", "reopened-store"])
+@pytest.mark.parametrize("cursor_reset", [False, True], ids=["clear-not-detectable", "cursor-reset"])
+def test_phase_console_clear_gap_survives_late_queries_and_storage(
+    tmp_path, phase, reopen_store, cursor_reset,
+):
+    # Model Unity's two honest fallback outcomes; do not clear a live Editor Console.
+    reason = ("capture_switch_reload_or_cursor_reset" if cursor_reset
+              else "console_cursor_clear_or_reload_not_detectable")
+    frozen_logs = [{"message": "frozen phase record", "type": "Log"}]
+    evidence = {
+        "source": "consoleDelta", "coverage": "partial", "gapReason": "console_cleared",
+        "logs": [{"message": "whole-run record must not leak"}],
+        "phases": [{
+            "phase": phase, "source": "consoleDelta", "startedAt": 1, "endedAt": 10,
+            "startSequence": 20, "endSequence": 2 if cursor_reset else 22,
+            "coverage": "partial", "gapReason": reason, "logs": frozen_logs,
+        }],
+    }
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    state.save_console_evidence("runGuid", "cleared-phase", evidence)
+    if reopen_store:
+        state = StateStore()
+        state.configure_project(str(tmp_path))
+    persisted = deepcopy(state.get_console_evidence("runGuid", "cleared-phase"))
+
+    class NoLiveReads:
+        async def call(self, *args, **kwargs):
+            raise AssertionError("Frozen phase queries must not read the current Console")
+
+    async def no_capture_read(**kwargs):
+        raise AssertionError("Console clearing must not attach a different Capture")
+
+    service = StatusDomainService()
+    service.server = SimpleNamespace(state=state, dispatcher=NoLiveReads())
+    service.console_capture_read = no_capture_read
+    for _ in range(2):
+        result = asyncio.run(service.console_search_logs(run_guid="cleared-phase", phase=phase))
+        assert result.ok
+        assert [item["message"] for item in result.data["logs"]] == (
+            [] if cursor_reset else ["frozen phase record"])
+        projected = result.data["consoleEvidence"]
+        assert projected["coverage"] == "partial"
+        assert reason in projected["gapReason"]
+        assert "logs" not in projected["phases"][0]
+        assert result.data["association"] == "observed_during_run_not_causal"
+        assert state.get_console_evidence("runGuid", "cleared-phase") == persisted

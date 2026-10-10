@@ -686,20 +686,18 @@ namespace CodingRiver.UPilot
                     return UPilotPortRegistration.TrySyncCurrent();
                 if (UPilotPortAllocator.IsPortAvailable(bridge.WsPort) &&
                     UPilotPortAllocator.IsPortAvailable(bridge.HttpPort) &&
-                    bridge.WsPort != bridge.HttpPort &&
-                    string.IsNullOrEmpty(UPilotPortRegistry.ForUser().Check(
-                        UPilotProjectConfig.ProjectRoot, bridge.WsPort, bridge.HttpPort)))
+                    bridge.WsPort != bridge.HttpPort)
                     return UPilotPortRegistration.TrySyncCurrent();
 
                 var pair = UPilotPortAllocator.FindAvailablePair(bridge.WsPort, bridge.HttpPort);
                 if (!EditorUtility.DisplayDialog("修改当前工程端口？",
-                        $"当前端口存在占用或预留冲突。将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort}。",
+                        $"当前端口不可绑定。将工程配置改为 WS {pair.wsPort} / HTTP {pair.httpPort}。",
                         "修改端口", "取消"))
                     return false;
                 bridge.SetProjectEndpoints(UPilotBridge.DefaultWsHost, pair.wsPort, pair.httpPort);
                 return true;
             }
-            catch (Exception ex) { UPilotPortRegistration.Report("配置启动端口", ex); return false; }
+            catch (Exception ex) { UnityEngine.Debug.LogError($"[UPilotPorts] 配置启动端口失败：{ex}"); return false; }
         }
 
         internal static void RewriteExistingAgentConfigs(AgentMcpConfigStatus[] statuses)

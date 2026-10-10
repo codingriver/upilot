@@ -72,7 +72,7 @@ namespace CodingRiver.UPilot.Execution
                         typeof(Func<CSharpEvaluationContext, CSharpEvaluationResult>), program);
                     return new Entry { Program = program, Delegate = compiled, AsyncDelegate = cached?.AsyncDelegate };
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!(ex is OperationCanceledException) && !(ex is OutOfMemoryException))
                 {
                     throw new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", ex.GetType().FullName + ": " + ex.Message);
                 }
@@ -112,7 +112,7 @@ namespace CodingRiver.UPilot.Execution
                         typeof(Func<CSharpEvaluationContext, Task<CSharpEvaluationResult>>), program);
                     return new Entry { Program = program, AsyncDelegate = compiled, Delegate = cached?.Delegate };
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!(ex is OperationCanceledException) && !(ex is OutOfMemoryException))
                 {
                     throw new ExecutionContractException("CSHARP_EMIT_COMPILE_FAILED", ex.GetType().FullName + ": " + ex.Message);
                 }

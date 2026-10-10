@@ -1,19 +1,57 @@
 # Automation Steps
 
-## Suspension boundary (mandatory)
+## Framework selection and required workflow (mandatory)
 
-All new generic Operation/Step starts and public validation are suspended with
-`GENERIC_ORCHESTRATION_DISABLED`, including built-in-only plans, handwritten callbacks,
-Bridge `automation.steps.start/validate` and public `StartJson`/`ValidateJson`.
-There is no re-enable switch or Flow exception. Use dedicated test, acceptance,
-compile, build, Capture or Snapshot tools instead. Never use Task wrappers,
-reflection, eval, temporary scripts or internal executors to bypass this boundary.
+UPilot Step is the default testing framework, not mandatory for every business test.
+Preserve an established non-Step framework; if none is specified, default to Step.
+Business needs may justify another approach with a brief reason; choosing a framework
+alone needs no additional approval. Genuine non-Step NUnit/Unity Test Framework/pytest
+tests and isolated framework unit tests keep their own tools. A sequence of operations
+alone does not define a Step test.
 
-The remaining schema, authoring examples and lifecycle descriptions are **historical
-contracts and internal maintenance reference only**, not an executable new-plan guide.
-They describe already accepted runs and isolated engine fixtures. Existing status,
-artifacts and bounded stop retain original identities within the current service lifetime.
-aborted is not an active lifecycle; unknown outcomes end aborted, never success.
+Before authoring, modifying, validating or running Step tests, the main Agent and any
+participating auxiliary Agent must load this reference. It is the single detailed
+Step workflow, not a requirement to spawn a sub-agent or duplicate rules elsewhere.
+
+Once tests use Step cases/plans and their lifecycle, they must use the UPilot executor:
+
+1. Discover registered Steps and implement/reuse the business cases, assertions, data
+   and necessary business cleanup; preserve the authorized business sequence.
+2. Compose the complete plan and use official preflight; validation must not execute
+   Steps, create a run or start Capture. Validate methods/constructors are side-effect free.
+3. Start once through an official entry. Start validates again; old preflight success
+   is not a permanent admission grant.
+4. Observe the original operation/run identity. UPilot owns execution, Finally, resource
+   cleanup and evidence/report finalization. A wait-window expiry never renews deadlines.
+5. Judge the actual terminal result and evidence; accepted/started is not passed.
+
+## Authorization and runtime capability boundary
+
+Skills compose plans and call the framework; they are not another executor. Official
+entries include UPilot MCP `unity_operation_validate/start`, the existing C#
+`UPilotAutomationStepService.ValidateJson/StartJson` APIs and existing integrations
+that delegate to that same executor. Prefer semantic MCP tools for Agent-driven Editor
+work; a thin C# adapter is not permission to evade a blocked tool. Honor each entry's
+applicable authorization, exact project, readiness, registration and ownership checks.
+C# calls run on the Unity main thread; retain their operationId/runId and use the facade's
+status/cancel/artifact APIs. Internal Bridge routes are not third-party client endpoints.
+
+Do not call Step Execute callbacks yourself or implement a parallel Step scheduler,
+timeout/cancellation loop, Finally processor or reporter. Renaming a workflow, embedding
+it in NUnit, using reflection/eval, a menu, script or Task wrapper does not exempt it.
+Thin official-API adapters and isolated tests of framework internals are allowed; neither
+may become an alternative business Step executor. No new launcher/framework is needed.
+
+New MCP Operations require `jobSpec.stepPlan`; handwritten start/status/cancel callbacks
+and Task-wrapped launches remain unsupported. Unavailable admission, denied permission
+or failed preflight blocks that Step run. In particular, an older deployment returning
+`GENERIC_ORCHESTRATION_DISABLED` must not be bypassed via C#, reflection or manual Step
+calls. A genuine non-Step alternative must explain changed coverage and must not be
+reported as Step acceptance. Rule edits alone do not deploy runtime changes.
+
+Examples below are not independent execution authorization. Existing status, artifacts
+and bounded stop retain original identities within the current service lifetime. Unknown
+outcomes end aborted, never success; historical reports never recreate active runs.
 
 ## Ownership and Discovery
 
@@ -31,12 +69,12 @@ aborted is not an active lifecycle; unknown outcomes end aborted, never success.
 - Discover through the compiled `UPilotAutomationStepService.CatalogJson()` facade.
   UPilot keeps one type/factory registry snapshot per assembly generation, shared by
   internal validation and execution; it does not pool mutable Step instances. Public
-  validation/start now reject before accessing that registry. Catalog is read-only
-  discovery, not permission to launch. Do not invent IDs or reflection fallbacks.
+  validation/start may use that registry when deployed admission permits. Catalog is
+  read-only discovery, not proof of available admission or permission to launch. Do not invent IDs or reflection fallbacks.
 - Internal Bridge routes are `automation.steps.catalog/validate/start/state/cancel/artifacts`;
   these are implementation routes, not a second public MCP surface.
 
-## Authoring A Step (internal maintenance only)
+## Authoring A Step
 
 ### Decide Ownership Before Coding
 
@@ -170,7 +208,8 @@ Inspect and manually remove stale local symbols when necessary, preserving other
 Do not commit local package paths or generated PlayerSettings changes for teammates.
 
 After the correlated Unity compile, query UPilot Catalog, check the exact ID, type,
-metadata and diagnostics. Internal fixtures may validate historical plans; public validation remains disabled. A file on disk,
+metadata and diagnostics. Use public complete-plan validation only when live capability
+permits; a disabled runtime must be reported without an internal-route fallback. A file on disk,
 an attribute text search or a catalog entry with diagnostics is not usable registration.
 If absent, inspect compile evidence, current target defines, Editor assembly inclusion,
 attribute placement, public no-argument constructor, interface and duplicate IDs.
@@ -254,16 +293,22 @@ public interface IAutomationStep
 - Persist original configuration before modifying it. Finally restores that saved value,
   tolerates an unstarted configuration step, and fails instead of inventing missing originals.
 
-The service exposes JSON-string `CatalogJson()`, `ValidateJson(planJson)`,
+The official service exposes JSON-string `CatalogJson()`, `ValidateJson(planJson)`,
 `StartJson(operationId,captureSessionId,planJson)`, `StateJson(runId)`,
-`CancelJson(runId)` and `ArtifactsJson(runId)`. Internal Bridge responses remain
-structured objects, not JSON strings inside another JSON envelope.
+`CancelJson(runId)` and `ArtifactsJson(runId)`. MCP and C# integration use the same
+plan validator and single executor, including its busy guard and lifecycle. C# callers
+supply a unique operation identity, retain returned run identity, and remain responsible
+for any caller-owned Capture; prefer plan-owned Capture for self-contained Step plans.
+Pass the plan itself to C#; MCP accepts the surrounding `jobSpec.stepPlan` envelope.
+Use public facades rather than invoking Step callbacks or allocating another executor.
 
 ## Plan and Arguments
 
-This is the stored schema of historical `jobSpec.stepPlan` records, not a request
-to submit. Both `unity_operation_validate` and `unity_operation_start` reject all new
-plans. Preserve an existing operationId for status/wait and evidence; never Start again.
+This is the `jobSpec.stepPlan` schema for an authorized public workflow when live
+validation/start capabilities permit. Compose the approved project template, validate
+the complete plan, and submit Start once. Preserve its operationId for status/wait and
+evidence; never repeat Start to obtain an uncertain result. Runtime admission may
+still be disabled independently of Agent-policy permission.
 
 ```json
 {
@@ -281,8 +326,9 @@ plans. Preserve an existing operationId for status/wait and evidence; never Star
 }
 ```
 
-The scene and ordered steps above illustrate a historical record only. Do not replace
-its fields to launch a new plan, or mutate an accepted run to manufacture recovery evidence.
+The scene and ordered steps above are illustrative, not authorization to start a run.
+Use the actual project-approved scene, order, assertions and cleanup. Never mutate an
+accepted run to manufacture recovery evidence.
 
 Each item needs a unique instanceId and a discovered, case-sensitive stepId.
 There is exactly one business argument string; omission means empty string.
@@ -304,7 +350,7 @@ do not shorten it to a single tool wait window.
 
 ## Bounded Lifecycle
 
-- Generic admission remains disabled. These rules cover historical same-lifetime work and isolated executor fixtures only.
+- These lifecycle contracts apply to authorized public runs, existing same-lifetime work and isolated executor fixtures; live capability discovery determines whether new admission is available.
 - Execute is called at most once per Step. Normal completion, failure, cancel and timeout share one finalization path. Cancel is sent at most once; Poll/Cleanup reuse the original deadline.
 - Normal cleanup timeout skips remaining Normal and enters Finally once. Finally failure without timeout records the error and advances. Any Finally execution or cleanup timeout immediately finalizes timed_out, skips the remaining Finally steps and performs no additional cleanup/report wait.
 - ResourceCleaning consumes cleanupTimeoutSeconds, not a separate unbounded phase. Existing timeoutSeconds and cleanupTimeoutSeconds are the only per-Step budgets. Evidence, Capture stop and report finalization otherwise share 60 seconds total.
@@ -331,7 +377,7 @@ workflow before starting. A successful setter call is not a successful mode tran
 
 ## Evidence
 
-Historical self-contained plans may have `upilot.console_capture_start` first and once;
+Authorized self-contained plans may have `upilot.console_capture_start` first and once;
 with empty arguments, and explicitly set Operation `consoleCapture.enabled=false`.
 Do not wrap that plan in another Capture. Its Step Cleanup does not stop the run's
 Capture. UPilot persists private credentials and start/stop intents separately
@@ -438,11 +484,14 @@ separately through the original Operation.
 
 ## Deployment and Verification
 
-Check exact project identity and loaded code, not only version/health. Public start and
-validation must return `GENERIC_ORCHESTRATION_DISABLED` before parsing or dispatch;
-capability discovery must mark new Operation admission unavailable. Historical query
-and dedicated tools stay registered. Do not use internal routes as a production fallback.
-Isolated internal executor tests are not permission to start real Step runs.
+Check exact project identity, live capabilities and loaded code, not only version/health.
+Agent-policy permission must not be reported as runtime availability. If deployed
+Server/Bridge admission remains disabled, public start/validation and capability
+discovery must report that restriction consistently; do not infer successful admission
+from registered Steps. Verify enabled admission only under a separately authorized
+product/deployment task. Existing query and dedicated tools stay registered. Do not
+use internal routes as a production fallback. Isolated internal executor tests alone
+do not authorize real Step runs.
 Refresh only through authorized maintenance; never replay an uncertain original start.
 
 Run targeted contract/executor/built-in/evidence tests in Tests~/UPilotTest. Verify real

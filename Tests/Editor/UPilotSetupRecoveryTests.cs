@@ -184,9 +184,6 @@ namespace CodingRiver.UPilot.Tests
         {
             var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
             var originalError = UPilotPortRegistration.LastError;
-            var generationField = typeof(UPilotPortRegistration).GetField("_configurationGeneration",
-                BindingFlags.NonPublic | BindingFlags.Static);
-            var generation = generationField.GetValue(null);
             try
             {
                 const string history = "old restart: WS8770 port_release_timeout";
@@ -218,16 +215,85 @@ namespace CodingRiver.UPilot.Tests
                     Is.EqualTo(saveFails ? MessageType.Error : MessageType.None));
                 Assert.That(UPilotPortRegistration.LastError,
                     Is.EqualTo(saveFails ? "current port error" : ""));
-                Assert.That((long)generationField.GetValue(null),
-                    Is.EqualTo((long)generation + (saveFails ? 0 : 1)));
                 Assert.That(UPilotServerRestartDiagnostics.Current, Is.SameAs(record));
                 Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(config));
             }
             finally
             {
-                generationField.SetValue(null, generation);
                 UPilotPortRegistration.LastError = originalError;
                 UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void BusyReferenceProbeDoesNotOverrideActualPortAvailability(bool occupied)
+        {
+            var root = Path.Combine(Path.GetTempPath(), "UPilot-setup-lock-test-" + Guid.NewGuid().ToString("N"));
+            var registry = new UPilotPortRegistry(root, _ => true, 0);
+            Directory.CreateDirectory(root);
+            var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
+            var originalError = UPilotPortRegistration.LastError;
+            UPilotPortRegistration.LastError = "";
+            var config = File.ReadAllBytes(UPilotProjectConfig.ConfigPath);
+            var manager = UPilotMcpServerManager.Instance;
+            var beforeWs = manager.WsPort;
+            var beforeHttp = manager.HttpPort;
+            var wsListener = new TcpListener(IPAddress.Loopback, 0);
+            var httpListener = new TcpListener(IPAddress.Loopback, 0);
+            try
+            {
+                wsListener.Start();
+                httpListener.Start();
+                var ws = ((IPEndPoint)wsListener.LocalEndpoint).Port;
+                var http = ((IPEndPoint)httpListener.LocalEndpoint).Port;
+                httpListener.Stop();
+                if (!occupied) wsListener.Stop();
+                SetField(window, "_setupWsPort", ws);
+                SetField(window, "_setupHttpPort", http);
+                SetField(window, "_recommendedWsPort", 18003);
+                SetField(window, "_recommendedHttpPort", 19003);
+                using (var held = new FileStream(registry.LockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+                {
+                    UnityEngine.TestTools.LogAssert.Expect(LogType.Warning,
+                        new System.Text.RegularExpressions.Regex(@"\[UPilotPorts\] operation=读取参考端口登记;.*"));
+                    var timer = System.Diagnostics.Stopwatch.StartNew();
+                    window.EvaluateSetupPorts(registry);
+                    Assert.That(timer.ElapsedMilliseconds, Is.LessThan(500), "Reference lock contention must not block UI checks.");
+                    Assert.That(GetField(window, "_setupPortsReady"), Is.EqualTo(!occupied));
+                    Assert.That(GetField(window, "_setupPortMessageType"),
+                        Is.EqualTo(occupied ? MessageType.Error : MessageType.Info));
+                    Assert.That(GetField(window, "_setupPortMessage").ToString(),
+                        Does.Contain(occupied ? "端口不可监听" : "当前端口可用"));
+                    if (!occupied)
+                    {
+                        Assert.That(GetField(window, "_recommendedWsPort"), Is.Zero);
+                        Assert.That(GetField(window, "_recommendedHttpPort"), Is.Zero);
+                    }
+                    var next = (double)GetField(window, "_nextSetupPortCheckAt");
+                    typeof(UPilotMainWindow).GetMethod("RefreshSetupPortsForRunningService",
+                        BindingFlags.Instance | BindingFlags.NonPublic).Invoke(window, null);
+                    Assert.That(GetField(window, "_nextSetupPortCheckAt"), Is.EqualTo(next));
+                    window.EvaluateSetupPorts(registry); // Repeated reference failures only warn once.
+                    Assert.That(GetField(window, "_setupPortsReady"), Is.EqualTo(!occupied));
+                }
+                window.EvaluateSetupPorts(registry);
+                Assert.That(GetField(window, "_setupPortsReady"), Is.EqualTo(!occupied));
+                Assert.That(File.Exists(registry.LockPath), Is.True);
+                Assert.That(File.Exists(registry.RegistryPath), Is.False, "A UI check never writes reference data.");
+                Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(config));
+                Assert.That(manager.WsPort, Is.EqualTo(beforeWs));
+                Assert.That(manager.HttpPort, Is.EqualTo(beforeHttp));
+            }
+            finally
+            {
+                wsListener.Stop();
+                httpListener.Stop();
+                UPilotPortRegistration.LastError = originalError;
+                UnityEngine.Object.DestroyImmediate(window);
+                Assert.That(Path.GetFullPath(root).StartsWith(Path.Combine(Path.GetTempPath(), "UPilot-setup-lock-test-"),
+                    StringComparison.OrdinalIgnoreCase), Is.True);
+                Directory.Delete(root, true);
             }
         }
 

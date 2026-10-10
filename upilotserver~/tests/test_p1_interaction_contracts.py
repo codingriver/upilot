@@ -74,3 +74,65 @@ def test_profiler_defaults_and_explicit_legacy_mode_are_forwarded():
     legacy = asyncio.run(service.profiler_capture_start(capture_mode="legacy", include_default_ai_markers=False))
     assert legacy.data["captureMode"] == "legacy" and legacy.data["includeDefaultAiMarkers"] is False
     assert not asyncio.run(service.profiler_capture_start(capture_mode="wrong")).ok
+
+
+@pytest.mark.parametrize("route,dispatched", [("uitoolkit", True), ("imgui", True), ("uitoolkit", False)])
+def test_mouse_public_tool_dispatcher_roundtrip_preserves_receipt(monkeypatch, route, dispatched):
+    from unittest.mock import Mock
+    from upilot_mcp.dispatcher import CommandDispatcher
+    from upilot_mcp.mcp_tools import status_tools
+
+    receipt = {"ok": dispatched, "state": "click:Fixture:" + route, "input": {
+        "windowInstanceId": "123", "dispatchRoute": route, "dispatched": dispatched,
+        "businessEffectVerified": False, "hitVerified": True,
+        "hitType": "fixture", "hitName": "counter", "position": {"x": 15, "y": 30},
+        "eventConsumption": "unobserved"}}
+
+    class Transport:
+        def is_ready(self): return True
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+        async def send_command(self, *, command_id, name, payload):
+            self.name, self.payload = name, payload
+            self.future.set_result({"type": "result", "payload": receipt})
+
+    transport = Transport()
+    service = Service()
+    service.dispatcher = CommandDispatcher(transport, Mock())
+    monkeypatch.setattr(status_tools, "_get_facade", lambda: service)
+    monkeypatch.setattr(status_tools, "_reject_write_if_unapproved", lambda _: None)
+    result = asyncio.run(status_tools.unity_mouse_event(
+        action="click", button="left", x=15, y=30, targetWindow="Fixture", windowInstanceId="123"))
+    assert transport.name == "mouse.event"
+    assert str(transport.payload["windowInstanceId"]) == "123"
+    assert result.structuredContent["data"] == receipt
+
+
+@pytest.mark.parametrize("receipt", [
+    {"menuPath": "Fixture/Menu", "executed": True},
+    {"menuPath": "Fixture/Menu", "executed": False},
+    {"commandId": "menu-pending", "waitingForModalUi": True, "terminal": False},
+])
+def test_menu_public_dispatcher_roundtrip_preserves_receipt_once(monkeypatch, receipt):
+    from unittest.mock import Mock
+    from upilot_mcp.dispatcher import CommandDispatcher
+    from upilot_mcp.mcp_tools import resource_tools
+
+    class Transport:
+        def __init__(self): self.calls = []
+        def is_ready(self): return True
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+        async def send_command(self, *, command_id, name, payload):
+            self.calls.append((name, payload))
+            self.future.set_result({"type": "result", "payload": receipt})
+
+    transport = Transport()
+    service = Service()
+    service.dispatcher = CommandDispatcher(transport, Mock())
+    monkeypatch.setattr(resource_tools, "_get_facade", lambda: service)
+    result = asyncio.run(resource_tools.unity_menu_execute(menuPath="Fixture/Menu"))
+    assert transport.calls == [("menu.execute", {"menuPath": "Fixture/Menu"})]
+    assert result.structuredContent["data"] == receipt

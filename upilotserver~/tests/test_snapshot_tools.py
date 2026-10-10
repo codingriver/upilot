@@ -569,3 +569,219 @@ def test_snapshot_baseline_rejects_unsafe_key_and_unaccepted_artifact(tmp_path) 
     ))
     assert rejected.ok is False
     assert rejected.error.code == "SNAPSHOT_ARTIFACT_NOT_ACCEPTED"
+
+
+@pytest.mark.parametrize("selector", [{}, {"instanceId": ""}, {"instanceId": "0"}, {"instanceId": "42"}])
+def test_gameview_model_through_real_dispatcher_preserves_selector_intent(selector):
+    from unittest.mock import Mock
+    from upilot_mcp.dispatcher import CommandDispatcher
+
+    class Transport:
+        def is_ready(self):
+            return True
+
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+
+        async def send_command(self, *, command_id, name, payload):
+            self.payload = payload
+            self.future.set_result({"type": "result", "payload": {"snapshotId": "test", "terminal": True}})
+
+    transport = Transport()
+    service = SnapshotDomainService()
+    service.dispatcher = CommandDispatcher(transport, Mock())
+    target = snapshot_tools._SnapshotTargetSchema.model_validate({"kind": "gameview", **selector}).model_dump()
+    asyncio.run(service.snapshot_capture([target], wait_ms=0))
+    wired = transport.payload["targets"][0]
+    if selector.get("instanceId", "") == "":
+        assert "instanceId" not in wired
+    else:
+        # The Unity selector guard must still see explicit zero/nonempty IDs.
+        assert wired["instanceId"] == int(selector["instanceId"])
+    assert target["instanceId"] == selector.get("instanceId", "")
+
+
+def test_gameview_null_selector_remains_invalid():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        snapshot_tools._SnapshotTargetSchema.model_validate({"kind": "gameview", "instanceId": None})
+
+@pytest.mark.parametrize("route", ["native", "proxy"])
+@pytest.mark.parametrize("selector", [
+    {"exactName": "NamedCamera"},
+    {"hierarchyPath": "Root/Camera"},
+    {"cameraName": "LegacyCamera"},
+    {"exactName": "NamedCamera", "hierarchyPath": "Root/Camera"},
+    {},
+], ids=["exact-name", "hierarchy", "legacy-name", "multiple", "none"])
+@pytest.mark.parametrize("instance_id", [
+    {}, {"instanceId": ""}, {"instanceId": "0"},
+    {"instanceId": "568105584918842838"},
+], ids=["omitted", "empty", "explicit-zero", "nonempty"])
+def test_camera_public_model_through_real_dispatcher_preserves_selector_intent(
+    monkeypatch, route, selector, instance_id,
+):
+    """Both public routes must preserve Camera selector intent before Unity."""
+    from copy import deepcopy
+    from unittest.mock import Mock
+    from upilot_mcp.dispatcher import CommandDispatcher
+
+    class Transport:
+        def __init__(self):
+            self.commands = []
+
+        def is_ready(self):
+            return True
+
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+
+        async def send_command(self, *, command_id, name, payload):
+            self.commands.append((name, payload))
+            self.future.set_result({"type": "result", "payload": {
+                "snapshotId": "camera-intent", "terminal": True,
+            }})
+
+    transport = Transport()
+    service = SnapshotDomainService()
+    service.dispatcher = CommandDispatcher(transport, Mock())
+    monkeypatch.setattr(snapshot_tools, "_get_facade", lambda: service)
+    # Omit kind too: the real public model defaults it to Camera.
+    arguments = {"targets": [{"targetId": "camera", **selector, **instance_id}], "waitMs": 0}
+    original = deepcopy(arguments)
+    if route == "native":
+        result = asyncio.run(runtime.mcp._tool_manager.call_tool("unity_snapshot_capture", arguments))
+        assert result.structuredContent["data"]["snapshotId"] == "camera-intent"
+    else:
+        result = asyncio.run(dispatch_public_tool(service, "unity_snapshot_capture", arguments))
+        assert result.ok and result.data["snapshotId"] == "camera-intent"
+
+    assert arguments == original
+    assert len(transport.commands) == 1
+    name, payload = transport.commands[0]
+    assert name == "snapshot.start"
+    wired = payload["targets"][0]
+    assert wired["kind"] == "camera"
+    if instance_id.get("instanceId", "") == "":
+        assert "instanceId" not in wired
+    else:
+        # Keep explicit IDs, including zero and multi-selector requests, visible
+        # to Unity's existing selector validation. Do not silently fix them.
+        assert wired["instanceId"] == int(instance_id["instanceId"])
+    for field in ("exactName", "hierarchyPath", "cameraName"):
+        assert wired[field] == selector.get(field, "")
+
+
+@pytest.mark.parametrize("route", ["native", "proxy"])
+def test_camera_public_null_selector_rejected_without_dispatch(monkeypatch, route):
+    service = _service()
+    monkeypatch.setattr(snapshot_tools, "_get_facade", lambda: service)
+    arguments = {"targets": [{"exactName": "NamedCamera", "instanceId": None}], "waitMs": 0}
+    if route == "native":
+        with pytest.raises(ToolError):
+            asyncio.run(runtime.mcp._tool_manager.call_tool("unity_snapshot_capture", arguments))
+    else:
+        result = asyncio.run(dispatch_public_tool(service, "unity_snapshot_capture", arguments))
+        assert not result.ok and result.error.code == "INVALID_TOOL_ARGUMENTS"
+    assert service.dispatcher.calls == []
+
+
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_native_tooltip_listing_is_explicitly_opt_in(opt_in):
+    from upilot_mcp.domain.status_service import StatusDomainService
+    service = StatusDomainService()
+    service.dispatcher = _Dispatcher([ok("list", {"windows": []})])
+    result = asyncio.run(service.editor_windows_list(include_native_tooltips=opt_in))
+    assert result.ok
+    assert service.dispatcher.calls == [("editor.windows.list", {"includeNativeTooltips": True} if opt_in else {})]
+
+
+def test_tooltip_model_through_dispatcher_preserves_exact_identity_and_domain():
+    from unittest.mock import Mock
+    from upilot_mcp.dispatcher import CommandDispatcher
+
+    class Transport:
+        def is_ready(self): return True
+        def register_pending(self, command_id):
+            self.future = asyncio.get_running_loop().create_future()
+            return self.future
+        async def send_command(self, *, command_id, name, payload):
+            self.payload = payload
+            self.future.set_result({"type": "result", "payload": {"snapshotId": "tip", "terminal": True}})
+
+    transport = Transport()
+    service = SnapshotDomainService()
+    service.dispatcher = CommandDispatcher(transport, Mock())
+    target = snapshot_tools._SnapshotTargetSchema.model_validate({
+        "kind": "tooltip", "instanceId": "18446744073709550001", "domainGeneration": "1234"}).model_dump()
+    asyncio.run(service.snapshot_capture([target], wait_ms=0))
+    wired = transport.payload["targets"][0]
+    assert wired["instanceId"] == 18446744073709550001
+    assert wired["domainGeneration"] == "1234"
+    assert wired["kind"] == "tooltip"
+
+
+@pytest.mark.parametrize("route", ["native", "proxy"])
+@pytest.mark.parametrize("wait_ms", [0, -1])
+@pytest.mark.parametrize("completion_policy", ["allOrNothing", "bestEffort"])
+def test_sceneview_nonwaiting_start_exposes_exact_snapshot_for_cancellation(
+    monkeypatch, route, wait_ms, completion_policy,
+):
+    """A non-waiting public start must expose the job, not a blocking Task handle."""
+    started = {"snapshotId": "snapshot-own-scene", "requestKey": "own-request",
+               "status": "running", "phase": "rendering", "terminal": False}
+    service = _service(
+        ok("start", started),
+        ok("cancel", {**started, "cancelRequested": True}),
+        ok("status", {**started, "status": "cancelled", "terminal": True,
+                      "success": False, "cancelRequested": True}),
+    )
+
+    async def forbidden_task(*args, **kwargs):
+        pytest.fail("waitMs<=0 must not hide snapshotId behind a SceneView Task")
+
+    service.task_start = forbidden_task
+    monkeypatch.setattr(snapshot_tools, "_get_facade", lambda: service)
+    arguments = {
+        "targets": [{"targetId": "own-scene", "kind": "sceneView", "instanceId": "42",
+                     "domainGeneration": "domain-own", "requireContentRect": True}],
+        "waitMs": wait_ms, "requestKey": "own-request",
+        "completionPolicy": completion_policy,
+    }
+
+    async def run():
+        if route == "native":
+            response = await runtime.mcp._tool_manager.call_tool("unity_snapshot_capture", arguments)
+            envelope = response.structuredContent
+            assert envelope["ok"] is True
+            data = envelope["data"]
+        else:
+            response = await dispatch_public_tool(service, "unity_snapshot_capture", arguments)
+            assert response.ok is True
+            data = response.data
+        assert data["snapshotId"] == "snapshot-own-scene"
+        assert data["requestKey"] == "own-request"
+        assert data["terminal"] is False
+        assert data["persistenceVerified"] is False
+        assert "taskId" not in data
+        assert len(service.dispatcher.calls) == 1
+        cancelled = await service.snapshot_cancel(data["snapshotId"])
+        assert cancelled.ok and cancelled.data["cancelRequested"]
+        terminal = await service.snapshot_status(data["snapshotId"], "full")
+        assert terminal.ok and terminal.data["status"] == "cancelled"
+        assert terminal.data["success"] is False
+
+    asyncio.run(run())
+    assert [name for name, _ in service.dispatcher.calls] == [
+        "snapshot.start", "snapshot.cancel", "snapshot.status",
+    ]
+    payload = service.dispatcher.calls[0][1]
+    assert payload["targets"][0]["instanceId"] == "42"
+    assert payload["targets"][0]["domainGeneration"] == "domain-own"
+    assert payload["targets"][0]["requireContentRect"] is True
+    assert payload["completionPolicy"] == completion_policy
+    assert payload["requestKey"] == "own-request"
+    assert started == {"snapshotId": "snapshot-own-scene", "requestKey": "own-request",
+                       "status": "running", "phase": "rendering", "terminal": False}

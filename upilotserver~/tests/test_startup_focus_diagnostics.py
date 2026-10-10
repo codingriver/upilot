@@ -24,7 +24,7 @@ def _service(project: Path) -> StatusDomainService:
     service = StatusDomainService.__new__(StatusDomainService)
     service.server = SimpleNamespace(
         session_manager=SimpleNamespace(active=SimpleNamespace(project_path=str(project))),
-        state=SimpleNamespace(project_path=str(project)),
+        state=SimpleNamespace(project_path=str(project), execution_state=lambda: {}),
     )
     return service
 
@@ -333,3 +333,68 @@ def test_startup_summary_keeps_health_handshake_and_ready_as_independent_evidenc
     assert summary["current"] is True
     assert summary["missingStages"] == missing
     assert summary["historicalEditorReady"] is False
+
+
+def test_queued_diagnostics_are_observations_and_revalidate_identity(monkeypatch, tmp_path):
+    service = _service(tmp_path)
+    target = {"ok": True, "hwnd": 10, "targetPid": 42}
+    monkeypatch.setattr(service, "_resolve_verified_unity_window", lambda: target)
+    monkeypatch.setattr(service, "_revalidate_window_target", lambda _: (True, ""))
+    monkeypatch.setattr(service, "_enumerate_windows_for_pid", lambda _: [
+        {"hwnd": 10, "enabled": False},
+        {"hwnd": 11, "ownerHwnd": 10, "visible": True, "title": "Save"},
+    ])
+    monkeypatch.setattr(service, "_foreground_window", lambda: 999)
+    monkeypatch.setattr(service, "_window_process_id", lambda _: 9)
+    result = service._queued_editor_diagnostics({"authoritative": True, "isUpdating": True, "compilePhase": "queued"})
+    assert set(result["hints"]) == {"asset_import_in_progress", "queued_with_main_thread_pumping", "editor_in_background", "possible_modal_window"}
+    assert result["causalAttribution"] == "unverified"
+    monkeypatch.setattr(service, "_revalidate_window_target", lambda _: (False, "process_identity_changed"))
+    assert service._queued_editor_diagnostics({})["windowObservation"]["status"] == "unknown"
+
+@pytest.mark.parametrize("failure", ["access_denied", "identity_changed_after_enumeration", "main_window_disappeared"])
+def test_queued_diagnostics_discard_unverifiable_window_observations(monkeypatch, tmp_path, failure):
+    service = _service(tmp_path)
+    target = {"ok": True, "hwnd": 10, "targetPid": 42}
+    monkeypatch.setattr(service, "_resolve_verified_unity_window", lambda: target)
+    validations = iter([(True, ""), (failure != "identity_changed_after_enumeration", "process_identity_changed" if failure == "identity_changed_after_enumeration" else "")])
+    monkeypatch.setattr(service, "_revalidate_window_target", lambda _: next(validations))
+    queried_pids = []
+
+    def enumerate_windows(pid):
+        queried_pids.append(pid)
+        if failure == "access_denied":
+            raise OSError("access denied")
+        return [] if failure == "main_window_disappeared" else [
+            {"hwnd": 10, "enabled": False},
+            {"hwnd": 11, "ownerHwnd": 10, "visible": True, "title": "Untrusted"},
+        ]
+
+    monkeypatch.setattr(service, "_enumerate_windows_for_pid", enumerate_windows)
+    result = service._queued_editor_diagnostics({"authoritative": False, "isStale": True})
+    window = result["windowObservation"]
+    assert queried_pids == [42]
+    assert window["status"] == "unknown"
+    assert window["reason"] == {
+        "access_denied": "window_query_failed",
+        "identity_changed_after_enumeration": "process_identity_changed",
+        "main_window_disappeared": "main_window_disappeared",
+    }[failure]
+    assert "possibleModalWindows" not in window
+    assert result["hints"] == ["insufficient_evidence"]
+    assert result["causalAttribution"] == "unverified"
+
+
+@pytest.mark.parametrize("execution,expected", [
+    ({"authoritative": True, "isStale": False, "compilePhase": "queued"}, ["queued_with_main_thread_pumping"]),
+    ({"authoritative": True, "isStale": True, "isUpdating": True, "compilePhase": "queued"}, ["insufficient_evidence"]),
+    ({"authoritative": False, "isUpdating": True, "compilePhase": "queued"}, ["insufficient_evidence"]),
+    ({"authoritative": True, "isStale": False, "isUpdating": True, "compilePhase": "queued", "lastMainThreadPumpAt": 1, "editorPumpAgeMs": 10001}, ["main_thread_not_advancing"]),
+])
+def test_queued_hints_do_not_promote_stale_import_or_queue_state(monkeypatch, tmp_path, execution, expected):
+    service = _service(tmp_path)
+    monkeypatch.setattr(service, "_resolve_verified_unity_window", lambda: {"ok": False, "reason": "identity_unverified"})
+    result = service._queued_editor_diagnostics(execution)
+    assert result["hints"] == expected
+    assert result["causalAttribution"] == "unverified"
+    assert execution.get("compilePhase") == "queued"

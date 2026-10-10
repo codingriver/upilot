@@ -554,6 +554,71 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(read.diskSnapshotNextSequence, Is.EqualTo(boundary.nextSequence));
         }
 
+        [Test]
+        public void ReloadFlushPersistsPendingRecordsAndPreservesOwnedRecovery()
+        {
+            var started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            var service = typeof(UPilotConsoleCaptureService);
+            var receive = service.GetMethod("OnLogMessageReceived", BindingFlags.Static | BindingFlags.NonPublic);
+            var flush = service.GetMethod("FlushBeforeAssemblyReload", BindingFlags.Static | BindingFlags.NonPublic);
+            var active = service.GetField("s_active", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(receive, Is.Not.Null);
+            Assert.That(flush, Is.Not.Null);
+            Assert.That(active, Is.Not.Null);
+            const string marker = "UPILOT_OWNED_PENDING_RELOAD_RECORD";
+            receive.Invoke(null, new object[] { marker, string.Empty, LogType.Log });
+            // No Editor update can flush between these synchronous calls.
+            Assert.That(File.ReadAllText(started.session.jsonlPath), Does.Not.Contain(marker));
+            flush.Invoke(null, null);
+            byte[] first = File.ReadAllBytes(started.session.jsonlPath);
+            Assert.That(Encoding.UTF8.GetString(first), Does.Contain(marker));
+            var persisted = JsonUtility.FromJson<ConsoleCaptureManifest>(File.ReadAllText(started.session.manifestPath));
+            Assert.That(persisted.active, Is.True);
+            Assert.That(persisted.nextSequence, Is.EqualTo(1));
+            Assert.That(persisted.ownerTokenSha256, Is.EqualTo(started.session.ownerTokenSha256));
+            flush.Invoke(null, null);
+            Assert.That(File.ReadAllBytes(started.session.jsonlPath), Is.EqualTo(first));
+            // Isolated recovery seam, not a claim that a real Domain Reload occurred.
+            active.SetValue(null, null);
+            var restored = UPilotConsoleCaptureApi.Status(_sessionId);
+            Assert.That(restored.ok && restored.session.active, Is.True);
+            Assert.That(restored.session.nextSequence, Is.EqualTo(persisted.nextSequence));
+            Assert.That(UPilotConsoleCaptureApi.Stop(_sessionId, "not-the-owner").ok, Is.False);
+            receive.Invoke(null, new object[] { "UPILOT_OWNED_AFTER_RECOVERY", string.Empty, LogType.Log });
+            var stopped = UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken);
+            Assert.That(stopped.ok, Is.True, stopped.error);
+            var lines = File.ReadAllLines(stopped.session.jsonlPath);
+            Assert.That(lines.Length, Is.EqualTo(2));
+            Assert.That(JsonUtility.FromJson<ConsoleCaptureRecord>(lines[0]).sequence, Is.EqualTo(0));
+            Assert.That(JsonUtility.FromJson<ConsoleCaptureRecord>(lines[1]).sequence, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ReloadFlushRecordsOwnedWriteFailureWithoutStoppingOrThrowing()
+        {
+            var started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            var service = typeof(UPilotConsoleCaptureService);
+            var receive = service.GetMethod("OnLogMessageReceived", BindingFlags.Static | BindingFlags.NonPublic);
+            var flush = service.GetMethod("FlushBeforeAssemblyReload", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.That(receive, Is.Not.Null);
+            Assert.That(flush, Is.Not.Null);
+            receive.Invoke(null, new object[] { "UPILOT_OWNED_LOCKED_RELOAD_RECORD", string.Empty, LogType.Log });
+            // Only this fixture's JSONL is locked. No physical disk failure is claimed.
+            using (new FileStream(started.session.jsonlPath, FileMode.Open, FileAccess.Read, FileShare.None))
+                Assert.DoesNotThrow(() => flush.Invoke(null, null));
+            var observed = UPilotConsoleCaptureApi.Status(_sessionId);
+            Assert.That(observed.ok && observed.session.active, Is.True);
+            Assert.That(observed.session.lastError, Is.Not.Empty);
+            Assert.That(observed.session.droppedCount, Is.EqualTo(1));
+            Assert.That(observed.session.nextSequence, Is.EqualTo(1));
+            Assert.That(File.ReadAllBytes(started.session.jsonlPath).Length, Is.EqualTo(0));
+            var persisted = JsonUtility.FromJson<ConsoleCaptureManifest>(File.ReadAllText(started.session.manifestPath));
+            Assert.That(persisted.lastError, Is.Not.Empty);
+            Assert.That(persisted.droppedCount, Is.EqualTo(1));
+        }
+
         private ConsoleCaptureResult Start(string path = null, bool allowOutsideProject = false, long maxFileBytes = 50L * 1024L * 1024L)
         {
             var result = UPilotConsoleCaptureApi.Start(new ConsoleCaptureStartPayload

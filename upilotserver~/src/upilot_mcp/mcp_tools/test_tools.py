@@ -37,20 +37,21 @@ async def unity_test_run(
     r = await _get_facade().test_run(test_mode=testMode, test_filter=testFilter, test_names=testNames, fixtures=fixtures, assemblies=assemblies, categories=categories, match_mode=matchMode, require_all_selectors_match=requireAllSelectorsMatch, expected_selection_domain=expectedSelectionDomain, expected_selection_snapshot_id=expectedSelectionSnapshotId)
     return _log_tool_result("unity_test_run", _payload(r))
 
-@mcp.tool(description="获取最近一次或指定 runGuid 的 Unity 测试结果；cursor='begin' 开始只读增量叶子事件，后续使用 nextCursor。省略 cursor 保留完整结果兼容行为。")
+@mcp.tool(description="获取最近一次或指定 runGuid 的 Unity 测试结果；cursor='begin' 开始只读增量叶子事件，后续使用 nextCursor。省略 cursor 保留完整结果兼容行为。detailLevel=summary 返回<=8192字节业务data摘要（不含MCP外壳），不能与cursor组合；full默认无损。")
 async def unity_test_results(
     runGuid: str = "",
     cursor: str = "",
     count: Annotated[int, Field(strict=True, ge=1, le=1000)] = 100,
+    detailLevel: str = "full",
 ):
-    _log_tool_call("unity_test_results", {"runGuid": runGuid, "cursor": cursor, "count": count})
-    r = await _get_facade().test_results(run_guid=runGuid, cursor=cursor, count=count)
+    _log_tool_call("unity_test_results", {"runGuid": runGuid, "cursor": cursor, "count": count, "detailLevel": detailLevel})
+    r = await _get_facade().test_results(run_guid=runGuid, cursor=cursor, count=count, detail_level=detailLevel)
     return _log_tool_result("unity_test_results", _payload(r))
 
-@mcp.tool(description="获取当前 Unity Test Runner 运行 GUID、当前测试、进度时间与取消/清理状态。")
-async def unity_test_status():
-    _log_tool_call("unity_test_status", {})
-    r = await _get_facade().test_status()
+@mcp.tool(description="获取当前 Unity Test Runner 运行 GUID、当前测试、进度时间与取消/清理状态。detailLevel=summary 返回<=8192字节业务data摘要；默认full保持原status契约。")
+async def unity_test_status(detailLevel: str = "full"):
+    _log_tool_call("unity_test_status", {"detailLevel": detailLevel})
+    r = await _get_facade().test_status(detail_level=detailLevel)
     return _log_tool_result("unity_test_status", _payload(r))
 
 @mcp.tool(description="通过 Unity Test Framework 官方 run GUID 取消当前测试；重复调用是幂等的，终态以 RunFinished 与清理完成为准。")

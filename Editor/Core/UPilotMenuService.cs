@@ -70,7 +70,14 @@ namespace CodingRiver.UPilot
                 {
                     menuPath = p.menuPath, executed = EditorApplication.ExecuteMenuItem(p.menuPath),
                 }, p.expectedModal);
-                await _bridge.SendResultAsync(id, "menu.execute", payload, token);
+                // RunAsync returns either a receipt or a pending modal as object.
+                // Preserve the concrete type; JsonUtility serializes object payloads as {}.
+                if (payload is MenuExecuteResultPayload receipt)
+                    await _bridge.SendResultAsync(id, "menu.execute", receipt, token);
+                else if (payload is ModalObservationPayload modal)
+                    await _bridge.SendResultAsync(id, "menu.execute", modal, token);
+                else
+                    throw new InvalidOperationException("Unexpected menu observation result type.");
             }
             catch (Exception ex)
             {

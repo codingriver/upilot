@@ -14,7 +14,8 @@ import subprocess
 import sys
 import time
 import secrets
-from dataclasses import asdict
+import zlib
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,122 @@ from ..test_job_context import TEST_JOB_CONTEXT, checkpoint
 logger = logging.getLogger("upilot.mcp")
 _MIN_PLACEHOLDER_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 _TEST_RESULT_CURSOR_KEY = secrets.token_bytes(32)
+# A local, lossless test.results transport only; the Bridge frame limit remains
+# 4 MiB. Bound decompression independently from compressed input size.
+_TEST_RESULT_MAX_DECODED_BYTES = 64 * 1024 * 1024
+
+
+def _decode_test_result_transfer(data: dict, run_guid: str) -> dict:
+    if "resultEncoding" not in data:
+        return data  # Older Bridges and small results retain the original shape.
+    size = data.get("uncompressedBytes")
+    encoded = data.get("compressedResult")
+    if (data.get("resultEncoding") != "gzip+base64"
+            or type(size) is not int or not 0 < size <= _TEST_RESULT_MAX_DECODED_BYTES
+            or not isinstance(encoded, str) or len(encoded) > 4 * 1024 * 1024):
+        raise ValueError("Unsupported or out-of-bounds test result transfer.")
+    compressed = base64.b64decode(encoded, validate=True)
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    raw = decoder.decompress(compressed, size + 1)
+    if (len(raw) != size or not decoder.eof
+            or decoder.unconsumed_tail or decoder.unused_data):
+        raise ValueError("Incomplete, oversized or trailing test result transfer.")
+    result = json.loads(raw.decode("utf-8"))
+    if (not isinstance(result, dict) or not isinstance(result.get("runGuid"), str)
+            or not isinstance(result.get("results"), list) or not isinstance(result.get("events"), list)
+            or (run_guid and result["runGuid"] != run_guid)):
+        raise ValueError("Test result transfer shape or run identity mismatch.")
+    return result
+
+
+_TEST_SUMMARY_MAX_BYTES = 8192
+_TEST_SUMMARY_SCALARS = """
+serviceLifecycleId resultStreamVersion runGuid originatingRequestId originatingCommandId
+operationId status phase testMode currentTest startedAt lastProgressAt isRunning
+cancelRequested cancelAccepted cancelAttemptCount stopRequestedAt stoppingAt cleanupStartedAt
+endedAt cleanupPending forceStopAttempted forceStopSucceeded forceStopError
+cleanupAttemptDeadlineAt cleanupResourcesReleased total passed failed skipped
+completedLeafCount passedSoFar failedSoFar skippedSoFar lastCompletedTest firstFailure
+intermediate noTests discoveryStatus requestedFilter selectionDomain selectionSnapshotId
+expectedSelectionDomain expectedSelectionSnapshotId discoveredCount matchedCount
+outcomeStatus cleanupStatus cleanupSucceeded resultAuthoritative terminalReason
+firstProgressDeadlineAt firstProgressObserved suspectedStuck watchdogState failureSignature
+nextAction snapshotSequence persistenceError cancelBinding runnerState recoveryDiagnostic
+callbackDomain terminal authoritative
+""".split()
+_TEST_SUMMARY_IDENTITIES = {
+    "serviceLifecycleId", "runGuid", "originatingRequestId", "originatingCommandId",
+    "operationId", "selectionDomain", "selectionSnapshotId", "expectedSelectionDomain",
+    "expectedSelectionSnapshotId", "callbackDomain", "sessionId", "captureSessionId",
+}
+_TEST_SUMMARY_ARRAYS = (
+    "results", "events", "selectors", "selectedLeafIdentities", "discoveredAssemblies",
+    "cleanupErrors", "cleanupErrorHistory", "unresolvedResources", "consolePhases",
+)
+
+
+def _test_summary(response: ToolResponse) -> ToolResponse:
+    """A final, local data projection; never mutate durable/Bridge results.
+
+    Byte accounting uses the public payload's UTF-8 JSON spacing, not the
+    compressed Bridge frame or the MCP envelope. Missing facts stay missing.
+    """
+    if not response.ok or not isinstance(response.data, dict):
+        return response
+    source = response.data
+    summary = {key: source[key] for key in _TEST_SUMMARY_SCALARS
+               if key in source and (source[key] is None or isinstance(source[key], (str, bool, int, float)))}
+    summary["arrayCounts"] = {key: len(source[key]) for key in _TEST_SUMMARY_ARRAYS
+                              if isinstance(source.get(key), list)}
+    evidence = source.get("consoleEvidence")
+    if isinstance(evidence, dict):
+        summary["consoleEvidence"] = {key: evidence[key] for key in (
+            "coverage", "gapReason", "source", "sessionId", "captureSessionId",
+            "fromSequence", "toSequence", "relation", "attribution",
+        ) if key in evidence and (evidence[key] is None or isinstance(evidence[key], (str, bool, int, float)))}
+    # Disposition may contain positive cleanup facts not present at the top level.
+    disposition = source.get("disposition")
+    if isinstance(disposition, dict):
+        summary["disposition"] = {key: value for key, value in disposition.items()
+                                  if key in {"outcomeStatus", "cleanupStatus", "cleanupSucceeded",
+                                             "resultAuthoritative", "terminal", "terminalReason"}
+                                  and (value is None or isinstance(value, (str, bool, int, float)))}
+    summary.update(detailLevel="summary", summaryMaxBytes=_TEST_SUMMARY_MAX_BYTES,
+                   summaryBytes=0, summaryTruncated=True,
+                   fullResultAvailable=True)
+    # Bound explanatory strings, not run/selection identities. The latter must
+    # either fit unchanged or fail explicitly, never masquerade as another run.
+    truncated = []
+    for cap in (512, 128, 32):
+        for container in (summary, summary.get("consoleEvidence", {}), summary.get("disposition", {})):
+            for key, value in list(container.items()):
+                if key not in _TEST_SUMMARY_IDENTITIES and isinstance(value, str) and len(value) > cap:
+                    container[key] = value[:cap]
+                    if key not in truncated:
+                        truncated.append(key)
+        summary["truncatedFields"] = truncated
+        # The byte receipt includes itself; converge when its decimal width changes.
+        for _ in range(4):
+            measured = len(json.dumps(summary, ensure_ascii=False).encode("utf-8"))
+            if measured == summary["summaryBytes"]:
+                break
+            summary["summaryBytes"] = measured
+        if summary["summaryBytes"] <= _TEST_SUMMARY_MAX_BYTES:
+            return replace(response, data=summary)
+    return fail(response.request_id, "TEST_SUMMARY_IDENTITY_TOO_LARGE",
+                "The unchanged run/selection identities exceed the summary budget; request detailLevel=full.",
+                {"summaryMaxBytes": _TEST_SUMMARY_MAX_BYTES, "sideEffectsMayHaveOccurred": False},
+                context=response.context, timing=response.timing)
+
+
+def _test_detail_error(request_id: str, detail_level: str, cursor: str = "") -> ToolResponse | None:
+    if detail_level not in ("summary", "full"):
+        return fail(request_id, "TEST_DETAIL_LEVEL_INVALID", "detailLevel must be summary or full.",
+                    {"sideEffectsMayHaveOccurred": False})
+    if detail_level == "summary" and cursor:
+        return fail(request_id, "TEST_DETAIL_CURSOR_CONFLICT", "summary cannot be combined with cursor; use cursor alone.",
+                    {"sideEffectsMayHaveOccurred": False})
+    return None
 
 
 def _response_summary(response: ToolResponse) -> dict:
@@ -425,8 +542,12 @@ class TestDomainService:
         return value
 
     @observed_test
-    async def test_results(self, run_guid: str = "", cursor: str = "", count: int = 100) -> ToolResponse:
+    async def test_results(self, run_guid: str = "", cursor: str = "", count: int = 100,
+                           detail_level: str = "full") -> ToolResponse:
         request_id = new_id("req")
+        detail_error = _test_detail_error(request_id, detail_level, cursor)
+        if detail_error is not None:
+            return detail_error
         if not isinstance(cursor, str):
             return fail(
                 request_id,
@@ -435,11 +556,25 @@ class TestDomainService:
                 {"sideEffectsMayHaveOccurred": False},
             )
         if not cursor:
-            payload = {"runGuid": run_guid} if run_guid else {}
+            payload = {"acceptCompressed": True}
+            if run_guid:
+                payload["runGuid"] = run_guid
             response = await self.dispatcher.call(request_id, "test.results", payload)
+            if detail_level == "summary" and isinstance(response.data, dict):
+                # Copy before decoding too: a compressed wire response must
+                # remain available unchanged to its owner/full consumers.
+                response = replace(response, data=dict(response.data))
+            if response.ok and isinstance(response.data, dict):
+                try:
+                    response.data = _decode_test_result_transfer(response.data, run_guid)
+                except (ValueError, zlib.error) as exc:
+                    return fail(request_id, "TEST_RESULT_TRANSFER_INVALID", str(exc),
+                                {"runGuid": run_guid, "commandSubmitted": True,
+                                 "replayAttempted": False, "sideEffectsMayHaveOccurred": False},
+                                context=response.context, timing=response.timing)
             resolved_run_guid = str(run_guid or (response.data or {}).get("runGuid") or "")
             await self._attach_test_console_evidence(response, resolved_run_guid)
-            return response
+            return _test_summary(response) if detail_level == "summary" else response
         if not run_guid:
             return fail(request_id, "TEST_RESULT_CURSOR_INVALID",
                         "Incremental test results require runGuid; the cursor never selects a run implicitly.",
@@ -548,14 +683,21 @@ class TestDomainService:
                     "gapReason": f"end_boundary_failed:{type(exc).__name__}",
                 }
             state_store.save_console_evidence("runGuid", run_guid, evidence)
+        if data is not None and isinstance(data.get("consolePhases"), list):
+            evidence = {**(evidence or {}), "phases": data["consolePhases"]}
+            state_store.save_console_evidence("runGuid", run_guid, evidence)
         if data is not None and evidence:
             data["consoleEvidence"] = evidence
         elif response.error is not None and evidence:
             response.error.detail["consoleEvidence"] = evidence
 
-    async def test_status(self) -> ToolResponse:
+    async def test_status(self, detail_level: str = "full") -> ToolResponse:
         request_id = new_id("req")
-        return await self.dispatcher.call(request_id, "test.status", {})
+        detail_error = _test_detail_error(request_id, detail_level)
+        if detail_error is not None:
+            return detail_error
+        response = await self.dispatcher.call(request_id, "test.status", {})
+        return _test_summary(response) if detail_level == "summary" else response
 
     @audited("Test", "cancel", "run_guid")
     async def test_cancel(self, run_guid: str = "") -> ToolResponse:
