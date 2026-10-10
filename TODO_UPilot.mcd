@@ -284,5 +284,11 @@
 - 修复：只开放完整 `jobSpec.stepPlan` 和现有 C# ValidateJson/StartJson，共用校验及单执行器；保留权限、预算、Capture 所有权、固定期限、单次启动、Finally/报告。手写回调及 Task 包装仍禁用。
 - 补丁审计：2026-10-09 临时补丁以 v0.3.43 为基线，Step 核心方向正确；本次只纳入相关实现。两项 recovery 测试改按原有 aborted 终态契约，保留不重放、不续期、不实际调用 Capture 断言；Eval 文档按本候选实际旧 auto 实现区分新旧 Bridge，不引入 Eval 运行时代码。
 - 模板：权威 Agent/Skill 源版本 56/65，受控输出由源生成，不手改安装产物。
-- 状态：候选已实现，定向 Python/Unity/正式入口/五目标同步验收待完成；正式发布及外部项目升级未执行。标准项目仅 D:/upilot/Tests~/UPilotTest。
-- 证据：Tests~/UPilotTest/Log/StepAdmission/20261010/。原 2026-10-09 记录是历史证据，不替代本候选验收。
+- 2026-10-10 独立发布候选验收完成（未发布）：从远端 main / v0.3.43 的 7fcdf3a9891c5fcdd5fdfb90c5c50696cc8ffbd8 隔离生成最小候选；运行时代码/测试冻结提交 3850521a93a2115ad5a722145c33136eb95c5c59，不整包复制临时补丁，不纳入开发工作树其他功能。后续仅本条验收文档更新，最终候选身份和逐文件哈希保存在同一证据目录。
+- Python：Step 准入及 Operation/Capture 清理五文件 138 passed / 2 deprecation warnings；包含两项原失败 recovery 用例，按既有 aborted 终态保留不重放、不续期、不实际操作 Capture 的断言。候选默认 source-quality contracts 411 passed / 2 warnings；未跳过用例、未改变检查策略。
+- Unity：仅标准项目 D:/upilot/Tests~/UPilotTest。候选 WriteBatch wb-315d008f-ba17-45a8-8dfc-592cbe681c63 / compile 360f8fe2738848628d4943e465bd1590 已验证关联终态，0 errors / 0 warnings。Registry 24 + Executor 89，共 113/113 passed、0 failed/skipped；runGuid 65d4b15e-849f-404a-9687-e60de3544926，权威结果及清理完成。未运行全量 EditMode。
+- 正式中立冒烟：官方预检成功后只 Start 一次，op-4b1ac157-45c8-4853-b8ec-458fd180dde4 / run 7f595343b6ad4929b322dee67c58d0ff；受控 Capture、Normal wait、Finally wait 全部 Succeeded，startAttemptCount=1，业务/清理/编辑器终态完成，cleanupPending=false，8 项产物大小与 SHA256 实读核验一致，结束无活动 Capture。无场景/玩法配置修改、无玩法验收。
+- 模板/部署：Agent 56 / Skill 65，源生成/检查通过；候选 UPM 五目标 current、两份 installed 检查通过，重复实际 apply changed=false、文件内容/时间戳/备份列表无变化、规则块外字节保留。候选 Server 进程命令行和实际 UPM 源指向该工作树，新增测试与正式准入实测通过；旧基线缺少全模块 loaded-source 哈希证明，不能由版本/PID/路径推出全部加载字节已验证。
+- 环境恢复：标准项目原依赖 file:../../.. 已恢复，manifest、packages-lock、UPilot config 与基线字节相同，Unity PID 23796 不变，恢复 fresh Ready/EditMode。恢复自动编译 31439ba37fe74fd2b3d21963f7757642 / errorsVerified=true 为 0 errors、4 warnings，仅作为环境恢复结果，不替代候选批次关联验收；其持久 Console 编译边界缺失，日志覆盖不完整。最近 Console 的端口登记锁 Sharing violation 已属现有 V06 项，不据此归因 Step 或扩大本次修复。原开发源五目标重同步/双 Skill 校验/重复零变化检查完成；队列库存 complete/空、active Capture=0。
+- 交付状态/范围：最小修复已提交，候选验收通过；远端 main 推送结果以本轮 push-verification.json 为准，正式发布需后续明确授权，包版本/标签仍由发布工作流维护。未操作 xclient/xclient2、未修改临时补丁目录；未覆盖 Unity2022、全量 EditMode、实际捕获中 Reload/PlayMode recovery、业务玩法、全模块加载鉴证或发布 EXE/资产。
+- 本轮证据：Tests~/UPilotTest/Log/StepAdmission/20261010/（verification.json、restoration-verification.json、candidate-quality/quality.json、neutral-smoke-*.json、candidate-test-status-2.json、candidate-compile-verified.json；最终提交/文件清单/哈希见 final-candidate-source.json）。原框架报告 Log/UPilotSteps/7f595343b6ad4929b322dee67c58d0ff/；既有历史记录保持，不代替本候选证据。
