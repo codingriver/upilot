@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from pathlib import Path
+from typing import Annotated, Any
+
+from pydantic import Field
+from ..models import ToolResponse
+from ..protocol import new_id
+from ..responses import fail, ok
+from ..tool_registry import REGISTRY, register_public_tool
+from .. import mcp_stdio_server as runtime
+
+mcp = runtime.mcp
+_get_facade = runtime._get_facade
+_payload = runtime._payload
+_log_tool_call = runtime._log_tool_call
+_log_tool_result = runtime._log_tool_result
+_reject_compile_in_playmode = runtime._reject_compile_in_playmode
+_reject_write_if_unapproved = runtime._reject_write_if_unapproved
+CONFIG = runtime.CONFIG
+logger = logging.getLogger("upilot.mcp")
+
+@mcp.tool(description="当前项目任务汇总及有界软停止。默认 dryRun=true 只读；执行需原目标/action/reason、expectedProjectPath 和一次性 confirmToken，受独立 aiQueueCleanupAllowed 授权控制。重复结束正常返回 ending/not_found，不重复收尾。All/* + force_clear_all 为软停止全部，60 秒总预算；保留预览 requestId，以 force_clear_status 观察原请求。软停止失败仅在独立 AI 服务维护授权及自动硬停止选项同时有效时升级为项目级 Server/Bridge 重启；不重启 Unity、不恢复旧队列、不删除历史产物。不再提供 recover/release/abandon 行政处置。")
+async def unity_queue_cleanup(targetType: str = "", targetId: str = "", action: str = "",
+                              reason: str = "", dryRun: bool = True, confirmToken: str = "",
+                              expectedProjectPath: str = ""):
+    r = await _get_facade().queue_cleanup(target_type=targetType, target_id=targetId, action=action,
+        reason=reason, dry_run=dryRun, confirm_token=confirmToken, expected_project_path=expectedProjectPath)
+    return _payload(r)
+
+@mcp.tool(
+    description="预检测试环境就绪：检查 Unity 连接 + 编译完成 + 编辑模式。返回 ready=true/false 及各项状态。"
+)
+async def unity_ensure_ready(timeoutS: float = 120, requiredEditorMode: str = "edit", editorModeControl: str = "automatic"):
+    _log_tool_call("unity_ensure_ready", {"timeoutS": timeoutS})
+    r = await _get_facade().ensure_ready(timeout_s=timeoutS, required_editor_mode=requiredEditorMode, editor_mode_control=editorModeControl)
+    return _log_tool_result("unity_ensure_ready", _payload(r))
+
+@mcp.tool(
+    description=(
+        "带超时看门狗执行另一个 MCP 工具。超时默认不重启 Unity；应先使用业务 cancel/stop、"
+        "hang_status 和有界清理。只有调用方显式设置 restartUnityOnTimeout=true 时才允许进程级恢复。"
+        "不要包裹非幂等/破坏性操作重试，除非用户已确认可重复执行。"
+    )
+)
+async def unity_task_execute(
+    taskName: str,
+    toolName: str,
+    toolArgs: dict | None = None,
+    timeoutS: float = 600,
+    maxTotalS: float = 1200,
+    retryCount: int = 1,
+    restartUnityOnTimeout: bool = False,
+):
+    _log_tool_call(
+        "unity_task_execute",
+        {
+            "taskName": taskName,
+            "toolName": toolName,
+            "toolArgs": toolArgs,
+            "timeoutS": timeoutS,
+            "maxTotalS": maxTotalS,
+            "retryCount": retryCount,
+            "restartUnityOnTimeout": restartUnityOnTimeout,
+        },
+    )
+    r = await _get_facade().task_execute(
+        task_name=taskName,
+        tool_name=toolName,
+        tool_args=toolArgs,
+        timeout_s=timeoutS,
+        max_total_s=maxTotalS,
+        retry_count=retryCount,
+        restart_unity_on_timeout=restartUnityOnTimeout,
+    )
+    return _log_tool_result("unity_task_execute", _payload(r))
+
+@mcp.tool(description="异步启动有界任务并返回 taskId。测试/包验收要求 retryCount=0；保存 runGuid、原期限和历史摘要。服务重启不恢复活动任务或观察器，普通重连不延长期限。")
+async def unity_task_start(
+    taskName: str,
+    toolName: str,
+    toolArgs: dict | None = None,
+    timeoutS: float = 600,
+    retryCount: int = 0,
+):
+    _log_tool_call("unity_task_start", {"taskName": taskName, "toolName": toolName, "timeoutS": timeoutS, "retryCount": retryCount})
+    r = await _get_facade().task_start(
+        task_name=taskName,
+        tool_name=toolName,
+        tool_args=toolArgs,
+        timeout_s=timeoutS,
+        retry_count=retryCount,
+    )
+    return _log_tool_result("unity_task_start", _payload(r))
+
+@mcp.tool(description="读取异步 UPilot 任务的状态、阶段、耗时、结果或错误。")
+async def unity_task_status(taskId: str, detailLevel: str = "summary"):
+    _log_tool_call("unity_task_status", {"taskId": taskId, "detailLevel": detailLevel})
+    r = await _get_facade().task_status(task_id=taskId, detail_level=detailLevel)
+    return _log_tool_result("unity_task_status", _payload(r))
+
+@mcp.tool(description="请求一次有界软停止。重复请求正常返回 ending/not_found；收尾失败或超时仍终结任务，不冒充业务成功或底层已停止。不支持协作停止时明确报告，只有授权的自动升级才硬停止当前项目。")
+async def unity_task_cancel(taskId: str):
+    _log_tool_call("unity_task_cancel", {"taskId": taskId})
+    r = await _get_facade().task_cancel(task_id=taskId)
+    return _log_tool_result("unity_task_cancel", _payload(r))
+
+@mcp.tool(description="列出 Unity Bridge 最近操作，包含阶段、步骤、耗时、错误和卡住状态。")
+async def unity_operation_list(status: str = "", limit: int = 50):
+    _log_tool_call("unity_operation_list", {"status": status, "limit": limit})
+    r = await _get_facade().operation_list(status=status, limit=limit)
+    return _log_tool_result("unity_operation_list", _payload(r))
+
+@mcp.tool(description="按 commandId 读取一个 Unity Bridge 操作的完整步骤和计时。")
+async def unity_operation_get(commandId: str):
+    _log_tool_call("unity_operation_get", {"commandId": commandId})
+    r = await _get_facade().operation_get(command_id=commandId)
+    return _log_tool_result("unity_operation_get", _payload(r))
+
+@mcp.tool(description="通过 UPilot 正式入口启动已验证的完整 jobSpec.stepPlan 一次；保留权限、项目身份、Capture 所有权和清理检查。旧通用回调及 Task 包装仍禁用。")
+async def unity_operation_start(jobSpec: dict):
+    _log_tool_call("unity_operation_start", {"jobSpec": jobSpec})
+    r = await _get_facade().operation_start(job_spec=jobSpec)
+    return _log_tool_result("unity_operation_start", _payload(r))
+
+@mcp.tool(description="只读预检完整 jobSpec.stepPlan，调用 Unity Step 参数验证并检查预算及 Capture 所有权；不创建 Run、Capture 或执行业务 Step。旧通用回调仍禁用。")
+async def unity_operation_validate(jobSpec: dict, inspectReflection: bool = True):
+    _log_tool_call("unity_operation_validate", {"jobSpec": jobSpec, "inspectReflection": inspectReflection})
+    r = await _get_facade().operation_validate(job_spec=jobSpec, inspect_reflection=inspectReflection)
+    return _log_tool_result("unity_operation_validate", _payload(r))
+
+@mcp.tool(description="读取并刷新一个通用长作业状态；会调用 jobSpec.statusCall 并归一化通用状态字段。")
+async def unity_operation_status(operationId: str, detailLevel: str = "summary", maxTailChars: int = 2000, includeRawState: bool = False):
+    _log_tool_call("unity_operation_status", {"operationId": operationId, "detailLevel": detailLevel, "maxTailChars": maxTailChars, "includeRawState": includeRawState})
+    r = await _get_facade().operation_status(operation_id=operationId, detail_level=detailLevel, max_tail_chars=maxTailChars, include_raw_state=includeRawState)
+    return _log_tool_result("unity_operation_status", _payload(r))
+
+@mcp.tool(
+    description=(
+        "等待已有通用长作业直到终态、等待窗口结束或疑似卡住；原执行及收尾期限不可续期，无法取得结果则中止，不启动恢复或重放。只返回 phase/status/error/"
+        "failureSignature/artifact 变化摘要，并在终态收集 artifacts。"
+    )
+)
+async def unity_operation_wait(
+    operationId: str,
+    timeoutSec: float | None = None,
+    pollIntervalSec: float | None = None,
+    returnOnSuspectedStuck: bool = True,
+    detailLevel: str = "summary",
+    maxTailChars: int = 2000,
+    includeRawState: bool = False,
+):
+    _log_tool_call(
+        "unity_operation_wait",
+        {
+            "operationId": operationId,
+            "timeoutSec": timeoutSec,
+            "pollIntervalSec": pollIntervalSec,
+            "returnOnSuspectedStuck": returnOnSuspectedStuck,
+            "detailLevel": detailLevel,
+            "maxTailChars": maxTailChars,
+            "includeRawState": includeRawState,
+        },
+    )
+    r = await _get_facade().operation_wait(
+        operation_id=operationId,
+        timeout_s=timeoutSec,
+        poll_interval_s=pollIntervalSec,
+        return_on_suspected_stuck=returnOnSuspectedStuck,
+        detail_level=detailLevel,
+        max_tail_chars=maxTailChars,
+        include_raw_state=includeRawState,
+    )
+    return _log_tool_result("unity_operation_wait", _payload(r))
+
+@mcp.tool(description="请求取消一个通用长作业；成功仅表示 cancel 已接受，仍需 statusCall 确认业务退出和 cleanup 完成后才进入终态。重复调用幂等。")
+async def unity_operation_cancel(operationId: str):
+    _log_tool_call("unity_operation_cancel", {"operationId": operationId})
+    r = await _get_facade().operation_cancel(operation_id=operationId)
+    return _log_tool_result("unity_operation_cancel", _payload(r))
+
+@mcp.tool(description="按作业状态 JSON 和 artifactRules 收集报告、summary、timing、截图等 artifact 元数据与 hash。")
+async def unity_operation_collect_artifacts(operationId: str, detailLevel: str = "summary", maxTailChars: int = 2000, includeRawState: bool = False):
+    _log_tool_call("unity_operation_collect_artifacts", {"operationId": operationId, "detailLevel": detailLevel, "maxTailChars": maxTailChars, "includeRawState": includeRawState})
+    r = await _get_facade().operation_collect_artifacts(operation_id=operationId, detail_level=detailLevel, max_tail_chars=maxTailChars, include_raw_state=includeRawState)
+    return _log_tool_result("unity_operation_collect_artifacts", _payload(r))
+
+@mcp.tool(description="通过 Unity 当前 UPM 模板只读检查全部五个 Agent/Skill 目标，不创建目录或元数据。")
+async def unity_agent_integrations_check():
+    _log_tool_call("unity_agent_integrations_check", {})
+    r = await _get_facade().agent_integrations_check()
+    return _log_tool_result("unity_agent_integrations_check", _payload(r))
+
+@mcp.tool(description="同步全部五个 Agent/Skill 目标；默认 apply=false 只预览。apply=true 需项目写授权；自动备份本地定制，逐目标验证及回滚。")
+async def unity_agent_integrations_sync(apply: bool = False):
+    _log_tool_call("unity_agent_integrations_sync", {"apply": apply})
+    if apply:
+        rejected = _reject_write_if_unapproved("unity_agent_integrations_sync")
+        if rejected is not None:
+            return rejected
+    r = await _get_facade().agent_integrations_sync(apply=apply)
+    return _log_tool_result("unity_agent_integrations_sync", _payload(r))
+
+@mcp.tool(description="只读检查项目根 AGENTS.md 的 UPilot 受控规则块，返回 diff 摘要和 recommendedBlock，不写文件。")
+async def unity_agent_rules_check():
+    _log_tool_call("unity_agent_rules_check", {})
+    r = await _get_facade().agent_rules_check()
+    return _log_tool_result("unity_agent_rules_check", _payload(r))
+
+@mcp.tool(description="安装或更新项目根 AGENTS.md 的 UPilot 受控规则块。默认 dry-run；只有 apply=true 才写文件。")
+async def unity_agent_rules_install(apply: bool = False):
+    _log_tool_call("unity_agent_rules_install", {"apply": apply})
+    if apply:
+        rejected = _reject_write_if_unapproved("unity_agent_rules_install")
+        if rejected is not None:
+            return rejected
+    r = await _get_facade().agent_rules_install(apply=apply)
+    return _log_tool_result("unity_agent_rules_install", _payload(r))
+
+@mcp.tool(
+    description=(
+        "在 Unity 主线程延迟指定毫秒（不阻塞 Python）。用于等待编辑器布局；"
+        "delayMs 最大 120000。"
+    ),
+)
+async def unity_editor_delay(delayMs: int = 100):
+    _log_tool_call("unity_editor_delay", {"delayMs": delayMs})
+    r = await _get_facade().editor_delay(delay_ms=delayMs)
+    return _log_tool_result("unity_editor_delay", _payload(r))
+
+_DESTRUCTIVE_TOOLS = {
+    "unity_asset_delete", "unity_asset_move", "unity_asset_modify_data",
+    "unity_script_create", "unity_script_update", "unity_script_delete",
+    "unity_package_add", "unity_package_remove", "unity_scene_save",
+    "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
+    "unity_agent_rules_install",
+    "unity_agent_integrations_sync",
+}
+_NON_IDEMPOTENT_TOOLS = {
+    "unity_queue_cleanup",
+    "unity_operation_start",
+    "unity_operation_wait",
+    "unity_operation_cancel",
+    "unity_agent_rules_install",
+    "unity_agent_integrations_sync",
+}
+_HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
+_PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
+for _name, _value in list(globals().items()):
+    if not callable(_value) or not _name.startswith("unity_"):
+        continue
+    if _name in _HIDDEN_PUBLIC_TOOLS:
+        continue
+    register_public_tool(
+        _name,
+        public_handler=_value,
+        destructive=_name in _DESTRUCTIVE_TOOLS,
+        requires_unity_connection=False if _name == "unity_queue_cleanup" else None,
+        requires_write_access=False if _name == "unity_agent_integrations_sync" else None,
+        write_access_predicate=(lambda args: bool(args.get("apply", False))) if _name == "unity_agent_integrations_sync" else None,
+        write_access_condition="apply=true" if _name == "unity_agent_integrations_sync" else "",
+        idempotent=_name not in (_DESTRUCTIVE_TOOLS | _NON_IDEMPOTENT_TOOLS),
+        play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
+        feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
+    )

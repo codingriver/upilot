@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -27,6 +28,8 @@ namespace CodingRiver.UPilot
         Foreign,
     }
 
+    public enum McpStatusFailureKind { None, Transient, Confirmed }
+
     public struct McpServerStatus
     {
         public bool IsRunning;
@@ -35,6 +38,7 @@ namespace CodingRiver.UPilot
         public int? ProcessId;
         public string ProcessCommandLine;
         public string ErrorMessage;
+        public McpStatusFailureKind FailureKind;
         public int WsClientCount;
         public int HttpClientCount;
         public string ServerVersion;
@@ -67,6 +71,9 @@ namespace CodingRiver.UPilot
         public bool EditorObservationAvailable;
         public string EditorObservationStatus;
         public string EditorObservationReason;
+        public string EditorObservationLifecyclePhase;
+        public string EditorObservationLifecycleId;
+        public long EditorObservationLifecycleStartedAtUtcMs;
         public long EditorObservationObservedAtUtcMs;
         public long EditorObservationWaitingSinceUtcMs;
         public long EditorObservationWaitingDurationMs;
@@ -290,7 +297,7 @@ namespace CodingRiver.UPilot
                 int healthServerProcessId,
                 string healthProjectPath,
                 UPilotServerHealth health,
-                string failure)
+                string failure, McpStatusFailureKind failureKind = McpStatusFailureKind.None)
             {
                 WsCount = wsCount;
                 HttpCount = httpCount;
@@ -312,6 +319,7 @@ namespace CodingRiver.UPilot
                 HealthProjectPath = healthProjectPath;
                 Health = health;
                 Failure = failure;
+                FailureKind = failureKind;
             }
 
             public int WsCount { get; }
@@ -334,6 +342,7 @@ namespace CodingRiver.UPilot
             public string HealthProjectPath { get; }
             public UPilotServerHealth Health { get; }
             public string Failure { get; }
+            public McpStatusFailureKind FailureKind { get; }
         }
 
         private readonly struct McpProcessProbe
@@ -342,14 +351,17 @@ namespace CodingRiver.UPilot
                 McpProcessOwnership ownership,
                 int? processId,
                 string commandLine,
-                string evidence)
+                string evidence,
+                bool ownsBothPorts = false)
             {
+                OwnsBothPorts = ownsBothPorts;
                 Ownership = ownership;
                 ProcessId = processId;
                 CommandLine = commandLine;
                 Evidence = evidence;
             }
 
+            public bool OwnsBothPorts { get; }
             public McpProcessOwnership Ownership { get; }
             public int? ProcessId { get; }
             public string CommandLine { get; }
@@ -624,7 +636,7 @@ namespace CodingRiver.UPilot
 
         private void RequestEditorHealthObservationIfNeeded(McpServerStatus status, long nowUtcMs)
         {
-            if (!status.IsRunning || !status.HealthEndpointResponded || status.HealthServerProcessId <= 0 ||
+            if (!status.IsRunning || (!status.HealthEndpointResponded && status.FailureKind != McpStatusFailureKind.Transient) || status.HealthServerProcessId <= 0 ||
                 IsServiceTransitionActive || UPilotServiceMaintenance.IsActive || UPilotQuickStart.IsExplicitlyStopped)
                 return;
 
@@ -660,7 +672,11 @@ namespace CodingRiver.UPilot
                 using var request = CreateLoopbackStatusRequest($"http://127.0.0.1:{httpPort}/health");
                 using var response = await _httpClient.SendAsync(request, cancellation.Token);
                 if (!response.IsSuccessStatusCode)
-                    return;
+                {
+                    if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized || response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                        throw new UnauthorizedAccessException("/health HTTP " + (int)response.StatusCode);
+                    throw new System.Net.Http.HttpRequestException("/health HTTP " + (int)response.StatusCode);
+                }
 
                 var json = await response.Content.ReadAsStringAsync();
                 var health = JsonUtility.FromJson<UPilotServerHealth>(json);
@@ -687,8 +703,12 @@ namespace CodingRiver.UPilot
                     }
 
                     var status = _cachedStatus;
-                    status.Health ??= health;
-                    status.Health.editor_observation = observation;
+                    status.Health = health;
+                    status.HealthEndpointResponded = true;
+                    status.LastSuccessfulStatusAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    status.FailureKind = McpStatusFailureKind.None;
+                    status.ErrorMessage = "";
+                    status.StatusFailureStage = "";
                     ApplyEditorObservation(ref status, observation);
                     _cachedStatus = status;
                 }
@@ -699,6 +719,17 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                lock (_statusLock)
+                {
+                    if (generation == Volatile.Read(ref _statusGeneration))
+                    {
+                        _cachedStatus.HealthEndpointResponded = false;
+                        _cachedStatus.FailureKind = ClassifyStatusException(ex);
+                        _cachedStatus.ErrorMessage = ex.GetType().Name + ": " + ex.Message;
+                        _cachedStatus.StatusFailureStage = "health_query";
+                        AgeEditorObservation(ref _cachedStatus, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    }
+                }
                 Logger.Log("SERVER", "Lightweight Editor health observation failed: " + ex.GetType().Name + ": " + ex.Message);
             }
             finally
@@ -730,6 +761,9 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrEmpty(expected.Health?.server_instance_id) &&
                 health.server_instance_id != expected.Health.server_instance_id)
                 return false;
+            if (!string.IsNullOrEmpty(expected.Health?.configured_project_path) &&
+                !UPilotDeploymentDiagnostics.SamePath(expected.Health.configured_project_path, health.configured_project_path))
+                return false;
             return observation.session_id == expected.EditorObservationSessionId &&
                    observation.producer_epoch == expected.EditorObservationProducerEpoch &&
                    observation.domain_generation == expected.EditorObservationDomainGeneration;
@@ -738,16 +772,21 @@ namespace CodingRiver.UPilot
         internal static void ApplyEditorObservation(ref McpServerStatus status, UPilotEditorObservation observation)
         {
             var recognized = observation != null &&
-                             (observation.status == "responsive" || observation.status == "waiting_editor" ||
+                             (observation.status == "responsive" || observation.status == "waiting_editor" || observation.status == "waiting_lifecycle" ||
                               observation.status == "unknown");
             status.EditorObservationAvailable = recognized;
             status.EditorObservationStatus = recognized ? observation.status : "";
             status.EditorObservationReason = recognized ? observation.reason ?? "" : "";
+            status.EditorObservationLifecyclePhase = recognized ? observation.lifecycle_phase ?? "" : "";
+            status.EditorObservationLifecycleId = recognized ? observation.lifecycle_id ?? "" : "";
+            status.EditorObservationLifecycleStartedAtUtcMs = recognized ? observation.lifecycle_started_at_ms : 0;
             status.EditorObservationObservedAtUtcMs = recognized ? observation.observed_at_ms : 0;
             status.EditorObservationWaitingSinceUtcMs = recognized ? observation.waiting_since_ms : 0;
             status.EditorObservationWaitingDurationMs = recognized ? observation.waiting_duration_ms : 0;
-            status.EditorObservationPumpAgeMs = recognized ? observation.pump_age_ms : 0;
-            status.EditorObservationHeartbeatAgeMs = recognized ? observation.heartbeat_age_ms : 0;
+            status.EditorObservationPumpAgeMs = recognized && (observation.pump_age_ms > 0 || observation.last_main_thread_pump_at_ms > 0)
+                ? observation.pump_age_ms : -1;
+            status.EditorObservationHeartbeatAgeMs = recognized && (observation.heartbeat_age_ms > 0 || observation.heartbeat_at_ms > 0)
+                ? observation.heartbeat_age_ms : -1;
             status.EditorObservationCount = recognized ? observation.observation_count : 0;
             status.EditorObservationSessionId = recognized ? observation.session_id ?? "" : "";
             status.EditorObservationProducerEpoch = recognized ? observation.producer_epoch ?? "" : "";
@@ -757,15 +796,28 @@ namespace CodingRiver.UPilot
             status.RecentEditorStall = recognized ? observation.recent_stall : null;
         }
 
+        internal static void AgeEditorObservation(ref McpServerStatus status, long now)
+        {
+            if (!status.EditorObservationAvailable) return;
+            var age = Math.Max(0, now - status.EditorObservationObservedAtUtcMs);
+            if (status.EditorObservationPumpAgeMs >= 0) status.EditorObservationPumpAgeMs += age;
+            if (status.EditorObservationHeartbeatAgeMs >= 0) status.EditorObservationHeartbeatAgeMs += age;
+            if (status.EditorObservationStatus == "waiting_lifecycle")
+                status.EditorObservationWaitingDurationMs = Math.Max(0, now - status.EditorObservationLifecycleStartedAtUtcMs);
+            status.EditorObservationObservedAtUtcMs = now;
+        }
+
         internal static bool ShouldRequestFullStatusRefresh(McpServerStatus status, int currentGeneration) =>
             // An explicit invalidation must escape the waiting_editor lightweight-only path.
             status.StatusGeneration != currentGeneration || ShouldRequestFullStatusRefresh(status);
 
         internal static bool ShouldRequestFullStatusRefresh(McpServerStatus status) =>
-            !status.EditorObservationAvailable || status.EditorObservationStatus != "waiting_editor";
+            status.FailureKind == McpStatusFailureKind.Confirmed ||
+            !status.EditorObservationAvailable || (status.EditorObservationStatus != "waiting_editor" &&
+                status.EditorObservationStatus != "waiting_lifecycle");
 
         internal static int GetEditorHealthObservationIntervalMs(McpServerStatus status) =>
-            status.EditorObservationAvailable && status.EditorObservationStatus == "waiting_editor" ? 1000 : 2000;
+            status.EditorObservationAvailable && (status.EditorObservationStatus == "waiting_editor" || status.EditorObservationStatus == "waiting_lifecycle") ? 1000 : 2000;
 
         private void UpdateEditorHealthObservationScheduleLocked(McpServerStatus status, long completedAtUtcMs)
         {
@@ -862,6 +914,7 @@ namespace CodingRiver.UPilot
                     _cachedStatus.StatusFailureStage = _activeStatusRefreshStage;
                     _cachedStatus.StatusGeneration = generation;
                     _cachedStatus.StatusCancellationReason = "timeout";
+                    _cachedStatus.FailureKind = McpStatusFailureKind.Transient;
                     _cachedStatus.StatusQueryCompleted = true;
                     _lastRefreshMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 }
@@ -927,6 +980,7 @@ namespace CodingRiver.UPilot
                     status.HealthServerProcessId = stats.HealthServerProcessId;
                     status.HealthProjectPath = stats.HealthProjectPath;
                     status.Health = stats.Health;
+                    status.FailureKind = stats.FailureKind;
                     ApplyEditorObservation(ref status, stats.Health?.editor_observation);
                     status.StatusFailureStage = stats.HealthEndpointResponded ? "" : "health_query";
                     if (!stats.HealthEndpointResponded)
@@ -938,11 +992,14 @@ namespace CodingRiver.UPilot
                 var reason = request.Reason;
                 bool expected = IsExpectedStatusInterruption(ex, token, reason);
                 status.ErrorMessage = ex.GetType().Name + ": " + ex.Message;
+                status.FailureKind = ClassifyStatusException(ex);
                 status.StatusFailureStage = stage;
                 status.StatusCancellationReason = ex is OperationCanceledException
                     ? (string.IsNullOrEmpty(reason) ? "unknown" : reason) : "";
                 if (expected)
                     Debug.LogWarning($"[UPilotMcpServerManager] Expected {reason} status interruption at {stage} (generation {generation}).");
+                else if (status.FailureKind == McpStatusFailureKind.Transient)
+                    Logger.Log("SERVER", $"Status not yet confirmed at {stage}: {ex.GetType().Name}");
                 else
                     Debug.LogError($"[UPilotMcpServerManager] Status refresh failed at {stage} (generation {generation}): {ex}");
             }
@@ -959,6 +1016,7 @@ namespace CodingRiver.UPilot
                 if (!string.IsNullOrEmpty(status.ErrorMessage))
                     status.Health ??= _cachedStatus.Health;
                 ApplyEditorObservation(ref status, status.Health?.editor_observation);
+                if (!status.HealthEndpointResponded) AgeEditorObservation(ref status, refreshedAt);
                 UpdateDiagnosisTracking(ref status, refreshedAt);
                 _cachedStatus = status;
                 UpdateEditorHealthObservationScheduleLocked(status, refreshedAt);
@@ -967,6 +1025,10 @@ namespace CodingRiver.UPilot
 
             return status;
         }
+
+        internal static McpStatusFailureKind ClassifyStatusException(Exception ex) =>
+            ex is OperationCanceledException || ex is TimeoutException || ex is System.Net.Http.HttpRequestException ||
+            ex is SocketException ? McpStatusFailureKind.Transient : McpStatusFailureKind.Confirmed;
 
         internal static bool IsExpectedStatusInterruption(Exception ex, CancellationToken token, string reason) =>
             ex is OperationCanceledException && token.IsCancellationRequested
@@ -1020,6 +1082,7 @@ namespace CodingRiver.UPilot
             string healthProjectPath = "";
             UPilotServerHealth health = null;
             string failure = "";
+            var failureKind = McpStatusFailureKind.None;
 
             // /health is the authoritative restart gate. Probe it before optional statistics,
             // and close each loopback connection so a replaced Server cannot leave a stale
@@ -1071,7 +1134,12 @@ namespace CodingRiver.UPilot
                     toolRegistryVersion = ParseIntFromJson(json, "registry_version");
                     toolCategorySummary = ParseStringFromJson(json, "tool_category_summary");
                 }
-                else failure = "/health HTTP " + (int)response.StatusCode;
+                else
+                {
+                    failure = "/health HTTP " + (int)response.StatusCode;
+                    failureKind = response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                        response.StatusCode == System.Net.HttpStatusCode.Forbidden ? McpStatusFailureKind.Confirmed : McpStatusFailureKind.Transient;
+                }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
@@ -1080,6 +1148,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 failure = "/health: " + DescribeProbeException(ex);
+                failureKind = ClassifyStatusException(ex);
             }
 
             if (includeStats) try
@@ -1145,7 +1214,7 @@ namespace CodingRiver.UPilot
                 healthServerProcessId,
                 healthProjectPath,
                 health,
-                failure);
+                failure, failureKind);
         }
 
         // The request budget covers headers AND buffered body, independently of a handler's
@@ -1235,9 +1304,11 @@ namespace CodingRiver.UPilot
             status.ProcessId = process.ProcessId;
             status.ProcessOwnership = process.Ownership;
             status.ProcessOwnershipEvidence = process.Evidence;
+            status.ProcessCommandLine = process.CommandLine;
             status.IsRunning = true;
             status.HttpPortListening = true;
-            status.WsPortListening = UPilotBridge.Instance.GetStatus().IsWsOpen;
+            // Port ownership is OS evidence, not evidence of an authenticated Bridge.
+            status.WsPortListening = process.OwnsBothPorts;
             return status;
         }
 
@@ -2379,6 +2450,14 @@ namespace CodingRiver.UPilot
                 if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _restartVerificationDeadlineUtcMs) { ObserveRestart(); return; }
                 if (UPilotServerRestartDiagnostics.IsActive(operationId))
                 {
+                    if (status.HealthEndpointResponded)
+                    {
+                        // Preserve actual health identity even when a later gate rejects it.
+                        UPilotServerRestartDiagnostics.RecordServerBridgeDiagnostics(operationId, status.Health);
+                        UPilotServerRestartDiagnostics.RecordDeploymentIdentity(operationId, status.Health);
+                    }
+                    if (TryAdoptRestartWorker(operationId, processId, status))
+                        processId = _trackedProcessId ?? processId;
                     var outcome = ClassifyRestartProbe(status);
                     if (status.ProcessOwnership == McpProcessOwnership.Foreign ||
                         (status.ProcessId > 0 && status.ProcessId != processId)) outcome = "process_identity_mismatch";
@@ -2409,11 +2488,6 @@ namespace CodingRiver.UPilot
                         return;
                     }
                     UPilotServerRestartDiagnostics.RecordBridgeSnapshot(operationId, UPilotBridge.Instance.GetStatus());
-                    if (status.HealthEndpointResponded)
-                    {
-                        UPilotServerRestartDiagnostics.RecordServerBridgeDiagnostics(operationId, status.Health);
-                        UPilotServerRestartDiagnostics.RecordDeploymentIdentity(operationId, status.Health);
-                    }
                 }
                 if (!string.Equals(operationId, _restartOperationId, StringComparison.Ordinal) ||
                     !UPilotServerRestartDiagnostics.IsActive(operationId))
@@ -2565,12 +2639,19 @@ namespace CodingRiver.UPilot
                 : "connect_failure";
         }
 
+        internal static System.Net.Http.HttpClient CreateReadOnlyProbeClient()
+        {
+            var client = CreateLoopbackStatusClient();
+            client.Timeout = TimeSpan.FromMilliseconds(7000);
+            return client;
+        }
+
         internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId, long deadlineUtcMs = 0, CancellationToken token = default)
         {
             var nonce = Guid.NewGuid().ToString("N");
             var remaining = deadlineUtcMs <= 0 ? 7000 : Math.Min(7000, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             if (remaining <= 0) throw new TimeoutException("Maintenance deadline elapsed.");
-            using var client = CreateLoopbackStatusClient();
+            using var client = CreateReadOnlyProbeClient();
             using var response = await SendBoundedStatusAsync(client,
                 $"http://127.0.0.1:{HttpPort}/health?probe=bridge&session={Uri.EscapeDataString(bridgeSessionId)}&nonce={nonce}",
                 deadlineUtcMs, token, (int)remaining);
@@ -2582,6 +2663,108 @@ namespace CodingRiver.UPilot
                 !UPilotDeploymentDiagnostics.SamePath(health.configured_project_path, UPilotProjectConfig.ProjectRoot))
                 throw new InvalidOperationException("实际只读调用未通过：" + (health?.bridge_probe_error ?? "实例、项目或会话证据缺失"));
         }
+
+        // A one-file EXE can launch a same-executable worker which owns the ports.
+        // Accept only a direct child of the exact process this restart started.
+        private bool TryAdoptRestartWorker(string operationId, int launcherId, McpServerStatus status)
+        {
+            if (UPilotServerRuntimeService.Instance.GetConfiguredMode() != UPilotServerRuntimeMode.StandaloneExe ||
+                status.ProcessId == launcherId || !IsVerifiedStartupHealth(status) ||
+                !status.HttpPortListening || !status.WsPortListening ||
+                !SameProjectPath(status.HealthProjectPath, _restartExpectedProjectPath)) return false;
+            Process worker = null;
+            try
+            {
+                var launcher = _trackedProcess;
+                if (launcher == null || launcher.Id != launcherId || launcher.HasExited) return false;
+                worker = Process.GetProcessById(status.ProcessId.Value);
+                var workerCreatedAt = worker.StartTime.ToUniversalTime().Ticks;
+                var launcherCreatedAt = launcher.StartTime.ToUniversalTime().Ticks;
+                if (worker.HasExited || !IsVerifiedRestartWorker(status, launcherId,
+                    _trackedProcessCreatedAtTicks, launcherCreatedAt, ReadParentProcessId(worker.Id),
+                    workerCreatedAt, launcher.MainModule.FileName, worker.MainModule.FileName,
+                    UPilotProjectConfig.Current.runtime?.serverExePath, _restartExpectedProjectPath)) return false;
+                // Recheck lifetime after collecting OS evidence; PID reuse must never be accepted.
+                launcher.Refresh();
+                worker.Refresh();
+                if (launcher.HasExited || worker.HasExited ||
+                    launcher.StartTime.ToUniversalTime().Ticks != launcherCreatedAt ||
+                    worker.StartTime.ToUniversalTime().Ticks != workerCreatedAt ||
+                    !UPilotServerRestartDiagnostics.RecordWorkerProcess(operationId, launcherId,
+                        worker.Id, workerCreatedAt)) return false;
+                DisposeTrackedProcess();
+                _trackedProcess = worker;
+                _trackedProcessId = worker.Id;
+                _trackedProcessCreatedAtTicks = workerCreatedAt;
+                worker = null; // Ownership transferred to the manager, not another start request.
+                return true;
+            }
+            catch { return false; } // Unreadable OS identity never relaxes the existing gate.
+            finally { worker?.Dispose(); }
+        }
+
+        internal static bool IsVerifiedRestartWorker(McpServerStatus status, int launcherId,
+            long expectedLauncherCreatedAt, long actualLauncherCreatedAt, int workerParentId,
+            long workerCreatedAt, string launcherExe, string workerExe, string configuredExe,
+            string expectedProjectPath)
+        {
+            return launcherId > 0 && expectedLauncherCreatedAt > 0 &&
+                actualLauncherCreatedAt == expectedLauncherCreatedAt &&
+                workerCreatedAt >= actualLauncherCreatedAt &&
+                workerParentId == launcherId && status.ProcessId != launcherId &&
+                IsVerifiedStartupHealth(status) && status.HttpPortListening && status.WsPortListening &&
+                SameProjectPath(status.HealthProjectPath, expectedProjectPath) &&
+                !string.IsNullOrWhiteSpace(configuredExe) &&
+                UPilotDeploymentDiagnostics.SamePath(launcherExe, configuredExe) &&
+                UPilotDeploymentDiagnostics.SamePath(workerExe, configuredExe) &&
+                UPilotDeploymentDiagnostics.SamePath(status.Health?.server_entry_path, configuredExe);
+        }
+
+        internal static int ReadParentProcessId(int processId)
+        {
+#if UNITY_EDITOR_WIN
+            if (processId <= 0) return 0;
+            var snapshot = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+            if (snapshot == new IntPtr(-1) || snapshot == IntPtr.Zero) return 0;
+            try
+            {
+                var entry = new RestartProcessEntry { size = (uint)Marshal.SizeOf(typeof(RestartProcessEntry)) };
+                if (!Process32First(snapshot, ref entry)) return 0;
+                do
+                {
+                    if (entry.processId == (uint)processId) return (int)entry.parentProcessId;
+                } while (Process32Next(snapshot, ref entry));
+                return 0;
+            }
+            finally { CloseHandle(snapshot); }
+#else
+            return 0;
+#endif
+        }
+
+#if UNITY_EDITOR_WIN
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RestartProcessEntry
+        {
+            public uint size, usage, processId;
+            public UIntPtr defaultHeapId;
+            public uint moduleId, threads, parentProcessId;
+            public int priority;
+            public uint flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string executable;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+        [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Process32First(IntPtr snapshot, ref RestartProcessEntry entry);
+        [DllImport("kernel32.dll", EntryPoint = "Process32NextW", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Process32Next(IntPtr snapshot, ref RestartProcessEntry entry);
+        [DllImport("kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+#endif
 
         internal static bool IsVerifiedRestartHealth(
             McpServerStatus status,
@@ -2781,7 +2964,8 @@ namespace CodingRiver.UPilot
                         McpProcessOwnership.CurrentUPilot,
                         pid,
                         commandLine,
-                        "监听端口与 UPilot 启动参数匹配");
+                        "监听端口与 UPilot 启动参数匹配",
+                        hasHttpOwner && hasWsOwner);
                 }
             }
 

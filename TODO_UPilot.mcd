@@ -678,3 +678,37 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 精确界面夹具 EditMode run 637239fb-2dd7-460e-ac09-631bccfee1f9：41 passed/0 failed/0 skipped，resultAuthoritative=true、cleanupSucceeded=true；补充三种活动阶段按观察时间增长、旧绘制结果一致、已结束冻结、非法开始/当前/结束时间及不写回结束时间测试，维持原刷新/滚动/关闭回归。
 - 官方 Validate/Start 一次三个 wait Step 实机验证：Operation op-1c245c87-2073-4c44-9e3f-b01a54edbb0d / Run 160eb16dd8124d9fa2fc9065205ebc76 最终 Succeeded、terminal=true、cleanupPending=false、cleanupTerminal=true、unresolvedResources=[]。两次 verified pixel 截图 snapshot-81fe7b577b5d4af7b7b2b8d9d5259287 与 snapshot-ba35e356cfbf4c1f9bfdeba6d50b4837（Log/UPilotSnapshots/20261010/）确认运行项耗时 1.713 s → 3.833 s，已完成项保持 0.322 s，未开始项未知。窗口相关 Console 查询 0 匹配。
 - 未运行完整测试套件；未提交/发布或重启服务，其他既有修改保留。
+
+
+### 2026-10-10 独立 EXE 重启：启动器/服务子进程 PID 被误判（源码已修复；外部部署验收未执行）
+
+- 观察/复现：D:/MA/xclient 的 0.3.45 重启 restart-973c5ea751a849f39c127f6542b0e971 于本地 UTC+08 18:33:41 报 process_identity_mismatch，启动 PID 36844，而 /health 返回 40372。只读 OS 证据确认 40372 是 36844 的直接子进程，两者创建于 18:33:39，执行同一受管 EXE；8019/8769 两端口均由 40372 监听，health 配置项目为精确 D:/MA/xclient。现有打包入口使用 onefile；旧验证将启动器 PID 必须等于工作进程 PID 作为要求，错误拒绝此现场已核实结构。
+- 受影响：UPilotMcpServerManager 的重启身份门、UPilotServerRestartDiagnostics 的 PID/部署实际值展示。身份失败前未保存 health，导致已收到的实际身份仍显示未知。
+- 最小修复：仅在 StandaloneExe 模式，要求原启动进程 PID/创建时间一致、直接 OS 父子关系、工作进程创建时间有效、两端口归属同一独立核实进程、精确项目路径及启动器/工作进程/health 入口均匹配配置 EXE，才将原重启跟踪对象切换为该工作进程；再次核验存活与时间以拒绝 PID 复用。保存原启动器身份、原期限，不启动新进程、不重放请求，不放宽其他项目/未知归属拒绝规则。health 实际身份在分类失败前保存；Bridge/部署/实际只读门继续独立验证。
+- 定向验证：默认 D:/upilot/Tests~/UPilotTest EditMode run 2d79e0bd-81ba-4fc0-94cb-4bea9d42c9d2，68 passed/0 failed/0 skipped，resultAuthoritative=true、cleanupSucceeded=true、cleanupResourcesReleased=true、unresolvedResources=0。覆盖维护夹具 60 项及启动/重启身份直接回归 8 项；新增 26 项包含错误父进程、PID 复用、时间缺失/逆序、健康响应不能替代 OS 归属、错误项目/EXE、端口缺失、期限保持、重复/晚到采用及当前 Unity 进程原生父 PID 只读查询。
+- 编译边界：live compile ef4b4172bd2241b6a18dd80e3883f182 / req-4ddc5ce5-6f66-4456-b73c-64f35e1ec38b 报 completed/terminal/errorsVerified，0 错误、4 项其他未改文件警告，verifiedAt=1791628815917。WriteBatch wb-6ba77bf0-5f8d-4f52-9b91-22792adc5b0f（createdAt=1791628787721）因服务实例更换 aborted/service_restarted，evidenceAvailable=false、correlationVerified=false；不能声称完整批次编译验收通过。三 C# 文件 SHA256 与注册值一致；git diff --check 通过；未运行完整套件。
+- 下一步/状态：源码与定向测试已完成，等待经授权部署到外部项目后，以一次新的重启核验服务身份、新 Bridge、部署入口及实际只读往返；当前未发布、未更新 xclient 包、未停止其进程、未重启或重放原操作，不能报告现场修复验收完成。
+
+### 2026-10-10 编译期间服务实例更换导致 WriteBatch 证据关联中断（待诊断/改进）
+- 外部项目补充（2026-10-10 Squad完整行为FSM验收补证，2026-10-10 20:05:35 +08:00，P0）：xclient E测试适配批次`wb-533b7b13-cf03-4dc0-955f-20565b1dd6dc`注册期限到期为timed_out/outcome=unknown；精确Unity PID109068仍存在，connected/serverReady=false、mainThreadUnresponsive=true、主线程心跳约89.8分钟未更新，缓存domain_reload及0错误/34警告非权威。本xclient现场的服务是否更换及具体因果未核实，不能套用本条默认测试项目的已观测服务更换事实，不把UPilot窗口认定为原因。
+- 同一条目现场续记（2026-10-10T20:48:22+08:00）：本次20:44:47/20:45:53实时MCP检查仍为xclient精确主Editor PID109068、UnityDisconnected，主线程心跳约130.09分钟未更新、CPU采样115.54%。未重放过期批次或发起编译/Step/重启；原因未知，服务重启不能中断同步Unity挂起。新证据`D:\MA\xclient\Tools\squad_fsm_resume_status_20261010_204446.json`、`D:\MA\xclient\Tools\squad_fsm_resume_hang_20261010_204553.json`；现有双向引用不变。
+- 改进能力/收益：在已有历史证据诊断中区分正常Domain Reload、服务更换与主线程长期挂起；有界查询统一呈现心跳/快照年龄、终态身份、原有dump及建议，避免反复等待或再次编译。旧终态不续命、不恢复活动、不重放，恢复后以新的当前源码验证取得证据；预计减少手工交叉查询并防止缓存误判成功。
+- 可验收标准/状态：在`D:\upilot\Tests~\UPilotTest`隔离模拟三个分支，断连缓存不可通过编译判定、历史timed_out不可重新激活、恢复验证身份不混入历史，已有dump可关联且不默认重复采集。待诊断/改进；本次未改UPilot源码或部署、未重启Unity/服务，历史正常Reload修复不因此撤销。
+- 项目清单双向引用：`D:\MA\xclient\TODO_UPilot.mcd`的“2026-08-04 P0：编译等待超时与编译阶段诊断不足导致验证阻塞”；证据`D:\MA\xclient\Tools\squad_fsm_resume12_status_20261010.json`、`squad_fsm_resume12_hang_20261010.json`、既有dump `D:\MA\xclient\Log\UPilotDiagnostics\unity-109068-1791628877584.dmp`及共享`D:\MA\_AI_Docs\xclient\40_EVIDENCE\Diagnostics\SquadMemberFullBehaviorFSM_2026-10-10.md`。
+
+- 观察：上述默认项目自动 WriteBatch 存储状态停在 compiling 后被归档为 aborted/service_restarted；Unity PID 23796 未变，Server PID 138408 → 130472，Bridge session a316471f97704a488983b136f256754a → f558e4c5253243d8b737f22e53c9ce26。新实例 live Unity 快照仍报告同一 batch/compile 已 completed 且 errorsVerified=true，但服务侧 correlationVerified=false、批次 terminalSnapshot=null。服务更换触发来源未核实，本任务未请求重启，不归因于本次 EXE PID 补丁。
+- 受影响：自动写入批次/安全编译的证据交接和诊断，导致需要手工区分 live 编译结果与已中断批次的验收资格。
+- 建议：围绕已有服务生命周期边界增强历史批次诊断，保留可独立核实的 Unity 编译终态身份、时间及源码 hash 作为只读历史证据，明确呈现关联断点与已核实/未知项；补充正常 Domain Reload 与实际服务重启的区分回归。禁止恢复旧活动、重放批次或将未核实关联自动提升为成功。
+- 状态：待诊断/改进；本次只记录证据与限制，未扩大修复范围，也未为补验而再次编译未变代码。
+
+
+## UPilot-20261010-WriteBatchFixedRounds：固定成员调度与共享真实编译证据（源码修复完成，实机验收待解阻）
+
+- 问题/复现：自动 WriteBatch 原逐批派发不能明确表达同一轮覆盖边界，编译期间登记的修改还可能遇到占用即 aborted；多任务连续修改同一文件，不能以登记时历史 Hash 或编译开始回调时间推断覆盖。
+- 影响工具：`unity_write_batch_register/status`、自动 WriteBatch 协调器、安全编译及 StateStore 证据关联。
+- 最小修复：保留 500ms 固定合并窗口；首次 Refresh 前用 SQLite 事务冻结成员，保存轻量轮次和唯一锚定批次；之后登记只能下一轮；结束主动排空后续轮次。共享原始编译 request/operation/核验终态，不改写 Unity terminalSnapshot。Hash 仅用于诊断，不验收历史文件版本。
+- 边界：仅确认未派发的 Bridge 忙/模式拒绝可等待；派发未知只观察原身份，不重放。成员独立 600s 期限、取消/超时不误伤其他成员、迟到终态不覆盖已有终态；服务重启不恢复旧活动；无新增通用队列、全量重编或自动抢焦点。
+- 接口/规则：仅增加 `compileOwnerWriteBatchId` / `compileMemberWriteBatchIds`，登记提示改为查询自己的 WriteBatch 状态而非借全局编译成功。Agent 57 / Skill 66，官方生成和 source 检查通过；MCP 规则检查因主线程未推进超时后，使用文档规定的 integrations-only CLI 同步五目标，两份 installed 检查通过，重复实际同步无字节/mtime/文件集合/备份目录变化，块外字节与父规则继承保留。
+- 自动证据：新增 `upilotserver~/tests/test_write_batch_rounds.py` 39 项通过；12 个直接相关 Server 测试文件最终 355 项通过（2 条警告），包含新增状态提示回归；结果见 `.upilot/validation/writebatch-rounds-20261010/targeted-server-final.xml`（默认测试工程内）。额外旧版 release/abandon 21 项失败已在隔离未修改 HEAD `6c6ebf1ca636296d5502d33e8b15fd68caf22ec2` 复现相同失败名，不属于本次新增回归，未弱化断言。
+- 实机阻塞：2026-10-10 默认工程的另一个 EditMode run `cd2d85e3-554c-4ac0-ac14-6d9e78d27efc` 尚在 stopping/cleanupPending；只读 hang 状态 mainThreadUnresponsive=true，规则检查 COMMAND_TIMEOUT；当前 Server 已加载入口与磁盘不同。未取消他人测试、未重启服务/Unity、未运行本次后台/第二轮探针，不能报告实机通过。
+- 完成/待办：源码调度缺陷与直接自动回归已修复；待原运行真实终态及维护窗口，再通过专用维护入口加载本次 Server 并核验所选源码入口、非聚焦主动编译和编译中二次登记的独立第二轮。保留同日“编译期间服务实例更换导致 WriteBatch 证据关联中断”独立问题，不因本修复将其关闭。

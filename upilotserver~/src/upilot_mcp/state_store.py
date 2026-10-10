@@ -93,6 +93,8 @@ class StateStore:
         self.commands: dict[str, CommandRecord] = {}
         self.lifecycle_id = uuid.uuid4().hex
         self._current_write_batches: set[str] = set()
+        self._current_compile_rounds: set[str] = set()
+        self._compile_round_runtime: dict[str, dict] = {}
         self._write_batch_runtime: dict[str, dict] = {}
         self.compile = CompileSnapshot()
         self.editor = EditorSnapshot()
@@ -164,6 +166,9 @@ class StateStore:
                 db.execute("ALTER TABLE write_batches ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
             if "disposition_json" not in write_batch_columns:
                 db.execute("ALTER TABLE write_batches ADD COLUMN disposition_json TEXT")
+            if "compile_round_id" not in write_batch_columns:
+                db.execute("ALTER TABLE write_batches ADD COLUMN compile_round_id TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE TABLE IF NOT EXISTS write_batch_compile_rounds (round_id TEXT PRIMARY KEY, project_path TEXT NOT NULL, owner_id TEXT NOT NULL, owner_created_at INTEGER NOT NULL, members_json TEXT NOT NULL, deadline_at INTEGER NOT NULL, status TEXT NOT NULL, compile_request_id TEXT NOT NULL DEFAULT '', compile_operation_id TEXT NOT NULL DEFAULT '', terminal_snapshot_json TEXT)")
             verified_successors = db.execute(
                 "SELECT write_batch_id,created_at,changes_json FROM write_batches WHERE project_path=? "
                 "AND status='verified' AND terminal_snapshot_json IS NOT NULL ORDER BY rowid",
@@ -232,6 +237,8 @@ class StateStore:
             row = db.execute("SELECT snapshot_json FROM project_state WHERE project_path = ?", (resolved,)).fetchone()
         # History is evidence, never an active queue for a new Server instance.
         self._current_write_batches.clear()
+        self._current_compile_rounds.clear()
+        self._compile_round_runtime.clear()
         self._write_batch_runtime.clear()
         if row:
             try:
@@ -266,7 +273,7 @@ class StateStore:
         with sqlite3.connect(self._db_path) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT write_batch_id,operation_id,created_at,updated_at,paths_json,changes_json,compile_when_edit_mode FROM write_batches WHERE project_path=? AND status IN ('pending','deferred') ORDER BY updated_at DESC LIMIT 1",
+                "SELECT write_batch_id,operation_id,created_at,updated_at,paths_json,changes_json,compile_when_edit_mode FROM write_batches WHERE project_path=? AND status IN ('pending','deferred') AND compile_round_id='' ORDER BY updated_at DESC LIMIT 1",
                 (self._project_path,),
             ).fetchone()
             coalesced = bool(
@@ -639,6 +646,215 @@ class StateStore:
         return [batch for batch in batches if batch and batch.get("storedStatus") != "verified" and batch["status"] in
                 {"pending", "deferred", "recovery_required"} and not batch.get("disposition")]
 
+    def freeze_write_batch_round(self, excluded: set[str] | None = None) -> dict[str, Any] | None:
+        """Commit immutable membership before any Refresh. Only proven unstarted rounds may resume."""
+        self.expire_write_batches()
+        excluded = excluded or set()
+        if self._db_path is None:
+            return None
+        with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            deferred = db.execute(
+                "SELECT round_id,members_json FROM write_batch_compile_rounds WHERE project_path=? "
+                "AND status='deferred' AND compile_request_id='' AND compile_operation_id='' ORDER BY rowid",
+                (self._project_path,),
+            ).fetchall()
+            round_id = ""
+            for candidate, raw_members in deferred:
+                if candidate in self._current_compile_rounds and not excluded.intersection(json.loads(raw_members)):
+                    round_id = candidate
+                    db.execute("UPDATE write_batch_compile_rounds SET status='prepared' WHERE round_id=?", (round_id,))
+                    db.execute("UPDATE write_batches SET status='syncing',updated_at=? WHERE project_path=? AND compile_round_id=? AND status IN ('pending','deferred')",
+                               (_now_ms(), self._project_path, round_id))
+                    break
+            if not round_id:
+                rows = db.execute(
+                    "SELECT write_batch_id,created_at FROM write_batches WHERE project_path=? "
+                    "AND status IN ('pending','deferred') AND compile_when_edit_mode=1 AND compile_round_id='' "
+                    "AND compile_operation_id='' AND compile_request_id='' AND terminal_snapshot_json IS NULL "
+                    "AND superseded_by='' AND disposition_json IS NULL ORDER BY created_at,rowid",
+                    (self._project_path,),
+                ).fetchall()
+                rows = [row for row in rows if row[0] in self._current_write_batches and row[0] not in excluded
+                        and not self._write_batch_runtime.get(row[0], {}).get("terminal")]
+                if not rows:
+                    return None
+                round_id = f"wb-round-{uuid.uuid4()}"
+                members = [row[0] for row in rows]
+                db.execute(
+                    "INSERT INTO write_batch_compile_rounds(round_id,project_path,owner_id,owner_created_at,members_json,deadline_at,status) VALUES(?,?,?,?,?,?,'prepared')",
+                    (round_id, self._project_path, rows[0][0], rows[0][1], json.dumps(members),
+                     max(row[1] for row in rows) + 600000),
+                )
+                db.executemany(
+                    "UPDATE write_batches SET compile_round_id=?,status='syncing',updated_at=? WHERE write_batch_id=?",
+                    [(round_id, _now_ms(), member) for member in members],
+                )
+        # Neither activity nor dispatch intent escapes a failed transaction.
+        self._current_compile_rounds.add(round_id)
+        return self.get_write_batch_round(round_id)
+
+    def write_batch_round_id(self, batch_id: str) -> str:
+        if self._db_path is None or not batch_id:
+            return ""
+        with sqlite3.connect(self._db_path) as db:
+            row = db.execute("SELECT compile_round_id FROM write_batches WHERE project_path=? AND write_batch_id=?",
+                             (self._project_path, batch_id)).fetchone()
+        return str(row[0]) if row else ""
+
+    def get_write_batch_round(self, round_id: str) -> dict[str, Any] | None:
+        if self._db_path is None or not round_id:
+            return None
+        try:
+            with sqlite3.connect(self._db_path) as db:
+                row = db.execute(
+                    "SELECT owner_id,owner_created_at,members_json,deadline_at,status,compile_request_id,compile_operation_id,terminal_snapshot_json "
+                    "FROM write_batch_compile_rounds WHERE project_path=? AND round_id=?",
+                    (self._project_path, round_id),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            cached = self._compile_round_runtime.get(round_id)
+            if cached is None:
+                raise
+            self.persist_failure_count += 1
+            # Metadata can release logical activity, never assert newly verified evidence.
+            return dict(cached, correlationVerified=False, errorsVerified=False, terminal=False,
+                        outcome="unknown", persistenceError=str(exc))
+        if not row:
+            return None
+        try:
+            members = json.loads(row[2])
+            evidence = json.loads(row[7]) if row[7] else None
+            if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
+                return None
+            if evidence is not None and not isinstance(evidence, dict):
+                return None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        try:
+            verified_at = int((evidence or {}).get("lastCompileVerifiedAt") or 0)
+        except (TypeError, ValueError, OverflowError):
+            verified_at = 0
+        correlation = bool(
+            evidence and evidence.get("terminal") is True and evidence.get("errorsVerified") is True
+            and evidence.get("compileOrigin") == "mcp" and evidence.get("authoritative", True) is True
+            and evidence.get("compilePhase") in {"completed", "failed"}
+            and evidence.get("writeBatchId") == row[0] and row[0] in members
+            and evidence.get("writeBatchCreatedAt") == row[1]
+            and evidence.get("compileRequestId") == row[5] and row[5]
+            and evidence.get("compileOperationId") == row[6] and row[6]
+            and verified_at >= row[3] - 600000 > 0
+            and evidence.get("compilePhase") == row[4]
+        )
+        result = {
+            "roundId": round_id, "writeBatchId": row[0], "writeBatchCreatedAt": row[1],
+            "compileOwnerWriteBatchId": row[0], "compileMemberWriteBatchIds": members,
+            "deadlineAt": row[3], "status": row[4], "compileWhenEditMode": True,
+            "compileRequestId": row[5], "compileOperationId": row[6], "terminalSnapshot": evidence,
+            "terminal": correlation, "errorsVerified": correlation, "correlationVerified": correlation,
+            "outcome": ("passed" if evidence["compilePhase"] == "completed" else "failed") if correlation else "unknown",
+        }
+        if round_id in self._current_compile_rounds:
+            self._compile_round_runtime[round_id] = result
+        return result
+
+    def live_write_batch_round_members(self, round_id: str) -> list[str]:
+        self.expire_write_batches()
+        round_state = self.get_write_batch_round(round_id)
+        if round_id not in self._current_compile_rounds or not round_state:
+            return []
+        return [member for member in round_state["compileMemberWriteBatchIds"]
+                if member in self._current_write_batches and not (self.get_write_batch(member) or {}).get("terminal")]
+
+    def record_write_batch_round_dispatch(self, round_id: str, request_id: str) -> bool:
+        if not self.live_write_batch_round_members(round_id):
+            return False
+        with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE write_batch_compile_rounds SET status='dispatched',compile_request_id=? "
+                "WHERE project_path=? AND round_id=? AND status='prepared' AND compile_request_id='' AND terminal_snapshot_json IS NULL",
+                (request_id, self._project_path, round_id),
+            )
+            if cursor.rowcount != 1:
+                return False
+            db.execute("UPDATE write_batches SET compile_request_id=? WHERE project_path=? AND compile_round_id=?",
+                       (request_id, self._project_path, round_id))
+        return True
+
+    def end_write_batch_round(self, round_id: str, status: str, *, error: str = "") -> bool:
+        """Defer only a known undispatched round. Member termination never cancels the engine."""
+        round_state = self.get_write_batch_round(round_id)
+        if round_id not in self._current_compile_rounds or not round_state or round_state["correlationVerified"]:
+            return False
+        if status == "deferred" and round_state["compileOperationId"]:
+            return False
+        try:
+            with sqlite3.connect(self._db_path) as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("UPDATE write_batch_compile_rounds SET status=? WHERE project_path=? AND round_id=? AND terminal_snapshot_json IS NULL",
+                           (status, self._project_path, round_id))
+                if status == "deferred":
+                    db.execute("UPDATE write_batch_compile_rounds SET compile_request_id='' WHERE round_id=?", (round_id,))
+                    db.execute("UPDATE write_batches SET compile_request_id='' WHERE project_path=? AND compile_round_id=? AND terminal_snapshot_json IS NULL",
+                               (self._project_path, round_id))
+        except sqlite3.Error as exc:
+            self.persist_failure_count += 1
+            # Failed archival must not strand expired/cancelled members. A failed
+            # deferral cannot establish that another dispatch is safe.
+            if status == "deferred":
+                status = "aborted"
+            error = f"{error} Round archival failed: {exc}".strip()
+        for member in round_state["compileMemberWriteBatchIds"]:
+            self.mark_write_batch(member, "aborted" if status == "stopped" else status, error=error)
+        return True
+
+    def _persist_round_evidence(self, payload: dict[str, Any]) -> bool:
+        round_id = self.write_batch_round_id(str(payload.get("writeBatchId") or ""))
+        if not round_id:
+            return False
+        # A normal reconnect/reload retains activity; a new service never revives history.
+        if round_id not in self._current_compile_rounds:
+            return True
+        round_state = self.get_write_batch_round(round_id)
+        operation_id = str(payload.get("compileOperationId") or "")
+        if not (round_state and operation_id and payload.get("compileOrigin") == "mcp"
+                and payload.get("authoritative", True) is True
+                and round_state["compileRequestId"] and payload.get("compileRequestId") == round_state["compileRequestId"]
+                and payload.get("writeBatchId") == round_state["compileOwnerWriteBatchId"]
+                and payload.get("writeBatchCreatedAt") == round_state["writeBatchCreatedAt"]
+                and (not round_state["compileOperationId"] or round_state["compileOperationId"] == operation_id)
+                and not round_state["terminalSnapshot"]):
+            return True
+        self.expire_write_batches()
+        terminal = bool(payload.get("terminal") is True and payload.get("errorsVerified") is True
+                        and payload.get("compilePhase") in {"completed", "failed"}
+                        and int(payload.get("lastCompileVerifiedAt") or 0) >= round_state["deadlineAt"] - 600000 > 0)
+        with sqlite3.connect(self._db_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE write_batch_compile_rounds SET compile_operation_id=? WHERE round_id=? AND compile_operation_id=''",
+                       (operation_id, round_id))
+            db.execute("UPDATE write_batches SET compile_operation_id=? WHERE project_path=? AND compile_round_id=? AND compile_operation_id=''",
+                       (operation_id, self._project_path, round_id))
+            if terminal:
+                raw = json.dumps(payload, ensure_ascii=False)
+                db.execute("UPDATE write_batch_compile_rounds SET status=?,terminal_snapshot_json=? WHERE round_id=? AND terminal_snapshot_json IS NULL",
+                           (payload["compilePhase"], raw, round_id))
+                for member in round_state["compileMemberWriteBatchIds"]:
+                    # Preserve cancellations/timeouts even when their archival write failed.
+                    if self._write_batch_runtime.get(member, {}).get("terminal"):
+                        continue
+                    db.execute(
+                        "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=?,error='' "
+                        "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL "
+                        "AND status NOT IN ('verified','failed','canceled','aborted','timed_out')",
+                        ("verified" if payload["compilePhase"] == "completed" else "failed", _now_ms(), raw, self._project_path, member),
+                    )
+            else:
+                db.execute("UPDATE write_batches SET status='compiling' WHERE project_path=? AND compile_round_id=? "
+                           "AND status IN ('syncing','pending','deferred')", (self._project_path, round_id))
+        return True
+
     def mark_write_batch(self, write_batch_id: str, status: str, *, compile_operation_id: str = "", error: str = "") -> None:
         if self._db_path is None or write_batch_id not in self._current_write_batches:
             return
@@ -677,11 +893,20 @@ class StateStore:
             return None
         cached = self._write_batch_runtime.get(write_batch_id)
         if cached and cached.get("terminal") and not cached.get("terminalSnapshot"):
+            try:
+                round_state = self.get_write_batch_round(self.write_batch_round_id(write_batch_id))
+            except sqlite3.Error as exc:
+                self.persist_failure_count += 1
+                cached["persistenceError"] = str(exc)
+                return dict(cached)
+            if round_state:
+                return dict(cached, **{key: round_state[key] for key in (
+                    "compileOwnerWriteBatchId", "compileMemberWriteBatchIds", "compileOperationId", "compileRequestId")})
             return dict(cached)
         try:
             with sqlite3.connect(self._db_path) as db:
                 row = db.execute(
-                    "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by,disposition_json "
+                    "SELECT write_batch_id,operation_id,created_at,updated_at,status,compile_when_edit_mode,paths_json,files_sha256,compile_operation_id,error,changes_json,terminal_snapshot_json,compile_request_id,warning_details_json,warning_details_available,warnings_truncated,superseded_by,disposition_json,compile_round_id "
                     "FROM write_batches WHERE project_path=? AND write_batch_id=?",
                     (self._project_path, write_batch_id),
                 ).fetchone()
@@ -703,15 +928,29 @@ class StateStore:
             verified_at = int(evidence.get("lastCompileVerifiedAt") or 0) if evidence else 0
         except (TypeError, ValueError, OverflowError):
             verified_at = 0
+        try:
+            round_state = self.get_write_batch_round(str(row[18]))
+        except sqlite3.Error as exc:
+            self.persist_failure_count += 1
+            round_state = None
+        owner_id = round_state["compileOwnerWriteBatchId"] if round_state else row[0]
+        owner_created_at = round_state["writeBatchCreatedAt"] if round_state else row[2]
+        membership_verified = not row[18] or bool(
+            round_state and round_state["correlationVerified"]
+            and row[0] in round_state["compileMemberWriteBatchIds"]
+            and round_state["compileOperationId"] == row[8]
+            and round_state["compileRequestId"] == row[12]
+            and round_state["terminalSnapshot"] == evidence
+        )
         correlation = bool(
-            evidence and evidence.get("errorsVerified") is True and evidence.get("terminal") is True
+            membership_verified and evidence and evidence.get("errorsVerified") is True and evidence.get("terminal") is True
             and evidence.get("compilePhase") in ("completed", "failed")
             and (row[4] == "verified" and evidence.get("compilePhase") == "completed"
                  or row[4] == "failed" and evidence.get("compilePhase") == "failed")
-            and evidence.get("writeBatchId") == row[0]
+            and evidence.get("writeBatchId") == owner_id
             and evidence.get("compileOperationId") == row[8] and row[8]
             and (not row[12] or evidence.get("compileRequestId") == row[12])
-            and evidence.get("writeBatchCreatedAt") == row[2]
+            and evidence.get("writeBatchCreatedAt") == owner_created_at
             and verified_at >= row[2] > 0
         )
         details_available = bool(row[14])
@@ -748,6 +987,8 @@ class StateStore:
             "compileOperationId": row[8], "error": row[9],
             **self._write_batch_change_fields(row[10]),
             "terminalSnapshot": evidence,
+            "compileOwnerWriteBatchId": round_state["compileOwnerWriteBatchId"] if round_state else "",
+            "compileMemberWriteBatchIds": round_state["compileMemberWriteBatchIds"] if round_state else [],
             "terminal": (correlation or status in {"failed", "canceled", "aborted", "timed_out"}),
             "errorsVerified": correlation,
             "correlationVerified": correlation,
@@ -852,21 +1093,30 @@ class StateStore:
             persisted_available = 0
             persisted_truncated = 0
         try:
+            round_id = self.write_batch_round_id(write_batch_id)
+            round_state = self.get_write_batch_round(round_id)
+            if round_id and (not round_state or round_state.get("persistenceError")
+                             or round_state["compileOwnerWriteBatchId"] != write_batch_id
+                             or round_state["compileOperationId"] != compile_operation_id
+                             or round_state["compileRequestId"] != compile_request_id):
+                return False
             with sqlite3.connect(self._db_path) as db:
                 cursor = db.execute(
                     "UPDATE write_batches SET warning_details_json=?,warning_details_available=?,warnings_truncated=?,updated_at=? "
-                    "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? AND compile_request_id=? AND disposition_json IS NULL",
+                    "WHERE project_path=? AND (write_batch_id=? OR (compile_round_id<>'' AND compile_round_id=?)) AND compile_operation_id=? AND compile_request_id=? AND disposition_json IS NULL",
                     (
                         raw_warnings, persisted_available, persisted_truncated, _now_ms(),
-                        self._project_path, write_batch_id, compile_operation_id, compile_request_id,
+                        self._project_path, write_batch_id, round_id, compile_operation_id, compile_request_id,
                     ),
                 )
-            return cursor.rowcount == 1
+            return cursor.rowcount >= 1
         except sqlite3.Error:
             self.persist_failure_count += 1
             return False
 
     def _persist_batch_evidence(self, payload: dict[str, Any]) -> None:
+        if self._persist_round_evidence(payload):
+            return
         batch_id = str(payload.get("writeBatchId") or "")
         batch = self.get_write_batch(batch_id)
         if batch_id not in self._current_write_batches or not batch or batch.get("storedStatus") in {"verified", "failed", "canceled", "aborted", "timed_out"} or batch.get("evidenceAvailable") or batch.get("terminalSnapshot") is not None:
@@ -1089,19 +1339,20 @@ class StateStore:
         compile_state.warning_count = int(payload.get("warningCount") or 0)
         compile_state.last_progress_at = max(self.observed_at, compile_state.last_compile_verified_at, compile_state.last_compiler_finished_at, compile_state.last_compile_started_at)
         registered_batch = self.get_write_batch(compile_state.write_batch_id)
+        registered_round_id = self.write_batch_round_id(compile_state.write_batch_id)
         registered_operation_id = str((registered_batch or {}).get("compileOperationId") or "")
         operation_matches = bool(
             compile_state.compile_operation_id
             and (not registered_operation_id or registered_operation_id == compile_state.compile_operation_id)
         )
-        if (compile_state.compile_origin == "mcp" and registered_batch
+        if (not registered_round_id and compile_state.compile_origin == "mcp" and registered_batch
                 and compile_state.compile_operation_id and not registered_operation_id):
             self.mark_write_batch(
                 compile_state.write_batch_id,
                 "compiling" if not compile_state.terminal else str(registered_batch["status"]),
                 compile_operation_id=compile_state.compile_operation_id,
             )
-        if (not restored and compile_state.compile_origin == "mcp" and registered_batch and operation_matches
+        if (not restored and not registered_round_id and compile_state.compile_origin == "mcp" and registered_batch and operation_matches
                 and payload.get("authoritative", True) is True
                 and payload.get("writeBatchCreatedAt") == registered_batch["writeBatchCreatedAt"]
                 and payload.get("compileRequestId")):

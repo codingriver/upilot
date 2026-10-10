@@ -1049,7 +1049,7 @@ namespace CodingRiver.UPilot
             return "mainEditor";
         }
 
-        private static long GetCurrentProcessCreatedAt()
+        internal static long GetCurrentProcessCreatedAt()
         {
             try
             {
@@ -2151,7 +2151,7 @@ namespace CodingRiver.UPilot
             }
             return new EditorContextPayload
             {
-                playModeTransition = UPilotPlayModeTransitions.Latest,
+                playModeTransition = UPilotPlayModeTransitions.Current,
                 stateContractVersion = 2,
                 projectId = ProjectPathHashSuffix,
                 producerEpoch = _producerEpoch,
@@ -2203,6 +2203,7 @@ namespace CodingRiver.UPilot
                 mainThreadQueueDepth = _mainThreadQueue.Count,
                 lastDequeuedCommandId = _lastDequeuedCommandId ?? string.Empty,
                 processId = Process.GetCurrentProcess().Id,
+                processCreatedAt = GetCurrentProcessCreatedAt(),
             };
         }
 
@@ -2223,6 +2224,7 @@ namespace CodingRiver.UPilot
                     var restored = JsonUtility.FromJson<EditorExecutionStatePayload>(
                         File.ReadAllText(ExecutionStatePath));
                     if (restored != null && restored.processId == processId &&
+                        restored.processCreatedAt == GetCurrentProcessCreatedAt() &&
                         !string.IsNullOrEmpty(restored.producerEpoch))
                     {
                         _producerEpoch = restored.producerEpoch;
@@ -2309,6 +2311,7 @@ namespace CodingRiver.UPilot
                 mainThreadQueueDepth = context.mainThreadQueueDepth,
                 lastDequeuedCommandId = context.lastDequeuedCommandId,
                 processId = context.processId,
+                processCreatedAt = context.processCreatedAt,
                 errorCount = _compileService.LastErrorCount,
                 warningCount = _compileService.LastWarningCount,
                 preReloadPublishFailed = _preReloadPublishFailed,
@@ -2516,7 +2519,14 @@ namespace CodingRiver.UPilot
         private void OnPlayModeStateChanged(PlayModeStateChange change)
         {
             UPilotPlayModeTransitions.Observe(change, _sessionId);
+            _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            // Persist and bounded-publish the start before project callbacks can block
+            // the main thread or a domain unload destroys the outgoing async send.
+            if (change == PlayModeStateChange.ExitingEditMode || change == PlayModeStateChange.ExitingPlayMode)
+                PublishExecutionStateBounded("play_mode_changed");
             Logger.Log("SYSTEM", $"PlayMode 状态变更: {change}");
+            if (change == PlayModeStateChange.EnteredPlayMode || change == PlayModeStateChange.EnteredEditMode)
+                UPilotMcpServerManager.Instance.InvalidateStatusCache();
             _executionService?.OnPlayModeStateChanged(change);
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _cachedIsPlaying = EditorApplication.isPlaying;
@@ -2536,7 +2546,7 @@ namespace CodingRiver.UPilot
                 $"state={change}");
             if (_cts == null || _cts.IsCancellationRequested) return;
             var payload = _playInputService.CurrentPlayModeChangedPayload();
-            payload.transition = UPilotPlayModeTransitions.Latest;
+            payload.transition = UPilotPlayModeTransitions.Current;
             _cachedPlayModeState = payload.state;
             _ = PublishExecutionStateAsync("play_mode_changed", _cts.Token);
             _ = SendPlayModeChangedEventAsync(payload, _cts.Token);
@@ -2639,7 +2649,7 @@ namespace CodingRiver.UPilot
                 "sys.compile.start", "Unity编译开始",
                 $"ws={(_ws?.State == WebSocketState.Open ? "连接中" : "未连接")} 焦点={focus}");
             var tok = _cts?.Token ?? CancellationToken.None;
-            _ = PublishExecutionStateAsync("compile_started", tok);
+            PublishExecutionStateBounded("compile_started");
             _ = SendCompileStartedMcpPushAsync(tok);
         }
 

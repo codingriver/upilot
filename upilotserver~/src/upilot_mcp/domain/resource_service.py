@@ -324,7 +324,7 @@ class ResourceDomainService:
         if compile_when_edit_mode and can_compile:
             self._schedule_write_batch_resume()
             status = "queued"
-            next_action = "Poll unity_mcp_status until correlationVerified=true or the batch fails."
+            next_action = "Poll unity_write_batch_status with this writeBatchId until its own correlated terminal result is verified."
         elif compile_when_edit_mode:
             self.server.state.mark_write_batch(batch["writeBatchId"], "deferred")
             status = "deferred"
@@ -352,8 +352,25 @@ class ResourceDomainService:
     def _schedule_write_batch_resume(self) -> None:
         task = getattr(self, "_write_batch_resume_task", None)
         if task is not None and not task.done():
+            self._write_batch_resume_requested = True
             return
-        self._write_batch_resume_task = asyncio.create_task(self._resume_pending_write_batches())
+        self._write_batch_resume_requested = False
+        task = self._write_batch_resume_task = asyncio.create_task(self._resume_pending_write_batches())
+        task.add_done_callback(self._write_batch_resume_finished)
+
+    def _write_batch_resume_finished(self, task) -> None:
+        if not task.cancelled():
+            task.exception()
+        if getattr(self, "_write_batch_resume_task", None) is not task:
+            return
+        self._write_batch_resume_task = None
+        if getattr(self, "_write_batch_resume_requested", False):
+            execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+            if (execution.get("authoritative") and not execution.get("isStale")
+                    and execution.get("playModeState") == "edit" and not execution.get("isCompiling")
+                    and execution.get("compilePhase") not in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}
+                    and any(batch["compileWhenEditMode"] for batch in self.server.state.pending_write_batches())):
+                self._schedule_write_batch_resume()
 
     async def _on_editor_execution_state(self, execution: dict) -> None:
         self.server.state.expire_write_batches()
@@ -363,48 +380,40 @@ class ResourceDomainService:
             self._schedule_write_batch_resume()
 
     async def _resume_pending_write_batches(self) -> None:
-        await asyncio.sleep(0.5)
-        execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
-        if not execution.get("authoritative") or execution.get("playModeState") != "edit":
-            return
-        for batch in self.server.state.pending_write_batches():
-            if not batch["compileWhenEditMode"]:
-                continue
-            if batch["status"] == "recovery_required":
-                self.server.state.mark_write_batch(
-                    str(batch["writeBatchId"]), "aborted",
-                    error="Interrupted legacy execution is not resumed.",
-                )
-                continue
-            # A write registered after Unity had already begun an automatic
-            # compile cannot borrow that compile's result.  Leave this batch
-            # pending; the next fresh EditMode execution snapshot schedules
-            # the one already-authorized, request-scoped compile.  This branch
-            # neither marks recovery-required nor starts a second compile.
-            if (
-                str(execution.get("compileOrigin") or "") == "unity_auto"
-                and (
-                    bool(execution.get("isCompiling"))
-                    or str(execution.get("compilePhase") or "") in {
-                        "queued", "compiling", "compiler_finished", "domain_reload", "verifying"
-                    }
-                )
-            ):
-                continue
-            batch_id = str(batch["writeBatchId"])
-            stored = self.server.state.get_write_batch(batch_id)
-            if stored and stored.get("disposition"):
-                continue
-            if stored and stored.get("terminal") and stored.get("correlationVerified"):
-                continue
-            if batch_id in getattr(self, "_write_batch_safe_waits", ()):
-                continue
+        store = self.server.state
+        while True:
+            # A fixed settle window, not a debounce extended by every new save.
+            await asyncio.sleep(0.5)
+            execution = store.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+            if (not execution.get("authoritative") or execution.get("isStale")
+                    or execution.get("playModeState") != "edit"):
+                return
+            for batch in store.pending_write_batches():
+                if batch["compileWhenEditMode"] and batch["status"] == "recovery_required":
+                    store.mark_write_batch(batch["writeBatchId"], "aborted", error="Interrupted legacy execution is not resumed.")
+            # An unrelated automatic or MCP compile never proves coverage for pending work.
+            if (execution.get("isCompiling") or execution.get("compilePhase") in {
+                "queued", "compiling", "compiler_finished", "domain_reload", "verifying"
+            }):
+                return
+            try:
+                round_state = store.freeze_write_batch_round(getattr(self, "_write_batch_safe_waits", set()))
+            except Exception:
+                logger.exception("WriteBatch membership transaction failed; no compile dispatched")
+                return
+            if not round_state:
+                return
+            round_id = round_state["roundId"]
+            batch_id = round_state["compileOwnerWriteBatchId"]
             self._write_batch_active_id = batch_id
             work = None
             try:
-                remaining = max(0, (int(batch["writeBatchCreatedAt"]) + 600000 - now_ms()) / 1000)
+                remaining = max(0, (round_state["deadlineAt"] - now_ms()) / 1000)
                 if remaining <= 0:
-                    self.server.state.mark_write_batch(batch_id, "timed_out", error="Registration deadline expired.")
+                    store.end_write_batch_round(round_id, "timed_out", error="Registration deadline expired.")
+                    continue
+                if not store.live_write_batch_round_members(round_id):
+                    store.end_write_batch_round(round_id, "stopped")
                     continue
                 work = asyncio.create_task(self.safe_compile_and_wait(
                     timeout_s=remaining,
@@ -412,65 +421,54 @@ class ResourceDomainService:
                     prefer_events=True,
                     post_compile_delay_s=1.0,
                     write_batch_id=batch_id,
-                    write_batch_created_at=int(batch["writeBatchCreatedAt"]),
+                    write_batch_created_at=round_state["writeBatchCreatedAt"],
+                    _write_batch_round_id=round_id,
                 ))
                 self._write_batch_compile_task = work
+                observation_deadline = time.monotonic() + remaining
                 work.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
-                done, _ = await asyncio.wait({work}, timeout=remaining)
-                if not done:
-                    # Logical termination must not join cancellation-resistant code.
-                    work.cancel()
-                    self.server.state.mark_write_batch(batch_id, "timed_out", error="Registration deadline expired.")
-                    continue
-                result = work.result()
+                while True:
+                    remaining = max(0, min((round_state["deadlineAt"] - now_ms()) / 1000,
+                                           observation_deadline - time.monotonic()))
+                    done, _ = await asyncio.wait({work}, timeout=min(1.0, remaining))
+                    store.expire_write_batches()
+                    if done:
+                        result = work.result()
+                        break
+                    if time.monotonic() >= observation_deadline or not store.live_write_batch_round_members(round_id):
+                        # Release observation without joining cancellation-resistant code.
+                        work.cancel()
+                        store.end_write_batch_round(round_id, "timed_out" if time.monotonic() >= observation_deadline else "stopped",
+                                                   error="Round observation ended; Unity compilation is not interrupted.")
+                        result = None
+                        break
             except asyncio.CancelledError:
                 if work is not None and not work.done():
                     work.cancel()
-                self.server.state.mark_write_batch(batch_id, "aborted", error="Compile coordinator stopped.")
+                store.end_write_batch_round(round_id, "aborted", error="Compile coordinator stopped.")
                 raise
             except Exception as exc:
-                self.server.state.mark_write_batch(batch_id, "aborted", error=str(exc))
+                store.end_write_batch_round(round_id, "aborted", error=str(exc))
                 continue
             finally:
                 self._write_batch_compile_task = None
                 self._write_batch_active_id = ""
-            compile_operation_id = str(self.server.state.compile.compile_operation_id or "")
-            result_data = result.data or {}
-            phase = str(result_data.get("phase") or result_data.get("status") or "").lower()
-            correlation_verified = bool(result_data.get("correlationVerified"))
-            stored = self.server.state.get_write_batch(batch_id)
-            persisted_terminal = bool(
-                stored
-                and stored.get("terminal")
-                and stored.get("correlationVerified")
-                and stored.get("outcome") in {"passed", "failed"}
+            persisted_round = store.get_write_batch_round(round_id)
+            if persisted_round and persisted_round["correlationVerified"]:
+                continue
+            if result is None:
+                continue
+            error_code = str(result.error.code if result.error else "")
+            error_detail = result.error.detail if result.error else {}
+            if (error_detail.get("dispatchAttempted") is False and error_code in {
+                "COMMAND_TIMEOUT", "EDITOR_BUSY", "EDITOR_CONTEXT_NOT_READY", "EDITOR_IN_PLAY_MODE", "UNITY_NOT_CONNECTED"
+            } and store.end_write_batch_round(round_id, "deferred")):
+                return
+            store.end_write_batch_round(
+                round_id, "timed_out" if error_code in {"COMMAND_TIMEOUT", "COMPILE_TIMEOUT"} else "aborted",
+                error=result.error.message if result.error else "Compilation returned without a persisted correlated terminal snapshot.",
             )
-            if not (result.ok and correlation_verified and phase in {"completed", "failed"} and persisted_terminal):
-                error_code = str(result.error.code if result.error else "")
-                error_detail = result.error.detail if result.error else {}
-                if (
-                    error_detail.get("dispatchAttempted") is False
-                    and error_code in {
-                        "COMMAND_TIMEOUT",
-                        "EDITOR_BUSY",
-                        "EDITOR_CONTEXT_NOT_READY",
-                        "EDITOR_IN_PLAY_MODE",
-                        "UNITY_NOT_CONNECTED",
-                    }
-                ):
-                    self.server.state.mark_write_batch(batch_id, "deferred")
-                    continue
-                message = (
-                    result.error.message
-                    if result.error
-                    else "Compilation returned without a persisted correlated terminal snapshot."
-                )
-                self.server.state.mark_write_batch(
-                    batch_id,
-                    "timed_out" if error_code in {"COMMAND_TIMEOUT", "COMPILE_TIMEOUT"} else "aborted",
-                    compile_operation_id=compile_operation_id,
-                    error=message,
-                )
+            # Always check newly registered batches after settling this fixed round.
 
     async def asset_find(self, query: str, asset_type: str = "") -> ToolResponse:
         request_id = new_id("req")

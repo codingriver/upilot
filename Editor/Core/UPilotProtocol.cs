@@ -100,6 +100,7 @@ namespace CodingRiver.UPilot
         public int mainThreadQueueDepth;
         public string lastDequeuedCommandId;
         public int processId;
+        public long processCreatedAt;
     }
 
     [Serializable]

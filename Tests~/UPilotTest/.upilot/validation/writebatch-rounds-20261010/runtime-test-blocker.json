@@ -1,0 +1,12 @@
+{
+  "runGuid": "cd2d85e3-554c-4ac0-ac14-6d9e78d27efc",
+  "status": "stopping",
+  "phase": "stopping",
+  "isRunning": true,
+  "terminal": false,
+  "currentTest": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbeAllowsMoreThanTwoSecondsButKeepsOriginalDeadline",
+  "cleanupPending": true,
+  "cleanupResourcesReleased": false,
+  "cleanupStatus": "running",
+  "resultAuthoritative": false
+}

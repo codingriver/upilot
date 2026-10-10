@@ -53,6 +53,9 @@ namespace CodingRiver.UPilot
         public long waiting_since_ms;
         public long waiting_duration_ms;
         public int observation_count;
+        public string lifecycle_phase;
+        public string lifecycle_id;
+        public long lifecycle_started_at_ms;
         public UPilotEditorStallSummary recent_stall;
     }
 
@@ -86,6 +89,64 @@ namespace CodingRiver.UPilot
         public string last_close_code;
     }
 
+    internal enum UPilotHealthDisposition { Normal, ConfirmedFailure, WaitingLifecycle, Unconfirmed }
+    internal static class UPilotHealthAssessment
+    {
+        internal static bool HasServiceIdentity(McpServerStatus server) =>
+            server.ProcessOwnership == McpProcessOwnership.CurrentUPilot && server.ProcessId > 0 &&
+            server.Health?.server_pid == server.ProcessId && !string.IsNullOrEmpty(server.Health.server_instance_id) &&
+            UPilotDeploymentDiagnostics.SamePath(server.Health.configured_project_path, UPilotProjectConfig.ProjectRoot);
+
+        internal static bool HasLifecycleEvidence(McpServerStatus server) =>
+            server.EditorObservationAvailable && server.EditorObservationStatus == "waiting_lifecycle" &&
+            !string.IsNullOrEmpty(server.EditorObservationLifecycleId) &&
+            server.EditorObservationLifecycleStartedAtUtcMs > 0 && HasServiceIdentity(server) &&
+            !string.IsNullOrEmpty(server.EditorObservationSessionId) &&
+            server.EditorObservationSessionId == server.Health.bridge_session_id &&
+            (server.EditorObservationLifecyclePhase == "enteringPlay" || server.EditorObservationLifecyclePhase == "exitingPlay" ||
+             server.EditorObservationLifecyclePhase == "compiling" || server.EditorObservationLifecyclePhase == "domain_reload");
+
+        // Only source-classified transient failures may be suppressed. Unknown strings remain errors.
+        internal static UPilotHealthDisposition Classify(BridgeStatus bridge, McpServerStatus server)
+        {
+            if (!string.IsNullOrEmpty(bridge.AuthenticationError) || server.ProcessOwnership == McpProcessOwnership.Foreign ||
+                server.FailureKind == McpStatusFailureKind.Confirmed ||
+                (!string.IsNullOrEmpty(server.ErrorMessage) && server.FailureKind != McpStatusFailureKind.Transient) ||
+                server.EditorObservationReason == "unity_process_exited" ||
+                server.EditorObservationReason == "unity_process_identity_mismatch" ||
+                (server.HealthEndpointResponded && server.Health != null &&
+                 ((server.ProcessId > 0 && server.Health.server_pid > 0 && server.Health.server_pid != server.ProcessId) ||
+                  (!string.IsNullOrEmpty(server.Health.configured_project_path) &&
+                   !UPilotDeploymentDiagnostics.SamePath(server.Health.configured_project_path, UPilotProjectConfig.ProjectRoot)))))
+                return UPilotHealthDisposition.ConfirmedFailure;
+            if (HasLifecycleEvidence(server))
+                return UPilotPlayModeTransitions.HasEndedLifecycle(server.EditorObservationLifecycleId,
+                    server.EditorObservationLifecycleStartedAtUtcMs)
+                    ? UPilotHealthDisposition.Unconfirmed : UPilotHealthDisposition.WaitingLifecycle;
+            if (server.FailureKind == McpStatusFailureKind.Transient || server.DiagnosisPending ||
+                server.EditorObservationStatus == "unknown" || server.EditorObservationStatus == "waiting_lifecycle" ||
+                (server.StatusQueryCompleted && server.IsRunning &&
+                 (!server.HealthEndpointResponded || server.ProcessOwnership == McpProcessOwnership.Unknown)))
+                return UPilotHealthDisposition.Unconfirmed;
+            return UPilotHealthDisposition.Normal;
+        }
+
+        internal static string LifecycleTitle(string phase) => phase == "enteringPlay" ? "Unity 正在进入 PlayMode" :
+            phase == "exitingPlay" ? "Unity 正在退出 PlayMode" : phase == "domain_reload" ? "Unity 正在重载" : "Unity 正在编译";
+
+        internal static bool CanVerifyRecovery(BridgeStatus bridge, McpServerStatus server, long observedNowUtcMs = 0) =>
+            HasServiceIdentity(server) && server.HealthEndpointResponded && bridge.IsWsOpen && bridge.IsAuthenticated &&
+            bridge.SessionId == server.Health.bridge_session_id &&
+            (!server.EditorObservationAvailable || (server.EditorObservationStatus == "responsive" &&
+                server.EditorObservationSessionId == bridge.SessionId && server.EditorObservationObservedAtUtcMs > 0 &&
+                server.EditorObservationHeartbeatAgeMs >= 0 && server.EditorObservationPumpAgeMs >= 0 &&
+                server.EditorObservationHeartbeatAgeMs + ObservationAge(server, observedNowUtcMs) <= 6000 &&
+                server.EditorObservationPumpAgeMs + ObservationAge(server, observedNowUtcMs) <= 5000));
+
+        private static long ObservationAge(McpServerStatus server, long now) => Math.Max(0,
+            (now > 0 ? now : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) - server.EditorObservationObservedAtUtcMs);
+    }
+
     internal sealed class UPilotDeploymentIssue
     {
         public string Code;
@@ -103,6 +164,7 @@ namespace CodingRiver.UPilot
         private static string _source;
         private static bool _main;
         private static long _checkingSince;
+        private static bool _transientStatus;
         private static string _lastDetails = "";
 
         internal static string Version { get { Initialize(); return _version; } }
@@ -171,17 +233,22 @@ namespace CodingRiver.UPilot
                 _checkingSince = 0;
                 return Issues.Values.ToArray();
             }
-            if (_checkingSince == 0) _checkingSince = Stopwatch.GetTimestamp();
+            _transientStatus = server.FailureKind == McpStatusFailureKind.Transient;
+            var waiting = UPilotHealthAssessment.Classify(bridge, server) == UPilotHealthDisposition.WaitingLifecycle;
+            if (waiting) { Issues.Remove("timeout"); _checkingSince = 0; }
+            else if (_checkingSince == 0) _checkingSince = Stopwatch.GetTimestamp();
             Check("authentication", bridge.IsAuthenticated ? true :
                     string.IsNullOrEmpty(bridge.AuthenticationError) ? (bool?)null : false,
                 bridge.AuthenticationError ?? "Bridge 尚未完成身份握手", missingIsError: false);
-            Check("status", string.IsNullOrEmpty(server.ErrorMessage) ? server.StatusQueryCompleted ? true : (bool?)null : false,
+            Check("status", _transientStatus ? (bool?)null :
+                    string.IsNullOrEmpty(server.ErrorMessage) ? server.StatusQueryCompleted ? true : (bool?)null : false,
                 server.ErrorMessage ?? "状态尚未返回", missingIsError: false);
             if (server.StatusQueryCompleted && server.IsRunning)
             {
-                Check("ownership", server.ProcessOwnership == McpProcessOwnership.CurrentUPilot,
-                    $"项目或进程身份未通过：期望 {UPilotProjectConfig.ProjectRoot}；PID={server.ProcessId?.ToString() ?? "未知"}；{server.ProcessOwnershipEvidence}");
-                Check("health", server.HealthEndpointResponded,
+                Check("ownership", server.ProcessOwnership == McpProcessOwnership.Unknown ? (bool?)null :
+                        server.ProcessOwnership == McpProcessOwnership.CurrentUPilot,
+                    $"{(server.ProcessOwnership == McpProcessOwnership.Foreign ? "已确认端口属于其他项目或程序；" : "")}项目或进程身份未通过：期望 {UPilotProjectConfig.ProjectRoot}；PID={server.ProcessId?.ToString() ?? "未知"}；{server.ProcessOwnershipEvidence}");
+                Check("health", server.HealthEndpointResponded ? true : server.FailureKind == McpStatusFailureKind.Confirmed ? false : (bool?)null,
                     "状态获取失败：/health 未成功返回；" + server.StatusFailureStage);
                 if (UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.Python)
                     Check("configured_entry", SamePath(
@@ -224,9 +291,9 @@ namespace CodingRiver.UPilot
                 Issues.Remove("timeout");
                 _checkingSince = 0;
             }
-            else if ((Stopwatch.GetTimestamp() - _checkingSince) / (double)Stopwatch.Frequency >= 30)
+            else if (!waiting && (Stopwatch.GetTimestamp() - _checkingSince) / (double)Stopwatch.Frequency >= 30)
             {
-                Check("timeout", false, "状态获取超时（30 秒）：未完成连接、进程身份、健康信息或握手检查。");
+                Check("timeout", null, "状态尚未确认（观察超过 30 秒）：等待连接、进程身份、健康信息或握手证据；不凭等待时长确认故障。");
             }
             _lastDetails = $"Bridge：{Version}；渠道={Channel}；安装方式={InstallSource}；明确 main={IsMain}\n" +
                 $"当前包：{PackageRoot}\n配套入口：{ExpectedEntry}\n" +
@@ -239,13 +306,25 @@ namespace CodingRiver.UPilot
             return Issues.Values.ToArray();
         }
 
+        internal static void ClearTransientHealthIssues()
+        {
+            foreach (var key in Issues.Where(pair => !pair.Value.Confirmed).Select(pair => pair.Key).ToArray())
+                Issues.Remove(key);
+            _checkingSince = 0;
+        }
+
         private static void Compare(string key, bool? passed, string message) =>
             Check(key, passed, passed.HasValue ? message : "协议字段缺失或未返回；" + message);
 
         private static void Check(string key, bool? passed, string message, bool missingIsError = true)
         {
             if (passed == true) { Issues.Remove(key); return; }
-            if (!passed.HasValue && (Issues.ContainsKey(key) || !missingIsError)) return;
+            if (!passed.HasValue && !missingIsError)
+            {
+                if (key == "status" && _transientStatus) Issues.Remove(key);
+                return;
+            }
+            if (!passed.HasValue && Issues.TryGetValue(key, out var existing) && existing.Confirmed) return;
             Issues[key] = new UPilotDeploymentIssue { Code = key, Message = message, Confirmed = passed.HasValue };
         }
 

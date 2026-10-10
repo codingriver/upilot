@@ -1,0 +1,200 @@
+{
+  "files": {
+    ".agents/skills/upilot-unity-mcp/.upilot-install.json": {
+      "sha256": "faeffc49eafdede7597c5ea518a3f3311950907742164f707943a1a9cb2b85c6",
+      "mtime_ns": 1791634335079786200
+    },
+    ".agents/skills/upilot-unity-mcp/agents/openai.yaml": {
+      "sha256": "5042c04be0757573cd936b504d2bb18f80cbee088750a554c27527b754ddee98",
+      "mtime_ns": 1791634335071787300
+    },
+    ".agents/skills/upilot-unity-mcp/agents/openai.yaml.template": {
+      "sha256": "88ef0603ed5ce783271338b2f712cd1e43855a273154e83cbe1e995dc08cd6f6",
+      "mtime_ns": 1791634335072286600
+    },
+    ".agents/skills/upilot-unity-mcp/AGENTS.md.template": {
+      "sha256": "7c89eed833922916c87aa2d6d73936a7269ba8cf57a46834f83246d709e8b325",
+      "mtime_ns": 1791634335070288300
+    },
+    ".agents/skills/upilot-unity-mcp/references/automation-steps.md": {
+      "sha256": "67eef9836f3a1d3cb7f67aabbcdf0c916698858fb46a5c2f35a4ed89cfc6f295",
+      "mtime_ns": 1791634335072787000
+    },
+    ".agents/skills/upilot-unity-mcp/references/client-configs.md": {
+      "sha256": "0edbd473e544c3b956f2d0716d02f2579eace601c90f1c394d1f6ca1517fb2a7",
+      "mtime_ns": 1791634335073287200
+    },
+    ".agents/skills/upilot-unity-mcp/references/execution-tools.md": {
+      "sha256": "39095cdb7f7427de6b96e1aee9ff0c27ff19b8580100790212fbb09458621378",
+      "mtime_ns": 1791634335073787200
+    },
+    ".agents/skills/upilot-unity-mcp/references/flow.md": {
+      "sha256": "e08fe37a73bcc675aefbfaa9b088950df05e5fb6e935c3df959db3f00f70beb5",
+      "mtime_ns": 1791634335074286000
+    },
+    ".agents/skills/upilot-unity-mcp/references/installation.md": {
+      "sha256": "dcdc80c471176a8b1bbfeaed886b8d1569a505b0feec7809d3f8a5cadf580b59",
+      "mtime_ns": 1791634335074786700
+    },
+    ".agents/skills/upilot-unity-mcp/references/monohook-tracing.md": {
+      "sha256": "26121a80962eff469413ac7bc0094c3f87b94af0c0674bae8214f9fae87bd68b",
+      "mtime_ns": 1791634335075287400
+    },
+    ".agents/skills/upilot-unity-mcp/references/safety.md": {
+      "sha256": "4152e2e6c28fb9a15cfe148e181ebc839208d58668622ad64209c25881e7e723",
+      "mtime_ns": 1791634335076286200
+    },
+    ".agents/skills/upilot-unity-mcp/references/tool-boundaries.md": {
+      "sha256": "7d88e7398d8c75b44df0db5519111289e5a93e68303b712c2f881c2e3cd3fe6f",
+      "mtime_ns": 1791634335076286200
+    },
+    ".agents/skills/upilot-unity-mcp/references/tool-routing.md": {
+      "sha256": "3d5ce93ee8e93a7420060d9f7f07678d1572e2f301f1f19ac9cbdcd0151b2dd7",
+      "mtime_ns": 1791634335076786700
+    },
+    ".agents/skills/upilot-unity-mcp/references/workflows.md": {
+      "sha256": "ffcf1f2003d025762cee1cd5b8088e9822f2028d2e768a58b681b89b6200f5bb",
+      "mtime_ns": 1791634335077285800
+    },
+    ".agents/skills/upilot-unity-mcp/scripts/check_skill_pack.py": {
+      "sha256": "96fe7ac4cf5d3ae16cd4fd0cdf8c85e04b2fb6d3bdaf64e74686135354264d92",
+      "mtime_ns": 1791634335077786100
+    },
+    ".agents/skills/upilot-unity-mcp/scripts/install_upilot.py": {
+      "sha256": "0707b0b990792c900e0a1d84049ac51857ed548b33b4b2c38f5c1224a5bbf3b2",
+      "mtime_ns": 1791634335078286400
+    },
+    ".agents/skills/upilot-unity-mcp/scripts/render_skill_pack.py": {
+      "sha256": "2002e17ac287500cffac3ab05bf779497814ff453b0249daccafbb9a39e0dde0",
+      "mtime_ns": 1791634335078785300
+    },
+    ".agents/skills/upilot-unity-mcp/scripts/sync_integrations.py": {
+      "sha256": "50818938985a300f9dfe8e5463333d1989e68906d7a0a00d7db6cdcc3dc70e95",
+      "mtime_ns": 1791634335079287100
+    },
+    ".agents/skills/upilot-unity-mcp/SKILL.md": {
+      "sha256": "05cc1135a57f098df6463139dec98d9c30575a9d990e4b3a6d47347b1938074d",
+      "mtime_ns": 1791634335070787600
+    },
+    ".agents/skills/upilot-unity-mcp/SKILL.md.template": {
+      "sha256": "5fa481e3c899615fb3f8eb9921ccee224340369d7f2d7ea5b72bfa3c4f3b7431",
+      "mtime_ns": 1791634335071288300
+    },
+    ".agents/skills/upilot-unity-mcp/template-manifest.json": {
+      "sha256": "90c4435eb5d902108514793ef4350f3872eb7f4eda765936118e94ae9facecd5",
+      "mtime_ns": 1791634335071288300
+    },
+    ".claude/skills/upilot-unity-mcp/.upilot-install.json": {
+      "sha256": "faeffc49eafdede7597c5ea518a3f3311950907742164f707943a1a9cb2b85c6",
+      "mtime_ns": 1791634335183787100
+    },
+    ".claude/skills/upilot-unity-mcp/agents/openai.yaml": {
+      "sha256": "5042c04be0757573cd936b504d2bb18f80cbee088750a554c27527b754ddee98",
+      "mtime_ns": 1791634335176286100
+    },
+    ".claude/skills/upilot-unity-mcp/agents/openai.yaml.template": {
+      "sha256": "88ef0603ed5ce783271338b2f712cd1e43855a273154e83cbe1e995dc08cd6f6",
+      "mtime_ns": 1791634335176787100
+    },
+    ".claude/skills/upilot-unity-mcp/AGENTS.md.template": {
+      "sha256": "7c89eed833922916c87aa2d6d73936a7269ba8cf57a46834f83246d709e8b325",
+      "mtime_ns": 1791634335173786400
+    },
+    ".claude/skills/upilot-unity-mcp/references/automation-steps.md": {
+      "sha256": "67eef9836f3a1d3cb7f67aabbcdf0c916698858fb46a5c2f35a4ed89cfc6f295",
+      "mtime_ns": 1791634335177286700
+    },
+    ".claude/skills/upilot-unity-mcp/references/client-configs.md": {
+      "sha256": "0edbd473e544c3b956f2d0716d02f2579eace601c90f1c394d1f6ca1517fb2a7",
+      "mtime_ns": 1791634335177787400
+    },
+    ".claude/skills/upilot-unity-mcp/references/execution-tools.md": {
+      "sha256": "39095cdb7f7427de6b96e1aee9ff0c27ff19b8580100790212fbb09458621378",
+      "mtime_ns": 1791634335178287800
+    },
+    ".claude/skills/upilot-unity-mcp/references/flow.md": {
+      "sha256": "e08fe37a73bcc675aefbfaa9b088950df05e5fb6e935c3df959db3f00f70beb5",
+      "mtime_ns": 1791634335178788200
+    },
+    ".claude/skills/upilot-unity-mcp/references/installation.md": {
+      "sha256": "dcdc80c471176a8b1bbfeaed886b8d1569a505b0feec7809d3f8a5cadf580b59",
+      "mtime_ns": 1791634335179287000
+    },
+    ".claude/skills/upilot-unity-mcp/references/monohook-tracing.md": {
+      "sha256": "26121a80962eff469413ac7bc0094c3f87b94af0c0674bae8214f9fae87bd68b",
+      "mtime_ns": 1791634335179786400
+    },
+    ".claude/skills/upilot-unity-mcp/references/safety.md": {
+      "sha256": "4152e2e6c28fb9a15cfe148e181ebc839208d58668622ad64209c25881e7e723",
+      "mtime_ns": 1791634335180287300
+    },
+    ".claude/skills/upilot-unity-mcp/references/tool-boundaries.md": {
+      "sha256": "7d88e7398d8c75b44df0db5519111289e5a93e68303b712c2f881c2e3cd3fe6f",
+      "mtime_ns": 1791634335180787100
+    },
+    ".claude/skills/upilot-unity-mcp/references/tool-routing.md": {
+      "sha256": "3d5ce93ee8e93a7420060d9f7f07678d1572e2f301f1f19ac9cbdcd0151b2dd7",
+      "mtime_ns": 1791634335181286400
+    },
+    ".claude/skills/upilot-unity-mcp/references/workflows.md": {
+      "sha256": "ffcf1f2003d025762cee1cd5b8088e9822f2028d2e768a58b681b89b6200f5bb",
+      "mtime_ns": 1791634335181787400
+    },
+    ".claude/skills/upilot-unity-mcp/scripts/check_skill_pack.py": {
+      "sha256": "96fe7ac4cf5d3ae16cd4fd0cdf8c85e04b2fb6d3bdaf64e74686135354264d92",
+      "mtime_ns": 1791634335181787400
+    },
+    ".claude/skills/upilot-unity-mcp/scripts/install_upilot.py": {
+      "sha256": "0707b0b990792c900e0a1d84049ac51857ed548b33b4b2c38f5c1224a5bbf3b2",
+      "mtime_ns": 1791634335182286600
+    },
+    ".claude/skills/upilot-unity-mcp/scripts/render_skill_pack.py": {
+      "sha256": "2002e17ac287500cffac3ab05bf779497814ff453b0249daccafbb9a39e0dde0",
+      "mtime_ns": 1791634335182787100
+    },
+    ".claude/skills/upilot-unity-mcp/scripts/sync_integrations.py": {
+      "sha256": "50818938985a300f9dfe8e5463333d1989e68906d7a0a00d7db6cdcc3dc70e95",
+      "mtime_ns": 1791634335183287500
+    },
+    ".claude/skills/upilot-unity-mcp/SKILL.md": {
+      "sha256": "05cc1135a57f098df6463139dec98d9c30575a9d990e4b3a6d47347b1938074d",
+      "mtime_ns": 1791634335173786400
+    },
+    ".claude/skills/upilot-unity-mcp/SKILL.md.template": {
+      "sha256": "5fa481e3c899615fb3f8eb9921ccee224340369d7f2d7ea5b72bfa3c4f3b7431",
+      "mtime_ns": 1791634335174786300
+    },
+    ".claude/skills/upilot-unity-mcp/template-manifest.json": {
+      "sha256": "90c4435eb5d902108514793ef4350f3872eb7f4eda765936118e94ae9facecd5",
+      "mtime_ns": 1791634335175786400
+    },
+    ".cursor/rules/upilot-unity-mcp.mdc": {
+      "sha256": "048a52194e4eb47e9e606feab3f9ce12dba96cb06d153bd969b2b67e33a36f6b",
+      "mtime_ns": 1791634335030286000
+    },
+    ".upilot/agent-integrations.json": {
+      "sha256": "ff455e5c19f37e0035578a71b6039c5750067cd57f0f93854e7eb5d084bb62bb",
+      "mtime_ns": 1791634335038787000
+    },
+    "AGENTS.md": {
+      "sha256": "6167832ff7647d658d10131a1b3fd7b35b68fbf11468c67e6e660034489d85e9",
+      "mtime_ns": 1791634335021786100
+    },
+    "CLAUDE.md": {
+      "sha256": "05da704d1374bba29ff925b8838e34fafee2ccf5f54826aa9ae055c2bbab0a19",
+      "mtime_ns": 1788504559071520000
+    }
+  },
+  "backupDirectories": [
+    "20260920T081335347630Z-d0729022",
+    "20260920T081335347630Z-d0729022/.agents",
+    "20260920T081335347630Z-d0729022/.agents/skills",
+    "20260920T081335347630Z-d0729022/.agents/skills/upilot-unity-mcp",
+    "20260920T081335347630Z-d0729022/.agents/skills/upilot-unity-mcp/agents",
+    "20260920T081335347630Z-d0729022/.agents/skills/upilot-unity-mcp/references",
+    "20260920T081335347630Z-d0729022/.agents/skills/upilot-unity-mcp/scripts",
+    "20260920T083432093Z-8031cd2a",
+    "20260920T083432093Z-8031cd2a/.cursor",
+    "20260920T083432093Z-8031cd2a/.cursor/rules"
+  ]
+}

@@ -636,18 +636,30 @@ namespace CodingRiver.UPilot
                 return;
 
             var observationStatus = _mcpStatus.EditorObservationStatus;
-            if (observationStatus != "waiting_editor" && observationStatus != "unknown")
+            if (observationStatus != "waiting_editor" && observationStatus != "unknown" && observationStatus != "waiting_lifecycle")
                 return;
 
             var observed = FormatObservationTime(_mcpStatus.EditorObservationObservedAtUtcMs);
-            if (observationStatus == "waiting_editor")
+            if (observationStatus == "waiting_lifecycle")
+            {
+                var waitingMs = Math.Max(_mcpStatus.EditorObservationWaitingDurationMs,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _mcpStatus.EditorObservationLifecycleStartedAtUtcMs);
+                EditorGUILayout.HelpBox(
+                    UPilotHealthAssessment.LifecycleTitle(_mcpStatus.EditorObservationLifecyclePhase) +
+                    $"，已等待 {FormatObservationDuration(waitingMs)}；正常生命周期等待不会触发自动修复或重启。\n" +
+                    $"Server HTTP：{(_mcpStatus.HealthEndpointResponded ? "已响应" : "尚未确认")}；" +
+                    $"Bridge 心跳年龄：{FormatObservationDuration(_mcpStatus.EditorObservationHeartbeatAgeMs)}；" +
+                    $"Editor 主线程更新年龄：{FormatObservationDuration(_mcpStatus.EditorObservationPumpAgeMs)}。",
+                    MessageType.Info);
+            }
+            else if (observationStatus == "waiting_editor")
             {
                 var waitingMs = _mcpStatus.EditorObservationWaitingDurationMs;
                 if (_mcpStatus.EditorObservationWaitingSinceUtcMs > 0)
                     waitingMs = Math.Max(waitingMs,
                         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _mcpStatus.EditorObservationWaitingSinceUtcMs);
                 EditorGUILayout.HelpBox(
-                    "Unity 主线程暂未响应，疑似长时间更新停顿。网络心跳仍正常，正在每秒检查；未执行自动重启。\n" +
+                    "Unity 主线程暂未响应，疑似长时间更新停顿。心跳与主线程推进分别观测，正在每秒检查；未执行自动重启。\n" +
                     $"已等待 {FormatObservationDuration(waitingMs)}；最近观察 {observed}。该间隔是主线程更新间隔，不是精确帧耗时。",
                     MessageType.Warning);
             }
@@ -669,7 +681,7 @@ namespace CodingRiver.UPilot
 
         private static string FormatObservationDuration(long durationMs)
         {
-            if (durationMs < 0) durationMs = 0;
+            if (durationMs < 0) return "未知";
             var duration = TimeSpan.FromMilliseconds(durationMs);
             if (duration.TotalMinutes >= 1)
                 return $"{(int)duration.TotalMinutes} 分 {duration.Seconds} 秒";
@@ -1035,6 +1047,7 @@ namespace CodingRiver.UPilot
             {
                 "responsive" => "响应正常",
                 "waiting_editor" => "等待 Unity 主线程推进",
+                "waiting_lifecycle" => "等待 Unity 生命周期完成",
                 "unknown" => "暂无法确认",
                 _ => "旧版或无观察信息",
             };

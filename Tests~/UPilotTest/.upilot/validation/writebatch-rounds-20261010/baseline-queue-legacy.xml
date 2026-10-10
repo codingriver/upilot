@@ -1,0 +1,373 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="21" skipped="0" tests="29" time="5.269" timestamp="2026-10-10T20:06:58.429590+08:00" hostname="Codingriver"><testcase classname="tests.test_queue_disposition" name="test_release_operation_is_backed_up_not_success_and_survives_restart" time="0.069"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-637246f7-7aad-439e-88c6-52283d251154', timestamp=1791634020903, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-637246f7-7aad-439e-88c6-52283d251154', timestamp=1791634020903, context=None, timing=None).ok">tests\test_queue_disposition.py:106: in test_release_operation_is_backed_up_not_success_and_survives_restart
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:84: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-637246f7-7aad-439e-88c6-52283d251154', timestamp=1791634020903, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-637246f7-7aad-439e-88c6-52283d251154', timestamp=1791634020903, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_uncertain_release_observes_same_request_across_server_restart_never_resends" time="0.068"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-343c9be1-fc05-44fe-bf9f-dc1329372b9f', timestamp=1791634021371, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-343c9be1-fc05-44fe-bf9f-dc1329372b9f', timestamp=1791634021371, context=None, timing=None).ok">tests\test_queue_disposition.py:126: in test_uncertain_release_observes_same_request_across_server_restart_never_resends
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:113: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-343c9be1-fc05-44fe-bf9f-dc1329372b9f', timestamp=1791634021371, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-343c9be1-fc05-44fe-bf9f-dc1329372b9f', timestamp=1791634021371, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[changed]" time="0.053"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-57a3cbad-d002-4d5a-bb2a-d2e716548b13', timestamp=1791634021462, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-57a3cbad-d002-4d5a-bb2a-d2e716548b13', timestamp=1791634021462, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-57a3cbad-d002-4d5a-bb2a-d2e716548b13', timestamp=1791634021462, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-57a3cbad-d002-4d5a-bb2a-d2e716548b13', timestamp=1791634021462, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[grant]" time="0.055"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-8772d179-429d-4b43-8c1f-56b6fec2ec62', timestamp=1791634021564, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-8772d179-429d-4b43-8c1f-56b6fec2ec62', timestamp=1791634021564, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-8772d179-429d-4b43-8c1f-56b6fec2ec62', timestamp=1791634021564, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-8772d179-429d-4b43-8c1f-56b6fec2ec62', timestamp=1791634021564, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[pending]" time="0.053"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-15b085bd-b2bf-4222-a371-bc2ee10837b8', timestamp=1791634021712, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-15b085bd-b2bf-4222-a371-bc2ee10837b8', timestamp=1791634021712, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-15b085bd-b2bf-4222-a371-bc2ee10837b8', timestamp=1791634021712, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-15b085bd-b2bf-4222-a371-bc2ee10837b8', timestamp=1791634021712, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[backup]" time="0.059"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ce9644af-7f4c-4e08-89fe-6d04894edabb', timestamp=1791634021811, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ce9644af-7f4c-4e08-89fe-6d04894edabb', timestamp=1791634021811, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ce9644af-7f4c-4e08-89fe-6d04894edabb', timestamp=1791634021811, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ce9644af-7f4c-4e08-89fe-6d04894edabb', timestamp=1791634021811, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[persistence]" time="0.050"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ca9db0e4-602c-4c62-bff3-471492180298', timestamp=1791634021900, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ca9db0e4-602c-4c62-bff3-471492180298', timestamp=1791634021900, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ca9db0e4-602c-4c62-bff3-471492180298', timestamp=1791634021900, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-ca9db0e4-602c-4c62-bff3-471492180298', timestamp=1791634021900, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[identity]" time="0.052"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-85299d43-37a4-481e-9ca6-1c5a9cf56486', timestamp=1791634021992, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-85299d43-37a4-481e-9ca6-1c5a9cf56486', timestamp=1791634021992, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-85299d43-37a4-481e-9ca6-1c5a9cf56486', timestamp=1791634021992, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-85299d43-37a4-481e-9ca6-1c5a9cf56486', timestamp=1791634021992, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_release_rejects_unsafe_operation_without_sending[capture]" time="0.054"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-b2819c64-13cb-40cd-b9bc-23eb0efea562', timestamp=1791634022134, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-b2819c64-13cb-40cd-b9bc-23eb0efea562', timestamp=1791634022134, context=None, timing=None).ok">tests\test_queue_disposition.py:147: in test_release_rejects_unsafe_operation_without_sending
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:133: in run
+    args = await preview(service, "Operation", state["operationId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-b2819c64-13cb-40cd-b9bc-23eb0efea562', timestamp=1791634022134, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-b2819c64-13cb-40cd-b9bc-23eb0efea562', timestamp=1791634022134, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_task_release_retains_partial_failed_test_result_and_removes_only_its_admission_block" time="0.047"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-4f7f36aa-fa44-44c2-b088-94206c81b955', timestamp=1791634022222, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-4f7f36aa-fa44-44c2-b088-94206c81b955', timestamp=1791634022222, context=None, timing=None).ok">tests\test_queue_disposition.py:166: in test_task_release_retains_partial_failed_test_result_and_removes_only_its_admission_block
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:153: in run
+    args = await preview(service, "Task", state["taskId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-4f7f36aa-fa44-44c2-b088-94206c81b955', timestamp=1791634022222, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-4f7f36aa-fa44-44c2-b088-94206c81b955', timestamp=1791634022222, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_task_release_requires_original_authoritative_execution_and_resource_proof[runGuid-other]" time="0.047" /><testcase classname="tests.test_queue_disposition" name="test_task_release_requires_original_authoritative_execution_and_resource_proof[runnerState-unknown]" time="0.048" /><testcase classname="tests.test_queue_disposition" name="test_task_release_requires_original_authoritative_execution_and_resource_proof[cleanupPending-True]" time="0.044" /><testcase classname="tests.test_queue_disposition" name="test_task_release_requires_original_authoritative_execution_and_resource_proof[resultAuthoritative-False]" time="0.045" /><testcase classname="tests.test_queue_disposition" name="test_task_release_requires_original_authoritative_execution_and_resource_proof[unresolvedResources-value4]" time="0.063" /><testcase classname="tests.test_queue_disposition" name="test_task_release_rechecks_state_after_awaiting_test_proof[finalizing]" time="0.046" /><testcase classname="tests.test_queue_disposition" name="test_task_release_rechecks_state_after_awaiting_test_proof[became_terminal]" time="0.044" /><testcase classname="tests.test_queue_disposition" name="test_task_release_rechecks_state_after_awaiting_test_proof[uncertain_cancel]" time="0.046" /><testcase classname="tests.test_queue_disposition" name="test_released_task_allows_new_test_but_does_not_bypass_another_blocker" time="0.047"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-bd491935-bfff-446f-ae66-7f32d2a4a912', timestamp=1791634022700, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-bd491935-bfff-446f-ae66-7f32d2a4a912', timestamp=1791634022700, context=None, timing=None).ok">tests\test_queue_disposition.py:219: in test_released_task_allows_new_test_but_does_not_bypass_another_blocker
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:201: in run
+    args = await preview(service, "Task", state["taskId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-bd491935-bfff-446f-ae66-7f32d2a4a912', timestamp=1791634022700, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-bd491935-bfff-446f-ae66-7f32d2a4a912', timestamp=1791634022700, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_task_release_persistence_failure_keeps_original_blocker" time="0.046"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-10e1c336-7a55-4205-aa2b-5238fc72ef9f', timestamp=1791634022805, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-10e1c336-7a55-4205-aa2b-5238fc72ef9f', timestamp=1791634022805, context=None, timing=None).ok">tests\test_queue_disposition.py:234: in test_task_release_persistence_failure_keeps_original_blocker
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:225: in run
+    args = await preview(service, "Task", state["taskId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-10e1c336-7a55-4205-aa2b-5238fc72ef9f', timestamp=1791634022805, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-10e1c336-7a55-4205-aa2b-5238fc72ef9f', timestamp=1791634022805, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_late_observer_result_does_not_resurrect_released_task" time="0.049"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-652ecbd8-8b28-42f0-9081-617f9a7df596', timestamp=1791634022896, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-652ecbd8-8b28-42f0-9081-617f9a7df596', timestamp=1791634022896, context=None, timing=None).ok">tests\test_queue_disposition.py:253: in test_late_observer_result_does_not_resurrect_released_task
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:248: in run
+    args = await preview(service, "Task", state["taskId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-652ecbd8-8b28-42f0-9081-617f9a7df596', timestamp=1791634022896, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-652ecbd8-8b28-42f0-9081-617f9a7df596', timestamp=1791634022896, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_released_acceptance_never_exposes_old_pass_as_current_result[summary]" time="0.055"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-66cd47bd-423c-4e36-b269-834db0d291da', timestamp=1791634023039, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-66cd47bd-423c-4e36-b269-834db0d291da', timestamp=1791634023039, context=None, timing=None).ok">tests\test_queue_disposition.py:279: in test_released_acceptance_never_exposes_old_pass_as_current_result
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:264: in run
+    args = await preview(service, "Task", state["taskId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-66cd47bd-423c-4e36-b269-834db0d291da', timestamp=1791634023039, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-66cd47bd-423c-4e36-b269-834db0d291da', timestamp=1791634023039, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_disposition" name="test_released_acceptance_never_exposes_old_pass_as_current_result[full]" time="0.047"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-cbd32655-8353-4332-b51d-64f7be3628b1', timestamp=1791634023130, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-cbd32655-8353-4332-b51d-64f7be3628b1', timestamp=1791634023130, context=None, timing=None).ok">tests\test_queue_disposition.py:279: in test_released_acceptance_never_exposes_old_pass_as_current_result
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:264: in run
+    args = await preview(service, "Task", state["taskId"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_disposition.py:59: in preview
+    assert result.ok, result
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-cbd32655-8353-4332-b51d-64f7be3628b1', timestamp=1791634023130, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-cbd32655-8353-4332-b51d-64f7be3628b1', timestamp=1791634023130, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_abandon" name="test_abandon_preserves_original_result_and_is_not_acceptance_success" time="0.049"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-475ea2de-6874-4693-a2a7-d7d3778ea95a', timestamp=1791634023217, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-475ea2de-6874-4693-a2a7-d7d3778ea95a', timestamp=1791634023217, context=None, timing=None).ok">tests\test_queue_abandon.py:59: in test_abandon_preserves_original_result_and_is_not_acceptance_success
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:52: in run
+    result = await apply(service, state)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:43: in apply
+    assert preview.ok, preview
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-475ea2de-6874-4693-a2a7-d7d3778ea95a', timestamp=1791634023217, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-475ea2de-6874-4693-a2a7-d7d3778ea95a', timestamp=1791634023217, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_abandon" name="test_abandon_lost_response_finishes_by_observation_without_second_dispatch" time="0.043"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-17c95cb0-43f2-4c16-a7c1-8d2f524b8b39', timestamp=1791634023291, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-17c95cb0-43f2-4c16-a7c1-8d2f524b8b39', timestamp=1791634023291, context=None, timing=None).ok">tests\test_queue_abandon.py:75: in test_abandon_lost_response_finishes_by_observation_without_second_dispatch
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:67: in run
+    result = await apply(service, state)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:43: in apply
+    assert preview.ok, preview
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-17c95cb0-43f2-4c16-a7c1-8d2f524b8b39', timestamp=1791634023291, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-17c95cb0-43f2-4c16-a7c1-8d2f524b8b39', timestamp=1791634023291, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_abandon" name="test_abandon_receipt_requires_identity_backup_and_final_commit[backup]" time="0.049"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-0f3f0332-51a0-4f3c-8963-777cc6ed3837', timestamp=1791634023373, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-0f3f0332-51a0-4f3c-8963-777cc6ed3837', timestamp=1791634023373, context=None, timing=None).ok">tests\test_queue_abandon.py:93: in test_abandon_receipt_requires_identity_backup_and_final_commit
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:84: in run
+    await apply(service, state)
+tests\test_queue_abandon.py:43: in apply
+    assert preview.ok, preview
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-0f3f0332-51a0-4f3c-8963-777cc6ed3837', timestamp=1791634023373, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-0f3f0332-51a0-4f3c-8963-777cc6ed3837', timestamp=1791634023373, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_abandon" name="test_abandon_receipt_requires_identity_backup_and_final_commit[identity]" time="0.047"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-1da1c159-c5c5-4610-bd40-b9e659d6fae0', timestamp=1791634023493, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-1da1c159-c5c5-4610-bd40-b9e659d6fae0', timestamp=1791634023493, context=None, timing=None).ok">tests\test_queue_abandon.py:93: in test_abandon_receipt_requires_identity_backup_and_final_commit
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:84: in run
+    await apply(service, state)
+tests\test_queue_abandon.py:43: in apply
+    assert preview.ok, preview
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-1da1c159-c5c5-4610-bd40-b9e659d6fae0', timestamp=1791634023493, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-1da1c159-c5c5-4610-bd40-b9e659d6fae0', timestamp=1791634023493, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_abandon" name="test_abandon_receipt_requires_identity_backup_and_final_commit[pending]" time="0.047"><failure message="AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-69a7be90-ae42-4520-ba99-586707b46b51', timestamp=1791634023578, context=None, timing=None)&#10;assert False&#10; +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-69a7be90-ae42-4520-ba99-586707b46b51', timestamp=1791634023578, context=None, timing=None).ok">tests\test_queue_abandon.py:93: in test_abandon_receipt_requires_identity_backup_and_final_commit
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:84: in run
+    await apply(service, state)
+tests\test_queue_abandon.py:43: in apply
+    assert preview.ok, preview
+E   AssertionError: ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-69a7be90-ae42-4520-ba99-586707b46b51', timestamp=1791634023578, context=None, timing=None)
+E   assert False
+E    +  where False = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-69a7be90-ae42-4520-ba99-586707b46b51', timestamp=1791634023578, context=None, timing=None).ok</failure></testcase><testcase classname="tests.test_queue_abandon" name="test_abandon_probe_reports_original_bridge_refusal_without_dispatch" time="0.044"><failure message="AssertionError: assert 'TEST_ABANDON_RUNNER_NOT_INACTIVE' in 'No safe adapter for this target/action; records were not removed.'&#10; +  where 'No safe adapter for this target/action; records were not removed.' = ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this target/action; records were not removed.', detail={'dispatchAttempted': False}).message&#10; +    where ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this target/action; records were not removed.', detail={'dispatchAttempted': False}) = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-7abfc37d-7cac-4eaa-90e7-3ba65a7c7200', timestamp=1791634023661, context=None, timing=None).error">tests\test_queue_abandon.py:111: in test_abandon_probe_reports_original_bridge_refusal_without_dispatch
+    asyncio.run(run())
+C:\Python311\Lib\asyncio\runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Python311\Lib\asyncio\base_events.py:650: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests\test_queue_abandon.py:108: in run
+    assert 'TEST_ABANDON_RUNNER_NOT_INACTIVE' in preview.error.message
+E   AssertionError: assert 'TEST_ABANDON_RUNNER_NOT_INACTIVE' in 'No safe adapter for this target/action; records were not removed.'
+E    +  where 'No safe adapter for this target/action; records were not removed.' = ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this target/action; records were not removed.', detail={'dispatchAttempted': False}).message
+E    +    where ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this target/action; records were not removed.', detail={'dispatchAttempted': False}) = ToolResponse(ok=False, data=None, error=ToolError(code='QUEUE_CLEANUP_UNSUPPORTED', message='No safe adapter for this ...False}), request_id='cleanup-7abfc37d-7cac-4eaa-90e7-3ba65a7c7200', timestamp=1791634023661, context=None, timing=None).error</failure></testcase></testsuite></testsuites>

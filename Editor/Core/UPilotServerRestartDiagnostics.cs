@@ -62,6 +62,8 @@ namespace CodingRiver.UPilot
         public string phase = "intent_persisted";
         public int oldProcessId;
         public int newProcessId;
+        public int launcherProcessId;
+        public long launcherProcessCreatedAtTicks;
         public string oldBridgeSessionId;
         public string newBridgeSessionId;
         public long requestedAtUtcMs;
@@ -479,6 +481,27 @@ namespace CodingRiver.UPilot
                 record.newProcessCreatedAtTicks = createdAtTicks;
                 MarkGateCore(record, "new_process", "passed", "process_started", $"PID {processId}");
             });
+        }
+
+        internal static bool RecordWorkerProcess(string operationId, int launcherId, int workerId, long workerCreatedAt)
+        {
+            var resolved = false;
+            Update(operationId, record => resolved = ApplyWorkerProcess(record, launcherId, workerId, workerCreatedAt));
+            return resolved;
+        }
+
+        internal static bool ApplyWorkerProcess(UPilotServerRestartRecord record, int launcherId, int workerId, long workerCreatedAt)
+        {
+            if (record == null || record.status != "running" || launcherId <= 0 || workerId <= 0 ||
+                workerId == launcherId || record.newProcessId != launcherId || record.launcherProcessId != 0 ||
+                record.newProcessCreatedAtTicks <= 0 || workerCreatedAt < record.newProcessCreatedAtTicks) return false;
+            record.launcherProcessId = launcherId;
+            record.launcherProcessCreatedAtTicks = record.newProcessCreatedAtTicks;
+            record.newProcessId = workerId;
+            record.newProcessCreatedAtTicks = workerCreatedAt;
+            MarkGateCore(record, "new_process", "passed", "worker_identity_verified",
+                $"启动 PID {launcherId}；实际 Server PID {workerId}（已核实直接子进程）");
+            return true;
         }
 
         internal static void RecordHealthVerified(
@@ -1265,6 +1288,8 @@ namespace CodingRiver.UPilot
                 Path.Combine(r.packageRoot, "upilotserver~", "src", "upilot_mcp"),
                 r.actualModule, checkedDeployment ? "通过" : "未知/未通过");
             Row("main", r.bridgeIsMain.ToString(), r.bridgeIsMain.ToString(), "重启请求时本地记录");
+            if (r.launcherProcessId > 0)
+                Row("启动器 PID", r.launcherProcessId.ToString(), r.launcherProcessId.ToString(), "已核实直接父进程");
             Row("PID", r.newProcessId > 0 ? r.newProcessId.ToString() : "未知",
                 r.healthProcessId > 0 ? r.healthProcessId.ToString() : "未知",
                 checkedIdentity ? "通过" : "未知/未通过");

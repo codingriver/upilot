@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import pytest
+from pathlib import Path
+from types import SimpleNamespace
+
+from upilot_mcp.domain.resource_service import ResourceDomainService
+from upilot_mcp.config import CONFIG
+from upilot_mcp.domain.task_service import TaskDomainService
+from upilot_mcp.domain.test_service import TestDomainService
+from upilot_mcp.responses import ok
+from upilot_mcp.tool_registry import REGISTRY
+from upilot_mcp.mcp_tools import resource_tools as _resource_tools  # noqa: F401
+from upilot_mcp.mcp_tools import test_tools as _test_tools  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _acceptance_write_grant(monkeypatch):
+    monkeypatch.setattr(CONFIG, "write_access_approved", True)
+
+
+class _Dispatcher:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call(self, request_id: str, name: str, payload: dict, **_kwargs):
+        self.calls.append((name, payload))
+        return ok(request_id, {"assetPath": payload.get("assetPath", ""), "messages": []})
+
+
+def test_shader_diagnostics_forward_and_register_as_read_only() -> None:
+    service = ResourceDomainService.__new__(ResourceDomainService)
+    service.dispatcher = _Dispatcher()
+    inspected = asyncio.run(service.shader_inspect("Assets/Test.shader"))
+    checked = asyncio.run(service.shader_check_errors("Assets/Test.shader", include_warnings=False))
+
+    assert inspected.ok and checked.ok
+    assert service.dispatcher.calls == [
+        ("shader.inspect", {"assetPath": "Assets/Test.shader"}),
+        ("shader.checkErrors", {"assetPath": "Assets/Test.shader", "includeWarnings": False}),
+    ]
+    for name in ("unity_shader_inspect", "unity_shader_check_errors"):
+        descriptor = REGISTRY.resolve(name)
+        assert descriptor is not None
+        assert descriptor.destructive is False
+        assert descriptor.idempotent is True
+
+
+def _operation_state(tmp_path: Path) -> dict:
+    return {
+        "operationId": "op-compact", "displayName": "compact", "status": "Running", "phase": "Work",
+        "error": "", "detail": "", "progress": 0.5, "failureSignature": "", "startedAt": 1,
+        "updatedAt": 2, "endedAt": 0, "timeoutSec": 30, "pollIntervalSec": 1,
+        "lastStatusData": {"metrics": {"fps": 60}, "domain": {"huge": "x" * 10000}, "raw": "y" * 10000},
+        "artifacts": {"report": {"path": str(tmp_path / "report.txt"), "tail": "z" * 5000}},
+        "artifactErrors": [], "consoleCapture": {
+            "sessionId": "cap", "ownerToken": "secret-owner-token", "stopped": False,
+            "start": {"data": {"ownerToken": "nested-secret"}}, "read": {"logs": "q" * 10000},
+        },
+        "timing": {}, "jobSpec": {},
+    }
+
+
+def test_operation_summary_is_compact_and_full_is_available(tmp_path: Path) -> None:
+    service = TaskDomainService.__new__(TaskDomainService)
+    state = _operation_state(tmp_path)
+    summary = service._public_operation_state(state, "summary", 256, False)
+    full = service._public_operation_state(state, "full", 20000, False)
+
+    assert summary["responseDetailLevel"] == "summary"
+    assert "lastStatusData" not in summary and "domain" not in summary
+    assert summary["consoleCapture"] == {"sessionId": "cap", "stopped": False}
+    assert summary["artifacts"]["report"]["tail"].endswith("chars]")
+    assert full["lastStatusData"]["domain"]["huge"] == "x" * 10000
+    assert full["responseBytes"] > summary["responseBytes"] * 2
+    assert "secret-owner-token" not in json.dumps(full, ensure_ascii=False)
+    assert "nested-secret" not in json.dumps(full, ensure_ascii=False)
+
+
+class _AcceptanceService(TestDomainService):
+    def __init__(self, expected_project: Path, *, active_capture: bool = False) -> None:
+        self.expected_project = expected_project
+        self.status_calls = 0
+        self.active_capture = active_capture
+
+    async def mcp_status(self, **_kwargs):
+        return ok("status", {"connected": True, "serverReady": True, "paths": {"unityProjectAbsolute": str(self.expected_project)}})
+
+    async def ensure_ready(self, **_kwargs): return ok("ready", {"ready": True})
+    async def console_capture_list(self, **_kwargs):
+        return ok("captures", {"sessions": [{"sessionId": "old", "active": True}] if self.active_capture else []})
+    async def console_capture_stop(self, **_kwargs):
+        pytest.fail("Package acceptance must not stop another task's capture")
+    async def safe_compile_and_wait(self, **_kwargs): return ok("compile", {"status": "success", "errorsVerified": True, "errorTotal": 0})
+    async def test_list(self, **_kwargs): return ok("list", {"tests": ["UPilot.Test"]})
+    async def test_run(self, **_kwargs): return ok("run", {"status": "started", "runGuid": "run-1"})
+    async def test_results(self, run_guid=""):
+        self.status_calls += 1
+        assert run_guid == "run-1"
+        return ok("test-status", {
+            "status": "completed", "runGuid": run_guid, "resultAuthoritative": True,
+            "cleanupPending": False, "cleanupSucceeded": True, "cleanupStatus": "completed",
+            "cleanupErrors": [], "unresolvedResources": [],
+            "total": 1, "passed": 1, "failed": 0, "noTests": False,
+        })
+    async def compile_errors(self, *_args, **_kwargs): return ok("errors", {"total": 0, "errors": []})
+    async def console_search_logs(self, **_kwargs): return ok("console", {"logs": []})
+
+
+def test_acceptance_checks_correlated_clean_result_without_cross_capture_cleanup() -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected)
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+
+    assert result.ok and result.data["acceptancePassed"] is True
+    assert "failureCode" not in result.data
+    assert "failureMessage" not in result.data
+    assert result.data["stoppedConsoleCaptures"] == []
+    assert result.data["discoveredTestCount"] == 1
+    descriptor = REGISTRY.resolve("unity_upilot_acceptance_run")
+    assert descriptor is not None and descriptor.idempotent is False
+
+
+def test_acceptance_blocks_unknown_active_capture_without_stopping_it() -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected, active_capture=True)
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok and result.error.code == "UPILOT_ACCEPTANCE_CAPTURE_OWNERSHIP_REQUIRED"
+    assert result.error.detail["activeConsoleCaptures"] == [{"sessionId": "old", "ownerId": ""}]
+
+
+def test_acceptance_supports_explicit_repository_unity_2022_project() -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest2022").resolve()
+    service = _AcceptanceService(expected)
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert result.ok and result.data["acceptancePassed"]
+    assert result.data["expectedProject"] == str(expected)
+    assert result.data["acceptanceProject"] == "UPilotTest2022"
+    assert result.data["sourceUnchanged"]
+
+
+@pytest.mark.parametrize("project", ("UPilotTest2022-other", "../Other/UPilotTest2022", "Customers/UPilotTest"))
+def test_acceptance_does_not_allow_name_only_or_sibling_project_matches(project) -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / project).resolve()
+    service = _AcceptanceService(expected)
+    async def forbidden(**_):
+        pytest.fail("Rejected project must not trigger Editor mutations or tests")
+    service.ensure_ready = forbidden
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_PROJECT_MISMATCH"
+
+
+@pytest.mark.parametrize("change", [
+    {"cleanupSucceeded": False, "cleanupStatus": "failed", "cleanupErrors": ["callback-unregister"]},
+    {"cleanupSucceeded": None},
+    {"cleanupPending": None},
+    {"cleanupErrors": None},
+    {"unresolvedResources": ["callback"]},
+    {"resultAuthoritative": False},
+    {"runGuid": "another-run"},
+    {"total": 0},
+    {"failed": None},
+])
+def test_acceptance_rejects_failed_or_missing_evidence(change) -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected)
+    original = service.test_results
+
+    async def altered(run_guid=""):
+        response = await original(run_guid)
+        response.data.update(change)
+        return response
+
+    service.test_results = altered
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.detail["acceptancePassed"] is False
+    assert result.error.detail["runGuid"] == "run-1"
+    observation = result.error.detail["steps"]["testStatus"]
+    observed = observation["data"] or (observation["error"] or {}).get("detail", {})
+    assert observed.items() >= change.items()
+
+
+@pytest.mark.parametrize("compile_data", [
+    {"status": "failed", "errorsVerified": True, "errorTotal": 1},
+    {"status": "completed", "errorTotal": 0},
+    {"status": "compiling", "errorsVerified": True, "errorTotal": 0},
+])
+def test_acceptance_does_not_treat_compile_transport_success_as_acceptance(compile_data) -> None:
+    expected = (Path(__file__).resolve().parents[2] / "Tests~" / "UPilotTest").resolve()
+    service = _AcceptanceService(expected)
+
+    async def compile_result(**_kwargs):
+        return ok("compile", compile_data)
+
+    service.safe_compile_and_wait = compile_result
+    result = asyncio.run(service._execute_upilot_acceptance_run(timeout_sec=10, write_artifact=False))
+    assert not result.ok
+    assert result.error.code == "UPILOT_ACCEPTANCE_COMPILE_FAILED"
+    assert service.status_calls == 0
+
+
+@pytest.mark.parametrize("case", ["success", "failed", "missing", "many_errors", "oversize", "task_summary"])
+def test_documented_powershell_projection_is_bounded_and_preserves_unknown(tmp_path, case):
+    import base64
+    import shutil
+    import subprocess
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("PowerShell is required to execute the documented example")
+    workflow = (Path(__file__).resolve().parents[2] /
+                "skills/upilot-unity-mcp/references/workflows.md").read_text(encoding="utf-8")
+    code = workflow.split("<!-- bounded-acceptance-projection -->", 1)[1].split("```powershell\n", 1)[1].split("```", 1)[0]
+    report = {"runGuid": "original-run", "acceptancePassed": True, "cleanupVerified": True,
+              "steps": {"testStatus": {"data": {"total": 2, "passed": 2, "failed": 0}},
+                        "compile": {"data": {"compileRequestId": "request-1", "errorsVerified": True}}}}
+    kind = "AcceptanceReport"
+    if case == "failed":
+        report.update(acceptancePassed=False, failureCode="FAILED", failureMessage="x" * 2000)
+    elif case == "missing":
+        report = {}
+    elif case == "many_errors":
+        report["steps"]["compileErrors"] = {"data": {"errors": [{"code": "ERR", "message": "错" * 1000}] * 1000}}
+    elif case == "oversize":
+        report["steps"]["compileErrors"] = {"data": {"errors": [{"code": "\x01" * 512, "message": "\x01" * 512}] * 8}}
+    elif case == "task_summary":
+        kind = "TaskSummary"
+        report = {"taskId": "task-1", "runGuid": "original-run", "status": "completed", "phase": "done",
+                  "tests": {"total": 2}, "result": {"result": {"acceptancePassed": False,
+                  "compile": {"writeBatchId": "original-batch"}, "cleanupVerified": False}},
+                  "error": {"code": "ERR", "message": "x" * 1000, "raw": {"secret": "not printed"}}}
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+    command = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\n" + code
+    command += "\n$x=Get-Content -LiteralPath '" + str(path).replace("'", "''") + "' -Raw -Encoding UTF8 | ConvertFrom-Json\n"
+    command += f"ConvertTo-UPilotEvidenceSummary -InputObject $x -Kind {kind}"
+    encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+    completed = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                               capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    raw = completed.stdout.decode("utf-8-sig").strip()
+    assert len(raw.encode("utf-8")) <= 16384
+    value = json.loads(raw)
+    assert "not printed" not in raw
+    if not value.get("projectionOmitted"):
+        assert len(value["projectionOmissions"]) <= 8
+        assert value["projectionOmissionCount"] >= len(value["projectionOmissions"])
+    if case == "missing":
+        assert value["tests"]["total"] is None and value["acceptancePassed"] is None
+        assert value["cleanupVerified"] is None and value["compile"]["errorsVerified"] is None
+    elif case == "oversize":
+        assert value["projectionOmitted"] is True and value["acceptancePassed"] is None
+    elif case == "many_errors":
+        assert value["errorTotal"] == 1000 and len(value["errors"]) == 8
+        assert len(value["errors"][0]["message"]) == 512
+        assert "errors[8:]" in value["projectionOmissions"]
+    elif case == "task_summary":
+        assert value["compile"]["writeBatchId"] == "original-batch"
+        assert value["tests"]["total"] == 2 and value["tests"]["passed"] is None
+        assert value["acceptancePassed"] is False and value["cleanupVerified"] is False
+    else:
+        assert value["acceptancePassed"] is (case == "success")
+        assert value["tests"]["total"] == 2
+        assert value["compile"]["compileRequestId"] == "request-1"
+        if case == "failed":
+            assert len(value["failureMessage"]) == 512 and "failureMessage" in value["projectionOmissions"]

@@ -82,7 +82,7 @@ async def unity_asset_refresh():
     r = await _get_facade().asset_refresh()
     return _log_tool_result("unity_asset_refresh", _payload(r))
 
-@mcp.tool(description="Read persisted evidence for one write batch in the current project; never triggers compilation.")
+@mcp.tool(description="Read one persisted write batch; never triggers compilation. compileOwnerWriteBatchId and compileMemberWriteBatchIds identify its fixed shared round. terminalSnapshot retains Unity's original owner identity; correlationVerified requires persisted membership and verified compile evidence, not historical file-version acceptance.")
 async def unity_write_batch_status(writeBatchId: str):
     _log_tool_call("unity_write_batch_status", {"writeBatchId": writeBatchId})
     r = await _get_facade().write_batch_status(write_batch_id=writeBatchId)
@@ -93,7 +93,7 @@ async def unity_write_batch_status(writeBatchId: str):
         "Register one saved C#/asmdef/asmref/rsp change batch. paths must exist; optional deletedPaths must be absent. "
         "A code batch may also include project-local prefab/meta or other asset deletions in deletedPaths; they are persisted as assetChanges without adding a compile. Asset-only batches remain invalid. "
         "Represent a move as its new path plus its deleted old path. Registration does not delete or move files. "
-        "When compileWhenEditMode=true, EditMode batches compile after a 500ms settle window; PlayMode batches remain durable and resume only after Unity publishes authoritative EditMode."
+        "When compileWhenEditMode=true, freeze automatic members before Refresh after a fixed 500ms settle window and actively request one incremental compilation per round; later registrations enter the next round. Busy/PlayMode batches wait for authoritative EditMode. Each batch keeps its original 600s deadline; hashes are diagnostic, not historical-version acceptance. compileWhenEditMode=false remains manual."
     )
 )
 async def unity_write_batch_register(

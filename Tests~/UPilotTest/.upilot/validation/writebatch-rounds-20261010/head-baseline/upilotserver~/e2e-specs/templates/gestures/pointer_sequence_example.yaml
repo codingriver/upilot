@@ -1,0 +1,36 @@
+# M27 手势模板：uitoolkit.pointerSequence
+# Runner 会将本步展开为多条 uitoolkit.event（继承同级的 targetWindow、elementName 等）。
+# 请按实际窗口标题与元素 name 修改 defaults 与 events。
+specVersion: "1"
+name: pointer_sequence_gesture_template
+timeoutS: 120
+defaults:
+  targetWindow: "YourEditorWindowTitle"
+
+setup: []
+
+steps:
+  - action: uitoolkit.pointerSequence
+    elementName: "draggable-or-scroll-area"
+    events:
+      - eventType: mousedown
+        mouseButton: 0
+        mouseX: 100
+        mouseY: 200
+      - eventType: mousemove
+        mouseX: 100
+        mouseY: 280
+      - eventType: mouseup
+        mouseButton: 0
+        mouseX: 100
+        mouseY: 280
+  - action: wait
+    ms: 200
+
+  - action: uitoolkit.event
+    elementName: "scroll-area"
+    eventType: wheel
+    wheelDeltaX: 0
+    wheelDeltaY: 40
+
+teardown: []

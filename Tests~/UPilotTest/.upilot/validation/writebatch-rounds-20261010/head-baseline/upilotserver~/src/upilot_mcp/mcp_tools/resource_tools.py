@@ -1,0 +1,986 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from pathlib import Path
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
+from ..models import ToolResponse
+from ..protocol import new_id
+from ..responses import fail, ok
+from ..tool_registry import REGISTRY, register_public_tool
+from .. import mcp_stdio_server as runtime
+from ..wire_ids import WireIdInput
+
+mcp = runtime.mcp
+_get_facade = runtime._get_facade
+_payload = runtime._payload
+_log_tool_call = runtime._log_tool_call
+_log_tool_result = runtime._log_tool_result
+_reject_compile_in_playmode = runtime._reject_compile_in_playmode
+CONFIG = runtime.CONFIG
+logger = logging.getLogger("upilot.mcp")
+
+@mcp.tool(description="在 Unity 资源数据库中搜索资源，支持按名称和类型过滤。")
+async def unity_asset_find(query: str, assetType: str = ""):
+    _log_tool_call("unity_asset_find", {"query": query, "assetType": assetType})
+    r = await _get_facade().asset_find(query=query, asset_type=assetType)
+    return _log_tool_result("unity_asset_find", _payload(r))
+
+@mcp.tool(description="在 Unity Assets 目录下创建新文件夹。")
+async def unity_asset_create_folder(parentFolder: str, newFolderName: str):
+    _log_tool_call(
+        "unity_asset_create_folder",
+        {"parentFolder": parentFolder, "newFolderName": newFolderName},
+    )
+    r = await _get_facade().asset_create_folder(
+        parent_folder=parentFolder, new_folder_name=newFolderName
+    )
+    return _log_tool_result("unity_asset_create_folder", _payload(r))
+
+@mcp.tool(
+    description="复制 Unity 资源到指定路径。会在项目磁盘创建新资源和 .meta；确认 destinationPath 不覆盖重要资源。"
+)
+async def unity_asset_copy(sourcePath: str, destinationPath: str):
+    _log_tool_call(
+        "unity_asset_copy",
+        {"sourcePath": sourcePath, "destinationPath": destinationPath},
+    )
+    r = await _get_facade().asset_copy(
+        source_path=sourcePath, destination_path=destinationPath
+    )
+    return _log_tool_result("unity_asset_copy", _payload(r))
+
+@mcp.tool(
+    description="移动 Unity 资源到指定路径。会改动项目磁盘资源和 .meta/GUID 引用关系；sourcePath/destinationPath 应在 Assets 或 Packages 可写范围内，调用前确认路径。"
+)
+async def unity_asset_move(sourcePath: str, destinationPath: str):
+    _log_tool_call(
+        "unity_asset_move",
+        {"sourcePath": sourcePath, "destinationPath": destinationPath},
+    )
+    r = await _get_facade().asset_move(
+        source_path=sourcePath, destination_path=destinationPath
+    )
+    return _log_tool_result("unity_asset_move", _payload(r))
+
+@mcp.tool(
+    description="删除指定路径的 Unity 资源。破坏性磁盘操作：调用前先用 unity_asset_get_info/find 确认路径，不要删除未确认的目录或共享资源。"
+)
+async def unity_asset_delete(assetPath: str):
+    _log_tool_call("unity_asset_delete", {"assetPath": assetPath})
+    r = await _get_facade().asset_delete(asset_path=assetPath)
+    return _log_tool_result("unity_asset_delete", _payload(r))
+
+@mcp.tool(description="触发 Unity 资源数据库刷新（AssetDatabase.Refresh）。")
+async def unity_asset_refresh():
+    _log_tool_call("unity_asset_refresh", {})
+    r = await _get_facade().asset_refresh()
+    return _log_tool_result("unity_asset_refresh", _payload(r))
+
+@mcp.tool(description="Read persisted evidence for one write batch in the current project; never triggers compilation.")
+async def unity_write_batch_status(writeBatchId: str):
+    _log_tool_call("unity_write_batch_status", {"writeBatchId": writeBatchId})
+    r = await _get_facade().write_batch_status(write_batch_id=writeBatchId)
+    return _log_tool_result("unity_write_batch_status", _payload(r))
+
+@mcp.tool(
+    description=(
+        "Register one saved C#/asmdef/asmref/rsp change batch. paths must exist; optional deletedPaths must be absent. "
+        "A code batch may also include project-local prefab/meta or other asset deletions in deletedPaths; they are persisted as assetChanges without adding a compile. Asset-only batches remain invalid. "
+        "Represent a move as its new path plus its deleted old path. Registration does not delete or move files. "
+        "When compileWhenEditMode=true, EditMode batches compile after a 500ms settle window; PlayMode batches remain durable and resume only after Unity publishes authoritative EditMode."
+    )
+)
+async def unity_write_batch_register(
+    paths: list[str],
+    compileWhenEditMode: bool = True,
+    deletedPaths: list[str] | None = None,
+):
+    _log_tool_call(
+        "unity_write_batch_register",
+        {"paths": paths, "compileWhenEditMode": compileWhenEditMode, "deletedPaths": deletedPaths},
+    )
+    r = await _get_facade().write_batch_register(
+        paths=paths,
+        compile_when_edit_mode=compileWhenEditMode,
+        deleted_paths=deletedPaths,
+    )
+    return _log_tool_result("unity_write_batch_register", _payload(r))
+
+@mcp.tool(
+    description=(
+        "在 Cursor/IDE 中改完或新建完本轮所有脚本并全部保存后，再调用一次（不要每文件一调）："
+        "先等待 delayS 秒（默认 2，缓解落盘延迟），再 AssetDatabase.Refresh；"
+        "triggerCompile=true 时再触发 unity_compile（含 Refresh+脚本编译）。"
+        "随后可 unity_compile_wait 确认编译结束。避免 Unity 无焦点时迟迟不导入。"
+    ),
+)
+async def unity_sync_after_disk_write(
+    delayS: float = 2.0,
+    triggerCompile: bool = False,
+    writeBatchId: str = "",
+    writeBatchCreatedAt: int = 0,
+    compileOperationId: str = "",
+):
+    _log_tool_call(
+        "unity_sync_after_disk_write",
+        {
+            "delayS": delayS,
+            "triggerCompile": triggerCompile,
+            "writeBatchId": writeBatchId,
+            "writeBatchCreatedAt": writeBatchCreatedAt,
+            "compileOperationId": compileOperationId,
+        },
+    )
+    if triggerCompile:
+        rejected = await _reject_compile_in_playmode("unity_sync_after_disk_write")
+        if rejected is not None:
+            return rejected
+    r = await _get_facade().sync_after_disk_write(
+        delay_s=delayS,
+        trigger_compile=triggerCompile,
+        write_batch_id=writeBatchId,
+        write_batch_created_at=writeBatchCreatedAt,
+        compile_operation_id=compileOperationId,
+    )
+    return _log_tool_result("unity_sync_after_disk_write", _payload(r))
+
+@mcp.tool(description="获取 Unity 资源的元数据信息（GUID、类型、大小等）。")
+async def unity_asset_get_info(assetPath: str):
+    _log_tool_call("unity_asset_get_info", {"assetPath": assetPath})
+    r = await _get_facade().asset_get_info(asset_path=assetPath)
+    return _log_tool_result("unity_asset_get_info", _payload(r))
+
+@mcp.tool(description="列出 FBX 等资源文件中的内嵌子资源；可按类型过滤并排除预览 AnimationClip。")
+async def unity_asset_subresources_list(assetPath: str, typeFilter: str = "", includePreview: bool = False):
+    _log_tool_call("unity_asset_subresources_list", {"assetPath": assetPath, "typeFilter": typeFilter, "includePreview": includePreview})
+    r = await _get_facade().asset_subresources_list(asset_path=assetPath, type_filter=typeFilter, include_preview=includePreview)
+    return _log_tool_result("unity_asset_subresources_list", _payload(r))
+
+@mcp.tool(description="只读列出资源文件依赖，或在显式 object 模式下执行有界对象引用正反查。默认 file/forward 保留原行为；反查必须提供 referenceQuery 和 Assets/ scope。readOnly/changedEditorState 仅透传 Unity 实测；旧 Bridge 未提供时为 null/unknown，不推断零状态变化。")
+async def unity_asset_dependencies(
+    assetPath: str = "",
+    recursive: bool = True,
+    evidenceMode: Literal["file", "object"] = "file",
+    runtimeBoundary: Literal["none", "ExcludeAssetsEditor"] = "none",
+    direction: Literal["forward", "reverse"] = "forward",
+    referenceQuery: dict | None = None,
+    scope: list[str] | None = None,
+    maxNodes: Annotated[int, Field(strict=True, ge=1, le=5000)] = 500,
+    timeBudgetMs: Annotated[int, Field(strict=True, ge=1, le=30000)] = 5000,
+    continuationToken: str = "",
+):
+    _log_tool_call("unity_asset_dependencies", {"assetPath": assetPath, "recursive": recursive, "evidenceMode": evidenceMode,
+                                                   "runtimeBoundary": runtimeBoundary, "direction": direction, "referenceQuery": referenceQuery,
+                                                   "scope": scope, "maxNodes": maxNodes, "timeBudgetMs": timeBudgetMs,
+                                                   "continuationToken": continuationToken})
+    r = await _get_facade().asset_dependencies(
+        asset_path=assetPath,
+        recursive=recursive,
+        evidence_mode=evidenceMode,
+        runtime_boundary=runtimeBoundary,
+        direction=direction,
+        reference_query=referenceQuery,
+        scope=scope,
+        max_nodes=maxNodes,
+        time_budget_ms=timeBudgetMs,
+        continuation_token=continuationToken,
+    )
+    return _log_tool_result("unity_asset_dependencies", _payload(r))
+
+@mcp.tool(description="只读审计 AnimatorController 的层、权重、混合模式、AvatarMask、State、Motion、默认状态和未引用 Clip。")
+async def unity_animator_controller_inspect(assetPath: str):
+    _log_tool_call("unity_animator_controller_inspect", {"assetPath": assetPath})
+    r = await _get_facade().animator_controller_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_animator_controller_inspect", _payload(r))
+
+@mcp.tool(description="只读展开 AvatarMask 的全部 Transform 路径及 active 状态。")
+async def unity_avatar_mask_inspect(assetPath: str):
+    _log_tool_call("unity_avatar_mask_inspect", {"assetPath": assetPath})
+    r = await _get_facade().avatar_mask_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_avatar_mask_inspect", _payload(r))
+
+@mcp.tool(description="只读审计模型导入器的 Rig、Avatar、动画 Clip、循环设置和位移/旋转/缩放曲线摘要。")
+async def unity_model_importer_inspect(assetPath: str):
+    _log_tool_call("unity_model_importer_inspect", {"assetPath": assetPath})
+    r = await _get_facade().model_importer_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_model_importer_inspect", _payload(r))
+
+@mcp.tool(description="只读返回 TextureImporter 的 Mipmap、Alpha、sRGB、Wrap、Filter、压缩、尺寸、可读性和平台覆盖。")
+async def unity_texture_importer_get(assetPath: str):
+    _log_tool_call("unity_texture_importer_get", {"assetPath": assetPath})
+    r = await _get_facade().texture_importer_get(asset_path=assetPath)
+    return _log_tool_result("unity_texture_importer_get", _payload(r))
+
+@mcp.tool(description="Patch one ordinary prefab component: preview, explicit approval, confirmToken apply, reload and verify. Exact paths, enum names only; no nested/variant/model or array structure edits.")
+async def unity_prefab_patch(
+    assetPath: str, componentType: str, properties: list[dict],
+    hierarchyPath: str = ".", dryRun: bool = True, confirmToken: str = "",
+):
+    r = await _get_facade().prefab_patch(
+        asset_path=assetPath, component_type=componentType, properties=properties,
+        hierarchy_path=hierarchyPath, dry_run=dryRun, confirm_token=confirmToken,
+    )
+    return _log_tool_result("unity_prefab_patch", _payload(r))
+
+
+@mcp.tool(description="Read a bounded summary of loaded scenes, nodes, components, missing scripts, cameras and lights. Partial coverage is explicit; no complete hierarchy download.")
+async def unity_scene_summary(
+    maxNodes: Annotated[int, Field(strict=True, ge=1, le=10000)] = 2000,
+    maxMilliseconds: Annotated[int, Field(strict=True, ge=1, le=1000)] = 100,
+    maxExamples: Annotated[int, Field(strict=True, ge=0, le=50)] = 12,
+):
+    r = await _get_facade().scene_summary(max_nodes=maxNodes, max_milliseconds=maxMilliseconds, max_examples=maxExamples)
+    return _log_tool_result("unity_scene_summary", _payload(r))
+
+
+@mcp.tool(description="两阶段修改 TextureImporter。先 dryRun=true 获取 confirmToken，再用相同 changes、当前资源/meta 哈希和 token 应用并重导入。")
+async def unity_texture_importer_patch(assetPath: str, changes: dict, dryRun: bool = True, confirmToken: str = "", reimport: bool = True):
+    args = {"assetPath": assetPath, "changes": changes, "dryRun": dryRun, "confirmToken": bool(confirmToken), "reimport": reimport}
+    _log_tool_call("unity_texture_importer_patch", args)
+    r = await _get_facade().texture_importer_patch(asset_path=assetPath, changes=changes, dry_run=dryRun, confirm_token=confirmToken, reimport=reimport)
+    return _log_tool_result("unity_texture_importer_patch", _payload(r))
+
+@mcp.tool(description="强制重导入一个现有 Assets/... 资源。会改变导入产物，需项目写权限。")
+async def unity_asset_reimport(assetPath: str):
+    _log_tool_call("unity_asset_reimport", {"assetPath": assetPath})
+    r = await _get_facade().asset_reimport(asset_path=assetPath)
+    return _log_tool_result("unity_asset_reimport", _payload(r))
+
+@mcp.tool(description="搜索 Unity 内置资源（如默认材质、Shader、字体等）。")
+async def unity_asset_find_built_in(query: str = "", assetType: str = ""):
+    _log_tool_call(
+        "unity_asset_find_built_in", {"query": query, "assetType": assetType}
+    )
+    r = await _get_facade().asset_find_built_in(query=query, asset_type=assetType)
+    return _log_tool_result("unity_asset_find_built_in", _payload(r))
+
+@mcp.tool(description="获取 Unity 资源的序列化属性树；maxDepth 控制 Generic/数组展开，maxNodes 与 continuationToken 提供有界分页。")
+async def unity_asset_get_data(
+    assetPath: str = "",
+    gameObjectId: WireIdInput = 0,
+    componentType: str = "",
+    componentIndex: int = 0,
+    maxDepth: int = 10,
+    maxNodes: int = 500,
+    continuationToken: str = "",
+):
+    _log_tool_call(
+        "unity_asset_get_data",
+        {
+            "assetPath": assetPath,
+            "gameObjectId": gameObjectId,
+            "componentType": componentType,
+            "componentIndex": componentIndex,
+            "maxDepth": maxDepth,
+            "maxNodes": maxNodes,
+            "continuationToken": continuationToken,
+        },
+    )
+    r = await _get_facade().asset_get_data(
+        asset_path=assetPath,
+        game_object_id=gameObjectId,
+        component_type=componentType,
+        component_index=componentIndex,
+        max_depth=maxDepth,
+        max_nodes=maxNodes,
+        continuation_token=continuationToken,
+    )
+    return _log_tool_result("unity_asset_get_data", _payload(r))
+
+@mcp.tool(
+    description="修改 Unity 资源或组件的 SerializedObject 属性。低层写入工具，适合没有专用工具的属性调整；调用前先用 unity_asset_get_data 确认 propertyPath、类型和值，避免写错序列化路径。"
+)
+async def unity_asset_modify_data(
+    properties: list[dict],
+    assetPath: str = "",
+    gameObjectId: WireIdInput = 0,
+    componentType: str = "",
+    componentIndex: int = 0,
+):
+    _log_tool_call(
+        "unity_asset_modify_data",
+        {
+            "properties": properties,
+            "assetPath": assetPath,
+            "gameObjectId": gameObjectId,
+            "componentType": componentType,
+            "componentIndex": componentIndex,
+        },
+    )
+    r = await _get_facade().asset_modify_data(
+        properties=properties,
+        asset_path=assetPath,
+        game_object_id=gameObjectId,
+        component_type=componentType,
+        component_index=componentIndex,
+    )
+    return _log_tool_result("unity_asset_modify_data", _payload(r))
+
+@mcp.tool(
+    description=(
+        "只读递归查询 Prefab 子层级组件。不会进入 Prefab 编辑模式、不会保存资源、"
+        "不要求写权限；按 componentType 返回 GameObject 路径、组件类型和可选序列化字段。"
+        "readOnly/changedEditorState 仅透传 Unity 实测；缺失观测明确为 unknown。"
+    )
+)
+async def unity_prefab_query_components(
+    prefabPath: str,
+    componentType: str,
+    includeSerializedFields: bool = True,
+    maxDepth: int = 6,
+    maxResults: int = 50,
+    followObjectReferences: bool = False,
+    includeNestedPrefabContents: bool = False,
+    referenceDepth: Annotated[int, Field(strict=True, ge=1, le=4)] = 1,
+):
+    _log_tool_call(
+        "unity_prefab_query_components",
+        {
+            "prefabPath": prefabPath,
+            "componentType": componentType,
+            "includeSerializedFields": includeSerializedFields,
+            "maxDepth": maxDepth,
+            "maxResults": maxResults,
+            "followObjectReferences": followObjectReferences,
+            "includeNestedPrefabContents": includeNestedPrefabContents,
+            "referenceDepth": referenceDepth,
+        },
+    )
+    r = await _get_facade().prefab_query_components(
+        prefab_path=prefabPath,
+        component_type=componentType,
+        include_serialized_fields=includeSerializedFields,
+        max_depth=maxDepth,
+        max_results=maxResults,
+        follow_object_references=followObjectReferences,
+        include_nested_prefab_contents=includeNestedPrefabContents,
+        reference_depth=referenceDepth,
+    )
+    return _log_tool_result("unity_prefab_query_components", _payload(r))
+
+
+@mcp.tool(
+    description=(
+        "只读批量审计 Prefab 的 3D/2D Collider、Trigger、Rigidbody、Layer、Active、Enabled "
+        "及 Collider-Rigidbody 绑定关系；隔离加载资源，不进入 Prefab 编辑模式。"
+    )
+)
+async def unity_prefab_physics_audit(
+    prefabPaths: list[str],
+    maxResultsPerPrefab: int = 1000,
+    sortBy: str = "colliderCount",
+    descending: bool = True,
+):
+    _log_tool_call(
+        "unity_prefab_physics_audit",
+        {
+            "prefabPaths": prefabPaths,
+            "maxResultsPerPrefab": maxResultsPerPrefab,
+            "sortBy": sortBy,
+            "descending": descending,
+        },
+    )
+    r = await _get_facade().prefab_physics_audit(
+        prefab_paths=prefabPaths,
+        max_results_per_prefab=maxResultsPerPrefab,
+        sort_by=sortBy,
+        descending=descending,
+    )
+    return _log_tool_result("unity_prefab_physics_audit", _payload(r))
+
+@mcp.tool(description="将场景中的 GameObject 创建为 Prefab 资源。")
+async def unity_prefab_create(sourceGameObjectId: WireIdInput, prefabPath: str):
+    _log_tool_call(
+        "unity_prefab_create",
+        {"sourceGameObjectId": sourceGameObjectId, "prefabPath": prefabPath},
+    )
+    r = await _get_facade().prefab_create(
+        source_game_object_id=sourceGameObjectId, prefab_path=prefabPath
+    )
+    return _log_tool_result("unity_prefab_create", _payload(r))
+
+@mcp.tool(description="在场景中实例化指定路径的 Prefab。")
+async def unity_prefab_instantiate(prefabPath: str, parentId: WireIdInput = 0):
+    _log_tool_call(
+        "unity_prefab_instantiate", {"prefabPath": prefabPath, "parentId": parentId}
+    )
+    r = await _get_facade().prefab_instantiate(
+        prefab_path=prefabPath, parent_id=parentId
+    )
+    return _log_tool_result("unity_prefab_instantiate", _payload(r))
+
+@mcp.tool(
+    description="进入 Prefab 编辑模式。会切换编辑上下文到指定 Prefab；修改后需 unity_prefab_save 保存或 unity_prefab_close 退出。"
+)
+async def unity_prefab_open(prefabPath: str):
+    _log_tool_call("unity_prefab_open", {"prefabPath": prefabPath})
+    r = await _get_facade().prefab_open(prefab_path=prefabPath)
+    return _log_tool_result("unity_prefab_open", _payload(r))
+
+@mcp.tool(
+    description="退出 Prefab 编辑模式。离开当前 Prefab 编辑上下文；若有修改，先确认是否已保存。"
+)
+async def unity_prefab_close():
+    _log_tool_call("unity_prefab_close", {})
+    r = await _get_facade().prefab_close()
+    return _log_tool_result("unity_prefab_close", _payload(r))
+
+@mcp.tool(
+    description="保存当前 Prefab 编辑模式下的修改。会将 Prefab 编辑内容写入磁盘；调用前确认当前 Prefab 是目标资源。"
+)
+async def unity_prefab_save():
+    _log_tool_call("unity_prefab_save", {})
+    r = await _get_facade().prefab_save()
+    return _log_tool_result("unity_prefab_save", _payload(r))
+
+@mcp.tool(description="创建新的 Unity 材质资源并指定 Shader。")
+async def unity_material_create(materialPath: str, shaderName: str = "Standard"):
+    _log_tool_call(
+        "unity_material_create",
+        {"materialPath": materialPath, "shaderName": shaderName},
+    )
+    r = await _get_facade().material_create(
+        material_path=materialPath, shader_name=shaderName
+    )
+    return _log_tool_result("unity_material_create", _payload(r))
+
+@mcp.tool(description="修改 Unity 材质的属性（颜色、纹理、数值等）。")
+async def unity_material_modify(materialPath: str, properties: dict):
+    _log_tool_call(
+        "unity_material_modify",
+        {"materialPath": materialPath, "properties": properties},
+    )
+    r = await _get_facade().material_modify(
+        material_path=materialPath, properties=properties
+    )
+    return _log_tool_result("unity_material_modify", _payload(r))
+
+@mcp.tool(description="将材质分配给场景中 GameObject 的渲染器。")
+async def unity_material_assign(
+    targetGameObjectId: WireIdInput, materialPath: str, materialIndex: int = 0
+):
+    _log_tool_call(
+        "unity_material_assign",
+        {
+            "targetGameObjectId": targetGameObjectId,
+            "materialPath": materialPath,
+            "materialIndex": materialIndex,
+        },
+    )
+    r = await _get_facade().material_assign(
+        target_game_object_id=targetGameObjectId,
+        material_path=materialPath,
+        material_index=materialIndex,
+    )
+    return _log_tool_result("unity_material_assign", _payload(r))
+
+@mcp.tool(description="获取 Unity 材质的详细属性信息。")
+async def unity_material_get(materialPath: str):
+    _log_tool_call("unity_material_get", {"materialPath": materialPath})
+    r = await _get_facade().material_get(material_path=materialPath)
+    return _log_tool_result("unity_material_get", _payload(r))
+
+@mcp.tool(description="列出 Unity 中所有可用的 Shader。")
+async def unity_shader_list():
+    _log_tool_call("unity_shader_list", {})
+    r = await _get_facade().shader_list()
+    return _log_tool_result("unity_shader_list", _payload(r))
+
+@mcp.tool(description="检查指定 Shader 资产的导入状态、平台支持、属性、依赖和编译消息。")
+async def unity_shader_inspect(assetPath: str):
+    _log_tool_call("unity_shader_inspect", {"assetPath": assetPath})
+    r = await _get_facade().shader_inspect(asset_path=assetPath)
+    return _log_tool_result("unity_shader_inspect", _payload(r))
+
+@mcp.tool(description="读取指定 Shader 资产的结构化编译错误和警告，不修改或重新导入资产。")
+async def unity_shader_check_errors(assetPath: str, includeWarnings: bool = True):
+    _log_tool_call("unity_shader_check_errors", {"assetPath": assetPath, "includeWarnings": includeWarnings})
+    r = await _get_facade().shader_check_errors(asset_path=assetPath, include_warnings=includeWarnings)
+    return _log_tool_result("unity_shader_check_errors", _payload(r))
+
+@mcp.tool(
+    description="执行 Unity 编辑器中指定路径的菜单项。菜单项可能触发任意编辑器行为、编译、窗口打开或项目修改；调用前确认 menuPath，必要时先 unity_menu_list。"
+)
+async def unity_menu_execute(menuPath: str, expectedModal: dict | None = None):
+    _log_tool_call("unity_menu_execute", {"menuPath": menuPath, "expectedModal": expectedModal})
+    r = await _get_facade().menu_execute(menu_path=menuPath, expected_modal=expectedModal)
+    return _log_tool_result("unity_menu_execute", _payload(r))
+
+@mcp.tool(description="列出 Unity 编辑器中所有可用的菜单项。")
+async def unity_menu_list():
+    _log_tool_call("unity_menu_list", {})
+    r = await _get_facade().menu_list()
+    return _log_tool_result("unity_menu_list", _payload(r))
+
+@mcp.tool(
+    description="通过 Unity Package Manager 添加包（名称、版本或 Git URL）。会修改 Packages/manifest.json 并触发 Unity 包解析/编译；添加前确认包名、版本和项目兼容性。"
+)
+async def unity_package_add(packageName: str, version: str = ""):
+    _log_tool_call(
+        "unity_package_add", {"packageName": packageName, "version": version}
+    )
+    r = await _get_facade().package_add(package_name=packageName, version=version)
+    return _log_tool_result("unity_package_add", _payload(r))
+
+@mcp.tool(
+    description="通过 Unity Package Manager 移除已安装的包。破坏性项目配置操作：会修改 Packages/manifest.json 并可能导致编译错误；先用 unity_package_list 确认依赖。"
+)
+async def unity_package_remove(packageName: str):
+    _log_tool_call("unity_package_remove", {"packageName": packageName})
+    r = await _get_facade().package_remove(package_name=packageName)
+    return _log_tool_result("unity_package_remove", _payload(r))
+
+@mcp.tool(description="列出 Unity 项目中所有已安装的包。")
+async def unity_package_list():
+    _log_tool_call("unity_package_list", {})
+    r = await _get_facade().package_list()
+    return _log_tool_result("unity_package_list", _payload(r))
+
+@mcp.tool(description="在 Unity Package Manager 注册表中搜索包。")
+async def unity_package_search(query: str):
+    _log_tool_call("unity_package_search", {"query": query})
+    r = await _get_facade().package_search(query=query)
+    return _log_tool_result("unity_package_search", _payload(r))
+
+@mcp.tool(description="读取 Unity 项目中指定路径的 C# 脚本内容。")
+async def unity_script_read(scriptPath: str):
+    _log_tool_call("unity_script_read", {"scriptPath": scriptPath})
+    r = await _get_facade().script_read(script_path=scriptPath)
+    return _log_tool_result("unity_script_read", _payload(r))
+
+@mcp.tool(
+    description="在 Unity 项目中创建新的 C# 脚本文件。写磁盘操作：scriptPath 应位于 Assets 下并以 .cs 结尾；整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
+)
+async def unity_script_create(scriptPath: str, content: str = ""):
+    _log_tool_call(
+        "unity_script_create", {"scriptPath": scriptPath, "content": content}
+    )
+    r = await _get_facade().script_create(script_path=scriptPath, content=content)
+    return _log_tool_result("unity_script_create", _payload(r))
+
+@mcp.tool(
+    description="更新 Unity 项目中已有 C# 脚本文件。会覆盖文件内容；调用前读取或确认目标文件。整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
+)
+async def unity_script_update(scriptPath: str, content: str):
+    _log_tool_call(
+        "unity_script_update", {"scriptPath": scriptPath, "content": content}
+    )
+    r = await _get_facade().script_update(script_path=scriptPath, content=content)
+    return _log_tool_result("unity_script_update", _payload(r))
+
+@mcp.tool(
+    description="删除 Unity 项目中指定路径的 C# 脚本文件。破坏性磁盘操作：调用前确认路径和影响。整批完成后登记一次 unity_write_batch_register(paths, compileWhenEditMode=true, deletedPaths=已删除路径)；paths 只放仍存在的代码文件，仅删除代码时 paths=[]。用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
+)
+async def unity_script_delete(scriptPath: str):
+    _log_tool_call("unity_script_delete", {"scriptPath": scriptPath})
+    r = await _get_facade().script_delete(script_path=scriptPath)
+    return _log_tool_result("unity_script_delete", _payload(r))
+
+@mcp.resource(
+    "unity://scenes/hierarchy", description="Unity 当前场景的 GameObject 层级树。"
+)
+async def resource_scene_hierarchy():
+    r = await _get_facade().resource_scene_hierarchy()
+    return _log_tool_result("resource_scene_hierarchy", _payload(r))
+
+@mcp.resource("unity://console/logs", description="Unity 控制台最近日志。")
+async def resource_console_logs():
+    r = await _get_facade().resource_console_logs()
+    return _log_tool_result("resource_console_logs", _payload(r))
+
+@mcp.resource("unity://editor/state", description="Unity 编辑器当前状态快照。")
+async def resource_editor_state():
+    r = await _get_facade().resource_editor_state()
+    return _log_tool_result("resource_editor_state", _payload(r))
+
+@mcp.resource("unity://packages/list", description="Unity 项目已安装的包列表。")
+async def resource_packages():
+    r = await _get_facade().resource_packages()
+    return _log_tool_result("resource_packages", _payload(r))
+
+@mcp.resource("unity://build/status", description="Unity 当前构建状态。")
+async def resource_build_status():
+    r = await _get_facade().resource_build_status()
+    return _log_tool_result("resource_build_status", _payload(r))
+
+@mcp.resource(
+    "unity://diagnostics/upilot-logs-tab",
+    description="upilot 诊断日志标签页布局快照（横向滚动风险、滚动位置等，需打开窗口并切到该标签）。",
+)
+async def resource_upilot_logs_tab():
+    r = await _get_facade().resource_upilot_logs_tab()
+    return _log_tool_result("resource_upilot_logs_tab", _payload(r))
+
+@mcp.resource(
+    "unity://diagnostics/window",
+    description="upilot 全窗口级布局诊断快照（健康分、各区域宽度溢出检测、编译状态、代码版本、Domain Reload 纪元）。",
+)
+async def resource_window_diagnostics():
+    r = await _get_facade().resource_window_diagnostics()
+    return _log_tool_result("resource_window_diagnostics", _payload(r))
+
+@mcp.resource(
+    "unity://console/summary",
+    description="Unity 控制台日志按类型统计（logCount/warningCount/errorCount/assertCount）。",
+)
+async def resource_console_summary():
+    r = await _get_facade().resource_console_summary()
+    return _log_tool_result("resource_console_summary", _payload(r))
+
+# Scene graph, component, batch, and selection tools.
+@mcp.tool(description="在 Unity 场景中创建新的 GameObject。")
+async def unity_gameobject_create(
+    name: str = "New GameObject",
+    parentId: WireIdInput = 0,
+    primitiveType: str = "",
+):
+    _log_tool_call(
+        "unity_gameobject_create",
+        {"name": name, "parentId": parentId, "primitiveType": primitiveType},
+    )
+    r = await _get_facade().gameobject_create(
+        name=name, parent_id=parentId, primitive_type=primitiveType
+    )
+    return _log_tool_result("unity_gameobject_create", _payload(r))
+
+@mcp.tool(
+    description="在已加载 Unity 场景中查找 GameObject，支持按名称、标签、组件或 InstanceID 查找；includeHidden 默认关闭，开启时返回 HideFlags、场景身份和截断信息。"
+)
+async def unity_gameobject_find(
+    name: str = "", tag: str = "", instanceId: WireIdInput = 0,
+    componentType: str = "", includeInactive: bool = True,
+    includeHidden: bool = False, limit: int = 100
+):
+    _log_tool_call(
+        "unity_gameobject_find", {"name": name, "tag": tag, "instanceId": instanceId, "componentType": componentType, "includeInactive": includeInactive, "includeHidden": includeHidden, "limit": limit}
+    )
+    r = await _get_facade().gameobject_find(name=name, tag=tag, instance_id=instanceId, component_type=componentType, include_inactive=includeInactive, include_hidden=includeHidden, limit=limit)
+    return _log_tool_result("unity_gameobject_find", _payload(r))
+
+@mcp.tool(
+    description="修改 Unity 场景中 GameObject 的属性（名称、标签、层级、激活状态等）。"
+)
+async def unity_gameobject_modify(
+    instanceId: WireIdInput,
+    name: str | None = None,
+    tag: str | None = None,
+    layer: int | None = None,
+    activeSelf: bool | None = None,
+    isStatic: bool | None = None,
+    parentId: WireIdInput | None = None,
+):
+    _log_tool_call(
+        "unity_gameobject_modify",
+        {
+            "instanceId": instanceId,
+            "name": name,
+            "tag": tag,
+            "layer": layer,
+            "activeSelf": activeSelf,
+            "isStatic": isStatic,
+            "parentId": parentId,
+        },
+    )
+    r = await _get_facade().gameobject_modify(
+        instance_id=instanceId,
+        name=name,
+        tag=tag,
+        layer=layer,
+        active_self=activeSelf,
+        is_static=isStatic,
+        parent_id=parentId,
+    )
+    return _log_tool_result("unity_gameobject_modify", _payload(r))
+
+@mcp.tool(
+    description="销毁 Unity 场景中的 GameObject。破坏性操作：调用前先用 find/list/get 确认 instanceId 属于目标对象；成功回执包含目标身份、删除前后存在性、场景 dirty/saveRequired 与副作用状态。不会删除磁盘资源，但会修改当前场景，之后需要 scene_save 才会持久化。"
+)
+async def unity_gameobject_delete(instanceId: WireIdInput):
+    _log_tool_call("unity_gameobject_delete", {"instanceId": instanceId})
+    r = await _get_facade().gameobject_delete(instance_id=instanceId)
+    return _log_tool_result("unity_gameobject_delete", _payload(r))
+
+@mcp.tool(description="修改 Unity 场景中 GameObject 的变换（位置、旋转、缩放）。")
+async def unity_gameobject_move(
+    instanceId: WireIdInput,
+    position: dict | None = None,
+    rotation: dict | None = None,
+    scale: dict | None = None,
+):
+    _log_tool_call(
+        "unity_gameobject_move",
+        {
+            "instanceId": instanceId,
+            "position": position,
+            "rotation": rotation,
+            "scale": scale,
+        },
+    )
+    r = await _get_facade().gameobject_move(
+        instance_id=instanceId,
+        position=position,
+        rotation=rotation,
+        scale=scale,
+    )
+    return _log_tool_result("unity_gameobject_move", _payload(r))
+
+@mcp.tool(description="复制 Unity 场景中的 GameObject（包含所有子对象和组件）。")
+async def unity_gameobject_duplicate(instanceId: WireIdInput):
+    _log_tool_call("unity_gameobject_duplicate", {"instanceId": instanceId})
+    r = await _get_facade().gameobject_duplicate(instance_id=instanceId)
+    return _log_tool_result("unity_gameobject_duplicate", _payload(r))
+
+@mcp.tool(
+    description="在 Unity 中新建空场景。会改变当前编辑器场景上下文；若当前场景有未保存更改，先确认保存策略。"
+)
+async def unity_scene_create(sceneName: str = ""):
+    _log_tool_call("unity_scene_create", {"sceneName": sceneName})
+    r = await _get_facade().scene_create(scene_name=sceneName)
+    return _log_tool_result("unity_scene_create", _payload(r))
+
+@mcp.tool(
+    description="在 Unity 中打开指定路径的场景。mode=single 会替换当前场景，mode=additive 叠加打开；先确认未保存更改和目标路径。"
+)
+async def unity_scene_open(scenePath: str, mode: str = "single"):
+    _log_tool_call("unity_scene_open", {"scenePath": scenePath, "mode": mode})
+    r = await _get_facade().scene_open(scene_path=scenePath, mode=mode)
+    return _log_tool_result("unity_scene_open", _payload(r))
+
+@mcp.tool(
+    description="保存当前 Unity 场景或指定路径的场景。会将当前场景修改写入磁盘；调用前确认目标场景和用户意图。scenePath 为空时保存当前激活场景。"
+)
+async def unity_scene_save(scenePath: str = ""):
+    _log_tool_call("unity_scene_save", {"scenePath": scenePath})
+    r = await _get_facade().scene_save(scene_path=scenePath)
+    return _log_tool_result("unity_scene_save", _payload(r))
+
+@mcp.tool(
+    description="加载 Unity 场景。mode=additive 叠加加载；mode=single 会替换当前打开场景，可能丢失未保存更改，调用前应确认或先保存。"
+)
+async def unity_scene_load(scenePath: str, mode: str = "additive"):
+    _log_tool_call("unity_scene_load", {"scenePath": scenePath, "mode": mode})
+    r = await _get_facade().scene_load(scene_path=scenePath, mode=mode)
+    return _log_tool_result("unity_scene_load", _payload(r))
+
+@mcp.tool(description="设置指定场景为 Unity 当前激活场景。")
+async def unity_scene_set_active(scenePath: str):
+    _log_tool_call("unity_scene_set_active", {"scenePath": scenePath})
+    r = await _get_facade().scene_set_active(scene_path=scenePath)
+    return _log_tool_result("unity_scene_set_active", _payload(r))
+
+@mcp.tool(description="获取 Unity 当前所有已打开场景列表。")
+async def unity_scene_list():
+    _log_tool_call("unity_scene_list", {})
+    r = await _get_facade().scene_list()
+    return _log_tool_result("unity_scene_list", _payload(r))
+
+@mcp.tool(
+    description="卸载 Unity 场景。可能移除层级视图中的场景；不会删除 .unity 资源。若场景有未保存修改，调用前应确认保存策略。"
+)
+async def unity_scene_unload(scenePath: str, removeScene: bool = False):
+    _log_tool_call(
+        "unity_scene_unload", {"scenePath": scenePath, "removeScene": removeScene}
+    )
+    r = await _get_facade().scene_unload(scene_path=scenePath, remove_scene=removeScene)
+    return _log_tool_result("unity_scene_unload", _payload(r))
+
+@mcp.tool(
+    description=(
+        "确保并打开用于自动化/验收的空场景：若磁盘上已有资源则单场景打开；否则新建 EmptyScene 并保存。"
+        "默认 Assets/upilot-test.unity。返回 ensureAction: opened|created 与 scene 信息。"
+    ),
+)
+async def unity_scene_ensure_test(
+    sceneName: str = "upilot-test",
+    scenePath: str = "",
+):
+    _log_tool_call(
+        "unity_scene_ensure_test", {"sceneName": sceneName, "scenePath": scenePath}
+    )
+    r = await _get_facade().scene_ensure_test(
+        scene_name=sceneName, scene_path=scenePath
+    )
+    return _log_tool_result("unity_scene_ensure_test", _payload(r))
+
+@mcp.tool(
+    description="在指定 GameObject 上添加组件。会修改场景或 Prefab 实例；先确认 gameObjectId 和 componentType，添加后需要保存场景/Prefab 才持久化。"
+)
+async def unity_component_add(gameObjectId: WireIdInput, componentType: str):
+    _log_tool_call(
+        "unity_component_add",
+        {"gameObjectId": gameObjectId, "componentType": componentType},
+    )
+    r = await _get_facade().component_add(
+        game_object_id=gameObjectId, component_type=componentType
+    )
+    return _log_tool_result("unity_component_add", _payload(r))
+
+@mcp.tool(
+    description="从指定 GameObject 上移除组件。破坏性场景修改：先用 unity_component_list/get 确认 componentType 与 componentIndex，尤其同类型多组件时。之后需要 scene/prefab 保存才会持久化。"
+)
+async def unity_component_remove(
+    gameObjectId: WireIdInput, componentType: str, componentIndex: int = 0
+):
+    _log_tool_call(
+        "unity_component_remove",
+        {
+            "gameObjectId": gameObjectId,
+            "componentType": componentType,
+            "componentIndex": componentIndex,
+        },
+    )
+    r = await _get_facade().component_remove(
+        game_object_id=gameObjectId,
+        component_type=componentType,
+        component_index=componentIndex,
+    )
+    return _log_tool_result("unity_component_remove", _payload(r))
+
+@mcp.tool(description="获取指定 GameObject 上组件的序列化属性。")
+async def unity_component_get(
+    gameObjectId: WireIdInput, componentType: str, componentIndex: int = 0
+):
+    _log_tool_call(
+        "unity_component_get",
+        {
+            "gameObjectId": gameObjectId,
+            "componentType": componentType,
+            "componentIndex": componentIndex,
+        },
+    )
+    r = await _get_facade().component_get(
+        game_object_id=gameObjectId,
+        component_type=componentType,
+        component_index=componentIndex,
+    )
+    return _log_tool_result("unity_component_get", _payload(r))
+
+@mcp.tool(
+    description="修改指定 GameObject 上组件的序列化属性。会改变场景或 Prefab 实例状态；先用 unity_component_get 查看属性路径和值，谨慎处理同类型多组件 componentIndex。"
+)
+async def unity_component_modify(
+    gameObjectId: WireIdInput,
+    componentType: str,
+    properties: dict,
+    componentIndex: int = 0,
+):
+    _log_tool_call(
+        "unity_component_modify",
+        {
+            "gameObjectId": gameObjectId,
+            "componentType": componentType,
+            "properties": properties,
+            "componentIndex": componentIndex,
+        },
+    )
+    r = await _get_facade().component_modify(
+        game_object_id=gameObjectId,
+        component_type=componentType,
+        properties=properties,
+        component_index=componentIndex,
+    )
+    return _log_tool_result("unity_component_modify", _payload(r))
+
+@mcp.tool(description="列出指定 GameObject 上的所有组件。")
+async def unity_component_list(gameObjectId: WireIdInput):
+    _log_tool_call("unity_component_list", {"gameObjectId": gameObjectId})
+    r = await _get_facade().component_list(game_object_id=gameObjectId)
+    return _log_tool_result("unity_component_list", _payload(r))
+
+@mcp.tool(
+    description="批量执行多个 Unity 操作指令（sequential 或 parallel）。用于重复/组合操作；批量中包含删除、写磁盘、包变更、场景保存等破坏性步骤时，必须先确认目标。stopOnError=true 时首个失败会停止后续步骤。"
+)
+async def unity_batch_execute(
+    operations: list,
+    mode: str = "sequential",
+    stopOnError: bool = True,
+):
+    _log_tool_call(
+        "unity_batch_execute",
+        {"operations": operations, "mode": mode, "stopOnError": stopOnError},
+    )
+    r = await _get_facade().batch_execute(
+        operations=operations, mode=mode, stop_on_error=stopOnError
+    )
+    return _log_tool_result("unity_batch_execute", _payload(r))
+
+@mcp.tool(description="取消正在执行的批量操作。")
+async def unity_batch_cancel(batchId: str):
+    _log_tool_call("unity_batch_cancel", {"batchId": batchId})
+    r = await _get_facade().batch_cancel(batch_id=batchId)
+    return _log_tool_result("unity_batch_cancel", _payload(r))
+
+@mcp.tool(description="查询批量操作的执行结果。")
+async def unity_batch_results(batchId: str):
+    _log_tool_call("unity_batch_results", {"batchId": batchId})
+    r = await _get_facade().batch_results(batch_id=batchId)
+    return _log_tool_result("unity_batch_results", _payload(r))
+
+@mcp.tool(description="获取 Unity 编辑器当前选中的 GameObject 和资源列表。")
+async def unity_selection_get():
+    _log_tool_call("unity_selection_get", {})
+    r = await _get_facade().selection_get()
+    return _log_tool_result("unity_selection_get", _payload(r))
+
+@mcp.tool(
+    description="设置 Unity 编辑器的选中项（支持 InstanceID 列表或资源路径列表）。"
+)
+async def unity_selection_set(
+    gameObjectIds: list[WireIdInput] | None = None,
+    assetPaths: list[str] | None = None,
+):
+    _log_tool_call(
+        "unity_selection_set",
+        {"gameObjectIds": gameObjectIds, "assetPaths": assetPaths},
+    )
+    r = await _get_facade().selection_set(
+        game_object_ids=gameObjectIds, asset_paths=assetPaths
+    )
+    return _log_tool_result("unity_selection_set", _payload(r))
+
+@mcp.tool(description="清空 Unity 编辑器的当前选中项；返回业务效果核验、changed/no-op、前后选择数量及活动对象身份。")
+async def unity_selection_clear():
+    _log_tool_call("unity_selection_clear", {})
+    r = await _get_facade().selection_clear()
+    return _log_tool_result("unity_selection_clear", _payload(r))
+
+
+_DESTRUCTIVE_TOOLS = {
+    "unity_asset_delete", "unity_asset_move", "unity_asset_modify_data",
+    "unity_asset_create_folder", "unity_asset_copy",
+    "unity_prefab_create", "unity_prefab_instantiate", "unity_prefab_save",
+    "unity_material_create", "unity_material_modify", "unity_material_assign",
+    "unity_menu_execute",
+    "unity_script_create", "unity_script_update", "unity_script_delete",
+    "unity_package_add", "unity_package_remove", "unity_scene_create",
+    "unity_scene_save", "unity_scene_unload", "unity_scene_ensure_test",
+    "unity_gameobject_create", "unity_gameobject_modify",
+    "unity_gameobject_delete", "unity_gameobject_move",
+    "unity_gameobject_duplicate", "unity_component_add",
+    "unity_component_remove", "unity_component_modify",
+    "unity_batch_execute",
+    "unity_texture_importer_patch", "unity_asset_reimport",
+    "unity_write_batch_register",
+    "unity_prefab_patch",
+}
+_HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
+_PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
+for _name, _value in list(globals().items()):
+    if not callable(_value) or not _name.startswith("unity_"):
+        continue
+    if _name in _HIDDEN_PUBLIC_TOOLS:
+        continue
+    register_public_tool(
+        _name,
+        public_handler=_value,
+        destructive=_name in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in _DESTRUCTIVE_TOOLS,
+        play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
+        feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
+    )

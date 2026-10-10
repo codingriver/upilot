@@ -1,0 +1,8 @@
+# M26 — minimal smoke: requires Unity connected; no UIToolkit.
+specVersion: "1"
+name: smoke_editor_state
+timeoutS: 90
+steps:
+  - action: ensure_ready
+    timeoutS: 90
+  - action: editor.state

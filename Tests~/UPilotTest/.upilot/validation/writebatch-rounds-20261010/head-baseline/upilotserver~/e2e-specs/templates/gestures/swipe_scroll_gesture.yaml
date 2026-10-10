@@ -1,0 +1,28 @@
+# 模板：垂直「滑动手势」— pointerSequence 模拟在可滚动区域内的拖动。
+specVersion: "1"
+name: swipe_scroll_gesture_template
+timeoutS: 120
+defaults:
+  targetWindow: "YourWindow"
+
+setup: []
+
+steps:
+  - action: uitoolkit.pointerSequence
+    elementName: "scrollable-surface"
+    events:
+      - eventType: mousedown
+        mouseButton: 0
+        mouseX: 100
+        mouseY: 300
+      - eventType: mousemove
+        mouseX: 100
+        mouseY: 180
+      - eventType: mouseup
+        mouseButton: 0
+        mouseX: 100
+        mouseY: 180
+  - action: wait
+    ms: 150
+
+teardown: []

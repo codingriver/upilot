@@ -559,6 +559,7 @@ def test_auto_resumed_compile_accepts_only_a_persisted_correlated_terminal(tmp_p
         return None
 
     async def completed_compile(**_kwargs):
+        assert state.record_write_batch_round_dispatch(_kwargs["_write_batch_round_id"], "req-completed")
         terminal = _snapshot(
             1,
             operation_id="compile-persisted",
@@ -566,6 +567,7 @@ def test_auto_resumed_compile_accepts_only_a_persisted_correlated_terminal(tmp_p
             write_batch_created_at=1000,
             observed_at=2000,
         )
+        terminal["compileRequestId"] = "req-completed"
         assert state.update_editor_execution_state(terminal)
         return ok("req-completed", {"status": "completed", "phase": "completed", "terminal": True, "correlationVerified": True})
 
@@ -603,7 +605,11 @@ def test_auto_resumed_compile_timeout_terminates_without_replay(tmp_path: Path, 
 
     async def timed_out_compile(**kwargs):
         calls.append(kwargs)
-        state.compile.compile_operation_id = "compile-timeout"
+        assert state.record_write_batch_round_dispatch(kwargs["_write_batch_round_id"], "req-timeout")
+        queued = _snapshot(1, phase="queued", operation_id="compile-timeout", write_batch_id=batch["writeBatchId"],
+                           write_batch_created_at=1000, terminal=False, errors_verified=False)
+        queued["compileRequestId"] = "req-timeout"
+        assert state.update_editor_execution_state(queued)
         return fail("req-timeout", "COMMAND_TIMEOUT", "compile.request timed out")
 
     monkeypatch.setattr(asyncio, "sleep", no_sleep)
@@ -927,11 +933,14 @@ def test_automatic_compile_child_is_authorized_but_other_task_is_rejected(tmp_pa
             await release.wait()
             # Correlated completion lets the real guard return evidence without
             # this unit test dispatching Unity commands.
-            assert state.update_editor_execution_state(_snapshot(
-                2, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
-                observed_at=1200, terminal=False, errors_verified=False, transition="compile_queued"))
-            assert state.update_editor_execution_state(_snapshot(
-                3, write_batch_id=identity, write_batch_created_at=1000, observed_at=1300))
+            assert state.record_write_batch_round_dispatch(kwargs["_write_batch_round_id"], "req-child")
+            queued = _snapshot(2, phase="queued", write_batch_id=identity, write_batch_created_at=1000,
+                               observed_at=1200, terminal=False, errors_verified=False, transition="compile_queued")
+            queued["compileRequestId"] = "req-child"
+            assert state.update_editor_execution_state(queued)
+            terminal = _snapshot(3, write_batch_id=identity, write_batch_created_at=1000, observed_at=1300)
+            terminal["compileRequestId"] = "req-child"
+            assert state.update_editor_execution_state(terminal)
             result = await CompileDomainService._safe_compile_and_wait(
                 service, write_batch_id=identity, write_batch_created_at=1000, identity={})
             child_results.append(result)

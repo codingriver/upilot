@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "upilot": {
+      "url": "http://127.0.0.1:8011/mcp",
+      "timeout": 300
+    }
+  },
+  "_comments": {
+    "_usage": "复制本文件到 AI 工具要求的项目配置位置。第三方 AI 工具只连接 Streamable HTTP URL。",
+    "url": "UPilot 对外 MCP endpoint。必须使用 /mcp 路径；默认端口是 8011。",
+    "server-start": "MCP Server 应由 UPilot/Unity 管理器或独立服务提前启动，不要让 AI 客户端通过 command/args 启动它。",
+    "internal-websocket": "8765 是 MCP Server 与 Unity Bridge 之间的内部 WebSocket 端口，绝不能配置成 AI 客户端 URL。",
+    "multiple-projects": "多项目并行时，为每个项目分配不同的 HTTP/内部 WebSocket 端口对和不同的 MCP 注册名称，但 AI 客户端只配置各自的 HTTP /mcp URL。"
+  }
+}

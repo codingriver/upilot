@@ -256,6 +256,7 @@ class CompileDomainService:
         *,
         write_batch_id: str = "",
         write_batch_created_at: int = 0,
+        _write_batch_round_id: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
         state_r, execution = await self._refresh_execution_state()
@@ -266,12 +267,13 @@ class CompileDomainService:
         precondition_error = self._compile_precondition_error(request_id, execution)
         if precondition_error is not None:
             return precondition_error
-        if bool(execution.get("isCompiling")):
+        if (bool(execution.get("isCompiling"))
+                or execution.get("compilePhase") in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}):
             return fail(
                 request_id,
                 "EDITOR_BUSY",
                 "Unity compilation is already active.",
-                execution,
+                {**execution, "dispatchAttempted": False},
             )
         compile_state = self.server.state.compile
         uses_v2_state = bool(self.server.state.producer_epoch)
@@ -340,6 +342,14 @@ class CompileDomainService:
             elif response.error is not None:
                 response.error.detail["consoleEvidence"] = public_console_evidence(console_evidence)
             return response
+        if _write_batch_round_id:
+            try:
+                recorded = self.server.state.record_write_batch_round_dispatch(_write_batch_round_id, request_id)
+            except Exception as exc:
+                return fail(request_id, "WRITE_BATCH_PERSISTENCE_FAILED", str(exc), {"dispatchAttempted": False})
+            if not recorded:
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED", "The frozen round cannot acquire another dispatch intent.",
+                            {"dispatchAttempted": False, "nextAction": "Observe the original round; do not recompile."})
         result = await self.dispatcher.call(
             request_id,
             "compile.request",
@@ -350,6 +360,12 @@ class CompileDomainService:
             },
             timeout_ms=180000,
         )
+
+        # These compile.request refusals are emitted by Bridge only before Refresh/
+        # RequestScriptCompilation (including the main-thread admission recheck).
+        # A transport timeout or any other error does not prove non-dispatch.
+        if not result.ok and result.error and result.error.code in {"EDITOR_BUSY", "EDITOR_IN_PLAY_MODE"}:
+            result.error.detail["dispatchAttempted"] = False
 
         # If compile failed due to domain reload disconnect, wait for reconnect then return status
         if (
@@ -952,6 +968,7 @@ class CompileDomainService:
         write_batch_id: str = "",
         write_batch_created_at: int = 0,
         compile_operation_id: str = "",
+        _write_batch_round_id: str = "",
     ) -> ToolResponse:
         request_id = new_id("req")
         # The batch identity is an authorization and correlation boundary, not
@@ -1016,7 +1033,7 @@ class CompileDomainService:
             response = await self._safe_compile_and_wait(
                 timeout_s, poll_interval_s, prefer_events, post_compile_delay_s,
                 attach_compile_request_id, write_batch_id, write_batch_created_at,
-                compile_operation_id, request_id, identity,
+                compile_operation_id, request_id, identity, _write_batch_round_id,
             )
         except Exception as exc:
             response = fail(
@@ -1054,6 +1071,7 @@ class CompileDomainService:
         compile_operation_id: str = "",
         request_id: str = "",
         identity: dict | None = None,
+        _write_batch_round_id: str = "",
     ) -> ToolResponse:
         """Robust compile wait with post-compile cooldown and double-verification.
 
@@ -1072,6 +1090,12 @@ class CompileDomainService:
 
         workflow_started = time.monotonic()
 
+        def batch_compile_record():
+            if _write_batch_round_id:
+                return self.server.state.get_write_batch_round(_write_batch_round_id)
+            get_batch = getattr(self.server.state, "get_write_batch", None)
+            return get_batch(write_batch_id) if callable(get_batch) else None
+
         if write_batch_id:
             compile_task = getattr(self, "_write_batch_compile_task", None)
             if (not attach_compile_request_id
@@ -1081,8 +1105,7 @@ class CompileDomainService:
                             "The original batch is already being dispatched or observed.",
                             {**identity, "dispatchAttempted": False,
                              "nextAction": "Observe unity_write_batch_status for the original batch."})
-            get_write_batch = getattr(self.server.state, "get_write_batch", None)
-            stored_batch = get_write_batch(write_batch_id) if callable(get_write_batch) else None
+            stored_batch = batch_compile_record()
             if stored_batch is None:
                 return fail(
                     request_id,
@@ -1094,6 +1117,12 @@ class CompileDomainService:
                         "nextAction": "Register the saved changes for the connected project before compiling.",
                     },
                 )
+            if _write_batch_round_id and (
+                _write_batch_round_id not in self.server.state._current_compile_rounds
+                or stored_batch["writeBatchId"] != write_batch_id
+            ):
+                return fail(request_id, "COMPILE_OPERATION_MISMATCH", "The round owner or service lifetime differs.",
+                            {**identity, "dispatchAttempted": False})
             stored_created_at = int(stored_batch.get("writeBatchCreatedAt") or 0)
             if write_batch_created_at and stored_created_at != int(write_batch_created_at):
                 return fail(
@@ -1149,13 +1178,17 @@ class CompileDomainService:
                     },
                     context=terminal_snapshot,
                 )
+            if not _write_batch_round_id and stored_batch.get("compileOwnerWriteBatchId"):
+                return fail(request_id, "COMPILE_RECOVERY_REQUIRED", "The original frozen round owns this batch.",
+                            {**identity, "dispatchAttempted": False,
+                             "nextAction": "Observe unity_write_batch_status; do not dispatch or attach another compile."})
             if stored_batch.get("disposition") or stored_batch.get("compileWhenEditMode") is not True:
                 return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
                             "This batch has no authorization for an automatic compile.",
                             {**identity, "dispatchAttempted": False,
                              "nextAction": "Observe or release the original batch through its existing manual workflow."})
             if str(stored_batch.get("status") or "") in {
-                "verified", "failed", "canceled", "recovery_required"
+                "verified", "failed", "canceled", "aborted", "timed_out", "stopped", "recovery_required"
             }:
                 return fail(
                     request_id,
@@ -1221,7 +1254,7 @@ class CompileDomainService:
             if write_batch_id and (compile_state.write_batch_id != write_batch_id
                                    or not compile_state.compile_request_id
                                    or compile_state.write_batch_created_at < write_batch_created_at):
-                return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                return fail(request_id, "EDITOR_BUSY" if compile_state.write_batch_id != write_batch_id else "COMPILE_RECOVERY_REQUIRED",
                             "An active compile is not proven to cover this batch.",
                             {**identity, "dispatchAttempted": False,
                              "nextAction": "Observe the active compile and original batch; do not substitute its result."})
@@ -1237,13 +1270,15 @@ class CompileDomainService:
         else:
             state_r = await self.dispatcher.call(new_id("req"), "resource.editorState", {})
             if not state_r.ok:
+                if state_r.error is not None:
+                    state_r.error.detail["dispatchAttempted"] = False
                 return state_r
             if state_r.ok and state_r.data and bool(state_r.data.get("isCompiling", False)):
                 if write_batch_id and (self.server.state.compile.write_batch_id != write_batch_id
                                        or not self.server.state.compile.compile_request_id
                                        or not self.server.state.compile.compile_operation_id
                                        or self.server.state.compile.write_batch_created_at < write_batch_created_at):
-                    return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                    return fail(request_id, "EDITOR_BUSY" if self.server.state.compile.write_batch_id != write_batch_id else "COMPILE_RECOVERY_REQUIRED",
                                 "A concurrent compile has no verified batch identity.",
                                 {**identity, "dispatchAttempted": False})
                 attached_to_existing = True
@@ -1263,6 +1298,7 @@ class CompileDomainService:
                         self.compile(
                             write_batch_id=write_batch_id,
                             write_batch_created_at=write_batch_created_at,
+                            **({"_write_batch_round_id": _write_batch_round_id} if _write_batch_round_id else {}),
                         )
                         if write_batch_id
                         else self.compile()
@@ -1277,7 +1313,7 @@ class CompileDomainService:
                                                or not current.compile_request_id
                                                or not current.compile_operation_id
                                                or current.write_batch_created_at < write_batch_created_at):
-                            return fail(request_id, "COMPILE_RECOVERY_REQUIRED",
+                            return fail(request_id, "EDITOR_BUSY" if current.write_batch_id != write_batch_id else "COMPILE_RECOVERY_REQUIRED",
                                         "A concurrent compile has no verified batch identity.",
                                         {**identity, "dispatchAttempted": False,
                                          "nextAction": "Observe the original batch and active compile; do not substitute its result."})
@@ -1290,6 +1326,28 @@ class CompileDomainService:
                                 "phase": str(self.server.state.compile.phase or "compiling"),
                             },
                         )
+                if (not compile_r.ok and _write_batch_round_id and compile_r.error
+                        and compile_r.error.detail.get("dispatchAttempted") is not False):
+                    # The request may have reached Unity. Observe only its persisted
+                    # original identity; never issue another request to recover it.
+                    while time.monotonic() - workflow_started < timeout_s:
+                        record = batch_compile_record()
+                        if not record or not record.get("compileRequestId"):
+                            break
+                        if record.get("compileOperationId"):
+                            attached_to_existing = True
+                            compile_r = ok(request_id, {
+                                "status": "attached", "compileRequestId": record["compileRequestId"],
+                                "compileOperationId": record["compileOperationId"],
+                            })
+                            break
+                        if not self.server.state.live_write_batch_round_members(_write_batch_round_id):
+                            break
+                        remaining = timeout_s - (time.monotonic() - workflow_started)
+                        if self.server.is_ready():
+                            await self.dispatcher.call(new_id("req"), "resource.editorState", {},
+                                                       timeout_ms=max(1, min(15000, int(remaining * 1000))))
+                        await asyncio.sleep(min(max(0.05, poll_interval_s), max(0, timeout_s - (time.monotonic() - workflow_started))))
                 if not compile_r.ok:
                     return compile_r
 
@@ -1300,7 +1358,8 @@ class CompileDomainService:
         expected_compile_operation_id = str(
             compile_operation_id
             or (compile_r.data or {}).get("compileOperationId")
-            or self.server.state.compile.compile_operation_id
+            or ((batch_compile_record() or {}).get("compileOperationId") if _write_batch_round_id
+                else self.server.state.compile.compile_operation_id)
             or ""
         )
         identity.update(
@@ -1315,7 +1374,7 @@ class CompileDomainService:
             prefer_events=prefer_events,
         )
         if write_batch_id:
-            persisted_batch = self.server.state.get_write_batch(write_batch_id)
+            persisted_batch = batch_compile_record()
             snapshot = persisted_batch.get("terminalSnapshot") if persisted_batch else None
             if (persisted_batch and persisted_batch.get("correlationVerified")
                     and isinstance(snapshot, dict)
@@ -1415,7 +1474,7 @@ class CompileDomainService:
             )
 
         # Step 5: Double-verify compile errors (reads from disk on Unity side)
-        persisted_batch = self.server.state.get_write_batch(write_batch_id) if write_batch_id else None
+        persisted_batch = batch_compile_record() if write_batch_id else None
         if persisted_batch and persisted_batch.get("correlationVerified"):
             snapshot = persisted_batch["terminalSnapshot"]
             if (persisted_batch.get("compileRequestId") != compile_request_id
@@ -1462,6 +1521,14 @@ class CompileDomainService:
                 },
             )
         terminal_execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+        if _write_batch_round_id:
+            round_record = batch_compile_record()
+            if round_record and round_record.get("correlationVerified"):
+                terminal_execution = round_record["terminalSnapshot"]
+            else:
+                return fail(request_id, "COMPILE_CORRELATION_NOT_VERIFIED",
+                            "The round has no persisted verified terminal evidence.",
+                            {**identity, "correlationVerified": False, "executionState": terminal_execution})
         correlation_verified = bool(
             write_batch_id
             and terminal_execution.get("writeBatchId") == write_batch_id

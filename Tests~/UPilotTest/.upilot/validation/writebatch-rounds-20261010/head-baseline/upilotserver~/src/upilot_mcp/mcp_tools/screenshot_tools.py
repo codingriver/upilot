@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from pathlib import Path
+from typing import Annotated, Any
+
+from pydantic import Field
+from ..models import ToolResponse
+from ..protocol import new_id
+from ..responses import fail, ok
+from ..tool_registry import REGISTRY, register_public_tool
+from .. import mcp_stdio_server as runtime
+
+mcp = runtime.mcp
+_get_facade = runtime._get_facade
+_payload = runtime._payload
+_log_tool_call = runtime._log_tool_call
+_log_tool_result = runtime._log_tool_result
+_reject_compile_in_playmode = runtime._reject_compile_in_playmode
+CONFIG = runtime.CONFIG
+logger = logging.getLogger("upilot.mcp")
+
+@mcp.tool(description="Snapshot 薄包装：仅 PlayMode 截取 Display 0 的真正 GameView 最终合成，返回 data.snapshot、证据产物和兼容 Base64。")
+async def unity_screenshot_game_view(
+    width: int = 1280,
+    height: int = 720,
+    format: str = "png",
+    quality: int = 75,
+):
+    _log_tool_call(
+        "unity_screenshot_game_view",
+        {"width": width, "height": height, "format": format, "quality": quality},
+    )
+    r = await _get_facade().screenshot_game_view(
+        width=width, height=height, format=format, quality=quality
+    )
+    return _log_tool_result("unity_screenshot_game_view", _payload(r))
+
+@mcp.tool(description="Snapshot 薄包装：截取当前唯一/聚焦 SceneView，要求精确窗口像素、重绘、Handles 与 Scene GUI 证据。")
+async def unity_screenshot_scene_view(
+    width: int = 1280,
+    height: int = 720,
+    format: str = "png",
+    quality: int = 75,
+):
+    _log_tool_call(
+        "unity_screenshot_scene_view",
+        {"width": width, "height": height, "format": format, "quality": quality},
+    )
+    r = await _get_facade().screenshot_scene_view(
+        width=width, height=height, format=format, quality=quality
+    )
+    return _log_tool_result("unity_screenshot_scene_view", _payload(r))
+
+@mcp.tool(description="Snapshot 薄包装：按精确 Camera 名称截图，返回 data.snapshot、证据产物和兼容 Base64。多 Camera 请直接使用 unity_snapshot_capture。")
+async def unity_screenshot_camera(
+    cameraName: str,
+    width: int = 1280,
+    height: int = 720,
+    format: str = "png",
+    quality: int = 75,
+):
+    _log_tool_call(
+        "unity_screenshot_camera",
+        {
+            "cameraName": cameraName,
+            "width": width,
+            "height": height,
+            "format": format,
+            "quality": quality,
+        },
+    )
+    r = await _get_facade().screenshot_camera(
+        camera_name=cameraName,
+        width=width,
+        height=height,
+        format=format,
+        quality=quality,
+    )
+    return _log_tool_result("unity_screenshot_camera", _payload(r))
+
+@mcp.tool(
+    description="Snapshot 薄包装：采集严格证据后将 accepted color 产物复制到指定 .png，返回 data.snapshot、路径、大小和 sha256；不再静默回退来源。"
+)
+async def unity_screenshot_save(
+    path: str = "",
+    source: str = "gameView",
+    overwrite: bool = False,
+    width: int = 1280,
+    height: int = 720,
+    format: str = "png",
+    quality: int = 75,
+    cameraName: str = "",
+    windowTitle: str = "Game",
+    allowOutsideProject: bool = False,
+    degrade: str = "none",
+    fallbackSources: list[str] | None = None,
+):
+    _log_tool_call(
+        "unity_screenshot_save",
+        {
+            "path": path,
+            "source": source,
+            "overwrite": overwrite,
+            "width": width,
+            "height": height,
+            "format": format,
+            "quality": quality,
+            "cameraName": cameraName,
+            "windowTitle": windowTitle,
+            "allowOutsideProject": allowOutsideProject,
+            "degrade": degrade,
+            "fallbackSources": fallbackSources,
+        },
+    )
+    r = await _get_facade().screenshot_save(
+        path=path,
+        source=source,
+        overwrite=overwrite,
+        width=width,
+        height=height,
+        format=format,
+        quality=quality,
+        camera_name=cameraName,
+        window_title=windowTitle,
+        allow_outside_project=allowOutsideProject,
+        degrade=degrade,
+        fallback_sources=fallbackSources,
+    )
+    return _log_tool_result("unity_screenshot_save", _payload(r))
+
+@mcp.tool(description="只读分析工程内 PNG 的矩形区域，返回尺寸、SHA256、近黑/透明像素比例及亮度/Alpha 直方图，不返回原始像素。")
+async def unity_screenshot_pixel_stats(path: str, region: dict | None = None, nearBlackThreshold: int = 16, alphaThreshold: int = 8, histogramBins: int = 16):
+    args = {"path": path, "region": region, "nearBlackThreshold": nearBlackThreshold, "alphaThreshold": alphaThreshold, "histogramBins": histogramBins}
+    _log_tool_call("unity_screenshot_pixel_stats", args)
+    r = await _get_facade().screenshot_pixel_stats(path=path, region=region, near_black_threshold=nearBlackThreshold, alpha_threshold=alphaThreshold, histogram_bins=histogramBins)
+    return _log_tool_result("unity_screenshot_pixel_stats", _payload(r))
+
+@mcp.tool(description="只读比较工程内两张同尺寸 PNG，返回差异像素比例、平均通道差与指定区域近黑比例变化，不返回原始像素。")
+async def unity_screenshot_compare(baselinePath: str, candidatePath: str, region: dict | None = None, channelTolerance: int = 0, nearBlackThreshold: int = 16):
+    args = {"baselinePath": baselinePath, "candidatePath": candidatePath, "region": region, "channelTolerance": channelTolerance, "nearBlackThreshold": nearBlackThreshold}
+    _log_tool_call("unity_screenshot_compare", args)
+    r = await _get_facade().screenshot_compare(baseline_path=baselinePath, candidate_path=candidatePath, region=region, channel_tolerance=channelTolerance, near_black_threshold=nearBlackThreshold)
+    return _log_tool_result("unity_screenshot_compare", _payload(r))
+
+@mcp.tool(
+    description="Snapshot 薄包装：按窗口标题解析唯一/聚焦 EditorWindow 后，以精确 instanceId 截图；不再降级为 SceneView 或占位图。"
+)
+async def unity_screenshot_editor_window(
+    windowTitle: str = "upilot",
+    screenshotDegrade: str = "none",
+):
+    _log_tool_call(
+        "unity_screenshot_editor_window",
+        {"windowTitle": windowTitle, "screenshotDegrade": screenshotDegrade},
+    )
+    r = await _get_facade().screenshot_editor_window(
+        window_title=windowTitle, degrade=screenshotDegrade
+    )
+    return _log_tool_result("unity_screenshot_editor_window", _payload(r))
+
+_DESTRUCTIVE_TOOLS = {
+    "unity_asset_delete", "unity_asset_move", "unity_asset_modify_data",
+    "unity_script_create", "unity_script_update", "unity_script_delete",
+    "unity_package_add", "unity_package_remove", "unity_scene_save",
+    "unity_scene_unload", "unity_gameobject_delete", "unity_component_remove",
+}
+_HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
+_PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
+for _name, _value in list(globals().items()):
+    if not callable(_value) or not _name.startswith("unity_"):
+        continue
+    if _name in _HIDDEN_PUBLIC_TOOLS:
+        continue
+    register_public_tool(
+        _name,
+        destructive=_name in _DESTRUCTIVE_TOOLS,
+        idempotent=_name not in _DESTRUCTIVE_TOOLS and _name not in {
+            "unity_screenshot_game_view",
+            "unity_screenshot_scene_view",
+            "unity_screenshot_camera",
+            "unity_screenshot_save",
+            "unity_screenshot_editor_window",
+        },
+        play_mode_policy="blocked" if _name in _PLAYMODE_BLOCKED else "allowed",
+        feature="flow" if _name.startswith("unity_upilot_flow_") else "core",
+    )

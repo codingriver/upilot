@@ -15,6 +15,9 @@ namespace CodingRiver.UPilot
         public string toState;
         public long at;
         public string unitySessionId;
+        public string projectPath;
+        public int processId;
+        public long processCreatedAt;
         public string origin;
         public string requestId;
         public string commandId;
@@ -31,6 +34,7 @@ namespace CodingRiver.UPilot
             public List<PlayModeTransitionRecord> records = new List<PlayModeTransitionRecord>();
             public PlayModeTransitionRecord intent;
             public int processId;
+            public long processCreatedAt;
         }
         private static readonly string PathName = Path.Combine("Library", "UPilot", "playmode-transitions.json");
         private static Ledger ledger;
@@ -42,13 +46,30 @@ namespace CodingRiver.UPilot
                 try { ledger = JsonUtility.FromJson<Ledger>(File.ReadAllText(PathName)); } catch { }
                 ledger = ledger ?? new Ledger();
                 ledger.records = ledger.records ?? new List<PlayModeTransitionRecord>();
-                if (ledger.processId != System.Diagnostics.Process.GetCurrentProcess().Id) ledger.intent = null;
+                if (ledger.processId != System.Diagnostics.Process.GetCurrentProcess().Id ||
+                    ledger.processCreatedAt != UPilotBridge.GetCurrentProcessCreatedAt()) ledger.intent = null;
                 ledger.processId = System.Diagnostics.Process.GetCurrentProcess().Id;
+                ledger.processCreatedAt = UPilotBridge.GetCurrentProcessCreatedAt();
                 return ledger;
             }
         }
         public static PlayModeTransitionRecord Latest => State.records.LastOrDefault();
         public static PlayModeTransitionRecord[] Recent => State.records.ToArray();
+        // Historical records remain visible, but never authorize a current wait.
+        internal static PlayModeTransitionRecord Current => IsCurrentProcessRecord(Latest) ? Latest : null;
+        internal static bool IsCurrentProcessRecord(PlayModeTransitionRecord record) =>
+            record != null && record.processId == System.Diagnostics.Process.GetCurrentProcess().Id &&
+            record.processCreatedAt == UPilotBridge.GetCurrentProcessCreatedAt() &&
+            UPilotDeploymentDiagnostics.SamePath(record.projectPath, UPilotProjectConfig.ProjectRoot);
+
+
+        internal static bool HasEndedLifecycle(string lifecycleId, long startedAt)
+        {
+            var start = State.records.LastOrDefault(record => record.transitionId == lifecycleId);
+            var end = Current;
+            return IsCurrentProcessRecord(start) && end != null && end.at >= startedAt && end.at >= start.at &&
+                (end.toState == "play" || end.toState == "edit");
+        }
 
         public static void RequestProjectExit(string operationId = "")
         {
@@ -102,6 +123,8 @@ namespace CodingRiver.UPilot
             return new PlayModeTransitionRecord
             {
                 transitionId = Guid.NewGuid().ToString("N"), fromState = from, toState = to, unitySessionId = session, at = at,
+                projectPath = UPilotProjectConfig.ProjectRoot, processId = System.Diagnostics.Process.GetCurrentProcess().Id,
+                processCreatedAt = UPilotBridge.GetCurrentProcessCreatedAt(),
                 origin = intent?.origin ?? "unknown", requestId = intent?.requestId ?? "", commandId = intent?.commandId ?? "",
                 operationId = intent?.operationId ?? "", toolName = intent?.toolName ?? "", runGuid = intent?.runGuid ?? "",
             };

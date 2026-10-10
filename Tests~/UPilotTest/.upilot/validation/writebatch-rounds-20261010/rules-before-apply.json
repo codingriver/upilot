@@ -1,0 +1,20 @@
+{
+  "AGENTS.md": {
+    "exists": true,
+    "prefixSha256": "9bfd0c694d45a7e566940e8fd7b4755c204b57122ad56d405efd6364fd55edc4",
+    "suffixSha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "hasBlock": true
+  },
+  ".cursor/rules/upilot-unity-mcp.mdc": {
+    "exists": true,
+    "prefixSha256": "c0a6bbf4081609faf93da7700271df5d03d0379c0fbbf8f92f5ac4990cf6632e",
+    "suffixSha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "hasBlock": true
+  },
+  "CLAUDE.md": {
+    "exists": true,
+    "prefixSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "suffixSha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "hasBlock": true
+  }
+}

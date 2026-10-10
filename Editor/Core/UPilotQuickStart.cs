@@ -84,11 +84,15 @@ namespace CodingRiver.UPilot
         private static bool _explicitlyStopped;
         private static Action _afterRepairStart;
         private static bool _recoveryProbeRunning;
+        private static long _lastRecoveryProbeAtUtcMs;
         private static int _repairGeneration;
         private static string PendingAttemptKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.PendingAttempt");
         private static string PendingCauseKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.PendingCause");
         private static string AutoAttemptKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Attempted");
         private static string FailureKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Failure");
+        private static string HealthRecoveryKey => UPilotPreferences.ProjectKey("UPilot.Health.PendingRecovery");
+        private static string VerifiedHealthKey => UPilotPreferences.ProjectKey("UPilot.Health.VerifiedRecovery");
+        private static string VerifiedRestartHistoryKey => UPilotPreferences.ProjectKey("UPilot.Health.VerifiedRestartHistory");
         private static string FailureDialogKey => UPilotPreferences.ProjectKey("UPilot.DirectRepair.Dialog");
         internal static bool IsRepairing => _repairTask != null && !_repairTask.IsCompleted;
         internal static bool IsExplicitlyStopped => _explicitlyStopped;
@@ -134,24 +138,29 @@ namespace CodingRiver.UPilot
                 var server = UPilotMcpServerManager.Instance.GetStatus();
                 var bridge = UPilotBridge.Instance.GetStatus();
                 var issues = UPilotDeploymentDiagnostics.Observe(bridge, server);
+                TrackLifecycleRecovery(server);
+                var disposition = UPilotHealthAssessment.Classify(bridge, server);
                 var record = UPilotServerRestartDiagnostics.Current;
-                if (record?.status == "failed")
+                if (disposition == UPilotHealthDisposition.WaitingLifecycle && !issues.Any(issue => issue.Confirmed)) return;
+                if (record?.status == "failed" && SessionState.GetString(VerifiedRestartHistoryKey, "") != record.operationId)
                     ShowRepairFailureOnce(record.operationId, record.failurePhase + "\n" + record.error);
                 if (IsRepairing || record?.status == "running") return;
-                if (issues.Length == 0 && bridge.IsAuthenticated && server.HealthEndpointResponded)
+                if (!issues.Any(issue => issue.Confirmed) && UPilotHealthAssessment.CanVerifyRecovery(bridge, server))
                 {
-                    if (!_recoveryProbeRunning && (EditorPrefs.GetBool(AutoAttemptKey, false) ||
+                    if (!_recoveryProbeRunning && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastRecoveryProbeAtUtcMs >= 10000 &&
+                        (IsHealthRecoveryPending || EditorPrefs.GetBool(AutoAttemptKey, false) ||
                         !string.IsNullOrEmpty(EditorPrefs.GetString(FailureKey, ""))))
                         _ = ConfirmObservedRecoveryAsync(server, bridge.SessionId, _repairGeneration);
                     return;
                 }
                 if (!bridge.IsStarted || !server.StatusQueryCompleted || issues.Length == 0 ||
                     EditorPrefs.GetBool(AutoAttemptKey, false)) return;
-                // A fresh explicit mismatch or an exhausted observation window starts one repair.
-                if (!issues.Any(issue => issue.Code == "authentication" || issue.Code == "timeout" ||
+                // Only an explicit confirmed mismatch can start repair, never an observation timeout.
+                if (disposition == UPilotHealthDisposition.Unconfirmed) return;
+                if (!issues.Any(issue => issue.Confirmed && (issue.Code == "authentication" ||
                     issue.Code == "version" || issue.Code == "channel" || issue.Code == "protocol" ||
                     issue.Code == "entry" || issue.Code == "configured_entry" || issue.Code == "module" || issue.Code == "project" ||
-                    issue.Code == "instance")) return;
+                    issue.Code == "instance"))) return;
                 _ = AutoRepairAsync(null);
             }
             catch (Exception ex)
@@ -160,19 +169,52 @@ namespace CodingRiver.UPilot
             }
         }
 
+        internal static string LifecycleRecoveryToken(McpServerStatus server) =>
+            string.IsNullOrEmpty(server.EditorObservationLifecycleId) ? "" :
+                server.Health?.server_instance_id + ":" + server.EditorObservationLifecycleId;
+
+        private static bool IsHealthRecoveryPending => !string.IsNullOrEmpty(SessionState.GetString(HealthRecoveryKey, ""));
+        internal static void TrackLifecycleRecovery(McpServerStatus server)
+        {
+            if (!UPilotHealthAssessment.HasServiceIdentity(server)) return;
+            var token = LifecycleRecoveryToken(server);
+            if (!string.IsNullOrEmpty(token) && token != SessionState.GetString(VerifiedHealthKey, ""))
+                SessionState.SetString(HealthRecoveryKey, token);
+        }
+
         private static async Task ConfirmObservedRecoveryAsync(McpServerStatus server, string sessionId, int generation)
         {
             _recoveryProbeRunning = true;
+            _lastRecoveryProbeAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var pending = SessionState.GetString(HealthRecoveryKey, "");
             try
             {
                 await UPilotMcpServerManager.Instance.VerifyReadOnlyRoundTripAsync(server, sessionId);
-                if (generation != _repairGeneration || IsRepairing ||
-                    UPilotBridge.Instance.GetStatus().SessionId != sessionId) return;
-                EditorPrefs.DeleteKey(FailureKey);
-                EditorPrefs.DeleteKey(AutoAttemptKey);
+                CompleteObservedRecovery(server, sessionId, generation, pending,
+                    UPilotBridge.Instance.GetStatus(), UPilotMcpServerManager.Instance.GetStatus());
             }
             catch { /* Observation never hides the original failure or opens another dialog. */ }
             finally { _recoveryProbeRunning = false; }
+        }
+
+        // Called only after the actual read-only probe succeeded. Recheck current facts
+        // before clearing transient UI errors; never rewrite a failed restart record.
+        internal static bool CompleteObservedRecovery(McpServerStatus expected, string sessionId, int generation,
+            string pending, BridgeStatus bridge, McpServerStatus latest)
+        {
+            if (generation != _repairGeneration || IsRepairing || bridge.SessionId != sessionId ||
+                pending != SessionState.GetString(HealthRecoveryKey, "") || latest.ProcessId != expected.ProcessId ||
+                latest.Health?.server_instance_id != expected.Health?.server_instance_id ||
+                !UPilotHealthAssessment.CanVerifyRecovery(bridge, latest) ||
+                UPilotDeploymentDiagnostics.Observe(bridge, latest).Any(issue => issue.Confirmed)) return false;
+            if (!string.IsNullOrEmpty(pending)) SessionState.SetString(VerifiedHealthKey, pending);
+            SessionState.EraseString(HealthRecoveryKey);
+            UPilotDeploymentDiagnostics.ClearTransientHealthIssues();
+            var history = UPilotServerRestartDiagnostics.Current;
+            if (history?.status == "failed") SessionState.SetString(VerifiedRestartHistoryKey, history.operationId);
+            EditorPrefs.DeleteKey(FailureKey);
+            EditorPrefs.DeleteKey(AutoAttemptKey);
+            return true;
         }
 
         public static UPilotMainSnapshot Evaluate(
@@ -197,10 +239,19 @@ namespace CodingRiver.UPilot
                     activeRestart?.status == "running"
                         ? UPilotServerRestartDiagnostics.WaitingMessage(activeRestart, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
                         : _repairPhase + "\n" + _repairCause, bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            TrackLifecycleRecovery(mcpStatus);
+            var disposition = UPilotHealthAssessment.Classify(bridgeStatus, mcpStatus);
             var failure = EditorPrefs.GetString(FailureKey, "");
-            if (issues.Length > 0 || !string.IsNullOrEmpty(failure))
+            if (issues.Any(issue => issue.Confirmed) || disposition == UPilotHealthDisposition.ConfirmedFailure ||
+                (!string.IsNullOrEmpty(failure) && disposition == UPilotHealthDisposition.Normal && !IsHealthRecoveryPending))
                 return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "UPilot 需要修复",
-                    issues.Length > 0 ? issues[0].Message : failure, bridgeStatus.IsStarted, mcpStatus.IsRunning);
+                    issues.FirstOrDefault(issue => issue.Confirmed)?.Message ?? (mcpStatus.ErrorMessage ?? failure), bridgeStatus.IsStarted, mcpStatus.IsRunning);
+
+            if (disposition == UPilotHealthDisposition.WaitingLifecycle || disposition == UPilotHealthDisposition.Unconfirmed)
+                return EvaluateServiceState(bridgeStatus, mcpStatus);
+            if (IsHealthRecoveryPending || issues.Length > 0)
+                return new UPilotMainSnapshot(UPilotMainState.CheckingStatus, "正在验证恢复",
+                    "正在确认当前身份、Bridge 握手、新鲜终态快照和实际只读往返；尚未恢复可用。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
 
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&
@@ -230,10 +281,23 @@ namespace CodingRiver.UPilot
             BridgeStatus bridgeStatus,
             McpServerStatus mcpStatus)
         {
-            if (!string.IsNullOrEmpty(bridgeStatus.AuthenticationError) || !string.IsNullOrEmpty(mcpStatus.ErrorMessage))
+            var disposition = UPilotHealthAssessment.Classify(bridgeStatus, mcpStatus);
+            if (mcpStatus.ProcessOwnership == McpProcessOwnership.Foreign)
+                return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "端口被其他程序占用",
+                    "已确认端口属于其他项目或程序。修复不会停止该进程，也不会自动修改端口。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            if (disposition == UPilotHealthDisposition.ConfirmedFailure)
                 return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "服务状态异常",
                     bridgeStatus.AuthenticationError + "\n" + mcpStatus.ErrorMessage,
                     bridgeStatus.IsStarted, mcpStatus.IsRunning);
+
+            if (disposition == UPilotHealthDisposition.WaitingLifecycle)
+                return new UPilotMainSnapshot(UPilotMainState.CheckingStatus,
+                    UPilotHealthAssessment.LifecycleTitle(mcpStatus.EditorObservationLifecyclePhase),
+                    $"已等待 {mcpStatus.EditorObservationWaitingDurationMs / 1000} 秒；Server HTTP、Bridge 心跳与 Editor 响应分别观测；未执行自动重启。",
+                    bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            if (disposition == UPilotHealthDisposition.Unconfirmed)
+                return new UPilotMainSnapshot(UPilotMainState.CheckingStatus, "Unity 响应状态暂无法确认",
+                    "正在等待新的身份、主线程与网络证据；未执行自动重启。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
 
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&
@@ -269,7 +333,7 @@ namespace CodingRiver.UPilot
                     return new UPilotMainSnapshot(
                         UPilotMainState.CheckingStatus,
                         "Unity 主线程暂未响应",
-                        "疑似长时间更新停顿。网络心跳仍正常，正在每秒检查；未执行自动重启。",
+                        "疑似长时间更新停顿。心跳与主线程推进分别观测，正在每秒检查；未执行自动重启。",
                         bridgeStatus.IsStarted,
                         mcpStatus.IsRunning);
                 }

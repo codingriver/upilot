@@ -1,0 +1,21 @@
+{
+  "sourceCommit": "6c6ebf1ca636296d5502d33e8b15fd68caf22ec2",
+  "files": {
+    "upilotserver~/src/upilot_mcp/state_store.py": "ef9de4f0f89880b8104c97c0f7db8cf55e4fdf973ef93af7f392bd9390d95859",
+    "upilotserver~/src/upilot_mcp/domain/compile_service.py": "e21c019f73bbf5314373d98ec108de93e2a4ae06145b2aff6676802c916c3db9",
+    "upilotserver~/src/upilot_mcp/domain/resource_service.py": "a4d6923ad8b98242193b01b6a0dbad2799a4a42d898ac2de264ae72e5111dd9d",
+    "upilotserver~/src/upilot_mcp/mcp_tools/resource_tools.py": "ed7f57e11fd262190aaef8392b7fdd1bddad8a26c2e92df0db16fd456e077280",
+    "upilotserver~/src/upilot_mcp/source_identity.py": "f9702c7110bff5882790bb0aa6b7fcffbb4c25736d4841651eefa0912d132ff3",
+    "upilotserver~/tests/test_write_batch_rounds.py": "2c15c5319c78d01f110501c46ce2f6ec020c1c17aa0592f479cac8b8f1a1d198",
+    "upilotserver~/tests/test_editor_execution_state_v2.py": "40469c6ebcf1db022871356fd1f6f7912124d3324b66c01719abd0c76647e7cc",
+    "upilotserver~/tests/test_loaded_source_evidence.py": "194eebc888592bf817dd28091834504f82ef64c1d4cb3a73b0abdb631a990101",
+    "skills/upilot-unity-mcp/AGENTS.md.template": "7c89eed833922916c87aa2d6d73936a7269ba8cf57a46834f83246d709e8b325",
+    "skills/upilot-unity-mcp/SKILL.md.template": "5fa481e3c899615fb3f8eb9921ccee224340369d7f2d7ea5b72bfa3c4f3b7431",
+    "skills/upilot-unity-mcp/SKILL.md": "05cc1135a57f098df6463139dec98d9c30575a9d990e4b3a6d47347b1938074d",
+    "skills/upilot-unity-mcp/references/workflows.md": "ffcf1f2003d025762cee1cd5b8088e9822f2028d2e768a58b681b89b6200f5bb",
+    "skills/upilot-unity-mcp/scripts/check_skill_pack.py": "96fe7ac4cf5d3ae16cd4fd0cdf8c85e04b2fb6d3bdaf64e74686135354264d92",
+    "skills/upilot-unity-mcp/template-manifest.json": "90c4435eb5d902108514793ef4350f3872eb7f4eda765936118e94ae9facecd5",
+    "Documentation~/AgentRules/AGENTS.upilot.md": "3f18be281be1a7bd414bcef81917866b3c943004762911328cac961f3b434c0a"
+  },
+  "liveValidation": "blocked: unrelated active stopping test, EditorContextStale and loaded-source mismatch"
+}

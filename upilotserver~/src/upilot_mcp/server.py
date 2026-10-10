@@ -105,6 +105,10 @@ class WsOrchestratorServer(WsTransport):
         self._last_bridge_close_reason = ""
         self._editor_stall_active: dict[str, Any] | None = None
         self._recent_editor_stall: dict[str, Any] | None = None
+        # Only live, admitted, ordered Unity snapshots establish a lifecycle wait.
+        self._editor_lifecycle: dict[str, Any] | None = None
+        self._editor_lifecycle_recovery: dict[str, Any] | None = None
+        self._editor_lifecycle_producer: tuple[int, int, str, int, int] | None = None
 
     @staticmethod
     def _resolve_expected_project_path(configured: str) -> str:
@@ -465,12 +469,19 @@ class WsOrchestratorServer(WsTransport):
             session_id
             and state_session_id == session_id
             and producer_epoch
-            and bool(getattr(editor, "authoritative", False))
+            # Freshness is not process/project identity. A blocked pump deliberately
+            # makes authoritative false while retaining its admitted producer.
         )
 
         status = "unknown"
         reason = "evidence_unavailable"
-        if not network_fresh:
+        lifecycle, lifecycle_error = self._current_editor_lifecycle()
+        if lifecycle_error:
+            reason = lifecycle_error
+        elif lifecycle:
+            status = "waiting_lifecycle"
+            reason = "confirmed_unity_lifecycle"
+        elif not network_fresh:
             reason = "network_heartbeat_not_fresh"
         elif not identity_consistent:
             reason = "identity_transition_or_missing"
@@ -479,6 +490,11 @@ class WsOrchestratorServer(WsTransport):
         elif pump_age > _EDITOR_PUMP_STALE_MS:
             status = "waiting_editor"
             reason = "main_thread_pump_stale"
+        elif self._editor_lifecycle_recovery and str(self.state.compile.phase or "").lower() in {
+                "queued", "compiling", "compiler_finished", "domain_reload", "verifying", "failed"}:
+            reason = "terminal_snapshot_not_ready"
+        elif not bool(getattr(editor, "authoritative", False)):
+            reason = "snapshot_not_authoritative"
         else:
             status = "responsive"
             reason = "fresh_same_identity_evidence"
@@ -503,7 +519,132 @@ class WsOrchestratorServer(WsTransport):
             "recent_stall": dict(self._recent_editor_stall) if self._recent_editor_stall else None,
         }
         self._track_editor_stall(payload, identity)
+        evidence = lifecycle or self._editor_lifecycle_recovery
+        if evidence and not lifecycle_error:
+            payload.update(
+                lifecycle_phase=evidence["phase"] if lifecycle else "verifying_recovery",
+                lifecycle_id=evidence["id"], lifecycle_started_at_ms=evidence["started_at_ms"],
+            )
+            if lifecycle:
+                payload.update(waiting_since_ms=evidence["started_at_ms"],
+                               waiting_duration_ms=max(0, observed_at - evidence["started_at_ms"]))
         return payload
+
+    def _current_editor_lifecycle(self) -> tuple[dict[str, Any] | None, str]:
+        record = self._editor_lifecycle or self._editor_lifecycle_recovery
+        if not record:
+            return None, ""
+        session = self.session_manager.active
+        if (not session or not session.identity_verified
+                or not paths_equal(session.project_path, record["project"])
+                or session.process_id != record["pid"]
+                or session.process_created_at != record["created_at"]):
+            self._editor_lifecycle = self._editor_lifecycle_recovery = None
+            return None, "lifecycle_identity_changed"
+        # Kernel queries only; never run a CIM scan for every /health observation.
+        if not process_exists(record["pid"]):
+            self._editor_lifecycle = self._editor_lifecycle_recovery = None
+            return None, "unity_process_exited"
+        created_at = process_creation_time(record["pid"])
+        if created_at and created_at // 10 != record["created_at"] // 10:
+            self._editor_lifecycle = self._editor_lifecycle_recovery = None
+            return None, "unity_process_identity_mismatch"
+        if os.name == "nt" and not created_at:
+            return None, "process_identity_unconfirmed"
+        return self._editor_lifecycle, ""
+
+    def _observe_editor_lifecycle(self, payload: dict[str, Any]) -> None:
+        """Consume only snapshots already admitted by StateStore's ordering gate."""
+        session = self.session_manager.active
+        if (not session or not session.identity_verified or not session.process_created_at
+                or payload.get("sessionId") != session.session_id
+                or int(payload.get("processId") or 0) != session.process_id
+                or int(payload.get("processCreatedAt") or 0) != session.process_created_at
+                or not paths_equal(session.project_path, self.expected_project_path or session.project_path)):
+            return
+        epoch = str(payload.get("producerEpoch") or "")
+        domain = int(payload.get("domainGeneration") or 0)
+        observed = int(payload.get("observedAt") or 0)
+        if not epoch or not observed:
+            return
+        sequence = int(payload.get("sequence") or 0)
+        producer = self._editor_lifecycle_producer
+        if producer and producer[:2] == (session.process_id, session.process_created_at):
+            if epoch != producer[2] or (domain, sequence) <= producer[3:]:
+                return
+        self._editor_lifecycle_producer = (session.process_id, session.process_created_at, epoch, domain, sequence)
+        record = self._editor_lifecycle
+        if record and (record["pid"] != session.process_id or record["created_at"] != session.process_created_at
+                       or not paths_equal(record["project"], session.project_path)):
+            self._editor_lifecycle = self._editor_lifecycle_recovery = record = None
+        if record and (epoch != record["epoch"] or domain < record["domain"]
+                       or observed < record["started_at_ms"]):
+            return
+        transition = payload.get("playModeTransition") or {}
+        current_transition = (isinstance(transition, dict)
+                              and transition.get("processId") == session.process_id
+                              and transition.get("processCreatedAt") == session.process_created_at
+                              and paths_equal(str(transition.get("projectPath") or ""), session.project_path))
+        to_state = transition.get("toState") if current_transition else None
+        transition_at = int(transition.get("at") or 0) if current_transition else 0
+        phase = str(payload.get("compilePhase") or "").lower()
+        event = str(payload.get("transition") or "")
+        compile_id = str(payload.get("compileOperationId") or "")
+        reload_id = str(payload.get("reloadId") or "")
+        authoritative = payload.get("authoritative") is True
+        if record and record["phase"] in {"enteringPlay", "exitingPlay"}:
+            # A current terminal Unity event also covers cancellation back to EditMode.
+            if (to_state in {"play", "edit"} and transition.get("unitySessionId") == session.session_id
+                    and transition_at >= record["started_at_ms"] and authoritative):
+                record["ended_at_ms"] = observed
+                self._editor_lifecycle_recovery = record
+                self._editor_lifecycle = None
+            return
+        # Compilation -> reload belongs to the same compile, not a new wait/deadline.
+        same_compile = bool(record and record.get("compile_id") and compile_id == record["compile_id"])
+        same_reload = bool(record and record.get("reload_id") and reload_id == record["reload_id"])
+        if record and authoritative and (
+                (same_compile and phase in {"completed", "failed"} and payload.get("terminal") is True
+                 and payload.get("errorsVerified") is True)
+                or (not record.get("compile_id")
+                    and ((same_reload and domain > record["domain"]
+                          and event in {"domain_reload_recovered", "connected_snapshot"})
+                         or (event == "connected_snapshot" and session.session_id != record["session_id"]
+                             and domain >= record["domain"]))
+                    and phase not in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"})):
+            record["ended_at_ms"] = observed
+            self._editor_lifecycle_recovery = record
+            self._editor_lifecycle = None
+            return
+        if (to_state in {"enteringPlay", "exitingPlay"}
+                and transition.get("unitySessionId") == session.session_id
+                and 0 < transition_at <= observed and authoritative):
+            lifecycle_phase, lifecycle_id, started = to_state, str(transition.get("transitionId") or ""), transition_at
+        elif authoritative and event in {"compile_queued", "compiling", "compile_started", "domain_reload_starting"}:
+            lifecycle_phase = "domain_reload" if event == "domain_reload_starting" else "compiling"
+            # A reload outside a compile must not inherit the last completed compile's ID.
+            if phase not in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}:
+                compile_id = ""
+            lifecycle_id = compile_id or reload_id or str(payload.get("snapshotId") or "")
+            started = observed
+        else:
+            return
+        if not lifecycle_id:
+            return
+        if record:
+            if same_compile or (not record.get("compile_id") and same_reload):
+                record["phase"] = lifecycle_phase
+                if reload_id:
+                    record["reload_id"] = reload_id
+            return
+        recovered = self._editor_lifecycle_recovery
+        if recovered and (lifecycle_id == recovered["id"] or started <= recovered["ended_at_ms"]):
+            return  # A later heartbeat cannot resurrect the ended start record.
+        self._editor_lifecycle_recovery = None
+        self._editor_lifecycle = dict(phase=lifecycle_phase, id=lifecycle_id, started_at_ms=started,
+                                     project=session.project_path, pid=session.process_id,
+                                     created_at=session.process_created_at, epoch=epoch, domain=domain,
+                                     session_id=session.session_id, compile_id=compile_id, reload_id=reload_id)
 
     def _track_editor_stall(self, payload: dict[str, Any], identity: tuple[str, str, int]) -> None:
         status = payload["status"]
@@ -1229,6 +1370,7 @@ class WsOrchestratorServer(WsTransport):
                 if int(heartbeat_context.get("stateContractVersion") or 0) >= 2:
                     accepted = self.state.update_editor_execution_state(heartbeat_context)
                     if accepted:
+                        self._observe_editor_lifecycle(heartbeat_context)
                         self.editor_observation()
                         self._notify_editor_execution_state()
                 else:
@@ -1281,6 +1423,7 @@ class WsOrchestratorServer(WsTransport):
                 if not accepted:
                     logger.debug("Rejected stale/duplicate execution snapshot: %s", message.payload.get("snapshotId"))
                     return
+                self._observe_editor_lifecycle(message.payload)
                 phase = str(self.state.compile.phase or "").lower()
                 self._note_compile_busy(phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"})
                 if str(self.state.transition).lower() == "domain_reload_starting":

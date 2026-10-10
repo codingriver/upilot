@@ -155,3 +155,17 @@ def test_command_observation_entries_are_in_the_existing_limited_loading_scope()
     assert ("upilot_mcp.domain.task_service", "TaskDomainService.operation_get") in source_identity.SELECTED_CODE_ENTRIES
     assert "not globals" in source_identity.SELECTED_CODE_SCOPE
     assert "all modules" in source_identity.SELECTED_CODE_SCOPE
+
+
+def test_write_batch_round_entries_have_loaded_code_evidence():
+    required = {
+        ("upilot_mcp.state_store", "StateStore.freeze_write_batch_round"),
+        ("upilot_mcp.state_store", "StateStore.record_write_batch_round_dispatch"),
+        ("upilot_mcp.state_store", "StateStore._persist_round_evidence"),
+        ("upilot_mcp.state_store", "StateStore.get_write_batch_round"),
+        ("upilot_mcp.state_store", "StateStore.get_write_batch"),
+        ("upilot_mcp.domain.resource_service", "ResourceDomainService._resume_pending_write_batches"),
+        ("upilot_mcp.domain.compile_service", "CompileDomainService.compile"),
+        ("upilot_mcp.domain.compile_service", "CompileDomainService._safe_compile_and_wait"),
+    }
+    assert required <= set(source_identity.SELECTED_CODE_ENTRIES)

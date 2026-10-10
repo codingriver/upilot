@@ -1,0 +1,225 @@
+{
+  "endpoint": "http://127.0.0.1:8011/mcp",
+  "connected": true,
+  "serverReady": true,
+  "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
+  "unity": {
+    "processId": 23796,
+    "bridgeSessionId": "d55451cdbd7540b894c989dc0da77feb",
+    "verified": true,
+    "processRole": "editor"
+  },
+  "serverProcessId": 130472,
+  "loadedSource": {
+    "status": "different",
+    "scope": "selected-entry-code-only; not globals, closure values, dependencies or all modules",
+    "entries": [
+      {
+        "module": "upilot_mcp.server",
+        "entry": "WsOrchestratorServer._handle_message",
+        "status": "different",
+        "layers": [
+          {
+            "function": "WsOrchestratorServer._handle_message",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\server.py",
+            "status": "different",
+            "sourceSha256": "9a1ce7d2896303e721b1f8d0af4d30d1aff84762d6c8e58ebb485bf9bfc6a577"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.server",
+        "entry": "WsOrchestratorServer._suspend_or_fail_pending_on_disconnect",
+        "status": "different",
+        "layers": [
+          {
+            "function": "WsOrchestratorServer._suspend_or_fail_pending_on_disconnect",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\server.py",
+            "status": "different",
+            "sourceSha256": "9a1ce7d2896303e721b1f8d0af4d30d1aff84762d6c8e58ebb485bf9bfc6a577"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.server",
+        "entry": "WsOrchestratorServer._resend_pending_commands",
+        "status": "different",
+        "layers": [
+          {
+            "function": "WsOrchestratorServer._resend_pending_commands",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\server.py",
+            "status": "different",
+            "sourceSha256": "9a1ce7d2896303e721b1f8d0af4d30d1aff84762d6c8e58ebb485bf9bfc6a577"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.server",
+        "entry": "WsOrchestratorServer.send_command",
+        "status": "different",
+        "layers": [
+          {
+            "function": "WsOrchestratorServer.send_command",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\server.py",
+            "status": "different",
+            "sourceSha256": "9a1ce7d2896303e721b1f8d0af4d30d1aff84762d6c8e58ebb485bf9bfc6a577"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.dispatcher",
+        "entry": "CommandDispatcher.call",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "CommandDispatcher.call",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\dispatcher.py",
+            "status": "equivalent",
+            "sourceSha256": "61d50387aa5e622e5ba22d0cc870339a34c4eec642b9a70980110b0bc2be3adc"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.domain.execution_service",
+        "entry": "ExecutionDomainService.diagnostic_module",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "ExecutionDomainService.diagnostic_module",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\domain\\execution_service.py",
+            "status": "equivalent",
+            "sourceSha256": "edd27d8180c07d66ba4fe066e8ea1dc6b188539309d902cf4bc0ae90f2337219"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.mcp_tools.execution_tools",
+        "entry": "diagnostic_module",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "diagnostic_module",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\mcp_tools\\execution_tools.py",
+            "status": "equivalent",
+            "sourceSha256": "ae8e64a4a4e8a3372218197724d6a1d1af6df98d17c71b782e30e951188e3c6d"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.domain.task_service",
+        "entry": "TaskDomainService.task_start",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "TaskDomainService.task_start",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\domain\\task_service.py",
+            "status": "equivalent",
+            "sourceSha256": "1a41799c2366a54e22c61f335bed71f4ab0f197a7cfb2975a2bdaf752d247f86"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.domain.task_service",
+        "entry": "TaskDomainService.operation_get",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "TaskDomainService.operation_get",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\domain\\task_service.py",
+            "status": "equivalent",
+            "sourceSha256": "1a41799c2366a54e22c61f335bed71f4ab0f197a7cfb2975a2bdaf752d247f86"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.domain.task_service",
+        "entry": "TaskDomainService._run_test_task",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "TaskDomainService._run_test_task",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\domain\\task_service.py",
+            "status": "equivalent",
+            "sourceSha256": "1a41799c2366a54e22c61f335bed71f4ab0f197a7cfb2975a2bdaf752d247f86"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.domain.queue_service",
+        "entry": "QueueDomainService.queue_inventory",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "QueueDomainService.queue_inventory",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\domain\\queue_service.py",
+            "status": "equivalent",
+            "sourceSha256": "a8e99bccfa2538d04a42c55d9669f78dca40d458f962b4dcee84c156cf94c966"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.state_store",
+        "entry": "StateStore.save_test_job",
+        "status": "different",
+        "layers": [
+          {
+            "function": "StateStore.save_test_job",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\state_store.py",
+            "status": "different",
+            "sourceSha256": "ef9de4f0f89880b8104c97c0f7db8cf55e4fdf973ef93af7f392bd9390d95859"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.state_store",
+        "entry": "StateStore.command_observation",
+        "status": "different",
+        "layers": [
+          {
+            "function": "StateStore.command_observation",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\state_store.py",
+            "status": "different",
+            "sourceSha256": "ef9de4f0f89880b8104c97c0f7db8cf55e4fdf973ef93af7f392bd9390d95859"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.mcp_stdio_server",
+        "entry": "_call_tool_with_strict_arguments",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "_call_tool_with_strict_arguments",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\mcp_stdio_server.py",
+            "status": "equivalent",
+            "sourceSha256": "a650b94137a595539ae3a193b8781267a7fe77f3b0a1ceb36c256f2b325f10fa"
+          }
+        ]
+      },
+      {
+        "module": "upilot_mcp.operation_context",
+        "entry": "request_origin_from_context",
+        "status": "equivalent",
+        "layers": [
+          {
+            "function": "request_origin_from_context",
+            "path": "D:\\upilot\\upilotserver~\\src\\upilot_mcp\\operation_context.py",
+            "status": "equivalent",
+            "sourceSha256": "e6f8bd2c3c1948c9300cf842d337287cd6170f1e7a1fee4c955a36d09af799f3"
+          }
+        ]
+      }
+    ]
+  },
+  "editor": {
+    "ready": false,
+    "authoritative": false,
+    "isStale": true,
+    "blockedReason": "EditorContextStale",
+    "playModeState": "edit",
+    "compilePhase": "completed",
+    "lastMainThreadPumpAt": 1791633917425,
+    "editorPumpAgeMs": 674684,
+    "mainThreadQueueDepth": 8
+  }
+}
