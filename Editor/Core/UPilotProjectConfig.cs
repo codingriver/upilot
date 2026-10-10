@@ -207,7 +207,7 @@ namespace CodingRiver.UPilot
                 Debug.LogError($"[UPilotPorts] 保存工程配置失败：{ex}");
                 throw;
             }
-            // Best-effort reference data: even constructing its user path must not block Save.
+            // Best-effort EditorPrefs reference data must not block Save.
             try { UPilotPortRegistry.ForUser().Sync(ProjectRoot); }
             catch (Exception ex) { UPilotPortRegistration.Report("同步参考端口登记", ex); }
         }

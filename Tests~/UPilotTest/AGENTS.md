@@ -11,9 +11,9 @@
 # UPilot Unity MCP
 
 rulesVersion: 56
-upilotPackageVersion: 0.3.43
+upilotPackageVersion: 0.3.44
 projectPath: D:\upilot\Tests~\UPilotTest
-generatedAt: 2026-10-10T06:33:23Z
+generatedAt: 2026-10-10T09:45:16Z
 
 This Unity project has the `io.github.codingriver.upilot` UPM package installed.
 Project-specific business rules outside this controlled UPilot block take precedence.

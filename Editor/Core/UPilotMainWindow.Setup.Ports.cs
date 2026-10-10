@@ -36,8 +36,10 @@ namespace CodingRiver.UPilot
                 {
                     if (GUILayout.Button("重新检测", GUILayout.Height(26)))
                         EvaluateSetupPorts();
-                    if (GUILayout.Button("端口登记管理", GUILayout.Height(26)))
-                        UPilotPortRegistryWindow.Open();
+                    if (GUILayout.Button("打印端口登记", GUILayout.Height(26)))
+                        UPilotPortRegistry.ForUser().Print();
+                    if (GUILayout.Button("清除端口登记", GUILayout.Height(26)))
+                        UPilotPortRegistry.ForUser().Clear();
 
                     using (new EditorGUI.DisabledScope(_setupPortsReady || _recommendedWsPort <= 0 || _recommendedHttpPort <= 0))
                     {
@@ -47,6 +49,7 @@ namespace CodingRiver.UPilot
                 }
             }
 
+            EditorGUILayout.LabelField("端口登记仅供参考；清除不修改工程端口，不影响运行中的服务。", EditorStyles.miniLabel);
             EditorGUILayout.Space(12);
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -73,11 +76,11 @@ namespace CodingRiver.UPilot
                 EvaluateSetupPorts();
         }
 
-        internal void EvaluateSetupPorts(UPilotPortRegistry registry = null)
+        internal void EvaluateSetupPorts()
         {
             // Reuse the normal redraw; do not block every OnGUI event or add a retry timer.
             _nextSetupPortCheckAt = EditorApplication.timeSinceStartup + 2d;
-            try { EvaluateSetupPortsCore(registry); }
+            try { EvaluateSetupPortsCore(); }
             catch (Exception ex)
             {
                 _setupPortsReady = false;
@@ -87,7 +90,7 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void EvaluateSetupPortsCore(UPilotPortRegistry registry)
+        private void EvaluateSetupPortsCore()
         {
             _setupPortsReady = false;
             _recommendedWsPort = 0;
@@ -111,15 +114,6 @@ namespace CodingRiver.UPilot
 
             var manager = UPilotMcpServerManager.Instance;
             var serviceStatus = manager.GetStatus();
-            // Reference information only; a failed probe or stale entry cannot block setup.
-            try
-            {
-                var conflict = (registry ?? UPilotPortRegistry.ForUser()).Check(
-                    UPilotProjectConfig.ProjectRoot, _setupWsPort, _setupHttpPort);
-                if (!string.IsNullOrEmpty(conflict))
-                    UPilotPortRegistration.Report("参考端口登记", new System.IO.IOException(conflict));
-            }
-            catch (Exception ex) { UPilotPortRegistration.Report("读取参考端口登记", ex); }
             var owned = serviceStatus.ProcessOwnership == McpProcessOwnership.CurrentUPilot;
             var wsAvailable = UPilotPortAllocator.IsPortAvailable(_setupWsPort) ||
                               (owned && _setupWsPort == manager.WsPort && serviceStatus.WsPortListening);

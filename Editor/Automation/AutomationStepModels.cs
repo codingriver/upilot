@@ -134,6 +134,8 @@ namespace CodingRiver.UPilot.Automation
         public long cleanupRecoveryDeadlineUtcMs;
         public string resourceRecoveryError = "";
         public bool cancelRequested;
+        // Zero preserves the ordinary lifecycle for existing stored runs.
+        public long immediateStopRequestedAtUtcMs;
         public long startedAtUtcMs;
         public long finishedAtUtcMs;
         public long finalizationDeadlineUtcMs;

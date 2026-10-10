@@ -4,29 +4,19 @@
 
 UPilot 会在 Unity 中启动本地 MCP 服务，并为常见 Agent 自动写入项目级连接配置。配置完成后，你可以直接让 Agent 查看场景、检查编译错误、读取 Console、修改 GameObject、管理资源、运行测试或构建任务。
 
-> 当前版本：`0.2.0`
->
 > Unity：`2022.3` 或更高
 >
-> Python：`3.11` 或更高
+> 正式版使用独立 MCP Server，由 UPilot 下载并管理，无需另外安装运行环境。
 >
 > 默认 MCP 地址：`http://127.0.0.1:8011/mcp`
 
-> 教程截图来自 Windows 上的 Unity 2022.3。不同 Unity 版本、操作系统或编辑器主题下，界面外观可能略有差异，但按钮名称和操作流程一致。
+> 教程截图来自 Windows 上的 Unity 2022.3。不同 Unity 版本或编辑器主题下，界面外观可能略有差异，请以实际界面提示为准。
 
-## 5 分钟快速上手
+## 2 分钟上手
 
-### 1. 确认环境
+安装 Unity 包 → 安装推荐服务并配置 Agent → 验证连接，即可开始使用。首次下载和 Unity 编译的耗时取决于网络与项目规模。
 
-只有从源码运行 MCP Server 时才需要 Python。若使用 UPilot 管理的独立 MCP Server 可执行程序，可跳过本步骤。源码模式请确认已安装 Python 3.11 或更高版本：
-
-```powershell
-python --version
-```
-
-如果系统提示找不到 `python`，请先安装 [Python](https://www.python.org/downloads/)，安装时勾选 **Add Python to PATH**。
-
-### 2. 安装 Unity 包
+### 1. 安装 Unity 包
 
 在 Unity 中打开：
 
@@ -37,35 +27,16 @@ Window > Package Manager
 点击左上角 `+`，选择 **Add package from git URL...**，输入：
 
 ```text
-https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>
-#开发模式
-https://github.com/codingriver/upilot.git#main
+https://github.com/codingriver/upilot.git#v0.3.44
 ```
 
-点击 **Add**，等待 Unity 完成包导入和脚本编译。
-
-安装完成后，UPilot 会为当前构建目标在 PlayerSettings 的 Scripting Define Symbols 中追加公共宏 `UPILOT`。项目内仅供 UPilot 使用的 Editor/测试代码可以用 `#if UPILOT` 隔离；切换构建目标时，新目标会自动补充该宏。通过 Unity Package Manager 正常卸载时，UPilot 会删除自己写入过的 `UPILOT`，并保留其他宏及其顺序。直接删除包目录或手工删除 manifest 引用时，包代码无法执行卸载清理，需要在 PlayerSettings 中手动移除残留的 `UPILOT`。
+点击 **Add**，等待 Unity 完成包导入和脚本编译。这里以固定发布版本 `v0.3.44` 为例；安装其他正式版本时，将链接末尾的标签替换为对应的 `vMAJOR.MINOR.PATCH`。
 
 ![在 Package Manager 中输入 UPilot Git URL](Documentation~/images/upilot-package-manager-git-url.png)
 
 *输入 UPilot Git URL 后点击右侧 Add。*
 
-### 3. 可选：安装 Python MCP Server
-
-仅在不使用独立 MCP Server 可执行程序、需要从 Python 源码运行时执行。显式选择所需的 Server ref；它不从 Unity 包的 `package.json` 自动推断，也可以独立版本化：
-
-```powershell
-python -m pip install "git+https://github.com/codingriver/upilot.git@<SERVER_REF>#subdirectory=upilotserver~"
-```
-
-如果你已经下载或克隆了 UPilot 仓库，也可以在仓库中执行：
-
-```powershell
-cd upilotserver~
-python -m pip install -e .
-```
-
-### 4. 在 Unity 中配置并启动
+### 2. 在 Unity 中安装服务并配置 Agent
 
 包导入完成后，Unity 会自动打开 UPilot 设置界面。如果没有自动打开，请选择：
 
@@ -75,17 +46,18 @@ UPilot > 打开 UPilot
 
 然后：
 
-1. 选择你正在使用的 Agent：`Codex`、`Claude Code`、`Cursor` 或 `OpenCode`，支持多选。
-2. 点击 **配置并启动**。
-3. 等待界面显示 **已就绪**。
+1. 在设置向导的 **网络端口** 步骤使用推荐端口，点击 **下一步**。
+2. 在服务设置中选择 **由 UPilot 管理服务**，点击 **安装推荐服务**，等待独立服务下载完成后进入下一步。
+3. 选择你正在使用的 Agent：`Codex`、`Claude Code`、`Cursor` 或 `OpenCode`，支持多选。
+4. 保持启动选项勾选，点击 **写入配置并启动**，等待主界面显示 **已就绪**。
 
 ![UPilot 首次配置界面](Documentation~/images/upilot-first-setup.png)
 
-*选择常用 Agent 后点击“配置并启动”。*
+*按设置向导安装推荐服务、选择常用 Agent，再写入配置并启动。*
 
 UPilot 会自动选择可用端口、写入所选 Agent 的 MCP 配置，并同步所需的 Skill/规则。
 
-### 5. 重启 Agent 并验证
+### 3. 重启 Agent 并验证
 
 首次写入配置后，请重新启动 Agent 客户端，或重新加载当前项目窗口，使 MCP 工具列表刷新。
 
@@ -103,22 +75,35 @@ UPilot 会自动选择可用端口、写入所选 Agent 的 MCP 配置，并同�
 
 现在可以开始使用 UPilot。
 
-## 受控执行工具
+## UPilot 能做什么
 
-UPilot 提供五个分工明确的执行入口：`unity_reflection_call` 调用一个已加载方法或一条受限表达式；只读 `csharp_validate` 预检语法或后端支持；`csharp_eval` 执行有预算的 UPilot C# 子集语句；`reflection_emit_type` 从结构化 spec 创建临时 CLR 类型；`execution_session` 管理跨调用变量、对象、类型和 delegate 句柄。它们不使用 Roslyn、Unity Eval/Compilation API、CodeDom 或 mcs。
+UPilot 是 AI Agent 与 Unity Editor 之间的桥梁：Agent 通过 MCP 工具读取真实的 Unity 状态，并在授权后执行修改，而不只是生成一段代码供你手动粘贴。
 
-`csharp_validate` 只解析/绑定/编译，不执行目标代码、getter 或构造器；其余执行工具可能产生副作用，需要项目写入授权，且不会被安全地自动重试。`csharp_eval` 的 `upilot-csharp-subset-v2` 支持 try/catch/finally/throw、引用语义 closure、typed/block/async lambda、Task/ValueTask await、实用级确定性泛型推断、`??`/`??=`/`typeof`/`nameof`/`default(T)`、隐式/交错及 rank 1–4 多维数组，以及由 persistent session 管理的事件和逃逸 delegate；明确禁止 async void。跨调用 closure 使用当前调用预算和取消上下文，独立的外部 delegate 调用由 session token 管理，不会引用已经释放的单次调用资源。取消和超时不会回滚已经发生的状态，基础设施错误不可被用户 catch，finally 使用独立有界清理预算。执行错误通过结构化 `stage/sourceSpan/diagnostics/candidates/cleanupDiagnostics/nextAction` 提供定位和恢复建议。
+| 功能 | 可以让 Agent 做什么 |
+|---|---|
+| 项目与场景检查 | 读取工程路径、Editor 状态、已打开场景、对象层级和组件信息 |
+| 场景与对象编辑 | 创建或修改 GameObject、Transform、Component，管理场景与 Prefab |
+| 资源与项目设置 | 查找、导入和管理资源，处理材质、贴图及项目设置 |
+| 编译与 Console 诊断 | 查看 Unity 编译结果、定位 Error/Warning，修改脚本后同步并等待编译验证 |
+| 测试与构建 | 运行 Unity 测试或构建任务，查询进度并获取最终结果和产物 |
+| 截图与日志取证 | 获取编辑器画面、采集 Console 日志，为问题定位和测试保留证据 |
+| 自动化步骤（UPilot Step） | 将业务测试组织为完整步骤计划，由执行器统一处理超时、取消、清理和报告 |
+| 受控 C# 执行 | 调用已加载方法、验证并执行受限 C# 语句，用会话管理跨调用状态 |
+| Agent 自动配置 | 为 Codex、Claude Code、Cursor、OpenCode 配置 MCP 连接，并同步规则和 Skill |
+| 多项目连接 | 为不同 Unity 项目分配独立端口，通过返回的工程路径确认操作目标 |
+| 可选高级功能 | UPilot Flow 编排 Editor 界面操作；UPilot 追踪器按过滤条件观察对象事件 |
 
-`csharp_eval` 的 `emit` 是兼容的 AST `DynamicMethod` 入口缓存；显式 `compiled` 才会把受支持的同步 AST lowering 为 Expression Tree delegate，并在不支持时于执行前失败且不回退。`reflection_emit_type` 创建真实 CLR Type，body 可选 `bodyBackend=interpret|compiled`。Emit callback 可配置次数、重入和 `isolate|propagate` 异常策略；相同 spec 的缓存只复用 CLR Type，callback guard、诊断和清理 lease 仍按 session 与实例隔离。动态类型仅支持 Unity Editor/JIT，其程序集使用 `Run`，只能在 Domain Reload 时真正释放。当前阶段不支持 DLL 动态加载或替换已有程序集方法；完整边界见 `Documentation~/CSharpEvalAndEmitDesign.md` 和 `skills/upilot-unity-mcp/references/execution-tools.md`。
+具体工具是否可调用取决于当前 Unity 连接、功能开关与项目授权。Flow 和追踪器默认关闭，入门使用无需启用。修改脚本、资源或项目设置前，请确认目标并按界面提示授权。
 
 ## 环境要求
 
 | 项目 | 要求 |
 |---|---|
 | Unity | 2022.3 或更高版本 |
-| Python | 3.11 或更高版本 |
+| 系统 | 当前正式版独立服务提供 Windows x64 可执行程序 |
 | Agent | Codex、Claude Code、Cursor、OpenCode，或支持 Streamable HTTP MCP 的客户端 |
-| 网络 | 首次通过 Git 和 pip 安装时需要访问 GitHub 与 Python 包源 |
+| Git | Unity 通过 Git URL 安装包时需能调用 Git |
+| 网络 | 首次安装 Unity 包和独立服务时需要访问 GitHub |
 
 UPilot 默认只监听本机地址 `127.0.0.1`。Unity Editor 必须保持打开，Agent 才能操作当前项目。
 
@@ -137,7 +122,7 @@ UPilot 默认只监听本机地址 `127.0.0.1`。Unity Editor 必须保持打开
 *点击左上角加号，然后选择“Add package from git URL...”。*
 
 ```text
-https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>
+https://github.com/codingriver/upilot.git#v0.3.44
 ```
 
 安装完成后，Package Manager 中应显示包名 **UPilot**，包标识为：
@@ -153,40 +138,25 @@ io.github.codingriver.upilot
 ```json
 {
   "dependencies": {
-    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#<STABLE_RELEASE_TAG>"
+    "io.github.codingriver.upilot": "https://github.com/codingriver/upilot.git#v0.3.44"
   }
 }
 ```
 
 如果文件中已有其他依赖，请只增加这一项，并注意上一项末尾的逗号。保存后返回 Unity，等待包解析和脚本编译完成。
 
-### 可选：安装 Python MCP Server
-
-UPilot 可使用独立 MCP Server 可执行程序，因此 Python 版本号不是 Unity UPM 安装所必需的。只有源码运行 Server 时才安装 Python 包，并显式选择兼容的 Server ref：
-
-```powershell
-python -m pip install "git+https://github.com/codingriver/upilot.git@<SERVER_REF>#subdirectory=upilotserver~"
-```
-
-安装完成后可以执行以下命令进行检查：
-
-```powershell
-python -c "import mcp, websockets, yaml, PIL; print('UPilot Python dependencies OK')"
-```
-
-看到 `UPilot Python dependencies OK` 即表示依赖可用。
-
-如果电脑安装了多个 Python，请确保执行安装命令的 Python 版本为 3.11 或更高，并且可以从系统 PATH 中找到。
-
 ## 首次配置教程
 
-### 使用简化设置（推荐）
+### 使用设置向导（推荐）
 
-首次导入 UPilot 后，主界面会提示“完成一次简单设置”。
+首次导入正式版 UPilot 后，按设置向导完成以下操作：
 
-1. 选择常用 Agent。
-2. 点击 **配置并启动**。
-3. 等待状态从“正在启动”变为“已就绪”。
+1. 使用推荐的网络端口，进入下一步。
+2. 选择 **由 UPilot 管理服务**，点击 **安装推荐服务**。UPilot 会下载并校验独立 MCP Server；完成后进入下一步。
+3. 选择常用 Agent，保持启动选项勾选，点击 **写入配置并启动**。
+4. 等待主界面状态变为 **已就绪**。
+
+如果服务已安装，可直接使用现有服务继续配置；也可以通过 **选择本地服务文件** 指定已下载的正式版独立服务。
 
 ![UPilot 首次配置界面](Documentation~/images/upilot-first-setup.png)
 
@@ -198,6 +168,7 @@ python -c "import mcp, websockets, yaml, PIL; print('UPilot Python dependencies 
 
 UPilot 会自动处理以下内容：
 
+- 下载、校验并管理独立 MCP Server（首次安装推荐服务时）。
 - 为当前 Unity 项目选择可用的本地端口。
 - 启动 Unity Bridge 和 MCP 服务。
 - 写入所选 Agent 的项目级 MCP 连接。
@@ -472,74 +443,11 @@ UPilot 的规则 managed block 与固定目标下的 `upilot-unity-mcp` Skill �
 
 展开主界面的 **运行详情** 可以查看运行状态、UPM/服务版本、运行方式、发布通道、**MCP 端口**、**Unity Bridge 端口**和 Bridge 连接状态。Unity Bridge 端口仅用于 MCP Server 与 Unity Editor 的内部连接，不能配置为 Agent 的 MCP 地址。
 
-### Skill/规则模板维护
+### 自定义项目规则
 
-#### 随包分发的源文件
+项目自己的业务约束应写在 `AGENTS.md` 等规则文件的 UPilot 管理块之外。UPilot 生成的规则和 Skill 会随包更新同步；本地修改会先备份到 `.upilot/backups/agent-integrations/`，不要直接维护生成文件。
 
-通用 Agent 规则、Skill 和新增 Step 指南均保存在 UPilot 仓库内，不依赖开发者机器上的全局 Skill：
-
-```text
-skills/upilot-unity-mcp/
-|-- AGENTS.md.template             Agent 规则权威源
-|-- SKILL.md.template              Skill 指令权威源
-|-- SKILL.md                       生成的可读 Skill 入口
-|-- template-manifest.json         规则及 Skill 版本
-|-- agents/openai.yaml.template    Skill 元数据权威源
-|-- agents/openai.yaml             生成的元数据
-|-- references/automation-steps.md Step 新增、生命周期、注册与验收指南
-|-- references/installation.md     安装与同步流程
-`-- scripts/                      生成、校验和安装工具
-Documentation~/AgentRules/AGENTS.upilot.md  生成的规则阅读版
-```
-
-UPM/Git 分发保留仓库内整份 `skills/upilot-unity-mcp/`，不是只复制 `SKILL.md`。
-独立 Server EXE 也内嵌该目录的模板、Skill、参考文件和脚本，排除 Unity `.meta`、
-Python 缓存和项目安装标记；这不代表独立 EXE 会自动向项目安装文件。
-项目安装仍以当前 UPM 包的模板为准，通过既有五目标同步流程写入规则和两份 Skill。
-新增 Step 指南纳入 Skill 必需文件检查，缺失时校验失败。
-
-维护只改上述权威源；不把用户目录的安装副本反向覆盖进包，也不复制含本机路径/端口的项目
-`AGENTS.md` 作为默认规则。`ksb-smoke-runner`、关卡/英雄及战场日志规则属于项目业务技能，
-不作为 UPilot 的通用默认分发内容。发布前完成源生成/校验，提交后随正常发布流程交付；
-本地文件修改不等于已发布。
-
-UPilot 的 Agent 规则、Skill 指令和 OpenAI Skill 元数据分别只维护以下源模板：
-
-```text
-skills/upilot-unity-mcp/AGENTS.md.template
-skills/upilot-unity-mcp/SKILL.md.template
-skills/upilot-unity-mcp/agents/openai.yaml.template
-```
-
-三份模板及版本统一由 `skills/upilot-unity-mcp/template-manifest.json` 描述。安装或更新时，UPilot 会渲染工程路径、MCP 地址、健康检查地址、规则版本、Skill 包版本、UPilot 包版本和生成时间等上下文。模板引擎仅支持简单的 `{{token}}`；未知、缺失或残留占位符会直接失败。
-
-模板会部署到这些目标位置：
-
-```text
-AGENTS.md
-CLAUDE.md
-.cursor/rules/upilot-unity-mcp.mdc
-.agents/skills/upilot-unity-mcp/AGENTS.md.template
-.claude/skills/upilot-unity-mcp/AGENTS.md.template
-```
-
-`CLAUDE.md` 默认引用 `@AGENTS.md`；Cursor 规则会在同一模板内容外包一层 Cursor frontmatter；OpenCode 原生复用 `AGENTS.md`。仓库中的 `SKILL.md`、`agents/openai.yaml` 以及 `Documentation~/AgentRules/AGENTS.upilot.md` 是提交到版本库的受管生成产物；安装时再按项目实际端口生成 `.agents/skills` 和 `.claude/skills` 副本，Cursor 与 OpenCode 直接复用 `.agents/skills`。
-
-可使用以下命令检查或重新生成受管产物：
-
-```powershell
-python skills/upilot-unity-mcp/scripts/render_skill_pack.py --check
-python skills/upilot-unity-mcp/scripts/render_skill_pack.py --write
-```
-
-main 分支维护规则：
-
-- 只编辑 `AGENTS.md.template`、`SKILL.md.template` 和 `agents/openai.yaml.template`，不要直接编辑生成的 `SKILL.md`、`agents/openai.yaml` 或 Agent 规则参考产物。
-- Agent 行为发生语义变化时，递增 manifest 中的 `agentRulesVersion`。
-- 任意已安装 Skill 文件或模板发生变化时，递增 manifest 中的 `skillPackVersion`。
-- 纯重构、读取方式变化或文案不影响 Agent 行为时，不需要递增 `agentRulesVersion`。
-- `.upilot-install.json` schema v2 同时记录模板哈希、最终内容哈希和渲染上下文；清洁旧版本直接升级，本地定制、无元数据或无法验证的副本自动备份后权威重建。`--force` 仅为兼容旧调用保留，不再决定是否覆盖 UPilot 自有目标。
-- `main` / source 安装仍按 source 通道运行本机 Python，不使用自动管理 EXE；正式 tag 发布时由 Action 写入 tag 版本。
+需要开发或维护 UPilot 规则模板时，请查看 [Agent/Skill 安装与同步指南](skills/upilot-unity-mcp/references/installation.md)，普通使用无需执行模板生成命令。
 
 ## 高级设置、停止与诊断
 
@@ -551,7 +459,7 @@ UPilot > 高级设置
 
 ![UPilot 高级设置界面](Documentation~/images/upilot-advanced-settings.png)
 
-*高级设置提供运行检查、重启、红色停止按钮、端口、Python 和诊断功能。*
+*高级设置提供运行检查、重启、停止、端口和诊断功能。*
 
 ### 停止 UPilot
 
@@ -565,9 +473,8 @@ UPilot > 高级设置
 - 启动、重启或停止 UPilot。
 - 开启或关闭自动启动。
 - 修改 HTTP 和内部 WS 端口。
-- 检查或修复 Python 启动入口。
 - 查看操作日志、通信日志和完整诊断结果。
-- 在普通停止无效时清理残留的 UPilot Python 进程。
+- 在普通停止无效时，按诊断提示处理残留的 UPilot 服务进程。
 
 结束所有疑似 MCP 服务进程属于故障恢复操作，只应在普通停止无效、端口持续被占用时使用。
 
@@ -588,21 +495,17 @@ UPilot 首次配置或自动修复时会优先寻找空闲端口。多项目同�
 
 ### 更新 Unity 包
 
-使用固定版本 Git URL 时，把 `Packages/manifest.json` 中的版本标签改为目标版本，例如：
+使用固定版本 Git URL 时，把 `Packages/manifest.json` 中的版本标签改为目标正式版本。例如，升级到 `v0.3.44` 时使用：
 
 ```text
-https://github.com/codingriver/upilot.git#<TARGET_RELEASE_TAG>
+https://github.com/codingriver/upilot.git#v0.3.44
 ```
 
 保存后等待 Unity 完成包更新和脚本编译。
 
-### 更新 Python 包
+### 更新独立 MCP Server
 
-源码安装 MCP Server 时，显式选择需要升级到的兼容 Server ref。MCP Server 可以作为独立程序版本化，不要求从 Unity 包版本自动推断：
-
-```powershell
-python -m pip install --upgrade "git+https://github.com/codingriver/upilot.git@<TARGET_SERVER_REF>#subdirectory=upilotserver~"
-```
+按照 UPilot 界面的服务更新提示更新独立 MCP Server，等待下载和校验完成后再启动服务。如果手动选择本地服务文件，请使用与目标发布版本匹配的独立程序。
 
 ### 同步 Agent 配置
 
@@ -624,30 +527,14 @@ python -m pip install --upgrade "git+https://github.com/codingriver/upilot.git@<
 3. 检查 Console 是否有其他 C# 编译错误；项目中任何编译错误都可能阻止 Editor 菜单加载。
 4. 关闭并重新打开 Unity 项目。
 
-### 点击“配置并启动”后一直停留在启动中
+### 安装服务失败，或写入配置后一直停留在启动中
 
-1. 确认 `python --version` 为 3.11 或更高。
-2. 重新执行 Python 依赖安装命令。
-3. 点击 **自动修复**。
-4. 仍未恢复时打开 **高级设置**，检查 Python 入口、HTTP/WS 端口和诊断日志。
+1. 确认安装的是固定发布标签版本，并已完成 **安装推荐服务**。
+2. 下载失败时，检查是否能访问 GitHub、下载目录是否可写，以及安全软件是否拦截独立服务。
+3. 点击 **自动修复**，根据界面显示的错误处理。
+4. 仍未恢复时打开 **高级设置**，检查服务文件路径、HTTP/WS 端口和诊断日志。
 
-### 提示找不到 Python
-
-安装 Python 3.11 或更高版本，并确保 Python 已加入 PATH。重新打开 Unity 后再次启动 UPilot。
-
-Windows 可以执行：
-
-```powershell
-where.exe python
-python --version
-```
-
-macOS 或 Linux 可以执行：
-
-```bash
-which python3
-python3 --version
-```
+如果使用 **选择本地服务文件**，请确认文件存在，并且与当前系统和目标发布版本匹配。
 
 ### Agent 看不到 UPilot 工具
 
@@ -677,37 +564,6 @@ python3 --version
 
 UPilot 会权威同步固定目标下的 Skill 和 Agent managed block，以保证它们与当前 UPM 包版本一致。覆盖前会自动备份本地修改到 `.upilot/backups/agent-integrations/<UTC时间>-<随机ID>/`；备份失败时对应目标不会被修改。项目业务规则应写在 Agent managed block 外，不要直接维护生成的 Skill 文件。
 
-### 统一模板生成与同步
-
-维护顺序固定为：修改 `skills/upilot-unity-mcp/` 的权威模板/资源 → 递增
-`template-manifest.json` 版本 → `scripts/render_skill_pack.py --write` →
-`--check` 和 `scripts/check_skill_pack.py --mode source` → 项目同步 → 两份 installed 校验。
-Agent 行为变化递增 `agentRulesVersion`，任意分发 Skill 文件变化递增 `skillPackVersion`；
-不直接维护生成的 `SKILL.md`、`agents/openai.yaml` 或 Agent 参考文档。
-
-`unity_agent_integrations_check()` 只读检查全部五个目标；
-`unity_agent_integrations_sync(apply=false)` 预览，`apply=true` 使用项目写入授权同步。
-在线模板源是当前 Unity 安装的 UPM 包，不是 Server EXE 内置副本。
-旧 `unity_agent_rules_check/install` 仍只处理项目 `AGENTS.md`。
-
-| 权威源 | 项目目标 | 管理边界 |
-|---|---|---|
-| `AGENTS.md.template` | `AGENTS.md`、`.cursor/rules/upilot-unity-mcp.mdc` | 仅 UPilot 区块，保留外部字节/BOM |
-| 安装器固定引用 | `CLAUDE.md` | 仅 `@AGENTS.md` 受管区块 |
-| `SKILL.md.template`、`agents/openai.yaml.template`、资源 | `.agents/skills/upilot-unity-mcp/` | 全目录，Codex/Cursor/OpenCode 共用 |
-| 同上 | `.claude/skills/upilot-unity-mcp/` | 全目录，Claude 独立 |
-
-离线使用 `scripts/install_upilot.py --integrations-only --unity-project <项目> --upilot-dir <源码> --dry-run --json`，
-移除 `--dry-run` 后执行；不修改依赖、Python 环境或 MCP 配置。
-项目端口取显式参数、项目配置、manifest 默认值的首个有效来源。
-保存模板不代表已同步项目，不新增后台文件监听。当前测试项目仍继承 `../../AGENTS.md`，
-父规则与 `AGENT_Distill.md` 不纳入 UPilot 模板覆盖。
-
-同步使用 C#/Python 共用项目文件锁，暂存和回滚位于 `.upilot`、Skill 发现路径之外。
-受管区块标记损坏、路径越界或锁占用会明确失败；备份失败不覆盖原目标，
-替换/最终验证失败会回滚该目标，其余独立目标继续并汇总结果。
-无内容/上下文差异则不改文件时间戳。历史备份不自动清理。
-
 ### 浏览器访问 /mcp 返回 406
 
 这是正常现象。`/mcp` 只用于 MCP 客户端通信，浏览器检查请访问：
@@ -720,47 +576,43 @@ http://127.0.0.1:8011/health
 
 1. 在 `UPilot > 高级设置` 中点击红色 **停止**，并确认停止。
 2. 在 Unity Package Manager 中选择 **UPilot**，点击 **Remove**。
-3. 如不再使用 Python 服务，可执行：
-
-```powershell
-python -m pip uninstall upilot-mcp
-```
-
-4. 如需彻底清理项目配置，请只删除各配置文件中的 `upilot` MCP 项，不要直接删除包含其他服务的整个配置文件。
-5. 可选清理 UPilot 管理的规则和 Skill：
+3. 如需清理项目连接，只删除各配置文件中的 `upilot` MCP 项，不要删除包含其他服务的整个配置文件。
+4. 可选清理 UPilot 管理的规则和 Skill：
 
 ```text
 .agents/skills/upilot-unity-mcp
+.claude/skills/upilot-unity-mcp
 .cursor/rules/upilot-unity-mcp.mdc
 ```
 
 `AGENTS.md`、`CLAUDE.md` 等文件可能包含项目自己的规则。清理时只移除 `<!-- upilot:start -->` 与 `<!-- upilot:end -->` 之间的 UPilot 管理块。
 
-## Automation 公共支撑 API
+通过 Package Manager 正常卸载时，UPilot 会清理自己写入的 `UPILOT` 编译宏；直接删除包目录或手工删除包引用后，如有残留，需要在 PlayerSettings 中手动移除该宏。独立服务文件可能供多个项目共用，不要在仍有项目使用时删除。
 
-UPilot 提供 Editor-only、业务无关的 Automation API：`AutomationCatalog` / `AutomationSelection`、`UPilotConsoleCaptureApi`、`AutomationLogPolicy`、`AutomationReportWriter` 和顺序 Step 执行器。所有 Automation 类型、方法和脚本名称不带版本后缀；JSON 的 `version/apiVersion` 与历史数据契约保留。
+## 自动化与高级执行
 
-步骤显式使用 `[AutomationStep("id")]` 并实现 `IAutomationStep`，推荐继承 `AutomationStepBase`。七个生命周期方法只接收字符串，统一为 `runId, instanceId, contextJson, arguments`；`GetError` 在最后一个 `arguments` 前增加 `errorCode`。校验、轮询、错误、清理和恢复返回严格校验的 JSON，项目无需引用 Context、Result、Status 或 Error DTO。
+### UPilot Step
 
-UPilot 在程序集加载后维护同一注册快照，持有全量预检、执行状态及持久化；Skill 查询 Catalog、选择固定流程模板与 Case 后提交 `jobSpec.stepPlan`，继续使用 `unity_operation_*`。业务 Step 只实现业务动作与恢复，不再维护另一个执行器。状态查询不推进步骤；域恢复只调用 Restore，不重放 Execute。检查点与共享值通过基类或服务的 `SaveCheckpoint/SaveSharedValue` 在可写生命周期回调中同步持久化，`arguments` 始终原样传递。
+UPilot Step 是默认的业务自动化测试方式。项目提供业务步骤、断言、测试数据和清理逻辑，UPilot 执行器负责完整计划的验证、执行、超时、取消、Finally 清理、日志采集与报告。
 
-域初始化尚未完成时，Step 查询返回 `STEP_SERVICE_INITIALIZING`，Operation 继续只读观察原 run。初始化完成后仍找不到身份才返回 `STEP_RUN_IDENTITY_MISMATCH`；Editor 重启则保留 `STEP_EDITOR_RESTARTED/RecoveryRequired`。查询不会触发 Initialize、Restore 或 Execute，也不会自动解除已有恢复门禁。
+内置步骤支持打开场景、切换运行模式、等待、启动 Console 采集和截图。可以通过 `unity_operation_*` 提交完整计划、查询状态并获取产物；只有执行结束并验证结果，才代表测试完成。
 
-业务附件通过基类或服务的 `RegisterArtifact(runId, instanceId, kind, path)` 在当前可写生命周期回调中登记。文件必须已完成且位于工程内；框架保存身份、大小和 SHA256，收尾再次校验并放入统一 `attachments` 索引。Finally 可在前序清理失败后登记恢复证据，但不能因此消除 `RecoveryRequired`；项目不需要引用报告 DTO。
+- [Step 编写与执行指南](skills/upilot-unity-mcp/references/automation-steps.md)
+- [Automation 公共支撑 API 与集成说明](Documentation~/Automation-Integration-Plan.md)
 
-Console 收尾摘要保留至多10条阻断样本、精确序号/步骤/规则及截断标记，完整分类写入不可变的 `console-policy.json` 哈希产物。状态中的 `domain.logSummary` 不读取文件或推进执行；Policy 失败不覆盖此前业务首错。更新 Server 后须验证公开 Operation 附件收集，不能以磁盘源码或 Bridge 编译通过代替部署验证。
+### 受控执行工具
 
-新报告从同一冻结 summary 导出 `report.txt` 和 `timing.csv`，先写导出文件，再由 `summary.json` 提交整组产物；数据字段 `exportVersion=1`，旧报告不补写。时序区分执行与 Cleanup，未开始项不伪造耗时。Finalizing 域恢复沿用持久报告快照及完成时间，重新校验附件哈希；文件缺失或变化保留首错并要求恢复，不重放步骤或修复冻结文件。业务指标仍是项目附件，报告提交不代表 Operation-owned Capture 已停止。导出与冻结恢复已有规范工程定向证据，当前覆盖和未执行矩阵见集成方案。
+| 工具 | 用途 |
+|---|---|
+| `unity_reflection_call` | 调用一个已加载方法或一条受限表达式 |
+| `csharp_validate` | 只读预检语法、绑定和后端支持，不执行目标代码 |
+| `csharp_eval` | 执行有预算限制的 UPilot C# 子集语句 |
+| `reflection_emit_type` | 从结构化描述创建临时 CLR 类型 |
+| `execution_session` | 管理跨调用变量、对象、类型和 delegate 句柄 |
 
-重开报告以单次读取的原始 summary 字节作为校验基线，兼容历史 UTF-8 BOM，不重写文件。打开后删除、改写或仅增删 BOM 都会阻止发布产物和重复完成；不能通过文本重新编码或忽略 BOM 放宽不可变证据检查。相关回归已在规范工程定向通过。
+除只读验证外，执行可能产生副作用，需要项目写入授权。取消不会回滚已发生的修改，不应自动重试；优先使用专用 Unity 工具，仅在确有需要时使用这些高级入口。
 
-通过既有 `unity_operation_*` 的 `jobSpec.stepPlan` 提交列表，执行前检查完整注册与参数，执行器统一负责轮询、超时、取消、Finally、域恢复和证据收尾。内置`upilot.open_scene/enter_play_mode/enter_edit_mode/wait_seconds/console_capture_start/capture_snapshot`六个业务无关步骤；项目只负责业务Step、断言和恢复，固定组合由Skill维护。项目可选适配使用`#if UNITY_EDITOR && UPILOT`，不新增运行时依赖或平行MCP start/status工具。
-
-计划自有Capture必须第一项且只启动一次，Operation明确`consoleCapture.enabled=false`，禁止双重所有权。启动Step清理不提前停采；全部Finally之后包确认停止及原始文件，再处理最终日志区间、Policy和报告。私有凭据不进入公开状态，未知身份或未确认释放保持RecoveryRequired。其它不含Capture Step的计划仍可借用Operation Capture。
-
-截图Step及基类字符串接口`BeginSnapshotJson/PollSnapshotJson/CancelSnapshotJson/SnapshotErrorJson`共用包内生命周期。默认可信GameView1280x720、3秒等待、2秒取消确认；保存启动意图后再调用Snapshot，域恢复不重放。验真绑定原文件大小/哈希及run目录，即使项目未轮询，执行器也确认资源完成后才推进。业务只决定取证时机和画面能否证明断言。
-
-接口、边界、接入时序和验收证据见 [Automation 公共支撑能力集成方案](Documentation~/Automation-Integration-Plan.md)。
+详细边界见 [受控 C# 执行设计](Documentation~/CSharpEvalAndEmitDesign.md) 和 [执行工具指南](skills/upilot-unity-mcp/references/execution-tools.md)。
 
 ## UPilot Flow
 

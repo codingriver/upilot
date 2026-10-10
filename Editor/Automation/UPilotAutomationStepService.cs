@@ -177,6 +177,33 @@ namespace CodingRiver.UPilot.Automation
                 throw new InvalidOperationException("STEP_RUN_IDENTITY_MISMATCH");
             return state;
         }
+        [Serializable] internal sealed class CurrentSnapshot
+        {
+            public bool initialized, busy;
+            public string error = "";
+            public AutomationStepRun run;
+        }
+        internal static CurrentSnapshot GetCurrentSnapshot()
+        {
+            RequireMainThread();
+            return ObserveCurrent(s_executor);
+        }
+        // Memory only: no Initialize, historical lookup, restore, or executor advancement.
+        internal static CurrentSnapshot ObserveCurrent(AutomationStepExecutor executor) => executor == null
+            ? new CurrentSnapshot { error = "STEP_SERVICE_INITIALIZING" }
+            : new CurrentSnapshot { initialized = true, busy = executor.Busy, run = executor.State };
+
+        internal static StopReply StopCurrentImmediately(string runId, string operationId, string serviceLifecycleId)
+        {
+            RequireMainThread();
+            var run = s_executor?.State;
+            if (run == null || string.IsNullOrEmpty(runId) || run.runId != runId || run.operationId != operationId
+                || run.serviceLifecycleId != serviceLifecycleId || serviceLifecycleId != UPilotServiceLifetime.Id)
+                return new StopReply { status = "not_found" };
+            if (run.terminal)
+                return new StopReply { status = s_executor.ReleasingImmediateStopResources ? "ending" : "not_found" };
+            return new StopReply { changed = s_executor.StopImmediately(), status = "stopped" };
+        }
         public static string StateJson(string runId) => JsonUtility.ToJson(Public(State(runId)));
         [Serializable] internal sealed class StopReply
         {

@@ -1,63 +1,105 @@
-# Per-project Server ports
+# Local port reference registration
 
-The project's `.upilot/config.json` is authoritative for its HTTP and internal
-WebSocket ports. The current OS user's `.upilot/ports.json` is a persistent
-reservation index, coordinated through `.upilot/ports.lock`.
+## Authoritative configuration and availability
 
-- Registered projects reserve both ports even while Unity and Server are stopped.
-- HTTP and WS share one conflict set. New recommendations exclude all other
-  registered projects' ports, pending reservations and actual listener ports.
-- Opening an existing project registers its configuration. Previously unseen
-  projects can also be imported through **UPilot > 端口登记管理**.
-- Copying a project to another absolute path creates a separate local identity.
-  If its copied ports conflict, the user must confirm a new pair.
-- A project's on-disk ports win over its own index entry and over stale in-memory
-  ports when saving unrelated settings. Conflicting projects are never rewritten.
-- Explicit endpoint changes save the pair together and check again under the
-  cross-process lock. An exhausted search is an error, not a fallback to occupied
-  defaults. Automatic repair requires confirmation before changing ports.
+The actual project configuration remains `<project>/.upilot/config.json`.
+Configuration validation, atomic writes, bind probes and observed service listeners
+remain authoritative. Reference registration never reserves a socket, proves
+ownership, rejects a port pair or excludes a recommendation.
 
-## Failure recovery
+Saving unrelated settings preserves the current on-disk port pair. Explicit
+endpoint changes validate both ports; invalid ports, actual unavailability and
+configuration-write failures retain their existing error behavior. Atomic config
+replacement never deletes the destination first; failed candidate files remain
+at the `.tmp-*` paths reported in the error log.
 
-Saving first records both the old and new port pairs, atomically writes the
-project configuration, then finalizes the index. Interrupted operations retain
-both pairs until that project's configuration is successfully reconciled.
-Atomic replacement never deletes the destination first; failed candidate files
-remain at the `.tmp-*` paths reported in the error log.
+## EditorPrefs reference list
 
-Invalid registries, unavailable user directories, lock timeouts, write failures,
-port conflicts and failed release operations block the affected action, record
-`[UPilotPorts]` errors with paths/context, and queue an Editor main-thread dialog.
-Batch-mode runs report errors without interactive dialogs.
+The global current-user EditorPrefs key is `upilot_allocate_ports`. Its string
+value contains one record per line, separated by `\n`:
 
-Reservations do not expire based on time, process exit, unavailable disks or
-missing projects. Manual release requires confirmation, an unchanged index
-snapshot and non-listening ports; the current project's reservation cannot be
-released from its own window. Release removes only the index entry, not the
-project configuration. Opening that project again may then report a conflict.
+```text
+projectPathHash:wsPort:httpPort
+```
 
-## Multiple projects and upgrades
+The project identity reuses the existing project-preference suffix algorithm:
+normalize path separators to `/`, remove trailing separators, lowercase the path,
+and encode the first eight bytes of SHA256 as sixteen lowercase hexadecimal
+characters. Lowercasing is for hashing only, not filesystem access.
 
-Projects retain independent Server processes and project-local logs. Server
-cache installation locks are independent of the short-lived port registry lock;
-downloading or upgrading a shared EXE never holds the port registry lock.
+Successful configuration saving and existing startup checks register the current
+project. Each update reads EditorPrefs again, replaces that project's record,
+removes its duplicate records and preserves other records. An unchanged value is
+not written again. UI redraws, port checks, health queries and heartbeats do not
+register projects.
 
-Process ownership requires both configured ports and the exact project-specific
-`--log-file` path. A legacy or manually launched process lacking that identity is
-not automatically adopted or stopped.
+There are no file locks, background maintenance, automatic retries or expiry.
+Concurrent Unity processes can overwrite each other's read-modify-write updates;
+missing, stale or lost records are accepted because this list is reference data
+only. Read/write/delete exceptions produce warnings, never modal dialogs or
+startup/configuration-save failure. Consecutive identical registration warnings
+are suppressed and kept separate from real configuration errors.
 
-This index coordinates participating UPilot versions under the same OS user.
-Unregistered projects, old clients and other users/programs can still occupy
-ports, so Server startup checks actual availability and reports conflicts.
-Preflight checks do not reserve sockets against unrelated applications.
+## Print and clear
 
-## Validation
+Advanced Settings and the setup wizard provide two buttons:
 
-`UPilotPortRegistryTests` covers offline and cross-protocol reservations,
-concurrent commits, external-process locking, missing/corrupt configuration,
-configuration authority, interrupted writes, native Windows file locks,
-explicit release and main-thread error-dialog deduplication. The process
-ownership regression is `McpProcessMatchingRequiresBothCurrentProjectPorts`.
+- **打印端口登记**: prints the key and its value as one multiline Console message,
+  one record per line; a missing or empty key prints `暂无端口登记`.
+- **清除端口登记**: calls `EditorPrefs.DeleteKey("upilot_allocate_ports")` without
+  a confirmation dialog. It does not change project configuration, configured
+  ports or running services. A later normal save/startup can register again.
+
+The global key is not part of resetting the current project's preferences.
+The former management window, import, per-project release, lock waiting,
+pending-state, timestamp and configuration-hash registry features are removed.
+
+## No migration or compatibility
+
+The implementation neither reads nor writes the old registration files or old
+key. It has no migration, fallback, dual-write or old-format parsing. Old data is
+not automatically deleted and no longer participates in runtime behavior.
+Shared Server installation/cache locks are unrelated and remain unchanged.
+
+## Targeted validation
+
+`UPilotPortRegistryTests` covers isolated EditorPrefs keys, registration updates,
+reference-only failures, print/clear behavior, config authority, real config
+write failures and port allocator regressions. `UPilotSetupRecoveryTests` covers
+actual port availability and setup recovery without reference-data UI side
+effects. Temporary test keys are deleted in teardown; tests do not clear the
+real global registration key. No migration or old-format cases are added.
+
+### EditorPrefs acceptance (2026-10-10)
+
+The canonical `Tests~/UPilotTest` project (Unity `6000.6.0a2`) passed a correlated
+MCP compilation for WriteBatch `wb-90d4f3ad-e274-482a-9a9d-806b77ce17fa`:
+`terminal`, `errorsVerified` and `correlationVerified` are true, with zero errors.
+The one CS0618 warning is in the unchanged `UPilotDiagnosticModuleTamperTests.cs`.
+The first automatic compilation had failed on an unsupported `NonParallelizable`
+attribute in the new fixture; removing only that attribute fixed compatibility,
+without changing assertions or dependencies. Earlier connection-preflight failures
+never submitted a WriteBatch or compilation; their observations remain available.
+
+Run `6dda8a93-37fa-4cdb-8f04-4907818ff21d` passed 58/58 targeted tests
+(`UPilotPortRegistryTests`: 48; `UPilotSetupRecoveryTests`: 10), with zero failures
+or skips, an authoritative terminal result, successful cleanup and no unresolved
+resources. All seven code-input hashes and both deleted paths match the registered
+batch. The new Bridge project-path hash helper was exercised by the compiled
+fixture; this is not a whole-Bridge or Server loaded-source attestation.
+
+Evidence: `Tests~/UPilotTest/Log/P0P1/ports-editorprefs-20261010/` contains the
+original calls and `final-acceptance-verification.json`. Console error searches
+returned zero, but compile logs have a `console_cleared` gap and execution/cleanup
+phase logs are partial; complete Console coverage is not claimed. No full EditMode
+suite, Unity 2022.3 matrix, original-user long-duration observation or manual
+production-key button click was run. Full Server loaded-source identity remains
+unverified. No real registration key was cleared by the tests, no service was
+restarted, and unrelated V06 acceptance matrices remain open.
+
+Previous file-registry evidence below is historical, not EditorPrefs acceptance.
+
+## Historical file-registry evidence (not EditorPrefs acceptance)
 
 ### Recorded evidence (2026-09-10)
 

@@ -330,3 +330,42 @@ def test_initialization_error_does_not_relax_unrelated_status_routes(tmp_path):
         assert (state["startedAt"], state["timeoutSec"]) == original_window
         assert svc.calls == []
     asyncio.run(run())
+
+
+def test_immediate_step_abort_observes_resource_release_without_resubmitting_business(tmp_path):
+    async def run():
+        svc = service(tmp_path)
+        started = await svc.seed_legacy_operation(spec())
+        operation_id = started.data["operationId"]
+        state = svc._operations[operation_id]
+        pending = True
+
+        async def call(request_id, route, payload, **kwargs):
+            assert route == "automation.steps.state"
+            assert payload["operationId"] == operation_id
+            svc.bridge_calls.append((route, payload))
+            return ok(request_id, {
+                "status": "Aborted", "runId": "step-run", "operationId": operation_id,
+                "phase": "ResourceReleasing" if pending else "Completed",
+                "error": "STEP_STOPPED_IMMEDIATELY", "failureSignature": "STEP_STOPPED_IMMEDIATELY",
+                "terminal": True, "businessTerminal": True, "cleanupPending": pending,
+            })
+
+        svc.dispatcher.call = call
+        observed = await svc.operation_status(operation_id)
+        assert observed.ok and not observed.data["terminal"]
+        assert observed.data["cleanupPending"]
+        assert observed.data["status"] != "succeeded"
+        pending = False
+        ended = await svc.operation_status(operation_id)
+        assert ended.ok and ended.data["terminal"]
+        assert not ended.data["cleanupPending"]
+        assert ended.data["status"] == "Canceled"
+        assert ended.data["failureSignature"] == "STEP_STOPPED_IMMEDIATELY"
+        count = len(svc.bridge_calls)
+        retained = await svc.operation_status(operation_id)
+        assert retained.ok and retained.data["terminal"]
+        assert len(svc.bridge_calls) == count
+        assert state["startAttemptCount"] == 1 and state["cancelAttemptCount"] == 0
+        assert svc.calls == []
+    asyncio.run(run())

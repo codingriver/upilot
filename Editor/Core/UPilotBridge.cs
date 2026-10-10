@@ -159,18 +159,20 @@ namespace CodingRiver.UPilot
                     return _projectPathHashSuffix;
 
                 var root = Path.GetDirectoryName(Application.dataPath) ?? Application.dataPath;
-                var normalized = root.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
-                using (var sha = SHA256.Create())
-                {
-                    var digest = sha.ComputeHash(Encoding.UTF8.GetBytes(normalized));
-                    var sb = new StringBuilder(16);
-                    for (var i = 0; i < 8; i++)
-                        sb.Append(digest[i].ToString("x2"));
-                    _projectPathHashSuffix = sb.ToString();
-                }
+                _projectPathHashSuffix = ComputeProjectPathHash(root);
 
                 return _projectPathHashSuffix;
             }
+        }
+
+        internal static string ComputeProjectPathHash(string root)
+        {
+            var normalized = root.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
+            using var sha = SHA256.Create();
+            var digest = sha.ComputeHash(Encoding.UTF8.GetBytes(normalized));
+            var sb = new StringBuilder(16);
+            for (var i = 0; i < 8; i++) sb.Append(digest[i].ToString("x2"));
+            return sb.ToString();
         }
 
         private static string WsHostPrefsKey => $"upilot.WsHost.{ProjectPathHashSuffix}";

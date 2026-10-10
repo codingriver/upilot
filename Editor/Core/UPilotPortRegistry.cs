@@ -1,66 +1,36 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Security.Cryptography;
 using System.Text;
-using System.Threading;
+using UnityEditor;
 using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
-    [Serializable]
-    internal sealed class UPilotPortReservation
-    {
-        public string projectPath;
-        public int wsPort;
-        public int httpPort;
-        public int[] pendingPorts;
-        public string configSha256;
-        public string syncedAtUtc;
-    }
-
-    [Serializable]
-    internal sealed class UPilotPortRegistryData
-    {
-        public int schemaVersion;
-        public List<UPilotPortReservation> projects;
-    }
-
-    // A busy registry is not evidence of a bad port configuration or a listener conflict.
-    internal sealed class UPilotPortRegistryBusyException : IOException
-    {
-        internal UPilotPortRegistryBusyException(string path, IOException cause)
-            : base($"端口登记暂时繁忙：{path}。尚未完成登记校验，不代表端口冲突；请稍后重试。", cause) { }
-    }
-
-    // The project config is authoritative; this index never rewrites another project.
+    // Reference data only: actual project config and bind probes remain authoritative.
     internal sealed class UPilotPortRegistry
     {
-        internal readonly string RegistryPath;
-        internal string LockPath => Path.Combine(Path.GetDirectoryName(RegistryPath), "ports.lock");
+        internal const string PrefsKey = "upilot_allocate_ports";
+        private readonly string _prefsKey;
         private readonly Func<int, bool> _available;
-        private readonly int _lockTimeoutMs;
         private readonly Action<string, string> _write;
+        private readonly Func<string, string> _readRegistration;
+        private readonly Action<string, string> _writeRegistration;
 
-        internal UPilotPortRegistry(string directory, Func<int, bool> available = null, int lockTimeoutMs = 1000,
-            Action<string, string> write = null)
+        // Alternate key and delegates are small test seams; production always uses PrefsKey.
+        internal UPilotPortRegistry(string prefsKey = PrefsKey, Func<int, bool> available = null,
+            Action<string, string> write = null, Func<string, string> readRegistration = null,
+            Action<string, string> writeRegistration = null)
         {
-            if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathRooted(directory))
-                throw new IOException("无法取得用户端口登记目录，拒绝回退到临时目录。");
-            RegistryPath = Path.Combine(Path.GetFullPath(directory), "ports.json");
+            if (string.IsNullOrWhiteSpace(prefsKey)) throw new ArgumentException("登记 key 不能为空。", nameof(prefsKey));
+            _prefsKey = prefsKey;
             _available = available ?? UPilotPortAllocator.IsPortAvailable;
-            _lockTimeoutMs = lockTimeoutMs;
             _write = write ?? AtomicWrite;
+            _readRegistration = readRegistration ?? (key => EditorPrefs.GetString(key, ""));
+            _writeRegistration = writeRegistration ?? EditorPrefs.SetString;
         }
 
-        internal static UPilotPortRegistry ForUser(int lockTimeoutMs = 0)
-        {
-            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            if (string.IsNullOrWhiteSpace(profile))
-                throw new IOException("无法取得当前系统用户目录。");
-            return new UPilotPortRegistry(Path.Combine(profile, ".upilot"), lockTimeoutMs: lockTimeoutMs);
-        }
+        internal static UPilotPortRegistry ForUser() => new UPilotPortRegistry();
 
         internal static string NormalizeProject(string path)
         {
@@ -90,52 +60,6 @@ namespace CodingRiver.UPilot
             return config;
         }
 
-        private FileStream AcquireLock()
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(RegistryPath));
-            var timer = System.Diagnostics.Stopwatch.StartNew();
-            while (true)
-            {
-                try { return new FileStream(LockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-                catch (IOException ex) when (IsLockContention(ex))
-                {
-                    if (timer.ElapsedMilliseconds >= _lockTimeoutMs)
-                        throw new UPilotPortRegistryBusyException(LockPath, ex);
-                    Thread.Sleep(25);
-                }
-                catch (IOException ex)
-                {
-                    // Storage/path errors cannot be repaired by waiting for another lock owner.
-                    throw new IOException($"打开端口登记锁失败：{LockPath}；错误码=0x{ex.HResult:X8}。", ex);
-                }
-            }
-        }
-
-        internal static bool IsLockContention(IOException ex)
-        {
-            var code = ex.HResult & 0xffff;
-            return code == 32 || code == 33; // Sharing violation / lock violation (also mapped by Mono).
-        }
-
-        private UPilotPortRegistryData Read()
-        {
-            if (!File.Exists(RegistryPath))
-                return new UPilotPortRegistryData { schemaVersion = 1, projects = new List<UPilotPortReservation>() };
-            var data = JsonUtility.FromJson<UPilotPortRegistryData>(File.ReadAllText(RegistryPath));
-            if (data == null || data.schemaVersion != 1 || data.projects == null)
-                throw new InvalidDataException($"端口登记表损坏或版本不受支持，原文件已保留：{RegistryPath}");
-            var paths = new HashSet<string>();
-            foreach (var entry in data.projects)
-            {
-                if (entry == null || !paths.Add(NormalizeProject(entry.projectPath)))
-                    throw new InvalidDataException($"端口登记项为空或工程重复：{RegistryPath}");
-                ValidatePorts(entry.wsPort, entry.httpPort);
-                if (entry.pendingPorts == null || entry.pendingPorts.Any(p => p < 1 || p > 65535))
-                    throw new InvalidDataException($"无效的待提交预留：{entry.projectPath}");
-            }
-            return data;
-        }
-
         internal static void AtomicWrite(string path, string text)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -156,45 +80,6 @@ namespace CodingRiver.UPilot
             {
                 throw new IOException($"原子写入失败：source={temporary}, target={path}；临时文件已保留。", ex);
             }
-        }
-
-        private void Write(UPilotPortRegistryData data) => _write(RegistryPath, JsonUtility.ToJson(data, true));
-
-        private static HashSet<int> ReservedPorts(UPilotPortReservation entry)
-        {
-            var ports = new HashSet<int>(entry.pendingPorts) { entry.wsPort, entry.httpPort };
-            try
-            {
-                var config = ReadConfig(entry.projectPath).mcp;
-                ports.Add(config.wsPort);
-                ports.Add(config.httpPort);
-            }
-            catch (Exception ex) when (ex is IOException || ex is InvalidDataException ||
-                                       ex is UnauthorizedAccessException || ex is ArgumentException)
-            {
-                // An offline disk, deleted project or unreadable config never expires its reservation.
-            }
-            return ports;
-        }
-
-        private static string Conflict(UPilotPortRegistryData data, string project, int ws, int http)
-        {
-            foreach (var entry in data.projects)
-            {
-                if (NormalizeProject(entry.projectPath) == project) continue;
-                var ports = ReservedPorts(entry);
-                if (ports.Contains(ws) || ports.Contains(http))
-                    return $"参考登记中存在相同端口（不代表实际监听或占用）：{entry.projectPath}\n" +
-                           $"参考重复端口：{string.Join(", ", new[] { ws, http }.Where(ports.Contains))}";
-            }
-            return "";
-        }
-
-        internal string Check(string project, int ws, int http)
-        {
-            ValidatePorts(ws, http);
-            using var guard = AcquireLock();
-            return Conflict(Read(), NormalizeProject(project), ws, http);
         }
 
         internal (int wsPort, int httpPort) Recommend(string project, int ws, int http, int attempts) =>
@@ -233,69 +118,66 @@ namespace CodingRiver.UPilot
             var config = ValidateConfig(project, requested, requireAvailable, preserveExistingPorts, _available);
             var ports = config.mcp;
             var configPath = ConfigPath(project);
-            // The reference registry must never prevent the authoritative config write.
             if (requested != null) _write(configPath, JsonUtility.ToJson(config, true));
             var verified = ReadConfig(project).mcp;
             if (verified.wsPort != ports.wsPort || verified.httpPort != ports.httpPort)
                 throw new IOException($"工程端口在保存期间发生变化：{configPath}");
             try
             {
-                using var guard = AcquireLock();
-                var data = Read();
-                var conflict = Conflict(data, project, ports.wsPort, ports.httpPort);
-                if (conflict.Length > 0)
-                    UPilotPortRegistration.Report("参考端口登记", new IOException(conflict));
-                var entry = data.projects.Find(e => NormalizeProject(e.projectPath) == project);
-                if (entry == null)
-                {
-                    entry = new UPilotPortReservation { projectPath = project };
-                    data.projects.Add(entry);
-                }
-                entry.wsPort = ports.wsPort;
-                entry.httpPort = ports.httpPort;
-                entry.pendingPorts = Array.Empty<int>();
-                entry.configSha256 = Hash(File.ReadAllText(configPath));
-                entry.syncedAtUtc = DateTime.UtcNow.ToString("O");
-                Write(data);
+                var before = _readRegistration(_prefsKey);
+                var after = UpdateEntries(before, UPilotBridge.ComputeProjectPathHash(project), ports.wsPort, ports.httpPort);
+                if (before != after) _writeRegistration(_prefsKey, after);
+                UPilotPortRegistration.LastWarning = "";
             }
-            catch (Exception ex)
+            catch (Exception ex) { UPilotPortRegistration.Report("同步参考端口登记", ex); }
+        }
+
+        internal static string UpdateEntries(string value, string projectHash, int ws, int http)
+        {
+            ValidatePorts(ws, http);
+            var prefix = projectHash + ":";
+            var replacement = prefix + ws + ":" + http;
+            var entries = new List<string>();
+            var replaced = false;
+            foreach (var entry in value.Split('\n'))
             {
-                UPilotPortRegistration.Report("同步参考端口登记", ex);
+                if (entry.Length == 0) continue;
+                if (entry.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    if (!replaced) entries.Add(replacement);
+                    replaced = true;
+                }
+                else entries.Add(entry);
             }
+            if (!replaced) entries.Add(replacement);
+            return string.Join("\n", entries);
         }
 
-        internal List<UPilotPortReservation> Snapshot()
+        internal void Print()
         {
-            using var guard = AcquireLock();
-            return Read().projects;
+            try
+            {
+                var value = _readRegistration(_prefsKey);
+                Debug.Log($"[UPilotPorts] {_prefsKey}\n" + (value.Length == 0 ? "暂无端口登记" : value));
+            }
+            catch (Exception ex) { UPilotPortRegistration.Report("打印参考端口登记", ex); }
         }
 
-        internal static string Hash(string value)
+        internal void Clear()
         {
-            using var sha = SHA256.Create();
-            return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(value))).Replace("-", "").ToLowerInvariant();
-        }
-
-        internal void Release(UPilotPortReservation expected, string currentProject)
-        {
-            using var guard = AcquireLock();
-            var data = Read();
-            var path = NormalizeProject(expected.projectPath);
-            if (path == NormalizeProject(currentProject))
-                throw new IOException("不能释放当前工程的预留。请在其他工程中确认释放。");
-            var entry = data.projects.Find(e => NormalizeProject(e.projectPath) == path);
-            if (entry == null || JsonUtility.ToJson(entry) != JsonUtility.ToJson(expected))
-                throw new IOException("登记项已变化，请刷新后重新确认。");
-            if (ReservedPorts(entry).Any(p => !_available(p)))
-                throw new IOException($"工程预留端口仍被监听，拒绝释放：{entry.projectPath}");
-            data.projects.Remove(entry);
-            Write(data);
+            try
+            {
+                EditorPrefs.DeleteKey(_prefsKey);
+                Debug.Log($"[UPilotPorts] 已清除参考端口登记：{_prefsKey}；工程配置和运行中的服务不变。");
+            }
+            catch (Exception ex) { UPilotPortRegistration.Report("清除参考端口登记", ex); }
         }
     }
 
     internal static class UPilotPortRegistration
     {
         internal static string LastError { get; set; } = "";
+        internal static string LastWarning { get; set; } = "";
 
         internal static void OnEndpointsConfirmed() => LastError = "";
 
@@ -321,10 +203,10 @@ namespace CodingRiver.UPilot
 
         internal static void Report(string operation, Exception ex)
         {
-            if (LastError == ex.Message) return;
-            LastError = ex.Message;
+            if (LastWarning == ex.Message) return;
+            LastWarning = ex.Message;
             Debug.LogWarning($"[UPilotPorts] operation={operation}; project={UPilotProjectConfig.ProjectRoot}; " +
-                             $"registry=.upilot/ports.json; error={ex}\n" +
+                             $"registry={UPilotPortRegistry.PrefsKey}; error={ex}\n" +
                              "端口登记数据仅供参考；登记读写失败不影响工程配置保存或实际端口校验。");
         }
     }

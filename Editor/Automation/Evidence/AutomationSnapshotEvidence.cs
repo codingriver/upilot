@@ -218,6 +218,40 @@ namespace CodingRiver.UPilot.Automation
             }
             return Result(record);
         }
+        /// <summary>Framework-only release. This never calls a Step's Cancel, Poll or Cleanup.</summary>
+        internal bool StopAndObserveRelease(AutomationSnapshotRecord record,
+            Func<string, SnapshotApiResultV1> status = null, Func<string, SnapshotApiResultV1> cancel = null)
+        {
+            if (string.IsNullOrEmpty(record.snapshotId)) throw new InvalidDataException("STEP_SNAPSHOT_IDENTITY_INVALID");
+            status ??= UPilotSnapshotApiV1.Status;
+            cancel ??= UPilotSnapshotApiV1.Cancel;
+            var observed = status(record.snapshotId);
+            if (!observed.ok) throw new InvalidDataException(observed.errorCode ?? "STEP_SNAPSHOT_OBSERVATION_FAILED");
+            ValidateReleaseIdentity(record, observed.job);
+            if (observed.job.terminal)
+            {
+                AcceptReleased(record, observed.job);
+                if (record.status == "Running")
+                {
+                    record.status = "Failed";
+                    record.errorCode = "STEP_SNAPSHOT_CANCELED";
+                    record.message = "Interrupted by immediate stop; resource release verified.";
+                }
+                _save();
+                return true;
+            }
+            record.unresolved = true;
+            if (!record.cancelIntent)
+            {
+                record.cancelIntent = true;
+                record.cancelRequestedAt = _clock();
+                _save(); // Durable intent precedes the one native cancellation attempt.
+                try { cancel(record.snapshotId); }
+                catch { /* An uncertain response is observed on later ticks, never replayed. */ }
+            }
+            return false;
+        }
+
         // Recovery is observation-only: never Start/Cancel, including after cancellation grace expires.
         internal bool ObserveRelease(AutomationSnapshotRecord record)
         {
@@ -226,7 +260,7 @@ namespace CodingRiver.UPilot.Automation
             if (!observed.ok) throw new InvalidDataException("STEP_SNAPSHOT_OBSERVATION_FAILED");
             return AcceptReleased(record, observed.job);
         }
-        internal bool AcceptReleased(AutomationSnapshotRecord record, SnapshotJobPayload job)
+        private void ValidateReleaseIdentity(AutomationSnapshotRecord record, SnapshotJobPayload job)
         {
             string expectedKey = RequestKey(_run.runId, record.instanceId, record.evidenceKey);
             string directory = Path.GetFullPath(Path.Combine(_run.reportDirectory, "snapshots", expectedKey.Substring("step:".Length)));
@@ -235,6 +269,10 @@ namespace CodingRiver.UPilot.Automation
                 || string.IsNullOrEmpty(job.outputDirectory) || !string.Equals(Path.GetFullPath(job.outputDirectory),
                     directory, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("STEP_SNAPSHOT_IDENTITY_INVALID");
+        }
+        internal bool AcceptReleased(AutomationSnapshotRecord record, SnapshotJobPayload job)
+        {
+            ValidateReleaseIdentity(record, job);
             if (!job.terminal) return false;
             VerifyFiles(job, artifacts => { foreach (var artifact in artifacts) AddArtifact(record, artifact); });
             // Preserve the original business/evidence failure even when the underlying request is now finished.

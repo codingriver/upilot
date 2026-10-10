@@ -1531,8 +1531,14 @@ namespace CodingRiver.UPilot
                     EditorGUILayout.LabelField("桥接器运行中，连接地址暂不可修改。", EditorStyles.miniLabel);
                 if (!string.IsNullOrEmpty(UPilotPortRegistration.LastError))
                     EditorGUILayout.HelpBox(UPilotPortRegistration.LastError, MessageType.Warning);
-                if (GUILayout.Button("端口登记管理", GUILayout.Height(22)))
-                    UPilotPortRegistryWindow.Open();
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("打印端口登记", GUILayout.Height(22)))
+                        UPilotPortRegistry.ForUser().Print();
+                    if (GUILayout.Button("清除端口登记", GUILayout.Height(22)))
+                        UPilotPortRegistry.ForUser().Clear();
+                }
+                EditorGUILayout.LabelField("端口登记仅供参考；清除不修改工程端口，不影响运行中的服务。", EditorStyles.miniLabel);
             }
         }
 
