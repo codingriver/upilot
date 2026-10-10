@@ -122,13 +122,13 @@ async def unity_operation_get(commandId: str):
     r = await _get_facade().operation_get(command_id=commandId)
     return _log_tool_result("unity_operation_get", _payload(r))
 
-@mcp.tool(description="通用 Operation／Step 计划的新启动已暂停。保留兼容入口并返回 GENERIC_ORCHESTRATION_DISABLED；请使用专用工具，不创建任务或 Capture。")
+@mcp.tool(description="通过 UPilot 正式入口启动已验证的完整 jobSpec.stepPlan 一次；保留权限、项目身份、Capture 所有权和清理检查。旧通用回调及 Task 包装仍禁用。")
 async def unity_operation_start(jobSpec: dict):
     _log_tool_call("unity_operation_start", {"jobSpec": jobSpec})
     r = await _get_facade().operation_start(job_spec=jobSpec)
     return _log_tool_result("unity_operation_start", _payload(r))
 
-@mcp.tool(description="通用编排验证已暂停，返回 GENERIC_ORCHESTRATION_DISABLED；不会调用项目验证回调，不再建议启动新的 Operation。")
+@mcp.tool(description="只读预检完整 jobSpec.stepPlan，调用 Unity Step 参数验证并检查预算及 Capture 所有权；不创建 Run、Capture 或执行业务 Step。旧通用回调仍禁用。")
 async def unity_operation_validate(jobSpec: dict, inspectReflection: bool = True):
     _log_tool_call("unity_operation_validate", {"jobSpec": jobSpec, "inspectReflection": inspectReflection})
     r = await _get_facade().operation_validate(job_spec=jobSpec, inspect_reflection=inspectReflection)

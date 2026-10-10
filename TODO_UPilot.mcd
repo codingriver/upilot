@@ -277,3 +277,12 @@
 - 观察与工具：提交 `a451dcd77e034197a28055df1b88be2c702222b1` 的 `check_release_quality.py` 返回 `passed=false`：411 项通过、2 项失败。`test_operation_invalid_reflection_json_requires_recovery` 观察到实际状态 `aborted` 而断言期望 `RecoveryRequired`；`test_operation_cancel_is_idempotent_after_acceptance` 的第二次取消响应缺少 `cancelAttemptCount`。质量产物位于 `artifacts/reliability-quality/quality.json` 与 `contracts.log`。本次未检查实现，根因未确认。
 - 期望改进：按既有终态与幂等取消契约核实并修复两项行为，保留契约断言；在同一 source-quality 门中验证相关直接回归后再评估发布。
 - 可验收标准：上述两项定向契约检查通过，原有状态/取消安全约束未弱化，source-quality 对目标提交给出通过结果；不得仅通过放宽断言或跳过检查消除失败。
+
+## UP-20261009-AgentOrchestrationAdmissionPolicy：正式 Step 最小准入修复
+
+- 问题：已发布 v0.3.43 将完整 stepPlan 与手写回调一并暂停，返回“通用编排新启动已暂停”/`GENERIC_ORCHESTRATION_DISABLED`；同步规则不能部署 Server/Bridge 修复。沿用开发工作树已有本 ID，不另建重复事项。
+- 修复：只开放完整 `jobSpec.stepPlan` 和现有 C# ValidateJson/StartJson，共用校验及单执行器；保留权限、预算、Capture 所有权、固定期限、单次启动、Finally/报告。手写回调及 Task 包装仍禁用。
+- 补丁审计：2026-10-09 临时补丁以 v0.3.43 为基线，Step 核心方向正确；本次只纳入相关实现。两项 recovery 测试改按原有 aborted 终态契约，保留不重放、不续期、不实际调用 Capture 断言；Eval 文档按本候选实际旧 auto 实现区分新旧 Bridge，不引入 Eval 运行时代码。
+- 模板：权威 Agent/Skill 源版本 56/65，受控输出由源生成，不手改安装产物。
+- 状态：候选已实现，定向 Python/Unity/正式入口/五目标同步验收待完成；正式发布及外部项目升级未执行。标准项目仅 D:/upilot/Tests~/UPilotTest。
+- 证据：Tests~/UPilotTest/Log/StepAdmission/20261010/。原 2026-10-09 记录是历史证据，不替代本候选验收。

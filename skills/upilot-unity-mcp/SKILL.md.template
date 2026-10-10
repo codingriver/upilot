@@ -1,6 +1,6 @@
 ---
 name: upilot-unity-mcp
-description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, historical Automation Step diagnosis and suspended-orchestration boundaries, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
+description: Inspect, diagnose, automate, and modify Unity Editor projects through the UPilot MCP server. Use for Unity connection checks, compile and Console diagnostics, optional UPilot Tracer diagnostics, scenes, assets, tests, builds, authorized Automation Step workflows and runtime capability boundaries, execution sessions, reflection calls, bounded C# evaluation, Reflection.Emit types, long-running Unity task monitoring, and UPilot Agent/Skill template maintenance and project synchronization.
 ---
 
 <!-- Generated from SKILL.md.template. Do not edit SKILL.md directly. -->
@@ -54,7 +54,7 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - Use read-only `csharp_validate` to preflight generated code or an explicit backend without executing target code. Use `csharp_eval` for a bounded expression or multi-statement C# subset program. `interpret` is the complete V2 interpreter, `emit` is the compatible AST-entry cache, and `compiled` is the finite synchronous direct backend with no fallback. Use `reflection_emit_type` only when an actual temporary CLR type/interface implementation is required; its bodies may opt into `bodyBackend=compiled`. Open `execution_session` before any result must survive the call, and always close it. Execution tools are write-gated, non-idempotent, and never automatically retried; `csharp_validate` is read-only and idempotent. Read `references/execution-tools.md` for schemas, examples, limits, and recovery.
 - For Unity Editor operations, prefer an available UPilot semantic tool. Fall back to local scripts, menu execution, reflection evaluation, or UI automation only after targeted capability discovery confirms the dedicated tool is unavailable or an actual call fails. Report the fallback reason.
 - Do not repeatedly fetch the full tool list. Use `unity_tools_find` for targeted discovery.
-- Check `resourceDiagnostics` even on successful Eval/Emit/validation responses; on failure read `error.detail.resourceDiagnostics`. Eviction or post-success warmup warnings never require replay. Fixed caches hold 256 emit keys and 128 compiled keys; Domain type generation allows 256 attempts, including failures after reservation. Capacity refusals are errors, not silent eviction of CLR types. Session close/reconnect does not restore type quota; do not reload automatically. Inspect `resourceDiagnosticsDroppedCount` and read `execution.resources` through capabilities for live totals.
+- Check `resourceDiagnostics` even on successful Eval/Emit/validation responses; on failure read `error.detail.resourceDiagnostics`. This Bridge revision interprets cold `auto` keys, then warms/reuses Emit; `EVAL_CACHE_WARMUP_FAILED` is a post-success cache warning. Newer Bridges may prepare Emit before effects and report `EVAL_BACKEND_FALLBACK` for preparation fallback. Inspect deployed behavior, actual backend and result/error instead of assuming the newer implementation. Explicit `emit`/`compiled` stay strict. Never replay for eviction, fallback or warmup warnings, and never switch backend after execution starts. Fixed caches hold 256 emit keys and 128 compiled keys; Domain type generation allows 256 attempts, including failures after reservation. Capacity refusals are errors, not silent eviction of CLR types. Session close/reconnect does not restore type quota; do not reload automatically. Inspect `resourceDiagnosticsDroppedCount` and read `execution.resources` through capabilities for live totals.
 
 ## Writes And Validation
 
@@ -74,19 +74,20 @@ For acceptance after Server/Bridge/protocol changes, suspected deployment mismat
 - `unity_compile` already forces one incremental script-compilation request (`AssetDatabase.Refresh` + `RequestScriptCompilation`); it is not a Clean Build and cannot bypass a disconnected Bridge, PlayMode, an active compile, or stale Editor state. Prefer the correlated write-batch workflow after code changes.
 - Starting a test, build, or async task is not success; poll to a terminal state.
 - For PlayMode tests, keep the returned `runGuid` and query `unity_test_results(runGuid=...)`; UPilot persists the run across Domain Reload and MCP reconnects.
-- New generic Operation/Step admission and public validation are suspended with `GENERIC_ORCHESTRATION_DISABLED`. Use dedicated tools; do not submit handwritten callbacks or `stepPlan`, including built-ins.
+- Select the testing framework using the policy below. For Step work, load `references/automation-steps.md` before authoring or execution; use official validation/start and retain the original run identity.
 - Historical Operations end once within their fixed execution/cleanup budget. A tool wait-window boundary is not a new task deadline. Never replay Start/Cancel or extend deadlines; restart never restores old observers.
 - For long tasks, report phase changes, errors, or suspected-stuck state rather than every poll.
 - Use `detailLevel=summary` and a bounded `maxTailChars` for routine `unity_operation_status/wait`; use `standard` or `full` only for targeted diagnosis.
 - Retry automatically only when the operation is idempotent and non-destructive.
 
-## Dedicated Workflows And Historical Steps
+## Authorized Automation And Dedicated Workflows
 
-- Use `unity_test_run`, `unity_upilot_acceptance_run`, the compile/write-batch workflow, `unity_build_start`, `unity_console_capture_start` or `unity_snapshot_capture` for their respective jobs; observe their original identities and authoritative cleanup.
-- Generic `unity_operation_start/validate` are retained compatibility endpoints that reject new work before validation, records, Capture or business dispatch. Unity public Step start/validation also reject. This fixed pause is not controlled by Flow or a user switch.
-- Task wrappers, reflection/eval, temporary scripts and internal executors must not be used to repackage or bypass the suspended workflow. Ordinary unrelated single calls remain available.
-- Existing same-lifetime Operations/Steps keep status, artifacts and bounded stop. Recovery, release and abandon are not lifecycle stages; service reset never restores old activity.
-- Read `references/automation-steps.md` only for historical contracts or explicitly scoped internal maintenance. No new plan composition, production Step launch, recovery-framework expansion or production testing bypass is authorized by that reference. Use isolated engine fixtures for direct regressions.
+- UPilot Step is the default testing framework, not mandatory for every business test. Preserve an explicitly established test approach; when unspecified, default to Step. Business needs may justify a non-Step approach with a brief reason, without an extra framework-choice approval requirement. Genuine non-Step tests (including NUnit/Unity Test Framework/pytest and isolated framework unit tests) use their own tools; multiple operations alone do not make a test a Step test.
+- Before authoring, modifying, validating or running Step tests, load `references/automation-steps.md`. This applies to the main Agent and any participating auxiliary Agent; it does not require spawning a sub-agent or creating another rules file.
+- Once a test uses Step cases/plans and their lifecycle, follow the UPilot Step workflow: complete plan -> official validation -> official start once -> observe the original identity -> executor-owned Finally/cleanup/report -> authoritative result. Skills are callers and plan composers, not executors. UPilot MCP `unity_operation_validate/start`, the existing official C# `UPilotAutomationStepService.ValidateJson/StartJson` APIs and existing integrations using that same executor are allowed, subject to each entry's authorization/readiness checks. Prefer semantic MCP tools for Agent-driven Editor work; C# integration is not permission to bypass a blocked MCP route.
+- Implement cases, assertions, data, business helpers and business cleanup, not a replacement Step framework. Never call Step `Execute` methods individually or rebuild Step sequencing, timeouts, cancellation, Finally or reporting in a custom runner, script, wrapper or another test framework. Renaming/wrapping a Step workflow does not make it non-Step. Thin adapters to official APIs are allowed; isolated framework unit tests may exercise internals without becoming business Step launchers.
+- Verify the exact project, applicable authorization, fresh readiness and required capabilities before execution. Unavailable admission, denied permission or failed preflight blocks that Step run; do not fall back to manually running Steps. A genuine switch to non-Step testing must state the changed approach and coverage and cannot be reported as Step acceptance. New Operations require a complete `jobSpec.stepPlan`; handwritten start/status/cancel callbacks and Task-wrapped launches remain unsupported. Runtime `GENERIC_ORCHESTRATION_DISABLED` on an older deployment is a blocker, not permission to bypass it.
+- Use dedicated tools for genuine non-Step tests and standalone compile/build/Capture jobs; do not turn them into alternative Step executors. Preserve approved business order, original run identity, fixed deadlines, Capture ownership and cleanup evidence. Existing same-lifetime status/artifacts/bounded stop remain available; service reset never restores old activity. Examples alone do not authorize a run.
 
 ## Persistent Console Capture
 
@@ -174,7 +175,7 @@ For execution-tool selection and typed values, read `references/execution-tools.
 
 - Installation: read `references/installation.md`.
 - Common flows: read `references/workflows.md`.
-- Historical Step lifecycle, internal maintenance, optional-package isolation and evidence ownership: read `references/automation-steps.md`.
+- Authorized Step authoring/lifecycle, runtime capability boundaries, optional-package isolation and evidence ownership: read `references/automation-steps.md`.
 - Tool choice: read `references/tool-routing.md` and `references/tool-boundaries.md`.
 - Client transport/config: read `references/client-configs.md`.
 - Recovery and destructive work: read `references/safety.md`.
