@@ -296,8 +296,16 @@ namespace CodingRiver.UPilot
                     $"已等待 {mcpStatus.EditorObservationWaitingDurationMs / 1000} 秒；Server HTTP、Bridge 心跳与 Editor 响应分别观测；未执行自动重启。",
                     bridgeStatus.IsStarted, mcpStatus.IsRunning);
             if (disposition == UPilotHealthDisposition.Unconfirmed)
-                return new UPilotMainSnapshot(UPilotMainState.CheckingStatus, "Unity 响应状态暂无法确认",
-                    "正在等待新的身份、主线程与网络证据；未执行自动重启。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            {
+                var confirmingIdentity = mcpStatus.IsRunning &&
+                    (mcpStatus.DiagnosisPending || mcpStatus.ProcessOwnership == McpProcessOwnership.Unknown);
+                return new UPilotMainSnapshot(UPilotMainState.CheckingStatus,
+                    confirmingIdentity ? "正在确认服务" : "Unity 响应状态暂无法确认",
+                    confirmingIdentity
+                        ? "端口已启动，正在确认 MCP 服务身份；未执行自动重启。"
+                        : "正在等待新的身份、主线程与网络证据；未执行自动重启。",
+                    bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            }
 
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&

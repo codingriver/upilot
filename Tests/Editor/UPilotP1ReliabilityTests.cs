@@ -181,6 +181,229 @@ namespace CodingRiver.UPilot.Tests
                 new TestRunResultPayload { runGuid = snapshot.runGuid, snapshotSequence = saved.snapshotSequence + 1 }, true, false));
         }
 
+        private static TestRunResultPayload NewAdmission(string lifecycle = null)
+        {
+            string identity = "admission-" + Guid.NewGuid().ToString("N");
+            return new TestRunResultPayload
+            {
+                runGuid = identity, runAdmissionId = identity,
+                serviceLifecycleId = lifecycle ?? Guid.NewGuid().ToString("N"),
+                status = "started", phase = "admitted", isRunning = true,
+                startedAt = 100, cleanupAttemptDeadlineAt = 200, outcomeStatus = "pending",
+            };
+        }
+
+        [Test]
+        public void PreviousLifetimeRetiresOnlyActiveIndexAndPreservesHistory()
+        {
+            var previous = new TestRunResultPayload
+            {
+                runGuid = "previous-lifetime", serviceLifecycleId = Guid.NewGuid().ToString("N"),
+                status = "stopping", isRunning = true, cleanupAttemptDeadlineAt = 200,
+                resultAuthoritative = false, cleanupSucceeded = false,
+            };
+            UPilotTestRunStore.Save(_directory, previous, true, false);
+            string path = Path.Combine(_directory, previous.runGuid + ".json");
+            byte[] history = File.ReadAllBytes(path);
+            byte[] last = File.ReadAllBytes(Path.Combine(_directory, "last-run.txt"));
+
+            UPilotTestRunStore.RetirePreviousLifetime(_directory, Guid.NewGuid().ToString("N"));
+
+            Assert.That(File.Exists(Path.Combine(_directory, "active-run.txt")), Is.False);
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(history));
+            Assert.That(File.ReadAllBytes(Path.Combine(_directory, "last-run.txt")), Is.EqualTo(last));
+            Assert.That(UPilotTestRunStore.Read(path).cleanupAttemptDeadlineAt, Is.EqualTo(200));
+            Assert.That(UPilotTestRunStore.Read(path).cleanupSucceeded, Is.False);
+            var next = NewAdmission();
+            UPilotTestRunStore.Admit(_directory, next);
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(next.runGuid));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(history));
+        }
+
+        [Test]
+        public void CurrentLifetimeOwnerSurvivesReloadAndRejectsAnotherAdmission()
+        {
+            var owner = NewAdmission();
+            UPilotTestRunStore.Admit(_directory, owner);
+            byte[] history = File.ReadAllBytes(Path.Combine(_directory, owner.runGuid + ".json"));
+            UPilotTestRunStore.RetirePreviousLifetime(_directory, owner.serviceLifecycleId);
+            var next = NewAdmission(owner.serviceLifecycleId);
+
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Admit(_directory, next));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(owner.runGuid));
+            Assert.That(File.ReadAllBytes(Path.Combine(_directory, owner.runGuid + ".json")), Is.EqualTo(history));
+            Assert.That(File.Exists(Path.Combine(_directory, next.runGuid + ".json")), Is.False);
+        }
+
+        [TestCase("missing-snapshot")]
+        [TestCase("malformed-snapshot")]
+        [TestCase("wrong-run")]
+        [TestCase("missing-lifetime")]
+        [TestCase("invalid-lifetime")]
+        [TestCase("unsafe-pointer")]
+        public void UnknownActiveOwnershipFailsClosedBeforeAdmission(string failure)
+        {
+            var previous = new TestRunResultPayload
+            {
+                runGuid = "unconfirmed-owner", serviceLifecycleId = Guid.NewGuid().ToString("N"), status = "running",
+            };
+            if (failure == "missing-lifetime") previous.serviceLifecycleId = null;
+            if (failure == "invalid-lifetime") previous.serviceLifecycleId = "not-a-service-lifetime";
+            UPilotTestRunStore.Save(_directory, previous, true, false);
+            string path = Path.Combine(_directory, previous.runGuid + ".json");
+            string pointer = Path.Combine(_directory, "active-run.txt");
+            if (failure == "missing-snapshot") File.Delete(path);
+            if (failure == "malformed-snapshot") File.WriteAllText(path, "{ malformed");
+            if (failure == "wrong-run") File.WriteAllText(path, "{\"runGuid\":\"another-owner\"}");
+            if (failure == "unsafe-pointer") File.WriteAllText(pointer, "../another-project");
+            byte[] pointerBefore = File.ReadAllBytes(pointer);
+            byte[] historyBefore = File.Exists(path) ? File.ReadAllBytes(path) : null;
+            var next = NewAdmission();
+
+            Assert.Throws<IOException>(() => UPilotTestRunStore.RetirePreviousLifetime(_directory, next.serviceLifecycleId));
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Admit(_directory, next));
+            Assert.That(File.ReadAllBytes(pointer), Is.EqualTo(pointerBefore));
+            if (historyBefore != null) Assert.That(File.ReadAllBytes(path), Is.EqualTo(historyBefore));
+            Assert.That(File.Exists(Path.Combine(_directory, next.runGuid + ".json")), Is.False);
+        }
+
+        [TestCase("snapshot")]
+        [TestCase("last-run.txt")]
+        [TestCase("active-run.txt")]
+        public void AdmissionWriteFailureNeverCrossesRunnerStartBoundary(string failure)
+        {
+            var admission = NewAdmission();
+            bool runnerStarted = false;
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = path =>
+            {
+                if (Path.GetFileName(path) == (failure == "snapshot" ? admission.runGuid + ".json" : failure))
+                    throw new IOException("injected admission " + failure);
+            };
+            Assert.Throws<IOException>(() =>
+            {
+                UPilotTestRunStore.Admit(_directory, admission);
+                runnerStarted = true;
+            });
+            Assert.That(runnerStarted, Is.False);
+            Assert.That(File.Exists(Path.Combine(_directory, "active-run.txt")), Is.False);
+            Assert.That(Directory.GetFiles(_directory, "*.tmp"), Is.Empty);
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = null;
+            var next = NewAdmission(admission.serviceLifecycleId);
+            Assert.DoesNotThrow(() => UPilotTestRunStore.Admit(_directory, next));
+        }
+
+        [Test]
+        public void DurableAdmissionHandsOffToOfficialGuidAndLateAdmissionCannotTakeOwnership()
+        {
+            var admission = NewAdmission();
+            UPilotTestRunStore.Admit(_directory, admission);
+            var saved = UPilotTestRunStore.Read(Path.Combine(_directory, admission.runGuid + ".json"));
+            Assert.That(saved.runAdmissionId, Is.EqualTo(admission.runGuid));
+            Assert.That(saved.runnerStartAttempted, Is.False);
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(admission.runGuid));
+            var official = saved.ShallowCopyForPersistence();
+            official.runGuid = Guid.NewGuid().ToString();
+            official.runnerStartAttempted = true;
+            official.status = "running";
+            UPilotTestRunStore.Save(_directory, official, true, false);
+
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(official.runGuid));
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, admission, true, false));
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, admission, false, true));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(official.runGuid));
+            official.endedAt = 300;
+            official.terminal = true;
+            UPilotTestRunStore.Save(_directory, official, false, true);
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, admission, true, false));
+            Assert.That(File.Exists(Path.Combine(_directory, "active-run.txt")), Is.False);
+        }
+
+        [TestCase("active-pointer")]
+        [TestCase("active-clear")]
+        public void InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(string failure)
+        {
+            var admission = NewAdmission();
+            UPilotTestRunStore.Admit(_directory, admission);
+            var official = admission.ShallowCopyForPersistence();
+            official.runGuid = Guid.NewGuid().ToString();
+            official.status = "completed"; official.phase = "completed";
+            official.endedAt = 300; official.terminal = true;
+            official.cleanupSucceeded = true; official.cleanupResourcesReleased = true;
+            official.resultAuthoritative = true; official.outcomeStatus = "completed";
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = path =>
+            {
+                if (failure == "active-pointer" && Path.GetFileName(path) == "active-run.txt")
+                    throw new IOException("injected GUID handoff");
+            };
+            UPilotTestRunStore.BeforeActivePointerClearForTests = _ =>
+            {
+                if (failure == "active-clear") throw new IOException("injected admission clear");
+            };
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, official,
+                active: failure == "active-pointer", clearActive: failure == "active-clear"));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(admission.runGuid));
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Admit(_directory, NewAdmission(admission.serviceLifecycleId)));
+            var incomplete = UPilotTestRunStore.Read(Path.Combine(_directory, official.runGuid + ".json"));
+            Assert.That(incomplete.terminal, Is.False);
+            Assert.That(incomplete.cleanupSucceeded, Is.False);
+            Assert.That(incomplete.cleanupStatus, Is.EqualTo("committing"));
+            UPilotTestRunStore.BeforeAtomicReplaceForTests = null;
+            UPilotTestRunStore.BeforeActivePointerClearForTests = null;
+            UPilotTestRunStore.Save(_directory, official, false, true);
+            Assert.That(File.Exists(Path.Combine(_directory, "active-run.txt")), Is.False);
+            Assert.That(UPilotTestRunStore.Read(Path.Combine(_directory, official.runGuid + ".json")).cleanupSucceeded, Is.True);
+        }
+
+        [Test]
+        public void AdmissionHandoffRejectsAnotherServiceLifetime()
+        {
+            var admission = NewAdmission();
+            UPilotTestRunStore.Admit(_directory, admission);
+            var foreign = admission.ShallowCopyForPersistence();
+            foreign.runGuid = Guid.NewGuid().ToString();
+            foreign.serviceLifecycleId = Guid.NewGuid().ToString("N");
+            Assert.Throws<IOException>(() => UPilotTestRunStore.Save(_directory, foreign, true, false));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(admission.runGuid));
+            Assert.That(File.Exists(Path.Combine(_directory, foreign.runGuid + ".json")), Is.False);
+        }
+
+        [Test]
+        public void RetirementNeverDeletesAChangedOwner()
+        {
+            var previous = NewAdmission();
+            UPilotTestRunStore.Admit(_directory, previous);
+            byte[] history = File.ReadAllBytes(Path.Combine(_directory, previous.runGuid + ".json"));
+            UPilotTestRunStore.BeforeActivePointerClearForTests = path => File.WriteAllText(path, "replacement-owner");
+            Assert.Throws<IOException>(() => UPilotTestRunStore.RetirePreviousLifetime(_directory, Guid.NewGuid().ToString("N")));
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo("replacement-owner"));
+            Assert.That(File.ReadAllBytes(Path.Combine(_directory, previous.runGuid + ".json")), Is.EqualTo(history));
+        }
+
+        [Test]
+        public void ConcurrentAdmissionsHaveOneOwnerAndSeparateProjectDirectoriesAreIsolated()
+        {
+            string lifecycle = Guid.NewGuid().ToString("N");
+            int admitted = 0;
+            Parallel.For(0, 8, _ =>
+            {
+                try
+                {
+                    UPilotTestRunStore.Admit(_directory, NewAdmission(lifecycle));
+                    System.Threading.Interlocked.Increment(ref admitted);
+                }
+                catch (IOException) { }
+            });
+            Assert.That(admitted, Is.EqualTo(1));
+            string owner = File.ReadAllText(Path.Combine(_directory, "active-run.txt"));
+            Assert.That(UPilotTestRunStore.Read(Path.Combine(_directory, owner + ".json")).serviceLifecycleId,
+                Is.EqualTo(lifecycle));
+            var otherProject = NewAdmission(lifecycle);
+            string otherDirectory = Path.Combine(_directory, "project-b");
+            UPilotTestRunStore.Admit(otherDirectory, otherProject);
+            Assert.That(File.ReadAllText(Path.Combine(_directory, "active-run.txt")), Is.EqualTo(owner));
+            Assert.That(File.ReadAllText(Path.Combine(otherDirectory, "active-run.txt")), Is.EqualTo(otherProject.runGuid));
+        }
+
         public class ValidCancel { public static bool CancelTestRun(string guid) => true; }
         public class WrongCancel { public static void CancelTestRun(string guid) {} }
         [Test]

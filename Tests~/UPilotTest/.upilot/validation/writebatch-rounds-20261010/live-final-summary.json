@@ -1,0 +1,67 @@
+{
+  "observedAt": "2026-10-10T23:37:30.505287+08:00",
+  "project": "D:\\upilot\\Tests~\\UPilotTest",
+  "passed": true,
+  "liveReportSha256": "7f7ebdbf103cdc9fca43de71dcedaacc57dc95798baec5421bd86b78411f26c0",
+  "scenarios": {
+    "unfocusedActiveCompile": {
+      "passed": true,
+      "checks": {
+        "verifiedTerminal": true,
+        "activeMcpRequest": true,
+        "neverFocusedInObservedSamples": true,
+        "foregroundUnchangedInObservedSamples": true,
+        "originalOwner": true
+      }
+    },
+    "registrationDuringCompile": {
+      "passed": true,
+      "checks": {
+        "differentBatchIds": true,
+        "savedAndRegisteredDuringActualCompiler": true,
+        "bResponseStillObservedACompiling": true,
+        "fixedFirstRoundExcludesB": true,
+        "nextRoundOwnsB": true,
+        "differentRealCompileOperations": true,
+        "differentRealRequestIds": true,
+        "bothVerifiedTerminals": true,
+        "nextRoundRequestedAfterASettled": true,
+        "samePathDifferentDiagnosticHashesAccepted": true,
+        "aTerminalStableAfterB": true
+      }
+    }
+  },
+  "loadedSourceEvidenceScope": "eight relevant selected entry code objects equivalent to tested source; not whole Server globals/dependencies",
+  "sourceCompatibility": "All delivered implementation/test/Skill hashes unchanged. Generated documentation differs only in upilotPackageVersion 0.3.45 -> 0.3.46; exact normalized hash verified.",
+  "priorTargetedPythonRegression": {
+    "passed": 355,
+    "warnings": 2,
+    "newWriteBatchTests": 39,
+    "evidence": "targeted-server-final.xml",
+    "rerunInThisContinuation": false
+  },
+  "agentIntegrations": {
+    "agentRulesVersion": 57,
+    "skillPackVersion": 66,
+    "targetsCurrent": [
+      "AGENTS.md",
+      ".cursor/rules/upilot-unity-mcp.mdc",
+      "CLAUDE.md",
+      ".agents/skills/upilot-unity-mcp",
+      ".claude/skills/upilot-unity-mcp"
+    ],
+    "bothInstalledValidatorsPassed": true,
+    "repeatStatus": "current"
+  },
+  "cleanup": {
+    "probeAndMetaRemoved": true,
+    "ownDeletionCompileVerified": true,
+    "compileErrors": 0,
+    "compileWarnings": 0,
+    "newConsoleErrors": 0,
+    "queueComplete": true,
+    "queueItems": [],
+    "ready": true
+  },
+  "coverageLimit": "Only two approved live scenarios. No full EditMode suite, service/Unity restart, unrelated edits, release or test cancellation."
+}

@@ -165,6 +165,8 @@ namespace CodingRiver.UPilot
         public string phase;
         public string testMode;
         public string runGuid;
+        public string runAdmissionId; // Durable ownership before UTF supplies runGuid.
+        public bool runnerStartAttempted;
         public string originatingRequestId;
         public string originatingCommandId;
         public string operationId;
@@ -314,11 +316,14 @@ namespace CodingRiver.UPilot
         internal Action<MethodInfo, Type, object> CallbackUnregisterInvokerForTests;
         internal Action<UnityEngine.Object> ApiDestroyerForTests;
         internal Action<TestRunResultPayload, bool, bool> SnapshotSaverForTests;
+        internal string PersistenceDirectoryForTests;
+        private string _recoveryStorageError;
+        private string RunPersistenceDirectory => PersistenceDirectoryForTests ?? PersistenceDirectory;
 
         private static string PersistenceDirectory => Path.GetFullPath(
             Path.Combine(Application.dataPath, "..", "Library", "UPilot", "TestRuns"));
-        private static string ActiveRunPointerPath => Path.Combine(PersistenceDirectory, "active-run.txt");
-        private static string LastRunPointerPath => Path.Combine(PersistenceDirectory, "last-run.txt");
+        private string ActiveRunPointerPath => Path.Combine(RunPersistenceDirectory, "active-run.txt");
+        private string LastRunPointerPath => Path.Combine(RunPersistenceDirectory, "last-run.txt");
 
         [InitializeOnLoadMethod]
         private static void BootstrapPersistedRunRecovery()
@@ -498,10 +503,8 @@ namespace CodingRiver.UPilot
                     if (!RunSelectionMatches(selection, p.expectedSelectionDomain, p.expectedSelectionSnapshotId))
                         throw new TestSelectionStaleException(
                             "The selection changed before TestRunnerApi.Execute; TestRunnerApi.Execute was not called.", selection);
-                    ResetRunTracking();
-                    _isRunning = true;
                     long startedAt = NowMs();
-                    _lastResults = new TestRunResultPayload
+                    var admission = new TestRunResultPayload
                     {
                         serviceLifecycleId = UPilotServiceLifetime.Id,
                         testMode = mode,
@@ -527,9 +530,7 @@ namespace CodingRiver.UPilot
                         matchedCount = selection?.matchedCount ?? 0,
                         selectors = selection?.selectors ?? new List<TestSelectorMatchPayload>(),
                     };
-                    _activeRunGuid = null;
-                    _pendingTerminalStatus = null;
-                    PersistSnapshot();
+                    AdmitRun(admission);
 
                     // Use TestRunner API via reflection since it's in a separate assembly
                     // UnityEditor.TestTools.TestRunner.Api.TestRunnerApi
@@ -645,6 +646,11 @@ namespace CodingRiver.UPilot
                     if (string.Equals(_lastResults.testMode, "PlayMode", StringComparison.OrdinalIgnoreCase))
                         UPilotPlayModeTransitions.RegisterIntent("testFramework", "play",
                             _lastResults.originatingRequestId, id, _lastResults.operationId, "unity_test_run");
+                    _lastResults.runnerStartAttempted = true;
+                    _lastResults.phase = "starting";
+                    // Strict pre-start commit: recovery must know an interruption may have
+                    // scheduled a runner whose official GUID has not yet been committed.
+                    SaveSnapshot(_lastResults, active: true, clearActive: false);
                     object executeResult = executeMethod.Invoke(api, new[] { execSettings });
                     _activeRunGuid = Convert.ToString(executeResult);
                     _lastResults.runGuid = _activeRunGuid;
@@ -663,6 +669,12 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
+                    if (ex is TestRunAdmissionException)
+                    {
+                        // No API/callback/runner exists; the previous result is unchanged.
+                        tcs.SetException(ex);
+                        return;
+                    }
                     if (ex is TestRunPreflightException)
                     {
                         _pendingTerminalStatus = null;
@@ -700,6 +712,16 @@ namespace CodingRiver.UPilot
                 var root = ex is TargetInvocationException invocation && invocation.InnerException != null
                     ? invocation.InnerException
                     : ex;
+                if (root is TestRunAdmissionException admissionError)
+                {
+                    await _bridge.SendErrorAsync(id, "TEST_RUN_ADMISSION_FAILED", admissionError.Message, token, "test.run",
+                        new ErrorDetailPayload
+                        {
+                            stage = "persistence_admission", runnerStartAttempted = false,
+                            nextAction = "Inspect the active TestRuns owner and persistence diagnostics before requesting a new run.",
+                        });
+                    return;
+                }
                 if (root is TestRunPreflightException preflight)
                 {
                     await SendDirtyScenePreflightErrorAsync(id, preflight, token);
@@ -712,6 +734,32 @@ namespace CodingRiver.UPilot
                 }
                 await _bridge.SendErrorAsync(id, "TEST_RUN_FAILED", root.Message, token, "test.run");
             }
+        }
+
+        internal sealed class TestRunAdmissionException : IOException
+        {
+            internal TestRunAdmissionException(Exception cause)
+                : base("TestRuns durable admission failed; TestRunnerApi.Execute was not called. " + cause.Message, cause) { }
+        }
+
+        internal void AdmitRun(TestRunResultPayload candidate)
+        {
+            if (_isRunning) throw new InvalidOperationException("A test run is already in progress.");
+            candidate.runAdmissionId = "admission-" + Guid.NewGuid().ToString("N");
+            candidate.runGuid = candidate.runAdmissionId;
+            candidate.phase = "admitted";
+            try
+            {
+                if (candidate.serviceLifecycleId != UPilotServiceLifetime.Id)
+                    throw new IOException("The TestRuns admission does not belong to the current service lifetime.");
+                UPilotTestRunStore.Admit(RunPersistenceDirectory, candidate);
+            }
+            catch (Exception ex) { throw new TestRunAdmissionException(ex); }
+            // Publish in-memory ownership only after the durable reservation succeeds.
+            ResetRunTracking();
+            _recoveryStorageError = null;
+            _lastResults = candidate;
+            _isRunning = true;
         }
 
         private async Task SendSelectionStaleErrorAsync(
@@ -1009,7 +1057,14 @@ namespace CodingRiver.UPilot
         private TestRunResultPayload SnapshotStatus()
         {
             if (_lastResults == null)
-                return new TestRunResultPayload { status = "none", testMode = "", isRunning = false };
+                return new TestRunResultPayload
+                {
+                    status = string.IsNullOrEmpty(_recoveryStorageError) ? "none" : "unconfirmed",
+                    phase = string.IsNullOrEmpty(_recoveryStorageError) ? "" : "persistence_admission",
+                    testMode = "", isRunning = false, persistenceError = _recoveryStorageError ?? "",
+                    nextAction = string.IsNullOrEmpty(_recoveryStorageError) ? ""
+                        : "Inspect the active TestRuns owner; its identity is not verified and no runner was restored.",
+                };
 
             _lastResults.isRunning = _isRunning;
             _lastResults.runGuid = _activeRunGuid ?? _lastResults.runGuid;
@@ -2531,6 +2586,12 @@ namespace CodingRiver.UPilot
 
         private void RecoverPersistedState()
         {
+            try { UPilotTestRunStore.RetirePreviousLifetime(RunPersistenceDirectory, UPilotServiceLifetime.Id); }
+            catch (Exception ex)
+            {
+                _recoveryStorageError = ex.GetType().Name + ": " + ex.Message;
+                return; // An unreadable/unknown owner is not an empty TestRuns store.
+            }
             string runGuid = ReadPointer(ActiveRunPointerPath);
             bool active = !string.IsNullOrWhiteSpace(runGuid);
             if (!active)
@@ -2538,7 +2599,8 @@ namespace CodingRiver.UPilot
             if (string.IsNullOrWhiteSpace(runGuid))
                 return;
 
-            _lastResults = LoadPersistedSnapshot(runGuid);
+            _lastResults = PersistenceDirectoryForTests == null ? LoadPersistedSnapshot(runGuid)
+                : UPilotTestRunStore.Read(Path.Combine(RunPersistenceDirectory, runGuid + ".json"));
             RecoverLoadedRun(active);
         }
 
@@ -2547,6 +2609,18 @@ namespace CodingRiver.UPilot
             if (_lastResults == null || _lastResults.serviceLifecycleId != UPilotServiceLifetime.Id)
             { _lastResults = null; return; }
 
+            if (active && !_lastResults.terminal && !string.IsNullOrEmpty(_lastResults.runAdmissionId)
+                && _lastResults.runGuid == _lastResults.runAdmissionId)
+            {
+                // Never reattach/cancel with a provisional ID, replay Execute or renew a deadline.
+                _isRunning = false;
+                _activeRunGuid = null;
+                _cleanupOwnershipUnknown = true;
+                _lastResults.outcomeStatus = "unknown";
+                RequireCleanupRecovery("TestRuns admission was interrupted before the UTF run GUID was committed; "
+                    + "no runner was restored or replayed. Underlying Unity execution may still be running.");
+                return;
+            }
             _isRunning = active && !_lastResults.terminal;
             _activeRunGuid = _isRunning ? _lastResults.runGuid : null;
             _lastResults.isRunning = _isRunning;
@@ -2768,7 +2842,7 @@ namespace CodingRiver.UPilot
         {
             var saver = SnapshotSaverForTests;
             if (saver != null) saver(snapshot, active, clearActive);
-            else UPilotTestRunStore.Save(PersistenceDirectory, snapshot, active, clearActive);
+            else UPilotTestRunStore.Save(RunPersistenceDirectory, snapshot, active, clearActive);
         }
 
         private void PersistSnapshot(bool clearActivePointer = false)

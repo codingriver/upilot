@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using UnityEngine.TestTools;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -280,25 +282,52 @@ namespace CodingRiver.UPilot.Tests
         {
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
             {
-                await Task.Delay(2200, token);
+                await Task.Delay(2200, token).ConfigureAwait(false);
                 return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{}") };
             }
         }
 
-        [Test]
-        public async Task ReadOnlyProbeAllowsMoreThanTwoSecondsButKeepsOriginalDeadline()
+        [UnityTest]
+        public IEnumerator ReadOnlyProbeAllowsMoreThanTwoSecondsButKeepsOriginalDeadline()
         {
             using var configured = UPilotMcpServerManager.CreateReadOnlyProbeClient();
             Assert.That(configured.Timeout.TotalMilliseconds, Is.EqualTo(7000));
             using var client = new HttpClient(new DelayedHandler()) { Timeout = configured.Timeout };
-            using var response = await UPilotMcpServerManager.SendBoundedStatusAsync(client,
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var successful = UPilotMcpServerManager.SendBoundedStatusAsync(client,
                 "http://127.0.0.1:1/health?probe=bridge", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 7000, default, 7000);
+            // Yield the Editor thread: NUnit's synchronous async assertion must not
+            // block a continuation captured on Unity's synchronization context.
+            while (!successful.IsCompleted && elapsed.ElapsedMilliseconds < 9000) yield return null;
+            Assert.That(successful.IsCompleted, Is.True, "The bounded probe did not complete.");
+            using var response = successful.GetAwaiter().GetResult();
             Assert.That(response.IsSuccessStatusCode, Is.True);
-            Assert.ThrowsAsync<TimeoutException>(async () =>
-            {
-                using var expired = await UPilotMcpServerManager.SendBoundedStatusAsync(client,
-                    "http://127.0.0.1:1/health?probe=bridge", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 50, default, 7000);
-            });
+            Assert.That(elapsed.ElapsedMilliseconds, Is.GreaterThanOrEqualTo(2000));
+            Assert.That(elapsed.ElapsedMilliseconds, Is.LessThan(7000));
+
+            elapsed.Restart();
+            var expired = UPilotMcpServerManager.SendBoundedStatusAsync(client,
+                "http://127.0.0.1:1/health?probe=bridge", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 50, default, 7000);
+            while (!expired.IsCompleted && elapsed.ElapsedMilliseconds < 3000) yield return null;
+            Assert.That(expired.IsCompleted, Is.True, "The original maintenance deadline was not enforced.");
+            Assert.That(expired.IsFaulted, Is.True);
+            Assert.That(expired.Exception.InnerException, Is.TypeOf<TimeoutException>());
+            Assert.That(elapsed.ElapsedMilliseconds, Is.LessThan(2000), "The 7-second probe budget must not renew the deadline.");
+        }
+
+        [UnityTest]
+        public IEnumerator ReadOnlyProbePreservesCallerCancellation()
+        {
+            using var client = new HttpClient(new DelayedHandler()) { Timeout = TimeSpan.FromSeconds(7) };
+            using var cancellation = new CancellationTokenSource();
+            cancellation.CancelAfter(50);
+            var probe = UPilotMcpServerManager.SendBoundedStatusAsync(client,
+                "http://127.0.0.1:1/health?probe=bridge", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 7000,
+                cancellation.Token, 7000);
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            while (!probe.IsCompleted && elapsed.ElapsedMilliseconds < 3000) yield return null;
+            Assert.That(probe.IsCompleted, Is.True);
+            Assert.That(probe.IsCanceled, Is.True, "Caller cancellation must not be reported as a health timeout.");
         }
     }
 }

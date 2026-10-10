@@ -53,25 +53,59 @@ namespace CodingRiver.UPilot.Automation
         }
         private static AutomationStepExecutor s_executor;
         private static AutomationStepRegistry s_registry;
+        private static string s_storePath = Path.Combine(Application.dataPath, "../Library/UPilot/step-run.json");
+        private static string s_initializationError = "";
         [ThreadStatic] private static CallbackScope s_callback;
         private static readonly int MainThreadId = Thread.CurrentThread.ManagedThreadId;
         private readonly UPilotBridge _bridge;
-        static UPilotAutomationStepService() { EditorApplication.delayCall += Initialize; }
+        static UPilotAutomationStepService()
+        {
+            // Service hooks belong to the Domain, not to replaceable executor instances.
+            EditorApplication.update += Update;
+            AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
+            EditorApplication.delayCall += Initialize;
+        }
         private static void Initialize()
         {
-            if (s_executor != null) return;
             RequireMainThread();
-            s_executor = new AutomationStepExecutor(Registry, Path.Combine(Application.dataPath, "../Library/UPilot/step-run.json"));
-            s_executor.RestoreStored();
-            EditorApplication.update += Update;
-            AssemblyReloadEvents.beforeAssemblyReload += () => s_executor?.Dispose();
+            if (s_executor == null) CreateExecutor(true);
+        }
+        private static void CreateExecutor(bool restoreStored)
+        {
+            AutomationStepExecutor executor = null;
+            try
+            {
+                executor = new AutomationStepExecutor(Registry, s_storePath);
+                if (restoreStored) executor.RestoreStored();
+                // Publish only a fully initialized executor.
+                s_executor = executor;
+                s_initializationError = "";
+            }
+            catch (Exception ex)
+            {
+                s_initializationError = "STEP_SERVICE_INITIALIZATION_FAILED: " + ex.Message;
+                try { executor?.Dispose(); }
+                catch (Exception disposeError) { s_initializationError += "; " + disposeError.Message; }
+                throw;
+            }
         }
         internal static void ResetActive()
         {
-            s_executor?.Finish("Aborted", "SERVICE_HARD_STOP", "UPilot service lifetime ended.");
-            s_executor?.Dispose();
+            RequireMainThread();
+            var previous = s_executor;
             s_executor = null;
+            var errors = new System.Collections.Generic.List<Exception>();
+            try { previous?.Finish("Aborted", "SERVICE_HARD_STOP", "UPilot service lifetime ended."); }
+            catch (Exception ex) { errors.Add(ex); }
+            try { previous?.Dispose(); }
+            catch (Exception ex) { errors.Add(ex); }
+            // Hard reset creates an empty executor; stored work belongs to the old lifetime.
+            // Old finalization failures are diagnostic, not a prerequisite for rebuilding.
+            try { CreateExecutor(false); }
+            catch (Exception ex) { errors.Add(ex); }
+            if (errors.Count > 0) throw new AggregateException("STEP_EXECUTOR_RESET_FAILED", errors);
         }
+        private static void BeforeAssemblyReload() => s_executor?.Dispose();
         private static void Update() => s_executor?.Tick();
         private static AutomationStepRegistry Registry
         {
@@ -186,7 +220,10 @@ namespace CodingRiver.UPilot.Automation
         internal static CurrentSnapshot GetCurrentSnapshot()
         {
             RequireMainThread();
-            return ObserveCurrent(s_executor);
+            var snapshot = ObserveCurrent(s_executor);
+            if (!snapshot.initialized && !string.IsNullOrEmpty(s_initializationError))
+                snapshot.error = s_initializationError;
+            return snapshot;
         }
         // Memory only: no Initialize, historical lookup, restore, or executor advancement.
         internal static CurrentSnapshot ObserveCurrent(AutomationStepExecutor executor) => executor == null

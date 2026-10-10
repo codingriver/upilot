@@ -196,7 +196,8 @@ def test_health_bridge_probe_requires_real_roundtrip_and_matching_session(monkey
         def __init__(self, config):
             self.app = config.app
 
-        async def serve(self):
+        async def serve(self, *, sockets):
+            assert sockets  # prebound listeners are now passed to Uvicorn
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
                                          base_url="http://127.0.0.1") as client:
                 basic = (await client.get("/health")).json()
@@ -222,6 +223,6 @@ def test_health_bridge_probe_requires_real_roundtrip_and_matching_session(monkey
 
     monkeypatch.setattr(http_server, "Server", CapturedServer)
     async def run():
-        await http_server._run_http_server("127.0.0.1", 8011, asyncio.create_task(asyncio.sleep(0)))
+        await http_server._run_http_server("127.0.0.1", 0, asyncio.create_task(asyncio.sleep(0)))
 
     asyncio.run(run())

@@ -15,9 +15,126 @@ namespace CodingRiver.UPilot
 
         internal static void Save(string directory, TestRunResultPayload snapshot, bool active, bool clearActive)
         {
-            if (string.IsNullOrWhiteSpace(snapshot?.runGuid) || snapshot.runGuid.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
-                || snapshot.runGuid == "." || snapshot.runGuid == "..")
+            ValidateRunGuid(snapshot?.runGuid);
+            WithLock(directory, () => SaveLocked(directory, snapshot, active, clearActive));
+        }
+
+        // UTF supplies its run GUID only after Execute schedules the job. Persist ownership
+        // first, before constructing an API or registering callbacks; never launch on IO failure.
+        internal static void Admit(string directory, TestRunResultPayload admission)
+        {
+            ValidateRunGuid(admission?.runGuid);
+            ValidateLifecycle(admission.serviceLifecycleId);
+            if (!IsAdmission(admission) || !admission.runGuid.StartsWith("admission-", StringComparison.Ordinal)
+                || !Guid.TryParseExact(admission.runGuid.Substring("admission-".Length), "N", out _))
+                throw new ArgumentException("A distinct TestRuns admission identity is required.");
+            WithLock(directory, () =>
+            {
+                RetirePreviousLifetimeLocked(directory, admission.serviceLifecycleId);
+                if (File.Exists(Path.Combine(directory, "active-run.txt")))
+                    throw new IOException("A TestRuns owner in the current service lifetime already exists; runner start refused.");
+                SaveLocked(directory, admission, true, false, admitting: true);
+            });
+        }
+
+        internal static void RetirePreviousLifetime(string directory, string lifecycle)
+        {
+            ValidateLifecycle(lifecycle);
+            WithLock(directory, () => RetirePreviousLifetimeLocked(directory, lifecycle));
+        }
+
+        private static void RetirePreviousLifetimeLocked(string directory, string lifecycle)
+        {
+            string activePath = Path.Combine(directory, "active-run.txt");
+            if (!File.Exists(activePath)) return;
+            string owner = File.ReadAllText(activePath).Trim();
+            TestRunResultPayload previous;
+            try
+            {
+                ValidateRunGuid(owner);
+                previous = Read(Path.Combine(directory, owner + ".json"));
+                if (previous == null || previous.runGuid != owner)
+                    throw new IOException("The active pointer has no matching TestRuns snapshot.");
+                ValidateLifecycle(previous.serviceLifecycleId);
+            }
+            catch (Exception ex)
+            {
+                throw new IOException("Active TestRuns ownership is unconfirmed; runner start refused.", ex);
+            }
+            if (previous.serviceLifecycleId == lifecycle) return;
+            // Retire only the activity index. Results, cleanup evidence and deadlines stay
+            // byte-for-byte history; no previous-lifetime work is restored or replayed.
+            ClearOwnedPointer(activePath, owner);
+        }
+
+        private static void SaveLocked(string directory, TestRunResultPayload snapshot, bool active,
+            bool clearActive, bool admitting = false)
+        {
+            string activePath = Path.Combine(directory, "active-run.txt");
+            string owner = File.Exists(activePath) ? File.ReadAllText(activePath).Trim() : null;
+            if ((active || clearActive) && owner != null && owner != snapshot.runGuid
+                && !AdmissionOwns(directory, owner, snapshot))
+                throw new IOException("Active TestRuns pointer belongs to another run; commit refused.");
+            if (active && !clearActive && IsAdmission(snapshot) && owner == null && !admitting)
+                throw new IOException("The TestRuns admission is no longer active; commit refused.");
+            string path = Path.Combine(directory, snapshot.runGuid + ".json");
+            SnapshotHeader previous = ReadHeader(path);
+            if (previous.exists && (previous.snapshotSequence > snapshot.snapshotSequence
+                || (previous.endedAt > 0 && snapshot.endedAt == 0)))
+                throw new IOException("A newer TestRuns snapshot or terminal result already exists.");
+            long sequence = Math.Max(snapshot.snapshotSequence, previous.snapshotSequence) + 1;
+            var copy = snapshot.ShallowCopyForPersistence();
+            copy.snapshotSequence = sequence;
+            copy.persistenceError = "";
+            AtomicWrite(path, JsonUtility.ToJson(copy, true));
+            snapshot.snapshotSequence = sequence;
+            WritePointerIfChanged(Path.Combine(directory, "last-run.txt"), snapshot.runGuid);
+            if (clearActive)
+            {
+                if (owner != null) ClearOwnedPointer(activePath, owner);
+            }
+            else if (active)
+                WritePointerIfChanged(activePath, snapshot.runGuid);
+            snapshot.persistenceError = "";
+        }
+
+        private static bool IsAdmission(TestRunResultPayload snapshot) =>
+            !string.IsNullOrEmpty(snapshot.runAdmissionId) && snapshot.runGuid == snapshot.runAdmissionId;
+
+        private static bool AdmissionOwns(string directory, string owner, TestRunResultPayload snapshot)
+        {
+            if (string.IsNullOrEmpty(snapshot.runAdmissionId) || owner != snapshot.runAdmissionId) return false;
+            ValidateLifecycle(snapshot.serviceLifecycleId);
+            var admission = Read(Path.Combine(directory, owner + ".json"));
+            return admission != null && IsAdmission(admission) && admission.runGuid == owner
+                && admission.serviceLifecycleId == snapshot.serviceLifecycleId && admission.endedAt == 0;
+        }
+
+        private static void ClearOwnedPointer(string path, string owner)
+        {
+            if (!File.Exists(path) || File.ReadAllText(path).Trim() != owner)
+                throw new IOException("Active TestRuns pointer changed before commit.");
+            BeforeActivePointerClearForTests?.Invoke(path);
+            if (!File.Exists(path) || File.ReadAllText(path).Trim() != owner)
+                throw new IOException("Active TestRuns pointer changed before commit.");
+            File.Delete(path);
+        }
+
+        private static void ValidateRunGuid(string runGuid)
+        {
+            if (string.IsNullOrWhiteSpace(runGuid) || runGuid.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+                || runGuid == "." || runGuid == "..")
                 throw new ArgumentException("A safe runGuid file identity is required.");
+        }
+
+        private static void ValidateLifecycle(string lifecycle)
+        {
+            if (!Guid.TryParseExact(lifecycle, "N", out _))
+                throw new IOException("A verified TestRuns service lifetime is required.");
+        }
+
+        private static void WithLock(string directory, Action action)
+        {
             Directory.CreateDirectory(directory);
             using var hash = SHA256.Create();
             string key = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(
@@ -27,38 +144,7 @@ namespace CodingRiver.UPilot
             try { acquired = mutex.WaitOne(5000); }
             catch (AbandonedMutexException) { acquired = true; }
             if (!acquired) throw new IOException("Another TestRuns writer owns the persistence directory.");
-            try
-            {
-                string activePath = Path.Combine(directory, "active-run.txt");
-                if ((active || clearActive) && File.Exists(activePath)
-                    && File.ReadAllText(activePath).Trim() != snapshot.runGuid)
-                    throw new IOException("Active TestRuns pointer belongs to another run; commit refused.");
-                string path = Path.Combine(directory, snapshot.runGuid + ".json");
-                SnapshotHeader previous = ReadHeader(path);
-                if (previous.exists && (previous.snapshotSequence > snapshot.snapshotSequence
-                    || (previous.endedAt > 0 && snapshot.endedAt == 0)))
-                    throw new IOException("A newer TestRuns snapshot or terminal result already exists.");
-                long sequence = Math.Max(snapshot.snapshotSequence, previous.snapshotSequence) + 1;
-                var copy = snapshot.ShallowCopyForPersistence();
-                copy.snapshotSequence = sequence;
-                copy.persistenceError = "";
-                AtomicWrite(path, JsonUtility.ToJson(copy, true));
-                snapshot.snapshotSequence = sequence;
-                WritePointerIfChanged(Path.Combine(directory, "last-run.txt"), snapshot.runGuid);
-                if (clearActive)
-                {
-                    if (File.Exists(activePath) && File.ReadAllText(activePath).Trim() == snapshot.runGuid)
-                    {
-                        BeforeActivePointerClearForTests?.Invoke(activePath);
-                        if (File.ReadAllText(activePath).Trim() != snapshot.runGuid)
-                            throw new IOException("Active TestRuns pointer changed before commit.");
-                        File.Delete(activePath);
-                    }
-                }
-                else if (active)
-                    WritePointerIfChanged(activePath, snapshot.runGuid);
-                snapshot.persistenceError = "";
-            }
+            try { action(); }
             finally { mutex.ReleaseMutex(); }
         }
 
@@ -117,7 +203,9 @@ namespace CodingRiver.UPilot
             // A terminal candidate is not committed while its active pointer remains.
             // Read errors propagate: an unreadable pointer is not evidence of release.
             if ((snapshot.cleanupSucceeded || snapshot.disposition != null) && File.Exists(pointer)
-                && File.ReadAllText(pointer).Trim() == snapshot.runGuid)
+                && (File.ReadAllText(pointer).Trim() == snapshot.runGuid
+                    || (!string.IsNullOrEmpty(snapshot.runAdmissionId)
+                        && File.ReadAllText(pointer).Trim() == snapshot.runAdmissionId)))
             {
                 snapshot.status = "cleanup";
                 snapshot.phase = "cleanup";

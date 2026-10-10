@@ -1,0 +1,1471 @@
+{
+  "schemaVersion": 2,
+  "recordedAt": "2026-10-10T23:29:27.678922+08:00",
+  "evidenceKind": "Scoped local evidence from native UPilot MCP observations and persisted test snapshots; not a deployment or whole-suite acceptance report",
+  "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
+  "endpoint": "http://127.0.0.1:8011/mcp",
+  "gitHead": "ad75ee5f2a8163764c5034220bd0d9470f7226f7",
+  "scopeSourceSha256": {
+    "Editor/Core/UPilotTestRunStore.cs": "f30f7fc8725848d2d700c5fee0b398cdf9fcbefd61c058e4b0d47c50ce937d08",
+    "Editor/Core/UPilotTestService.cs": "b81d8191933d96885973f799f6a1521c35f433f488418ad00574721ab6ccd67d",
+    "Tests/Editor/UPilotP1ReliabilityTests.cs": "d27c8a8571557ca8b36b0f4d9a4b218d32358301d7412c4db6a5614ac01f0879",
+    "Tests/Editor/UPilotRunnerRecoveryTests.cs": "95af7db08a365548c0d09ab999675ef8353b0e9dc135af1868fdbfe810525d50",
+    "Tests/Editor/UPilotServiceMaintenanceTests.cs": "8e07d7f1a6e508a6c57c1b1349f171543918814ef1f147b273e8da37cb836060",
+    "Editor/Core/UPilotMcpServerManager.cs": "9cc7cd39edc3d243f52751b0c347b650251582b6b29dbf4a68c29fdb13980f50",
+    "Editor/Core/UPilotQuickStart.cs": "02765cd2c065ed9459cb27e5d3ff3d5b747e12f7e6fbd2511083206d37c3d88a",
+    "Tests/Editor/UPilotLifecycleHealthTests.cs": "91de639ae4e3473ee9b3c28de70ad698928378f2998cad65b2cef21d92a40ba8",
+    "upilotserver~/src/upilot_mcp/server.py": "bbe390c3f3ac37e6dfb9e147c448790d0214a31bc77b18433d016bf568ef328d",
+    "upilotserver~/tests/test_editor_lifecycle_health.py": "405ba7f2d1537f3cd0e76e41f075aeb3211435561098094e548e5318dabf2f27"
+  },
+  "repair": {
+    "rootCause": "Recovery discarded a different-service-lifetime snapshot but retained active-run.txt. Pre-Execute persistence was skipped because runGuid was null. UTF returned the official GUID only after Execute, then the first real persistence was rejected by the stale active pointer.",
+    "implementation": [
+      "Reuse the existing per-directory mutex; persist a unique admission owner before API/callback/runner construction.",
+      "Retire only a verified previous service lifetime active pointer; preserve all historical JSON, statuses and original deadlines.",
+      "Refuse same-lifetime or unknown/malformed ownership before runner start; failed admission preserves the previous result/resources.",
+      "Transfer admission ownership only to the official run GUID with a matching admission and service lifetime; preserve different-run and monotonic/terminal guards.",
+      "Fence late admission saves and recheck exact pointer ownership around clear; recover interrupted provisional admission as unknown/aborted, never replay Execute or invent a cancel GUID."
+    ],
+    "changedFiles": [
+      "Editor/Core/UPilotTestRunStore.cs",
+      "Editor/Core/UPilotTestService.cs",
+      "Tests/Editor/UPilotP1ReliabilityTests.cs",
+      "Tests/Editor/UPilotRunnerRecoveryTests.cs"
+    ]
+  },
+  "ownVerifiedCompile": {
+    "source": "unity_write_batch_status; persisted correlated result rechecked, not a new compile",
+    "writeBatchId": "wb-5d53b9a0-a9c8-4aed-9f25-3e1c0c52f623",
+    "operationId": "op-5b18bb36-6e5d-41fc-b677-e10f85afffda",
+    "compileOperationId": "a660071de62c42a8a1bb84f72021da5e",
+    "compileRequestId": "req-736902f5-20de-480a-b34e-8ad9715ad61b",
+    "writeBatchCreatedAt": 1791645145501,
+    "lastCompileVerifiedAt": 1791645162246,
+    "status": "verified",
+    "outcome": "passed",
+    "terminal": true,
+    "errorsVerified": true,
+    "correlationVerified": true,
+    "errorCount": 0,
+    "warningCount": 4,
+    "filesSha256": "d926ab24ac8cf080e4ef96317125aafe83a5cd2b9f2b7d173a684501590e226b",
+    "unchangedScopedSources": true,
+    "warningKinds": [
+      "CS0618 AssemblyBuilder obsolete",
+      "UAC1009 existing Flow dictionary serialization fields"
+    ]
+  },
+  "unityTargetedRuns": [
+    {
+      "serviceLifecycleId": "1382a9b66fa74660905c080cee7896d9",
+      "runGuid": "dede5583-3881-4fb4-a384-db43ae35aa7a",
+      "runAdmissionId": "admission-0fe60fcb1ab248358f534061f3719292",
+      "runnerStartAttempted": true,
+      "originatingRequestId": "req-b682fdbe-3b44-4e9a-8d03-8e7336b32c62",
+      "originatingCommandId": "cmd-dc3d0ad1-d92a-479d-b5dc-11ef9277c4d3",
+      "status": "completed",
+      "phase": "completed",
+      "testMode": "EditMode",
+      "startedAt": 1791645402205,
+      "endedAt": 1791645412641,
+      "cleanupStartedAt": 1791645410834,
+      "cleanupAttemptDeadlineAt": 1791645440840,
+      "total": 35,
+      "passed": 35,
+      "failed": 0,
+      "skipped": 0,
+      "matchedCount": 35,
+      "completedLeafCount": 35,
+      "selectionDomain": "4bd1e5635288486e94f42be874d62634",
+      "selectionSnapshotId": "68a4bf86fd4c97eb3308e7392ae20643e3f30815d5aea054f65d0e75751f2995",
+      "expectedSelectionDomain": "4bd1e5635288486e94f42be874d62634",
+      "expectedSelectionSnapshotId": "68a4bf86fd4c97eb3308e7392ae20643e3f30815d5aea054f65d0e75751f2995",
+      "selectors": [
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"current-owner\")",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"snapshot\")",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"last-run.txt\")",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"active-run.txt\")",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(True)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(True)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "fixture",
+          "selector": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests",
+          "matchedCount": 27,
+          "candidates": []
+        }
+      ],
+      "selectedLeafIdentities": [
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionHandoffRejectsAnotherServiceLifetime]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/AdmissionWriteFailureNeverCrossesRunnerStartBoundary/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"active-run.txt\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/AdmissionWriteFailureNeverCrossesRunnerStartBoundary/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"last-run.txt\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/AdmissionWriteFailureNeverCrossesRunnerStartBoundary/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"snapshot\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AtomicReplaceFailureKeepsPreviousReadableResult]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.CancelBindingChecksExactApiAndReturnType]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.ConcurrentAdmissionsHaveOneOwnerAndSeparateProjectDirectoriesAreIsolated]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.ConcurrentIndependentRunsAndReadersNeverObservePartialJson]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.CurrentLifetimeOwnerSurvivesReloadAndRejectsAnotherAdmission]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.DurableAdmissionHandsOffToOfficialGuidAndLateAdmissionCannotTakeOwnership]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/FinalCommitFailureRetainsActivePointerAndCanResume/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"active-clear\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/FinalCommitFailureRetainsActivePointerAndCanResume/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"last-pointer\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/FinalCommitFailureRetainsActivePointerAndCanResume/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"snapshot\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.HeaderScanIgnoresFieldNamesInsideNestedStringValues]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(\"active-clear\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(\"active-pointer\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedPointerUpdateKeepsResultAndCanResume]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.PreviousLifetimeRetiresOnlyActiveIndexAndPreservesHistory]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.RetirementNeverDeletesAChangedOwner]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.SnapshotSequenceRejectsOlderWriterAndProtectsOtherActiveRun]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnchangedPointersAreNotRewrittenOnRepeatedSave]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"invalid-lifetime\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"malformed-snapshot\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"missing-lifetime\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"missing-snapshot\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"unsafe-pointer\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"wrong-run\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(True)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"active-run.txt\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"current-owner\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"last-run.txt\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"snapshot\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(True)]"
+      ],
+      "outcomeStatus": "completed",
+      "terminal": true,
+      "resultAuthoritative": true,
+      "cleanupStatus": "completed",
+      "cleanupSucceeded": true,
+      "cleanupResourcesReleased": true,
+      "cleanupPending": false,
+      "cleanupErrors": [],
+      "cleanupErrorHistory": [],
+      "unresolvedResources": [],
+      "persistenceError": "",
+      "snapshotSequence": 79,
+      "cancelAttemptCount": 0,
+      "forceStopAttempted": false,
+      "results": [
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionHandoffRejectsAnotherServiceLifetime]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionHandoffRejectsAnotherServiceLifetime",
+          "testStatus": "Passed",
+          "duration": 0.05437279865145683,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/AdmissionWriteFailureNeverCrossesRunnerStartBoundary/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"snapshot\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"snapshot\")",
+          "testStatus": "Passed",
+          "duration": 0.021665899083018303,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/AdmissionWriteFailureNeverCrossesRunnerStartBoundary/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"last-run.txt\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"last-run.txt\")",
+          "testStatus": "Passed",
+          "duration": 0.021077999845147133,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/AdmissionWriteFailureNeverCrossesRunnerStartBoundary/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"active-run.txt\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AdmissionWriteFailureNeverCrossesRunnerStartBoundary(\"active-run.txt\")",
+          "testStatus": "Passed",
+          "duration": 0.024720599874854088,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AtomicReplaceFailureKeepsPreviousReadableResult]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.AtomicReplaceFailureKeepsPreviousReadableResult",
+          "testStatus": "Passed",
+          "duration": 0.01101780030876398,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.CancelBindingChecksExactApiAndReturnType]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.CancelBindingChecksExactApiAndReturnType",
+          "testStatus": "Passed",
+          "duration": 0.0047241998836398125,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.ConcurrentAdmissionsHaveOneOwnerAndSeparateProjectDirectoriesAreIsolated]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.ConcurrentAdmissionsHaveOneOwnerAndSeparateProjectDirectoriesAreIsolated",
+          "testStatus": "Passed",
+          "duration": 0.04756129905581474,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.ConcurrentIndependentRunsAndReadersNeverObservePartialJson]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.ConcurrentIndependentRunsAndReadersNeverObservePartialJson",
+          "testStatus": "Passed",
+          "duration": 0.68085777759552,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.CurrentLifetimeOwnerSurvivesReloadAndRejectsAnotherAdmission]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.CurrentLifetimeOwnerSurvivesReloadAndRejectsAnotherAdmission",
+          "testStatus": "Passed",
+          "duration": 0.02196119911968708,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.DurableAdmissionHandsOffToOfficialGuidAndLateAdmissionCannotTakeOwnership]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.DurableAdmissionHandsOffToOfficialGuidAndLateAdmissionCannotTakeOwnership",
+          "testStatus": "Passed",
+          "duration": 0.036999501287937164,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/FinalCommitFailureRetainsActivePointerAndCanResume/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"snapshot\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"snapshot\")",
+          "testStatus": "Passed",
+          "duration": 0.030153799802064896,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/FinalCommitFailureRetainsActivePointerAndCanResume/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"last-pointer\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"last-pointer\")",
+          "testStatus": "Passed",
+          "duration": 0.03476420044898987,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/FinalCommitFailureRetainsActivePointerAndCanResume/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"active-clear\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.FinalCommitFailureRetainsActivePointerAndCanResume(\"active-clear\")",
+          "testStatus": "Passed",
+          "duration": 0.03272780030965805,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.HeaderScanIgnoresFieldNamesInsideNestedStringValues]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.HeaderScanIgnoresFieldNamesInsideNestedStringValues",
+          "testStatus": "Passed",
+          "duration": 0.018343999981880188,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(\"active-pointer\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(\"active-pointer\")",
+          "testStatus": "Passed",
+          "duration": 0.04160090163350105,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(\"active-clear\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedAdmissionHandoffKeepsOwnerAndTerminalCommitUnconfirmed(\"active-clear\")",
+          "testStatus": "Passed",
+          "duration": 0.03410780057311058,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedPointerUpdateKeepsResultAndCanResume]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.InterruptedPointerUpdateKeepsResultAndCanResume",
+          "testStatus": "Passed",
+          "duration": 0.04108870029449463,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.PreviousLifetimeRetiresOnlyActiveIndexAndPreservesHistory]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.PreviousLifetimeRetiresOnlyActiveIndexAndPreservesHistory",
+          "testStatus": "Passed",
+          "duration": 0.03684740141034126,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.RetirementNeverDeletesAChangedOwner]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.RetirementNeverDeletesAChangedOwner",
+          "testStatus": "Passed",
+          "duration": 0.01952660083770752,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.SnapshotSequenceRejectsOlderWriterAndProtectsOtherActiveRun]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.SnapshotSequenceRejectsOlderWriterAndProtectsOtherActiveRun",
+          "testStatus": "Passed",
+          "duration": 0.04424219951033592,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnchangedPointersAreNotRewrittenOnRepeatedSave]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnchangedPointersAreNotRewrittenOnRepeatedSave",
+          "testStatus": "Passed",
+          "duration": 0.0210913997143507,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"missing-snapshot\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"missing-snapshot\")",
+          "testStatus": "Passed",
+          "duration": 0.016948899254202843,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"malformed-snapshot\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"malformed-snapshot\")",
+          "testStatus": "Passed",
+          "duration": 0.019075099378824234,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"wrong-run\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"wrong-run\")",
+          "testStatus": "Passed",
+          "duration": 0.017211100086569786,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"missing-lifetime\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"missing-lifetime\")",
+          "testStatus": "Passed",
+          "duration": 0.019970400258898735,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"invalid-lifetime\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"invalid-lifetime\")",
+          "testStatus": "Passed",
+          "duration": 0.019420599564909935,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotP1ReliabilityTests/UnknownActiveOwnershipFailsClosedBeforeAdmission/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"unsafe-pointer\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotP1ReliabilityTests.UnknownActiveOwnershipFailsClosedBeforeAdmission(\"unsafe-pointer\")",
+          "testStatus": "Passed",
+          "duration": 0.019151300191879272,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(True)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(True)",
+          "testStatus": "Passed",
+          "duration": 0.02396639995276928,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(False)",
+          "testStatus": "Passed",
+          "duration": 0.019896699115633965,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"current-owner\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"current-owner\")",
+          "testStatus": "Passed",
+          "duration": 0.016628099605441093,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"snapshot\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"snapshot\")",
+          "testStatus": "Passed",
+          "duration": 0.005000900011509657,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"last-run.txt\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"last-run.txt\")",
+          "testStatus": "Passed",
+          "duration": 0.008099500089883804,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"active-run.txt\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(\"active-run.txt\")",
+          "testStatus": "Passed",
+          "duration": 0.012090099975466728,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(False)",
+          "testStatus": "Passed",
+          "duration": 0.020593099296092987,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotRunnerRecoveryTests/InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(True)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotRunnerRecoveryTests.InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(True)",
+          "testStatus": "Passed",
+          "duration": 0.022230299189686775,
+          "message": "",
+          "stackTrace": ""
+        }
+      ],
+      "consolePhases": [
+        {
+          "phase": "testExecution",
+          "source": "consoleDelta",
+          "captureSessionId": "",
+          "domain": "4bd1e5635288486e94f42be874d62634",
+          "startSequence": 24,
+          "endSequence": 23,
+          "startedAt": 1791645407774,
+          "endedAt": 1791645410830,
+          "coverage": "partial",
+          "gapReason": "console_cursor_clear_or_reload_not_detectable",
+          "logs": []
+        },
+        {
+          "phase": "cleanup",
+          "source": "consoleDelta",
+          "captureSessionId": "",
+          "domain": "4bd1e5635288486e94f42be874d62634",
+          "startSequence": 24,
+          "endSequence": 23,
+          "startedAt": 1791645410830,
+          "endedAt": 1791645412641,
+          "coverage": "partial",
+          "gapReason": "console_cursor_clear_or_reload_not_detectable",
+          "logs": []
+        }
+      ],
+      "label": "TestRuns durable admission and direct recovery regressions",
+      "persistedSnapshotPath": "Tests~/UPilotTest/Library/UPilot/TestRuns/dede5583-3881-4fb4-a384-db43ae35aa7a.json",
+      "persistedSnapshotSha256": "383781e10aebd6d2323e13eb02e1b64498981b35f6093c567038ed8e1b70610d",
+      "recheckedWithNativeTool": "unity_test_results(detailLevel=summary)",
+      "consoleQuery": {
+        "tool": "unity_console_search_logs(runGuid=..., logType=Error)",
+        "errorLogsReturned": 0,
+        "topLevelCoverage": "complete",
+        "phaseCoverage": "partial",
+        "gapReason": "console_cursor_clear_or_reload_not_detectable",
+        "claim": "No complete Console no-error claim."
+      }
+    },
+    {
+      "serviceLifecycleId": "1382a9b66fa74660905c080cee7896d9",
+      "runGuid": "82cb4cbb-2584-4e2b-84cc-420bf79f0940",
+      "runAdmissionId": "admission-7baa856c4b8d4ad8a6e578ab7480903d",
+      "runnerStartAttempted": true,
+      "originatingRequestId": "req-ab7a8c91-a564-406e-af05-a01d4244541a",
+      "originatingCommandId": "cmd-93846af7-e831-4b9d-b503-6165c1290950",
+      "status": "completed",
+      "phase": "completed",
+      "testMode": "EditMode",
+      "startedAt": 1791645548280,
+      "endedAt": 1791645560827,
+      "cleanupStartedAt": 1791645558851,
+      "cleanupAttemptDeadlineAt": 1791645588860,
+      "total": 31,
+      "passed": 31,
+      "failed": 0,
+      "skipped": 0,
+      "matchedCount": 31,
+      "completedLeafCount": 31,
+      "selectionDomain": "4bd1e5635288486e94f42be874d62634",
+      "selectionSnapshotId": "d9ec559da63133b4db69e6e9a486cd922c4a3c024f833bf7915f406f60e63ea6",
+      "expectedSelectionDomain": "4bd1e5635288486e94f42be874d62634",
+      "expectedSelectionSnapshotId": "d9ec559da63133b4db69e6e9a486cd922c4a3c024f833bf7915f406f60e63ea6",
+      "selectors": [
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateTreatsUnconfirmedOwnershipAsChecking",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateRequiresConfirmedForeignOwnershipForPortRepair",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateDoesNotLetEditorWaitingHideAuthenticationOrIdentityErrors",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(False,null)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(True,\"responsive\")",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(1000)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(21000)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(29999)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.BridgeHealthMissingIsNotAnIdentityConflict",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "fixture",
+          "selector": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests",
+          "matchedCount": 22,
+          "candidates": []
+        }
+      ],
+      "selectedLeafIdentities": [
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateDoesNotLetEditorWaitingHideAuthenticationOrIdentityErrors]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/MainStateKeepsLegacyOrResponsiveHealthReady/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(False,null)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/MainStateKeepsLegacyOrResponsiveHealthReady/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(True,\"responsive\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateRequiresConfirmedForeignOwnershipForPortRepair]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateTreatsUnconfirmedOwnershipAsChecking]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.CachedObservationAgesWithoutInventingFreshEvidence]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"auth\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"foreign\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"process-exit\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"unknown-error\")]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedHttpFailureEscapesLifecycleLightweightCache]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ForeignEndpointAndMissingLifecycleEvidenceAreNotTrustedWaits]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"compiling\",600000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"domain_reload\",600000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",120000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",180000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",600000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"exitingPlay\",600000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongObservationDoesNotConfirmFailureAndTrustedLifecycleRemovesTimeoutIssue]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.MissingHeartbeatAndPumpEvidenceRemainUnknown]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory(False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory(True)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbeAllowsMoreThanTwoSecondsButKeepsOriginalDeadline]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbePreservesCallerCancellation]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.RecoveryRequiresFreshResponsiveSameIdentityAndHandshake]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.TimeoutIsUnconfirmedButMalformedIdentityIsConfirmed]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.TransitionHistoryFromOldProcessOrReusedPidCannotAuthorizeWait]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.BridgeHealthMissingIsNotAnIdentityConflict]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/MaintenanceDoesNotRenewConfiguredDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(1000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/MaintenanceDoesNotRenewConfiguredDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(21000)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/MaintenanceDoesNotRenewConfiguredDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(29999)]"
+      ],
+      "outcomeStatus": "completed",
+      "terminal": true,
+      "resultAuthoritative": true,
+      "cleanupStatus": "completed",
+      "cleanupSucceeded": true,
+      "cleanupResourcesReleased": true,
+      "cleanupPending": false,
+      "cleanupErrors": [],
+      "cleanupErrorHistory": [],
+      "unresolvedResources": [],
+      "persistenceError": "",
+      "snapshotSequence": 71,
+      "cancelAttemptCount": 0,
+      "forceStopAttempted": false,
+      "results": [
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateDoesNotLetEditorWaitingHideAuthenticationOrIdentityErrors]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateDoesNotLetEditorWaitingHideAuthenticationOrIdentityErrors",
+          "testStatus": "Passed",
+          "duration": 0.0021190999541431665,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/MainStateKeepsLegacyOrResponsiveHealthReady/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(False,null)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(False,null)",
+          "testStatus": "Passed",
+          "duration": 0.0007135000196285546,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/MainStateKeepsLegacyOrResponsiveHealthReady/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(True,\"responsive\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateKeepsLegacyOrResponsiveHealthReady(True,\"responsive\")",
+          "testStatus": "Passed",
+          "duration": 0.0002119999990100041,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateRequiresConfirmedForeignOwnershipForPortRepair]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateRequiresConfirmedForeignOwnershipForPortRepair",
+          "testStatus": "Passed",
+          "duration": 0.0016793999820947647,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotCoreTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateTreatsUnconfirmedOwnershipAsChecking]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotCoreTests.MainStateTreatsUnconfirmedOwnershipAsChecking",
+          "testStatus": "Passed",
+          "duration": 0.0004501999937929213,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.CachedObservationAgesWithoutInventingFreshEvidence]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.CachedObservationAgesWithoutInventingFreshEvidence",
+          "testStatus": "Passed",
+          "duration": 0.0013354000402614474,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"auth\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"auth\")",
+          "testStatus": "Passed",
+          "duration": 0.0009520999738015234,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"foreign\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"foreign\")",
+          "testStatus": "Passed",
+          "duration": 0.00024419999681413174,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"unknown-error\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"unknown-error\")",
+          "testStatus": "Passed",
+          "duration": 0.00031030000536702573,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/ConfirmedFailuresCannotBeHiddenByLifecycle/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"process-exit\")]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedFailuresCannotBeHiddenByLifecycle(\"process-exit\")",
+          "testStatus": "Passed",
+          "duration": 0.00016880000475794077,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedHttpFailureEscapesLifecycleLightweightCache]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ConfirmedHttpFailureEscapesLifecycleLightweightCache",
+          "testStatus": "Passed",
+          "duration": 0.0005748000112362206,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ForeignEndpointAndMissingLifecycleEvidenceAreNotTrustedWaits]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ForeignEndpointAndMissingLifecycleEvidenceAreNotTrustedWaits",
+          "testStatus": "Passed",
+          "duration": 0.0015657000476494431,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",120000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",120000)",
+          "testStatus": "Passed",
+          "duration": 0.002232200000435114,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",180000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",180000)",
+          "testStatus": "Passed",
+          "duration": 0.0012757000513374805,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",600000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"enteringPlay\",600000)",
+          "testStatus": "Passed",
+          "duration": 0.0015687999548390508,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"exitingPlay\",600000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"exitingPlay\",600000)",
+          "testStatus": "Passed",
+          "duration": 0.0012032999657094479,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"compiling\",600000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"compiling\",600000)",
+          "testStatus": "Passed",
+          "duration": 0.0012333999620750546,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"domain_reload\",600000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongLifecycleWaitNeverBecomesRepairEvenWithDisconnectedBridge(\"domain_reload\",600000)",
+          "testStatus": "Passed",
+          "duration": 0.0013922000071033835,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongObservationDoesNotConfirmFailureAndTrustedLifecycleRemovesTimeoutIssue]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.LongObservationDoesNotConfirmFailureAndTrustedLifecycleRemovesTimeoutIssue",
+          "testStatus": "Passed",
+          "duration": 0.007977199740707874,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.MissingHeartbeatAndPumpEvidenceRemainUnknown]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.MissingHeartbeatAndPumpEvidenceRemainUnknown",
+          "testStatus": "Passed",
+          "duration": 0.0010465000523254275,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory(False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory(False)",
+          "testStatus": "Passed",
+          "duration": 0.005485599860548973,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory(True)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.OnlyVerifiedRecoveryClearsTransientUiWithoutRewritingRestartHistory(True)",
+          "testStatus": "Passed",
+          "duration": 0.007706800010055304,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbeAllowsMoreThanTwoSecondsButKeepsOriginalDeadline]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbeAllowsMoreThanTwoSecondsButKeepsOriginalDeadline",
+          "testStatus": "Passed",
+          "duration": 2.549708366394043,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbePreservesCallerCancellation]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.ReadOnlyProbePreservesCallerCancellation",
+          "testStatus": "Passed",
+          "duration": 0.2808997929096222,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.RecoveryRequiresFreshResponsiveSameIdentityAndHandshake]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.RecoveryRequiresFreshResponsiveSameIdentityAndHandshake",
+          "testStatus": "Passed",
+          "duration": 0.0020208999048918486,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.TimeoutIsUnconfirmedButMalformedIdentityIsConfirmed]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.TimeoutIsUnconfirmedButMalformedIdentityIsConfirmed",
+          "testStatus": "Passed",
+          "duration": 0.00202700006775558,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotLifecycleHealthTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.TransitionHistoryFromOldProcessOrReusedPidCannotAuthorizeWait]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotLifecycleHealthTests.TransitionHistoryFromOldProcessOrReusedPidCannotAuthorizeWait",
+          "testStatus": "Passed",
+          "duration": 0.00163569999858737,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.BridgeHealthMissingIsNotAnIdentityConflict]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.BridgeHealthMissingIsNotAnIdentityConflict",
+          "testStatus": "Passed",
+          "duration": 0.0022088000550866127,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/MaintenanceDoesNotRenewConfiguredDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(1000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(1000)",
+          "testStatus": "Passed",
+          "duration": 0.01109359972178936,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/MaintenanceDoesNotRenewConfiguredDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(21000)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(21000)",
+          "testStatus": "Passed",
+          "duration": 0.009006800130009651,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/MaintenanceDoesNotRenewConfiguredDeadline/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(29999)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.MaintenanceDoesNotRenewConfiguredDeadline(29999)",
+          "testStatus": "Passed",
+          "duration": 0.009223599918186665,
+          "message": "",
+          "stackTrace": ""
+        }
+      ],
+      "consolePhases": [
+        {
+          "phase": "testExecution",
+          "source": "consoleDelta",
+          "captureSessionId": "",
+          "domain": "4bd1e5635288486e94f42be874d62634",
+          "startSequence": 24,
+          "endSequence": 23,
+          "startedAt": 1791645554266,
+          "endedAt": 1791645558851,
+          "coverage": "partial",
+          "gapReason": "console_cursor_clear_or_reload_not_detectable",
+          "logs": []
+        },
+        {
+          "phase": "cleanup",
+          "source": "consoleDelta",
+          "captureSessionId": "",
+          "domain": "4bd1e5635288486e94f42be874d62634",
+          "startSequence": 24,
+          "endSequence": 23,
+          "startedAt": 1791645558851,
+          "endedAt": 1791645560827,
+          "coverage": "partial",
+          "gapReason": "console_cursor_clear_or_reload_not_detectable",
+          "logs": []
+        }
+      ],
+      "label": "Lifecycle health, identity, legacy compatibility and fixed deadlines",
+      "persistedSnapshotPath": "Tests~/UPilotTest/Library/UPilot/TestRuns/82cb4cbb-2584-4e2b-84cc-420bf79f0940.json",
+      "persistedSnapshotSha256": "74811fd70061a22e51ca5c91317273ca9f1ab97116917bb129a3118f62441d60",
+      "recheckedWithNativeTool": "unity_test_results(detailLevel=summary)",
+      "consoleQuery": {
+        "tool": "unity_console_search_logs(runGuid=..., logType=Error)",
+        "errorLogsReturned": 0,
+        "topLevelCoverage": "complete",
+        "phaseCoverage": "partial",
+        "gapReason": "console_cursor_clear_or_reload_not_detectable",
+        "claim": "No complete Console no-error claim."
+      }
+    },
+    {
+      "serviceLifecycleId": "1382a9b66fa74660905c080cee7896d9",
+      "runGuid": "73496870-4932-4b87-9e15-2ea4e570b688",
+      "runAdmissionId": "admission-0e3728e4a6a54a40be0fe11dfe2d4887",
+      "runnerStartAttempted": true,
+      "originatingRequestId": "req-5cc5f72b-d395-4cef-a7d7-977677164df3",
+      "originatingCommandId": "cmd-193201fd-f6f6-400e-b27c-7be3192c93a9",
+      "status": "completed",
+      "phase": "completed",
+      "testMode": "EditMode",
+      "startedAt": 1791645641235,
+      "endedAt": 1791645649089,
+      "cleanupStartedAt": 1791645647748,
+      "cleanupAttemptDeadlineAt": 1791645677753,
+      "total": 20,
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0,
+      "matchedCount": 20,
+      "completedLeafCount": 20,
+      "selectionDomain": "4bd1e5635288486e94f42be874d62634",
+      "selectionSnapshotId": "8b6bd53adc80e16e17c60e306857661da7ff19351c761d88a2cda241636d1980",
+      "expectedSelectionDomain": "4bd1e5635288486e94f42be874d62634",
+      "expectedSelectionSnapshotId": "8b6bd53adc80e16e17c60e306857661da7ff19351c761d88a2cda241636d1980",
+      "selectors": [
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"valid\",True)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_parent\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"reused_launcher_pid\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_launcher_time\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"older_worker\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"foreign_owner\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"unknown_owner\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"health_only_evidence\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_pid\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_project\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_project\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_launcher_exe\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_worker_exe\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_exe\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_health\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_http_port\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_ws_port\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"same_pid\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_configuration\",False)",
+          "matchedCount": 1,
+          "candidates": []
+        },
+        {
+          "kind": "testName",
+          "selector": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRecordPreservesLauncherAndOriginalDeadline",
+          "matchedCount": 1,
+          "candidates": []
+        }
+      ],
+      "selectedLeafIdentities": [
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRecordPreservesLauncherAndOriginalDeadline]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"foreign_owner\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"health_only_evidence\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_configuration\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_health\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_http_port\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_launcher_time\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_project\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_ws_port\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"older_worker\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"reused_launcher_pid\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"same_pid\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"unknown_owner\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"valid\",True)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_exe\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_pid\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_launcher_exe\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_parent\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_project\",False)]",
+        "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_worker_exe\",False)]"
+      ],
+      "outcomeStatus": "completed",
+      "terminal": true,
+      "resultAuthoritative": true,
+      "cleanupStatus": "completed",
+      "cleanupSucceeded": true,
+      "cleanupResourcesReleased": true,
+      "cleanupPending": false,
+      "cleanupErrors": [],
+      "cleanupErrorHistory": [],
+      "unresolvedResources": [],
+      "persistenceError": "",
+      "snapshotSequence": 49,
+      "cancelAttemptCount": 0,
+      "forceStopAttempted": false,
+      "results": [
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRecordPreservesLauncherAndOriginalDeadline]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRecordPreservesLauncherAndOriginalDeadline",
+          "testStatus": "Passed",
+          "duration": 0.006323799956589937,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"valid\",True)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"valid\",True)",
+          "testStatus": "Passed",
+          "duration": 0.0022563000675290823,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_parent\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_parent\",False)",
+          "testStatus": "Passed",
+          "duration": 0.000666300009470433,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"reused_launcher_pid\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"reused_launcher_pid\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0005245999782346189,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_launcher_time\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_launcher_time\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0005771000287495553,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"older_worker\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"older_worker\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0005516000092029572,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"foreign_owner\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"foreign_owner\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0005701999762095511,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"unknown_owner\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"unknown_owner\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0006037999992258847,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"health_only_evidence\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"health_only_evidence\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0009486000053584576,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_pid\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_pid\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0007181999972090125,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_project\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_project\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0006906000198796391,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_project\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_project\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0005947999889031053,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_launcher_exe\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_launcher_exe\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0007883000071160495,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_worker_exe\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_worker_exe\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0008146999753080308,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_exe\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"wrong_health_exe\",False)",
+          "testStatus": "Passed",
+          "duration": 0.001137400045990944,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_health\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_health\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0007472999859601259,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_http_port\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_http_port\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0005868999869562685,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_ws_port\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_ws_port\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0007097999914549291,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"same_pid\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"same_pid\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0006204000092111528,
+          "message": "",
+          "stackTrace": ""
+        },
+        {
+          "leafKey": "UPilot.Editor.Tests.dll/CodingRiver/UPilot/Tests/UPilotServiceMaintenanceTests/RestartWorkerRequiresExactLauncherAndServiceIdentity/[UPilot.Editor.Tests][CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_configuration\",False)]",
+          "testName": "CodingRiver.UPilot.Tests.UPilotServiceMaintenanceTests.RestartWorkerRequiresExactLauncherAndServiceIdentity(\"missing_configuration\",False)",
+          "testStatus": "Passed",
+          "duration": 0.0006682000239379704,
+          "message": "",
+          "stackTrace": ""
+        }
+      ],
+      "consolePhases": [
+        {
+          "phase": "testExecution",
+          "source": "consoleDelta",
+          "captureSessionId": "",
+          "domain": "4bd1e5635288486e94f42be874d62634",
+          "startSequence": 25,
+          "endSequence": 24,
+          "startedAt": 1791645646514,
+          "endedAt": 1791645647748,
+          "coverage": "partial",
+          "gapReason": "console_cursor_clear_or_reload_not_detectable",
+          "logs": []
+        },
+        {
+          "phase": "cleanup",
+          "source": "consoleDelta",
+          "captureSessionId": "",
+          "domain": "4bd1e5635288486e94f42be874d62634",
+          "startSequence": 25,
+          "endSequence": 24,
+          "startedAt": 1791645647748,
+          "endedAt": 1791645649089,
+          "coverage": "partial",
+          "gapReason": "console_cursor_clear_or_reload_not_detectable",
+          "logs": []
+        }
+      ],
+      "label": "Exact PyInstaller launcher/worker identity and original restart deadline",
+      "persistedSnapshotPath": "Tests~/UPilotTest/Library/UPilot/TestRuns/73496870-4932-4b87-9e15-2ea4e570b688.json",
+      "persistedSnapshotSha256": "d414b4a4c0152b0bd637be0c7b5570304e0e691334d73f1df9897ee02b8ab138",
+      "recheckedWithNativeTool": "unity_test_results(detailLevel=summary)",
+      "consoleQuery": {
+        "tool": "unity_console_search_logs(runGuid=..., logType=Error)",
+        "errorLogsReturned": 0,
+        "topLevelCoverage": "complete",
+        "phaseCoverage": "partial",
+        "gapReason": "console_cursor_clear_or_reload_not_detectable",
+        "claim": "No complete Console no-error claim."
+      }
+    }
+  ],
+  "unityTotal": {
+    "passed": 86,
+    "failed": 0,
+    "skipped": 0,
+    "allResultAuthoritative": true,
+    "allCleanupCompleted": true,
+    "fullSuiteRun": false
+  },
+  "pythonReusedEvidence": {
+    "priorArtifactPath": "Tests~/UPilotTest/.upilot/validation/lifecycle-health/continuation-20261010.json",
+    "priorArtifactSha256": "09e526c45a67adff57d3e1d7bf93feccd8345e423facef5777ec838adec0089b",
+    "results": {
+      "lifecycleObservationAndRestart": {
+        "passed": 55,
+        "failed": 0
+      },
+      "orderedStateDirectRegression": {
+        "passed": 4,
+        "failed": 0,
+        "deselected": 98
+      },
+      "existingDeprecationWarningKinds": 2
+    },
+    "totalPassed": 59,
+    "rerunThisContinuation": false,
+    "fivePriorScopedSourceHashesUnchanged": true
+  },
+  "historyPreservation": {
+    "oldSnapshotPath": "Tests~/UPilotTest/Library/UPilot/TestRuns/cd2d85e3-554c-4ac0-ac14-6d9e78d27efc.json",
+    "oldSnapshotSha256BeforeAndAfter": "75830a3e11882bcba01704a66127e95188874bb90a8e8f17c22bb1cc88a5682b",
+    "serviceLifecycleId": "7894a16eb6a74368b6569502f5295ff8",
+    "status": "stopping",
+    "snapshotSequence": 54,
+    "cleanupAttemptDeadlineAt": 1791634146379,
+    "historyBytesUnchanged": true,
+    "activePointerExistsAtFinalRead": false,
+    "pointerRetiredByProductBootstrapNotManualFileEdit": true,
+    "priorAbortedRun": {
+      "runGuid": "ffcfcbca-25e4-4e36-972e-85d423eab2e5",
+      "serviceLifecycleId": "1382a9b66fa74660905c080cee7896d9",
+      "selectionDomain": "11a7ac4ee3f44bd4acecd4839c861a82",
+      "selectionSnapshotId": "f8939e01f660ad3c19f1e33bb76511677035c8009431cc2971922e693b4a940d",
+      "total": 31,
+      "passed": 31,
+      "failed": 0,
+      "skipped": 0,
+      "resultAuthoritative": true,
+      "outcomeStatus": "completed",
+      "terminal": true,
+      "status": "aborted",
+      "cleanupStatus": "failed",
+      "cleanupSucceeded": false,
+      "cleanupResourcesReleased": false,
+      "cleanupAttemptDeadlineAt": 1791643316152,
+      "endedAt": 1791643316939,
+      "persistenceError": "IOException: Active TestRuns pointer belongs to another run; commit refused.",
+      "cleanupConsoleCoverage": "partial",
+      "cleanupConsoleGapReason": "phase_boundary_not_closed"
+    },
+    "priorAbortedRunCanonicalSnapshotExists": false,
+    "priorAbortedRunPreservedInEvidenceNotRecreated": true,
+    "priorArtifactBytesUnchanged": true,
+    "oldStallDumpExists": true
+  },
+  "nativeFinalObservations": {
+    "runtimeIdentity": {
+      "unityPid": 141936,
+      "unityProcessCreatedAt": 134361162375123361,
+      "serverPid": 146196,
+      "bridgeSessionId": "f865271c185c4a99b36827fcd5bdcf6e",
+      "producerEpoch": "40cde94172f442a982132f6c0980a9a6",
+      "domainGeneration": 3
+    },
+    "editor": {
+      "connected": true,
+      "serverReady": true,
+      "ready": true,
+      "authoritative": true,
+      "isStale": false,
+      "playModeState": "edit",
+      "latestCompileRequestId": "req-87dc0aca-cf33-4c72-9da6-10632c0d18fc"
+    },
+    "captureList": {
+      "tool": "unity_console_capture_list(activeOnly=true)",
+      "requestId": "req-2a193009-fd09-4cc7-b3bd-64b78e48321e",
+      "observedAt": 1791645984749,
+      "activeCount": 0,
+      "returnedCount": 0
+    },
+    "serverLoadedSource": {
+      "tool": "unity_mcp_status",
+      "requestId": "req-8764a118-6c71-4998-97af-312e7b79a86e",
+      "observedAt": 1791645792934,
+      "status": "different",
+      "scope": "selected-entry-code-only; not globals, closure values, dependencies or all modules",
+      "latestServerSourceVerifiedLoaded": false
+    }
+  },
+  "concurrentCompileObservations": {
+    "ownership": "Another concurrent write batch; no files in that batch were edited by this continuation, and no new compile was requested here.",
+    "failedBatch": {
+      "writeBatchId": "wb-00b3d021-7d3f-42da-bcf7-28ddfdb22b83",
+      "paths": [
+        "Editor/Automation/UPilotAutomationStepService.cs",
+        "Tests/Editor/Automation/UPilotAutomationStepServiceTests.cs"
+      ],
+      "compileOperationId": "232f299c14834aebada2f82783879c4a",
+      "compileRequestId": "req-08cd9e53-c4fc-440d-91d0-8042c8b383e3",
+      "lastCompileVerifiedAt": 1791645641387,
+      "status": "failed",
+      "errorCount": 2,
+      "warningCount": 3,
+      "terminal": true,
+      "errorsVerified": true,
+      "errorDetailLimitation": "Historical unity_compile_errors returned COMPILE_IDENTITY_MISMATCH after the later compile; do not borrow latest diagnostics. Associated Console query returned no error logs; exact earlier compiler errors remain unconfirmed here."
+    },
+    "laterObservedBatch": {
+      "writeBatchId": "wb-b9cfc15f-abf4-4067-a42b-faf13544cf25",
+      "paths": [
+        "Tests/Editor/Automation/UPilotAutomationStepServiceTests.cs"
+      ],
+      "compileOperationId": "ca298935f61748d4bcf2433fd72e2350",
+      "compileRequestId": "req-87dc0aca-cf33-4c72-9da6-10632c0d18fc",
+      "writeBatchCreatedAt": 1791645754609,
+      "lastCompileVerifiedAt": 1791645766458,
+      "status": "verified",
+      "outcome": "passed",
+      "terminal": true,
+      "errorsVerified": true,
+      "correlationVerified": true,
+      "errorCount": 0,
+      "warningCount": 1,
+      "observedWith": [
+        "unity_write_batch_status",
+        "unity_compile_errors"
+      ],
+      "existingWarning": "CS0618 at Tests/Editor/UPilotDiagnosticModuleTamperTests.cs:88"
+    },
+    "currentWorkspaceBlockedByEarlierFailure": false
+  },
+  "limitations": [
+    "Latest live Server selected-entry code differs from disk. No service restart/deployment was authorized or performed; not a verified live end-to-end lifecycle-health fix.",
+    "Targeted Unity assertion and cleanup results are authoritative, but Console testExecution/cleanup phases have partial coverage; no complete no-Console-error claim.",
+    "Long lifecycle scenarios use virtual clocks/mock events, not deliberate 120/180/600-second Unity stalls or a new PlayMode transition.",
+    "Python 59 passed evidence is reused with unchanged prior scoped sources, not rerun in this continuation.",
+    "No full EditMode suite, release, external-project upgrade, service/Unity restart or old operation replay.",
+    "Root cause of the earlier independent Unity main-thread stall remains unconfirmed."
+  ]
+}

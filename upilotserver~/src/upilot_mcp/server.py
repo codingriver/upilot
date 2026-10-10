@@ -4,9 +4,7 @@ import asyncio
 import json
 import logging
 import os
-import socket
 import sqlite3
-import struct
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +25,7 @@ from .process_identity import (
     query_unity_processes,
 )
 from .session_manager import SessionManager
+from .socket_shutdown import enable_abortive_close
 from .state_store import CompileSnapshot, StateStore
 from .version import version_payload
 
@@ -108,6 +107,7 @@ class WsOrchestratorServer(WsTransport):
         # Only live, admitted, ordered Unity snapshots establish a lifecycle wait.
         self._editor_lifecycle: dict[str, Any] | None = None
         self._editor_lifecycle_recovery: dict[str, Any] | None = None
+        self._editor_lifecycle_failure: dict[str, Any] | None = None
         self._editor_lifecycle_producer: tuple[int, int, str, int, int] | None = None
 
     @staticmethod
@@ -146,12 +146,6 @@ class WsOrchestratorServer(WsTransport):
         return {"current": current, "latestRejection": dict(self._latest_session_rejection)}
 
     @staticmethod
-    def _abortive_linger_bytes() -> bytes:
-        if os.name == "nt":
-            return struct.pack("HH", 1, 0)
-        return struct.pack("ii", 1, 0)
-
-    @staticmethod
     def _server_close_timeout_seconds() -> float:
         return max(0.1, env_float("UPILOT_SERVER_CLOSE_TIMEOUT_S", 0.5))
 
@@ -167,57 +161,73 @@ class WsOrchestratorServer(WsTransport):
             return
 
         remote = getattr(websocket, "remote_address", None)
-        try:
-            websocket.fail_connection()
-        except Exception as ex:
-            logger.debug("fail_connection skipped for %s (%s): %s", remote, reason, ex)
-
         transport = getattr(websocket, "transport", None)
+        verified_linger = None
+        # fail_connection() or abort() may invalidate the socket immediately.
+        # Configure through the public transport API BEFORE either operation.
+        try:
+            sock = transport.get_extra_info("socket") if transport is not None else None
+            if sock is None:
+                raise RuntimeError("transport socket unavailable")
+            verified_linger = enable_abortive_close(sock)
+        except Exception:
+            logger.warning(
+                "WebSocket abortive close unverified for %s (%s); still aborting",
+                remote, reason, exc_info=True,
+            )
+
+        fail_connection = getattr(websocket, "fail_connection", None)
+        if fail_connection is not None:
+            try:
+                fail_connection()
+            except Exception as ex:
+                logger.debug("fail_connection skipped for %s (%s): %s", remote, reason, ex)
+
         if transport is None:
             logger.debug("No transport available for force disconnect %s (%s)", remote, reason)
             return
-
         try:
             transport.abort()
-        except Exception as ex:
-            logger.debug("transport.abort failed for %s (%s): %s", remote, reason, ex)
-
-        raw_socket = getattr(transport, "_sock", None)
-        if raw_socket is None:
-            raw_socket = transport.get_extra_info("socket")
-        if raw_socket is not None:
-            try:
-                raw_socket.setsockopt(
-                    socket.SOL_SOCKET,
-                    socket.SO_LINGER,
-                    self._abortive_linger_bytes(),
-                )
-            except OSError as ex:
-                logger.debug("set SO_LINGER=0 failed for %s (%s): %s", remote, reason, ex)
-            try:
-                if raw_socket.fileno() != -1:
-                    raw_socket.close()
-            except OSError as ex:
-                logger.debug("raw socket close failed for %s (%s): %s", remote, reason, ex)
-
-        logger.info("Force-aborted WebSocket to %s (%s)", remote, reason)
+        except Exception:
+            logger.warning("transport.abort failed for %s (%s)", remote, reason, exc_info=True)
+            return
+        # Only the transport closes its socket; no private _sock / double close.
+        logger.info(
+            "Force-aborted WebSocket to %s (%s), linger=%s verified=%s",
+            remote, reason, verified_linger, verified_linger is not None,
+        )
 
     async def start(self) -> None:
         self._stop_event.clear()
         self._listening_event.clear()
-        self._server = await websockets.serve(
-            self._handle, self.host, self.port, max_size=_MAX_BRIDGE_MESSAGE_BYTES,
-            # Unity's ClientWebSocket doesn't use compression. Declining it also
-            # keeps the byte limit independent of compressed continuation frames.
-            compression=None,
-        )
-        self._listening_event.set()
-        logger.info("WebSocket server listening on %s:%s", self.host, self.port)
-        expiry = asyncio.create_task(self._expire_write_batches(), name="write-batch-deadlines")
+        expiry = None
         try:
+            self._server = await websockets.serve(
+                self._handle, self.host, self.port, max_size=_MAX_BRIDGE_MESSAGE_BYTES,
+                # Unity's ClientWebSocket doesn't use compression. Declining it also
+                # keeps the byte limit independent of compressed continuation frames.
+                compression=None, start_serving=False,
+            )
+            if not self._server.sockets:
+                raise OSError("No sockets available for WebSocket listener")
+            for listener in self._server.sockets:
+                linger = enable_abortive_close(listener)
+                logger.info(
+                    "WebSocket socket policy=abortive linger=%s address=%s",
+                    linger, listener.getsockname(),
+                )
+            await self._server.start_serving()
+            self._listening_event.set()
+            logger.info("WebSocket server listening on %s:%s", self.host, self.port)
+            expiry = asyncio.create_task(self._expire_write_batches(), name="write-batch-deadlines")
             await self._stop_event.wait()
+        except Exception:
+            logger.exception("WebSocket server failed on %s:%s", self.host, self.port)
+            raise
         finally:
-            expiry.cancel()
+            self._listening_event.clear()
+            if expiry is not None:
+                expiry.cancel()
             logger.info("WebSocket server shutting down on %s:%s", self.host, self.port)
             self._shutting_down = True
             self._cancel_reconnect_grace()
@@ -531,7 +541,7 @@ class WsOrchestratorServer(WsTransport):
         return payload
 
     def _current_editor_lifecycle(self) -> tuple[dict[str, Any] | None, str]:
-        record = self._editor_lifecycle or self._editor_lifecycle_recovery
+        record = self._editor_lifecycle or self._editor_lifecycle_recovery or self._editor_lifecycle_failure
         if not record:
             return None, ""
         session = self.session_manager.active
@@ -539,14 +549,18 @@ class WsOrchestratorServer(WsTransport):
                 or not paths_equal(session.project_path, record["project"])
                 or session.process_id != record["pid"]
                 or session.process_created_at != record["created_at"]):
-            self._editor_lifecycle = self._editor_lifecycle_recovery = None
+            self._editor_lifecycle = self._editor_lifecycle_recovery = self._editor_lifecycle_failure = None
             return None, "lifecycle_identity_changed"
+        if self._editor_lifecycle_failure:
+            return None, self._editor_lifecycle_failure["failure_reason"]
         # Kernel queries only; never run a CIM scan for every /health observation.
         if not process_exists(record["pid"]):
+            self._editor_lifecycle_failure = dict(record, failure_reason="unity_process_exited")
             self._editor_lifecycle = self._editor_lifecycle_recovery = None
             return None, "unity_process_exited"
         created_at = process_creation_time(record["pid"])
         if created_at and created_at // 10 != record["created_at"] // 10:
+            self._editor_lifecycle_failure = dict(record, failure_reason="unity_process_identity_mismatch")
             self._editor_lifecycle = self._editor_lifecycle_recovery = None
             return None, "unity_process_identity_mismatch"
         if os.name == "nt" and not created_at:
@@ -568,6 +582,12 @@ class WsOrchestratorServer(WsTransport):
         if not epoch or not observed:
             return
         sequence = int(payload.get("sequence") or 0)
+        failure = self._editor_lifecycle_failure
+        if failure:
+            if (session.process_id == failure["pid"] and session.process_created_at == failure["created_at"]
+                    and paths_equal(session.project_path, failure["project"])):
+                return  # A snapshot cannot revive a confirmed exited or reused process.
+            self._editor_lifecycle_failure = None
         producer = self._editor_lifecycle_producer
         if producer and producer[:2] == (session.process_id, session.process_created_at):
             if epoch != producer[2] or (domain, sequence) <= producer[3:]:

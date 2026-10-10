@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -25,6 +26,7 @@ from mcp.types import CallToolResult, TextContent
 
 from .env import env_float, getenv
 from .server import WsOrchestratorServer
+from .socket_shutdown import enable_abortive_close
 from .tool_facade import McpToolFacade
 from .models import ToolResponse
 from .protocol import new_id
@@ -312,6 +314,65 @@ async def _stop_ws_task_fast(
             await task
 
 
+async def _bind_http_sockets(host: str, port: int) -> list[socket.socket]:
+    """Pre-bind like asyncio.create_server, without Uvicorn's SO_REUSEADDR.
+
+    No connections are accepted until Uvicorn takes ownership. Setting linger
+    here also covers accepted sockets when the process is killed without cleanup.
+    """
+    loop = asyncio.get_running_loop()
+    sockets = []
+    try:
+        infos = await loop.getaddrinfo(
+            host or None, port, family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE,
+        )
+        for family, socktype, proto, _, address in set(infos):
+            sock = socket.socket(family, socktype, proto)
+            sockets.append(sock)
+            # Match asyncio's platform default; Windows must NOT gain reuse.
+            if os.name == "posix" and sys.platform != "cygwin":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+            if socket.has_ipv6 and family == socket.AF_INET6 and hasattr(socket, "IPPROTO_IPV6"):
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, True)
+            linger = enable_abortive_close(sock)
+            sock.bind(address)
+            sock.setblocking(False)
+            logger.info(
+                "HTTP socket policy=abortive linger=%s address=%s",
+                linger, sock.getsockname(),
+            )
+        if not sockets:
+            raise OSError("No addresses available for HTTP listener")
+        return sockets
+    except BaseException:
+        logger.exception("HTTP socket setup failed on %s:%s", host, port)
+        for sock in sockets:
+            try:
+                sock.close()
+            except OSError:
+                logger.warning("HTTP socket cleanup failed", exc_info=True)
+        raise
+
+
+async def _serve_http_sockets(server: Server, host: str, port: int) -> None:
+    sockets = await _bind_http_sockets(host, port)
+    try:
+        await server.serve(sockets=sockets)
+    except BaseException:
+        logger.exception("HTTP server failed on %s:%s", host, port)
+        # Startup may transfer only some sockets before create_server fails.
+        for listener in getattr(server, "servers", ()):
+            listener.close()
+        raise
+    finally:
+        # Uvicorn/asyncio normally own closure; close any untransferred sockets
+        # too (e.g. lifespan failure or partial create_server startup failure).
+        for sock in sockets:
+            if sock.fileno() != -1:
+                sock.close()
+
+
 async def _run_http_server(
     http_host: str, http_port: int, ws_task: asyncio.Task[None]
 ) -> None:
@@ -575,7 +636,7 @@ async def _run_http_server(
     server = Server(config)
     _http_server = server
     try:
-        await server.serve()
+        await _serve_http_sockets(server, http_host, http_port)
     finally:
         if _http_server is server:
             _http_server = None
@@ -1425,7 +1486,7 @@ async def main() -> None:
         try:
             await _wait_for_ws_listener(_orchestrator)
             logger.info(
-                "UPilot MCP server started  transport=%s  ws=%s:%s  http=%s:%s  path=%s",
+                "UPilot MCP server starting  transport=%s  ws=%s:%s  http=%s:%s  path=%s",
                 transport,
                 ws_host,
                 ws_port,

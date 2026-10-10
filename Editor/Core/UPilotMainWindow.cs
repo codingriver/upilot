@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 
@@ -187,10 +188,10 @@ namespace CodingRiver.UPilot
             {
                 DrawMainWindowGui();
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!IsExitGUIException(ex))
             {
                 ReportMainWindowException("UPilot 主界面绘制失败", ex);
-                DrawExceptionFallback("UPilot 主界面绘制失败", ex);
+                DrawExceptionFallback("UPilot 主界面绘制失败", ex, new Rect(Vector2.zero, position.size));
             }
         }
 
@@ -2347,13 +2348,27 @@ namespace CodingRiver.UPilot
             Debug.LogError("[UPilot] " + context + "：" + ex.Message + "\n" + ex);
         }
 
-        private static void DrawExceptionFallback(string context, Exception ex)
+        internal static bool IsExitGUIException(Exception ex)
+        {
+            // Unity also treats reflection-wrapped ExitGUIException as GUI control flow.
+            while (ex is TargetInvocationException && ex.InnerException != null)
+                ex = ex.InnerException;
+            return ex is ExitGUIException;
+        }
+
+        internal static void DrawExceptionFallback(string context, Exception ex, Rect bounds)
         {
             try
             {
-                EditorGUILayout.HelpBox(context + "：" + ex.Message, MessageType.Error);
+                // The failed draw may have left GUILayout incomplete. Never add layout
+                // entries here: a Repaint has no matching fallback entries from Layout.
+                if (Event.current.type != EventType.Repaint)
+                    return;
+                var rect = new Rect(bounds.x + 8f, bounds.y + 8f,
+                    Mathf.Max(1f, bounds.width - 16f), Mathf.Min(80f, Mathf.Max(1f, bounds.height - 16f)));
+                EditorGUI.HelpBox(rect, context + "：" + ex.Message, MessageType.Error);
             }
-            catch (Exception fallbackEx)
+            catch (Exception fallbackEx) when (!IsExitGUIException(fallbackEx))
             {
                 Debug.LogError("[UPilot] 主界面错误提示绘制失败：" + fallbackEx.Message + "\n" + fallbackEx);
             }

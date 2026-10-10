@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-10T22:44:35.060796+08:00",
+  "evidenceKind": "recorded observations from native UPilot MCP and scoped pytest; not an acceptance success",
+  "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
+  "gitHead": "ad75ee5f2a8163764c5034220bd0d9470f7226f7",
+  "scopeSourceSha256": {
+    "Editor/Core/UPilotMcpServerManager.cs": "9cc7cd39edc3d243f52751b0c347b650251582b6b29dbf4a68c29fdb13980f50",
+    "Editor/Core/UPilotQuickStart.cs": "02765cd2c065ed9459cb27e5d3ff3d5b747e12f7e6fbd2511083206d37c3d88a",
+    "Tests/Editor/UPilotLifecycleHealthTests.cs": "91de639ae4e3473ee9b3c28de70ad698928378f2998cad65b2cef21d92a40ba8",
+    "upilotserver~/src/upilot_mcp/server.py": "bbe390c3f3ac37e6dfb9e147c448790d0214a31bc77b18433d016bf568ef328d",
+    "upilotserver~/tests/test_editor_lifecycle_health.py": "405ba7f2d1537f3cd0e76e41f075aeb3211435561098094e548e5318dabf2f27"
+  },
+  "python": {
+    "lifecycleObservationAndRestart": {
+      "passed": 55,
+      "failed": 0
+    },
+    "orderedStateDirectRegression": {
+      "passed": 4,
+      "failed": 0,
+      "deselected": 98
+    },
+    "existingDeprecationWarningKinds": 2
+  },
+  "unityCompile": {
+    "writeBatchId": "wb-a779a04e-e059-4b30-84df-8475cd4c704d",
+    "compileOperationId": "40f9737dfde2446594038dbb3abc49f6",
+    "compileRequestId": "req-11c8e128-f444-4350-a02f-f46131c879e3",
+    "writeBatchCreatedAt": 1791643073661,
+    "lastCompileVerifiedAt": 1791643089007,
+    "status": "verified",
+    "outcome": "passed",
+    "terminal": true,
+    "errorsVerified": true,
+    "correlationVerified": true,
+    "errorCount": 0,
+    "warningCount": 1,
+    "filesSha256": "99e360cf55906ab0c4d0a8bd83e3670969bcdd659baa0e2e03137e2e00687aa6",
+    "consoleCoverage": "partial",
+    "consoleGapReason": "console_cleared"
+  },
+  "unityTargetedTests": {
+    "runGuid": "ffcfcbca-25e4-4e36-972e-85d423eab2e5",
+    "serviceLifecycleId": "1382a9b66fa74660905c080cee7896d9",
+    "selectionDomain": "11a7ac4ee3f44bd4acecd4839c861a82",
+    "selectionSnapshotId": "f8939e01f660ad3c19f1e33bb76511677035c8009431cc2971922e693b4a940d",
+    "total": 31,
+    "passed": 31,
+    "failed": 0,
+    "skipped": 0,
+    "resultAuthoritative": true,
+    "outcomeStatus": "completed",
+    "terminal": true,
+    "status": "aborted",
+    "cleanupStatus": "failed",
+    "cleanupSucceeded": false,
+    "cleanupResourcesReleased": false,
+    "cleanupAttemptDeadlineAt": 1791643316152,
+    "endedAt": 1791643316939,
+    "persistenceError": "IOException: Active TestRuns pointer belongs to another run; commit refused.",
+    "cleanupConsoleCoverage": "partial",
+    "cleanupConsoleGapReason": "phase_boundary_not_closed"
+  },
+  "oldPointerReadOnlyObservation": {
+    "runGuid": "cd2d85e3-554c-4ac0-ac14-6d9e78d27efc",
+    "serviceLifecycleId": "7894a16eb6a74368b6569502f5295ff8",
+    "status": "stopping",
+    "terminal": false,
+    "snapshotSequence": 54,
+    "cleanupSucceeded": false,
+    "resultAuthoritative": false,
+    "originalCleanupAttemptDeadlineAt": 1791634146379,
+    "historyPreserved": true
+  },
+  "limitations": [
+    "Targeted test assertions passed; run cleanup failed, so package EditMode acceptance is incomplete.",
+    "Additional PyInstaller launcher/worker targeted tests were not started after the cleanup conflict.",
+    "No full EditMode suite, service restart, release or external-project upgrade was performed.",
+    "Latest Server source changes are not verified loaded in the live service.",
+    "Long lifecycle scenarios use virtual clocks and mock events, not deliberate long Unity blocking."
+  ]
+}

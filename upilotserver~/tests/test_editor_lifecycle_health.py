@@ -149,6 +149,51 @@ def test_real_identity_failure_wins_over_wait(lifecycle, monkeypatch, fault):
     assert server._editor_lifecycle is None
 
 
+
+@pytest.mark.parametrize("fault,reason", [
+    ("exit", "unity_process_exited"),
+    ("pid-reuse", "unity_process_identity_mismatch"),
+])
+def test_confirmed_process_fault_survives_repeated_health_queries(lifecycle, monkeypatch, fault, reason):
+    server, clock = lifecycle
+    publish(server, snapshot(server, clock, playModeTransition=transition(server, clock)))
+    if fault == "exit":
+        monkeypatch.setattr(server_module, "process_exists", lambda _: False)
+    else:
+        monkeypatch.setattr(server_module, "process_creation_time", lambda _: 54321)
+    for _ in range(3):
+        clock[0] += 1000
+        result = server.editor_observation(observed_at_ms=clock[0], network_connected=False)
+        assert result["status"] == "unknown"
+        assert result["reason"] == reason
+        assert "lifecycle_id" not in result
+        assert server._editor_lifecycle is None
+    # An admitted snapshot for the failed old identity must not restart its wait.
+    publish(server, snapshot(server, clock, sequence=2, playModeTransition=transition(server, clock)))
+    assert server.editor_observation(observed_at_ms=clock[0], network_connected=False)["reason"] == reason
+
+
+def test_new_verified_process_does_not_inherit_confirmed_lifecycle_fault(lifecycle, monkeypatch):
+    server, clock = lifecycle
+    publish(server, snapshot(server, clock, playModeTransition=transition(server, clock)))
+    monkeypatch.setattr(server_module, "process_exists", lambda _: False)
+    assert server.editor_observation(observed_at_ms=clock[0], network_connected=False)["reason"] == "unity_process_exited"
+    project = server.session_manager.active.project_path
+    server.session_manager.on_hello("session-new", dict(projectPath=project, processId=13,
+        processCreatedAt=54321, identityVerified=True))
+    server.state.reset_editor_session("session-new", 13)
+    monkeypatch.setattr(server_module, "process_exists", lambda pid: pid == 13)
+    monkeypatch.setattr(server_module, "process_creation_time", lambda pid: 54321 if pid == 13 else 0)
+    clock[0] += 1000
+    server.session_manager.active.last_heartbeat_at = clock[0]
+    data = snapshot(server, clock, playModeTransition=transition(server, clock))
+    data.update(producerEpoch="epoch-new", snapshotId="epoch-new:1:1")
+    publish(server, data)
+    result = server.editor_observation(observed_at_ms=clock[0], network_connected=True)
+    assert result["status"] == "waiting_lifecycle"
+    assert result["reason"] == "confirmed_unity_lifecycle"
+
+
 def test_wait_is_isolated_to_server_and_project(lifecycle, tmp_path):
     server, clock = lifecycle
     publish(server, snapshot(server, clock, playModeTransition=transition(server, clock)))

@@ -1238,7 +1238,14 @@ namespace CodingRiver.UPilot
                 token.ThrowIfCancellationRequested();
                 throw new TimeoutException("/health request headers/body timed out.");
             }
-            var response = await send;
+            System.Net.Http.HttpResponseMessage response;
+            try { response = await send; }
+            catch (OperationCanceledException error) when (timeout.IsCancellationRequested && !token.IsCancellationRequested)
+            {
+                // CancelAfter can win the race with Task.Delay. Keep budget expiry
+                // deterministic without turning caller cancellation into a timeout.
+                throw new TimeoutException("/health operation deadline elapsed.", error);
+            }
             if (timeout.IsCancellationRequested || (deadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= deadlineUtcMs))
             {
                 response.Dispose();

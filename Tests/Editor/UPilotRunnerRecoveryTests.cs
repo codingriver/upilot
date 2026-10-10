@@ -1454,6 +1454,143 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(snapshot.unresolvedResources.Single(), Is.EqualTo("test-callback"));
         }
 
+        [TestCase("current-owner")]
+        [TestCase("snapshot")]
+        [TestCase("last-run.txt")]
+        [TestCase("active-run.txt")]
+        public void FailedAdmissionPreservesPreviousResultAndDoesNotCreateRunnerResources(string failure)
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "UPilotAdmission-" + Guid.NewGuid().ToString("N"));
+            var previous = new TestRunResultPayload
+            {
+                runGuid = "previous-result", status = "aborted", terminal = true,
+                cleanupAttemptDeadlineAt = 123, cleanupSucceeded = false,
+            };
+            var service = DetachedService(previous);
+            service.PersistenceDirectoryForTests = directory;
+            SetField(service, "_isRunning", false);
+            try
+            {
+                if (failure == "current-owner")
+                    UPilotTestRunStore.Save(directory, new TestRunResultPayload
+                    {
+                        runGuid = "current-owner", serviceLifecycleId = UPilotServiceLifetime.Id, status = "running",
+                    }, true, false);
+                else
+                    UPilotTestRunStore.BeforeAtomicReplaceForTests = path =>
+                    {
+                        if ((failure == "snapshot" && Path.GetExtension(path) == ".json")
+                            || Path.GetFileName(path) == failure)
+                            throw new IOException("injected service admission " + failure);
+                    };
+                var candidate = new TestRunResultPayload { serviceLifecycleId = UPilotServiceLifetime.Id };
+                var error = Assert.Throws<UPilotTestService.TestRunAdmissionException>(() => service.AdmitRun(candidate));
+                Assert.That(error.Message, Does.Contain("TestRunnerApi.Execute was not called"));
+                Assert.That(service.IsRunning, Is.False);
+                Assert.That(GetField(service, "_lastResults"), Is.SameAs(previous));
+                Assert.That(GetField(service, "_activeApi"), Is.Null);
+                Assert.That(GetField(service, "_activeCallback"), Is.Null);
+                Assert.That(candidate.runnerStartAttempted, Is.False);
+                Assert.That(previous.cleanupAttemptDeadlineAt, Is.EqualTo(123));
+                Assert.That(previous.status, Is.EqualTo("aborted"));
+                if (failure == "current-owner")
+                    Assert.That(File.ReadAllText(Path.Combine(directory, "active-run.txt")), Is.EqualTo("current-owner"));
+            }
+            finally
+            {
+                UPilotTestRunStore.BeforeAtomicReplaceForTests = null;
+                DetachCleanup(service);
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void InterruptedProvisionalAdmissionNeverRestoresOrReplaysRunnerAndKeepsDeadline(bool startAttempted)
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "UPilotAdmissionReload-" + Guid.NewGuid().ToString("N"));
+            string admissionId = "admission-" + Guid.NewGuid().ToString("N");
+            long deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000;
+            var snapshot = new TestRunResultPayload
+            {
+                runGuid = admissionId, runAdmissionId = admissionId, serviceLifecycleId = UPilotServiceLifetime.Id,
+                status = "started", phase = "starting", isRunning = true, runnerStartAttempted = startAttempted,
+                cleanupAttemptDeadlineAt = deadline, outcomeStatus = "pending",
+            };
+            var service = DetachedService(snapshot);
+            service.PersistenceDirectoryForTests = directory;
+            service.RunnerAdapterResolverForTests = _ => throw new InvalidOperationException("No provisional runner may be probed.");
+            try
+            {
+                UPilotTestRunStore.Admit(directory, snapshot);
+                RecoverLoaded(service, active: true);
+                Assert.That(service.IsRunning, Is.False);
+                Assert.That(snapshot.status, Is.EqualTo("aborted"));
+                Assert.That(snapshot.terminal, Is.True);
+                Assert.That(snapshot.resultAuthoritative, Is.False);
+                Assert.That(snapshot.outcomeStatus, Is.EqualTo("unknown"));
+                Assert.That(snapshot.cleanupSucceeded, Is.False);
+                Assert.That(snapshot.cleanupResourcesReleased, Is.False);
+                Assert.That(snapshot.cleanupAttemptDeadlineAt, Is.EqualTo(deadline));
+                Assert.That(snapshot.runnerStartAttempted, Is.EqualTo(startAttempted));
+                Assert.That(GetField(service, "_activeRunGuid"), Is.Null);
+                Assert.That(GetField(service, "_activeApi"), Is.Null);
+                Assert.That(GetField(service, "_activeCallback"), Is.Null);
+                Assert.That(File.Exists(Path.Combine(directory, "active-run.txt")), Is.False);
+                Assert.That(UPilotTestRunStore.Read(Path.Combine(directory, admissionId + ".json")).outcomeStatus,
+                    Is.EqualTo("unknown"));
+            }
+            finally
+            {
+                DetachCleanup(service);
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void BootstrapRecoveryRetiresOnlyVerifiedPreviousLifetimeAndReportsUnknownOwner(bool verified)
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "UPilotAdmissionBootstrap-" + Guid.NewGuid().ToString("N"));
+            var previous = new TestRunResultPayload
+            {
+                runGuid = "historical-owner", serviceLifecycleId = verified ? Guid.NewGuid().ToString("N") : null,
+                status = "stopping", isRunning = true, cleanupAttemptDeadlineAt = 123,
+            };
+            var service = DetachedService(null);
+            service.PersistenceDirectoryForTests = directory;
+            SetField(service, "_isRunning", false);
+            service.RunnerAdapterResolverForTests = _ => throw new InvalidOperationException("No old-lifetime runner may be restored.");
+            try
+            {
+                UPilotTestRunStore.Save(directory, previous, true, false);
+                string path = Path.Combine(directory, previous.runGuid + ".json");
+                byte[] history = File.ReadAllBytes(path);
+                typeof(UPilotTestService).GetMethod("RecoverPersistedState", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(service, null);
+                var status = service.GetStatusSnapshot();
+                Assert.That(service.IsRunning, Is.False);
+                Assert.That(GetField(service, "_activeApi"), Is.Null);
+                Assert.That(GetField(service, "_activeCallback"), Is.Null);
+                Assert.That(status.status, Is.EqualTo(verified ? "none" : "unconfirmed"));
+                Assert.That(File.Exists(Path.Combine(directory, "active-run.txt")), Is.EqualTo(!verified));
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(history));
+                Assert.That(File.ReadAllText(Path.Combine(directory, "last-run.txt")), Is.EqualTo(previous.runGuid));
+                if (!verified)
+                {
+                    Assert.That(status.persistenceError, Does.Contain("ownership is unconfirmed"));
+                    Assert.Throws<UPilotTestService.TestRunAdmissionException>(() => service.AdmitRun(
+                        new TestRunResultPayload { serviceLifecycleId = UPilotServiceLifetime.Id }));
+                    Assert.That(File.ReadAllText(Path.Combine(directory, "active-run.txt")), Is.EqualTo(previous.runGuid));
+                }
+            }
+            finally
+            {
+                DetachCleanup(service);
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+        }
+
         private static void RecoverLoaded(UPilotTestService service, bool active) =>
             typeof(UPilotTestService).GetMethod("RecoverLoadedRun", BindingFlags.NonPublic | BindingFlags.Instance)
                 .Invoke(service, new object[] { active });
