@@ -16,7 +16,7 @@
     },
     "runtime": {
         "mode": "python",
-        "pythonPath": "C:\\Python311\\python.exe",
+        "pythonPath": "D:/upilot/upilotserver~/.venv/Scripts/python.exe",
         "serverExePath": "",
         "serverVersion": ""
     },

@@ -358,16 +358,12 @@ namespace CodingRiver.UPilot
             return Directory.GetParent(Application.dataPath)?.FullName ?? Application.dataPath;
         }
 
-        public UPilotServerRuntimeMode GetConfiguredMode()
-        {
-            if (IsSourceUpdateChannel())
-                return UPilotServerRuntimeMode.Python;
+        // 更新渠道决定更新策略，不覆盖用户显式选择的本地运行方式。
+        public UPilotServerRuntimeMode GetConfiguredMode() => ResolveConfiguredMode(UPilotProjectConfig.Current.runtime?.mode);
 
-            var mode = UPilotProjectConfig.Current.runtime?.mode ?? "python";
-            return string.Equals(mode, "exe", StringComparison.OrdinalIgnoreCase)
-                ? UPilotServerRuntimeMode.StandaloneExe
-                : UPilotServerRuntimeMode.Python;
-        }
+        internal static UPilotServerRuntimeMode ResolveConfiguredMode(string mode) =>
+            string.Equals(mode, "exe", StringComparison.OrdinalIgnoreCase)
+                ? UPilotServerRuntimeMode.StandaloneExe : UPilotServerRuntimeMode.Python;
 
         public void SetPythonRuntime(string pythonPath)
         {
@@ -387,15 +383,6 @@ namespace CodingRiver.UPilot
         {
             var config = UPilotProjectConfig.Current;
             config.runtime ??= new UPilotRuntimeConfig();
-            if (IsSourceUpdateChannel())
-            {
-                config.runtime.mode = "python";
-                config.runtime.serverExePath = "";
-                config.runtime.serverVersion = "";
-                UPilotProjectConfig.Save(config);
-                return;
-            }
-
             config.runtime.mode = "exe";
             config.runtime.serverExePath = exePath ?? "";
             if (!string.IsNullOrWhiteSpace(serverVersion))

@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - MCP server restart persistence and diagnostics.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -63,6 +63,9 @@ namespace CodingRiver.UPilot
         public int oldProcessId;
         public int newProcessId;
         public int launcherProcessId;
+        public ServerLaunchSpec launchSpec;
+        public string processRelationship;
+        public string processIdentityEvidence;
         public long launcherProcessCreatedAtTicks;
         public string oldBridgeSessionId;
         public string newBridgeSessionId;
@@ -230,7 +233,7 @@ namespace CodingRiver.UPilot
                 bridgeInstallSource = UPilotDeploymentDiagnostics.InstallSource,
                 bridgeIsMain = UPilotDeploymentDiagnostics.IsMain,
                 packageRoot = UPilotDeploymentDiagnostics.PackageRoot,
-                expectedEntry = UPilotDeploymentDiagnostics.PythonEntry,
+                expectedEntry = UPilotDeploymentDiagnostics.ExpectedEntry,
                 oldProcessId = Math.Max(0, oldProcessId),
                 oldBridgeSessionId = oldBridgeSessionId ?? "",
                 requestedAtUtcMs = acceptedAtUtcMs > 0 ? acceptedAtUtcMs : now,
@@ -470,6 +473,39 @@ namespace CodingRiver.UPilot
             });
         }
 
+        internal static void RecordLaunchSpec(string operationId, ServerLaunchSpec spec)
+        {
+            Update(operationId, record =>
+            {
+                if (record.launchSpec != null) return;
+                record.launchSpec = spec?.Snapshot();
+                record.expectedEntry = spec?.expectedEntry ?? record.expectedEntry;
+            });
+        }
+
+        internal static void RecordServiceIdentity(string operationId, ServerLaunchState state)
+        {
+            Update(operationId, record => ApplyServiceIdentity(record, state));
+        }
+
+        internal static bool ApplyServiceIdentity(UPilotServerRestartRecord record, ServerLaunchState state)
+        {
+            if (record == null || record.status != "running" || state?.verified != true ||
+                record.launcherProcessId != state.launcherPid || record.launcherProcessCreatedAtTicks != state.launcherCreatedAt ||
+                (record.newProcessId != state.launcherPid && record.newProcessId != state.servicePid) ||
+                (!string.IsNullOrEmpty(record.processIdentityEvidence) &&
+                 (record.newProcessId != state.servicePid || record.newProcessCreatedAtTicks != state.serviceCreatedAt))) return false;
+            // 已确认的重复回调不重写验证门发生时间。
+            if (!string.IsNullOrEmpty(record.processIdentityEvidence)) return true;
+            record.newProcessId = state.servicePid;
+            record.newProcessCreatedAtTicks = state.serviceCreatedAt;
+            record.processRelationship = state.launcherPid == state.servicePid ? "same_process" : "direct_child";
+            record.processIdentityEvidence = "创建时间/存活/可执行文件/父子关系/双端口/health PID/项目/入口/模块已核实";
+            MarkGateCore(record, "new_process", "passed", "service_identity_verified",
+                $"启动 PID {state.launcherPid}；服务 PID {state.servicePid}；{record.processRelationship}");
+            return true;
+        }
+
         internal static void RecordProcessStarted(string operationId, int processId, long createdAtTicks = 0)
         {
             if (processId <= 0) return;
@@ -479,6 +515,9 @@ namespace CodingRiver.UPilot
                 record.newProcessId = processId;
                 record.newProcessStartedAtUtcMs = UtcNowMs();
                 record.newProcessCreatedAtTicks = createdAtTicks;
+                record.launcherProcessId = processId;
+                record.launcherProcessCreatedAtTicks = createdAtTicks;
+                record.processRelationship = "unverified";
                 MarkGateCore(record, "new_process", "passed", "process_started", $"PID {processId}");
             });
         }
@@ -1284,12 +1323,15 @@ namespace CodingRiver.UPilot
             Row("Server 安装来源", r.bridgeInstallSource, r.serverInstallSource, checkedDeployment ? "通过" : "未知/未通过");
             Row("当前包路径", r.packageRoot, r.packageRoot, "重启请求时本地记录");
             Row("入口", r.expectedEntry, r.actualEntry, checkedDeployment ? "通过" : "未知/未通过");
-            Row("模块", string.IsNullOrWhiteSpace(r.packageRoot) ? null :
-                Path.Combine(r.packageRoot, "upilotserver~", "src", "upilot_mcp"),
+            Row("模块", r.launchSpec != null ? (string.IsNullOrEmpty(r.launchSpec.expectedModuleRoot) ? "独立部署：无包模块约束" : r.launchSpec.expectedModuleRoot) :
+                string.IsNullOrWhiteSpace(r.packageRoot) ? null : Path.Combine(r.packageRoot, "upilotserver~", "src", "upilot_mcp"),
                 r.actualModule, checkedDeployment ? "通过" : "未知/未通过");
             Row("main", r.bridgeIsMain.ToString(), r.bridgeIsMain.ToString(), "重启请求时本地记录");
             if (r.launcherProcessId > 0)
-                Row("启动器 PID", r.launcherProcessId.ToString(), r.launcherProcessId.ToString(), "已核实直接父进程");
+                Row("启动器 PID", r.launcherProcessId.ToString(), r.launcherProcessId.ToString(),
+                    string.IsNullOrEmpty(r.processRelationship) ? "旧记录：已核实直接父进程" : r.processRelationship);
+            if (!string.IsNullOrEmpty(r.processIdentityEvidence))
+                Row("进程身份依据", r.processRelationship, r.processIdentityEvidence, checkedIdentity ? "通过" : "待验证门确认");
             Row("PID", r.newProcessId > 0 ? r.newProcessId.ToString() : "未知",
                 r.healthProcessId > 0 ? r.healthProcessId.ToString() : "未知",
                 checkedIdentity ? "通过" : "未知/未通过");

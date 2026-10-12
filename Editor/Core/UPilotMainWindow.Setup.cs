@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - first setup view hosted by the main window.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -88,9 +88,9 @@ namespace CodingRiver.UPilot
             _setupRecoveryFailure = "";
             _showSetupRecoveryFailure = false;
             _setupStep = 0;
-            _setupRuntimeChoice = UPilotServerRuntimeService.IsSourceUpdateChannel()
-                ? SetupRuntimeChoice.Python
-                : SetupRuntimeChoice.Managed;
+            _setupRuntimeChoice = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
+                ? SetupRuntimeChoice.Managed : UPilotServerRuntimeService.IsSourceUpdateChannel()
+                    ? SetupRuntimeChoice.Python : SetupRuntimeChoice.Managed;
             _showPythonAdvanced = _setupRuntimeChoice == SetupRuntimeChoice.Python;
             _setupCompletionMessage = "";
             _setupCompletionMessageType = MessageType.None;

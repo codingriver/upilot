@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor tests
 // -----------------------------------------------------------------------
 
@@ -16,7 +16,7 @@ using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
-    // An asymmetric final-composite fixture: the test records pixels, never corrects orientation.
+    // 非对称最终合成画面：象限检查方向，四边标记检查完整构图。
     public sealed class UPilotGameViewOrientationProbe : MonoBehaviour
     {
         private void OnGUI()
@@ -30,6 +30,15 @@ namespace CodingRiver.UPilot.Tests
                 GUI.DrawTexture(new Rect((i % 2) * Screen.width / 2f, (i / 2) * Screen.height / 2f,
                     Screen.width / 2f, Screen.height / 2f), Texture2D.whiteTexture);
             }
+            float edge = Mathf.Max(4f, Mathf.Min(Screen.width, Screen.height) * 0.04f);
+            GUI.color = Color.magenta;
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, edge), Texture2D.whiteTexture);
+            GUI.color = Color.cyan;
+            GUI.DrawTexture(new Rect(0, Screen.height - edge, Screen.width, edge), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUI.DrawTexture(new Rect(0, 0, edge, Screen.height), Texture2D.whiteTexture);
+            GUI.color = Color.red;
+            GUI.DrawTexture(new Rect(Screen.width - edge, 0, edge, Screen.height), Texture2D.whiteTexture);
             GUI.color = Color.white;
             var style = new GUIStyle(GUI.skin.label) { fontSize = 28, alignment = TextAnchor.MiddleCenter };
             GUI.Label(new Rect(0, 8, Screen.width, 44), "TOP / UP 123", style);
@@ -1394,10 +1403,21 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        private bool gameViewProbeEnteredPlayMode;
+
+        [UnityTearDown]
+        public IEnumerator SettleGameViewOrientationCleanup()
+        {
+            if (!gameViewProbeEnteredPlayMode) yield break;
+            gameViewProbeEnteredPlayMode = false;
+            if (EditorApplication.isPlaying) yield return new ExitPlayMode();
+        }
+
         [UnityTest]
-        public IEnumerator AsymmetricGameViewReportsNativeScaledAndMismatchedOutputWithoutCorrection()
+        public IEnumerator AsymmetricGameViewPreservesOrientationAndFitsFullComposition()
         {
             yield return new EnterPlayMode();
+            gameViewProbeEnteredPlayMode = true;
             var root = new GameObject("UPilotGameViewOrientationProbe");
             root.AddComponent<UPilotGameViewOrientationProbe>();
             var directory = "Log/Stage4/AsymmetricGameView/" + Guid.NewGuid().ToString("N");
@@ -1407,8 +1427,10 @@ namespace CodingRiver.UPilot.Tests
                 int sw = Screen.width, sh = Screen.height;
                 Assert.That(sw, Is.GreaterThan(0));
                 Assert.That(sh, Is.GreaterThan(0));
-                var sizes = new[] { new Vector2Int(sw, sh), new Vector2Int(sw * 2, sh * 2),
-                    new Vector2Int(sh == sw ? sh / 2 : sh, sw) };
+                var sizes = new[] { new Vector2Int(sw, sh),
+                    new Vector2Int(Mathf.Min(sw * 2, 4096), Mathf.Min(sh * 2, 4096)),
+                    new Vector2Int(sh == sw ? sh / 2 : sh, sw),
+                    new Vector2Int(Mathf.Max(1, sw / 2), Mathf.Max(1, sh / 2)) };
                 for (int index = 0; index < sizes.Length; index++)
                 {
                     var size = sizes[index];
@@ -1434,11 +1456,12 @@ namespace CodingRiver.UPilot.Tests
                     Assert.That(diagnostic.outputWidth, Is.EqualTo(size.x));
                     Assert.That(diagnostic.outputHeight, Is.EqualTo(size.y));
                     Assert.That(diagnostic.capturedAt, Is.GreaterThan(0));
-                    Assert.That(diagnostic.aspectRatioMatches, Is.EqualTo(index != 2));
-                    Assert.That(string.IsNullOrEmpty(diagnostic.aspectWarning), Is.EqualTo(index != 2));
-                    Assert.That(diagnostic.contentOrientation, Is.EqualTo("unverified"));
-                    Assert.That(diagnostic.compositionComplete, Is.EqualTo("unverified"));
-                    Assert.That(diagnostic.internalCrop, Is.EqualTo("unknown"));
+                    bool matchingAspect = (long)sw * size.y == (long)sh * size.x;
+                    Assert.That(diagnostic.aspectRatioMatches, Is.EqualTo(matchingAspect));
+                    Assert.That(string.IsNullOrEmpty(diagnostic.aspectWarning), Is.EqualTo(matchingAspect));
+                    // 在像素断言之前保存原始观察，红灯也保留实际输出证据。
+                    File.WriteAllText(ProjectAbsolute(directory + "/" + index + "/observed-state.json"),
+                        JsonUtility.ToJson(job, true));
                     var png = job.artifacts.Single(a => a.path.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
                     var texture = new Texture2D(2, 2);
                     try
@@ -1446,15 +1469,54 @@ namespace CodingRiver.UPilot.Tests
                         Assert.That(texture.LoadImage(File.ReadAllBytes(ProjectAbsolute(png.path))), Is.True);
                         Assert.That(texture.width, Is.EqualTo(size.x));
                         Assert.That(texture.height, Is.EqualTo(size.y));
+                        AssertFullGameViewFrame(texture, sw, sh, diagnostic);
+                        Assert.That(diagnostic.contentOrientation, Is.EqualTo("upright"));
+                        Assert.That(diagnostic.compositionComplete, Is.EqualTo("full-source-frame"));
+                        Assert.That(diagnostic.internalCrop, Is.EqualTo("none"));
                     }
                     finally { UnityEngine.Object.DestroyImmediate(texture); }
-                    // Keep these self-owned manifests/PNGs for visual orientation and hash inspection.
-                    File.WriteAllText(ProjectAbsolute(directory + "/" + index + "/observed-state.json"),
-                        JsonUtility.ToJson(job, true));
                 }
             }
             finally { UnityEngine.Object.Destroy(root); }
             yield return new ExitPlayMode();
+        }
+
+        private static void AssertFullGameViewFrame(Texture2D texture, int sourceWidth, int sourceHeight, SnapshotGameViewEvidencePayload diagnostic)
+        {
+            // 独立按 contain 语义计算预期，不调用产品缩放函数作为 oracle。
+            double scale = Math.Min((double)texture.width / sourceWidth, (double)texture.height / sourceHeight);
+            int width = Math.Max(1, (int)Math.Round(sourceWidth * scale));
+            int height = Math.Max(1, (int)Math.Round(sourceHeight * scale));
+            int left = (texture.width - width) / 2, bottom = (texture.height - height) / 2;
+            AssertGameViewPixel(texture, left + width / 4, bottom + height * 3 / 4, Color.red, "top-left");
+            AssertGameViewPixel(texture, left + width * 3 / 4, bottom + height * 3 / 4, Color.green, "top-right");
+            AssertGameViewPixel(texture, left + width / 4, bottom + height / 4, Color.blue, "bottom-left");
+            AssertGameViewPixel(texture, left + width * 3 / 4, bottom + height / 4, Color.yellow, "bottom-right");
+            AssertGameViewPixel(texture, left + width / 2, bottom + height - 1 - Math.Max(1, height / 100), Color.magenta, "top-edge");
+            AssertGameViewPixel(texture, left + width / 2, bottom + Math.Max(1, height / 100), Color.cyan, "bottom-edge");
+            AssertGameViewPixel(texture, left + Math.Max(1, width / 100), bottom + height / 2, Color.white, "left-edge");
+            AssertGameViewPixel(texture, left + width - 1 - Math.Max(1, width / 100), bottom + height / 2, Color.red, "right-edge");
+            Assert.That(diagnostic.resizeMode, Is.EqualTo("contain"));
+            Assert.That(diagnostic.verticalFlipApplied, Is.EqualTo(SystemInfo.graphicsUVStartsAtTop));
+            Assert.That(diagnostic.contentLeft, Is.EqualTo(left));
+            Assert.That(diagnostic.contentTop, Is.EqualTo(texture.height - bottom - height));
+            Assert.That(diagnostic.contentWidth, Is.EqualTo(width));
+            Assert.That(diagnostic.contentHeight, Is.EqualTo(height));
+            if (left > 1) AssertGameViewPixel(texture, left / 2, texture.height / 2, Color.black, "left-letterbox");
+            if (texture.width - left - width > 1)
+                AssertGameViewPixel(texture, left + width + (texture.width - left - width) / 2, texture.height / 2, Color.black, "right-letterbox");
+            if (bottom > 1) AssertGameViewPixel(texture, texture.width / 2, bottom / 2, Color.black, "bottom-letterbox");
+            if (texture.height - bottom - height > 1)
+                AssertGameViewPixel(texture, texture.width / 2, bottom + height + (texture.height - bottom - height) / 2, Color.black, "top-letterbox");
+        }
+
+        private static void AssertGameViewPixel(Texture2D texture, int x, int y, Color expected, string marker)
+        {
+            Color32 pixel = texture.GetPixel(x, y), reference = expected;
+            Assert.That((int)pixel.r, Is.EqualTo((int)reference.r).Within(8), marker + " red");
+            Assert.That((int)pixel.g, Is.EqualTo((int)reference.g).Within(8), marker + " green");
+            Assert.That((int)pixel.b, Is.EqualTo((int)reference.b).Within(8), marker + " blue");
+            Assert.That((int)pixel.a, Is.EqualTo(255).Within(1), marker + " alpha");
         }
 
 #if UNITY_EDITOR_WIN

@@ -66,7 +66,11 @@ def test_default_and_explicit_full_remain_lossless_after_summary(tmp_path):
     default = asyncio.run(wire.test_results("run-original"))
     full = asyncio.run(wire.test_results("run-original", detail_level="full"))
     assert summary.data is not data
-    assert default.data == full.data == data
+    assert default.data == full.data
+    assert {key: full.data[key] for key in data} == data
+    assert response.data == data  # additive coverage metadata is a response-only projection
+    assert full.data["consoleEvidence"]["rangeCoverage"] == "unavailable"
+    assert full.data["consoleEvidence"]["phaseCoverage"] == "partial"
     assert len(full.data["results"]) == 5001
     assert all(payload == {"acceptCompressed": True, "runGuid": "run-original"}
                for name, payload in wire.calls)
@@ -87,7 +91,8 @@ def test_compressed_summary_preserves_wire_response_and_full_read(tmp_path):
     assert summary.data is not original.data
     assert summary.data["summaryBytes"] == len(json.dumps(summary.data, ensure_ascii=False).encode("utf-8")) <= 8192
     full = asyncio.run(wire.test_results("run-original", detail_level="full"))
-    assert full.ok and full.data == data
+    assert full.ok and {key: full.data[key] for key in data} == data
+    assert full.data["consoleEvidence"]["phaseCoverage"] == "partial"
     assert original.data == envelope
     assert wire.calls == [("test.results", {"acceptCompressed": True, "runGuid": "run-original"})] * 2
 

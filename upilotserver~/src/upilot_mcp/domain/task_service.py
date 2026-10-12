@@ -1197,7 +1197,20 @@ class TaskDomainService:
                 and status_call.get("kind") == "bridge"
                 and status_call.get("route") == "automation.steps.state"
             )
-            if result.error and (step_initializing or result.error.code in {
+            # A transport failure of the audited original Step state query says
+            # nothing about business execution or cleanup. Keep its deadline and
+            # identity; the next observation may only read that same run. Never
+            # replay Start or extend this exception to arbitrary callbacks.
+            original_step_read, _ = self._operation_recovery_call(state)
+            interrupted_step_read = (
+                original_step_read is not None
+                and result.error is not None
+                and result.error.code in {
+                    "CONNECTION_LOST", "COMMAND_RECOVERY_REQUIRED", "DOMAIN_RELOAD_TIMEOUT",
+                    "UPILOT_RECONNECT_PENDING"
+                }
+            )
+            if result.error and (step_initializing or interrupted_step_read or result.error.code in {
                 "COMMAND_TIMEOUT", "UNITY_NOT_CONNECTED", "DISCONNECTED", "EDITOR_BUSY"
             }):
                 state.update(phase="Recovering", lastObservationError=result.error.message)
@@ -1947,6 +1960,12 @@ class TaskDomainService:
         if state.get("terminal") or state.get("endedAt"):
             return
         state["lastStatusData"] = payload
+        # Preserve the business outcome before terminal status normalization/cleanup.
+        # An explicit unknown is evidence of uncertainty, not an invitation to infer success.
+        if "outcome" in payload:
+            state["outcome"] = str(payload.get("outcome") or "").strip() or "unknown"
+        elif _is_terminal_status(str(payload.get("status") or ""), state["jobSpec"].get("terminalStatusMapping")):
+            state["outcome"] = _normalize_status(payload["status"])
         if payload.get("ok") is False and not payload.get("status"):
             state["status"] = "Failed"
         elif "status" in payload:

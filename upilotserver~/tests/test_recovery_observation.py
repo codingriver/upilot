@@ -479,3 +479,152 @@ def test_removed_recovery_does_not_dispatch_even_when_persistence_fails(tmp_path
         await assert_recovery_rejected(service, state, dry_run=False, confirm_token="old-token",
                                        expected_project_path=service.server.state.project_path)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("code", ["CONNECTION_LOST", "COMMAND_RECOVERY_REQUIRED", "DOMAIN_RELOAD_TIMEOUT",
+                                  "UPILOT_RECONNECT_PENDING"])
+def test_original_step_transport_interruption_does_not_escalate_cleanup(tmp_path, code):
+    async def run():
+        service = StepService(tmp_path, [fail("q", code, "status transport interrupted"),
+                                         {"status": "Succeeded", "cleanupSucceeded": True}])
+        state = await start_step(service)
+        await stop_observers(service)
+        escalations = []
+        async def escalate(response):
+            escalations.append(response)
+        service._maybe_auto_hard_stop = escalate
+        original = copy.deepcopy({key: state.get(key) for key in
+                                  ("operationId", "startData", "startedAt", "timeoutSec", "jobTimeoutAt")})
+        first = await service.operation_status(state["operationId"])
+        await asyncio.sleep(0)
+        assert first.ok, first.error
+        assert state["phase"] == "Recovering" and state["status"] == "Running"
+        assert not state.get("terminal") and not state.get("endedAt")
+        assert state.get("cleanupSucceeded") is not False
+        assert not state.get("_cleanupEscalationObserved") and not escalations
+        assert state["lastObservationError"] == "status transport interrupted"
+        assert {key: state.get(key) for key in original} == original
+        second = await service.operation_status(state["operationId"])
+        assert second.ok and state["status"] == "Succeeded" and state["endedAt"]
+        assert state["lastObservationError"] == ""
+        assert service.reads == 2 and [name for name, _ in service.calls] == ["start"]
+        assert not escalations
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("code", ["COMMAND_RECOVERY_REQUIRED", "UPILOT_RECONNECT_PENDING"])
+@pytest.mark.parametrize("change", ["runId", "operationId", "missing_run", "unestablished"])
+def test_transport_interruption_requires_audited_original_step_identity(tmp_path, change, code):
+    async def run():
+        service = StepService(tmp_path, [fail("q", code, "not an audited original read")])
+        state = await start_step(service)
+        await stop_observers(service)
+        payload = state["resolvedStatusCall"]["payload"]
+        if change == "missing_run":
+            payload.pop("runId")
+        elif change == "unestablished":
+            state["recoveryIdentityEstablished"] = False
+        else:
+            payload[change] = "other"
+        result = await service.operation_status(state["operationId"])
+        assert not result.ok and result.error.code == "OPERATION_STATUS_FAILED"
+        assert state["terminal"] and state["status"] == "aborted"
+        assert service.reads == 1 and [name for name, _ in service.calls] == ["start"]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("code", ["CONNECTION_LOST", "UPILOT_RECONNECT_PENDING"])
+def test_retryable_step_observation_keeps_original_timeout_and_one_cancel(tmp_path, monkeypatch, code):
+    async def run():
+        service = StepService(tmp_path, [fail("q", code, "interrupted read"),
+                                         {"status": "Canceled", "cleanupSucceeded": True}])
+        state = await start_step(service)
+        await stop_observers(service)
+        deadline = state["startedAt"] + int(state["timeoutSec"] * 1000)
+        clock = [deadline - 1]
+        monkeypatch.setattr(task_service, "now_ms", lambda: clock[0])
+        first = await service.operation_status(state["operationId"])
+        assert first.ok and not state.get("timedOut") and not state.get("endedAt")
+        assert state["startedAt"] + int(state["timeoutSec"] * 1000) == deadline
+        clock[0] = deadline + 1
+        second = await service.operation_status(state["operationId"])
+        assert second.ok and state["timedOut"] and state["endedAt"]
+        assert state["startedAt"] + int(state["timeoutSec"] * 1000) == deadline
+        assert [name for name, _ in service.calls] == ["start", "cancel"]
+        await stop_observers(service)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status, public_status", [
+    ("Succeeded", "Succeeded"), ("SucceededWithWarnings", "Succeeded"),
+    ("Failed", "Failed"), ("Canceled", "Canceled"), ("TimedOut", "Timeout"),
+])
+@pytest.mark.parametrize("explicit_outcome", [True, False])
+def test_step_business_outcome_survives_status_normalization_and_publication(
+        tmp_path, status, public_status, explicit_outcome):
+    async def run():
+        sample = {"status": status}
+        if explicit_outcome:
+            sample["outcome"] = status
+        service = StepService(tmp_path, [sample])
+        state = await start_step(service, terminalStatusMapping={"success": ["SucceededWithWarnings"]})
+        await stop_observers(service)
+        result = await service.operation_status(state["operationId"])
+        assert result.ok and result.data["terminal"]
+        assert result.data["status"] == public_status
+        assert result.data["outcome"] == status
+        assert state["outcome"] == status
+        assert service.server.state.load_operations()[0]["outcome"] == status
+        # A late status cannot rewrite the original business result.
+        service._merge_operation_status(state, {"status": "Failed", "outcome": "Failed"})
+        late = await service.operation_status(state["operationId"])
+        assert late.data["outcome"] == status and service.reads == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("explicit_unknown", [None, "", "unknown"])
+def test_step_explicit_unknown_outcome_is_not_inferred_from_success(tmp_path, explicit_unknown):
+    async def run():
+        service = StepService(tmp_path, [{"status": "Succeeded", "outcome": explicit_unknown}])
+        state = await start_step(service)
+        await stop_observers(service)
+        result = await service.operation_status(state["operationId"])
+        assert result.ok and result.data["terminal"]
+        assert result.data["outcome"] == "unknown"
+    asyncio.run(run())
+
+
+def test_step_cleanup_timeout_does_not_replace_successful_business_outcome(tmp_path):
+    async def run():
+        service = StepService(tmp_path, [
+            {"status": "Succeeded", "outcome": "Succeeded", "cleanupPending": True},
+            {"status": "Succeeded", "outcome": "unknown", "cleanupPending": True},
+        ])
+        state = await start_step(service)
+        await stop_observers(service)
+        pending = await service.operation_status(state["operationId"])
+        assert pending.data["status"] == "CleaningUp" and not pending.data["terminal"]
+        assert pending.data["outcome"] == "Succeeded"
+        state["cleanupDeadlineAt"] = 1
+        final = await service.operation_status(state["operationId"])
+        assert final.data["terminal"] and final.data["status"] == "timed_out"
+        assert state["cleanupSucceeded"] is False
+        assert final.data["businessResult"]["status"] == "Succeeded"
+        assert final.data["outcome"] == "Succeeded"
+        assert service.server.state.load_operations()[0]["outcome"] == "Succeeded"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("identity_key", ["runId", "operationId"])
+def test_step_foreign_terminal_cannot_publish_a_business_outcome(tmp_path, identity_key):
+    async def run():
+        service = StepService(tmp_path, [
+            {"status": "Succeeded", "outcome": "Succeeded", identity_key: "foreign-run"},
+        ])
+        state = await start_step(service)
+        await stop_observers(service)
+        result = await service.operation_status(state["operationId"])
+        assert not result.ok and result.error.code == "OPERATION_IDENTITY_MISMATCH"
+        assert result.error.detail["outcome"] == "unknown"
+        assert state.get("outcome", "unknown") == "unknown"
+    asyncio.run(run())

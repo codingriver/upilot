@@ -117,7 +117,11 @@ def test_console_evidence_is_attached_after_decoding():
     service.server = SimpleNamespace(state=SimpleNamespace(get_console_evidence=lambda *args: evidence))
     response = asyncio.run(service.test_results("run-a"))
     assert response.data["results"] == result()["results"]
-    assert response.data["consoleEvidence"] == evidence
+    projected = response.data["consoleEvidence"]
+    assert {key: projected[key] for key in evidence} == evidence
+    assert projected["rangeCoverage"] == "partial" and projected["rangeGapReason"] == "original_gap"
+    assert projected["coverageScope"] == "range" and projected["phaseCoverage"] == "unavailable"
+    assert evidence == {"coverage": "partial", "gapReason": "original_gap"}
 
 
 def test_public_tool_returns_complete_decoded_result(monkeypatch):

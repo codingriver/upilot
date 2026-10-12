@@ -1,17 +1,20 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
     public sealed class UPilotSetupRecoveryTests
     {
+        private const string ExpectedFailurePrefix = "[预期故障测试] ";
         private readonly Dictionary<string, (bool exists, string value)> _strings = new();
         private readonly Dictionary<string, (bool exists, bool value)> _bools = new();
         private bool _lastRepairSucceeded;
@@ -72,8 +75,12 @@ namespace CodingRiver.UPilot.Tests
                 calls.Add("dialog");
             };
 
-            UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, openSetup, showDialog);
-            UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, openSetup, showDialog);
+            using (ExpectRepairError(attempt, failure))
+            {
+                UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, openSetup, showDialog);
+                UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, openSetup, showDialog);
+            }
+            LogAssert.NoUnexpectedReceived();
             Assert.That(calls, Is.EqualTo(new[] { "setup", "dialog" }));
             Assert.That(EditorPrefs.GetString(RepairKey("Failure")), Is.EqualTo(failure));
             Assert.That(EditorPrefs.GetBool(RepairKey("Attempted")), Is.True);
@@ -81,7 +88,8 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotQuickStart.IsRepairing, Is.EqualTo(repairing));
             Assert.That(UPilotServerRestartDiagnostics.Current, Is.SameAs(record));
 
-            UPilotQuickStart.ShowRepairFailureOnce(attempt + "-new", failure, openSetup, showDialog);
+            using (ExpectRepairError(attempt + "-new", failure))
+                UPilotQuickStart.ShowRepairFailureOnce(attempt + "-new", failure, openSetup, showDialog);
             Assert.That(calls, Is.EqualTo(new[] { "setup", "dialog", "setup", "dialog" }));
         }
 
@@ -104,13 +112,15 @@ namespace CodingRiver.UPilot.Tests
                 var dialogShown = false;
                 const string failure = "identity_probe: occupied port";
 
-                UPilotQuickStart.ShowRepairFailureOnce("setup-recovery-test-" + Guid.NewGuid().ToString("N"),
-                    failure, window.EnterSetupRecovery, (title, message) =>
-                    {
-                        Assert.That(GetField(window, "_mainView").ToString(), Is.EqualTo("Setup"));
-                        Assert.That(GetField(window, "_setupStep"), Is.EqualTo(0));
-                        dialogShown = true;
-                    });
+                var attempt = "setup-recovery-test-" + Guid.NewGuid().ToString("N");
+                using (ExpectRepairError(attempt, failure))
+                    UPilotQuickStart.ShowRepairFailureOnce(attempt,
+                        failure, window.EnterSetupRecovery, (title, message) =>
+                        {
+                            Assert.That(GetField(window, "_mainView").ToString(), Is.EqualTo("Setup"));
+                            Assert.That(GetField(window, "_setupStep"), Is.EqualTo(0));
+                            dialogShown = true;
+                        });
 
                 Assert.That(dialogShown, Is.True);
                 Assert.That(GetField(window, "_setupStartAfterSetup"), Is.True);
@@ -329,10 +339,171 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(message, Does.Not.Contain("端口占用"));
                 Assert.That(message, Does.Not.Contain("已重新打开安装向导"));
             };
-            for (var i = 0; i < 2; i++)
-                UPilotQuickStart.ShowRepairFailureOnce(record.operationId, UPilotServerRestartDiagnostics.HealthTimeoutMessage,
-                    setup, dialog, record);
+            using (ExpectRepairError(record.operationId, UPilotServerRestartDiagnostics.HealthTimeoutMessage))
+                for (var i = 0; i < 2; i++)
+                    UPilotQuickStart.ShowRepairFailureOnce(record.operationId, UPilotServerRestartDiagnostics.HealthTimeoutMessage,
+                        setup, dialog, record);
+            LogAssert.NoUnexpectedReceived();
             Assert.That(dialogs, Is.EqualTo(1));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void RepairFailureLogsOriginalDiagnosisBeforeUiFailure(bool matchingRecord)
+        {
+            var attempt = "repair-log-test-" + Guid.NewGuid().ToString("N");
+            const string failure = "process_started\n原始修复错误";
+            var record = UPilotServerRestartDiagnostics.CreateRecordForTests("test", 41, "old");
+            record.operationId = matchingRecord ? attempt : "unrelated-history";
+            record.status = "failed";
+            record.failurePhase = "process_started";
+            record.errorCode = "process_identity_mismatch";
+            record.error = "diagnostic-original-error";
+            record.launcherProcessId = record.newProcessId = 101;
+            record.healthProcessId = 202;
+            record.gateDiagnostics = new[] { new UPilotRestartGate { key = "identity", state = "failed" } };
+            string logged = null;
+            Application.LogCallback capture = (message, stack, type) =>
+            {
+                if (type == LogType.Error && message.StartsWith(
+                    ExpectedFailurePrefix + "[UPilot] 自动修复失败", StringComparison.Ordinal))
+                    logged = message;
+            };
+            Application.logMessageReceived += capture;
+            try
+            {
+                using (ExpectRepairError(attempt, failure))
+                {
+                    var exception = Assert.Throws<InvalidOperationException>(() =>
+                        UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, _ =>
+                        {
+                            // UI 失败前已经输出；不会把另一操作的历史错误归到本次尝试。
+                            Assert.That(logged, Does.Contain(failure).And.Contain(attempt));
+                            if (matchingRecord)
+                            {
+                                Assert.That(logged, Does.Contain("process_identity_mismatch"));
+                                Assert.That(logged, Does.Contain("diagnostic-original-error"));
+                                Assert.That(logged, Does.Contain("101").And.Contain("202"));
+                                Assert.That(logged, Does.Contain("PID 与项目身份验证"));
+                            }
+                            else
+                            {
+                                Assert.That(logged, Does.Contain("尚无对应重启 operation ID"));
+                                Assert.That(logged, Does.Not.Contain("unrelated-history"));
+                                Assert.That(logged, Does.Not.Contain("diagnostic-original-error"));
+                            }
+                            throw new InvalidOperationException("injected recovery UI failure");
+                        }, (_, __) => Assert.Fail("Failed setup must not reach dialog."), record));
+                    Assert.That(exception.Message, Is.EqualTo("injected recovery UI failure"));
+                    UPilotQuickStart.ShowRepairFailureOnce(attempt, failure,
+                        _ => Assert.Fail("Duplicate setup."), (_, __) => Assert.Fail("Duplicate dialog."), record);
+                }
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally { Application.logMessageReceived -= capture; }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ExpectedRepairErrorLabelIsScopedAndLeavesOtherLogsUntouched(bool throwInScope)
+        {
+            var original = Debug.unityLogger.logHandler;
+            var sink = new RecordingLogHandler();
+            const string attempt = "label-test-attempt";
+            const string failure = "injected failure";
+            var message = "[UPilot] 自动修复失败\n" + failure + "\n\n尝试 ID：" + attempt + "（测试）";
+            var exception = new InvalidOperationException("injected scope exit");
+            try
+            {
+                // 只用内存接收器验证非预期错误原样转发，不制造新的真实 Console 故障。
+                Debug.unityLogger.logHandler = sink;
+                ExpectedRepairErrorLogScope scope = null;
+                Action exercise = () =>
+                {
+                    using (scope = new ExpectedRepairErrorLogScope(RepairErrorPattern(attempt, failure)))
+                    {
+                        scope.LogFormat(LogType.Error, null, "{0}", message);
+                        scope.LogFormat(LogType.Warning, null, "{0}", message);
+                        scope.LogFormat(LogType.Error, null, "{0}", message.Replace(attempt, attempt + "-other"));
+                        scope.LogFormat(LogType.Error, null, "{0}", message.Replace(failure, "unexpected failure"));
+                        scope.LogException(exception, null);
+                        if (throwInScope) throw exception;
+                    }
+                };
+                if (throwInScope)
+                    Assert.That(Assert.Throws<InvalidOperationException>(() => exercise()), Is.SameAs(exception));
+                else
+                    exercise();
+                Assert.That(Debug.unityLogger.logHandler, Is.SameAs(sink));
+                scope.Dispose();
+                scope.LogFormat(LogType.Error, null, "{0}", message);
+                Assert.That(sink.Entries, Is.EqualTo(new[]
+                {
+                    (LogType.Error, ExpectedFailurePrefix + message),
+                    (LogType.Warning, message),
+                    (LogType.Error, message.Replace(attempt, attempt + "-other")),
+                    (LogType.Error, message.Replace(failure, "unexpected failure")),
+                    (LogType.Error, message)
+                }));
+                Assert.That(sink.Exception, Is.SameAs(exception));
+                Assert.That(Debug.unityLogger.logHandler, Is.SameAs(sink));
+            }
+            finally { Debug.unityLogger.logHandler = original; }
+        }
+
+        private static string RepairErrorPattern(string attempt, string failure) =>
+            "^\\[UPilot\\] 自动修复失败\\n" + Regex.Escape(failure) +
+            "\\n\\n[\\s\\S]*" + Regex.Escape(attempt) + "(?=[\\s（]|$)";
+
+        private static IDisposable ExpectRepairError(string attempt, string failure)
+        {
+            var pattern = RepairErrorPattern(attempt, failure);
+            LogAssert.Expect(LogType.Error, new Regex("^" + Regex.Escape(ExpectedFailurePrefix) + pattern.Substring(1)));
+            return new ExpectedRepairErrorLogScope(pattern);
+        }
+
+        // 标识仅在同步测试调用期间生效；不吞日志、不降级、不放宽 LogAssert 的次数校验。
+        private sealed class ExpectedRepairErrorLogScope : ILogHandler, IDisposable
+        {
+            private readonly ILogHandler _previous;
+            private readonly Regex _expected;
+            private bool _disposed;
+
+            public ExpectedRepairErrorLogScope(string pattern)
+            {
+                _expected = new Regex(pattern);
+                _previous = Debug.unityLogger.logHandler;
+                Debug.unityLogger.logHandler = this;
+            }
+
+            public void LogFormat(LogType logType, UnityEngine.Object context, string format, params object[] args)
+            {
+                if (!_disposed && logType == LogType.Error && _expected.IsMatch(string.Format(format, args)))
+                    format = ExpectedFailurePrefix + format;
+                _previous.LogFormat(logType, context, format, args);
+            }
+
+            public void LogException(Exception exception, UnityEngine.Object context) =>
+                _previous.LogException(exception, context);
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                if (ReferenceEquals(Debug.unityLogger.logHandler, this))
+                    Debug.unityLogger.logHandler = _previous;
+            }
+        }
+
+        private sealed class RecordingLogHandler : ILogHandler
+        {
+            public readonly List<(LogType type, string message)> Entries = new();
+            public Exception Exception;
+
+            public void LogFormat(LogType logType, UnityEngine.Object context, string format, params object[] args) =>
+                Entries.Add((logType, string.Format(format, args)));
+
+            public void LogException(Exception exception, UnityEngine.Object context) => Exception = exception;
         }
 
     }

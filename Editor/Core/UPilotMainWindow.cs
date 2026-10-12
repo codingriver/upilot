@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - simple user-facing entry window.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -958,6 +958,14 @@ namespace CodingRiver.UPilot
                 DrawRuntimeDetailRow("MCP WS 监听", GetListeningStateLabel(_mcpStatus.WsPortListening));
                 DrawRuntimeDetailRow("进程归属", GetProcessOwnershipLabel(_mcpStatus.ProcessOwnership));
                 DrawRuntimeDetailRow("进程 PID", _mcpStatus.ProcessId?.ToString() ?? "未识别");
+                var launch = UPilotMcpServerManager.Instance.LaunchIdentity;
+                if (launch != null)
+                {
+                    DrawRuntimeDetailRow("启动 PID", launch.launcherPid.ToString());
+                    DrawRuntimeDetailRow("服务 PID", launch.verified ? launch.servicePid.ToString() : "待核实");
+                    DrawRuntimeDetailRow("进程关系", !launch.verified ? "待核实" : launch.launcherPid == launch.servicePid ? "单进程" : "直接子进程");
+                    DrawRuntimeDetailRow("身份依据", launch.verified ? "创建时间、可执行文件、父子关系、双端口、health PID、项目和入口" : launch.error);
+                }
                 DrawRuntimeDetailRow("健康检查", GetHealthStatusLabel(_mcpStatus));
                 if (_mcpStatus.EditorObservationAvailable)
                 {

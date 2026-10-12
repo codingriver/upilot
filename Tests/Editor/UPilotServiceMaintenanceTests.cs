@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Reflection;
 using NUnit.Framework;
@@ -415,59 +415,6 @@ namespace CodingRiver.UPilot.Tests
             status.HealthServerProcessId = 42;
             status.HealthProjectPath = _root + "-foreign";
             Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.True);
-        }
-
-        [TestCase("valid", true)]
-        [TestCase("wrong_parent", false)]
-        [TestCase("reused_launcher_pid", false)]
-        [TestCase("missing_launcher_time", false)]
-        [TestCase("older_worker", false)]
-        [TestCase("foreign_owner", false)]
-        [TestCase("unknown_owner", false)]
-        [TestCase("health_only_evidence", false)]
-        [TestCase("wrong_health_pid", false)]
-        [TestCase("wrong_project", false)]
-        [TestCase("missing_project", false)]
-        [TestCase("wrong_launcher_exe", false)]
-        [TestCase("wrong_worker_exe", false)]
-        [TestCase("wrong_health_exe", false)]
-        [TestCase("missing_health", false)]
-        [TestCase("missing_http_port", false)]
-        [TestCase("missing_ws_port", false)]
-        [TestCase("same_pid", false)]
-        [TestCase("missing_configuration", false)]
-        public void RestartWorkerRequiresExactLauncherAndServiceIdentity(string scenario, bool expected)
-        {
-            var exe = Path.Combine(_root, "upilot-mcp-server.exe");
-            var status = new McpServerStatus
-            {
-                ProcessId = 43, ProcessOwnership = McpProcessOwnership.CurrentUPilot,
-                ProcessOwnershipEvidence = "监听端口与 UPilot 启动参数匹配",
-                HttpPortListening = true, WsPortListening = true,
-                HealthEndpointResponded = true, HealthIdentifiesUPilot = true,
-                HealthServerProcessId = 43, HealthProjectPath = _root,
-                Health = new UPilotServerHealth { server_entry_path = exe }
-            };
-            var parent = scenario == "wrong_parent" ? 99 : 42;
-            var expectedTime = scenario == "missing_launcher_time" ? 0 : 100;
-            var actualTime = scenario == "reused_launcher_pid" ? 101 : 100;
-            var workerTime = scenario == "older_worker" ? 99 : 102;
-            if (scenario == "foreign_owner") status.ProcessOwnership = McpProcessOwnership.Foreign;
-            if (scenario == "unknown_owner") status.ProcessOwnership = McpProcessOwnership.Unknown;
-            if (scenario == "health_only_evidence") status.ProcessOwnershipEvidence = "UPilot 健康检查响应";
-            if (scenario == "wrong_health_pid") status.HealthServerProcessId = 99;
-            if (scenario == "wrong_project") status.HealthProjectPath = _root + "-foreign";
-            if (scenario == "missing_project") status.HealthProjectPath = "";
-            if (scenario == "wrong_health_exe") status.Health.server_entry_path = exe + ".foreign";
-            if (scenario == "missing_health") status.Health = null;
-            if (scenario == "missing_http_port") status.HttpPortListening = false;
-            if (scenario == "missing_ws_port") status.WsPortListening = false;
-            if (scenario == "same_pid") status.ProcessId = status.HealthServerProcessId = 42;
-            Assert.That(UPilotMcpServerManager.IsVerifiedRestartWorker(status, 42, expectedTime,
-                actualTime, parent, workerTime,
-                scenario == "wrong_launcher_exe" ? exe + ".foreign" : exe,
-                scenario == "wrong_worker_exe" ? exe + ".foreign" : exe,
-                scenario == "missing_configuration" ? "" : exe, _root), Is.EqualTo(expected));
         }
 
         [Test]

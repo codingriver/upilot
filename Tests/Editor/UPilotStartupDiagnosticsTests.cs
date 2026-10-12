@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.IO;
 using System.Reflection;
@@ -79,25 +79,55 @@ namespace CodingRiver.UPilot.Tests
             stopped.Cancel("lifecycle_stop");
             stopped.Cancel("timeout");
             Assert.That(stopped.Reason, Is.EqualTo("lifecycle_stop"));
+            foreach (var failure in new Exception[] { new IOException(), new InvalidDataException() })
+            {
+                Assert.That(UPilotMcpServerManager.IsExpectedStatusInterruption(
+                    failure, stopped.Token, stopped.Reason), Is.False);
+                Assert.That(UPilotMcpServerManager.ClassifyStatusException(failure),
+                    Is.EqualTo(McpStatusFailureKind.Confirmed));
+            }
             stopped.Dispose();
             Assert.DoesNotThrow(() => stopped.Cancel("editor_exit"));
         }
 
         [TestCase("timeout")]
         [TestCase("unknown")]
-        public async Task StatusUnexpectedCancellationRemainsErrorAfterStop(string reason)
+        public async Task StatusUnexpectedCancellationRemainsTransientAfterStop(string reason)
         {
             var manager = IsolatedStatusManager();
             using var request = new UPilotMcpServerManager.StatusRefreshRequest(0);
             SetManagerField(manager, "_activeStatusRefresh", request);
             request.Cancel(reason);
             manager.InvalidateStatusCache("lifecycle_stop");
-            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(
-                @"\[UPilotMcpServerManager\] Status refresh failed at port_probe \(generation 0\): System.OperationCanceledException"));
-            await (Task<McpServerStatus>)typeof(UPilotMcpServerManager)
-                .GetMethod("RefreshStatusAsync", BindingFlags.Instance | BindingFlags.NonPublic)
-                .Invoke(manager, new object[] { 0, 0, request });
-            Assert.That(request.Reason, Is.EqualTo(reason));
+            var currentStatus = new McpServerStatus { IsRunning = true, StatusGeneration = 1 };
+            SetManagerField(manager, "_cachedStatus", currentStatus);
+            var originalMinLevel = Logger.MinLevel;
+            var originalLogToUnityConsole = Logger.LogToUnityConsole;
+            try
+            {
+                Logger.MinLevel = Logger.LogLevel.Info;
+                Logger.LogToUnityConsole = true;
+                LogAssert.Expect(LogType.Log,
+                    "[INFO ] [SERVER  ] Status not yet confirmed at port_probe: OperationCanceledException");
+                var observed = await (Task<McpServerStatus>)typeof(UPilotMcpServerManager)
+                    .GetMethod("RefreshStatusAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(manager, new object[] { 0, 0, request });
+                Assert.That(request.Reason, Is.EqualTo(reason));
+                var cancellation = new OperationCanceledException(request.Token);
+                Assert.That(UPilotMcpServerManager.IsExpectedStatusInterruption(
+                    cancellation, request.Token, request.Reason), Is.False);
+                Assert.That(UPilotMcpServerManager.ClassifyStatusException(cancellation),
+                    Is.EqualTo(McpStatusFailureKind.Transient));
+                Assert.That(observed, Is.EqualTo(currentStatus), "旧请求不得返回过期状态。");
+                Assert.That(typeof(UPilotMcpServerManager)
+                    .GetField("_cachedStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(manager), Is.EqualTo(currentStatus), "旧请求不得覆盖新代次缓存。");
+            }
+            finally
+            {
+                Logger.MinLevel = originalMinLevel;
+                Logger.LogToUnityConsole = originalLogToUnityConsole;
+            }
         }
 
         [TestCase(true)]

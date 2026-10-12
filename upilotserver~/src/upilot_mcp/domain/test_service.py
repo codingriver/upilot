@@ -88,6 +88,68 @@ _TEST_SUMMARY_ARRAYS = (
 )
 
 
+def _project_test_console_evidence(response: ToolResponse) -> ToolResponse:
+    """只在响应副本汇总覆盖，不回写持久化的原始范围证据。
+
+    无阶段信息的旧结果明确只描述范围。已有阶段取最弱覆盖
+    （complete < pending < partial < unavailable），不补造可选阶段，
+    也不根据 Console 覆盖推断测试 outcome。
+    """
+    if not response.ok or not isinstance(response.data, dict):
+        return response
+    data = response.data
+    evidence = data.get("consoleEvidence")
+    phases = data.get("consolePhases")
+    if not isinstance(evidence, dict) and not isinstance(phases, list):
+        return response
+    evidence = dict(evidence) if isinstance(evidence, dict) else {}
+    if isinstance(phases, list):
+        evidence["phases"] = phases
+    ranks = {"complete": 0, "pending": 1, "partial": 2, "unavailable": 3}
+
+    def scope(coverage, reason, fallback):
+        coverage = coverage if isinstance(coverage, str) and coverage in ranks else "partial"
+        reason = reason if isinstance(reason, str) else ""
+        if reason and coverage == "complete":
+            coverage = "partial"
+        if not reason and coverage in {"partial", "unavailable"}:
+            reason = fallback
+        return coverage, reason
+
+    range_coverage, range_reason = scope(
+        evidence.get("rangeCoverage", evidence.get("coverage", "unavailable")),
+        evidence.get("rangeGapReason", evidence.get("gapReason", "")),
+        "range_coverage_unverified",
+    )
+    phases = evidence.get("phases")
+    if isinstance(phases, list) and phases:
+        facts = [scope(p.get("coverage"), p.get("gapReason"), "phase_coverage_unverified")
+                 if isinstance(p, dict) and isinstance(p.get("phase"), str) and p["phase"]
+                 else ("partial", "phase_coverage_unverified") for p in phases]
+        phase_coverage = max((c for c, _ in facts), key=ranks.__getitem__)
+        phase_reason = ";".join(dict.fromkeys(r for _, reason in facts for r in reason.split(";") if r))
+        coverage_scope = "range_and_reported_phases"
+    elif ("phases" not in evidence and "rangeCoverage" in evidence
+          and evidence.get("coverageScope") == "range_and_reported_phases"):
+        # 摘要没有阶段数组，保留已汇总事实，避免二次投影把汇总误当原始范围。
+        phase_coverage, phase_reason = scope(
+            evidence.get("phaseCoverage"), evidence.get("phaseGapReason"), "phase_coverage_unverified")
+        coverage_scope = "range_and_reported_phases"
+    else:
+        phase_coverage, phase_reason = "unavailable", "phase_evidence_unavailable"
+        coverage_scope = "range"
+    coverage = range_coverage
+    gap_reason = range_reason
+    if coverage_scope == "range_and_reported_phases":
+        coverage = max((range_coverage, phase_coverage), key=ranks.__getitem__)
+        gap_reason = ";".join(dict.fromkeys(
+            r for reason in (range_reason, phase_reason) for r in reason.split(";") if r))
+    evidence.update(coverage=coverage, gapReason=gap_reason, coverageScope=coverage_scope,
+                    rangeCoverage=range_coverage, rangeGapReason=range_reason,
+                    phaseCoverage=phase_coverage, phaseGapReason=phase_reason)
+    return replace(response, data={**data, "consoleEvidence": evidence})
+
+
 def _test_summary(response: ToolResponse) -> ToolResponse:
     """A final, local data projection; never mutate durable/Bridge results.
 
@@ -96,6 +158,7 @@ def _test_summary(response: ToolResponse) -> ToolResponse:
     """
     if not response.ok or not isinstance(response.data, dict):
         return response
+    response = _project_test_console_evidence(response)
     source = response.data
     summary = {key: source[key] for key in _TEST_SUMMARY_SCALARS
                if key in source and (source[key] is None or isinstance(source[key], (str, bool, int, float)))}
@@ -106,6 +169,7 @@ def _test_summary(response: ToolResponse) -> ToolResponse:
         summary["consoleEvidence"] = {key: evidence[key] for key in (
             "coverage", "gapReason", "source", "sessionId", "captureSessionId",
             "fromSequence", "toSequence", "relation", "attribution",
+            "coverageScope", "rangeCoverage", "rangeGapReason", "phaseCoverage", "phaseGapReason",
         ) if key in evidence and (evidence[key] is None or isinstance(evidence[key], (str, bool, int, float)))}
     # Disposition may contain positive cleanup facts not present at the top level.
     disposition = source.get("disposition")
@@ -574,7 +638,7 @@ class TestDomainService:
                                 context=response.context, timing=response.timing)
             resolved_run_guid = str(run_guid or (response.data or {}).get("runGuid") or "")
             await self._attach_test_console_evidence(response, resolved_run_guid)
-            return _test_summary(response) if detail_level == "summary" else response
+            return _test_summary(response) if detail_level == "summary" else _project_test_console_evidence(response)
         if not run_guid:
             return fail(request_id, "TEST_RESULT_CURSOR_INVALID",
                         "Incremental test results require runGuid; the cursor never selects a run implicitly.",
@@ -660,14 +724,14 @@ class TestDomainService:
         data["nextCursor"] = self._encode_test_result_cursor(project_path, run_guid, actual_version, delivered)
         response = ok(request_id, data)
         await self._attach_test_console_evidence(response, run_guid)
-        return response
+        return _project_test_console_evidence(response)
 
     async def _attach_test_console_evidence(self, response: ToolResponse, run_guid: str) -> None:
         state_store = getattr(getattr(self, "server", None), "state", None)
         if not run_guid or not hasattr(state_store, "get_console_evidence"):
             return
         evidence = state_store.get_console_evidence("runGuid", run_guid)
-        data = response.data if isinstance(response.data, dict) else None
+        data = dict(response.data) if isinstance(response.data, dict) else None
         terminal = bool(data and (
             data.get("terminal")
             or str(data.get("status") or "").lower()
@@ -688,6 +752,7 @@ class TestDomainService:
             state_store.save_console_evidence("runGuid", run_guid, evidence)
         if data is not None and evidence:
             data["consoleEvidence"] = evidence
+            response.data = data
         elif response.error is not None and evidence:
             response.error.detail["consoleEvidence"] = evidence
 
@@ -697,7 +762,7 @@ class TestDomainService:
         if detail_error is not None:
             return detail_error
         response = await self.dispatcher.call(request_id, "test.status", {})
-        return _test_summary(response) if detail_level == "summary" else response
+        return _test_summary(response) if detail_level == "summary" else _project_test_console_evidence(response)
 
     @audited("Test", "cancel", "run_guid")
     async def test_cancel(self, run_guid: str = "") -> ToolResponse:

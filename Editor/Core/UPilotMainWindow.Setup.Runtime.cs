@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - first setup runtime selection.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -17,7 +17,8 @@ namespace CodingRiver.UPilot
             _setupPythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
             if (UPilotServerRuntimeService.IsSourceUpdateChannel())
             {
-                _setupRuntimeChoice = SetupRuntimeChoice.Python;
+                _setupRuntimeChoice = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
+                    ? SetupRuntimeChoice.Managed : SetupRuntimeChoice.Python;
                 _showPythonAdvanced = true;
                 _setupManifest = null;
                 _setupManifestError = "";
@@ -52,10 +53,22 @@ namespace CodingRiver.UPilot
             if (sourceChannel)
             {
                 EditorGUILayout.HelpBox(
-                    "当前是开发/source 安装，UPilot 将使用本机 Python 运行 MCP 服务；自动管理服务只随正式 tag 版本发布。",
+                    "当前是开发/source 安装，默认使用本机 Python；显式配置的本地 EXE 会被保留。自动管理下载仍只随正式 tag 版本发布。",
                     MessageType.Info);
-                _setupRuntimeChoice = SetupRuntimeChoice.Python;
+                _setupRuntimeChoice = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
+                    ? SetupRuntimeChoice.Managed : SetupRuntimeChoice.Python;
                 _showPythonAdvanced = true;
+                if (_setupRuntimeChoice == SetupRuntimeChoice.Managed)
+                    EditorGUILayout.LabelField("已配置的本地 EXE", UPilotProjectConfig.Current.runtime?.serverExePath ?? "", EditorStyles.wordWrappedMiniLabel);
+                if (GUILayout.Button("选择本地 EXE"))
+                {
+                    var selected = EditorUtility.OpenFilePanel("选择本地 MCP Server", "", Application.platform == RuntimePlatform.WindowsEditor ? "exe" : "");
+                    if (!string.IsNullOrWhiteSpace(selected))
+                    {
+                        UPilotServerRuntimeService.Instance.SetStandaloneExeRuntime(selected);
+                        _setupRuntimeChoice = SetupRuntimeChoice.Managed;
+                    }
+                }
                 DrawPythonRuntimeSetup();
             }
             else
@@ -333,6 +346,11 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            {
+                EditorUtility.DisplayDialog("本地运行文件未就绪", "请重新选择本地 EXE，或选择本机 Python。不会自动下载或切换运行方式。", "知道了");
+                return;
+            }
             var version = _setupManifest?.ServerVersion ?? "当前版本";
             if (!EditorUtility.DisplayDialog(
                     "安装推荐服务？",
@@ -360,8 +378,10 @@ namespace CodingRiver.UPilot
         {
             if (UPilotServerRuntimeService.IsSourceUpdateChannel())
             {
-                reason = "开发/source 安装仅支持本机 Python。";
-                return false;
+                var configured = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe &&
+                    UPilotServerRuntimeService.Instance.IsStandaloneExeConfigured(out _);
+                reason = configured ? "已显式配置本地 EXE，部署身份将在启动后验证。" : "请配置本地 EXE 或使用默认 Python。";
+                return configured;
             }
 
             if (_setupManifest == null)

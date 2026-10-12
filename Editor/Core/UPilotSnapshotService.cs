@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -198,6 +198,12 @@ namespace CodingRiver.UPilot
         public string contentOrientation = "unverified";
         public string compositionComplete = "unverified";
         public string internalCrop = "unknown";
+        public string resizeMode;
+        public bool verticalFlipApplied;
+        public int contentLeft;
+        public int contentTop;
+        public int contentWidth;
+        public int contentHeight;
         public bool playMode;
         public bool runInBackgroundForced;
     }
@@ -1011,7 +1017,17 @@ namespace CodingRiver.UPilot
                     outputLayout = ImageLayout(capture.width, capture.height),
                     aspectRatioMatches = AspectMatches(capture.screenWidth, capture.screenHeight, capture.width, capture.height),
                     aspectWarning = AspectMatches(capture.screenWidth, capture.screenHeight, capture.width, capture.height)
-                        ? "" : "SOURCE_OUTPUT_ASPECT_MISMATCH: content orientation/composition/crop remain unverified",
+                        ? "" : "SOURCE_OUTPUT_ASPECT_MISMATCH: full source frame fitted with opaque black letterboxing",
+                    readbackPath = "Screen-sized RenderTexture->UV-corrected contain blit->Texture2D.ReadPixels->EncodeToPNG",
+                    contentOrientation = "upright",
+                    compositionComplete = "full-source-frame",
+                    internalCrop = "none",
+                    resizeMode = "contain",
+                    verticalFlipApplied = capture.verticalFlipApplied,
+                    contentLeft = capture.contentRect.x,
+                    contentTop = capture.height - capture.contentRect.yMax,
+                    contentWidth = capture.contentRect.width,
+                    contentHeight = capture.contentRect.height,
                     playMode = true,
                     runInBackgroundForced = capture.runInBackgroundForced,
                 },
@@ -1356,6 +1372,54 @@ namespace CodingRiver.UPilot
             {
                 RenderTexture.active = previous;
                 UnityEngine.Object.DestroyImmediate(texture);
+            }
+        }
+
+        // 仅 GameView 使用：先采集真实屏幕大小，再完整缩放到请求画布，避免 ScreenCapture 裁切或留下未缩放内容。
+        private static byte[] ReadGameViewPng(RenderTexture source, int width, int height,
+            bool flipVertically, out RectInt contentRect)
+        {
+            double scale = Math.Min((double)width / source.width, (double)height / source.height);
+            int contentWidth = Math.Max(1, Math.Min(width, (int)Math.Round(source.width * scale)));
+            int contentHeight = Math.Max(1, Math.Min(height, (int)Math.Round(source.height * scale)));
+            contentRect = new RectInt((width - contentWidth) / 2, (height - contentHeight) / 2,
+                contentWidth, contentHeight);
+            var previous = RenderTexture.active;
+            bool previousSrgbWrite = GL.sRGBWrite;
+            var fitted = new RenderTexture(contentWidth, contentHeight, 0, RenderTextureFormat.ARGB32,
+                RenderTextureReadWrite.Default)
+            {
+                name = "UPilot Snapshot GameView Fitted Composite",
+                hideFlags = HideFlags.HideAndDontSave,
+                useDynamicScale = false,
+                useMipMap = false,
+                autoGenerateMips = false,
+            };
+            var texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            try
+            {
+                fitted.Create();
+                if (!fitted.IsCreated())
+                    throw new InvalidOperationException("Failed to allocate the fitted GameView render target.");
+                // ScreenCapture 的图形 API 原生 UV 方向与 PNG 像素方向不同；不影响 Camera/depth 的通用读取。
+                GL.sRGBWrite = QualitySettings.activeColorSpace == ColorSpace.Linear && fitted.sRGB;
+                Graphics.Blit(source, fitted, flipVertically ? new Vector2(1f, -1f) : Vector2.one,
+                    flipVertically ? new Vector2(0f, 1f) : Vector2.zero);
+                var background = new Color32[width * height];
+                var black = new Color32(0, 0, 0, 255);
+                for (int i = 0; i < background.Length; i++) background[i] = black;
+                texture.SetPixels32(background);
+                RenderTexture.active = fitted;
+                texture.ReadPixels(new Rect(0, 0, contentWidth, contentHeight), contentRect.x, contentRect.y, false);
+                texture.Apply(false, false);
+                return texture.EncodeToPNG();
+            }
+            finally
+            {
+                GL.sRGBWrite = previousSrgbWrite;
+                RenderTexture.active = previous;
+                UnityEngine.Object.DestroyImmediate(texture);
+                ReleaseAndDestroy(fitted);
             }
         }
 
@@ -2525,6 +2589,8 @@ namespace CodingRiver.UPilot
             public int width;
             public int height;
             public bool runInBackgroundForced;
+            public bool verticalFlipApplied;
+            public RectInt contentRect;
         }
 
         private sealed class GameViewCaptureRunner : MonoBehaviour
@@ -2561,9 +2627,16 @@ namespace CodingRiver.UPilot
             {
                 yield return new WaitForEndOfFrame();
                 if (_finished) yield break;
-                var target = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default)
+                int sourceWidth = Screen.width, sourceHeight = Screen.height;
+                if (sourceWidth <= 0 || sourceHeight <= 0)
+                {
+                    Complete(null, new InvalidOperationException("GameView has no valid screen-sized capture surface."));
+                    yield break;
+                }
+                var target = new RenderTexture(sourceWidth, sourceHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default)
                 {
                     name = "UPilot Snapshot GameView Composite",
+                    filterMode = FilterMode.Bilinear,
                     hideFlags = HideFlags.HideAndDontSave,
                     useDynamicScale = false,
                     useMipMap = false,
@@ -2574,10 +2647,10 @@ namespace CodingRiver.UPilot
                     target.Create();
                     if (!target.IsCreated())
                         throw new InvalidOperationException("Failed to allocate the GameView composite render target.");
-                    int sourceWidth = Screen.width, sourceHeight = Screen.height;
                     long capturedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     ScreenCapture.CaptureScreenshotIntoRenderTexture(target);
-                    var bytes = ReadColorPng(target, width, height);
+                    bool flipVertically = SystemInfo.graphicsUVStartsAtTop;
+                    var bytes = ReadGameViewPng(target, width, height, flipVertically, out var contentRect);
                     Complete(new SnapshotGameViewCapture
                     {
                         bytes = bytes,
@@ -2587,6 +2660,8 @@ namespace CodingRiver.UPilot
                         width = width,
                         height = height,
                         runInBackgroundForced = _runInBackgroundForced,
+                        verticalFlipApplied = flipVertically,
+                        contentRect = contentRect,
                     }, null);
                 }
                 catch (Exception ex)

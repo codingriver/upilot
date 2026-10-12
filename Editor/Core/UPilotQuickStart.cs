@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — simplified main-window state and actions.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -605,6 +605,8 @@ namespace CodingRiver.UPilot
                   "\n最后通过的验证门：未知；首个未通过的验证门：未知；status probe：未采集" +
                   "\n重启诊断记录与此次尝试不匹配；请打开高级设置核对 operation ID。";
             var healthFailure = record?.operationId == attemptId && UPilotServerRestartDiagnostics.IsHealthFailure(record);
+            // 与弹窗共用尝试去重；先输出红色错误，避免向导或弹窗异常时丢失失败依据。
+            UnityEngine.Debug.LogError("[UPilot] 自动修复失败\n" + failure + "\n\n" + diagnosis);
             // A failed health request is not evidence that the configured port is occupied.
             // Other setup failures retain the explicit configuration recovery entry point.
             if (!healthFailure) (openSetup ?? UPilotMainWindow.OpenSetupForRecovery)(failure);

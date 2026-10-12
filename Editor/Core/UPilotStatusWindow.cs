@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -1425,6 +1425,11 @@ namespace CodingRiver.UPilot
                 if (!_showProcessSettings)
                     return;
 
+                var launch = manager.LaunchIdentity;
+                if (launch != null)
+                    EditorGUILayout.HelpBox($"启动 PID={launch.launcherPid}；服务 PID={(launch.verified ? launch.servicePid.ToString() : "待核实")}\n" +
+                        (launch.verified ? (launch.launcherPid == launch.servicePid ? "单进程" : "直接子进程") +
+                            "；依据：创建时间、可执行文件、双端口、health、项目与入口" : launch.error), MessageType.Info);
                 var isRunning = mcpStatus.IsRunning;
                 using (new EditorGUILayout.HorizontalScope())
                 {

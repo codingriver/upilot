@@ -224,9 +224,15 @@ namespace CodingRiver.UPilot
             }
         }
 
-        internal static UPilotDeploymentIssue[] Observe(BridgeStatus bridge, McpServerStatus server)
+        internal static UPilotDeploymentIssue[] Observe(BridgeStatus bridge, McpServerStatus server, ServerLaunchSpec launchSpec = null)
         {
             Initialize();
+            launchSpec ??= UPilotMcpServerManager.Instance.LaunchSpec;
+            var entry = launchSpec?.expectedEntry ?? ExpectedEntry;
+            var module = launchSpec != null ? launchSpec.expectedModuleRoot :
+                UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.Python
+                    ? Path.Combine(PackageRoot, "upilotserver~", "src", "upilot_mcp") : "";
+            if (string.IsNullOrEmpty(module)) { Issues.Remove("configured_entry"); Issues.Remove("module"); }
             if (!bridge.IsStarted && !server.IsRunning && server.StatusQueryCompleted &&
                 string.IsNullOrEmpty(server.ErrorMessage))
             {
@@ -250,8 +256,8 @@ namespace CodingRiver.UPilot
                     $"{(server.ProcessOwnership == McpProcessOwnership.Foreign ? "已确认端口属于其他项目或程序；" : "")}项目或进程身份未通过：期望 {UPilotProjectConfig.ProjectRoot}；PID={server.ProcessId?.ToString() ?? "未知"}；{server.ProcessOwnershipEvidence}");
                 Check("health", server.HealthEndpointResponded ? true : server.FailureKind == McpStatusFailureKind.Confirmed ? false : (bool?)null,
                     "状态获取失败：/health 未成功返回；" + server.StatusFailureStage);
-                if (UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.Python)
-                    Check("configured_entry", SamePath(
+                if (!string.IsNullOrEmpty(module))
+                    Check("configured_entry", launchSpec != null ? SamePath(launchSpec.expectedEntry, PythonEntry) : SamePath(
                         Path.IsPathRooted(UPilotMcpServerManager.Instance.PythonEntryPath)
                             ? UPilotMcpServerManager.Instance.PythonEntryPath
                             : Path.Combine(UPilotProjectConfig.ProjectRoot, UPilotMcpServerManager.Instance.PythonEntryPath ?? ""),
@@ -270,11 +276,11 @@ namespace CodingRiver.UPilot
                     health.identity_contract_version == UPilotBridge.IdentityContractVersion && health.protocol_version == "1",
                     $"协议不兼容：期望身份契约={UPilotBridge.IdentityContractVersion}、协议=1；实际身份契约=" +
                     $"{(health.identity_contract_version == 0 ? "未知/未返回" : health.identity_contract_version.ToString())}、协议={Text(health.protocol_version)}");
-                Compare("entry", Known(health.server_entry_path) ? SamePath(ExpectedEntry, health.server_entry_path) : (bool?)null,
-                    $"Server 入口错误：当前包配套入口={ExpectedEntry}；实际入口={Text(health.server_entry_path)}");
-                if (UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.Python)
+                Compare("entry", Known(health.server_entry_path) ? SamePath(entry, health.server_entry_path) : (bool?)null,
+                    $"Server 入口错误：当前包配套入口={entry}；实际入口={Text(health.server_entry_path)}");
+                if (!string.IsNullOrEmpty(module))
                     Compare("module", Known(health.server_module_root) ?
-                        SamePath(Path.Combine(PackageRoot, "upilotserver~", "src", "upilot_mcp"), health.server_module_root) : (bool?)null,
+                        SamePath(module, health.server_module_root) : (bool?)null,
                         $"Server 模块来源错误：当前包={PackageRoot}；实际模块={Text(health.server_module_root)}");
                 Compare("project", Known(health.configured_project_path) ?
                     SamePath(UPilotProjectConfig.ProjectRoot, health.configured_project_path) : (bool?)null,
@@ -296,7 +302,7 @@ namespace CodingRiver.UPilot
                 Check("timeout", null, "状态尚未确认（观察超过 30 秒）：等待连接、进程身份、健康信息或握手证据；不凭等待时长确认故障。");
             }
             _lastDetails = $"Bridge：{Version}；渠道={Channel}；安装方式={InstallSource}；明确 main={IsMain}\n" +
-                $"当前包：{PackageRoot}\n配套入口：{ExpectedEntry}\n" +
+                $"当前包：{PackageRoot}\n配套入口：{entry}\n" +
                 $"Server：{Text(health?.server_version)}；渠道={Text(health?.build_channel)}；安装来源={Text(health?.server_install_source)}\n" +
                 $"实际入口：{Text(health?.server_entry_path)}\n实际模块：{Text(health?.server_module_root)}\n" +
                 $"期望项目：{UPilotProjectConfig.ProjectRoot}\n实际项目：{Text(health?.configured_project_path)}\n" +
