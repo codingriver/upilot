@@ -134,6 +134,11 @@ namespace CodingRiver.UPilot
         internal static string LifecycleTitle(string phase) => phase == "enteringPlay" ? "Unity 正在进入 PlayMode" :
             phase == "exitingPlay" ? "Unity 正在退出 PlayMode" : phase == "domain_reload" ? "Unity 正在重载" : "Unity 正在编译";
 
+        internal static string ObservationStatus(BridgeStatus bridge, McpServerStatus server) =>
+            server.EditorObservationStatus == "waiting_lifecycle" &&
+            Classify(bridge, server) != UPilotHealthDisposition.WaitingLifecycle
+                ? "unknown" : server.EditorObservationStatus;
+
         internal static bool CanVerifyRecovery(BridgeStatus bridge, McpServerStatus server, long observedNowUtcMs = 0) =>
             HasServiceIdentity(server) && server.HealthEndpointResponded && bridge.IsWsOpen && bridge.IsAuthenticated &&
             bridge.SessionId == server.Health.bridge_session_id &&
@@ -229,6 +234,7 @@ namespace CodingRiver.UPilot
             Initialize();
             launchSpec ??= UPilotMcpServerManager.Instance.LaunchSpec;
             var entry = launchSpec?.expectedEntry ?? ExpectedEntry;
+            var entrySource = launchSpec?.expectedEntry != null ? "当前启动记录" : "当前配置";
             var module = launchSpec != null ? launchSpec.expectedModuleRoot :
                 UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.Python
                     ? Path.Combine(PackageRoot, "upilotserver~", "src", "upilot_mcp") : "";
@@ -277,7 +283,7 @@ namespace CodingRiver.UPilot
                     $"协议不兼容：期望身份契约={UPilotBridge.IdentityContractVersion}、协议=1；实际身份契约=" +
                     $"{(health.identity_contract_version == 0 ? "未知/未返回" : health.identity_contract_version.ToString())}、协议={Text(health.protocol_version)}");
                 Compare("entry", Known(health.server_entry_path) ? SamePath(entry, health.server_entry_path) : (bool?)null,
-                    $"Server 入口错误：当前包配套入口={entry}；实际入口={Text(health.server_entry_path)}");
+                    $"启动入口不一致（期望来源：{entrySource}）\n期望入口：{entry}\n实际入口：{Text(health.server_entry_path)}");
                 if (!string.IsNullOrEmpty(module))
                     Compare("module", Known(health.server_module_root) ?
                         SamePath(module, health.server_module_root) : (bool?)null,
@@ -302,7 +308,7 @@ namespace CodingRiver.UPilot
                 Check("timeout", null, "状态尚未确认（观察超过 30 秒）：等待连接、进程身份、健康信息或握手证据；不凭等待时长确认故障。");
             }
             _lastDetails = $"Bridge：{Version}；渠道={Channel}；安装方式={InstallSource}；明确 main={IsMain}\n" +
-                $"当前包：{PackageRoot}\n配套入口：{entry}\n" +
+                $"当前包：{PackageRoot}\n期望入口（{entrySource}）：{entry}\n" +
                 $"Server：{Text(health?.server_version)}；渠道={Text(health?.build_channel)}；安装来源={Text(health?.server_install_source)}\n" +
                 $"实际入口：{Text(health?.server_entry_path)}\n实际模块：{Text(health?.server_module_root)}\n" +
                 $"期望项目：{UPilotProjectConfig.ProjectRoot}\n实际项目：{Text(health?.configured_project_path)}\n" +

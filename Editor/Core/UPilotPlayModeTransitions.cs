@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -38,6 +38,7 @@ namespace CodingRiver.UPilot
         }
         private static readonly string PathName = Path.Combine("Library", "UPilot", "playmode-transitions.json");
         private static Ledger ledger;
+        private static string recoveryCandidateKey;
         private static Ledger State
         {
             get
@@ -69,6 +70,41 @@ namespace CodingRiver.UPilot
             var end = Current;
             return IsCurrentProcessRecord(start) && end != null && end.at >= startedAt && end.at >= start.at &&
                 (end.toState == "play" || end.toState == "edit");
+        }
+
+        // 仅由真实 Editor update 调用；连续两次稳定事实用于补齐 Reload 后遗漏的进入通知。
+        internal static bool ReconcileEditorUpdate(bool isPlaying, bool willPlay, bool isBusy, string sessionId)
+        {
+            var recovered = RecoverOnEditorUpdate(Current, ref recoveryCandidateKey,
+                isPlaying, willPlay, isBusy, sessionId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            if (recovered == null) return false;
+            State.records.Add(recovered);
+            if (State.records.Count > 256) State.records.RemoveRange(0, State.records.Count - 256);
+            State.intent = null;
+            Persist();
+            UPilotTestService.Instance?.ObservePlayModeTransition(recovered);
+            return true;
+        }
+
+        internal static PlayModeTransitionRecord RecoverOnEditorUpdate(PlayModeTransitionRecord pending,
+            ref string candidateKey, bool isPlaying, bool willPlay, bool isBusy, string sessionId, long observedAt)
+        {
+            if (!IsCurrentProcessRecord(pending) || pending.toState != "enteringPlay" ||
+                string.IsNullOrEmpty(pending.transitionId) || string.IsNullOrEmpty(sessionId) ||
+                !isPlaying || !willPlay || isBusy || pending.at <= 0 || observedAt <= pending.at)
+            {
+                candidateKey = null;
+                return null;
+            }
+            var key = sessionId + ":" + pending.transitionId;
+            if (candidateKey != key)
+            {
+                candidateKey = key;
+                return null;
+            }
+            candidateKey = null;
+            // 沿用已记录的请求归属，不从可能已过期的 intent 重新推断。
+            return Build("enteringPlay", "play", sessionId, observedAt, pending);
         }
 
         public static void RequestProjectExit(string operationId = "")

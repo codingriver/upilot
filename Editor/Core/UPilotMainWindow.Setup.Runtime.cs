@@ -12,6 +12,9 @@ namespace CodingRiver.UPilot
 {
     public sealed partial class UPilotMainWindow
     {
+        internal static string GetRuntimeSelectionModeLabel(UPilotServerRuntimeMode mode) =>
+            mode == UPilotServerRuntimeMode.StandaloneExe ? "本地 EXE" : "本机 Python";
+
         private async void BeginRuntimeInspection()
         {
             _setupPythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
@@ -297,11 +300,12 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void SelectOrConfigurePythonRuntime()
+        internal void SelectOrConfigurePythonRuntime(Action<string> selectPython = null)
         {
             var runtime = UPilotServerRuntimeService.Instance;
-            if (runtime.IsPythonRuntimeConfigured(out _))
+            if (runtime.IsPythonRuntimeConfigured(out var configuredPython))
             {
+                (selectPython ?? runtime.SetPythonRuntime)(configuredPython);
                 _setupRuntimeChoice = SetupRuntimeChoice.Python;
                 return;
             }
@@ -317,7 +321,7 @@ namespace CodingRiver.UPilot
 
             _setupRuntimeChoice = SetupRuntimeChoice.Python;
             if (_setupPythonProbe.IsUsable)
-                runtime.SetPythonRuntime(_setupPythonProbe.PythonPath);
+                (selectPython ?? runtime.SetPythonRuntime)(_setupPythonProbe.PythonPath);
             else
                 runtime.StartAutoConfigurePythonEnvironment();
         }

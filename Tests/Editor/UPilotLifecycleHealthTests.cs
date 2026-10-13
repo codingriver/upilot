@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using UnityEngine.TestTools;
 using System.Net.Http;
@@ -52,6 +52,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(view.State, Is.EqualTo(UPilotMainState.CheckingStatus));
             Assert.That(view.Title, Does.Contain("Unity 正在"));
             Assert.That(view.Message, Does.Contain("未执行自动重启"));
+            Assert.That(UPilotHealthAssessment.ObservationStatus(bridge, status), Is.EqualTo("waiting_lifecycle"));
             Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, status.EditorObservationObservedAtUtcMs), Is.False);
             Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(status), Is.False);
         }
@@ -231,6 +232,257 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(record?.status, Is.EqualTo(historicalStatus));
                 Assert.That(record?.error, Is.EqualTo(historicalError));
             });
+        }
+
+        private static McpServerStatus Responsive(long now)
+        {
+            var status = Waiting("compiling", 1000);
+            status.LastSuccessfulStatusAtUtcMs = now;
+            status.EditorObservationObservedAtUtcMs = now;
+            status.EditorObservationStatus = "responsive";
+            status.EditorObservationHeartbeatAgeMs = 100;
+            status.EditorObservationPumpAgeMs = 100;
+            return status;
+        }
+
+        [Test]
+        public void EntryWarningKeepsHealthyCommunicationVisibleAndRepairRequired()
+        {
+            WithIsolatedHealthUi(() =>
+            {
+                var setupKey = UPilotPreferences.SetupCompletedKey;
+                var hadSetup = EditorPrefs.HasKey(setupKey);
+                var setup = EditorPrefs.GetBool(setupKey);
+                try
+                {
+                    EditorPrefs.SetBool(setupKey, true);
+                    var status = Responsive(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    PopulateDeploymentIdentity(status.Health);
+                    status.Health.server_entry_path = System.IO.Path.Combine(UPilotProjectConfig.ProjectRoot, "other-server.exe");
+                    var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+                    var view = UPilotQuickStart.Evaluate(bridge, status, Array.Empty<AgentMcpConfigStatus>());
+                    Assert.That(view.State, Is.EqualTo(UPilotMainState.NeedsRepair));
+                    Assert.That(view.Message, Does.Contain("Server：正常｜Bridge：已连接（心跳新鲜）｜Unity：响应正常"));
+                    Assert.That(view.Message, Does.Contain("启动入口不一致（期望来源："));
+                    Assert.That(view.Message, Does.Contain("期望入口："));
+                    Assert.That(view.Message, Does.Contain("实际入口：" + status.Health.server_entry_path));
+                    Assert.That(view.Message, Does.Not.Contain("当前包配套入口"));
+                }
+                finally
+                {
+                    if (hadSetup) EditorPrefs.SetBool(setupKey, setup); else EditorPrefs.DeleteKey(setupKey);
+                }
+            });
+        }
+
+        [TestCase("health-failed", "Server：待确认")]
+        [TestCase("health-expired", "Server：待确认")]
+        [TestCase("query-pending", "Server：待确认")]
+        [TestCase("timeout-with-stopped-cache", "Server：待确认")]
+        [TestCase("timeout-with-port-cache", "Server：待确认")]
+        [TestCase("server-stopped", "Server：未运行")]
+        [TestCase("port-closed", "Server：监听异常")]
+        [TestCase("server-error", "Server：状态异常")]
+        [TestCase("foreign", "Server：身份不符")]
+        [TestCase("wrong-pid", "Server：待确认")]
+        [TestCase("wrong-project", "Server：待确认")]
+        [TestCase("ws-closed", "Bridge：未连接")]
+        [TestCase("bridge-stopped", "Bridge：未启动")]
+        [TestCase("auth-failed", "Bridge：认证失败")]
+        [TestCase("auth-pending", "Bridge：等待认证")]
+        [TestCase("wrong-session", "Bridge：已连接（服务身份待确认）")]
+        [TestCase("heartbeat-expired", "Bridge：已连接（心跳待确认）")]
+        [TestCase("pump-expired", "Unity：待确认")]
+        [TestCase("observation-expired", "Unity：待确认")]
+        [TestCase("observation-missing", "Unity：待确认")]
+        [TestCase("observation-old-session", "Unity：待确认")]
+        [TestCase("waiting-editor", "Unity：UPilot 观测待更新")]
+        [TestCase("waiting-lifecycle", "Unity：正在编译")]
+        [TestCase("unity-exited", "Unity：进程已退出")]
+        public void RepairWarningDoesNotHideUnhealthyOrUnknownCommunication(string condition, string expected)
+        {
+            const long now = 1000000;
+            var status = Responsive(now);
+            var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+            switch (condition)
+            {
+                case "health-failed": status.HealthEndpointResponded = false; break;
+                case "health-expired": status.LastSuccessfulStatusAtUtcMs -= 6001; break;
+                case "query-pending": status.DiagnosisPending = true; break;
+                case "timeout-with-stopped-cache":
+                    status.IsRunning = false;
+                    status.FailureKind = McpStatusFailureKind.Transient;
+                    status.ErrorMessage = "fixture status timeout";
+                    break;
+                case "timeout-with-port-cache":
+                    status.HttpPortListening = false;
+                    status.FailureKind = McpStatusFailureKind.Transient;
+                    status.ErrorMessage = "fixture status timeout";
+                    break;
+                case "server-stopped": status.IsRunning = false; break;
+                case "port-closed": status.HttpPortListening = false; break;
+                case "server-error": status.ErrorMessage = "fixture failure"; break;
+                case "foreign": status.ProcessOwnership = McpProcessOwnership.Foreign; break;
+                case "wrong-pid": status.Health.server_pid++; break;
+                case "wrong-project": status.Health.configured_project_path += "/other-project"; break;
+                case "ws-closed": bridge.IsWsOpen = false; break;
+                case "bridge-stopped": bridge.IsStarted = false; break;
+                case "auth-failed": bridge.AuthenticationErrorCode = "TOKEN_REJECTED"; break;
+                case "auth-pending": bridge.IsAuthenticated = false; break;
+                case "wrong-session": bridge.SessionId = "old-session"; break;
+                case "heartbeat-expired": status.EditorObservationHeartbeatAgeMs = 6001; break;
+                case "pump-expired": status.EditorObservationPumpAgeMs = 5001; break;
+                case "observation-expired": status.EditorObservationObservedAtUtcMs -= 6001; break;
+                case "observation-missing": status.EditorObservationAvailable = false; break;
+                case "observation-old-session": status.EditorObservationSessionId = "old-session"; break;
+                case "waiting-editor": status.EditorObservationStatus = "waiting_editor"; break;
+                case "waiting-lifecycle": status.EditorObservationStatus = "waiting_lifecycle"; break;
+                case "unity-exited": status.EditorObservationReason = "unity_process_exited"; break;
+            }
+            var message = UPilotQuickStart.BuildRepairMessage(bridge, status, "入口差异详情", now);
+            Assert.That(message, Does.Contain(expected));
+            Assert.That(message, Does.Not.Contain("Unity：响应正常"));
+            Assert.That(message, Does.EndWith("\n\n入口差异详情"));
+        }
+
+        [Test]
+        public void StableEditorUpdatesRecoverEntryWithoutChangingRequestProvenance()
+        {
+            var intent = new PlayModeTransitionRecord { origin = "upilot", requestId = "request-a",
+                commandId = "command-a", operationId = "operation-a", toolName = "playmode.set", runGuid = "run-a" };
+            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "old-session", 100000, intent);
+            var original = UnityEngine.JsonUtility.ToJson(start);
+            string candidate = null;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "new-session", 700000), Is.Null);
+            var end = UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "new-session", 700001);
+            Assert.That(end, Is.Not.Null);
+            Assert.That(end.toState, Is.EqualTo("play"));
+            Assert.That(end.fromState, Is.EqualTo("enteringPlay"));
+            Assert.That(end.transitionId, Is.Not.EqualTo(start.transitionId));
+            Assert.That(end.at, Is.EqualTo(700001));
+            Assert.That(end.unitySessionId, Is.EqualTo("new-session"));
+            Assert.That(end.origin, Is.EqualTo(start.origin));
+            Assert.That(end.requestId, Is.EqualTo(start.requestId));
+            Assert.That(end.commandId, Is.EqualTo(start.commandId));
+            Assert.That(end.operationId, Is.EqualTo(start.operationId));
+            Assert.That(end.toolName, Is.EqualTo(start.toolName));
+            Assert.That(end.runGuid, Is.EqualTo(start.runGuid));
+            Assert.That(UnityEngine.JsonUtility.ToJson(start), Is.EqualTo(original));
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(end, ref candidate,
+                true, true, false, "new-session", 700002), Is.Null);
+        }
+
+        [TestCase(false, true, false)]
+        [TestCase(true, false, false)]
+        [TestCase(true, true, true)]
+        public void InterruptedEntryRecoveryRequiresTwoMoreStableEditorUpdates(bool playing, bool willPlay, bool busy)
+        {
+            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "session-a", 100000, null);
+            string candidate = null;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-a", 100001), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                playing, willPlay, busy, "session-a", 100002), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-a", 100003), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-a", 100004), Is.Not.Null);
+        }
+
+        [Test]
+        public void EntryRecoveryRequiresTwoStableUpdatesInTheSameBridgeSession()
+        {
+            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "session-a", 100000, null);
+            string candidate = null;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-a", 100001), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-b", 100002), Is.Null);
+            var end = UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-b", 100003);
+            Assert.That(end, Is.Not.Null);
+            Assert.That(end.unitySessionId, Is.EqualTo("session-b"));
+        }
+        [Test]
+        public void ReplacedEntryAndLongWaitDoNotReuseStableObservation()
+        {
+            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "session-a", 100000, null);
+            var replacement = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "session-a", 100001, null);
+            string candidate = null;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, "session-a", 100002), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(replacement, ref candidate,
+                true, true, false, "session-a", 100003), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(replacement, ref candidate,
+                false, true, false, "session-a", 700001), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(replacement, ref candidate,
+                false, true, false, "session-a", 700002), Is.Null);
+        }
+
+        [TestCase("pid")]
+        [TestCase("creation")]
+        [TestCase("project")]
+        [TestCase("id")]
+        [TestCase("session")]
+        [TestCase("exiting")]
+        [TestCase("timestamp")]
+        public void EntryRecoveryRejectsUnknownIdentityAndNonEntryStates(string invalid)
+        {
+            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "session-a", 100000, null);
+            var session = "session-a";
+            if (invalid == "pid") start.processId++;
+            if (invalid == "creation") start.processCreatedAt++;
+            if (invalid == "project") start.projectPath += "/other-project";
+            if (invalid == "id") start.transitionId = "";
+            if (invalid == "session") session = "";
+            if (invalid == "exiting") start.toState = "exitingPlay";
+            if (invalid == "timestamp") start.at = 700000;
+            string candidate = start.transitionId;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                true, true, false, session, 700000), Is.Null);
+            Assert.That(candidate, Is.Null);
+        }
+
+        [TestCase("play")]
+        [TestCase("edit")]
+        public void CompletedLocalLifecycleCannotKeepOldEnteringNotice(string terminalMode)
+        {
+            var field = typeof(UPilotPlayModeTransitions).GetField("ledger", BindingFlags.Static | BindingFlags.NonPublic);
+            var saved = field.GetValue(null);
+            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "session-a", 100000, null);
+            var end = UPilotPlayModeTransitions.Build("enteringPlay", terminalMode, "session-a", 100001, start);
+            var isolated = Activator.CreateInstance(field.FieldType, true);
+            field.FieldType.GetField("records").SetValue(isolated, new List<PlayModeTransitionRecord> { start, end });
+            try
+            {
+                field.SetValue(null, isolated);
+                var status = Waiting("enteringPlay", 600000);
+                status.EditorObservationLifecycleId = start.transitionId;
+                var bridge = new BridgeStatus { IsStarted = true };
+                Assert.That(UPilotPlayModeTransitions.HasEndedLifecycle(start.transitionId, start.at), Is.True);
+                Assert.That(UPilotHealthAssessment.Classify(bridge, status), Is.EqualTo(UPilotHealthDisposition.Unconfirmed));
+                Assert.That(UPilotHealthAssessment.ObservationStatus(bridge, status), Is.EqualTo("unknown"));
+                var view = UPilotQuickStart.EvaluateServiceState(bridge, status);
+                Assert.That(view.State, Is.EqualTo(UPilotMainState.CheckingStatus));
+                Assert.That(view.Title, Does.Not.Contain("正在进入"));
+                Assert.That(status.EditorObservationStatus, Is.EqualTo("waiting_lifecycle"));
+            }
+            finally { field.SetValue(null, saved); }
+        }
+
+        [Test]
+        public void ExpiredUpilotObservationDoesNotClaimUnityHasStalled()
+        {
+            var status = Waiting("enteringPlay", 600000);
+            status.EditorObservationStatus = "waiting_editor";
+            var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+            var view = UPilotQuickStart.EvaluateServiceState(bridge, status);
+            Assert.That(view.State, Is.EqualTo(UPilotMainState.CheckingStatus));
+            Assert.That(view.Title, Does.Contain("UPilot"));
+            Assert.That(view.Message, Does.Contain("不能据此认定 Unity 或游戏卡死"));
+            Assert.That(UPilotHealthAssessment.ObservationStatus(bridge, status), Is.EqualTo("waiting_editor"));
         }
 
         private static void PopulateDeploymentIdentity(UPilotServerHealth health)

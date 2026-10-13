@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
@@ -296,6 +297,221 @@ namespace CodingRiver.UPilot.Tests
                 UPilotPortRegistration.LastError = originalError;
                 UPilotPortRegistration.LastWarning = originalWarning;
                 UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+
+        [Test]
+        public void ExistingPythonSelectionPersistsPythonMode()
+        {
+            WithRuntimeConfig((path, original) =>
+            {
+                original.runtime.pythonPath = path;
+                var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
+                try
+                {
+                    var calls = 0;
+                    window.SelectOrConfigurePythonRuntime(selected =>
+                    {
+                        calls++;
+                        UPilotServerRuntimeService.SaveRuntimeSelection(UPilotServerRuntimeMode.Python, selected,
+                            saved => typeof(UPilotProjectConfig).GetField("_cached", BindingFlags.Static | BindingFlags.NonPublic)
+                                .SetValue(null, saved));
+                    });
+                    Assert.That(calls, Is.EqualTo(1));
+                    Assert.That(UPilotProjectConfig.Current.runtime.mode, Is.EqualTo("python"));
+                    Assert.That(UPilotProjectConfig.Current.runtime.pythonPath, Is.EqualTo(path));
+                    Assert.That(UPilotServerRuntimeService.Instance.GetConfiguredMode(), Is.EqualTo(UPilotServerRuntimeMode.Python));
+                    Assert.That(GetField(window, "_setupRuntimeChoice").ToString(), Is.EqualTo("Python"));
+                    Assert.That(original.runtime.mode, Is.EqualTo("exe"));
+                }
+                finally { UnityEngine.Object.DestroyImmediate(window); }
+            });
+        }
+
+        [Test]
+        public void ExplicitPythonSelectionValidatesExactPathBeforeSaving()
+        {
+            WithRuntimeConfig((path, original) =>
+            {
+                var calls = new List<string>();
+                UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.Python,
+                    "  " + path + "  ", saved =>
+                    {
+                        Assert.That(calls, Is.EqualTo(new[] { "validate" }));
+                        calls.Add("save");
+                        Assert.That(saved, Is.Not.SameAs(original));
+                        Assert.That(saved.runtime.mode, Is.EqualTo("python"));
+                        Assert.That(saved.runtime.pythonPath, Is.EqualTo(path));
+                        Assert.That(saved.mcp.httpPort, Is.EqualTo(original.mcp.httpPort));
+                    }, selected =>
+                    {
+                        Assert.That(selected, Is.EqualTo(path));
+                        Assert.That(original.runtime.mode, Is.EqualTo("exe"));
+                        calls.Add("validate");
+                        return Task.CompletedTask;
+                    }).GetAwaiter().GetResult();
+                Assert.That(calls, Is.EqualTo(new[] { "validate", "save" }));
+                Assert.That(original.runtime.mode, Is.EqualTo("exe"));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void PythonValidationFailureOrCancellationDoesNotSave(bool cancelled)
+        {
+            WithRuntimeConfig((path, original) =>
+            {
+                var before = JsonUtility.ToJson(original);
+                Exception failure = cancelled ? new OperationCanceledException("cancelled") : new InvalidOperationException("dependencies missing");
+                var task = UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.Python,
+                    path, _ => Assert.Fail("Validation failure must not save."), _ => Task.FromException(failure));
+                Assert.That(Assert.Catch(() => task.GetAwaiter().GetResult()), Is.SameAs(failure));
+                Assert.That(JsonUtility.ToJson(UPilotProjectConfig.Current), Is.EqualTo(before));
+            });
+        }
+
+        [Test]
+        public void RuntimeSaveFailurePreservesCurrentConfiguration()
+        {
+            WithRuntimeConfig((path, original) =>
+            {
+                var before = JsonUtility.ToJson(original);
+                var task = UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.Python,
+                    path, saved =>
+                    {
+                        Assert.That(saved, Is.Not.SameAs(original));
+                        Assert.That(saved.runtime, Is.Not.SameAs(original.runtime));
+                        throw new IOException("injected save failure");
+                    }, _ => Task.CompletedTask);
+                Assert.Throws<IOException>(() => task.GetAwaiter().GetResult());
+                Assert.That(UPilotProjectConfig.Current, Is.SameAs(original));
+                Assert.That(JsonUtility.ToJson(original), Is.EqualTo(before));
+            });
+        }
+
+        [TestCase(UPilotServerRuntimeMode.Python)]
+        [TestCase(UPilotServerRuntimeMode.StandaloneExe)]
+        public void RuntimeSelectionRejectsMissingAndRelativeFiles(UPilotServerRuntimeMode mode)
+        {
+            WithRuntimeConfig((path, original) =>
+            {
+                foreach (var selected in new[] { "python.exe", path + ".missing" })
+                {
+                    var task = UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(mode, selected,
+                        _ => Assert.Fail("Invalid path must not save."), _ => throw new Exception("Must not probe another Python."));
+                    Assert.Throws<FileNotFoundException>(() => task.GetAwaiter().GetResult());
+                }
+                Assert.That(UPilotProjectConfig.Current, Is.SameAs(original));
+            });
+        }
+
+        [Test]
+        public void ExplicitExeSelectionUsesRequestedFileWithoutPythonValidation()
+        {
+            WithRuntimeConfig((path, original) =>
+            {
+                var saves = 0;
+                original.runtime.pythonPath = "preserved-python";
+                UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.StandaloneExe,
+                    path, saved =>
+                    {
+                        saves++;
+                        Assert.That(saved.runtime.mode, Is.EqualTo("exe"));
+                        Assert.That(saved.runtime.serverExePath, Is.EqualTo(path));
+                        Assert.That(saved.runtime.serverVersion, Is.Empty);
+                        Assert.That(saved.runtime.pythonPath, Is.EqualTo("preserved-python"));
+                    }, _ => throw new Exception("EXE selection must not validate Python.")).GetAwaiter().GetResult();
+                Assert.That(saves, Is.EqualTo(1));
+                Assert.That(original.runtime.serverVersion, Is.EqualTo("old-version"));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void RepairPreparationUsesOnlySelectedRoute(bool explicitSelection)
+        {
+            var calls = new List<string>();
+            Func<Task> selected = () => { calls.Add("selected"); return Task.CompletedTask; };
+            UPilotQuickStart.PrepareRepairRuntimeAsync(explicitSelection ? selected : null,
+                () => { calls.Add("matching"); return Task.CompletedTask; }).GetAwaiter().GetResult();
+            Assert.That(calls, Is.EqualTo(new[] { explicitSelection ? "selected" : "matching" }));
+        }
+
+        [Test]
+        public void ExplicitPreparationFailureDoesNotFallBackToManagedDownload()
+        {
+            Assert.Throws<IOException>(() => UPilotQuickStart.PrepareRepairRuntimeAsync(
+                () => Task.FromException(new IOException("selected runtime failed")),
+                () => throw new Exception("Must not download a replacement.")).GetAwaiter().GetResult());
+        }
+
+        [Test]
+        public void BusyRuntimeSwitchIsRejectedBeforePreparingOrSaving()
+        {
+            var field = typeof(UPilotQuickStart).GetField("_repairTask", BindingFlags.Static | BindingFlags.NonPublic);
+            var previous = field.GetValue(null);
+            var pending = new TaskCompletionSource<string>();
+            WithRuntimeConfig((path, original) =>
+            {
+                try
+                {
+                    field.SetValue(null, pending.Task);
+                    Assert.That(UPilotQuickStart.CanSwitchRuntime, Is.False);
+                    Assert.Throws<InvalidOperationException>(() =>
+                        UPilotQuickStart.ApplyRuntimeAndRestartAsync(UPilotServerRuntimeMode.Python, path));
+                    Assert.That(UPilotProjectConfig.Current, Is.SameAs(original));
+                    Assert.That(field.GetValue(null), Is.SameAs(pending.Task));
+                }
+                finally { field.SetValue(null, previous); }
+            });
+        }
+
+        [Test]
+        public void StoppedSwitchDoesNotPersistValidatedRuntime()
+        {
+            var field = typeof(UPilotQuickStart).GetField("_explicitlyStopped", BindingFlags.Static | BindingFlags.NonPublic);
+            var previous = field.GetValue(null);
+            WithRuntimeConfig((path, original) =>
+            {
+                try
+                {
+                    field.SetValue(null, true);
+                    var task = UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.Python,
+                        path, UPilotQuickStart.SaveSelectedRuntime, _ => Task.CompletedTask);
+                    Assert.Throws<OperationCanceledException>(() => task.GetAwaiter().GetResult());
+                    Assert.That(UPilotProjectConfig.Current, Is.SameAs(original));
+                }
+                finally { field.SetValue(null, previous); }
+            });
+        }
+
+        [TestCase(UPilotServerRuntimeMode.Python, "本机 Python")]
+        [TestCase(UPilotServerRuntimeMode.StandaloneExe, "本地 EXE")]
+        public void RuntimeSelectionLabelReflectsConfiguredMode(UPilotServerRuntimeMode mode, string expected)
+        {
+            Assert.That(UPilotMainWindow.GetRuntimeSelectionModeLabel(mode), Is.EqualTo(expected));
+        }
+
+        // 同步作用域内替换缓存，保存用委托观察；不触碰真实运行配置或端口登记。
+        private static void WithRuntimeConfig(Action<string, UPilotProjectConfigData> action)
+        {
+            var field = typeof(UPilotProjectConfig).GetField("_cached", BindingFlags.Static | BindingFlags.NonPublic);
+            var previous = UPilotProjectConfig.Current;
+            var disk = File.ReadAllBytes(UPilotProjectConfig.ConfigPath);
+            var config = JsonUtility.FromJson<UPilotProjectConfigData>(JsonUtility.ToJson(previous));
+            config.runtime = new UPilotRuntimeConfig { mode = "exe", serverExePath = "old-server", serverVersion = "old-version" };
+            var path = Path.GetTempFileName();
+            try
+            {
+                field.SetValue(null, config);
+                action(path, config);
+                Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(disk));
+            }
+            finally
+            {
+                field.SetValue(null, previous);
+                File.Delete(path);
             }
         }
 

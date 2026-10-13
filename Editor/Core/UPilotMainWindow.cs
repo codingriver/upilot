@@ -636,7 +636,7 @@ namespace CodingRiver.UPilot
                 snapshot.State == UPilotMainState.Updating)
                 return;
 
-            var observationStatus = _mcpStatus.EditorObservationStatus;
+            var observationStatus = UPilotHealthAssessment.ObservationStatus(_bridgeStatus, _mcpStatus);
             if (observationStatus != "waiting_editor" && observationStatus != "unknown" && observationStatus != "waiting_lifecycle")
                 return;
 
@@ -650,7 +650,7 @@ namespace CodingRiver.UPilot
                     $"，已等待 {FormatObservationDuration(waitingMs)}；正常生命周期等待不会触发自动修复或重启。\n" +
                     $"Server HTTP：{(_mcpStatus.HealthEndpointResponded ? "已响应" : "尚未确认")}；" +
                     $"Bridge 心跳年龄：{FormatObservationDuration(_mcpStatus.EditorObservationHeartbeatAgeMs)}；" +
-                    $"Editor 主线程更新年龄：{FormatObservationDuration(_mcpStatus.EditorObservationPumpAgeMs)}。",
+                    $"UPilot 主线程观测年龄：{FormatObservationDuration(_mcpStatus.EditorObservationPumpAgeMs)}。",
                     MessageType.Info);
             }
             else if (observationStatus == "waiting_editor")
@@ -660,8 +660,8 @@ namespace CodingRiver.UPilot
                     waitingMs = Math.Max(waitingMs,
                         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _mcpStatus.EditorObservationWaitingSinceUtcMs);
                 EditorGUILayout.HelpBox(
-                    "Unity 主线程暂未响应，疑似长时间更新停顿。心跳与主线程推进分别观测，正在每秒检查；未执行自动重启。\n" +
-                    $"已等待 {FormatObservationDuration(waitingMs)}；最近观察 {observed}。该间隔是主线程更新间隔，不是精确帧耗时。",
+                    "UPilot 主线程观测暂未更新，正在每秒检查；不能据此认定 Unity 或游戏卡死，未执行自动重启。\n" +
+                    $"已等待 {FormatObservationDuration(waitingMs)}；最近观察 {observed}。该间隔是 UPilot 回调观测间隔，不是游戏帧耗时。",
                     MessageType.Warning);
             }
             else
@@ -763,6 +763,15 @@ namespace CodingRiver.UPilot
                 rect.width - horizontalPadding * 2f,
                 messageHeight);
             EditorGUI.LabelField(messageRect, snapshot.Message, EditorStyles.wordWrappedLabel);
+            if (snapshot.State == UPilotMainState.NeedsRepair)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("检查服务设置", GUILayout.Width(116f)))
+                        UPilotStatusWindow.OpenRuntimeSettings();
+                }
+            }
             if (snapshot.State == UPilotMainState.NeedsRepair || snapshot.State == UPilotMainState.Restarting)
             {
                 _deploymentDetailsExpanded = EditorGUILayout.Foldout(_deploymentDetailsExpanded, "状态诊断详情", true);

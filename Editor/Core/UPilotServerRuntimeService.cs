@@ -367,16 +367,70 @@ namespace CodingRiver.UPilot
 
         public void SetPythonRuntime(string pythonPath)
         {
-            var config = UPilotProjectConfig.Current;
+            SaveRuntimeSelection(UPilotServerRuntimeMode.Python, pythonPath);
+        }
+
+        internal static void SaveRuntimeSelection(UPilotServerRuntimeMode mode, string path,
+            Action<UPilotProjectConfigData> save = null)
+        {
+            // 保存失败时不把未落盘的选择留在当前配置缓存中。
+            var config = JsonUtility.FromJson<UPilotProjectConfigData>(JsonUtility.ToJson(UPilotProjectConfig.Current));
             config.runtime ??= new UPilotRuntimeConfig();
-            config.runtime.mode = "python";
-            config.runtime.pythonPath = pythonPath ?? "";
-            if (IsSourceUpdateChannel())
+            config.runtime.mode = mode == UPilotServerRuntimeMode.Python ? "python" : "exe";
+            if (mode == UPilotServerRuntimeMode.Python)
             {
-                config.runtime.serverExePath = "";
-                config.runtime.serverVersion = "";
+                config.runtime.pythonPath = path ?? "";
+                if (IsSourceUpdateChannel())
+                {
+                    config.runtime.serverExePath = "";
+                    config.runtime.serverVersion = "";
+                }
             }
-            UPilotProjectConfig.Save(config);
+            else
+            {
+                if (!UPilotDeploymentDiagnostics.SamePath(config.runtime.serverExePath, path))
+                    config.runtime.serverVersion = "";
+                config.runtime.serverExePath = path;
+            }
+            (save ?? (value => UPilotProjectConfig.Save(value)))(config);
+        }
+
+        internal async Task ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode mode, string path,
+            Action<UPilotProjectConfigData> save = null, Func<string, Task> validatePython = null)
+        {
+            if (mode != UPilotServerRuntimeMode.Python && mode != UPilotServerRuntimeMode.StandaloneExe)
+                throw new ArgumentOutOfRangeException(nameof(mode));
+            path = (path ?? "").Trim();
+            var pythonValidated = false;
+            if (mode == UPilotServerRuntimeMode.Python && path.Length == 0)
+            {
+                path = await BeginPythonEnvironmentSetup(activate: false);
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    var state = PythonEnvironmentState;
+                    if (state.IsCancelled) throw new OperationCanceledException("已取消 Python 环境配置，运行方式未保存。");
+                    throw new InvalidOperationException(string.IsNullOrWhiteSpace(state.ErrorMessage)
+                        ? "Python 环境配置未完成。" : state.ErrorMessage);
+                }
+                pythonValidated = true;
+            }
+            if (!Path.IsPathRooted(path) || !File.Exists(path))
+                throw new FileNotFoundException("请选择存在的运行文件绝对路径。", path);
+            if (mode == UPilotServerRuntimeMode.Python && !pythonValidated)
+            {
+                // 只验证所选解释器，不回退到 PATH 上另一份 Python。
+                if (validatePython != null) await validatePython(path);
+                else await Task.Run(() => ValidatePythonRuntime(path, CancellationToken.None));
+            }
+            SaveRuntimeSelection(mode, path, save);
+        }
+
+        private static void ValidatePythonRuntime(string interpreter, CancellationToken token)
+        {
+            var probe = ProbePythonCandidate(interpreter);
+            if (!probe.InterpreterUsable) throw new InvalidOperationException(probe.Message);
+            RunProcessChecked(interpreter, "-B -c \"import mcp, websockets, yaml, PIL\"", 30000, token);
+            RunProcessChecked(interpreter, "-B -m pip check", 30000, token);
         }
 
         public void SetStandaloneExeRuntime(string exePath, string serverVersion = "")
@@ -549,7 +603,7 @@ namespace CodingRiver.UPilot
                     {
                         IsRunning = false,
                         Phase = "已跳过",
-                        ErrorMessage = "开发版仅支持本机 Python，不下载自动管理 MCP 服务。",
+                        ErrorMessage = "开发版不下载自动管理 MCP 服务；可使用本机 Python 或本地 EXE。",
                         PlatformDisplayName = CurrentPlatformDisplayName,
                         FinishedAt = EditorApplication.timeSinceStartup,
                     };
@@ -596,7 +650,7 @@ namespace CodingRiver.UPilot
             if (manifest == null)
                 throw new ArgumentNullException(nameof(manifest));
             if (IsSourceUpdateChannel() || IsSourceChannel(manifest.Channel) || IsSourceChannel(manifest.ServerVersion))
-                throw new InvalidOperationException("开发版仅支持本机 Python，不准备自动管理 MCP 服务。");
+                throw new InvalidOperationException("开发版不准备自动管理 MCP 服务；可使用本机 Python 或本地 EXE。");
 
             var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var registered = false;
@@ -894,10 +948,16 @@ namespace CodingRiver.UPilot
 
         public void StartAutoConfigurePythonEnvironment()
         {
+            if (PythonEnvironmentState.IsRunning) return;
+            _ = BeginPythonEnvironmentSetup(activate: true);
+        }
+
+        private Task<string> BeginPythonEnvironmentSetup(bool activate)
+        {
             lock (_pythonEnvLock)
             {
                 if (_pythonEnvState.IsRunning)
-                    return;
+                    throw new InvalidOperationException("Python 环境正在配置，请等待本次操作完成。");
                 _pythonEnvState = new UPilotPythonEnvironmentState
                 {
                     IsRunning = true,
@@ -907,7 +967,7 @@ namespace CodingRiver.UPilot
             }
 
             _pythonEnvCts = new CancellationTokenSource();
-            _ = ConfigurePythonEnvironmentAsync(_pythonEnvCts.Token);
+            return ConfigurePythonEnvironmentAsync(_pythonEnvCts.Token, activate);
         }
 
         public void CancelPythonEnvironmentSetup()
@@ -2002,7 +2062,7 @@ namespace CodingRiver.UPilot
             };
         }
 
-        private async Task ConfigurePythonEnvironmentAsync(CancellationToken token)
+        private async Task<string> ConfigurePythonEnvironmentAsync(CancellationToken token, bool activate)
         {
             var venvPath = "";
             try
@@ -2037,24 +2097,18 @@ namespace CodingRiver.UPilot
                         UpdatePythonEnvState(state => state.Phase = "安装 MCP server 依赖");
                         await Task.Run(() => RunProcessChecked(interpreter, $"-m pip install -r \"{requirements}\"", 300000, token), token);
                     },
-                    interpreter =>
-                    {
-                        var probe = ProbePythonCandidate(interpreter);
-                        if (!probe.InterpreterUsable)
-                            throw new InvalidOperationException(probe.Message);
-                        RunProcessChecked(interpreter, "-B -c \"import mcp, websockets, yaml, PIL\"", 30000, token);
-                        RunProcessChecked(interpreter, "-B -m pip check", 30000, token);
-                    },
+                    interpreter => ValidatePythonRuntime(interpreter, token),
                     token);
                 token.ThrowIfCancellationRequested();
-                SetPythonRuntime(interpreterPath);
+                if (activate) SetPythonRuntime(interpreterPath);
                 UpdatePythonEnvState(state =>
                 {
                     state.IsRunning = false;
                     state.IsComplete = true;
-                    state.Phase = "环境已配置";
+                    state.Phase = activate ? "环境已配置" : "环境验证通过";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
+                return interpreterPath;
             }
             catch (OperationCanceledException)
             {
@@ -2077,12 +2131,13 @@ namespace CodingRiver.UPilot
                     state.Phase = "配置失败";
                     state.FinishedAt = EditorApplication.timeSinceStartup;
                 });
-                EditorApplication.delayCall += () => EditorUtility.DisplayDialog(
+                if (!RepairOwnsFailureDialog) EditorApplication.delayCall += () => EditorUtility.DisplayDialog(
                     "UPilot Python 环境配置失败",
                     ex.Message + "\n\nPython 环境目录：" + venvPath +
                     "\n\n已有环境不会自动覆盖或删除。请检查权限、文件占用和依赖，人工修复后重试。",
                     "确定");
             }
+            return null;
         }
 
         internal static async Task<string> PreparePythonEnvironmentAsync(

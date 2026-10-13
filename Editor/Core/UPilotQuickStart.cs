@@ -245,7 +245,9 @@ namespace CodingRiver.UPilot
             if (issues.Any(issue => issue.Confirmed) || disposition == UPilotHealthDisposition.ConfirmedFailure ||
                 (!string.IsNullOrEmpty(failure) && disposition == UPilotHealthDisposition.Normal && !IsHealthRecoveryPending))
                 return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "UPilot 需要修复",
-                    issues.FirstOrDefault(issue => issue.Confirmed)?.Message ?? (mcpStatus.ErrorMessage ?? failure), bridgeStatus.IsStarted, mcpStatus.IsRunning);
+                    BuildRepairMessage(bridgeStatus, mcpStatus,
+                        issues.FirstOrDefault(issue => issue.Confirmed)?.Message ?? (mcpStatus.ErrorMessage ?? failure)),
+                    bridgeStatus.IsStarted, mcpStatus.IsRunning);
 
             if (disposition == UPilotHealthDisposition.WaitingLifecycle || disposition == UPilotHealthDisposition.Unconfirmed)
                 return EvaluateServiceState(bridgeStatus, mcpStatus);
@@ -275,6 +277,64 @@ namespace CodingRiver.UPilot
             }
 
             return EvaluateServiceState(bridgeStatus, mcpStatus);
+        }
+
+        // 部署一致性与通信状态分别展示；此摘要不改变修复状态、恢复验证或命令准入。
+        internal static string BuildRepairMessage(BridgeStatus bridge, McpServerStatus server, string detail, long nowUtcMs = 0)
+        {
+            var now = nowUtcMs > 0 ? nowUtcMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var identityMatches = UPilotHealthAssessment.HasServiceIdentity(server);
+            var healthFresh = server.LastSuccessfulStatusAtUtcMs > 0 &&
+                              Math.Max(0, now - server.LastSuccessfulStatusAtUtcMs) <= 6000;
+            var serverHealthy = server.IsRunning && server.HttpPortListening && server.WsPortListening &&
+                                server.StatusQueryCompleted && server.HealthEndpointResponded &&
+                                !server.DiagnosisPending && identityMatches && healthFresh &&
+                                server.FailureKind == McpStatusFailureKind.None && string.IsNullOrEmpty(server.ErrorMessage);
+            var serverText = "待确认";
+            if (server.ProcessOwnership == McpProcessOwnership.Foreign)
+                serverText = "身份不符";
+            else if (server.FailureKind == McpStatusFailureKind.Confirmed ||
+                     (!string.IsNullOrEmpty(server.ErrorMessage) && server.FailureKind != McpStatusFailureKind.Transient))
+                serverText = "状态异常";
+            else if (server.FailureKind == McpStatusFailureKind.Transient || server.DiagnosisPending || !server.StatusQueryCompleted)
+                serverText = "待确认";
+            else if (server.StatusQueryCompleted && !server.IsRunning)
+                serverText = "未运行";
+            else if (server.IsRunning && (!server.HttpPortListening || !server.WsPortListening))
+                serverText = "监听异常";
+            else if (serverHealthy)
+                serverText = "正常";
+
+            var bridgeConnected = bridge.IsStarted && bridge.IsWsOpen && bridge.IsAuthenticated &&
+                                  string.IsNullOrEmpty(bridge.AuthenticationError) &&
+                                  string.IsNullOrEmpty(bridge.AuthenticationErrorCode);
+            var sameSession = !string.IsNullOrEmpty(bridge.SessionId) && bridge.SessionId == server.Health?.bridge_session_id;
+            var observationMatches = server.EditorObservationAvailable && server.EditorObservationObservedAtUtcMs > 0 &&
+                                     sameSession && server.EditorObservationSessionId == bridge.SessionId;
+            var observationAge = Math.Max(0, now - server.EditorObservationObservedAtUtcMs);
+            var heartbeatFresh = observationMatches && server.EditorObservationHeartbeatAgeMs >= 0 &&
+                                 server.EditorObservationHeartbeatAgeMs + observationAge <= 6000;
+            var bridgeText = !string.IsNullOrEmpty(bridge.AuthenticationError) || !string.IsNullOrEmpty(bridge.AuthenticationErrorCode)
+                ? "认证失败" : !bridge.IsStarted ? "未启动" : !bridge.IsWsOpen ? "未连接" : !bridge.IsAuthenticated
+                    ? "等待认证" : !serverHealthy || !sameSession ? "已连接（服务身份待确认）"
+                        : heartbeatFresh ? "已连接（心跳新鲜）" : "已连接（心跳待确认）";
+
+            var unityText = "待确认";
+            if (serverHealthy && bridgeConnected && observationMatches && observationAge <= 6000)
+            {
+                if (server.EditorObservationReason == "unity_process_exited")
+                    unityText = "进程已退出";
+                else if (server.EditorObservationReason == "unity_process_identity_mismatch")
+                    unityText = "身份不符";
+                else if (UPilotHealthAssessment.Classify(bridge, server) == UPilotHealthDisposition.WaitingLifecycle)
+                    unityText = UPilotHealthAssessment.LifecycleTitle(server.EditorObservationLifecyclePhase).Substring("Unity ".Length);
+                else if (server.EditorObservationStatus == "waiting_editor")
+                    unityText = "UPilot 观测待更新";
+                else if (server.EditorObservationStatus == "responsive" && heartbeatFresh &&
+                         UPilotHealthAssessment.CanVerifyRecovery(bridge, server, now))
+                    unityText = "响应正常";
+            }
+            return $"Server：{serverText}｜Bridge：{bridgeText}｜Unity：{unityText}\n\n{detail}";
         }
 
         internal static UPilotMainSnapshot EvaluateServiceState(
@@ -340,8 +400,8 @@ namespace CodingRiver.UPilot
                 {
                     return new UPilotMainSnapshot(
                         UPilotMainState.CheckingStatus,
-                        "Unity 主线程暂未响应",
-                        "疑似长时间更新停顿。心跳与主线程推进分别观测，正在每秒检查；未执行自动重启。",
+                        "UPilot 主线程观测待更新",
+                        "正在每秒检查；观测过期不能据此认定 Unity 或游戏卡死，未执行自动重启。",
                         bridgeStatus.IsStarted,
                         mcpStatus.IsRunning);
                 }
@@ -510,16 +570,52 @@ namespace CodingRiver.UPilot
                 return Task.FromResult("AI service maintenance is active: " + UPilotServiceMaintenance.Current.maintenanceId);
             if (afterStart != null) _afterRepairStart += afterStart;
             if (IsRepairing) return _repairTask;
+            return BeginRepair(null);
+        }
+
+        internal static bool CanSwitchRuntime => !IsRepairing && CanApplyRuntimeSelection;
+
+        private static bool CanApplyRuntimeSelection => !UPilotServiceMaintenance.IsActive &&
+            !UPilotMcpServerManager.Instance.IsServiceTransitionActive &&
+            !UPilotUpdateService.Instance.IsServiceStartBlocked && !UPilotUpdateService.Instance.IsUpdateRunning &&
+            !UPilotServerRuntimeService.Instance.DownloadState.IsRunning &&
+            !UPilotServerRuntimeService.Instance.PythonEnvironmentState.IsRunning &&
+            !EditorApplication.isCompiling && !EditorApplication.isUpdating;
+
+        internal static Task<string> ApplyRuntimeAndRestartAsync(UPilotServerRuntimeMode mode, string path)
+        {
+            if (!CanSwitchRuntime)
+                throw new InvalidOperationException("UPilot 正在处理编译、安装、更新或服务操作，请完成后再切换。");
+            return BeginRepair(async () =>
+            {
+                if (mode == UPilotServerRuntimeMode.Python)
+                    UPilotMcpServerManager.Instance.PreparePythonEntryForRepair();
+                await UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(mode, path, SaveSelectedRuntime);
+            });
+        }
+
+        internal static void SaveSelectedRuntime(UPilotProjectConfigData config)
+        {
+            // 验证可能跨越多帧；保存前复查用户停止及其间开始的更新/维护。
+            if (_explicitlyStopped) throw new OperationCanceledException("已停止切换，运行方式未保存。");
+            if (!CanApplyRuntimeSelection)
+                throw new InvalidOperationException("运行环境状态已变化，未保存所选运行方式；请等待当前操作完成后重试。");
+            UPilotProjectConfig.Save(config);
+        }
+
+        private static Task<string> BeginRepair(Func<Task> prepareRuntime)
+        {
             _repairGeneration++;
             _explicitlyStopped = false;
             EditorPrefs.SetBool(AutoAttemptKey, true);
-            _repairTask = RepairCoreAsync();
+            _repairTask = RepairCoreAsync(prepareRuntime);
             return _repairTask;
         }
 
-        private static async Task<string> RepairCoreAsync()
+        private static async Task<string> RepairCoreAsync(Func<Task> prepareRuntime)
         {
             LastRepairSucceeded = false;
+            var runtimeSaved = false;
             var attemptId = Guid.NewGuid().ToString("N");
             SessionState.SetString(PendingAttemptKey, attemptId);
             _repairCause = EditorPrefs.GetString(FailureKey, "");
@@ -541,9 +637,11 @@ namespace CodingRiver.UPilot
                     throw new InvalidOperationException("Server 返回其他项目身份，拒绝停止该进程。");
                 if (UPilotUpdateService.Instance.IsServiceStartBlocked)
                     throw new InvalidOperationException(UPilotUpdateService.ServiceStartBlockedMessage);
-                _repairPhase = "准备当前包的配套 Server";
+                _repairPhase = prepareRuntime == null ? "准备当前包的配套 Server" : "验证并保存所选运行方式";
                 UPilotServerRuntimeService.RepairOwnsFailureDialog = true;
-                await UPilotServerRuntimeService.Instance.PrepareMatchingServerForRepairAsync();
+                await PrepareRepairRuntimeAsync(prepareRuntime,
+                    () => UPilotServerRuntimeService.Instance.PrepareMatchingServerForRepairAsync());
+                runtimeSaved = prepareRuntime != null;
                 if (_explicitlyStopped) return "已按请求停止 UPilot 服务。";
                 _repairPhase = "停止旧 Bridge / Server，确认进程退出及端口释放";
                 var previousId = UPilotServerRestartDiagnostics.Current?.operationId;
@@ -573,7 +671,8 @@ namespace CodingRiver.UPilot
             {
                 if (_explicitlyStopped || UPilotServerRestartDiagnostics.Current is { status: "superseded" })
                     return _explicitlyStopped ? "已按请求停止 UPilot 服务。" : "包生命周期已替代原重启；等待部署稳定后按需恢复。";
-                var failure = "修复失败，阶段：" + _repairPhase + "\n" + ex.Message;
+                var failure = (runtimeSaved ? "运行配置已保存，重启未完成。\n" : "") +
+                    "修复失败，阶段：" + _repairPhase + "\n" + ex.Message;
                 EditorPrefs.SetString(FailureKey, failure);
                 ShowRepairFailureOnce(attemptId, failure);
                 return failure;
@@ -587,6 +686,9 @@ namespace CodingRiver.UPilot
                 ClearOperation();
             }
         }
+
+        internal static Task PrepareRepairRuntimeAsync(Func<Task> explicitSelection, Func<Task> matchingRuntime) =>
+            (explicitSelection ?? matchingRuntime)();
 
         internal static void ShowRepairFailureOnce(string attemptId, string failure,
             Action<string> openSetup = null, Action<string, string> showDialog = null,

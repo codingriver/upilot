@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -675,6 +675,15 @@ namespace CodingRiver.UPilot
             _cachedIsPlaying = EditorApplication.isPlaying;
             _cachedIsPaused = EditorApplication.isPaused;
             _cachedPlayModeState = _cachedIsPaused ? "pause" : (_cachedIsPlaying ? "play" : "edit");
+
+            if (UPilotPlayModeTransitions.ReconcileEditorUpdate(_cachedIsPlaying,
+                    EditorApplication.isPlayingOrWillChangePlaymode,
+                    EditorApplication.isCompiling || _cachedIsUpdating, _sessionId))
+            {
+                UPilotMcpServerManager.Instance.InvalidateStatusCache();
+                if (_cts != null && !_cts.IsCancellationRequested)
+                    _ = PublishExecutionStateAsync("play_mode_recovered", _cts.Token);
+            }
 
             while (true)
             {

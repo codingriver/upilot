@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - user-facing update center.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -422,9 +422,13 @@ namespace CodingRiver.UPilot
             var runtime = UPilotServerRuntimeService.Instance;
             var package = PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
             var currentUpm = UPilotServerRuntimeService.UpmVersion;
-            var pythonConfigured = runtime.IsPythonRuntimeConfigured(out var pythonPath);
+            var mode = runtime.GetConfiguredMode();
+            var configured = mode == UPilotServerRuntimeMode.Python
+                ? runtime.IsPythonRuntimeConfigured(out _) : runtime.IsStandaloneExeConfigured(out _);
+            var runtimePath = mode == UPilotServerRuntimeMode.Python
+                ? UPilotProjectConfig.Current.runtime?.pythonPath : UPilotProjectConfig.Current.runtime?.serverExePath;
 
-            DrawInfoRow("更新通道", "开发版（本机 Python）");
+            DrawInfoRow("更新通道", "开发版（main/source）");
             EditorGUILayout.Space(4);
             EditorGUILayout.HelpBox(
                 "当前安装来源是本地、嵌入或 main/source。开发版不下载自动管理 MCP 服务，也不执行远程版本比较；正式对外版本通过 v* tag 发布。",
@@ -436,14 +440,16 @@ namespace CodingRiver.UPilot
 
             DrawSeparator();
             DrawSectionTitle("MCP 服务");
-            DrawInfoRow("运行方式", "本机 Python");
-            DrawInfoRow("Python", pythonConfigured ? pythonPath : "尚未配置");
+            DrawInfoRow("运行方式", UPilotMainWindow.GetRuntimeSelectionModeLabel(mode));
+            DrawInfoRow(mode == UPilotServerRuntimeMode.Python ? "Python" : "本地 EXE", configured ? runtimePath : "尚未配置");
             DrawStatusAction(
                 "状态",
-                pythonConfigured ? "已按开发模式配置" : "请在首次设置中配置 Python 3.11+",
+                configured ? "运行文件已配置；通信状态请查看主界面" : "请在高级设置中选择运行方式",
                 null,
                 null,
                 false);
+            if (GUILayout.Button("打开运行方式设置"))
+                UPilotStatusWindow.OpenRuntimeSettings();
 
             if (!string.IsNullOrWhiteSpace(_notice))
                 EditorGUILayout.HelpBox(_notice, _noticeType);

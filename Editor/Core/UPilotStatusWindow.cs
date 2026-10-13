@@ -68,6 +68,12 @@ namespace CodingRiver.UPilot
         private bool _showProcessSettings;
         private bool _showAgentOtherActions;
         private bool _showDiagnosticDetails;
+        private bool _showRuntimeDetails;
+        private bool _runtimeSelectionInitialized;
+        private bool _runtimeSelectionBusy;
+        private bool _runtimeSelectionFailed;
+        private UPilotServerRuntimeMode _runtimeSelectionMode;
+        private string _runtimeSelectionPath = "";
         private int _selectedRestartHistory = -1;
         private double _lastAgentConfigRefresh;
 
@@ -102,6 +108,25 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 ReportStatusWindowException("打开 UPilot 高级设置失败", ex);
+            }
+        }
+
+        /// <summary>打开高级设置的服务运行方式，供异常提示和更新中心直接跳转。</summary>
+        public static void OpenRuntimeSettings()
+        {
+            try
+            {
+                var win = GetWindow<UPilotStatusWindow>("UPilot 高级设置");
+                win.minSize = new Vector2(500, 540);
+                win._activeTab = 0;
+                win._mainScroll = Vector2.zero;
+                win._showRuntimeDetails = true;
+                win.Show();
+                win.Repaint();
+            }
+            catch (Exception ex)
+            {
+                ReportStatusWindowException("打开服务运行方式设置失败", ex);
             }
         }
 
@@ -316,6 +341,8 @@ namespace CodingRiver.UPilot
 
             if (_activeTab == 0)
             {
+                DrawRuntimeSwitch(mcpStatus);
+                EditorGUILayout.Space(6);
                 DrawServiceSection(bridge, status, mcpStatus);
                 EditorGUILayout.Space(6);
                 DrawIssueGuidanceSection(bridge, status, mcpStatus);
@@ -343,6 +370,107 @@ namespace CodingRiver.UPilot
                 DrawDiagnosticsSection(bridge, status, mcpStatus, diagResult, diagRunning, diagResultAtMs);
                 EditorGUILayout.Space(4);
                 DrawLogFileSection();
+            }
+        }
+
+        private void DrawRuntimeSwitch(McpServerStatus server)
+        {
+            var runtime = UPilotServerRuntimeService.Instance;
+            if (!_runtimeSelectionInitialized)
+            {
+                _runtimeSelectionMode = runtime.GetConfiguredMode();
+                _runtimeSelectionPath = RuntimeSelectionPath(_runtimeSelectionMode);
+                _runtimeSelectionInitialized = true;
+            }
+
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("服务运行方式", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("当前配置", UPilotMainWindow.GetRuntimeSelectionModeLabel(runtime.GetConfiguredMode()));
+                using (new EditorGUI.DisabledScope(_runtimeSelectionBusy || !UPilotQuickStart.CanSwitchRuntime))
+                {
+                    var next = (UPilotServerRuntimeMode)EditorGUILayout.Popup("切换为", (int)_runtimeSelectionMode,
+                        new[] { "本机 Python", "本地 EXE" });
+                    if (next != _runtimeSelectionMode)
+                    {
+                        _runtimeSelectionMode = next;
+                        _runtimeSelectionPath = RuntimeSelectionPath(next);
+                    }
+                    EditorGUILayout.LabelField(_runtimeSelectionMode == UPilotServerRuntimeMode.Python ? "Python 解释器" : "Server EXE", EditorStyles.miniLabel);
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        _runtimeSelectionPath = EditorGUILayout.TextField(_runtimeSelectionPath);
+                        if (GUILayout.Button("选择…", GUILayout.Width(60)))
+                        {
+                            var selected = EditorUtility.OpenFilePanel("选择运行文件", "", Application.platform == RuntimePlatform.WindowsEditor ? "exe" : "");
+                            if (!string.IsNullOrWhiteSpace(selected)) _runtimeSelectionPath = selected;
+                        }
+                    }
+
+                    var changed = _runtimeSelectionMode != runtime.GetConfiguredMode() ||
+                        !string.Equals(_runtimeSelectionPath.Trim(), RuntimeSelectionPath(_runtimeSelectionMode).Trim(),
+                            Application.platform == RuntimePlatform.WindowsEditor ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+                    EditorGUILayout.LabelField(changed
+                        ? "待应用配置：" + UPilotMainWindow.GetRuntimeSelectionModeLabel(_runtimeSelectionMode)
+                        : "所选配置与当前配置一致", EditorStyles.miniLabel);
+                    if (_runtimeSelectionMode == UPilotServerRuntimeMode.Python)
+                        EditorGUILayout.LabelField("选择解释器；留空则配置并使用当前包的 Python 环境。", EditorStyles.wordWrappedMiniLabel);
+
+                    using (new EditorGUI.DisabledScope(!changed && !_runtimeSelectionFailed))
+                    {
+                        var label = _runtimeSelectionBusy ? "正在应用并重启…" :
+                            _runtimeSelectionFailed && !changed ? "重试重启服务" : "应用并重启服务";
+                        if (GUILayout.Button(label, GUILayout.Height(26)))
+                            ApplyRuntimeSelection();
+                    }
+                }
+
+                _showRuntimeDetails = EditorGUILayout.Foldout(_showRuntimeDetails, "运行详情", true);
+                if (_showRuntimeDetails)
+                {
+                    var actual = server.StatusQueryCompleted && !server.DiagnosisPending &&
+                        server.FailureKind == McpStatusFailureKind.None && string.IsNullOrEmpty(server.ErrorMessage) &&
+                        server.HealthEndpointResponded && UPilotHealthAssessment.HasServiceIdentity(server) &&
+                        server.LastSuccessfulStatusAtUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - server.LastSuccessfulStatusAtUtcMs <= 6000
+                        ? server.Health.server_entry_path : "待确认";
+                    EditorGUILayout.LabelField("实际入口：" + actual, EditorStyles.wordWrappedMiniLabel);
+                    if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+                        EditorGUILayout.LabelField("main/source 推荐 Python；本地 EXE 使用所选文件。", EditorStyles.wordWrappedMiniLabel);
+                }
+            }
+        }
+
+        private static string RuntimeSelectionPath(UPilotServerRuntimeMode mode)
+        {
+            var config = UPilotProjectConfig.Current.runtime;
+            if (mode == UPilotServerRuntimeMode.StandaloneExe) return config?.serverExePath ?? "";
+            if (!string.IsNullOrWhiteSpace(config?.pythonPath)) return config.pythonPath;
+            var candidate = Path.Combine(UPilotServerRuntimeService.GetPythonEnvironmentPath(out _), "Scripts", "python.exe");
+            return File.Exists(candidate) ? candidate : "";
+        }
+
+        private async void ApplyRuntimeSelection()
+        {
+            if (_runtimeSelectionBusy) return;
+            _runtimeSelectionBusy = true;
+            _runtimeSelectionFailed = false;
+            try
+            {
+                var message = await UPilotQuickStart.ApplyRuntimeAndRestartAsync(_runtimeSelectionMode, _runtimeSelectionPath);
+                if (this == null) return;
+                _runtimeSelectionFailed = !UPilotQuickStart.LastRepairSucceeded;
+                if (!_runtimeSelectionFailed) _runtimeSelectionInitialized = false;
+                ShowToast(message, _runtimeSelectionFailed ? MessageType.Error : MessageType.Info, 12d);
+            }
+            catch (Exception ex)
+            {
+                _runtimeSelectionFailed = true;
+                if (this != null) ShowExceptionToast("切换运行方式失败", ex);
+            }
+            finally
+            {
+                _runtimeSelectionBusy = false;
+                if (this != null) Repaint();
             }
         }
 
