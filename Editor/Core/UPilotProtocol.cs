@@ -560,26 +560,6 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
-    public class EditorWindowHistoryMessage
-    {
-        public string id;
-        public string type;
-        public string name;
-        public EditorWindowHistoryPayload payload;
-        public long timestamp;
-        public string sessionId;
-        public string protocolVersion;
-    }
-
-    [Serializable]
-    public class EditorWindowHistoryPayload
-    {
-        public string instanceId;
-        public long afterSequence;
-        public int count = 100;
-    }
-
-    [Serializable]
     public class EditorWindowOpenMessage
     {
         public string id;

@@ -785,36 +785,6 @@ def test_sceneview_persistence_failure_reports_possible_side_effect_without_repl
     assert len(service.dispatcher.calls) == 1
 
 
-def test_editor_window_history_validates_bounds_before_dispatch_and_preserves_cursor() -> None:
-    class _Dispatcher:
-        calls: list[tuple[str, dict]] = []
-
-        async def call(self, request_id: str, name: str, payload: dict):
-            self.calls.append((name, payload))
-            return ok(request_id, {
-                "events": [], "earliestSequence": 12, "truncated": True,
-                "gap": {"reason": "domain_reload", "afterSequence": 9},
-            })
-
-    service = StatusDomainService()
-    service.dispatcher = _Dispatcher()
-
-    assert not asyncio.run(service.editor_window_history(after_sequence=-1)).ok
-    assert not asyncio.run(service.editor_window_history(count=513)).ok
-    assert not asyncio.run(service.editor_window_history(after_sequence=True)).ok
-    assert not asyncio.run(service.editor_window_history(instance_id=42)).ok
-    accepted = asyncio.run(service.editor_window_history("42", after_sequence=9, count=2))
-
-    assert accepted.ok
-    assert accepted.data == {
-        "events": [], "earliestSequence": 12, "truncated": True,
-        "gap": {"reason": "domain_reload", "afterSequence": 9},
-    }
-    assert service.dispatcher.calls == [(
-        "editor.window.history", {"instanceId": "42", "afterSequence": 9, "count": 2},
-    )]
-
-
 def test_safe_window_open_and_focus_validate_before_dispatch() -> None:
     class _Dispatcher:
         calls: list[tuple[str, dict]] = []

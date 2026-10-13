@@ -4,6 +4,8 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from upilot_mcp.domain.status_service import StatusDomainService
 
 
@@ -149,6 +151,87 @@ def test_schema_two_success_requires_deployment_and_real_readonly_evidence(tmp_p
     )
     assert summary["verifiedSucceeded"] is True
     assert summary["verification"]["readOnlyVerified"] is True
+
+
+@pytest.mark.parametrize("failure", ["timeout", "connection", "os", None])
+def test_health_roundtrip_failure_logs_bounded_identity_and_timing_without_secrets(
+        monkeypatch, tmp_path, caplog, failure):
+    import asyncio
+    import time
+    import httpx
+    from upilot_mcp import mcp_stdio_server as http_server
+
+    session = SimpleNamespace(session_id="session-one", project_path=str(tmp_path),
+                              unity_version="2022.3", last_heartbeat_at=0)
+    secret_message = "ownerToken=secret-owner nonce=secret-nonce http://secret-host/private?token=secret-token"
+    exception = {"timeout": TimeoutError, "connection": ConnectionError, "os": OSError}.get(failure)
+
+    class Bridge:
+        port = 8765
+        session_manager = SimpleNamespace(active=session)
+        def __init__(self):
+            self.pending, self.commands = {}, []
+        def is_ready(self):
+            return True
+        def register_pending(self, command_id):
+            future = asyncio.get_running_loop().create_future()
+            self.pending[command_id] = future
+            return future
+        async def send_command(self, command_id, name, payload):
+            self.commands.append((name, payload))
+            if failure in {"connection", "os"}:
+                raise exception(secret_message)
+            if failure == "timeout":
+                self.pending[command_id].set_exception(exception(secret_message))
+            else:
+                self.pending[command_id].set_result({"type": "result", "name": name, "sessionId": "session-one"})
+        def unregister_pending(self, command_id):
+            self.pending.pop(command_id, None)
+
+    bridge = Bridge()
+    monkeypatch.setattr(http_server, "_orchestrator", bridge)
+    monkeypatch.setattr(http_server, "refresh_config_if_changed", lambda: {})
+    monkeypatch.setattr(http_server, "configured_project_root", lambda: tmp_path)
+    # Replace this module's clock only; asyncio keeps its real monotonic clock.
+    ticks = iter((100.0, 100.125))
+    monkeypatch.setattr(http_server, "time", SimpleNamespace(time=time.time, monotonic=lambda: next(ticks)))
+    original_wait_for = asyncio.wait_for
+    wait_budgets = []
+    async def wait_for(awaitable, timeout):
+        wait_budgets.append(timeout)
+        return await original_wait_for(awaitable, timeout)
+    monkeypatch.setattr(http_server.asyncio, "wait_for", wait_for)
+    monkeypatch.setattr(http_server, "Server", lambda config: SimpleNamespace(app=config.app))
+
+    async def serve_without_sockets(server, _host, _port):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://fixture") as client:
+            basic = await client.get("/health")
+            assert basic.status_code == 200 and "bridge_probe_ok" not in basic.json()
+            nonce = "a" * 32
+            wrong = await client.get("/health", params={"probe": "bridge", "session": "wrong", "nonce": nonce})
+            assert wrong.status_code == 200 and wrong.json()["bridge_probe_ok"] is False
+            assert bridge.commands == []
+            assert not [record for record in caplog.records if "phase=bridge_roundtrip" in record.message]
+            response = await client.get("/health", params={"probe": "bridge", "session": "session-one", "nonce": nonce})
+            data = response.json()
+            assert response.status_code == 200 and data["bridge_probe_nonce"] == nonce
+            assert data["bridge_probe_ok"] is (failure is None)
+            assert bridge.commands == [("editor.state", {})] and bridge.pending == {}
+            records = [record for record in caplog.records if record.name == "upilot.mcp" and "phase=bridge_roundtrip" in record.message]
+            assert len(records) == int(failure is not None)
+            if failure is not None:
+                assert data["bridge_probe_error"] == (exception.__name__ + ": " + secret_message)[:256]
+                message = records[0].message
+                assert f"serverPid={data['server_pid']}" in message
+                assert f"project={tmp_path.resolve()}" in message
+                assert "elapsedMs=125.0" in message and f"exceptionType={exception.__name__}" in message
+                assert nonce not in message and "secret-" not in message and "http://" not in message
+                assert "ownerToken" not in message and "nonce=" not in message and "token=" not in message
+            assert wait_budgets == ([] if failure in {"connection", "os"} else [5.0])
+    monkeypatch.setattr(http_server, "_serve_http_sockets", serve_without_sockets)
+    async def run():
+        await http_server._run_http_server("127.0.0.1", 0, asyncio.create_task(asyncio.sleep(0)))
+    asyncio.run(run())
 
 
 def test_health_bridge_probe_requires_real_roundtrip_and_matching_session(monkeypatch, tmp_path):

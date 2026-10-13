@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -401,16 +401,17 @@ namespace CodingRiver.UPilot
             }
 
             if (launchHealthProbe)
-                _ = ProbeServerHealthAsync(manager, finalHealthProbe);
+                ProbeServerHealth(manager, finalHealthProbe);
         }
 
-        private static async Task ProbeServerHealthAsync(UPilotMcpServerManager manager, bool finalProbe)
+        private static void ProbeServerHealth(UPilotMcpServerManager manager, bool finalProbe)
         {
             McpServerStatus status = default;
             Exception failure = null;
             try
             {
-                status = await manager.GetFreshStatusAsync();
+                // 复用已验证快照，诊断观察不得绕过周期配置强制发 health。
+                status = manager.GetStatus();
             }
             catch (Exception ex)
             {

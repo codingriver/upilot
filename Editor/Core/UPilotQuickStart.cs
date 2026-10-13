@@ -232,6 +232,8 @@ namespace CodingRiver.UPilot
                     mcpStatus.IsRunning);
             }
 
+            var lifecycle = EvaluateLifecycle(mcpStatus, bridgeStatus.IsStarted);
+            if (lifecycle.HasValue) return lifecycle.Value;
             var issues = UPilotDeploymentDiagnostics.Observe(bridgeStatus, mcpStatus);
             var activeRestart = UPilotServerRestartDiagnostics.Current;
             if (IsRepairing || activeRestart?.status == "running")
@@ -279,13 +281,29 @@ namespace CodingRiver.UPilot
             return EvaluateServiceState(bridgeStatus, mcpStatus);
         }
 
+        internal static UPilotMainSnapshot? EvaluateLifecycle(McpServerStatus status, bool bridgeStarted)
+        {
+            if (status.LifecyclePhase == UPilotServerLifecyclePhase.None) return null;
+            var state = status.LifecyclePhase == UPilotServerLifecyclePhase.Starting ? UPilotMainState.Starting :
+                status.LifecyclePhase == UPilotServerLifecyclePhase.Stopping ? UPilotMainState.Stopping : UPilotMainState.CheckingStatus;
+            var restart = UPilotServerRestartDiagnostics.Current;
+            var message = status.LifecyclePhase == UPilotServerLifecyclePhase.Starting ? "等待启动进程和 HTTP、WS 双端口；尚未进行健康检查。" :
+                status.LifecyclePhase == UPilotServerLifecyclePhase.Stopping ? "正在确认进程退出和端口释放。" :
+                restart?.status == "running" ? UPilotServerRestartDiagnostics.WaitingMessage(restart, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) :
+                "正在核实服务身份、Bridge 连接和实际只读往返。";
+            if (status.LifecyclePhase == UPilotServerLifecyclePhase.Verifying && !string.IsNullOrEmpty(status.ErrorMessage))
+                message += " 最近失败：" + status.StatusFailureStage + "；原因：" + status.ErrorMessage;
+            return new UPilotMainSnapshot(state, UPilotMcpServerManager.LifecycleTitle(status.LifecyclePhase), message, bridgeStarted, status.IsRunning);
+        }
+
         // 部署一致性与通信状态分别展示；此摘要不改变修复状态、恢复验证或命令准入。
         internal static string BuildRepairMessage(BridgeStatus bridge, McpServerStatus server, string detail, long nowUtcMs = 0)
         {
             var now = nowUtcMs > 0 ? nowUtcMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var identityMatches = UPilotHealthAssessment.HasServiceIdentity(server);
+            var cacheAllowanceMs = UPilotMcpServerManager.Instance.HealthCheckIntervalMs;
             var healthFresh = server.LastSuccessfulStatusAtUtcMs > 0 &&
-                              Math.Max(0, now - server.LastSuccessfulStatusAtUtcMs) <= 6000;
+                              Math.Max(0, now - server.LastSuccessfulStatusAtUtcMs) <= cacheAllowanceMs + 6000;
             var serverHealthy = server.IsRunning && server.HttpPortListening && server.WsPortListening &&
                                 server.StatusQueryCompleted && server.HealthEndpointResponded &&
                                 !server.DiagnosisPending && identityMatches && healthFresh &&
@@ -313,14 +331,15 @@ namespace CodingRiver.UPilot
                                      sameSession && server.EditorObservationSessionId == bridge.SessionId;
             var observationAge = Math.Max(0, now - server.EditorObservationObservedAtUtcMs);
             var heartbeatFresh = observationMatches && server.EditorObservationHeartbeatAgeMs >= 0 &&
-                                 server.EditorObservationHeartbeatAgeMs + observationAge <= 6000;
+                                 server.EditorObservationHeartbeatAgeMs <= 6000 &&
+                                  server.EditorObservationHeartbeatAgeMs + observationAge <= cacheAllowanceMs + 6000;
             var bridgeText = !string.IsNullOrEmpty(bridge.AuthenticationError) || !string.IsNullOrEmpty(bridge.AuthenticationErrorCode)
                 ? "认证失败" : !bridge.IsStarted ? "未启动" : !bridge.IsWsOpen ? "未连接" : !bridge.IsAuthenticated
                     ? "等待认证" : !serverHealthy || !sameSession ? "已连接（服务身份待确认）"
                         : heartbeatFresh ? "已连接（心跳新鲜）" : "已连接（心跳待确认）";
 
             var unityText = "待确认";
-            if (serverHealthy && bridgeConnected && observationMatches && observationAge <= 6000)
+            if (serverHealthy && bridgeConnected && observationMatches && observationAge <= cacheAllowanceMs + 6000)
             {
                 if (server.EditorObservationReason == "unity_process_exited")
                     unityText = "进程已退出";

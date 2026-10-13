@@ -307,7 +307,7 @@ namespace CodingRiver.UPilot.Tests
             switch (condition)
             {
                 case "health-failed": status.HealthEndpointResponded = false; break;
-                case "health-expired": status.LastSuccessfulStatusAtUtcMs -= 6001; break;
+                case "health-expired": status.LastSuccessfulStatusAtUtcMs -= UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 6001; break;
                 case "query-pending": status.DiagnosisPending = true; break;
                 case "timeout-with-stopped-cache":
                     status.IsRunning = false;
@@ -332,7 +332,7 @@ namespace CodingRiver.UPilot.Tests
                 case "wrong-session": bridge.SessionId = "old-session"; break;
                 case "heartbeat-expired": status.EditorObservationHeartbeatAgeMs = 6001; break;
                 case "pump-expired": status.EditorObservationPumpAgeMs = 5001; break;
-                case "observation-expired": status.EditorObservationObservedAtUtcMs -= 6001; break;
+                case "observation-expired": status.EditorObservationObservedAtUtcMs -= UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 6001; break;
                 case "observation-missing": status.EditorObservationAvailable = false; break;
                 case "observation-old-session": status.EditorObservationSessionId = "old-session"; break;
                 case "waiting-editor": status.EditorObservationStatus = "waiting_editor"; break;
@@ -343,6 +343,19 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(message, Does.Contain(expected));
             Assert.That(message, Does.Not.Contain("Unity：响应正常"));
             Assert.That(message, Does.EndWith("\n\n入口差异详情"));
+        }
+
+        [Test]
+        public void HealthyCachedObservationRemainsValidBetweenConfiguredHealthChecks()
+        {
+            const long now = 1000000;
+            var status = Responsive(now - UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 1);
+            var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+            var message = UPilotQuickStart.BuildRepairMessage(bridge, status, "fixture", now);
+            Assert.That(message, Does.Contain("Server：正常").And.Contain("Bridge：已连接（心跳新鲜）").And.Contain("Unity：响应正常"));
+            Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.True);
+            status.EditorObservationHeartbeatAgeMs = 6001;
+            Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.False);
         }
 
         [Test]

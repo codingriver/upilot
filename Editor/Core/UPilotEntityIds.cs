@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -13,6 +13,19 @@ namespace CodingRiver.UPilot
 {
     public static class UPilotEntityIds
     {
+        private static bool _debugLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.EntityIdLogsKey, false);
+
+        /// <summary>是否记录对象 ID 转换日志；默认关闭，按当前项目保存。</summary>
+        public static bool DebugLogsEnabled
+        {
+            get => _debugLogsEnabled;
+            set
+            {
+                _debugLogsEnabled = value;
+                EditorPrefs.SetBool(UPilotPreferences.EntityIdLogsKey, value);
+            }
+        }
+
 #if UNITY_6000_0_OR_NEWER
         public static Object ObjectFromWireId(ulong wireId)
         {
@@ -28,7 +41,8 @@ namespace CodingRiver.UPilot
         public static ulong ToWireId(Object o)
         {
             var id = o != null ? EntityId.ToULong(o.GetEntityId()) : 0UL;
-            Logger.Log("EntityIds", $"ToWireId: {o?.name} -> {id}");
+            if (_debugLogsEnabled)
+                Logger.Log("EntityIds", $"ToWireId: {o?.name} -> {id}");
             return id;
         }
 
@@ -55,7 +69,8 @@ namespace CodingRiver.UPilot
                     }
                 }
             }
-            Logger.Log("EntityIds", $"GameObjectFromWireId: {wireId} -> {go?.name}");
+            if (_debugLogsEnabled)
+                Logger.Log("EntityIds", $"GameObjectFromWireId: {wireId} -> {go?.name}");
             return go;
         }
 #else
@@ -67,7 +82,8 @@ namespace CodingRiver.UPilot
         public static ulong ToWireId(Object o)
         {
             var id = o != null ? (ulong)(uint)o.GetInstanceID() : 0UL;
-            Logger.Log("EntityIds", $"ToWireId: {o?.name} -> {id}");
+            if (_debugLogsEnabled)
+                Logger.Log("EntityIds", $"ToWireId: {o?.name} -> {id}");
             return id;
         }
 
@@ -79,7 +95,8 @@ namespace CodingRiver.UPilot
             }
 
             var go = EditorUtility.InstanceIDToObject(unchecked((int)(uint)wireId)) as GameObject;
-            Logger.Log("EntityIds", $"GameObjectFromWireId: {wireId} -> {go?.name}");
+            if (_debugLogsEnabled)
+                Logger.Log("EntityIds", $"GameObjectFromWireId: {wireId} -> {go?.name}");
             return go;
         }
 #endif

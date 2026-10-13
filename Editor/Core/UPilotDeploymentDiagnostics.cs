@@ -145,8 +145,12 @@ namespace CodingRiver.UPilot
             (!server.EditorObservationAvailable || (server.EditorObservationStatus == "responsive" &&
                 server.EditorObservationSessionId == bridge.SessionId && server.EditorObservationObservedAtUtcMs > 0 &&
                 server.EditorObservationHeartbeatAgeMs >= 0 && server.EditorObservationPumpAgeMs >= 0 &&
-                server.EditorObservationHeartbeatAgeMs + ObservationAge(server, observedNowUtcMs) <= 6000 &&
-                server.EditorObservationPumpAgeMs + ObservationAge(server, observedNowUtcMs) <= 5000));
+                // 配置间隔只补偿缓存年龄，不放宽采样时实际心跳/主线程超时标准。
+                server.EditorObservationHeartbeatAgeMs <= 6000 && server.EditorObservationPumpAgeMs <= 5000 &&
+                server.EditorObservationHeartbeatAgeMs + ObservationAge(server, observedNowUtcMs) <=
+                    UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 6000 &&
+                server.EditorObservationPumpAgeMs + ObservationAge(server, observedNowUtcMs) <=
+                    UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 5000));
 
         private static long ObservationAge(McpServerStatus server, long now) => Math.Max(0,
             (now > 0 ? now : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) - server.EditorObservationObservedAtUtcMs);

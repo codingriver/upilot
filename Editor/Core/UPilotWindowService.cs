@@ -82,7 +82,6 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("editor.windows.list", HandleWindowsListAsync);
             _bridge.Router.Register("editor.window.close", HandleWindowCloseAsync);
             _bridge.Router.Register("editor.window.setRect", HandleWindowSetRectAsync);
-            _bridge.Router.Register("editor.window.history", HandleWindowHistoryAsync);
             _bridge.Router.Register("editor.window.open", HandleWindowOpenAsync);
             _bridge.Router.Register("editor.window.focus", HandleWindowFocusAsync);
             _bridge.Router.Register("sceneview.setMaximized", HandleSceneViewSetMaximizedAsync);
@@ -469,26 +468,6 @@ namespace CodingRiver.UPilot
             {
                 await _bridge.SendErrorAsync(id, "WINDOW_SET_RECT_FAILED", ex.Message, token, "editor.window.setRect");
             }
-        }
-
-        private async Task HandleWindowHistoryAsync(string id, string json, CancellationToken token)
-        {
-            var message = JsonUtility.FromJson<EditorWindowHistoryMessage>(json);
-            var payload = message?.payload ?? new EditorWindowHistoryPayload();
-            if (payload.afterSequence < 0 || payload.count < 1 || payload.count > 512)
-            {
-                await _bridge.SendErrorAsync(id, "INVALID_PAYLOAD", "afterSequence must be non-negative and count must be between 1 and 512.", token, "editor.window.history");
-                return;
-            }
-
-            var completion = new TaskCompletionSource<EditorWindowHistoryResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _bridge.EnqueueTracked(id, () =>
-            {
-                try { completion.TrySetResult(UPilotWindowHistory.Query(payload.instanceId, payload.afterSequence, payload.count)); }
-                catch (Exception ex) { completion.TrySetException(ex); }
-            });
-            try { await _bridge.SendResultAsync(id, "editor.window.history", await completion.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "WINDOW_HISTORY_FAILED", ex.Message, token, "editor.window.history"); }
         }
 
         private async Task HandleWindowOpenAsync(string id, string json, CancellationToken token)

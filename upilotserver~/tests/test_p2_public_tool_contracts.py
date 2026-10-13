@@ -426,11 +426,6 @@ def test_p2_public_schemas_expose_existing_bounded_input_contracts() -> None:
     assert test_results["count"]["minimum"] == 1
     assert test_results["count"]["maximum"] == 1000
 
-    history = _schema("unity_editor_window_history")["properties"]
-    assert history["afterSequence"]["minimum"] == 0
-    assert history["count"]["minimum"] == 1
-    assert history["count"]["maximum"] == 512
-
     for name in ("unity_config_csv_get", "unity_config_csv_patch"):
         assert _schema(name)["properties"]["headerRowIndex"]["minimum"] == 0
 
@@ -745,23 +740,24 @@ def test_wp13_state_mutations_require_write_access_before_native_or_proxy_dispat
     assert calls == []
 
 
-def test_editor_window_history_schema_and_proxy_are_read_only(monkeypatch) -> None:
-    calls: list[dict] = []
+def test_removed_editor_window_history_is_unregistered_and_rejects_legacy_calls() -> None:
+    tool_name = "unity_editor_window_history"
+    arguments = {"instanceId": "42", "afterSequence": 9, "count": 2}
+    public_tools = {tool.name for tool in asyncio.run(runtime._original_mcp_list_tools())}
+    assert tool_name not in public_tools
+    assert REGISTRY.resolve(tool_name) is None
 
-    class Facade:
-        async def editor_window_history(self, **kwargs):
-            calls.append(kwargs)
-            return ok("history", {"events": []})
+    with pytest.raises(ToolError, match=tool_name):
+        asyncio.run(runtime.mcp._tool_manager.call_tool(tool_name, arguments))
 
-    monkeypatch.setattr(status_tools, "_get_facade", lambda: Facade())
-    schema = _schema("unity_editor_window_history")
-    assert list(schema["properties"]) == ["instanceId", "afterSequence", "count"]
-    result = asyncio.run(runtime.mcp._tool_manager.call_tool(
-        "unity_editor_window_history", {"instanceId": "42", "afterSequence": 9, "count": 2},
-    ))
-
-    assert result.structuredContent["data"]["events"] == []
-    assert calls == [{"instance_id": "42", "after_sequence": 9, "count": 2}]
+    service = McpToolFacade.__new__(McpToolFacade)
+    for result in (
+        asyncio.run(dispatch_public_tool(service, tool_name, arguments)),
+        asyncio.run(service.tool_call(tool_name, arguments)),
+    ):
+        assert not result.ok
+        assert result.error and result.error.code == "UNKNOWN_TOOL"
+        assert result.error.detail["tool"] == tool_name
 
 
 def test_safe_window_tools_expose_only_explicit_type_and_identity(monkeypatch) -> None:

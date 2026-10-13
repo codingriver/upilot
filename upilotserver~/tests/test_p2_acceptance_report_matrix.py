@@ -80,7 +80,9 @@ def test_every_finalization_gate_preserves_original_run_and_rejects_unknown(tmp_
         "changed": [{"path": "Assets/Probe.asset.meta"}] if gate == "import_changed" else [],
         "changeCount": 1 if gate == "import_changed" else 0,
     })
-    job = {gate: True} if gate in ("cancelRequested", "timedOut") else {}
+    job = {"runGuid": report["runGuid"]}
+    if gate in ("cancelRequested", "timedOut"):
+        job[gate] = True
     token = TEST_JOB_CONTEXT.set((job, lambda _state: None))
     try:
         result = asyncio.run(service._complete_acceptance_report(report, final_status=ok("result", data)))

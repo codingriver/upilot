@@ -5,6 +5,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 from pathlib import Path
 import secrets
 import time
@@ -17,6 +18,8 @@ from ..queue_audit import AUDIT, QUEUE_GUARD, notice, outcome, safe_text
 from ..responses import fail, ok
 from ..service_maintenance import same_path, _unique_object, read_summary
 import uuid
+
+logger = logging.getLogger("upilot.mcp")
 
 
 def authorization(project):
@@ -81,9 +84,21 @@ class QueueDomainService(QueueBulkMixin):
             return response
         maintenance_id = str(uuid.uuid4())
         self._automatic_hard_stop_id = maintenance_id # Latch before the first await, including failed dispatch.
+        source_error = data.get("error") if isinstance(data.get("error"), dict) else {}
+        source = {
+            "taskId": safe_text(data.get("taskId") or "", 128),
+            "operationId": safe_text(data.get("operationId") or "", 128),
+            "runGuid": safe_text(data.get("runGuid") or "", 128),
+            "failureCode": safe_text(code or source_error.get("code") or data.get("failureCode") or "", 128),
+            "cleanupStatus": safe_text(data.get("cleanupStatus") or "", 64),
+            "cleanupSucceeded": safe_text(str(data.get("cleanupSucceeded")), 32),
+        }
+        reason = "Authorized escalation after failed soft stop; " + " ".join(
+            f"{key}={value}" for key, value in source.items())
+        logger.warning("[UPilot][AutomaticHardStop] 请求自动硬停止 maintenanceId=%s %s", maintenance_id, reason)
         try:
             result = await self.service_restart(maintenance_id=maintenance_id, target="server",
-                reason="Authorized escalation after failed soft stop", expected_project_path=str(root),
+                reason=reason, expected_project_path=str(root),
                 expected_server_process_id=summary["expectedServerProcessId"],
                 expected_bridge_session_id=summary["expectedBridgeSessionId"],
                 expected_maintenance_id=summary["expectedMaintenanceId"])

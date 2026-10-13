@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -166,9 +166,66 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("NETWORK", false, false), Is.False);
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("UPilot.Flow", false, false), Is.False);
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("SYSTEM", false, false), Is.True);
+            Assert.That(Logger.ShouldMirrorInfoToUnityConsole("EntityIds", false, false), Is.True);
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("COMMAND", true, false), Is.True);
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("UPilot.Flow", true, false), Is.True);
             Assert.That(Logger.ShouldMirrorInfoToUnityConsole("NETWORK", true, true), Is.False);
+        }
+
+        [Test]
+        public void EntityIdDebugLogsAreOptInAndPreserveObjectResolution()
+        {
+            var key = UPilotPreferences.EntityIdLogsKey;
+            var hadPreference = EditorPrefs.HasKey(key);
+            var previousPreference = EditorPrefs.GetBool(key, false);
+            var previousEnabled = UPilotEntityIds.DebugLogsEnabled;
+            var previousConsole = Logger.LogToUnityConsole;
+            var previousLevel = Logger.MinLevel;
+            var messages = new List<string>();
+            Application.LogCallback capture = (message, stack, type) =>
+            {
+                if (message.StartsWith("[INFO ] [EntityIds]", StringComparison.Ordinal))
+                    messages.Add(message);
+            };
+            var go = new GameObject("UPilotEntityIdLogProbe");
+            Application.logMessageReceived += capture;
+            try
+            {
+                Logger.LogToUnityConsole = true;
+                Logger.MinLevel = Logger.LogLevel.Info;
+                UPilotEntityIds.DebugLogsEnabled = false;
+                Assert.That(EditorPrefs.GetBool(key, true), Is.False);
+                Assert.That(UPilotEntityIds.ToWireId(null), Is.Zero);
+                var id = UPilotEntityIds.ToWireId(go);
+                Assert.That(id, Is.Not.Zero);
+                Assert.That(UPilotEntityIds.ObjectFromWireId(id), Is.SameAs(go));
+                Assert.That(UPilotEntityIds.GameObjectFromWireId(id), Is.SameAs(go));
+                Assert.That(messages, Is.Empty);
+
+                UPilotEntityIds.DebugLogsEnabled = true;
+                Assert.That(EditorPrefs.GetBool(key, false), Is.True);
+                Assert.That(UPilotEntityIds.ToWireId(go), Is.EqualTo(id));
+                Assert.That(UPilotEntityIds.GameObjectFromWireId(id), Is.SameAs(go));
+                Assert.That(messages.Count, Is.EqualTo(2));
+                Assert.That(messages[0], Does.Contain("ToWireId: UPilotEntityIdLogProbe -> " + id));
+                Assert.That(messages[1], Does.Contain("GameObjectFromWireId: " + id + " -> UPilotEntityIdLogProbe"));
+                Assert.That(UPilotPreferences.CurrentProjectKeys, Does.Contain(key));
+
+                UPilotEntityIds.DebugLogsEnabled = false;
+                UPilotEntityIds.ToWireId(go);
+                UPilotEntityIds.GameObjectFromWireId(id);
+                Assert.That(messages.Count, Is.EqualTo(2));
+            }
+            finally
+            {
+                Application.logMessageReceived -= capture;
+                UPilotEntityIds.DebugLogsEnabled = previousEnabled;
+                if (hadPreference) EditorPrefs.SetBool(key, previousPreference);
+                else EditorPrefs.DeleteKey(key);
+                Logger.LogToUnityConsole = previousConsole;
+                Logger.MinLevel = previousLevel;
+                UnityEngine.Object.DestroyImmediate(go);
+            }
         }
 
         [Test]
@@ -875,361 +932,29 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(resolved.multipleMatches, Is.False);
         }
 
-        [UnityTest]
-        public IEnumerator EditorWindowHistoryRecordsNormalCloseWithoutInventingFailureAttribution()
+        [Test]
+        public void SafeWindowProbeResolvesCurrentIdentityWithoutHistory()
         {
-            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
             var window = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
-            var instanceId = UPilotEntityIds.ToWireId(window).ToString();
             try
             {
                 window.titleContent = new GUIContent(UPilotSafeWindowProbe.Title);
-                window.ShowUtility();
-                yield return null;
-                UPilotWindowHistory.SampleForTests();
-
-                var opened = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
-                Assert.That(opened.events.Any(item => item.kind == "observed-open"), Is.True);
-
-                var closeCursor = opened.latestSequence;
-                window.Close();
-                window = null;
-                yield return null;
-                UPilotWindowHistory.SampleForTests();
-
-                var closed = UPilotWindowHistory.Query(instanceId, closeCursor, 512);
-                var closeEvent = closed.events.Single(item => item.kind == "closed-or-lost");
-                Assert.That(closeEvent.failureReason, Is.EqualTo("not_observed_on_next_sample"));
-                Assert.That(closeEvent.failureReasonAuthoritative, Is.False);
-            }
-            finally
-            {
-                if (window != null)
-                    window.Close();
-            }
-        }
-
-        [UnityTest]
-        public IEnumerator EditorWindowHistoryReusesUnchangedWindowState()
-        {
-            var window = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
-            var instanceId = UPilotEntityIds.ToWireId(window).ToString();
-            var knownField = typeof(UPilotWindowHistory).GetField("Known", BindingFlags.NonPublic | BindingFlags.Static);
-            Assert.That(knownField, Is.Not.Null);
-            try
-            {
-                window.titleContent = new GUIContent(UPilotSafeWindowProbe.Title);
-                window.position = new Rect(100, 100, 320, 240);
-                window.ShowUtility();
-                yield return null;
-                UPilotWindowHistory.SampleForTests();
-                var known = (IDictionary)knownField.GetValue(null);
-                Assert.That(known.Contains(instanceId), Is.True);
-                var first = known[instanceId];
-
-                UPilotWindowHistory.SampleForTests();
-                Assert.That(known[instanceId], Is.SameAs(first));
-            }
-            finally
-            {
-                if (window != null)
-                    window.Close();
-            }
-        }
-
-        [Test]
-        public void EditorWindowHistoryMarksRestoredDomainBoundaryAsGap()
-        {
-            var historyType = typeof(UPilotWindowHistory);
-            var restoredField = historyType.GetField(
-                "_restoredPreviousDomain",
-                BindingFlags.NonPublic | BindingFlags.Static);
-            var boundaryField = historyType.GetField(
-                "_restoredDomainBoundarySequence",
-                BindingFlags.NonPublic | BindingFlags.Static);
-            Assert.That(restoredField, Is.Not.Null);
-            Assert.That(boundaryField, Is.Not.Null);
-
-            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
-            var previousRestored = (bool)restoredField.GetValue(null);
-            var previousBoundary = (long)boundaryField.GetValue(null);
-            try
-            {
-                restoredField.SetValue(null, true);
-                boundaryField.SetValue(null, before.latestSequence);
-
-                var restored = UPilotWindowHistory.Query(string.Empty, 0, 512);
-                Assert.That(restored.restoredPreviousDomain, Is.True);
-                Assert.That(restored.gap, Is.True);
-                Assert.That(restored.gapReason, Does.Contain("domain_reload_boundary"));
-                Assert.That(restored.gapAfterSequence, Is.EqualTo(before.latestSequence));
-            }
-            finally
-            {
-                restoredField.SetValue(null, previousRestored);
-                boundaryField.SetValue(null, previousBoundary);
-            }
-        }
-
-        [Test]
-        public void SafeWindowProbeOnEnableFailureReportsObservedGapWithoutInventingWindowAttribution()
-        {
-            var historyType = typeof(UPilotWindowHistory);
-            var samplingGapField = historyType.GetField("_samplingGap", BindingFlags.NonPublic | BindingFlags.Static);
-            var samplingGapAfterSequenceField = historyType.GetField("_samplingGapAfterSequence", BindingFlags.NonPublic | BindingFlags.Static);
-            var samplingGapReasonField = historyType.GetField("_samplingGapReason", BindingFlags.NonPublic | BindingFlags.Static);
-            var samplingErrorField = historyType.GetField("_samplingError", BindingFlags.NonPublic | BindingFlags.Static);
-            Assert.That(samplingGapField, Is.Not.Null);
-            Assert.That(samplingGapAfterSequenceField, Is.Not.Null);
-            Assert.That(samplingGapReasonField, Is.Not.Null);
-            Assert.That(samplingErrorField, Is.Not.Null);
-
-            var previousGap = (bool)samplingGapField.GetValue(null);
-            var previousGapAfterSequence = (long)samplingGapAfterSequenceField.GetValue(null);
-            var previousGapReason = (string)samplingGapReasonField.GetValue(null);
-            var previousSamplingError = (string)samplingErrorField.GetValue(null);
-            UPilotSafeWindowProbe window = null;
-            try
-            {
-                var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
-                UPilotSafeWindowProbe.FailOnEnableForTests = true;
-                window = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
                 var instanceId = UPilotEntityIds.ToWireId(window).ToString();
+                var resolved = UPilotWindowService.ResolveWindowByInstanceId(instanceId);
 
-                var result = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
-                Assert.That(result.gap, Is.True);
-                Assert.That(result.gapReason, Does.Contain("window_lifecycle_enable_failed"));
-                Assert.That(result.samplingError, Is.EqualTo(nameof(InvalidOperationException)));
-                Assert.That(result.events.Any(item =>
-                    item.failureReasonAuthoritative || !string.IsNullOrEmpty(item.failureReason)), Is.False);
+                Assert.That(resolved.window, Is.SameAs(window));
+                Assert.That(resolved.multipleMatches, Is.False);
+                Assert.That(resolved.info.instanceId.ToString(), Is.EqualTo(instanceId));
+                Assert.That(resolved.info.fullTypeName, Is.EqualTo(UPilotSafeWindowProbe.FullTypeName));
+                Assert.That(resolved.info.title, Is.EqualTo(UPilotSafeWindowProbe.Title));
+                Assert.That(window.minSize, Is.EqualTo(new Vector2(240, 120)));
+                Assert.That(UPilotSafeWindowProbe.IsAllowedTypeName(resolved.info.fullTypeName), Is.True);
+                Assert.That(UPilotSafeWindowProbe.IsAllowedTypeName(typeof(SceneView).FullName), Is.False);
             }
             finally
             {
-                UPilotSafeWindowProbe.FailOnEnableForTests = false;
-                if (window != null) UnityEngine.Object.DestroyImmediate(window);
-                samplingGapField.SetValue(null, previousGap);
-                samplingGapAfterSequenceField.SetValue(null, previousGapAfterSequence);
-                samplingGapReasonField.SetValue(null, previousGapReason);
-                samplingErrorField.SetValue(null, previousSamplingError);
+                UnityEngine.Object.DestroyImmediate(window);
             }
-        }
-
-        [Test]
-        public void SafeWindowProbeReloadFixtureStatePreservesStableLifecycleKeyForFieldAcceptance()
-        {
-            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
-            var original = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
-            var rebuilt = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
-            try
-            {
-                original.ArmReloadFixtureForTests();
-                var lifecycleKey = original.LifecycleKey;
-                var enableOrdinal = original.EnableOrdinal;
-                var instanceId = UPilotEntityIds.ToWireId(original).ToString();
-                var enabled = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
-                var serialized = EditorJsonUtility.ToJson(original);
-                EditorJsonUtility.FromJsonOverwrite(serialized, rebuilt);
-
-                Assert.That(lifecycleKey, Is.Not.Empty);
-                Assert.That(enabled.events.Any(item =>
-                    item.kind == "probe-enabled" && item.lifecycleKey == lifecycleKey), Is.True);
-                Assert.That(rebuilt.LifecycleKey, Is.EqualTo(lifecycleKey));
-                Assert.That(rebuilt.EnableOrdinal, Is.EqualTo(enableOrdinal));
-                Assert.That(rebuilt.ReloadFixtureArmed, Is.True);
-                // A real Domain Reload must then invoke OnEnable and append probe-rebuilt
-                // with this same key. The test intentionally does not trigger Reload.
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(original);
-                UnityEngine.Object.DestroyImmediate(rebuilt);
-            }
-        }
-
-        [Test]
-        public void EditorWindowHistoryReportsTruncationAfterMoreThanCapacityEvents()
-        {
-            var historyType = typeof(UPilotWindowHistory);
-            var eventsField = historyType.GetField("Events", BindingFlags.NonPublic | BindingFlags.Static);
-            var knownField = historyType.GetField("Known", BindingFlags.NonPublic | BindingFlags.Static);
-            var sequenceField = historyType.GetField("_lastSequence", BindingFlags.NonPublic | BindingFlags.Static);
-            var persistenceErrorField = historyType.GetField("_persistenceError", BindingFlags.NonPublic | BindingFlags.Static);
-            var append = historyType.GetMethod("Append", BindingFlags.NonPublic | BindingFlags.Static);
-            var persist = historyType.GetMethod("Persist", BindingFlags.NonPublic | BindingFlags.Static);
-            var stateType = historyType.GetNestedType("WindowState", BindingFlags.NonPublic);
-            Assert.That(eventsField, Is.Not.Null);
-            Assert.That(knownField, Is.Not.Null);
-            Assert.That(sequenceField, Is.Not.Null);
-            Assert.That(persistenceErrorField, Is.Not.Null);
-            Assert.That(append, Is.Not.Null);
-            Assert.That(persist, Is.Not.Null);
-            Assert.That(stateType, Is.Not.Null);
-
-            var events = (IList)eventsField.GetValue(null);
-            var known = (IDictionary)knownField.GetValue(null);
-            var savedEvents = events.Cast<object>().ToArray();
-            var savedKnown = new DictionaryEntry[known.Count];
-            known.CopyTo(savedKnown, 0);
-            var savedSequence = (long)sequenceField.GetValue(null);
-            var savedPersistenceError = (string)persistenceErrorField.GetValue(null);
-            try
-            {
-                events.Clear();
-                known.Clear();
-                sequenceField.SetValue(null, 0L);
-                var state = Activator.CreateInstance(stateType, nonPublic: true);
-                foreach (var field in new[] { "instanceId", "domainGeneration", "fullTypeName", "title" })
-                    stateType.GetField(field, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                        .SetValue(state, "capacity-probe");
-
-                for (var index = 0; index <= 513; index++)
-                    append.Invoke(null, new object[] { "capacity-probe", state, string.Empty, false, string.Empty });
-
-                // Cursor 1 precedes the retained ring segment once event 514 displaced it.
-                var result = UPilotWindowHistory.Query(string.Empty, afterSequence: 1, count: 512);
-                Assert.That(result.observationLimit, Is.EqualTo(512));
-                Assert.That(result.truncated, Is.True);
-                Assert.That(result.gap, Is.True);
-                Assert.That(result.gapReason, Does.Contain("history_truncated"));
-                Assert.That(result.earliestSequence, Is.GreaterThan(1));
-                Assert.That(result.events, Has.Count.EqualTo(512));
-                Assert.That(result.events[0].sequence, Is.EqualTo(result.earliestSequence));
-            }
-            finally
-            {
-                events.Clear();
-                foreach (var item in savedEvents) events.Add(item);
-                known.Clear();
-                foreach (var item in savedKnown) known.Add(item.Key, item.Value);
-                sequenceField.SetValue(null, savedSequence);
-                persist.Invoke(null, null);
-                persistenceErrorField.SetValue(null, savedPersistenceError);
-            }
-        }
-
-        [Test]
-        public void EditorWindowHistoryReportsPersistenceFailureAndRecovers()
-        {
-            // Persist is an explicit controlled boundary, not a side effect of Query.
-            // Lock only that task-local backing file, then release it and require the next
-            // explicit persistence attempt to recover without losing read availability.
-            var root = Directory.GetParent(Application.dataPath)?.FullName;
-            Assert.That(root, Is.Not.Null.And.Not.Empty);
-            var path = Path.Combine(root, "Library", "UPilot", "window-history.json");
-            UPilotWindowHistory.PersistForTests();
-            Assert.That(File.Exists(path), Is.True);
-
-            EditorWindowHistoryResultPayload failed;
-            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
-            {
-                UPilotWindowHistory.PersistForTests();
-                failed = UPilotWindowHistory.Query(string.Empty, 0, 1);
-            }
-
-            Assert.That(failed.persistenceError, Is.Not.Empty);
-            UPilotWindowHistory.PersistForTests();
-            var recovered = UPilotWindowHistory.Query(string.Empty, 0, 1);
-            Assert.That(recovered.persistenceError, Is.Empty);
-            Assert.That(recovered.observationLimit, Is.EqualTo(512));
-        }
-
-        [Serializable]
-        private sealed class WindowSamplingMeasurement
-        {
-            public string unityVersion;
-            public string projectPath;
-            public string profileMode = "caller_must_confirm_non_deep_profile";
-            public ulong[] windowIds;
-            public double[] elapsedMs;
-            public long[] allocatedBytes;
-            public double medianMs;
-            public double p95Ms;
-            public string interpretation = "measurement_only_not_a_historical_AB_comparison";
-        }
-
-        [Test, Explicit("D12: bounded sampling measurement; run manually without Deep Profile, not a performance pass gate.")]
-        public void WindowHistorySamplingRecordsWarmedBoundedMeasurements()
-        {
-            var probe = ScriptableObject.CreateInstance<UPilotSafeWindowProbe>();
-            try
-            {
-                probe.ShowUtility();
-                for (int i = 0; i < 8; ++i) UPilotWindowHistory.SampleForTests();
-                var report = new WindowSamplingMeasurement
-                {
-                    unityVersion = Application.unityVersion,
-                    projectPath = Directory.GetParent(Application.dataPath).FullName,
-                    windowIds = Resources.FindObjectsOfTypeAll<EditorWindow>().Select(w => UPilotEntityIds.ToWireId(w)).OrderBy(id => id).ToArray(),
-                    elapsedMs = new double[64], allocatedBytes = new long[64],
-                };
-                for (int i = 0; i < report.elapsedMs.Length; ++i)
-                {
-                    long allocated = GC.GetAllocatedBytesForCurrentThread();
-                    long start = System.Diagnostics.Stopwatch.GetTimestamp();
-                    UPilotWindowHistory.SampleForTests();
-                    long end = System.Diagnostics.Stopwatch.GetTimestamp();
-                    report.allocatedBytes[i] = GC.GetAllocatedBytesForCurrentThread() - allocated;
-                    report.elapsedMs[i] = (end - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-                }
-                var afterIds = Resources.FindObjectsOfTypeAll<EditorWindow>().Select(w => UPilotEntityIds.ToWireId(w)).OrderBy(id => id).ToArray();
-                Assert.That(afterIds, Is.EqualTo(report.windowIds), "Do not compare samples from different window sets.");
-                Assert.That(report.elapsedMs.All(ms => ms >= 0), Is.True);
-                Assert.That(report.allocatedBytes.All(bytes => bytes >= 0), Is.True);
-                var sorted = report.elapsedMs.OrderBy(ms => ms).ToArray();
-                report.medianMs = (sorted[31] + sorted[32]) / 2;
-                report.p95Ms = sorted[(int)Math.Ceiling(sorted.Length * 0.95) - 1];
-                string output = Path.Combine(report.projectPath, "Artifacts", "P2", "D12",
-                    DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N") + ".json");
-                Directory.CreateDirectory(Path.GetDirectoryName(output));
-                File.WriteAllText(output, JsonUtility.ToJson(report, true), new UTF8Encoding(false));
-                TestContext.Progress.WriteLine(output);
-            }
-            finally
-            {
-                if (probe != null) probe.Close();
-            }
-        }
-
-        [Test]
-        public void EditorWindowHistoryQueryDoesNotSampleOrPersist()
-        {
-            var historyType = typeof(UPilotWindowHistory);
-            var eventsField = historyType.GetField("Events", BindingFlags.NonPublic | BindingFlags.Static);
-            var knownField = historyType.GetField("Known", BindingFlags.NonPublic | BindingFlags.Static);
-            var sequenceField = historyType.GetField("_lastSequence", BindingFlags.NonPublic | BindingFlags.Static);
-            Assert.That(eventsField, Is.Not.Null);
-            Assert.That(knownField, Is.Not.Null);
-            Assert.That(sequenceField, Is.Not.Null);
-
-            UPilotWindowHistory.SampleForTests();
-            UPilotWindowHistory.PersistForTests();
-            var root = Directory.GetParent(Application.dataPath)?.FullName;
-            Assert.That(root, Is.Not.Null.And.Not.Empty);
-            var path = Path.Combine(root, "Library", "UPilot", "window-history.json");
-            Assert.That(File.Exists(path), Is.True);
-
-            var events = (IList)eventsField.GetValue(null);
-            var known = (IDictionary)knownField.GetValue(null);
-            var expectedEvents = events.Cast<object>().ToArray();
-            var expectedKnown = new DictionaryEntry[known.Count];
-            known.CopyTo(expectedKnown, 0);
-            var expectedSequence = (long)sequenceField.GetValue(null);
-            var expectedBytes = File.ReadAllBytes(path);
-            var expectedLastWriteTime = File.GetLastWriteTimeUtc(path);
-
-            var result = UPilotWindowHistory.Query(string.Empty, 0, 512);
-
-            Assert.That(result.latestSequence, Is.EqualTo(expectedSequence));
-            Assert.That(events.Cast<object>(), Is.EqualTo(expectedEvents));
-            Assert.That(known.Count, Is.EqualTo(expectedKnown.Length));
-            foreach (var expected in expectedKnown)
-            {
-                Assert.That(known.Contains(expected.Key), Is.True);
-                Assert.That(known[expected.Key], Is.SameAs(expected.Value));
-            }
-            Assert.That((long)sequenceField.GetValue(null), Is.EqualTo(expectedSequence));
-            Assert.That(File.ReadAllBytes(path), Is.EqualTo(expectedBytes));
-            Assert.That(File.GetLastWriteTimeUtc(path), Is.EqualTo(expectedLastWriteTime));
         }
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -3922,6 +3647,7 @@ namespace CodingRiver.UPilot.Tests
             var keys = UPilotPreferences.CurrentProjectKeys;
 
             Assert.That(keys, Does.Contain(UPilotPreferences.McpPythonEntryKey));
+            Assert.That(keys, Does.Contain(UPilotPreferences.McpHealthCheckIntervalSecondsKey));
             Assert.That(keys, Does.Contain(UPilotPreferences.SetupCompletedKey));
             Assert.That(keys.Distinct().Count(), Is.EqualTo(keys.Count));
             Assert.That(keys, Does.Not.Contain(UPilotBootstrap.EnabledPrefKey));

@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
@@ -53,17 +52,6 @@ namespace CodingRiver.UPilot.Tests
             EditorGUI.DrawRect(new Rect(width - MarkerThickness, 0, MarkerThickness, height), Color.green);
             EditorGUI.DrawRect(new Rect(0, 0, width, MarkerThickness), Color.blue);
             EditorGUI.DrawRect(new Rect(0, height - MarkerThickness, width, MarkerThickness), Color.yellow);
-        }
-    }
-
-    public sealed class UPilotFailingOnEnableWindowProbe : EditorWindow
-    {
-        internal static bool ThrowOnEnable;
-
-        private void OnEnable()
-        {
-            if (ThrowOnEnable)
-                throw new InvalidOperationException("UPILOT_P2_WINDOW_ON_ENABLE_PROBE");
         }
     }
 
@@ -575,32 +563,6 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotSnapshotService.CaptureFailureCode(nativeFailure), Is.EqualTo("SNAPSHOT_TARGET_CAPTURE_FAILED"));
             Assert.That(UPilotSnapshotService.CaptureFailureCode(new InvalidOperationException()),
                 Is.EqualTo("SNAPSHOT_TARGET_CAPTURE_FAILED"));
-        }
-
-        [UnityTest]
-        public IEnumerator WindowHistoryDoesNotInventAuthoritativeAttributionForOnEnableFailure()
-        {
-            var before = UPilotWindowHistory.Query(string.Empty, 0, 512);
-            UPilotFailingOnEnableWindowProbe window = null;
-            try
-            {
-                UPilotFailingOnEnableWindowProbe.ThrowOnEnable = true;
-                LogAssert.Expect(LogType.Exception, new Regex("UPILOT_P2_WINDOW_ON_ENABLE_PROBE"));
-                window = ScriptableObject.CreateInstance<UPilotFailingOnEnableWindowProbe>();
-                var instanceId = window == null ? string.Empty : UPilotEntityIds.ToWireId(window).ToString();
-                yield return null;
-
-                var history = UPilotWindowHistory.Query(instanceId, before.latestSequence, 512);
-                Assert.That(history.events.All(item => !item.failureReasonAuthoritative), Is.True);
-                Assert.That(history.events.All(item =>
-                    string.IsNullOrEmpty(item.failureReason)
-                    || !item.failureReason.Contains("UPILOT_P2_WINDOW_ON_ENABLE_PROBE")), Is.True);
-            }
-            finally
-            {
-                UPilotFailingOnEnableWindowProbe.ThrowOnEnable = false;
-                if (window != null) UnityEngine.Object.DestroyImmediate(window);
-            }
         }
 
         [Test]

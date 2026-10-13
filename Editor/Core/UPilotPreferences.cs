@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - registered EditorPrefs keys and reset operations.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -19,9 +19,11 @@ namespace CodingRiver.UPilot
         public static string McpPythonEntryKey => $"{McpManagerPrefix}PythonEntry.{ProjectSuffix}";
         public static string McpLogLevelKey => $"{McpManagerPrefix}LogLevel.{ProjectSuffix}";
         public static string McpAutoStartKey => $"{McpManagerPrefix}AutoStart.{ProjectSuffix}";
+        public static string McpHealthCheckIntervalSecondsKey => $"{McpManagerPrefix}HealthCheckIntervalSeconds.{ProjectSuffix}";
         public static string SetupCompletedKey => SetupCompletedPrefix + ProjectSuffix;
         public static string BridgeEnabledKey => ProjectKey("CodingRiver.UPilot.BridgeEnabled");
         public static string DebugWireLogsKey => ProjectKey("upilot.DebugWireLogs");
+        public static string EntityIdLogsKey => ProjectKey("upilot.EntityIdLogs");
         public static string VerboseLogsKey => ProjectKey("upilot.VerboseLogs");
         public static string AutoRestartOnStuckKey => ProjectKey("upilot.AutoRestartOnStuck");
         public static string LogToUnityConsoleKey => ProjectKey("CodingRiver.UPilot.Logger.LogToUnityConsole");
@@ -40,9 +42,11 @@ namespace CodingRiver.UPilot
                     McpPythonEntryKey,
                     McpLogLevelKey,
                     McpAutoStartKey,
+                    McpHealthCheckIntervalSecondsKey,
                     SetupCompletedKey,
                     BridgeEnabledKey,
                     DebugWireLogsKey,
+                    EntityIdLogsKey,
                     VerboseLogsKey,
                     AutoRestartOnStuckKey,
                     LogToUnityConsoleKey,

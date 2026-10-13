@@ -557,6 +557,7 @@ async def _run_http_server(
             else:
                 command_id = new_id("repair-probe")
                 pending = _orchestrator.register_pending(command_id)
+                probe_started_at = time.monotonic()
                 try:
                     await _orchestrator.send_command(command_id, "editor.state", {})
                     result = await asyncio.wait_for(pending, timeout=5.0)
@@ -570,6 +571,12 @@ async def _run_http_server(
                         payload["bridge_probe_error"] = "Read-only response or session did not match."
                 except (asyncio.TimeoutError, ConnectionError, OSError) as ex:
                     payload["bridge_probe_error"] = (type(ex).__name__ + ": " + str(ex))[:256]
+                    logger.warning(
+                        "[UPilot][Health] Bridge 只读探测失败 serverPid=%s project=%s "
+                        "phase=bridge_roundtrip elapsedMs=%.1f exceptionType=%s",
+                        payload["server_pid"], payload["configured_project_path"].replace("\r", " ").replace("\n", " ")[:512],
+                        max(0.0, (time.monotonic() - probe_started_at) * 1000), type(ex).__name__,
+                    )
                 finally:
                     _orchestrator.unregister_pending(command_id)
         return JSONResponse(payload)

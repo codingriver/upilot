@@ -211,11 +211,16 @@ namespace CodingRiver.UPilot
                 "最后通过：" + UPilotRestartDiagnosticView.LastPassed(record) + "；最近错误：" + record.statusProbeError;
         }
 
-        internal static string WaitingMessage(UPilotServerRestartRecord record, long now) =>
-            (HasPassedHealthGate(record) ? "正在验证：" + UPilotRestartDiagnosticView.Label(FirstUnpassedGate(record)) :
-                "正在验证服务健康状态，失败后将继续重试") +
-            $"；已耗时 {Math.Max(0, now - record.requestedAtUtcMs) / 1000} 秒 / 剩余 {Math.Max(0, Deadline(record) - now) / 1000} 秒；" +
-            $"探测 {record.statusProbeCount} 次；最近错误：{record.statusProbeError}";
+        internal static string WaitingMessage(UPilotServerRestartRecord record, long now)
+        {
+            var title = record.phase == "starting" || record.phase == "process_started" ? "正在启动服务器" :
+                record.phase == "stopping" || record.phase == "stopping_old_services" ? "正在关闭服务器" :
+                "正在验证服务：" + UPilotRestartDiagnosticView.Label(FirstUnpassedGate(record));
+            var result = title + $"；已耗时 {Math.Max(0, now - record.requestedAtUtcMs) / 1000} 秒 / 剩余 {Math.Max(0, Deadline(record) - now) / 1000} 秒";
+            if (!string.IsNullOrEmpty(record.statusProbeError))
+                result += $"；失败阶段：{record.statusProbeFailureStage}；原因：{record.statusProbeError}；重试次数：{Math.Max(0, record.statusProbeCount - 1)}";
+            return result;
+        }
 
         internal static UPilotServerRestartRecord Begin(
             string projectPath,

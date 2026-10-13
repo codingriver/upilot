@@ -1837,22 +1837,6 @@ class StatusDomainService:
             return requested.lower() in actual.lower()
         return actual == requested
 
-    async def editor_window_history(
-        self, instance_id: str = "", after_sequence: int = 0, count: int = 100,
-    ) -> ToolResponse:
-        request_id = new_id("req")
-        if not isinstance(instance_id, str):
-            return fail(request_id, "INVALID_PAYLOAD", "instanceId must be a string.")
-        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
-            return fail(request_id, "INVALID_PAYLOAD", "afterSequence must be a non-negative integer.")
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > 512:
-            return fail(request_id, "INVALID_PAYLOAD", "count must be an integer between 1 and 512.")
-        return await self.dispatcher.call(
-            request_id,
-            "editor.window.history",
-            {"instanceId": instance_id, "afterSequence": after_sequence, "count": count},
-        )
-
     async def editor_window_open(self, type_name: str) -> ToolResponse:
         request_id = new_id("req")
         if not isinstance(type_name, str) or not type_name.strip():

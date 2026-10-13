@@ -473,6 +473,26 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotMcpServerManager.IsVerifiedExistingProjectService(status, project), Is.False);
         }
 
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.Unknown, false, "", "service_ownership_unverified", true)]
+        [TestCase(McpStatusFailureKind.Confirmed, McpProcessOwnership.Unknown, false, "", "service_ownership_unverified", false)]
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.Foreign, false, "", "service_ownership_unverified", false)]
+        [TestCase(McpStatusFailureKind.None, McpProcessOwnership.Unknown, true, "", "service_ownership_unverified", true)]
+        [TestCase(McpStatusFailureKind.None, McpProcessOwnership.Unknown, true, "process_identity", "service_ownership_unverified", true)]
+        [TestCase(McpStatusFailureKind.None, McpProcessOwnership.CurrentUPilot, true, "", "service_relationship_mismatch", false)]
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.CurrentUPilot, true, "", "service_relationship_mismatch", false)]
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.CurrentUPilot, true, "", "service_executable_mismatch", false)]
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.CurrentUPilot, true, "", "service_health_pid_mismatch", false)]
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.CurrentUPilot, true, "", "launch_identity_missing", false)]
+        [TestCase(McpStatusFailureKind.Transient, McpProcessOwnership.Unknown, false, "", "project_identity_mismatch", false)]
+        public void ExistingServiceProbeRetriesOnlyUnconfirmedObservation(McpStatusFailureKind failure,
+            McpProcessOwnership ownership, bool health, string stage, string identityError, bool retry)
+        {
+            var status = new McpServerStatus { FailureKind = failure, ProcessOwnership = ownership,
+                HealthEndpointResponded = health, HealthIdentifiesUPilot = health, StatusFailureStage = stage,
+                ErrorMessage = stage == "process_identity" ? "Process ownership probe timed out; ownership unconfirmed." : "" };
+            Assert.That(UPilotMcpServerManager.ShouldRetryExistingServiceProbe(status, identityError), Is.EqualTo(retry));
+        }
+
         [Test]
         public void HistoricalHealthMilestoneDoesNotFinishANewDomainCycle()
         {
@@ -1017,35 +1037,120 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotMcpServerManager.ResolveHealthProjectPath(legacyJson), Is.EqualTo("F:/legacy-project"));
         }
 
-        [Test]
-        public void EditorHealthObservationUsesFastCadenceOnlyWhileWaiting()
+        [TestCase("responsive")]
+        [TestCase("unknown")]
+        [TestCase("waiting_editor")]
+        [TestCase("waiting_lifecycle")]
+        public void PeriodicHealthCadenceIsSharedByLightweightAndFullRefresh(string observationStatus)
         {
-            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(default), Is.EqualTo(2000));
-            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(new McpServerStatus
+            var manager = IsolatedStatusManager();
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            SetManagerField(manager, "_healthCheckIntervalSeconds", 10);
+            SetManagerField(manager, "_launchState", new ServerLaunchState { verified = true, readyVerified = true });
+            SetManagerField(manager, "_lastRefreshMs", now);
+            SetManagerField(manager, "_editorHealthObservationEnabled", true);
+            var status = new McpServerStatus { IsRunning = true, HealthEndpointResponded = true,
+                HealthServerProcessId = 42, EditorObservationAvailable = true, EditorObservationStatus = observationStatus };
+            SetManagerField(manager, "_cachedStatus", status);
+            var handler = new RestartHealthHandler { Response = _ => new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                { Content = new System.Net.Http.StringContent("{}") } };
+            using var client = new System.Net.Http.HttpClient(handler);
+            var observe = typeof(UPilotMcpServerManager).GetMethod("RequestEditorHealthObservationIfNeeded", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(manager.HealthCheckIntervalMs, Is.EqualTo(10000));
+            observe.Invoke(manager, new object[] { status, now + 9999, client });
+            Assert.That(handler.Calls, Is.Zero);
+            observe.Invoke(manager, new object[] { status, now + 10000, client });
+            Assert.That(handler.Calls, Is.EqualTo(1));
+            manager.GetStatus();
+            Assert.That(handler.Calls, Is.EqualTo(1), "Full refresh must not immediately follow lightweight health.");
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_statusRefreshTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager), Is.Null);
+        }
+
+        [TestCase((int)UPilotServerLifecyclePhase.None, false)]
+        [TestCase((int)UPilotServerLifecyclePhase.Starting, true)]
+        [TestCase((int)UPilotServerLifecyclePhase.Stopping, true)]
+        [TestCase((int)UPilotServerLifecyclePhase.Verifying, true)]
+        public async Task PeriodicHealthRequiresCompletedStartup(int phaseValue, bool readyVerified)
+        {
+            var manager = IsolatedStatusManager();
+            SetManagerField(manager, "_healthCheckIntervalSeconds", 10);
+            SetManagerField(manager, "_launchState", new ServerLaunchState { verified = true, readyVerified = readyVerified });
+            SetManagerField(manager, "_lifecyclePhase", (UPilotServerLifecyclePhase)phaseValue);
+            SetManagerField(manager, "_editorHealthObservationEnabled", true);
+            var status = new McpServerStatus { IsRunning = true, HealthEndpointResponded = true, HealthServerProcessId = 42 };
+            SetManagerField(manager, "_cachedStatus", status);
+            Assert.That(manager.PeriodicHealthChecksAllowed, Is.False);
+            manager.GetStatus();
+            if (phaseValue != (int)UPilotServerLifecyclePhase.None) await manager.GetFreshStatusAsync();
+            typeof(UPilotMcpServerManager).GetMethod("RequestEditorHealthObservationIfNeeded", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(manager, new object[] { status, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), null });
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_statusRefreshTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager), Is.Null);
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_editorHealthObservationTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager), Is.Null);
+        }
+
+        [Test]
+        public void VerifiedStartupCachesReadyStatusAndWaitsBeforeFirstPeriodicHealth()
+        {
+            var manager = IsolatedStatusManager();
+            SetManagerField(manager, "_healthCheckIntervalSeconds", 10);
+            SetManagerField(manager, "_launchState", new ServerLaunchState { verified = true, readyVerified = true });
+            SetManagerField(manager, "_editorHealthObservationEnabled", true);
+            var before = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(manager, new object[] { new McpServerStatus { IsRunning = true, ProcessId = 42,
+                    HealthEndpointResponded = true, HealthServerProcessId = 42 } });
+            Assert.That(manager.PeriodicHealthChecksAllowed, Is.True);
+            Assert.That(manager.GetStatus().ProcessId, Is.EqualTo(42));
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_nextEditorHealthObservationAtUtcMs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager),
+                Is.GreaterThanOrEqualTo(before + 10000));
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_statusRefreshTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager), Is.Null);
+        }
+
+        [Test]
+        public void HealthIntervalPersistsReschedulesAndResetsPerProject()
+        {
+            var key = UPilotPreferences.McpHealthCheckIntervalSecondsKey;
+            var hadKey = UnityEditor.EditorPrefs.HasKey(key);
+            var original = UnityEditor.EditorPrefs.GetInt(key);
+            var prefs = new[] { UPilotPreferences.McpPythonEntryKey, UPilotPreferences.McpLogLevelKey,
+                UPilotPreferences.McpAutoStartKey, UPilotPreferences.McpPythonEntryKey + ".Managed" };
+            var hadPrefs = prefs.Select(UnityEditor.EditorPrefs.HasKey).ToArray();
+            var entry = UnityEditor.EditorPrefs.GetString(prefs[0]);
+            var level = UnityEditor.EditorPrefs.GetString(prefs[1]);
+            var autoStart = UnityEditor.EditorPrefs.GetBool(prefs[2]);
+            var managed = UnityEditor.EditorPrefs.GetBool(prefs[3]);
+            var manager = IsolatedStatusManager();
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            SetManagerField(manager, "_healthCheckIntervalSeconds", 10);
+            SetManagerField(manager, "_lastRefreshMs", now);
+            SetManagerField(manager, "_editorHealthObservationEnabled", true);
+            SetManagerField(manager, "_cachedStatus", new McpServerStatus { HealthEndpointResponded = true, HealthServerProcessId = 42 });
+            try
             {
-                EditorObservationAvailable = true,
-                EditorObservationStatus = "responsive",
-            }), Is.EqualTo(2000));
-            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(new McpServerStatus
+                UnityEditor.EditorPrefs.DeleteKey(key);
+                Assert.That(UnityEditor.EditorPrefs.GetInt(key, UPilotMcpServerManager.DefaultHealthCheckIntervalSeconds), Is.EqualTo(10));
+                manager.HealthCheckIntervalSeconds = 25;
+                Assert.That(UnityEditor.EditorPrefs.GetInt(key), Is.EqualTo(25));
+                Assert.That(manager.HealthCheckIntervalMs, Is.EqualTo(25000));
+                Assert.That(typeof(UPilotMcpServerManager).GetField("_nextEditorHealthObservationAtUtcMs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager),
+                    Is.EqualTo(now + 25000));
+                manager.HealthCheckIntervalSeconds = 0;
+                Assert.That(manager.HealthCheckIntervalSeconds, Is.EqualTo(1));
+                manager.HealthCheckIntervalSeconds = 9999;
+                Assert.That(manager.HealthCheckIntervalSeconds, Is.EqualTo(600));
+                UPilotPreferences.DeleteKeys(new[] { key });
+                manager.ResetPreferencesToDefaultsInMemory();
+                Assert.That(manager.HealthCheckIntervalSeconds, Is.EqualTo(10));
+                Assert.That(UnityEditor.EditorPrefs.HasKey(key), Is.False);
+            }
+            finally
             {
-                EditorObservationAvailable = true,
-                EditorObservationStatus = "unknown",
-            }), Is.EqualTo(2000));
-            Assert.That(UPilotMcpServerManager.GetEditorHealthObservationIntervalMs(new McpServerStatus
-            {
-                EditorObservationAvailable = true,
-                EditorObservationStatus = "waiting_editor",
-            }), Is.EqualTo(1000));
-            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(new McpServerStatus
-            {
-                EditorObservationAvailable = true,
-                EditorObservationStatus = "waiting_editor",
-            }), Is.False);
-            Assert.That(UPilotMcpServerManager.ShouldRequestFullStatusRefresh(new McpServerStatus
-            {
-                EditorObservationAvailable = true,
-                EditorObservationStatus = "responsive",
-            }), Is.True);
+                if (hadKey) UnityEditor.EditorPrefs.SetInt(key, original); else UnityEditor.EditorPrefs.DeleteKey(key);
+                if (hadPrefs[0]) UnityEditor.EditorPrefs.SetString(prefs[0], entry); else UnityEditor.EditorPrefs.DeleteKey(prefs[0]);
+                if (hadPrefs[1]) UnityEditor.EditorPrefs.SetString(prefs[1], level); else UnityEditor.EditorPrefs.DeleteKey(prefs[1]);
+                if (hadPrefs[2]) UnityEditor.EditorPrefs.SetBool(prefs[2], autoStart); else UnityEditor.EditorPrefs.DeleteKey(prefs[2]);
+                if (hadPrefs[3]) UnityEditor.EditorPrefs.SetBool(prefs[3], managed); else UnityEditor.EditorPrefs.DeleteKey(prefs[3]);
+            }
         }
 
         [Test]
@@ -1226,15 +1331,216 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(handler.Calls, Is.EqualTo(1));
         }
 
+        [TestCase((int)UPilotServerLifecyclePhase.Starting)]
+        [TestCase((int)UPilotServerLifecyclePhase.Stopping)]
+        public async Task LifecyclePhysicalTransitionSendsNoHealthOrStats(int phaseValue)
+        {
+            var manager = IsolatedStatusManager();
+            var generation = manager.SetLifecyclePhase((UPilotServerLifecyclePhase)phaseValue, 42, "fixture");
+            var handler = new RestartHealthHandler { Response = _ => throw new Exception("Must not dispatch") };
+            using var client = new System.Net.Http.HttpClient(handler);
+            // 此 NUnit 版本的 ThrowsAsync 会把取消 Task 转成 TaskCanceledException；直接 await 检查实际异常。
+            foreach (var path in new[] { "/health", "/stats", "/health?probe=bridge" })
+            {
+                try
+                {
+                    using var ignored = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1" + path, 0);
+                    Assert.Fail("Physical transition dispatched a request");
+                }
+                catch (UPilotMcpServerManager.LifecycleProbeDeferredException) { }
+            }
+            Assert.That(handler.Calls, Is.Zero);
+            manager.EndLifecyclePhase(generation);
+        }
+
+        [Test]
+        public async Task LifecycleDualPortsAllowFirstHealthWithoutCancelingObserver()
+        {
+            var manager = IsolatedStatusManager();
+            using var observer = new System.Threading.CancellationTokenSource();
+            SetManagerField(manager, "_restartProbeCancellation", observer);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var generation = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Starting, 42, "fixture", now + 10000);
+            Assert.That(manager.AdvanceStartingPhase(generation, true, true, false, now), Is.False);
+            Assert.That(manager.AdvanceStartingPhase(generation, true, true, true, now), Is.True);
+            Assert.That(observer.IsCancellationRequested, Is.False);
+            var handler = new RestartHealthHandler { Response = _ => new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) };
+            using var client = new System.Net.Http.HttpClient(handler);
+            using var response = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/health", now + 10000);
+            Assert.That(handler.Calls, Is.EqualTo(1));
+            manager.EndLifecyclePhase((long)typeof(UPilotMcpServerManager).GetField("_lifecycleGeneration", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager));
+        }
+
+        [Test]
+        public async Task LifecycleLateReplyCannotCrossStoppingOrOverwriteNewGeneration()
+        {
+            var manager = IsolatedStatusManager();
+            var body = new StalledHealthBody();
+            var handler = new RestartHealthHandler { Response = _ => new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = body } };
+            using var client = new System.Net.Http.HttpClient(handler);
+            var old = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, 42, "old");
+            var pending = manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/health", 0);
+            var current = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, 43, "new");
+            Assert.That(manager.EndLifecyclePhase(old), Is.False);
+            try { using var ignored = await pending; Assert.Fail("Late response was accepted"); }
+            catch (UPilotMcpServerManager.LifecycleProbeDeferredException) { }
+            finally { body.Release.TrySetResult(true); }
+            Assert.That(manager.GetStatus().LifecyclePhase, Is.EqualTo(UPilotServerLifecyclePhase.Stopping));
+            Assert.That(handler.Calls, Is.EqualTo(1));
+            manager.EndLifecyclePhase(current);
+        }
+
+        [Test]
+        public async Task LifecycleOldQueryCannotContinueStatsAfterReturningToVerification()
+        {
+            var manager = IsolatedStatusManager();
+            var old = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, 42, "old");
+            var handler = new RestartHealthHandler { Response = _ => new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) };
+            using var client = new System.Net.Http.HttpClient(handler);
+            using var first = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/health", 0, expectedGeneration: old);
+            manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, 42, "old");
+            var current = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, 43, "new");
+            try
+            {
+                using var ignored = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/stats", 0, expectedGeneration: old);
+                Assert.Fail("Old query dispatched stats into a new generation");
+            }
+            catch (UPilotMcpServerManager.LifecycleProbeDeferredException) { }
+            Assert.That(handler.Calls, Is.EqualTo(1));
+            manager.EndLifecyclePhase(current);
+        }
+
+        [TestCase(false, false)]
+        [TestCase(true, true)]
+        public void LifecycleExitOrOriginalDeadlineEndsStarting(bool alive, bool expired)
+        {
+            var manager = IsolatedStatusManager();
+            var generation = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Starting, 42, "fixture", 1000);
+            var originalConsole = Logger.LogToUnityConsole;
+            var originalLevel = Logger.MinLevel;
+            try
+            {
+                Logger.LogToUnityConsole = true;
+                Logger.MinLevel = Logger.LogLevel.Info;
+                if (expired) LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(".*生命周期终态超时 source=Unity客户端.*"));
+                Assert.That(manager.AdvanceStartingPhase(generation, alive, true, true, expired ? 1000 : 999), Is.False);
+                Assert.That(manager.EndLifecyclePhase(generation), Is.False);
+            }
+            finally { Logger.LogToUnityConsole = originalConsole; Logger.MinLevel = originalLevel; }
+        }
+
+        [Test]
+        public void LifecycleWindowAndFirstVerificationDoNotInventRetryErrors()
+        {
+            foreach (var phase in new[] { UPilotServerLifecyclePhase.Starting, UPilotServerLifecyclePhase.Stopping, UPilotServerLifecyclePhase.Verifying })
+            {
+                var snapshot = UPilotQuickStart.EvaluateLifecycle(new McpServerStatus { LifecyclePhase = phase }, false).Value;
+                Assert.That(snapshot.Title, Is.EqualTo(UPilotMcpServerManager.LifecycleTitle(phase)));
+            }
+            var record = new UPilotServerRestartRecord { requestedAtUtcMs = 1000, deadlineAtUtcMs = 11000, phase = "verifying" };
+            var first = UPilotServerRestartDiagnostics.WaitingMessage(record, 2000);
+            Assert.That(first, Does.Not.Contain("错误").And.Not.Contain("重试").And.Not.Contain("失败"));
+            record.statusProbeError = "fixture failure";
+            record.statusProbeFailureStage = "health_query";
+            record.statusProbeCount = 2;
+            var retry = UPilotServerRestartDiagnostics.WaitingMessage(record, 3000);
+            Assert.That(retry, Does.Contain("health_query").And.Contain("fixture failure").And.Contain("重试次数：1"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task LifecycleIdleAndVerificationPermitExistingServiceHealth(bool verifying)
+        {
+            var manager = IsolatedStatusManager();
+            if (verifying) manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, 42, "fixture");
+            var handler = new RestartHealthHandler { Response = _ => new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) };
+            using var client = new System.Net.Http.HttpClient(handler);
+            using var response = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/health", 0);
+            Assert.That(handler.Calls, Is.EqualTo(1));
+            manager.EndLifecyclePhase((long)typeof(UPilotMcpServerManager).GetField("_lifecycleGeneration", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void OrdinaryIdentityConfirmationDoesNotRenewLaunchDeadline(bool identityVerified)
+        {
+            var manager = IsolatedStatusManager();
+            var state = new ServerLaunchState { verified = identityVerified, deadlineUtcMs = 1000 };
+            Assert.That(manager.LaunchProbeDeadline(state, 999), Is.EqualTo(1000));
+            Assert.That(manager.IsLaunchVerificationExpired(state, 1000), Is.True);
+            SetManagerField(manager, "_launchReloadRevalidation", true);
+            Assert.That(manager.LaunchProbeDeadline(state, 2000), Is.EqualTo(7000));
+            Assert.That(manager.IsLaunchVerificationExpired(state, 2000), Is.False);
+            Assert.That(state.deadlineUtcMs, Is.EqualTo(1000));
+        }
+
+        [Test]
+        public async Task LifecycleInvalidationCancelsOldQueriesWithoutPermanentlyBlockingHealth()
+        {
+            var manager = IsolatedStatusManager();
+            var handler = new RestartHealthHandler { Response = _ => new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) };
+            using var client = new System.Net.Http.HttpClient(handler);
+            using var first = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/health", 0);
+            manager.InvalidateStatusCache("explicit_stop");
+            using var next = await manager.SendLifecycleStatusAsync(client, "http://127.0.0.1:1/health", 0);
+            Assert.That(handler.Calls, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void ReloadNeedsCompletedReadOnlyVerificationToUseObservationBudget()
+        {
+            var state = new ServerLaunchState { verified = true, launcherPid = 42, launcherCreatedAt = 100,
+                servicePid = 43, serviceCreatedAt = 101, deadlineUtcMs = 1000 };
+            Assert.That(UPilotMcpServerManager.HasCompletedLaunchVerification(state, null), Is.False);
+            var record = new UPilotServerRestartRecord { status = "running", readOnlyVerified = true,
+                launcherProcessId = 42, launcherProcessCreatedAtTicks = 100, newProcessId = 43, newProcessCreatedAtTicks = 101 };
+            Assert.That(UPilotMcpServerManager.HasCompletedLaunchVerification(state, record), Is.False);
+            record.status = "succeeded";
+            Assert.That(UPilotMcpServerManager.HasCompletedLaunchVerification(state, record), Is.True);
+            record.newProcessCreatedAtTicks++;
+            Assert.That(UPilotMcpServerManager.HasCompletedLaunchVerification(state, record), Is.False);
+            state.readyVerified = true;
+            var restored = state.Snapshot();
+            Assert.That(UPilotMcpServerManager.HasCompletedLaunchVerification(restored, null), Is.True);
+            Assert.That(restored.deadlineUtcMs, Is.EqualTo(1000));
+        }
+
+        [Test]
+        public async Task LateLightweightHealthCannotResetNewPeriodicSchedule()
+        {
+            var manager = IsolatedStatusManager();
+            SetManagerField(manager, "_healthCheckIntervalSeconds", 10);
+            SetManagerField(manager, "_editorHealthObservationEnabled", true);
+            var release = new TaskCompletionSource<System.Net.Http.HttpResponseMessage>();
+            var handler = new RestartHealthHandler { PendingResponse = release.Task };
+            using var client = new System.Net.Http.HttpClient(handler);
+            using var cancellation = new System.Threading.CancellationTokenSource();
+            SetManagerField(manager, "_editorHealthObservationCancellation", cancellation);
+            var work = (Task)typeof(UPilotMcpServerManager).GetMethod("RefreshEditorHealthObservationAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(manager, new object[] { 1, 0, default(McpServerStatus), cancellation, client });
+            SetManagerField(manager, "_statusGeneration", 1);
+            SetManagerField(manager, "_lastRefreshMs", 123456L);
+            SetManagerField(manager, "_cachedStatus", new McpServerStatus { ProcessId = 84 });
+            release.SetResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                { Content = new System.Net.Http.StringContent("{}") });
+            await work;
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_lastRefreshMs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager),
+                Is.EqualTo(123456L));
+            var cached = (McpServerStatus)typeof(UPilotMcpServerManager).GetField("_cachedStatus", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager);
+            Assert.That(cached.ProcessId, Is.EqualTo(84));
+        }
+
         private sealed class RestartHealthHandler : System.Net.Http.HttpMessageHandler
         {
             internal int Calls;
             internal Func<int, System.Net.Http.HttpResponseMessage> Response;
+            internal Task<System.Net.Http.HttpResponseMessage> PendingResponse;
             protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request,
                 System.Threading.CancellationToken token)
             {
                 Assert.That(request.RequestUri.AbsolutePath, Is.EqualTo("/health"), "/stats is optional and must never delay restart.");
-                return Task.FromResult(Response(++Calls));
+                ++Calls;
+                return PendingResponse ?? Task.FromResult(Response(Calls));
             }
         }
 
@@ -1263,10 +1569,12 @@ namespace CodingRiver.UPilot.Tests
                 var failed = await UPilotMcpServerManager.GetRestartHealthAsync(client, 1, deadline);
                 Assert.That(failed.HealthEndpointResponded, Is.False);
                 Assert.That(failed.ErrorMessage, Is.Not.Empty);
+                Assert.That(failed.FailureKind, Is.EqualTo(i < 3 ? McpStatusFailureKind.Transient : McpStatusFailureKind.Confirmed));
             }
             var recovered = await UPilotMcpServerManager.GetRestartHealthAsync(client, 1, deadline);
             Assert.That(recovered.HealthEndpointResponded, Is.True);
             Assert.That(recovered.HealthServerProcessId, Is.EqualTo(42));
+            Assert.That(recovered.FailureKind, Is.EqualTo(McpStatusFailureKind.None));
             Assert.That(handler.Calls, Is.EqualTo(5));
             Assert.That(UPilotMcpServerManager.RestartProbeIntervalMs, Is.EqualTo(2000));
         }

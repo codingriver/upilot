@@ -567,6 +567,8 @@ namespace CodingRiver.UPilot
 
         public void Stop()
         {
+            var unityPid = Process.GetCurrentProcess().Id;
+            Debug.Log($"[UPilotBridge] 请求关闭 Bridge；宿主 Unity PID={unityPid}；已启动={_started}；连接状态={_ws?.State}。");
             var wasAuthenticated = _isAuthenticated;
             var wasWsOpen = _ws?.State == WebSocketState.Open;
             var wsToClose = _ws;
@@ -591,6 +593,7 @@ namespace CodingRiver.UPilot
                 _connectFailureStreak = 0;
                 _connectLoopTask = null;
                 ClearMcpServerDisplayState();
+                Debug.Log($"[UPilotBridge] Bridge 已停止；宿主 Unity PID={unityPid}；连接已请求中止。");
                 UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.stop", "Bridge停止",
                     $"原因=手动停止 连接状态={(wasWsOpen ? "已连接" : "未连接")} 认证状态={(wasAuthenticated ? "已认证" : "未认证")} socket=abort",
@@ -620,6 +623,7 @@ namespace CodingRiver.UPilot
 
         private void StartConnectLoop()
         {
+            Debug.Log($"[UPilotBridge] 启动 Bridge 连接循环；端点={GetServerUrl()}。");
             if (_cts == null || _cts.IsCancellationRequested)
                 _cts = new CancellationTokenSource();
 
@@ -2578,6 +2582,7 @@ namespace CodingRiver.UPilot
 
         private void OnBeforeAssemblyReload()
         {
+            Debug.Log("[UPilotBridge] Domain Reload 即将卸载脚本域，Bridge 当前连接将断开。");
             var focus = GetFocusStateString();
             var isCompiling = CurrentIsCompiling();
             _compileService?.MarkDomainReload();

@@ -75,6 +75,8 @@ def outcome(response):
     if data.get("terminal") or data.get("endedAt") or (
         data.get("resultAuthoritative") and data.get("cleanupSucceeded")
     ):
+        if data.get("cleanupStatus") == "not_applicable":
+            return "completed", "已确认取消，测试未派发，无需 Runner 清理", ""
         return "completed", "已确认停止且清理完成", ""
     return "accepted", "尚未停止", ""
 
@@ -196,10 +198,12 @@ def observe(service, kind, state):
     state["_queueAuditPhase"] = phase
     request = state.setdefault("queueAuditRequest", new_id("cleanup"))
     target = state.get("taskId") if kind == "Task" else state.get("operationId")
+    result = ("结果未确认" if unknown else "已确认取消，测试未派发，无需 Runner 清理"
+              if state.get("cleanupStatus") == "not_applicable" else "已确认停止且清理完成")
     try:
         asyncio.get_running_loop().create_task(notice(
             service, request, kind, target, "cancel", phase,
-            "结果未确认" if unknown else "已确认停止且清理完成",
+            result,
             state.get("queueAuditReason", "observer"), "CLEANUP_UNCONFIRMED" if unknown else ""))
     except RuntimeError:
         pass

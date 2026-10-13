@@ -4,11 +4,13 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.domain.test_service import TestDomainService
+from upilot_mcp.domain.queue_service import QueueDomainService
 from upilot_mcp.protocol import now_ms
 from upilot_mcp.responses import fail, ok
 from upilot_mcp.state_store import StateStore
@@ -331,6 +333,222 @@ def acceptance_gate(monkeypatch):
     from upilot_mcp.domain import task_service
     monkeypatch.setattr(task_service, "refresh_config_if_changed", lambda: None)
     monkeypatch.setattr(task_service.CONFIG, "write_access_approved", True)
+
+
+class EscalatingAcceptanceService(AcceptanceService, QueueDomainService):
+    """Real task finalization/escalation; process maintenance is always mocked."""
+    def __init__(self, output_root):
+        super().__init__(output_root)
+        self.server.session_manager = SimpleNamespace(active=SimpleNamespace(
+            project_path=self.server.state.project_path))
+        self.server.is_ready = lambda: False
+        self.service_restart = AsyncMock(return_value=ok("restart", {}))
+
+
+@pytest.fixture
+def escalation_gate(monkeypatch):
+    from upilot_mcp.domain import queue_service
+    monkeypatch.setattr(queue_service, "read_summary", lambda *_args: dict(
+        effectiveApproved=True, autoHardStopOnSoftFailure=True,
+        expectedServerProcessId=123, expectedBridgeSessionId="fixture", expectedMaintenanceId=""))
+
+
+@pytest.mark.parametrize("case,code,status", [
+    ("stale_snapshot", "TEST_SELECTION_STALE", "failed"),
+    ("no_tests", "UPILOT_ACCEPTANCE_NO_TESTS", "no_tests"),
+    ("not_ready", "UPILOT_ACCEPTANCE_NOT_READY", "failed"),
+    ("compile_budget", "UPILOT_ACCEPTANCE_DEADLINE_EXCEEDED", "failed"),
+    ("active_capture", "UPILOT_ACCEPTANCE_CAPTURE_OWNERSHIP_REQUIRED", "failed"),
+    ("unknown_capture", "UPILOT_ACCEPTANCE_CAPTURE_STATE_UNKNOWN", "failed"),
+    ("runner_preflight", "TEST_SELECTION_STALE", "failed"),
+])
+def test_acceptance_pre_dispatch_failures_have_no_runner_cleanup_or_restart(
+        tmp_path, monkeypatch, acceptance_gate, escalation_gate, case, code, status):
+    async def scenario():
+        service = EscalatingAcceptanceService(tmp_path)
+        arguments = {"write_artifact": False, "timeout_sec": 10}
+        if case == "stale_snapshot":
+            service.test_list = AsyncMock(return_value=ok("list", {
+                "tests": ["Demo.Fixture.Test"], "selectionValid": True,
+                "selectionDomain": "current-domain", "selectionSnapshotId": "current-snapshot"}))
+            arguments.update(fixtures=["Demo.Fixture"], expected_selection_domain="old-domain",
+                             expected_selection_snapshot_id="old-snapshot")
+        elif case == "no_tests":
+            service.test_list = AsyncMock(return_value=ok("list", {"tests": []}))
+        elif case == "not_ready":
+            service.ensure_ready = AsyncMock(return_value=ok("ready", {"ready": False}))
+        elif case == "compile_budget":
+            clock = {"now": 1000}
+            monkeypatch.setattr("upilot_mcp.domain.task_service.now_ms", lambda: clock["now"])
+            monkeypatch.setattr("upilot_mcp.domain.test_service.now_ms", lambda: clock["now"])
+            async def compile(**_kwargs):
+                clock["now"] += 11000
+                return ok("compile", {"status": "success", "errorsVerified": True, "errorTotal": 0})
+            service.safe_compile_and_wait = compile
+        elif case == "active_capture":
+            service.active_capture = True
+        elif case == "unknown_capture":
+            service.console_capture_list = AsyncMock(return_value=fail("capture", "CAPTURE_LIST_FAILED", "fixture"))
+        else:
+            # The acceptance call was attempted, but test_run's own preflight
+            # rejected it before the test.run send boundary.
+            service.test_run = AsyncMock(return_value=fail("run", "TEST_SELECTION_STALE", "fixture"))
+        started = await service.task_start("preflight", "unity_upilot_acceptance_run", arguments)
+        assert started.ok, started.error
+        task_id = started.data["taskId"]
+        await service._async_task_handles[task_id]
+        await asyncio.sleep(0)
+        state = service._async_tasks[task_id]
+        assert state["terminal"] and state["status"] == status
+        assert state["error"]["code"] == code
+        assert state["acceptanceReport"]["acceptancePassed"] is False
+        assert state["acceptanceReport"]["runnerStartAttempted"] is (case == "runner_preflight")
+        assert state["startIntentSent"] is False and state["startSendState"] == "not_sent"
+        assert not state["runGuid"] and service.start_count == 0
+        assert state["cleanupSucceeded"] is None and state["cleanupPending"] is False
+        assert state["cleanupStatus"] == "not_applicable"
+        assert not state.get("_cleanupEscalationObserved")
+        service.service_restart.assert_not_awaited()
+        history = service.server.state.load_test_jobs()
+        await asyncio.gather(*(service.task_status(task_id) for _ in range(3)))
+        assert service.server.state.load_test_jobs() == history
+        service.service_restart.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("after_report", [False, True])
+def test_cancel_before_dispatch_needs_no_runner_cleanup_with_or_without_report(
+        tmp_path, acceptance_gate, escalation_gate, after_report):
+    async def scenario():
+        service = EscalatingAcceptanceService(tmp_path)
+        entered, release = asyncio.Event(), asyncio.Event()
+        if after_report:
+            async def ready(**_kwargs):
+                entered.set()
+                await release.wait()
+                checkpoint("preflight")
+                return ok("ready", {"ready": True})
+            service.ensure_ready = ready
+        started = await service.task_start("cancel-preflight", "unity_upilot_acceptance_run", {"write_artifact": False})
+        task_id = started.data["taskId"]
+        if after_report:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+        cancelled = await service.task_cancel(task_id)
+        assert cancelled.ok
+        release.set()
+        await service._async_task_handles[task_id]
+        await asyncio.sleep(0)
+        state = service._async_tasks[task_id]
+        assert state["terminal"] and state["status"] == "cancelled"
+        assert bool(state.get("acceptanceReport")) is after_report
+        assert state["cleanupStatus"] == "not_applicable" and state["cleanupSucceeded"] is None
+        assert service.start_count == 0 and not state["runGuid"]
+        service.service_restart.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "exception", "cancelled"])
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_exception_finalization_distinguishes_no_dispatch_from_unknown_dispatch(
+        tmp_path, acceptance_gate, escalation_gate, failure, dispatched):
+    async def scenario():
+        service = EscalatingAcceptanceService(tmp_path)
+        async def interrupted(**_kwargs):
+            checkpoint("preflight", acceptanceReport={"runnerStartAttempted": False, "steps": {}})
+            if dispatched:
+                checkpoint("starting", startIntentSent=True, startSendState="sent_unknown")
+            if failure == "timeout":
+                raise TimeoutError("fixture")
+            if failure == "cancelled":
+                raise asyncio.CancelledError()
+            raise RuntimeError("fixture")
+        service._execute_upilot_acceptance_run = interrupted
+        started = await service.task_start("interrupted", "unity_upilot_acceptance_run", {"write_artifact": False})
+        task_id = started.data["taskId"]
+        await asyncio.gather(service._async_task_handles[task_id], return_exceptions=True)
+        await asyncio.sleep(0)
+        state = service._async_tasks[task_id]
+        assert state["terminal"] and state["status"] == ("timed_out" if failure == "timeout" else "aborted")
+        assert not state["runGuid"]
+        if not dispatched or failure == "timeout":
+            assert state["cleanupSucceeded"] is (False if dispatched else None)
+            assert state["cleanupStatus"] == ("failed" if dispatched else "not_applicable")
+        else:
+            # Server shutdown can cancel its observer after dispatch. Preserve
+            # the existing unknown cleanup instead of scheduling a new restart.
+            assert "cleanupSucceeded" not in state and "cleanupStatus" not in state
+        expected_restart = int(dispatched and failure == "timeout")
+        assert service.service_restart.await_count == expected_restart
+        await asyncio.gather(*(service.task_status(task_id) for _ in range(3)))
+        assert service.service_restart.await_count == expected_restart
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("evidence", [
+    {"runGuid": "run-established"}, {"cleanupSucceeded": False}, {"cleanupPending": True},
+    {"cleanupErrors": ["capture-stop"]}, {"unresolvedResources": ["capture"]},
+    {"stoppedConsoleCaptures": [{"sessionId": "capture-uncertain"}]},
+])
+def test_no_dispatch_does_not_mask_independent_run_or_cleanup_evidence(
+        tmp_path, acceptance_gate, escalation_gate, evidence):
+    async def scenario():
+        service = EscalatingAcceptanceService(tmp_path)
+        async def failure(**_kwargs):
+            checkpoint("preflight", acceptanceReport={
+                "runnerStartAttempted": False, "steps": {}, **evidence})
+            return fail("preflight", "PREFLIGHT_FAILED", "fixture")
+        service._execute_upilot_acceptance_run = failure
+        started = await service.task_start("independent-cleanup", "unity_upilot_acceptance_run", {"write_artifact": False})
+        await service._async_task_handles[started.data["taskId"]]
+        await asyncio.sleep(0)
+        state = service._async_tasks[started.data["taskId"]]
+        assert state["cleanupSucceeded"] is False and state["cleanupStatus"] == "failed"
+        assert state["error"]["code"] == "PREFLIGHT_FAILED"
+        service.service_restart.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("intent,send_state", [(None, "not_sent"), ("false", "not_sent"), (False, None), (True, "not_sent")])
+def test_preflight_report_alone_never_proves_an_unknown_send_boundary(
+        tmp_path, acceptance_gate, escalation_gate, intent, send_state):
+    async def scenario():
+        service = EscalatingAcceptanceService(tmp_path)
+        async def failure(**_kwargs):
+            checkpoint("preflight", startIntentSent=intent, startSendState=send_state,
+                       acceptanceReport={"runnerStartAttempted": False, "steps": {}})
+            return fail("preflight", "PREFLIGHT_FAILED", "fixture")
+        service._execute_upilot_acceptance_run = failure
+        started = await service.task_start("unknown-boundary", "unity_upilot_acceptance_run", {"write_artifact": False})
+        await service._async_task_handles[started.data["taskId"]]
+        await asyncio.sleep(0)
+        state = service._async_tasks[started.data["taskId"]]
+        assert state["cleanupSucceeded"] is False and state["cleanupStatus"] == "failed"
+        service.service_restart.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+def test_late_preflight_finally_preserves_a_real_soft_stop_timeout(
+        tmp_path, acceptance_gate, escalation_gate):
+    from upilot_mcp.test_job_context import TEST_JOB_CONTEXT
+    async def scenario():
+        service = EscalatingAcceptanceService(tmp_path)
+        async def timed_out(**_kwargs):
+            checkpoint("preflight", acceptanceReport={"runnerStartAttempted": False, "steps": {}})
+            # Model the existing watchdog's terminal record, which a late return
+            # must not reinterpret as a successful or unnecessary cleanup.
+            state = TEST_JOB_CONTEXT.get()[0]
+            state.update(status="aborted", terminal=True, cleanupSucceeded=False, cleanupPending=False,
+                         cleanupStatus="timed_out", error={"code": "SOFT_STOP_TIMEOUT", "message": "fixture"})
+            return fail("late", "PREFLIGHT_FAILED", "late result")
+        service._execute_upilot_acceptance_run = timed_out
+        started = await service.task_start("soft-stop-timeout", "unity_upilot_acceptance_run", {"write_artifact": False})
+        await service._async_task_handles[started.data["taskId"]]
+        await asyncio.sleep(0)
+        state = service._async_tasks[started.data["taskId"]]
+        assert state["cleanupStatus"] == "timed_out" and state["cleanupSucceeded"] is False
+        assert state["error"]["code"] == "SOFT_STOP_TIMEOUT"
+        service.service_restart.assert_awaited_once()
+    asyncio.run(scenario())
 
 
 def test_acceptance_summary_finishes_without_polling_and_has_verified_hash(tmp_path, acceptance_gate):

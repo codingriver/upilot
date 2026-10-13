@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from upilot_mcp.domain.task_service import TaskDomainService
+from upilot_mcp.domain.test_service import TestDomainService
 from upilot_mcp.domain import queue_service
-from upilot_mcp.queue_audit import audited
+from upilot_mcp.queue_audit import audited, observe, outcome
 from upilot_mcp.responses import ok, fail
 from upilot_mcp.state_store import StateStore
 from test_queue_cleanup import Service
@@ -70,6 +71,70 @@ def test_validation_failures_never_escalate(tmp_path, monkeypatch, code):
         await service._maybe_auto_hard_stop(fail("invalid", code, "fixture"))
         await service._maybe_auto_hard_stop(ok("missing", dict(status="not_found", changed=False)))
         service.service_restart.assert_not_called()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["unknown_dispatch", "failed_cleanup", "failed_test_cleaned"])
+def test_test_result_cleanup_escalation_keeps_original_failure_and_runs_once(tmp_path, monkeypatch, caplog, case):
+    class Tests(TaskDomainService, TestDomainService, Service):
+        pass
+    async def run():
+        service = Tests(tmp_path)
+        monkeypatch.setattr(queue_service, "read_summary", lambda *_args: dict(
+            effectiveApproved=True, autoHardStopOnSoftFailure=True,
+            expectedServerProcessId=123, expectedBridgeSessionId="fixture", expectedMaintenanceId=""))
+        service.service_restart = AsyncMock(return_value=ok("restart", {}))
+        state = dict(taskId="task-original", runGuid="" if case == "unknown_dispatch" else "run-original",
+                     startIntentSent=True, startSendState="sent_unknown", terminal=False, status="running")
+        if case == "unknown_dispatch":
+            result = fail("start", "COMMAND_RECOVERY_REQUIRED", "fixture unknown dispatch",
+                          {"ownerToken": "must-not-log-owner", "confirmToken": "must-not-log-confirm"})
+        else:
+            cleaned = case == "failed_test_cleaned"
+            result = ok("result", dict(runGuid="run-original", resultAuthoritative=True, status="completed",
+                cleanupPending=False, cleanupSucceeded=cleaned, cleanupStatus="completed" if cleaned else "failed",
+                cleanupErrors=[] if cleaned else ["unregister"], unresolvedResources=[],
+                total=1, passed=0 if cleaned else 1, failed=1 if cleaned else 0))
+        service._apply_test_task_result(state, result)
+        observe(service, "Task", state)
+        await asyncio.sleep(0)
+        assert state["status"] == ("failed" if case == "failed_test_cleaned" else "aborted")
+        assert state["cleanupSucceeded"] is (case == "failed_test_cleaned")
+        expected = int(case != "failed_test_cleaned")
+        assert service.service_restart.await_count == expected
+        observe(service, "Task", state)
+        await service._maybe_auto_hard_stop(ok("cleanup-again", dict(state)))
+        assert service.service_restart.await_count == expected
+        if expected:
+            reason = service.service_restart.await_args.kwargs["reason"]
+            assert "taskId=task-original" in reason and "cleanupStatus=failed" in reason
+            assert "cleanupSucceeded=False" in reason
+            if case == "unknown_dispatch":
+                assert state["error"]["code"] == "COMMAND_RECOVERY_REQUIRED"
+                assert "failureCode=COMMAND_RECOVERY_REQUIRED" in reason
+            else:
+                assert "runGuid=run-original" in reason
+            records = [record for record in caplog.records if "[UPilot][AutomaticHardStop]" in record.message]
+            assert len(records) == 1 and "taskId=task-original" in records[0].message
+            assert "must-not-log-owner" not in records[0].message and "must-not-log-confirm" not in records[0].message
+            assert "must-not-log-owner" not in reason and "must-not-log-confirm" not in reason
+    asyncio.run(run())
+
+
+def test_no_runner_cancel_audit_reports_not_applicable_without_claiming_cleanup(monkeypatch):
+    from upilot_mcp import queue_audit
+    async def run():
+        service = SimpleNamespace()
+        notices = AsyncMock()
+        monkeypatch.setattr(queue_audit, "notice", notices)
+        state = dict(taskId="task-not-dispatched", status="cancelled", terminal=True,
+                     cancelRequested=True, cleanupPending=False, cleanupSucceeded=None, cleanupStatus="not_applicable")
+        assert outcome(ok("cancel", state)) == ("completed", "已确认取消，测试未派发，无需 Runner 清理", "")
+        observe(service, "Task", state)
+        await asyncio.sleep(0)
+        notices.assert_awaited_once()
+        assert notices.await_args.args[6] == "已确认取消，测试未派发，无需 Runner 清理"
+        assert "清理完成" not in notices.await_args.args[6]
     asyncio.run(run())
 
 

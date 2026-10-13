@@ -3097,17 +3097,21 @@ class TaskDomainService:
             self._apply_test_task_result(state, result)
         except TimeoutError:
             if not state.get("terminal"):
-                state.update(status="timed_out", terminal=True, cleanupSucceeded=False)
+                state.update(status="timed_out", terminal=True)
+                self._set_test_task_cleanup(state)
         except TestJobCancelledBeforeStart:
             if state.get("terminal"):
                 return
-            state.update(status="cancelled", terminal=True)
-            if state.get("acceptanceReport"):
-                report = state["acceptanceReport"]
-                self._finish_acceptance_report(report, False, "UPILOT_ACCEPTANCE_CANCELLED", "Cancelled before test start.")
-                state["result"] = {"result": report}
-                if report.get("artifact"):
-                    state["artifact"] = report["artifact"]
+            state.update(status="cancelled")
+            try:
+                if state.get("acceptanceReport"):
+                    report = state["acceptanceReport"]
+                    self._finish_acceptance_report(report, False, "UPILOT_ACCEPTANCE_CANCELLED", "Cancelled before test start.")
+                    state["result"] = {"result": report}
+                    if report.get("artifact"):
+                        state["artifact"] = report["artifact"]
+            finally:
+                state["terminal"] = True
         except asyncio.CancelledError:
             if not state.get("terminal"):
                 state.update(status="aborted", terminal=True, phase="interrupted")
@@ -3119,6 +3123,8 @@ class TaskDomainService:
             TEST_JOB_CONTEXT.reset(token)
             if not state.get("terminal"):
                 state.update(status="aborted", terminal=True)
+            if "cleanupStatus" not in state and self._test_cleanup_not_applicable(state):
+                self._set_test_task_cleanup(state)
             state["phase"] = state["status"]
             state["updatedAt"] = now_ms()
             state["endedAt"] = state.get("endedAt") or now_ms()
@@ -3199,6 +3205,53 @@ class TaskDomainService:
         finally:
             TEST_JOB_CONTEXT.reset(token)
 
+    @staticmethod
+    def _test_cleanup_not_applicable(state: dict, result: ToolResponse | None = None) -> bool:
+        # Only the persisted send boundary proves that this task never dispatched
+        # test.run. runnerStartAttempted describes entering test_run, whose own
+        # preflight can still reject the request before that boundary.
+        if state.get("startIntentSent") is not False or state.get("startSendState") != "not_sent":
+            return False
+        report = state.get("acceptanceReport") or {}
+        sources = [state, report, state.get("result")]
+        if isinstance(state.get("result"), dict):
+            sources.append(state["result"].get("result"))
+        if result is not None:
+            sources.extend((result.data, result.error.detail if result.error else None))
+        if isinstance(report, dict):
+            for name in ("testRun", "testStatus"):
+                step = (report.get("steps") or {}).get(name) or {}
+                if isinstance(step, dict):
+                    sources.append(step.get("data"))
+                    error = step.get("error") or {}
+                    if isinstance(error, dict):
+                        sources.append(error.get("detail"))
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            if source.get("runGuid") or source.get("stoppedConsoleCaptures"):
+                return False
+            # No Runner does not exempt an independently failed/uncertain cleanup,
+            # including a real soft-stop timeout recorded before this finally.
+            if (source.get("cleanupSucceeded") is False or source.get("cleanupVerified") is False
+                    or source.get("cleanupPending") is True or source.get("cleanupErrors")
+                    or source.get("unresolvedResources") or source.get("cleanupError")
+                    or source.get("cleanupFailureSignature") or source.get("persistenceError")
+                    or source.get("cleanupStatus") not in (None, "", "completed", "not_applicable")):
+                return False
+        return True
+
+    def _set_test_task_cleanup(self, state: dict, result: ToolResponse | None = None) -> bool:
+        report = state.get("acceptanceReport") or {}
+        test_result = (report.get("steps", {}).get("testStatus", {}).get("data")
+                       if report else result.data if result is not None else None) or {}
+        cleaned = self._test_cleanup_verified(test_result)
+        not_applicable = not cleaned and self._test_cleanup_not_applicable(state, result)
+        state["cleanupSucceeded"] = None if not_applicable else cleaned
+        state["cleanupPending"] = False
+        state["cleanupStatus"] = "not_applicable" if not_applicable else "completed" if cleaned else "failed"
+        return cleaned
+
     def _apply_test_task_result(self, state: dict, result: ToolResponse) -> None:
         if state.get("terminal"):
             return
@@ -3206,10 +3259,7 @@ class TaskDomainService:
         test_result = (report.get("steps", {}).get("testStatus", {}).get("data")
                        if report else result.data) or {}
         no_tests = bool(test_result.get("noTests"))
-        cleaned = self._test_cleanup_verified(test_result)
-        state["cleanupSucceeded"] = cleaned
-        state["cleanupPending"] = False
-        state["cleanupStatus"] = "completed" if cleaned else "failed"
+        cleaned = self._set_test_task_cleanup(state, result)
         identity_verified = test_result.get("runGuid") == state.get("runGuid") and test_result.get("resultAuthoritative") is True
         state["result"] = {"result": result.data or (result.error.detail if result.error else {}), "runGuid": state.get("runGuid")}
         if report.get("artifact"):

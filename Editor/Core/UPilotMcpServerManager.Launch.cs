@@ -18,6 +18,7 @@ namespace CodingRiver.UPilot
         private CancellationTokenSource _launchObservationCancellation;
         private bool _launchProbeRunning;
         private bool _launchNeedsRevalidation;
+        private bool _launchReloadRevalidation;
         private long _launchNextProbeAt;
         private long _pendingLaunchDeadline;
         private int _stoppingHttpPort, _stoppingWsPort;
@@ -55,6 +56,9 @@ namespace CodingRiver.UPilot
                 throw new TimeoutException("本次启动期限已到，未启动服务");
             Directory.CreateDirectory(Path.Combine(spec.projectPath, "log"));
             if (_restartMaintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
+            UnityEngine.Debug.Log($"[UPilotMcpServerManager] 正在启动 MCP Server；入口={spec.expectedEntry}；HTTP={spec.httpPort}；WS={spec.wsPort}。");
+            var lifecycleId = IsRestartObservationActive() ? _restartOperationId : Guid.NewGuid().ToString("N");
+            SetLifecyclePhase(UPilotServerLifecyclePhase.Starting, 0, lifecycleId, deadline);
             var process = Process.Start(spec.StartInfo());
             if (process == null) throw new InvalidOperationException("服务启动未返回进程句柄");
             // 保留真实句柄，不能以后仅凭 PID 重新认领进程。
@@ -63,6 +67,8 @@ namespace CodingRiver.UPilot
             _launcherProcess?.Dispose();
             DisposeTrackedProcess();
             _launcherProcess = process;
+            _lifecycleProcessId = process.Id;
+            _launchReloadRevalidation = false;
             _launchState = new ServerLaunchState
             {
                 spec = spec, launcherPid = process.Id,
@@ -80,7 +86,7 @@ namespace CodingRiver.UPilot
                 UPilotServerRestartDiagnostics.RecordLaunchSpec(_restartOperationId, spec);
                 UPilotServerRestartDiagnostics.RecordProcessStarted(_restartOperationId, process.Id, _launchState.launcherCreatedAt);
             }
-            UnityEngine.Debug.Log($"[UPilotMcpServerManager] 服务启动 PID={process.Id}；入口={spec.expectedEntry}；HTTP={spec.httpPort}；WS={spec.wsPort}；等待统一身份核验");
+            UnityEngine.Debug.Log($"[UPilotMcpServerManager] 服务启动 PID={process.Id}；入口={spec.expectedEntry}；HTTP={spec.httpPort}；WS={spec.wsPort}；operationId={lifecycleId}；等待统一身份核验");
             BeginLaunchObservation();
         }
 
@@ -90,6 +96,7 @@ namespace CodingRiver.UPilot
         private void BeforeLaunchDomainReload()
         {
             PersistLaunchState();
+            _lifecycleQueryCancellation?.Cancel();
             StopLaunchObservation();
             _launcherProcess?.Dispose();
             _launcherProcess = null;
@@ -116,11 +123,12 @@ namespace CodingRiver.UPilot
         private void ObserveLaunch()
         {
             var state = _launchState;
-            if (state == null || (state.verified && !_launchNeedsRevalidation) || state.terminal) { StopLaunchObservation(); return; }
+            if (state == null || (state.verified && !_launchNeedsRevalidation && _lifecyclePhase == UPilotServerLifecyclePhase.None) || state.terminal) { StopLaunchObservation(); return; }
             // 重启使用原观察器及其验证门；普通/自动启动使用完全相同的身份解析器。
             if (IsRestartObservationActive() || _restartPending || _launchProbeRunning) return;
-            if (!state.verified && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= state.deadlineUtcMs)
+            if (IsLaunchVerificationExpired(state, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
             {
+                EndLifecyclePhase(_lifecycleGeneration, "launch_identity_timeout: " + state.error, true);
                 state.error = "launch_identity_timeout: " + state.error;
                 state.terminal = true;
                 PersistLaunchState();
@@ -133,22 +141,51 @@ namespace CodingRiver.UPilot
             _ = ProbeLaunchAsync(state, _launchObservationCancellation.Token);
         }
 
+        internal bool IsLaunchVerificationExpired(ServerLaunchState state, long nowUtcMs) =>
+            !_launchReloadRevalidation && nowUtcMs >= state.deadlineUtcMs;
+
+        internal long LaunchProbeDeadline(ServerLaunchState state, long nowUtcMs) =>
+            _launchReloadRevalidation ? nowUtcMs + 5000 : state.deadlineUtcMs;
+
         private async Task ProbeLaunchAsync(ServerLaunchState state, CancellationToken token)
         {
             try
             {
                 // 已完成启动的 Reload 只重新观察存活身份；不续期原启动操作。
-                var probeDeadline = state.verified ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000 : state.deadlineUtcMs;
+                var probeDeadline = LaunchProbeDeadline(state, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                if (!await PrepareLifecycleProbeAsync(token)) return;
+                var lifecycleGeneration = _lifecycleGeneration;
                 var status = await GetRestartStatusAsync(probeDeadline, token, state.spec);
-                if (token.IsCancellationRequested || !ReferenceEquals(state, _launchState)) return;
+                if (token.IsCancellationRequested || lifecycleGeneration != _lifecycleGeneration || !ReferenceEquals(state, _launchState)) return;
                 if (!TryResolveStartedService(state, status, out var error))
                 {
                     state.error = error;
                     if (error == "process_exited" || status.ProcessOwnership == McpProcessOwnership.Foreign)
                         state.terminal = true;
                     PersistLaunchState();
+                    if (state.terminal) EndLifecyclePhase(lifecycleGeneration, state.error);
+                }
+                else
+                {
+                    _launchNeedsRevalidation = true;
+                    var bridge = UPilotBridge.Instance.GetStatus();
+                    if (!bridge.IsWsOpen || !bridge.IsAuthenticated ||
+                        UPilotDeploymentDiagnostics.Observe(bridge, status, state.spec).Length > 0) return;
+                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, probeDeadline, token);
+                    var after = UPilotBridge.Instance.GetStatus();
+                    if (token.IsCancellationRequested || lifecycleGeneration != _lifecycleGeneration ||
+                        !ReferenceEquals(state, _launchState) || !after.IsWsOpen || !after.IsAuthenticated ||
+                        after.SessionId != bridge.SessionId) return;
+                    if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= probeDeadline) return;
+                    state.readyVerified = true;
+                    PersistLaunchState();
+                    _launchNeedsRevalidation = false;
+                    if (EndLifecyclePhase(lifecycleGeneration))
+                        CacheVerifiedStartupStatus(status);
+                    StopLaunchObservation();
                 }
             }
+            catch (LifecycleProbeDeferredException) { }
             catch (Exception ex)
             {
                 if (!token.IsCancellationRequested && ReferenceEquals(state, _launchState))
@@ -208,11 +245,12 @@ namespace CodingRiver.UPilot
             finally { candidate?.Dispose(); }
         }
 
-        private bool TryTrackExistingProcess(McpServerStatus status, ServerLaunchSpec spec, long deadline)
+        private bool TryTrackExistingProcess(McpServerStatus status, ServerLaunchSpec spec, long deadline, out string error)
         {
             // Reload 优先恢复本 Editor 的冻结身份。首次附着已有服务时只采集精确 OS 证据，绝不启动。
+            error = "service_ownership_unverified";
             if (_launchState != null)
-                return TryResolveStartedService(_launchState, status, out _);
+                return TryResolveStartedService(_launchState, status, out error);
             if (!IsVerifiedStartupHealth(status)) return false;
             Process launcher = null;
             try
@@ -239,14 +277,25 @@ namespace CodingRiver.UPilot
                     launcherCreatedAt = launcher.StartTime.ToUniversalTime().Ticks, deadlineUtcMs = deadline };
                 _launcherProcess = launcher;
                 _launchState = state;
-                if (TryResolveStartedService(state, status, out _)) { launcher = null; return true; }
+                if (TryResolveStartedService(state, status, out error)) { launcher = null; return true; }
                 _launchState = null;
                 _launcherProcess = null;
                 return false;
             }
-            catch { _launchState = null; _launcherProcess = null; return false; }
+            catch (ThreadAbortException) { throw; }
+            catch (Exception ex)
+            {
+                error = "process_evidence_unavailable: " + DescribeProbeException(ex);
+                _launchState = null; _launcherProcess = null; return false;
+            }
             finally { launcher?.Dispose(); }
         }
+
+        internal static bool HasCompletedLaunchVerification(ServerLaunchState state, UPilotServerRestartRecord record) =>
+            state.verified && (state.readyVerified ||
+                (record?.status == "succeeded" && record.readOnlyVerified &&
+                 record.launcherProcessId == state.launcherPid && record.launcherProcessCreatedAtTicks == state.launcherCreatedAt &&
+                 record.newProcessId == state.servicePid && record.newProcessCreatedAtTicks == state.serviceCreatedAt));
 
         private void RestoreLaunchObservation()
         {
@@ -270,6 +319,11 @@ namespace CodingRiver.UPilot
                     throw new InvalidOperationException("服务进程在 Reload 后身份不符");
                 // 不更新期限，不重放启动，不恢复任何业务任务。
                 _launchNeedsRevalidation = state.verified;
+                _launchReloadRevalidation = HasCompletedLaunchVerification(state, UPilotServerRestartDiagnostics.Current);
+                if (!state.terminal)
+                    SetLifecyclePhase(state.verified ? UPilotServerLifecyclePhase.Verifying : UPilotServerLifecyclePhase.Starting,
+                        state.launcherPid, IsRestartObservationActive() ? _restartOperationId : Guid.NewGuid().ToString("N"),
+                        _launchReloadRevalidation ? 0 : state.deadlineUtcMs);
                 if (!state.terminal) BeginLaunchObservation();
             }
             catch (Exception ex)

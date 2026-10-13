@@ -232,18 +232,6 @@ async def unity_editor_window_set_rect(
     )
     return _log_tool_result("unity_editor_window_set_rect", _payload(r))
 
-@mcp.tool(description="查询已观测的 EditorWindow 生命周期事件；仅返回有界元数据，不打开、聚焦或关闭窗口。")
-async def unity_editor_window_history(
-    instanceId: str = "",
-    afterSequence: Annotated[int, Field(strict=True, ge=0)] = 0,
-    count: Annotated[int, Field(strict=True, ge=1, le=512)] = 100,
-):
-    _log_tool_call("unity_editor_window_history", {"instanceId": instanceId, "afterSequence": afterSequence, "count": count})
-    r = await _get_facade().editor_window_history(
-        instance_id=instanceId, after_sequence=afterSequence, count=count,
-    )
-    return _log_tool_result("unity_editor_window_history", _payload(r))
-
 @mcp.tool(description="仅打开已审计的 UPilot Safe Mode 探针窗口；未知或第三方窗口类型会在创建前拒绝。")
 async def unity_editor_window_open(typeName: str):
     _log_tool_call("unity_editor_window_open", {"typeName": typeName})

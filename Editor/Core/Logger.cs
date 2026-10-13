@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -201,7 +201,6 @@ namespace CodingRiver.UPilot
         {
             return string.Equals(category, "COMMAND", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(category, "COMPILE", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(category, "EntityIds", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(category, "NETWORK", StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(category, "UPilot.Flow", StringComparison.OrdinalIgnoreCase);
         }

@@ -252,6 +252,7 @@ namespace CodingRiver.UPilot
         public int launcherPid, servicePid;
         public long launcherCreatedAt, serviceCreatedAt, deadlineUtcMs;
         public bool verified, terminal;
+        public bool readyVerified; // 身份确认与完整只读就绪分开保存，Reload 不延长未完成的启动。
         public string instanceId = "", error = "";
 
         internal ServerLaunchState Snapshot() => JsonUtility.FromJson<ServerLaunchState>(JsonUtility.ToJson(this));

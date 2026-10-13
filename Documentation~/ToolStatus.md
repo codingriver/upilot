@@ -4,6 +4,8 @@
 
 最近同步：2026-09-16，`tools/list` 以当前 MCP 实时返回为准；本表已同步 Snapshot schema v1、Registry v7 及三项集成修复的定向证据。
 
+2026-10-13 维护：按用户要求从源码工具清单移除窗口历史工具及后台采集。下文带日期的工具数量与验收记录保留为历史，不代表当前注册数量或部署结果。
+
 ## 状态口径
 
 | 字段 | 建议取值 | 说明 |
@@ -115,7 +117,6 @@
 | `unity_editor_windows_list` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功列出打开的 EditorWindow。 |
 | `unity_editor_window_close` | 是 | 是 | 是 | 2026-06-30 自动验收通过：补注册 Bridge 路由后成功关闭浮动 `upilot` 窗口，并通过菜单恢复窗口。 |
 | `unity_editor_window_set_rect` | 是 | 是 | 是 | 2026-06-30 自动验收通过：补注册 Bridge 路由后成功设置浮动 `upilot` 窗口位置和大小。 |
-| `unity_editor_window_history` | 是 | 待补充 | 条件可用 | 返回有界窗口生命周期元数据与 Reload/gap 诊断，不读取窗口内容；真实跨 Reload 重建链待验收。 |
 | `unity_editor_window_open` | 是 | 待补充 | 条件可用 | Safe Mode 仅允许经审计的自有探针类型；未知类型在创建前拒绝。生产白名单保持 fail-closed。 |
 | `unity_editor_window_focus` | 是 | 待补充 | 条件可用 | 只聚焦精确 instanceId/domainGeneration 的已审计探针，不按标题创建或猜测目标。 |
 | `unity_editor_execute_command` | 是 | 是 | 是 | 2026-06-30 自动验收通过：成功执行 `Window/General/Console` 编辑器命令。 |

@@ -1353,6 +1353,13 @@ namespace CodingRiver.UPilot
                 if (newDebugWire != debugWire)
                     bridge.DebugWireLogsEnabled = newDebugWire;
 
+                var entityIdLogs = UPilotEntityIds.DebugLogsEnabled;
+                var newEntityIdLogs = EditorGUILayout.ToggleLeft(
+                    new GUIContent("对象 ID 转换日志", "记录 EntityIds 对象 ID 转换；默认关闭。开启后可能高频输出，关闭时同时停止文件和 Console 记录。"),
+                    entityIdLogs);
+                if (newEntityIdLogs != entityIdLogs)
+                    UPilotEntityIds.DebugLogsEnabled = newEntityIdLogs;
+
                 var verboseLogs = bridge.VerboseLogsEnabled;
                 var newVerboseLogs = EditorGUILayout.ToggleLeft(
                     new GUIContent("详细运行日志", "将命令、编译和普通网络 INFO 过程同步到 Unity Console，并记录额外心跳与连接状态。"),
@@ -1371,7 +1378,7 @@ namespace CodingRiver.UPilot
                 }
 
                 EditorGUILayout.LabelField(
-                    $"文件日志始终写入；单文件 {Logger.MaxLogSizeBytes / (1024 * 1024)} MiB，保留 {Logger.MaxBackupFiles} 个备份（约 {(Logger.MaxBackupFiles + 1) * Logger.MaxLogSizeBytes / (1024 * 1024)} MiB）",
+                    $"已启用的日志始终写入文件；单文件 {Logger.MaxLogSizeBytes / (1024 * 1024)} MiB，保留 {Logger.MaxBackupFiles} 个备份（约 {(Logger.MaxBackupFiles + 1) * Logger.MaxLogSizeBytes / (1024 * 1024)} MiB）",
                     EditorStyles.miniLabel);
                 if (!string.IsNullOrEmpty(Logger.LastFileError))
                     EditorGUILayout.HelpBox("最近一次日志文件异常：" + Logger.LastFileError, MessageType.Warning);
@@ -1571,6 +1578,14 @@ namespace CodingRiver.UPilot
                         manager.LogLevel = levels[levelIndex];
                     }
                 }
+
+                EditorGUI.BeginChangeCheck();
+                var healthInterval = EditorGUILayout.IntField(
+                    new GUIContent("Health 检查间隔（秒）", "默认 10 秒，范围 1～600 秒；启动验证就绪后开始周期检查。"),
+                    manager.HealthCheckIntervalSeconds);
+                if (EditorGUI.EndChangeCheck())
+                    manager.HealthCheckIntervalSeconds = healthInterval;
+                EditorGUILayout.LabelField("周期检查在服务就绪后开始；启动、关闭期间暂停。", EditorStyles.miniLabel);
 
                 EditorGUILayout.LabelField("Python 入口", EditorStyles.miniBoldLabel);
                 using (new EditorGUILayout.HorizontalScope())
