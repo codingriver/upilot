@@ -54,7 +54,7 @@ parallel Skill.
 Generated repository files, project managed blocks, installed Skill files, and installed
 templates are outputs, not editable sources. Do not append package-wide UPilot instructions
 to unmanaged project/parent rules or create installed Skill files by hand. Preserve genuine
-business rules/Skills, repository release rules, parent inheritance, and `AGENT_Distill.md`.
+business rules/Skills, repository release rules, and parent inheritance.
 If the authoritative source is unavailable, report the missing source and leave outputs
 untouched rather than treating an installed copy as the source.
 

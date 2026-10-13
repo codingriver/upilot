@@ -2,7 +2,7 @@
 
 # UPilot Unity MCP
 
-rulesVersion: 57
+rulesVersion: 58
 upilotPackageVersion: 0.3.46
 projectPath: <UNITY_PROJECT_ROOT>
 generatedAt: (documentation profile)
@@ -22,7 +22,7 @@ Project-specific business rules outside this controlled UPilot block take preced
 - Resolve source templates through `skills/upilot-unity-mcp/template-manifest.json` in the UPilot package source. `AGENTS.md.template` generates the UPilot blocks in project `AGENTS.md` and `.cursor/rules/upilot-unity-mcp.mdc`, plus `Documentation~/AgentRules/AGENTS.upilot.md`; the installer maintains the `CLAUDE.md` block referencing `@AGENTS.md`.
 - Author package-wide UPilot rules only in `AGENTS.md.template`. Never append them to the unmanaged area of project or parent `AGENTS.md`, or directly edit Cursor rules. The generated UPilot managed blocks remain the standing rule entry points; they are outputs, not independent authoring sources.
 - Author UPilot Skill instructions in `SKILL.md.template` and metadata in `agents/openai.yaml.template`. Never hand-create or hand-update an installed UPilot Skill, modify installed template copies, or create a parallel test-project-specific UPilot Skill to bypass this workflow. Fix the authoritative package source instead of patching generated repository files or installed copies.
-- Maintain distributed `references`, `scripts`, and other non-generated resources directly in package source, then distribute them through the same synchronization workflow; do not add templates for these resources. These ownership rules do not replace genuine project business rules/Skills, repository release rules, or `AGENT_Distill.md`.
+- Maintain distributed `references`, `scripts`, and other non-generated resources directly in package source, then distribute them through the same synchronization workflow; do not add templates for these resources. These ownership rules do not replace genuine project business rules/Skills or repository release rules.
 - Increment manifest `agentRulesVersion` for Agent behavior changes, and `skillPackVersion` for any distributed Skill file or template change, including `AGENTS.md.template`. Keep the manifest as the version source of truth.
 - After every authorized batch of template or distributed-resource changes, automatically complete source generation, source validation, project synchronization, and installed validation within the same task, without waiting for a separate user reminder. Follow the existing UPilot Skill's `references/installation.md` maintenance procedure. Saving templates alone is not completion; there is no background file watcher.
 - Verify project identity before using `unity_agent_integrations_check` and `unity_agent_integrations_sync(apply=true)`. These tools use that project's installed UPM templates, not Server-bundled templates. The legacy `unity_agent_rules_check/install` tools affect only `AGENTS.md` and cannot prove complete synchronization.
