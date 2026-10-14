@@ -19,6 +19,7 @@ namespace CodingRiver.UPilot
             EditorPrefs.SetInt(Key(name), value);
             Changed?.Invoke(name);
         }
+        internal static int WatchdogIntervalSeconds { get => Read(nameof(WatchdogIntervalSeconds), 2, 1, 60); set => Save(nameof(WatchdogIntervalSeconds), value, 1, 60); }
         internal static int ReloadIntervalSeconds { get => Read(nameof(ReloadIntervalSeconds), 2, 1, 60); set => Save(nameof(ReloadIntervalSeconds), value, 1, 60); }
         internal static int ReloadRoundTimeoutSeconds
         {
@@ -27,7 +28,10 @@ namespace CodingRiver.UPilot
         }
         internal static int ReloadTotalTimeoutSeconds { get => Math.Max(ReloadRoundTimeoutSeconds, Read(nameof(ReloadTotalTimeoutSeconds), 120, 5, 600)); set => Save(nameof(ReloadTotalTimeoutSeconds), Math.Max(ReloadRoundTimeoutSeconds, value), 5, 600); }
         internal static int ReloadMaxAttempts { get => Read(nameof(ReloadMaxAttempts), 30, 1, 100); set => Save(nameof(ReloadMaxAttempts), value, 1, 100); }
+        internal static int UpmRequestObservationTimeoutSeconds { get => Read(nameof(UpmRequestObservationTimeoutSeconds), 600, 30, 3600); set => Save(nameof(UpmRequestObservationTimeoutSeconds), value, 30, 3600); }
+        internal static int UpmCompletionCheckIntervalMs { get => Read(nameof(UpmCompletionCheckIntervalMs), 100, 50, 1000); set => Save(nameof(UpmCompletionCheckIntervalMs), value, 50, 1000); }
         internal static int PackageUpdateRecoveryTimeoutSeconds { get => Read(nameof(PackageUpdateRecoveryTimeoutSeconds), 600, 30, 3600); set => Save(nameof(PackageUpdateRecoveryTimeoutSeconds), value, 30, 3600); }
+        internal static int ProfilerCaptureDefaultDurationSeconds { get => Read(nameof(ProfilerCaptureDefaultDurationSeconds), 30, 1, 3600); set => Save(nameof(ProfilerCaptureDefaultDurationSeconds), value, 1, 3600); }
         internal static int WindowObservationTimeoutMs { get => Read(nameof(WindowObservationTimeoutMs), 5000, 500, 30000); set { Save(nameof(WindowObservationTimeoutMs), value, 500, 30000); ModalCheckIntervalMs = ModalCheckIntervalMs; } }
         internal static int ModalCheckIntervalMs { get => Math.Min(WindowObservationTimeoutMs / 2, Read(nameof(ModalCheckIntervalMs), 100, 50, 1000)); set => Save(nameof(ModalCheckIntervalMs), Math.Min(value, WindowObservationTimeoutMs / 2), 50, 1000); }
         internal static int BridgeReconnectDelaySeconds { get => Read(nameof(BridgeReconnectDelaySeconds), 1, 1, 60); set => Save(nameof(BridgeReconnectDelaySeconds), value, 1, 60); }
@@ -36,7 +40,7 @@ namespace CodingRiver.UPilot
         internal static int StepWindowRefreshMs { get => Read(nameof(StepWindowRefreshMs), 1000, 100, 5000); set => Save(nameof(StepWindowRefreshMs), value, 100, 5000); }
         internal static IEnumerable<string> PreferenceKeys
         {
-            get { foreach (var name in new[] { nameof(ReloadIntervalSeconds), nameof(ReloadRoundTimeoutSeconds), nameof(ReloadTotalTimeoutSeconds), nameof(ReloadMaxAttempts), nameof(PackageUpdateRecoveryTimeoutSeconds), nameof(WindowObservationTimeoutMs), nameof(ModalCheckIntervalMs), nameof(BridgeReconnectDelaySeconds), nameof(MainWindowRefreshMs), nameof(DebugWindowRefreshMs), nameof(StepWindowRefreshMs) }) yield return Key(name); }
+            get { foreach (var name in new[] { nameof(WatchdogIntervalSeconds), nameof(ReloadIntervalSeconds), nameof(ReloadRoundTimeoutSeconds), nameof(ReloadTotalTimeoutSeconds), nameof(ReloadMaxAttempts), nameof(PackageUpdateRecoveryTimeoutSeconds), nameof(UpmRequestObservationTimeoutSeconds), nameof(UpmCompletionCheckIntervalMs), nameof(ProfilerCaptureDefaultDurationSeconds), nameof(WindowObservationTimeoutMs), nameof(ModalCheckIntervalMs), nameof(BridgeReconnectDelaySeconds), nameof(MainWindowRefreshMs), nameof(DebugWindowRefreshMs), nameof(StepWindowRefreshMs) }) yield return Key(name); }
         }
         internal static void ResetDefaults() { UPilotPreferences.DeleteKeys(PreferenceKeys); Changed?.Invoke(""); }
         internal static void PreferencesReset() => Changed?.Invoke("");

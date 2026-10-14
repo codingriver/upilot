@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from upilot_mcp.config import CONFIG
 from upilot_mcp.domain.analysis_service import ProjectAnalysisDomainService
 from upilot_mcp.state_store import StateStore
@@ -61,6 +63,25 @@ def test_runtime_diagnostics_routes_are_structured_and_bounded() -> None:
     assert service.dispatcher.calls[1][1]["markerNames"] == ["Battle.Tick"]
     assert service.dispatcher.calls[1][1]["maxMarkers"] == 256
     assert service.dispatcher.calls[1][1]["telemetryTypeName"] == "Game.Telemetry"
+
+
+@pytest.mark.parametrize("arguments,configured,seconds", [
+    ({}, True, 30.0),
+    ({"duration_sec": None}, True, 30.0),
+    ({"duration_sec": 30}, False, 30.0),
+    ({"duration_sec": 12.5}, False, 12.5),
+    ({"duration_sec": 0}, False, 1.0),
+    ({"duration_sec": 99999}, False, 3600.0),
+])
+def test_profiler_duration_distinguishes_project_default_from_explicit_value(arguments, configured, seconds) -> None:
+    service = ProjectAnalysisDomainService.__new__(ProjectAnalysisDomainService)
+    service.dispatcher = _RecordingDispatcher()
+    result = asyncio.run(service.profiler_capture_start(**arguments))
+    assert result.ok
+    command, payload = service.dispatcher.calls[0]
+    assert command == "profiler.capture.start"
+    assert payload["useConfiguredDuration"] is configured
+    assert payload["durationSec"] == seconds
 
 
 def test_texture_importer_patch_preview_binds_asset_and_meta_hash(tmp_path: Path) -> None:

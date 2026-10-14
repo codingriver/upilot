@@ -271,6 +271,7 @@ namespace CodingRiver.UPilot
                 while (_mainThreadQueue.TryDequeue(out _)) { }
                 _trackedQueueActions.Clear();
             }
+            Reset(() => UPilotUpmRequestObservation.ResetAll("service_reset"));
             Reset(() => UPilotOperationTracker.Instance.AbortActive());
             Reset(() => Automation.UPilotAutomationStepService.ResetActive());
             Reset(() => _testService?.ResetActive());
@@ -399,13 +400,21 @@ namespace CodingRiver.UPilot
                 SignalHeartbeatIntervalChanged();
         }
 
+        private int _watchdogIntervalMs;
+        internal int WatchdogIntervalMs => Volatile.Read(ref _watchdogIntervalMs);
         internal int ReconnectDelayMs => Volatile.Read(ref _reconnectDelayMs);
         private void ApplyTimingPreferenceChange(string name)
         {
-            if (name.Length != 0 && name != nameof(UPilotTimingSettings.BridgeReconnectDelaySeconds)) return;
-            var value = UPilotTimingSettings.BridgeReconnectDelaySeconds * 1000;
-            if (Interlocked.Exchange(ref _reconnectDelayMs, value) == value) return;
-            try { _reconnectIntervalChanged.Release(); } catch (SemaphoreFullException) { }
+            if (name.Length == 0 || name == nameof(UPilotTimingSettings.BridgeReconnectDelaySeconds))
+            {
+                var value = UPilotTimingSettings.BridgeReconnectDelaySeconds * 1000;
+                if (Interlocked.Exchange(ref _reconnectDelayMs, value) != value)
+                {
+                    try { _reconnectIntervalChanged.Release(); } catch (SemaphoreFullException) { }
+                }
+            }
+            if (name.Length == 0 || name == nameof(UPilotTimingSettings.WatchdogIntervalSeconds))
+                Interlocked.Exchange(ref _watchdogIntervalMs, UPilotTimingSettings.WatchdogIntervalSeconds * 1000);
         }
 
         private void SignalHeartbeatIntervalChanged()
@@ -633,6 +642,7 @@ namespace CodingRiver.UPilot
             }
             finally
             {
+                UPilotUpmRequestObservation.ResetOwner(this, "bridge_stopped");
                 EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
                 EditorApplication.pauseStateChanged -= OnPauseStateChanged;
                 EditorApplication.update -= ProcessMainThreadQueue;
@@ -769,10 +779,15 @@ namespace CodingRiver.UPilot
                     startupContext.ready, startupContext.authoritative, startupContext.isStale, _sessionId);
             }
 
-            if (EditorApplication.timeSinceStartup - _lastWatchdogCheck > 2.0)
+            CheckWatchdog(UPilotOperationTracker.Instance, EditorApplication.timeSinceStartup);
+        }
+
+        internal void CheckWatchdog(UPilotOperationTracker tracker, double now)
+        {
+            if (tracker.HasActiveCommands &&
+                now - _lastWatchdogCheck > WatchdogIntervalMs / 1000d)
             {
-                _lastWatchdogCheck = EditorApplication.timeSinceStartup;
-                var tracker = UPilotOperationTracker.Instance;
+                _lastWatchdogCheck = now;
                 var stuckCommands = tracker.RunWatchdog();
                 foreach (var cmd in stuckCommands)
                     Logger.LogWarning("WATCHDOG", $"操作卡住: {cmd}");

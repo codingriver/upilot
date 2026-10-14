@@ -14,6 +14,77 @@ namespace CodingRiver.UPilot.Tests
         private static object Call(string method, params object[] args) =>
             typeof(UPilotRuntimeDiagnosticsService).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static).Invoke(null, args);
 
+        [TestCase(true, 30f, 45f)]
+        [TestCase(false, 30f, 30f)]
+        [TestCase(false, 12.5f, 12.5f)]
+        [TestCase(false, 0f, 1f)]
+        [TestCase(false, 99999f, 3600f)]
+        public void ProjectDefaultAndExplicitDurationsRemainDistinct(bool configured, float requested, float expected)
+        {
+            string key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.ProfilerCaptureDefaultDurationSeconds));
+            int? previous = EditorPrefs.HasKey(key) ? EditorPrefs.GetInt(key) : (int?)null;
+            ProfilerCaptureResultPayload start = null;
+            try
+            {
+                UPilotTimingSettings.ProfilerCaptureDefaultDurationSeconds = 45;
+                // The old wire payload has no useConfiguredDuration field.
+                var payload = JsonUtility.FromJson<ProfilerCaptureStartPayload>("{\"durationSec\":30}");
+                Assert.That(payload.useConfiguredDuration, Is.False);
+                payload.useConfiguredDuration = configured;
+                payload.durationSec = requested;
+                payload.includeDefaultAiMarkers = false;
+                payload.maxMarkers = 0;
+                payload.title = "profiler-duration-selection";
+                start = (ProfilerCaptureResultPayload)Call("StartProfiler", payload);
+                Assert.That(start.durationSec, Is.EqualTo(expected));
+                var stopped = (ProfilerCaptureResultPayload)Call("StopProfiler", start.captureId, "Stopped");
+                Assert.That(stopped.durationSec, Is.EqualTo(expected));
+            }
+            finally
+            {
+                try { if (start != null) Call("StopProfiler", start.captureId, "Stopped"); }
+                finally { if (previous.HasValue) EditorPrefs.SetInt(key, previous.Value); else EditorPrefs.DeleteKey(key); }
+            }
+        }
+
+        [TestCase("lowOverhead", true)]
+        [TestCase("lowOverhead", false)]
+        [TestCase("legacy", true)]
+        [TestCase("legacy", false)]
+        public void ExpiryAndManualStopReleaseSamplingResources(string mode, bool expire)
+        {
+            var start = (ProfilerCaptureResultPayload)Call("StartProfiler", new ProfilerCaptureStartPayload
+            {
+                captureMode = mode, durationSec = 1f, includeDefaultAiMarkers = false,
+                maxMarkers = 0, title = "profiler-duration-cleanup",
+            });
+            try
+            {
+                var state = typeof(UPilotRuntimeDiagnosticsService).GetField("_profiler", BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
+                var timer = state.GetType().GetField("editModeSampleTimer");
+                if (mode == "lowOverhead") Assert.That(timer.GetValue(state), Is.Not.Null);
+                else Assert.That(EditorApplication.update.GetInvocationList().Any(callback =>
+                    callback.Method.DeclaringType == typeof(UPilotRuntimeDiagnosticsService) && callback.Method.Name == "SampleProfiler"), Is.True);
+                if (expire)
+                {
+                    state.GetType().GetField("startedTimestamp").SetValue(state,
+                        System.Diagnostics.Stopwatch.GetTimestamp() - 2 * System.Diagnostics.Stopwatch.Frequency);
+                    Call("SampleProfiler");
+                }
+                else Call("StopProfiler", start.captureId, "Stopped");
+                var ended = (ProfilerCaptureResultPayload)Call("GetProfilerStatus", start.captureId);
+                Assert.That(ended.status, Is.EqualTo(expire ? "Completed" : "Stopped"));
+                Assert.That(ended.elapsedFrozen, Is.True);
+                Assert.That(timer.GetValue(state), Is.Null);
+                Assert.That(((System.Collections.IDictionary)state.GetType().GetField("recorders").GetValue(state)).Count, Is.Zero);
+                Assert.That(EditorApplication.update?.GetInvocationList().Any(callback =>
+                    callback.Method.DeclaringType == typeof(UPilotRuntimeDiagnosticsService) && callback.Method.Name == "SampleProfiler") ?? false, Is.False);
+                Assert.That(Call("StopProfiler", start.captureId, "Stopped"), Is.Not.Null);
+                Assert.That(((ProfilerCaptureResultPayload)Call("GetProfilerStatus", start.captureId)).status, Is.EqualTo(ended.status));
+            }
+            finally { Call("StopProfiler", start.captureId, "Stopped"); }
+        }
+
         [Test]
         public void BoundedBufferAndCheapSummaryPreserveTerminalIdentity()
         {

@@ -133,7 +133,7 @@ namespace CodingRiver.UPilot
         private static bool _reloadGuardAutoRefreshBlocked;
         private static bool _reloadGuardAssemblyReloadLocked;
 
-        private AddRequest _upmRequest;
+        private UPilotUpmRequestObservation _upmObservation;
         private Action<string, MessageType> _notice;
         private bool _releaseCheckRunning;
         private bool _releaseCheckCompleted;
@@ -217,6 +217,7 @@ namespace CodingRiver.UPilot
                 $"检测到你在 UPilot 更新过程中通过 Unity Package Manager 更新 UPilot 包（目标：{targetText}）。" +
                 "已取消当前 UPilot 更新任务并释放更新保护，正在尝试切换为 Package Manager 更新恢复流程。";
 
+            CancelUpmObservation("external_package_manager_takeover");
             SessionState.SetBool(ProjectKey(ExternalPackageManagerAbortKey), true);
             if (downloadState.IsRunning)
             {
@@ -382,9 +383,8 @@ namespace CodingRiver.UPilot
                 return;
             try
             {
-                _upmRequest = Client.Add(identifier);
-                EditorApplication.update += PollUpmUpdate;
                 SetOperationPhase(UPilotUpdateOperationPhase.UpdatingPackage, "正在重试 Unity Package Manager 更新…");
+                BeginUpmObservation(identifier);
             }
             catch (Exception ex)
             {
@@ -1057,7 +1057,7 @@ namespace CodingRiver.UPilot
             if (downloadRunning)
                 UPilotServerRuntimeService.Instance.CancelDownload();
 
-            Instance._upmRequest = null;
+            Instance.CancelUpmObservation("source_channel_reset");
             Instance._releaseCheckRunning = false;
             Instance._releaseCheckCompleted = false;
             Instance._releaseCheckStatus = new UPilotReleaseUpdateCheckStatus();
@@ -1077,10 +1077,10 @@ namespace CodingRiver.UPilot
         internal string RepairUpdateState(Action<string, MessageType> notice = null)
         {
             Debug.LogWarning("[UPilot] Repairing update state and reload guard.");
+            CancelUpmObservation("manual_repair");
             EndUpdateReloadGuard("manual repair", force: true, clearFailure: true);
             ClearOperationStatus();
             UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: true);
-            _upmRequest = null;
 
             if (UPilotSetupState.IsCompleted)
             {
@@ -1368,7 +1368,8 @@ namespace CodingRiver.UPilot
 
             try
             {
-                _upmRequest = Client.Add(identifier);
+                SetOperationPhase(UPilotUpdateOperationPhase.UpdatingPackage, "正在更新 UPilot 包…", manifest.UpmVersion, installManagedServerAfterUpdate ? manifest.ServerVersion : "");
+                BeginUpmObservation(identifier);
             }
             catch (Exception ex)
             {
@@ -1380,45 +1381,53 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            EditorApplication.update += PollUpmUpdate;
-            SetOperationPhase(
-                UPilotUpdateOperationPhase.UpdatingPackage,
-                installManagedServerAfterUpdate
-                    ? "正在更新 UPilot 包，完成后会继续更新 MCP 服务…"
-                    : "正在更新 UPilot 包…",
-                manifest.UpmVersion,
-                installManagedServerAfterUpdate ? manifest.ServerVersion : "");
-            notice?.Invoke("正在更新 UPilot 包…", MessageType.Info);
+            if (_upmObservation != null) notice?.Invoke("正在更新 UPilot 包…", MessageType.Info);
         }
 
-        private void PollUpmUpdate()
+        internal void CompleteObservedUpmUpdateFromRegistration() => _upmObservation?.CompleteFromRegistration();
+
+        private void CancelUpmObservation(string reason)
         {
-            if (_upmRequest == null || !_upmRequest.IsCompleted)
-                return;
+            var observation = _upmObservation;
+            observation?.Cancel(reason);
+            if (ReferenceEquals(_upmObservation, observation)) _upmObservation = null;
+        }
 
-            EditorApplication.update -= PollUpmUpdate;
-            if (_upmRequest.Status == StatusCode.Failure)
-            {
-                _notice?.Invoke("UPilot 包更新失败：" + (_upmRequest.Error?.message ?? "unknown"), MessageType.Error);
-                _upmRequest = null;
-                UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
-                SetOperationFailed("UPilot 包更新失败");
-                return;
-            }
-
-            var managedPending = UPilotPackageUpdateLifecycle.IsManagedServerUpdatePending;
-            SetOperationPhase(
-                UPilotUpdateOperationPhase.WaitingForReload,
-                managedPending
-                    ? "UPilot 包已更新，等待 Unity 重载后继续更新 MCP 服务…"
-                    : "UPilot 包已更新，等待 Unity 重载后恢复服务…");
-            _notice?.Invoke(
-                managedPending
-                    ? "UPilot 包已更新，Unity 重载后将继续更新 MCP 服务"
-                    : "UPilot 包已更新，Unity 重载后将自动恢复服务",
-                MessageType.Info);
-            _upmRequest = null;
-            UPilotPackageUpdateLifecycle.MarkPackageUpdateCompleted();
+        private void BeginUpmObservation(string identifier)
+        {
+            if (_upmObservation != null && !_upmObservation.IsEnded)
+                throw new InvalidOperationException("An UPM update observation is already active.");
+            AddRequest request = null;
+            var notice = _notice;
+            UPilotUpmRequestObservation observation = null;
+            observation = UPilotUpmRequestObservation.Create(this, Guid.NewGuid().ToString("N"), "upilot.update",
+                () => request = Client.Add(identifier), () => request != null && request.IsCompleted,
+                () => request.Status == StatusCode.Failure
+                    ? new UPilotUpmRequestException("UPM_REQUEST_FAILED", request.Error?.message ?? "unknown") : null,
+                () =>
+                {
+                    request = null;
+                    if (!ReferenceEquals(_upmObservation, observation)) return;
+                    _upmObservation = null;
+                    var managedPending = UPilotPackageUpdateLifecycle.IsManagedServerUpdatePending;
+                    if (ReadOperationPhase() != UPilotUpdateOperationPhase.WaitingForReload)
+                        UPilotPackageUpdateLifecycle.MarkPackageUpdateCompleted();
+                    notice?.Invoke(managedPending ? "UPilot 包已更新，Unity 重载后将继续更新 MCP 服务"
+                        : "UPilot 包已更新，Unity 重载后将自动恢复服务", MessageType.Info);
+                },
+                ex =>
+                {
+                    request = null;
+                    if (!ReferenceEquals(_upmObservation, observation)) return;
+                    _upmObservation = null;
+                    SetOperationFailed("UPilot 包更新观察结束：" + ex.Message);
+                    if (observation.EndReason == "start_failed" || ex is UPilotUpmRequestException upm && upm.Code == "UPM_REQUEST_FAILED")
+                        UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
+                    else UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
+                    if (!(ex is OperationCanceledException)) notice?.Invoke("UPilot 包更新失败：" + ex.Message, MessageType.Error);
+                });
+            _upmObservation = observation;
+            observation.Start();
         }
 
         private static UPilotUpdateOperationPhase ReadOperationPhase()
@@ -1641,11 +1650,13 @@ namespace CodingRiver.UPilot
 
         private static void OnEditorQuitting()
         {
+            Instance.CancelUpmObservation("editor_quitting");
             UPilotServerRuntimeService.Instance.CancelDownload();
         }
 
         private static void OnBeforeAssemblyReload()
         {
+            Instance.CancelUpmObservation("domain_reload");
             UPilotServerRuntimeService.Instance.CancelDownload();
             if (UPilotServerRuntimeService.IsSourceUpdateChannel())
                 return;

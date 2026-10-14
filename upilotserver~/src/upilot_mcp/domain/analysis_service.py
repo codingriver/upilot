@@ -93,7 +93,7 @@ class ProjectAnalysisDomainService:
 
     async def profiler_capture_start(
         self,
-        duration_sec: float = 30.0,
+        duration_sec: float | None = None,
         sample_every_frames: int = 1,
         title: str = "runtime-profiler",
         output_directory: str = "",
@@ -113,7 +113,9 @@ class ProjectAnalysisDomainService:
             new_id("req"),
             "profiler.capture.start",
             {
-                "durationSec": max(1.0, min(float(duration_sec), 3600.0)),
+                # Keep a numeric fallback for older Bridges that do not know the flag.
+                "durationSec": 30.0 if duration_sec is None else max(1.0, min(float(duration_sec), 3600.0)),
+                "useConfiguredDuration": duration_sec is None,
                 "sampleEveryFrames": max(1, min(int(sample_every_frames), 600)),
                 "title": title,
                 "outputDirectory": output_directory,

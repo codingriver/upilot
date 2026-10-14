@@ -2,7 +2,12 @@ using System;
 using System.Collections;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Text.RegularExpressions;
+using System.Threading;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -10,6 +15,239 @@ namespace CodingRiver.UPilot.Tests
 {
     public sealed class UPilotCommandPhaseTests
     {
+        private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+        private static double WatchdogAt(UPilotBridge bridge) =>
+            (double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(bridge);
+        private static long PumpAt(UPilotBridge bridge) =>
+            (long)typeof(UPilotBridge).GetField("_lastMainThreadPumpAt", Private).GetValue(bridge);
+        private static UPilotBridge IsolatedWatchdogBridge()
+        {
+            // Constructors restore live state and subscribe callbacks; this instance only checks our tracker.
+            var bridge = (UPilotBridge)FormatterServices.GetUninitializedObject(typeof(UPilotBridge));
+            typeof(UPilotBridge).GetField("_watchdogIntervalMs", Private).SetValue(bridge, 2000);
+            return bridge;
+        }
+
+        [Test]
+        public void WatchdogOnlyChecksWhileOwnedTrackerHasActiveContexts()
+        {
+            var tracker = new UPilotOperationTracker();
+            var bridge = IsolatedWatchdogBridge();
+            bridge.CheckWatchdog(tracker, 100);
+            Assert.That(tracker.HasActiveCommands, Is.False);
+            Assert.That(WatchdogAt(bridge), Is.Zero);
+            var first = tracker.BeginOperation("watchdog-owned-first", "fixture.watchdog_first");
+            var second = tracker.BeginOperation("watchdog-owned-second", "fixture.watchdog_second");
+            Assert.That(tracker.HasActiveCommands, Is.True);
+            bridge.CheckWatchdog(tracker, 100);
+            Assert.That(WatchdogAt(bridge), Is.EqualTo(100), "The first activity after an overdue idle period is eligible immediately.");
+            bridge.CheckWatchdog(tracker, 102);
+            Assert.That(WatchdogAt(bridge), Is.EqualTo(100));
+            bridge.CheckWatchdog(tracker, 102.01);
+            Assert.That(WatchdogAt(bridge), Is.EqualTo(102.01));
+            first.Complete("owned watchdog cleanup"); tracker.EndOperation(first.CommandId);
+            Assert.That(tracker.HasActiveCommands, Is.True);
+            bridge.CheckWatchdog(tracker, 105);
+            Assert.That(WatchdogAt(bridge), Is.EqualTo(105));
+            second.Complete("owned watchdog cleanup"); tracker.EndOperation(second.CommandId);
+            Assert.That(tracker.HasActiveCommands, Is.False);
+            bridge.CheckWatchdog(tracker, 1000);
+            Assert.That(WatchdogAt(bridge), Is.EqualTo(105));
+            tracker.BeginOperation("watchdog-owned-reset", "fixture.watchdog_reset");
+            bridge.CheckWatchdog(tracker, 1001);
+            tracker.AbortActive(); // This tracker is isolated; no shared activity is cleared.
+            Assert.That(tracker.HasActiveCommands, Is.False);
+            bridge.CheckWatchdog(tracker, 2000);
+            Assert.That(WatchdogAt(bridge), Is.EqualTo(1001));
+        }
+
+        [Test]
+        public void WatchdogHotIntervalChangesUseLastRealCheckWithoutChangingCommandClock()
+        {
+            var key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.WatchdogIntervalSeconds));
+            bool hadKey = EditorPrefs.HasKey(key);
+            int original = EditorPrefs.GetInt(key);
+            var bridge = IsolatedWatchdogBridge();
+            using var reconnectChanged = new SemaphoreSlim(0, 1);
+            typeof(UPilotBridge).GetField("_reconnectIntervalChanged", Private).SetValue(bridge, reconnectChanged);
+            var changed = (Action<string>)Delegate.CreateDelegate(typeof(Action<string>), bridge,
+                typeof(UPilotBridge).GetMethod("ApplyTimingPreferenceChange", Private));
+            var tracker = new UPilotOperationTracker();
+            var context = tracker.BeginOperation("watchdog-owned-schedule", "fixture.watchdog_schedule");
+            var entry = tracker.GetEntriesCopy().Single();
+            var received = entry.ReceivedAt;
+            UPilotTimingSettings.Changed += changed;
+            try
+            {
+                UPilotTimingSettings.WatchdogIntervalSeconds = 2;
+                bridge.CheckWatchdog(tracker, 100);
+                UPilotTimingSettings.WatchdogIntervalSeconds = 10;
+                bridge.CheckWatchdog(tracker, 103);
+                Assert.That(WatchdogAt(bridge), Is.EqualTo(100), "Lengthening postpones from the last actual check.");
+                UPilotTimingSettings.WatchdogIntervalSeconds = 1;
+                bridge.CheckWatchdog(tracker, 103);
+                Assert.That(WatchdogAt(bridge), Is.EqualTo(103), "Shortening makes an overdue check eligible.");
+                bridge.CheckWatchdog(tracker, 104);
+                Assert.That(WatchdogAt(bridge), Is.EqualTo(103));
+                bridge.CheckWatchdog(tracker, 104.01);
+                Assert.That(WatchdogAt(bridge), Is.EqualTo(104.01));
+                EditorPrefs.DeleteKey(key);
+                UPilotTimingSettings.PreferencesReset();
+                bridge.CheckWatchdog(tracker, 105.5);
+                Assert.That(WatchdogAt(bridge), Is.EqualTo(104.01));
+                bridge.CheckWatchdog(tracker, 106.02);
+                Assert.That(WatchdogAt(bridge), Is.EqualTo(106.02));
+                Assert.That(entry.ReceivedAt, Is.EqualTo(received));
+            }
+            finally
+            {
+                UPilotTimingSettings.Changed -= changed;
+                context.Complete("owned scheduling fixture cleanup"); tracker.EndOperation(context.CommandId);
+                if (hadKey) EditorPrefs.SetInt(key, original); else EditorPrefs.DeleteKey(key);
+                UPilotTimingSettings.PreferencesReset();
+            }
+        }
+
+        [TestCase("queued", 10)]
+        [TestCase("executing", 30)]
+        [TestCase("waiting", 120)]
+        [TestCase("received", 300)]
+        public void WatchdogRetainsPhaseThresholdFromOriginalReceivedTime(string phase, int thresholdSeconds)
+        {
+            var tracker = new UPilotOperationTracker();
+            var context = tracker.BeginOperation("watchdog-owned-threshold", "fixture.watchdog_threshold");
+            var entry = tracker.GetEntriesCopy().Single();
+            // Inject elapsed age into this isolated fixture; no claim of real long-running execution.
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-(thresholdSeconds - 5));
+            context.SetPhase(phase);
+            Assert.That(tracker.RunWatchdog(), Is.Empty);
+            Assert.That(entry.IsStuck, Is.False);
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-(thresholdSeconds + 5));
+            context.SetPhase(phase); // A phase write must not reset the received clock.
+            Assert.That(tracker.RunWatchdog(), Is.EqualTo(new[] { context.CommandName }));
+            Assert.That(entry.IsStuck, Is.True);
+            var warnedSteps = entry.Steps.Count;
+            Assert.That(tracker.RunWatchdog(), Is.Empty);
+            Assert.That(entry.Steps.Count, Is.EqualTo(warnedSteps));
+            context.Complete("owned threshold fixture cleanup"); tracker.EndOperation(context.CommandId);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void WatchdogSkipsTerminalContextBeforeHandlerFinally(bool failed)
+        {
+            var tracker = new UPilotOperationTracker();
+            var bridge = IsolatedWatchdogBridge();
+            var context = tracker.BeginOperation("watchdog-owned-terminal", "fixture.watchdog_terminal");
+            var entry = tracker.GetEntriesCopy().Single();
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-305);
+            if (failed)
+            {
+                if (Logger.LogToUnityConsole && Logger.MinLevel <= Logger.LogLevel.Error)
+                    LogAssert.Expect(LogType.Error, new Regex("FAIL fixture.watchdog_terminal id=" + context.CommandId));
+                context.Fail("fixture_failure", "owned terminal filter fixture");
+            }
+            else context.Complete("owned terminal filter fixture");
+            var steps = entry.Steps.Count;
+            Assert.That(tracker.HasActiveCommands, Is.True, "The handler's finally has not yet ended this context.");
+            bridge.CheckWatchdog(tracker, 100);
+            Assert.That(entry.IsStuck, Is.False);
+            Assert.That(entry.Steps.Count, Is.EqualTo(steps));
+            Assert.That(tracker.GetCriticallyStuckCommandIds(), Is.Empty);
+            tracker.EndOperation(context.CommandId);
+            Assert.That(tracker.HasActiveCommands, Is.False);
+        }
+
+        [Test]
+        public void CriticalWatchdogRetainsAbsoluteThresholdWithoutRestartingUnity()
+        {
+            var tracker = new UPilotOperationTracker();
+            var context = tracker.BeginOperation("watchdog-owned-critical", "fixture.watchdog_critical");
+            var entry = tracker.GetEntriesCopy().Single();
+            context.SetPhase("waiting");
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-295);
+            Assert.That(tracker.GetCriticallyStuckCommandIds(), Is.Empty);
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-305);
+            Assert.That(entry.IsStuck, Is.False);
+            Assert.That(tracker.GetCriticallyStuckCommandIds(), Is.EqualTo(new[] { context.CommandId }),
+                "The critical criterion is independent of the warning marker and phase.");
+            context.Complete("owned critical fixture cleanup");
+            Assert.That(tracker.GetCriticallyStuckCommandIds(), Is.Empty);
+            tracker.EndOperation(context.CommandId);
+        }
+
+        [Serializable]
+        private sealed class WatchdogPumpWitness
+        {
+            public string project, commandId;
+            public double activeFirst, activeSecond, idleBefore, idleAfter, idleObservedSeconds;
+            public long idlePumpBefore, idlePumpAfter;
+            public bool activityObserved, idleObserved, ownedReleased, settingsRestored;
+        }
+
+        [UnityTest]
+        public IEnumerator ProductionWatchdogChecksActiveCommandsAndStopsScanningWhenIdle()
+        {
+            var project = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            if (!string.Equals(project, @"D:\upilot\Tests~\UPilotTest", StringComparison.OrdinalIgnoreCase))
+                Assert.Ignore("Production watchdog acceptance requires the exact canonical project.");
+            var key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.WatchdogIntervalSeconds));
+            bool hadKey = EditorPrefs.HasKey(key);
+            int original = EditorPrefs.GetInt(key);
+            var tracker = UPilotOperationTracker.Instance;
+            var bridge = UPilotBridge.Instance;
+            var id = "watchdog-pump-" + Guid.NewGuid().ToString("N");
+            var context = tracker.BeginOperation(id, "fixture.watchdog_pump");
+            var witness = new WatchdogPumpWitness { project = project, commandId = id };
+            double deadline = EditorApplication.timeSinceStartup + 15;
+            try
+            {
+                UPilotTimingSettings.WatchdogIntervalSeconds = 1;
+                double before = WatchdogAt(bridge);
+                while (WatchdogAt(bridge) <= before && EditorApplication.timeSinceStartup < deadline) yield return null;
+                witness.activeFirst = WatchdogAt(bridge);
+                Assert.That(witness.activeFirst, Is.GreaterThan(before), "The actual production pump must check our active command.");
+                while (WatchdogAt(bridge) <= witness.activeFirst && EditorApplication.timeSinceStartup < deadline) yield return null;
+                witness.activeSecond = WatchdogAt(bridge);
+                Assert.That(witness.activeSecond - witness.activeFirst, Is.GreaterThanOrEqualTo(1));
+                witness.activityObserved = true;
+                context.Complete("production watchdog activity observed"); tracker.EndOperation(id);
+
+                // Wait for unrelated commands to finish naturally; never clear shared activity.
+                while (!witness.idleObserved && EditorApplication.timeSinceStartup < deadline)
+                {
+                    while (tracker.HasActiveCommands && EditorApplication.timeSinceStartup < deadline) yield return null;
+                    if (EditorApplication.timeSinceStartup >= deadline) break;
+                    witness.idleBefore = WatchdogAt(bridge); witness.idlePumpBefore = PumpAt(bridge);
+                    double idleStarted = EditorApplication.timeSinceStartup;
+                    bool interrupted = false;
+                    while (EditorApplication.timeSinceStartup - idleStarted < 1.25 && EditorApplication.timeSinceStartup < deadline)
+                    {
+                        yield return null;
+                        if (tracker.HasActiveCommands || WatchdogAt(bridge) != witness.idleBefore) { interrupted = true; break; }
+                    }
+                    witness.idleAfter = WatchdogAt(bridge); witness.idlePumpAfter = PumpAt(bridge);
+                    witness.idleObservedSeconds = EditorApplication.timeSinceStartup - idleStarted;
+                    witness.idleObserved = !interrupted && witness.idleObservedSeconds >= 1.25 && witness.idlePumpAfter > witness.idlePumpBefore;
+                }
+                Assert.That(witness.idleObserved, Is.True, "Within the fixed deadline, observe natural idle across one interval while the production pump continues.");
+                Assert.That(witness.idleAfter, Is.EqualTo(witness.idleBefore));
+            }
+            finally
+            {
+                context.Complete("production watchdog fixture cleanup"); tracker.EndOperation(id);
+                if (hadKey) EditorPrefs.SetInt(key, original); else EditorPrefs.DeleteKey(key);
+                UPilotTimingSettings.PreferencesReset();
+                witness.ownedReleased = tracker.GetContext(id) == null;
+                witness.settingsRestored = EditorPrefs.HasKey(key) == hadKey && (!hadKey || EditorPrefs.GetInt(key) == original);
+                var directory = Path.Combine(project, "Log", "UPilotValidation", "Watchdog_20261014");
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, id + ".json"), JsonUtility.ToJson(witness, true));
+            }
+            Assert.That(witness.ownedReleased, Is.True);
+            Assert.That(witness.settingsRestored, Is.True);
+        }
+
         [Test]
         public void PhaseAndStepsCannotChangeCompletedEntry()
         {

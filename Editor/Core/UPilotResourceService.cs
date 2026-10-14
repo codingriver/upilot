@@ -428,48 +428,25 @@ namespace CodingRiver.UPilot
 
         private async Task HandlePackagesAsync(string id, string json, CancellationToken token)
         {
-            var tcs = new TaskCompletionSource<PackagesResourcePayload>();
-            _bridge.EnqueueTracked(id, () =>
-            {
-                try
-                {
-                    var result = new PackagesResourcePayload();
-                    var request = UnityEditor.PackageManager.Client.List(true);
-
-                    // Synchronous wait — PackageManager.Client.List is request-based
-                    // but we're already on main thread, so we spin-wait
-                    while (!request.IsCompleted)
-                    {
-                        System.Threading.Thread.Sleep(10);
-                    }
-
-                    if (request.Status == UnityEditor.PackageManager.StatusCode.Success)
-                    {
-                        foreach (var pkg in request.Result)
-                        {
-                            result.packages.Add(new PackageInfoItemPayload
-                            {
-                                name        = pkg.name,
-                                version     = pkg.version,
-                                displayName = pkg.displayName,
-                                description = pkg.description,
-                            });
-                        }
-                    }
-
-                    tcs.SetResult(result);
-                }
-                catch (Exception ex) { tcs.SetException(ex); }
-            });
-
             try
             {
-                var payload = await tcs.Task;
+                var payload = await UPilotUpmRequestObservation.RunAsync(_bridge, id, "resource.packages",
+                    () => UnityEditor.PackageManager.Client.List(true), request =>
+                    {
+                        var result = new PackagesResourcePayload();
+                        foreach (var pkg in request.Result)
+                            result.packages.Add(new PackageInfoItemPayload {
+                                name = pkg.name, version = pkg.version,
+                                displayName = pkg.displayName, description = pkg.description });
+                        return result;
+                    }, token);
                 await _bridge.SendResultAsync(id, "resource.packages", payload, token);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.packages");
+                var code = ex is UPilotUpmRequestException upm ? upm.Code : "RESOURCE_FAILED";
+                await _bridge.SendErrorAsync(id, code, ex.Message, token, "resource.packages");
             }
         }
 

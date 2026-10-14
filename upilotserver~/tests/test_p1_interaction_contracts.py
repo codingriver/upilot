@@ -71,6 +71,8 @@ def test_profiler_defaults_and_explicit_legacy_mode_are_forwarded():
     default = asyncio.run(service.profiler_capture_start())
     assert default.data["captureMode"] == "lowOverhead"
     assert default.data["maxSamples"] == 4096
+    assert default.data["useConfiguredDuration"] is True
+    assert default.data["durationSec"] == 30.0
     legacy = asyncio.run(service.profiler_capture_start(capture_mode="legacy", include_default_ai_markers=False))
     assert legacy.data["captureMode"] == "legacy" and legacy.data["includeDefaultAiMarkers"] is False
     assert not asyncio.run(service.profiler_capture_start(capture_mode="wrong")).ok

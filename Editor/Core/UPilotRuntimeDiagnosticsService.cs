@@ -87,6 +87,7 @@ namespace CodingRiver.UPilot
         public string captureMode = "lowOverhead";
         public int maxSamples = 4096;
         public float durationSec = 30f;
+        public bool useConfiguredDuration;
         public int sampleEveryFrames = 1;
         public string title = "runtime-profiler";
         public string outputDirectory = "";
@@ -466,7 +467,8 @@ namespace CodingRiver.UPilot
                 _ = new System.Text.RegularExpressions.Regex(payload.markerNameRegex,
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
             long startup = System.Diagnostics.Stopwatch.GetTimestamp();
-            var duration = Mathf.Clamp(payload.durationSec, 1f, 3600f);
+            var duration = Mathf.Clamp(payload.useConfiguredDuration
+                ? UPilotTimingSettings.ProfilerCaptureDefaultDurationSeconds : payload.durationSec, 1f, 3600f);
             bool captureInPlayMode = EditorApplication.isPlaying;
             SynchronizationContext mainThreadContext = SynchronizationContext.Current;
             if (!captureInPlayMode && payload.captureMode == "lowOverhead" && mainThreadContext == null)

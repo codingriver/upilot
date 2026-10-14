@@ -28,6 +28,48 @@ def _schema(tool_name: str) -> dict:
     return tools[tool_name].inputSchema
 
 
+@pytest.mark.parametrize("arguments,configured,seconds", [
+    ({}, True, 30.0),
+    ({"durationSec": None}, True, 30.0),
+    ({"durationSec": 30}, False, 30.0),
+    ({"durationSec": 12.5}, False, 12.5),
+])
+def test_profiler_duration_default_matches_native_and_proxy(monkeypatch, arguments, configured, seconds) -> None:
+    calls = []
+
+    class Dispatcher:
+        async def call(self, request_id, command, payload):
+            calls.append((command, payload))
+            return ok(request_id, payload)
+
+    facade = McpToolFacade.__new__(McpToolFacade)
+    facade.dispatcher = Dispatcher()
+    monkeypatch.setattr(analysis_tools, "_get_facade", lambda: facade)
+    schema = _schema("unity_profiler_capture_start")
+    duration = schema["properties"]["durationSec"]
+    assert "durationSec" not in schema.get("required", [])
+    assert duration["default"] is None
+    assert {entry["type"] for entry in duration["anyOf"]} == {"number", "null"}
+    discovered = proxy_argument_schema(facade.profiler_capture_start, "unity_profiler_capture_start")
+    proxy_duration = next(entry for entry in discovered if entry["name"] == "durationSec")
+    assert proxy_duration["required"] is False and proxy_duration["default"] is None
+    # Proxy metadata carries the default separately and omits the display-only title.
+    assert proxy_duration["schema"] == {key: value for key, value in duration.items() if key not in {"title", "default"}}
+    approved = CONFIG.write_access_approved
+    object.__setattr__(CONFIG, "write_access_approved", True)
+    try:
+        native = asyncio.run(runtime.mcp._tool_manager.call_tool("unity_profiler_capture_start", arguments))
+        proxy = asyncio.run(dispatch_public_tool(facade, "unity_profiler_capture_start", arguments))
+    finally:
+        object.__setattr__(CONFIG, "write_access_approved", approved)
+    assert native.structuredContent["ok"] and proxy.ok
+    assert len(calls) == 2
+    for command, payload in calls:
+        assert command == "profiler.capture.start"
+        assert payload["useConfiguredDuration"] is configured
+        assert payload["durationSec"] == seconds
+
+
 def test_proxy_discovery_uses_exact_public_schema_names_and_types() -> None:
     service = McpToolFacade.__new__(McpToolFacade)
     cases = {

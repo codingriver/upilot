@@ -37,11 +37,11 @@ namespace CodingRiver.UPilot.Tests
         }
         [Serializable] private sealed class SharedPump
         {
-            public string originalId, executionPhase;
-            public int effectCount, routeThreadId, executionThreadId, mainThreadId;
+            public string originalId, executionPhase, watchdogCommandId;
+            public int effectCount, routeThreadId, executionThreadId, mainThreadId, watchdogIntervalSeconds;
             public long pumpAt;
             public double watchdogBefore, watchdogAfter;
-            public bool executingIdentityVerified;
+            public bool executingIdentityVerified, watchdogObserverReleased, watchdogPreferenceRestored;
         }
         [Serializable] private sealed class LoopEnd { public string phase, status, failure; }
         [Serializable] private sealed class OwnedTasks
@@ -172,6 +172,7 @@ namespace CodingRiver.UPilot.Tests
             var paths = new[]
             {
                 "Tests/Editor/UPilotRealUnityRecoveryTests.cs", "Editor/Core/UPilotBridge.cs",
+                "Editor/Core/UPilotTimingSettings.cs", "Editor/Core/UPilotOperationTracker.cs",
                 "Editor/Core/UPilotCommandRouter.cs", "Editor/Core/UPilotProtocol.cs",
                 "upilotserver~/tests/real_unity_recovery_peer.py", "upilotserver~/src/upilot_mcp/server.py",
                 "upilotserver~/src/upilot_mcp/dispatcher.py", "upilotserver~/src/upilot_mcp/state_store.py"
@@ -220,8 +221,7 @@ namespace CodingRiver.UPilot.Tests
             var sharedBridge = productionMainThreadPump ? UPilotBridge.Instance : null;
             var sharedPump = new SharedPump
             {
-                mainThreadId = identity.mainThreadId,
-                watchdogBefore = sharedBridge == null ? 0 : (double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(sharedBridge)
+                mainThreadId = identity.mainThreadId
             };
             void PumpOwnedQueue()
             {
@@ -414,11 +414,43 @@ namespace CodingRiver.UPilot.Tests
                     await WaitFor(directory, "effect", peer, deadline.Token);
                     if (productionMainThreadPump)
                     {
-                        // Observe the normal shared 2-second watchdog tick; do not
-                        // call the watchdog or change its clock/thresholds here.
-                        while ((double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(sharedBridge) <= sharedPump.watchdogBefore)
-                            await Task.Delay(20, deadline.Token);
-                        sharedPump.watchdogAfter = (double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(sharedBridge);
+                        // Hold owned activity while observing one actual shared-pump check.
+                        // A bounded fixture interval preserves the original peer/test budgets.
+                        var watchdogKey = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.WatchdogIntervalSeconds));
+                        var hadWatchdogPreference = EditorPrefs.HasKey(watchdogKey);
+                        var watchdogPreference = EditorPrefs.GetInt(watchdogKey);
+                        var tracker = UPilotOperationTracker.Instance;
+                        OperationContext watchdogContext = null;
+                        sharedPump.watchdogCommandId = "fixture-watchdog-" + Guid.NewGuid().ToString("N");
+                        ownedIds.Add(sharedPump.watchdogCommandId);
+                        try
+                        {
+                            UPilotTimingSettings.WatchdogIntervalSeconds = 1;
+                            sharedPump.watchdogIntervalSeconds = UPilotTimingSettings.WatchdogIntervalSeconds;
+                            sharedPump.watchdogBefore = (double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(sharedBridge);
+                            watchdogContext = tracker.BeginOperation(sharedPump.watchdogCommandId, "fixture.watchdog_observation");
+                            while ((double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(sharedBridge) <= sharedPump.watchdogBefore)
+                                await Task.Delay(20, deadline.Token);
+                            sharedPump.watchdogAfter = (double)typeof(UPilotBridge).GetField("_lastWatchdogCheck", Private).GetValue(sharedBridge);
+                        }
+                        finally
+                        {
+                            try { watchdogContext?.Complete("owned shared-pump watchdog observation ended"); }
+                            finally
+                            {
+                                try { tracker.EndOperation(sharedPump.watchdogCommandId); }
+                                finally
+                                {
+                                    if (hadWatchdogPreference) EditorPrefs.SetInt(watchdogKey, watchdogPreference);
+                                    else EditorPrefs.DeleteKey(watchdogKey);
+                                    UPilotTimingSettings.PreferencesReset();
+                                }
+                            }
+                        }
+                        sharedPump.watchdogObserverReleased = tracker.GetContext(sharedPump.watchdogCommandId) == null;
+                        sharedPump.watchdogPreferenceRestored = EditorPrefs.HasKey(watchdogKey) == hadWatchdogPreference &&
+                            (!hadWatchdogPreference || EditorPrefs.GetInt(watchdogKey) == watchdogPreference);
+                        Assert.That(sharedPump.watchdogObserverReleased && sharedPump.watchdogPreferenceRestored, Is.True);
                         sharedPump.effectCount = cleanup.effectCount;
                         sharedPump.routeThreadId = cleanup.routeThreadId;
                         sharedPump.executionThreadId = cleanup.executionThreadId;

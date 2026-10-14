@@ -131,6 +131,46 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Field<bool>("_deferredRepairScheduled"), Is.False);
         }
 
+        [Test] public void SourceResetReleasesAnActiveSelfUpdateObservationBeforeClearingStatus()
+        {
+            var service = UPilotUpdateService.Instance;
+            int failures = 0;
+            var observation = UPilotUpmRequestObservation.Create(service, "fixture-update", "upilot.update",
+                () => { }, () => false, () => null, () => Assert.Fail("Reset cannot deliver success."), ex => ++failures);
+            typeof(UPilotUpdateService).GetField("_upmObservation", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(service, observation);
+            try
+            {
+                observation.Start();
+                UPilotUpdateService.SetOperationPhase(UPilotUpdateOperationPhase.UpdatingPackage, "fixture");
+                UPilotUpdateService.ResetSourceChannelState();
+                observation.Tick();
+                Assert.That(observation.IsSubscribed, Is.False);
+                Assert.That(failures, Is.EqualTo(1));
+                Assert.That(service.GetOperationStatus().Phase, Is.EqualTo(UPilotUpdateOperationPhase.None));
+            }
+            finally { observation.Cancel("fixture_end"); typeof(UPilotUpdateService).GetField("_upmObservation", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(service, null); }
+        }
+
+        [Test] public void RegisteredCompletionReleasesObservationAndPreservesRecoveryHandoff()
+        {
+            var service = UPilotUpdateService.Instance;
+            int successes = 0, failures = 0;
+            var observation = UPilotUpmRequestObservation.Create(service, "fixture-register", "upilot.update",
+                () => { }, () => false, () => null, () => ++successes, ex => ++failures);
+            var field = typeof(UPilotUpdateService).GetField("_upmObservation", BindingFlags.Instance | BindingFlags.NonPublic);
+            field.SetValue(service, observation);
+            try
+            {
+                observation.Start();
+                SessionState.SetBool(UPilotPreferences.ProjectKey("CodingRiver.UPilot.PackageUpdate.InProgress"), true);
+                UPilotPackageUpdateLifecycle.MarkPackageUpdateCompleted();
+                observation.Cancel("domain_reload");
+                Assert.That(observation.IsSubscribed, Is.False); Assert.That(successes, Is.EqualTo(1)); Assert.That(failures, Is.Zero);
+                Assert.That(service.GetOperationStatus().Phase, Is.EqualTo(UPilotUpdateOperationPhase.WaitingForReload));
+            }
+            finally { observation.Cancel("fixture_end"); field.SetValue(service, null); }
+        }
+
         private static void SaveWait(string key, string id, int timeout, long deadline) =>
             SessionState.SetString(UPilotPreferences.ProjectKey(key),
                 "{\"operationId\":\"" + id + "\",\"timeoutSeconds\":" + timeout + ",\"deadlineUtcMs\":" + deadline + "}");

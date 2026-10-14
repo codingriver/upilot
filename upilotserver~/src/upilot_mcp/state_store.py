@@ -98,6 +98,7 @@ class StateStore:
         self._current_compile_rounds: set[str] = set()
         self._compile_round_runtime: dict[str, dict] = {}
         self._write_batch_runtime: dict[str, dict] = {}
+        self._terminal_association_key: tuple | None = None
         self.compile = CompileSnapshot()
         self.editor = EditorSnapshot()
         self.auto_fix = None
@@ -121,6 +122,7 @@ class StateStore:
         self._db_path: Path | None = None
 
     def configure_project(self, project_path: str) -> None:
+        self._terminal_association_key = None
         resolved = str(Path(project_path).resolve())
         if self._project_path == resolved and self._db_path is not None:
             return
@@ -267,6 +269,7 @@ class StateStore:
         compile_when_edit_mode: bool,
         changes: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
+        self._terminal_association_key = None
         if self._db_path is None or not self._project_path:
             raise RuntimeError("StateStore project persistence is not configured")
         now = _now_ms()
@@ -668,6 +671,7 @@ class StateStore:
 
     def freeze_write_batch_round(self, excluded: set[str] | None = None) -> dict[str, Any] | None:
         """Commit immutable membership before any Refresh. Only proven unstarted rounds may resume."""
+        self._terminal_association_key = None
         self.expire_write_batches()
         excluded = excluded or set()
         if self._db_path is None:
@@ -723,6 +727,8 @@ class StateStore:
         return str(row[0]) if row else ""
 
     def get_write_batch_round(self, round_id: str) -> dict[str, Any] | None:
+        if round_id:
+            self._terminal_association_key = None
         if self._db_path is None or not round_id:
             return None
         try:
@@ -787,6 +793,7 @@ class StateStore:
                 if member in self._current_write_batches and not (self.get_write_batch(member) or {}).get("terminal")]
 
     def record_write_batch_round_dispatch(self, round_id: str, request_id: str) -> bool:
+        self._terminal_association_key = None
         if not self.live_write_batch_round_members(round_id):
             return False
         with sqlite3.connect(self._db_path) as db:
@@ -830,6 +837,7 @@ class StateStore:
         return True
 
     def _persist_round_evidence(self, payload: dict[str, Any]) -> bool:
+        self._terminal_association_key = None
         round_id = self.write_batch_round_id(str(payload.get("writeBatchId") or ""))
         if not round_id:
             return False
@@ -880,6 +888,7 @@ class StateStore:
         return True
 
     def mark_write_batch(self, write_batch_id: str, status: str, *, compile_operation_id: str = "", error: str = "") -> None:
+        self._terminal_association_key = None
         if self._db_path is None or write_batch_id not in self._current_write_batches:
             return
         if status == "verified":
@@ -915,6 +924,8 @@ class StateStore:
 
 
     def get_write_batch(self, write_batch_id: str) -> dict[str, Any] | None:
+        if write_batch_id:
+            self._terminal_association_key = None
         if self._db_path is None or not write_batch_id:
             return None
         cached = self._write_batch_runtime.get(write_batch_id)
@@ -1040,6 +1051,7 @@ class StateStore:
         Original status, compiler evidence, identities and unknown outcome are untouched.
         The caller must also establish that no execution is still possible.
         """
+        self._terminal_association_key = None
         if self._db_path is None:
             raise ValueError("QUEUE_STORAGE_UNAVAILABLE")
         with sqlite3.connect(self._db_path) as db:
@@ -1100,6 +1112,7 @@ class StateStore:
         particular, diagnostics from an automatic/unattributed compilation must
         not acquire a batch merely because a registration happened later.
         """
+        self._terminal_association_key = None
         if (
             self._db_path is None
             or not self._project_path
@@ -1142,6 +1155,7 @@ class StateStore:
             return False
 
     def _persist_batch_evidence(self, payload: dict[str, Any]) -> None:
+        self._terminal_association_key = None
         if self._persist_round_evidence(payload):
             return
         batch_id = str(payload.get("writeBatchId") or "")
@@ -1273,6 +1287,20 @@ class StateStore:
             self.persist_failure_count += 1
             return False
 
+    @staticmethod
+    def _terminal_compile_key(payload: dict[str, Any]) -> tuple | None:
+        if not (payload.get("terminal") is True and payload.get("errorsVerified") is True
+                and payload.get("authoritative", True) is True and not payload.get("verificationPending")
+                and payload.get("compileOrigin") == "mcp" and payload.get("compilePhase") in {"completed", "failed"}
+                and payload.get("writeBatchId") and payload.get("compileRequestId") and payload.get("compileOperationId")):
+            return None
+        fields = ("producerEpoch", "domainGeneration", "sessionId", "writeBatchId", "writeBatchCreatedAt",
+                  "compileRequestId", "compileOperationId", "originatingCommandRequestId", "compileOrigin",
+                  "compileStatus", "compilePhase", "lastCompileVerifiedAt", "lastTerminalCompileAt",
+                  "compileStartedAt", "compileFinishedAt", "lastCompileRequestedAt", "lastCompileStartedAt",
+                  "lastCompilerFinishedAt", "reloadId", "domainReloadObserved", "errorCount", "warningCount")
+        return tuple(payload.get(field) for field in fields)
+
     def update_editor_execution_state(self, payload: dict[str, Any], *, restored: bool = False) -> bool:
         if int(payload.get("stateContractVersion") or 0) < 2:
             return False
@@ -1368,76 +1396,88 @@ class StateStore:
         compile_state.error_count = int(payload.get("errorCount") or 0)
         compile_state.warning_count = int(payload.get("warningCount") or 0)
         compile_state.last_progress_at = max(self.observed_at, compile_state.last_compile_verified_at, compile_state.last_compiler_finished_at, compile_state.last_compile_started_at)
-        registered_batch = self.get_write_batch(compile_state.write_batch_id)
-        registered_round_id = self.write_batch_round_id(compile_state.write_batch_id)
-        registered_operation_id = str((registered_batch or {}).get("compileOperationId") or "")
-        operation_matches = bool(
-            compile_state.compile_operation_id
-            and (not registered_operation_id or registered_operation_id == compile_state.compile_operation_id)
+        association_key = self._terminal_compile_key(payload)
+        reuse_terminal = bool(
+            not restored and self.transition == "heartbeat" and association_key is not None
+            and self._terminal_association_key == association_key and self.correlation_verified
+            and not self.pending_write_batch_id and not self._write_batch_deadlines
         )
-        if (not registered_round_id and compile_state.compile_origin == "mcp" and registered_batch
-                and compile_state.compile_operation_id and not registered_operation_id):
-            self.mark_write_batch(
-                compile_state.write_batch_id,
-                "compiling" if not compile_state.terminal else str(registered_batch["status"]),
-                compile_operation_id=compile_state.compile_operation_id,
-            )
-        if (not restored and not registered_round_id and compile_state.compile_origin == "mcp" and registered_batch and operation_matches
-                and payload.get("authoritative", True) is True
-                and payload.get("writeBatchCreatedAt") == registered_batch["writeBatchCreatedAt"]
-                and payload.get("compileRequestId")):
-            with sqlite3.connect(self._db_path) as db:
-                db.execute(
-                    "UPDATE write_batches SET compile_request_id=?,updated_at=? "
-                    "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? "
-                    "AND compile_request_id='' AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
-                    (str(payload["compileRequestId"]), _now_ms(), self._project_path,
-                     compile_state.write_batch_id, compile_state.compile_operation_id),
-                )
+        if not reuse_terminal:
             registered_batch = self.get_write_batch(compile_state.write_batch_id)
-        request_matches = not (registered_batch or {}).get("compileRequestId") or (
-            compile_state.compile_request_id == registered_batch["compileRequestId"]
-        )
-        if not restored:
-            self._persist_batch_evidence(payload)
-        preserves_verified_terminal = bool(
-            not self.pending_write_batch_id
-            and (
-                self.correlation_verified
-                or str((registered_batch or {}).get("status") or "") in {"verified", "failed"}
+            registered_round_id = self.write_batch_round_id(compile_state.write_batch_id)
+            registered_operation_id = str((registered_batch or {}).get("compileOperationId") or "")
+            operation_matches = bool(
+                compile_state.compile_operation_id
+                and (not registered_operation_id or registered_operation_id == compile_state.compile_operation_id)
             )
-            and compile_state.terminal
-            and compile_state.errors_verified
-            and registered_batch is not None
-            and operation_matches
-            and request_matches
-        )
-        self.correlation_verified = bool(
-            compile_state.terminal
-            and compile_state.errors_verified
-            and compile_state.compile_origin == "mcp"
-            and compile_state.write_batch_id
-            and (
-                compile_state.write_batch_id == self.pending_write_batch_id
-                or preserves_verified_terminal
+            if (not registered_round_id and compile_state.compile_origin == "mcp" and registered_batch
+                    and compile_state.compile_operation_id and not registered_operation_id):
+                self.mark_write_batch(
+                    compile_state.write_batch_id,
+                    "compiling" if not compile_state.terminal else str(registered_batch["status"]),
+                    compile_operation_id=compile_state.compile_operation_id,
+                )
+            if (not restored and not registered_round_id and compile_state.compile_origin == "mcp" and registered_batch and operation_matches
+                    and payload.get("authoritative", True) is True
+                    and payload.get("writeBatchCreatedAt") == registered_batch["writeBatchCreatedAt"]
+                    and payload.get("compileRequestId")):
+                with sqlite3.connect(self._db_path) as db:
+                    db.execute(
+                        "UPDATE write_batches SET compile_request_id=?,updated_at=? "
+                        "WHERE project_path=? AND write_batch_id=? AND compile_operation_id=? "
+                        "AND compile_request_id='' AND terminal_snapshot_json IS NULL AND disposition_json IS NULL",
+                        (str(payload["compileRequestId"]), _now_ms(), self._project_path,
+                         compile_state.write_batch_id, compile_state.compile_operation_id),
+                    )
+                registered_batch = self.get_write_batch(compile_state.write_batch_id)
+            request_matches = not (registered_batch or {}).get("compileRequestId") or (
+                compile_state.compile_request_id == registered_batch["compileRequestId"]
             )
-            and registered_batch is not None
-            and int(registered_batch["writeBatchCreatedAt"]) == compile_state.write_batch_created_at
-            and operation_matches
-            and request_matches
-            and compile_state.last_compile_verified_at >= compile_state.write_batch_created_at > 0
-        )
-        persisted_batch = self.get_write_batch(compile_state.write_batch_id)
-        self.correlation_verified = bool(self.correlation_verified and persisted_batch
-                                         and persisted_batch.get("correlationVerified"))
-        if self.correlation_verified:
-            self.pending_write_batch_id = ""
-            self.compile_deferred_reason = ""
+            if not restored:
+                self._persist_batch_evidence(payload)
+            preserves_verified_terminal = bool(
+                not self.pending_write_batch_id
+                and (
+                    self.correlation_verified
+                    or str((registered_batch or {}).get("status") or "") in {"verified", "failed"}
+                )
+                and compile_state.terminal
+                and compile_state.errors_verified
+                and registered_batch is not None
+                and operation_matches
+                and request_matches
+            )
+            self.correlation_verified = bool(
+                compile_state.terminal
+                and compile_state.errors_verified
+                and compile_state.compile_origin == "mcp"
+                and compile_state.write_batch_id
+                and (
+                    compile_state.write_batch_id == self.pending_write_batch_id
+                    or preserves_verified_terminal
+                )
+                and registered_batch is not None
+                and int(registered_batch["writeBatchCreatedAt"]) == compile_state.write_batch_created_at
+                and operation_matches
+                and request_matches
+                and compile_state.last_compile_verified_at >= compile_state.write_batch_created_at > 0
+            )
+            persisted_batch = self.get_write_batch(compile_state.write_batch_id)
+            self.correlation_verified = bool(self.correlation_verified and persisted_batch
+                                             and persisted_batch.get("correlationVerified"))
+            if self.correlation_verified:
+                self.pending_write_batch_id = ""
+                self.compile_deferred_reason = ""
         self.accepted_snapshot_count += 0 if restored else 1
         if not restored and not self._persist_execution_snapshot(payload):
+            self._terminal_association_key = None
             self.editor.authoritative = False
             self.editor.source = "state-persistence-failed"
             return False
+        # Only committed evidence plus a committed current snapshot may populate the cache.
+        self._terminal_association_key = association_key if (
+            not restored and self.correlation_verified and not self.pending_write_batch_id
+            and not self._write_batch_deadlines) else None
         return True
 
     def update_editor_context(self, payload: dict[str, Any]) -> bool:
@@ -1520,6 +1560,7 @@ class StateStore:
         cmd.completed_at = _now_ms()
 
     def update_compile_status(self, payload: dict[str, Any]) -> None:
+        self._terminal_association_key = None
         incoming_request_id = str(payload.get("requestId") or "")
         if (
             incoming_request_id
@@ -1573,6 +1614,7 @@ class StateStore:
             self.compile.last_duration_ms = int(fa - sa)
 
     def update_compile_pipeline(self, payload: dict[str, Any]) -> None:
+        self._terminal_association_key = None
         phase = str(payload.get("phase", "")).lower()
         self.compile.pipeline_phase = phase
         if phase == "started":
@@ -1590,6 +1632,7 @@ class StateStore:
         self.compile.last_progress_at = _now_ms()
 
     def update_compile_lifecycle(self, payload: dict[str, Any]) -> None:
+        self._terminal_association_key = None
         phase = str(payload.get("phase", "")).lower()
         if phase == "started":
             self.compile.status = "compiling"
@@ -1636,6 +1679,7 @@ class StateStore:
         )
 
     def update_compile_errors(self, payload: dict[str, Any]) -> bool:
+        self._terminal_association_key = None
         if not self.matches_authoritative_compile_identity(payload):
             self.rejected_out_of_order_count += 1
             return False
@@ -1779,6 +1823,7 @@ class StateStore:
         return True
 
     def reset_editor_session(self, session_id: str, process_id: int = 0) -> None:
+        self._terminal_association_key = None
         self.editor = EditorSnapshot(
             connected=True,
             play_mode_state="unknown",

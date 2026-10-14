@@ -87,7 +87,7 @@ namespace CodingRiver.UPilot
             {
                 result = await RunPackageRequestAsync(
                     id,
-                    "等待包管理器完成",
+                    "package.add",
                     () => Client.Add(identifier),
                     request => new PackageAddResultPayload
                     {
@@ -97,9 +97,9 @@ namespace CodingRiver.UPilot
                     },
                     token);
             }
-            catch (PackageRequestFailedException ex)
+            catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, "PACKAGE_ADD_FAILED", ex.Message, token, "package.add");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_ADD_FAILED" : ex.Code, ex.Message, token, "package.add");
                 return;
             }
 
@@ -123,14 +123,14 @@ namespace CodingRiver.UPilot
             {
                 await RunPackageRequestAsync(
                     id,
-                    "等待包管理器完成",
+                    "package.remove",
                     () => Client.Remove(p.packageName),
                     _ => true,
                     token);
             }
-            catch (PackageRequestFailedException ex)
+            catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, "PACKAGE_REMOVE_FAILED", ex.Message, token, "package.remove");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_REMOVE_FAILED" : ex.Code, ex.Message, token, "package.remove");
                 return;
             }
 
@@ -146,14 +146,14 @@ namespace CodingRiver.UPilot
             {
                 result = await RunPackageRequestAsync(
                     id,
-                    "等待包管理器完成",
+                    "package.list",
                     () => Client.List(true), // include dependencies
                     request => BuildPackageListPayload(request.Result),
                     token);
             }
-            catch (PackageRequestFailedException ex)
+            catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, "PACKAGE_LIST_FAILED", ex.Message, token, "package.list");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_LIST_FAILED" : ex.Code, ex.Message, token, "package.list");
                 return;
             }
 
@@ -178,92 +178,25 @@ namespace CodingRiver.UPilot
             {
                 result = await RunPackageRequestAsync(
                     id,
-                    "等待包管理器完成",
+                    "package.search",
                     Client.SearchAll,
                     request => BuildPackageListPayload(request.Result),
                     token);
             }
-            catch (PackageRequestFailedException ex)
+            catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, "PACKAGE_SEARCH_FAILED", ex.Message, token, "package.search");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_SEARCH_FAILED" : ex.Code, ex.Message, token, "package.search");
                 return;
             }
 
             await _bridge.SendResultAsync(id, "package.search", result, token);
         }
 
-        private Task<TResult> RunPackageRequestAsync<TRequest, TResult>(
-            string id,
-            string waitingStep,
-            Func<TRequest> startRequest,
-            Func<TRequest, TResult> buildResult,
-            CancellationToken token)
-            where TRequest : Request
-        {
-            var tcs = new TaskCompletionSource<TResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var opCtx = UPilotOperationTracker.Instance.GetContext(id);
-            TRequest request = null;
-            bool started = false;
-            EditorApplication.CallbackFunction tick = null;
-
-            void Cleanup()
-            {
-                if (tick != null)
-                    EditorApplication.update -= tick;
-            }
-
-            tick = () =>
-            {
-                try
-                {
-                    if (token.IsCancellationRequested)
-                    {
-                        Cleanup();
-                        tcs.TrySetCanceled(token);
-                        return;
-                    }
-
-                    if (!started)
-                    {
-                        request = startRequest();
-                        started = true;
-                        opCtx?.Step(waitingStep);
-                    }
-
-                    if (request == null || !request.IsCompleted)
-                        return;
-
-                    Cleanup();
-                    if (request.Status == StatusCode.Failure)
-                    {
-                        string errMsg = request.Error != null ? request.Error.message : "Unknown error";
-                        tcs.TrySetException(new PackageRequestFailedException(errMsg));
-                        return;
-                    }
-
-                    tcs.TrySetResult(buildResult(request));
-                }
-                catch (Exception ex)
-                {
-                    Cleanup();
-                    tcs.TrySetException(ex);
-                }
-            };
-
-            _bridge.EnqueueTracked(id, () =>
-            {
-                if (token.IsCancellationRequested)
-                {
-                    tcs.TrySetCanceled(token);
-                    return;
-                }
-
-                EditorApplication.update += tick;
-                tick();
-            });
-
-            return tcs.Task;
-        }
+        private Task<TResult> RunPackageRequestAsync<TRequest, TResult>(string id, string kind,
+            Func<TRequest> startRequest, Func<TRequest, TResult> buildResult, CancellationToken token)
+            where TRequest : Request => UPilotUpmRequestObservation.RunAsync(_bridge, id,
+                kind,
+                startRequest, buildResult, token);
 
         private static PackageListResultPayload BuildPackageListPayload(IEnumerable<UnityEditor.PackageManager.PackageInfo> packages)
         {
@@ -286,9 +219,5 @@ namespace CodingRiver.UPilot
             return result;
         }
 
-        private sealed class PackageRequestFailedException : Exception
-        {
-            public PackageRequestFailedException(string message) : base(message) { }
-        }
     }
 }

@@ -203,6 +203,7 @@ namespace CodingRiver.UPilot
                 managedPending
                     ? "UPilot 包已更新，等待 Unity 重载后继续更新 MCP 服务…"
                     : "UPilot 包已更新，等待 Unity 重载后恢复服务…");
+            UPilotUpdateService.Instance.CompleteObservedUpmUpdateFromRegistration();
             ScheduleRestore();
         }
 

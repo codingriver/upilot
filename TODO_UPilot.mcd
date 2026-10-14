@@ -1025,6 +1025,7 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 | 主窗口每两秒 Agent 配置巡检 | 原 Dashboard Layout 中的 `RefreshAgentConfigs(force:false)` 定时读取 MCP/Rules/Skills 配置。 | 已删除 Layout 巡检、计时字段和 force 参数。打开窗口、检查配置以及配置/修复操作完成时仍显式刷新。真实 IMGUI 测试跨过原两秒间隔保持三个配置快照，手动检查再次读取。主窗口重绘和健康观察原有生命周期保留。 |
 | 心跳触发的重复历史裁剪 SQL | 原 `_persist_execution_snapshot` 在 heartbeat 不插入 `state_events` 时仍运行历史 DELETE。 | 已将裁剪放入非 heartbeat 历史写入分支，继续保留最新 500 条历史。heartbeat 仍保存 `project_state` 最新权威快照；SQL trace 证明不再对历史 INSERT/DELETE，501 条状态转换的保留边界通过。 |
 | Bridge 主线程 pump 的启动诊断上下文 | `Editor/Core/UPilotBridge.cs:668–738` 每帧处理队列、更新必要状态，同时无条件构建 `startup-diagnostics` 上下文并调用启动观察。 | 主线程队列与实时编辑器状态必要；诊断完成后停止构建专用上下文，仅在启动观察有效期间执行。验证空队列/诊断已结束不再生成该上下文，活动命令仍推进。 |
+| Bridge 命令 Watchdog | 原主线程 pump 即使无活动命令，也每两秒调用 `RunWatchdog`；普通扫描只处理活动上下文，但仍创建结果列表并更新时间戳，临界检查由默认关闭的原开关控制。 | 2026-10-14 已完成活动门禁与项目配置，默认 2 秒、1～60 秒。关联编译 0 错误、定向 EditMode 19/19；实际 1 秒周期与空闲停止扫描已验证，自有命令释放和设置恢复通过。保留主线程 pump、原状态警告阈值及临界重启行为。详见下方 Watchdog 条目与独立验证记录。 |
 | Bridge/Server 心跳快照落盘 | Bridge 开启且 WebSocket 连通时约每 2 秒构建并原子写 EditorExecutionState，Server 接收后再保存；`Editor/Core/UPilotBridge.cs:1078/2340–2396`、`upilotserver~/src/upilot_mcp/state_store.py:1221`。 | 通信心跳和新鲜度判断必要；评估仅状态变化及必要生命周期边界持久化，把例行心跳时间留内存。不得丢失 compile/reload 的权威快照、顺序/身份与断连恢复证据；先验证协议与恢复契约再改。 |
 | Server WriteBatch 过期扫描 | `upilotserver~/src/upilot_mcp/server.py:254–262` 每秒调用过期扫描；`state_store.py:626/891` 遍历批次并处理 SQL，终态历史仍参与遍历。 | 活动批次固定截止必要；仅扫描非终态/到期候选，无活动批次时停调度或等待最近截止。保留原 batch ID、期限、成员关联和终态查询，验证终态批次数增大不增加周期 SQL。 |
 | QuickStart 全局部署诊断/健康检查 | `Editor/Core/UPilotQuickStart.cs:101–171` 初始化后永久 Update，每 2 秒诊断；设置完成、Bridge 启用且未显式停止时调用 `GetStatus`，关闭主窗口仍运行。`UPilotMcpServerManager.cs:111/186/561/1000` 在服务已验证且无转换/维护时按默认 10 秒（可设 1–600 秒）做端口、进程身份及 HTTP 检查；并非每 2 秒都发 HTTP。 | 启动/重启身份核验必要；就绪后的全局重复扫描改为状态事件触发，或仅诊断/窗口观察期间挂载。保留已配置间隔、恢复判断与真实失败证据，验证关闭观察后不继续周期完整探测。 |
@@ -1048,6 +1049,14 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 保持边界：主线程 5 秒权威性和 StateStore/CONFIG 就绪门槛独立；长间隔过期样本返回 unknown，不凭旧缓存声称当前卡顿或 ready。未跑全量、Unity2022 或外部客户端；Console 范围有既有覆盖缺口，加载证据仅涵盖选定函数。
 - 待优化：hang_status 与 compile diagnostics 的固定 10 秒缓存布尔诊断可能在长心跳间隔下将过期 pump 样本解释为当前卡顿。仅按需查询时统一接收样本年龄与 pump 年龄：过期证据为 unknown，新样本携带旧 pump 才证明停滞；保持现有卡顿阈值和就绪门槛，补充长间隔与真实停滞的窄回归。本次未扩改。
 - 后续完成（2026-10-14）：hang／compile／queued 已统一样本新鲜度与 `bool|null` 诊断，相关定向回归通过；临时 15 秒心跳／45 秒网络超时时，约 11.4 秒旧样本的 not-pumping 与 suspectedBusyLoop 均返回 `null`，现场验证后恢复 3 秒／9 秒。原卡顿阈值和 EditorReady 门槛保留，本项已完成；证据及范围见[周期与超时验证记录](Documentation~/TimingAndTimeouts-Validation-20261014.md)。
+
+## UPilot-20261014-WatchdogActiveScheduling：命令 Watchdog 活动门禁与检查间隔
+
+- 观察问题：`UPilotBridge.ProcessMainThreadQueue` 原每两秒调用 `UPilotOperationTracker.RunWatchdog`，即使活动上下文为空仍创建结果列表并更新 `_lastWatchdogCheck`；现有真实恢复测试也依赖空闲检查时间戳递增。影响 Bridge 空闲工作和共享生产 pump 的回归证据。
+- 已确认改进：Tracker 用 `_activeContexts.IsEmpty` 提供轻量门禁；沿用必要的主线程 pump，有活动命令时才运行普通与临界扫描。高级设置 → 常规 → 周期与超时增加 `WatchdogIntervalSeconds`，默认 2 秒、范围 1～60 秒，项目隔离保存并支持恢复默认；Bridge 缓存配置，通过既有设置变更事件更新，空闲不读偏好、不扫描、不更新时间戳。
+- 生效与边界：以最后实际检查时间加新间隔判断下一次检查，缩短／延长即时调整后续检查；命令的 `ReceivedAt`、queued 10 秒／executing 30 秒／waiting 120 秒／其他 300 秒警告阈值和业务截止均不变。警告只记录一次，不取消命令、不执行 SQL；原 `AutoRestartOnCriticalStuck` 默认关闭、300 秒临界条件和强制重启 Unity 行为保持不变，不增加 Timer、线程或 Update 订阅。
+- 直接回归：覆盖项目配置／默认恢复／缓存同步、空闲时间戳不增长、首个／最后一个活动命令、热调整周期、完成过滤及原警告规则。真实恢复测试持有测试自有命令，临时使用 1 秒间隔，观察生产 pump 后在 `finally` 释放命令并恢复偏好原存在性／原值；保留 Python 时间戳递增断言和原 45／65 秒期限，不实际触发强制重启。
+- 当前状态：**已完成（2026-10-14）**。本批 `wb-7d92b889-563b-4e0c-9a0d-6c1c78202c8c` 关联编译 0 错误、1 个既有警告；规范项目两轮直接相关 EditMode 18/18 与 1/1，通过 authoritative／cleanup 验证。真实检查间隔约 1.00004 秒，连续约 1.30 秒自然空闲不扫描且必要 pump 继续推进；恢复 fixture 自有命令与原配置正确清理恢复。详见[命令 Watchdog 验证记录](Documentation~/Watchdog-Validation-20261014.md)及[周期与超时](Documentation~/TimingAndTimeouts.md)。未运行完整套件、未实际触发强制重启、尚未测 CPU／GC 收益。
 
 ## UPilot-20261014-StagingSourceImport：临时补丁副本避免被 Unity 当作源码导入
 
@@ -1090,3 +1099,56 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 验收标准：在包授权 Unity2022.3 专用 fixture 预置无关宿主 CS 错误后首次安装，取得 DLL 生成/加载/Bootstrap/设置/服务五阶段的独立证据；如实现独立引导，证明服务可提供只读编译诊断且错误仍如实阻断 Editor 变更和测试，修复宿主错误后按正常加载流程恢复。未实施或运行该 fixture。
 - 本轮状态：原因诊断完成，仅记录 TODO；未修改业务或包源码、配置、EditorPrefs，未启动/重启服务、强制 Reload、编译或测试。
 - 双向引用：F:\trunk\TODO_UPilot.mcd / UPilot-20261014-FirstInstallCompileBlocker；通用能力优先级和实施状态以 D:\upilot\TODO_UPilot.mcd 为准。
+
+## UPilot-20261014-ProfilerCaptureDefaultDuration：项目默认采集时长（Done）
+
+- 观察问题：Profiler start 已支持按次时长，但高级设置没有项目默认项；Python 默认实参始终为 30，无法区分省略与显式 30 秒。影响统一维护运行期限和保留显式请求优先级。
+- 已完成：周期与超时增加项目隔离的 `ProfilerCaptureDefaultDurationSeconds`，初始 30 秒、整数 1～3600 秒、支持恢复默认；省略／null 由 Bridge 开始时读取配置，显式值覆盖并支持小数，本次时长固定。保留旧 Bridge 数值回退和旧式显式请求行为，没有增加后台采集。
+- 验证：规范项目后续关联批次 `wb-7d92b889-563b-4e0c-9a0d-6c1c78202c8c` 0 错误／1 既有警告；18/18 定向 EditMode、84 项 Python 回归及原生／代理六种现场请求通过；服务刷新成功，新配置恢复默认 30，采集均停止且最终完整队列为空。初次失败及覆盖边界见验证记录。
+- 记录：[配置说明](Documentation~/TimingAndTimeouts.md)、[Profiler 默认时长验证](Documentation~/ProfilerCaptureDuration-Validation-20261014.md)。宿主应用预注入旧工具元数据仍需客户端重连刷新，不能由 Server 强制修改。
+
+
+## UPilot-20261014-ScriptGuidRemap — 跨项目脚本 GUID 引用重映射
+
+- 日期/触发场景：2026-10-14，trunk 保留旧 SceneTool 并迁入 XForge；来源沿用旧工具脚本 GUID，目标新脚本 GUID 已不同，Prefab 仍绑定旧类型。
+- 优先级/状态：P2，建议，未实现/未验收；通用优先级与实施状态以包根同 ID 条目为准。
+- 当前痛点/工具：unity_prefab_patch v1 不支持 m_Script 对象引用修改。此次根据来源和目标同路径脚本 meta 建立映射，通过有界字节替换修复 16 个 Prefab 与 1 个配置 asset，再由 unity_asset_reimport 导入；没有执行编译或自动验收。
+- 期望能力/收益：提供精确资源清单与脚本 GUID 映射的 dry-run/apply 专用入口，检查项目身份、资源哈希、脚本目标及 GUID 冲突，仅修改脚本引用并保留其余字节、字段和两套 meta；输出备份与逐项完成/未完成证据，减少临时磁盘脚本和手工迁移核对。不放宽现有通用 Prefab patch 边界。
+- 可验收标准：在 D:\upilot\Tests~\UPilotTest 的隔离资源 fixture 中覆盖新旧同名类型、重复/不存在 GUID、历史序列化字段、输入变更和中断；正确映射可被 Unity 解析，非脚本字段与 meta 字节不变，冲突在写入前拒绝。本轮未构造或执行该 fixture。
+- 双向引用：F:\trunk\TODO_UPilot.mcd / UPilot-20261014-ScriptGuidRemap；D:\upilot\TODO_UPilot.mcd / UPilot-20261014-ScriptGuidRemap。
+
+## UPilot-20261014-UpmAndServerObservation：五项有限观察与重复 I/O 优化（Done）
+
+- 观察问题：resource.packages 请求在主线程同步 Sleep 等待 UPM；普通包请求无本地期限；自身更新 Reset/Repair 可能遗留回调；Server refresh 重读配置，稳定终态心跳重复查询已结束编译关联。
+- 已完成：显式请求共用有限异步观察，开始一次、首轮立即检查、冻结期限与间隔；终态/取消/Reset/Reload/退出释放，排队等待也被 Reset 结束，包注册成功先释放再交接恢复。高级设置“周期与超时→包请求与恢复”新增600秒期限（30～3600）及100ms检查（50～1000），按项目保存并支持恢复默认，本次参数与下次设置分开显示。不增加后台包清单读取，不重发未知安装/卸载，不声称物理取消。
+- Server：refresh锁内单次内容读取，同字节哈希与解析、未变复用；权限热更新及环境覆盖保持。已提交验证终态使用单条严格身份缓存，变更及失败失效，显式批次查询仍读证据，权威心跳快照继续落盘。
+- 验证：6个原WriteBatch关联verified、0编译错误；EditMode首次26/27，调度夹具改Update后失败叶1/1复验通过；Python341项通过，隔离SQL trace稳定12次心跳0关联SELECT且12次快照UPSERT。有效授权维护成功，Server161852→137124，Unity127400保持，四个选定入口equivalent；真实资源返回50包，最终完整任务队列空。
+- 边界：资源仅MCP读取unity://packages/list时执行，普通unity_package_list独立入口；Server等待30/120/60秒不变。未进行物理安装卸载/取消、完整EditMode、2022或外部项目验收，生产SQL/CPU收益未测；Console覆盖partial，加载核验仅selected-entry-code-only。
+- 说明和证据：Documentation~/TimingAndTimeouts.md；Documentation~/UpmAndServer-Validation-20261014.md；Log/UPilotValidation/UpmAndServer_20261014/final-evidence.json。
+
+## UPilot-20261014-TestSchedulingFeedback：测试选择与调度诊断（建议）
+
+- 实际观察：unity_test_run的matchMode=exact被TEST_SELECTORS_INVALID拒绝；无人操作时delayCall在20帧见证窗口未触发，使用独立Update后复验通过。失败记录保留在本批验证证据。
+- 建议：测试选择错误就近列出union/intersection有效值；Editor推进验证优先使用独立Update并在finally释放，delayCall仅用于其自身行为验证。避免把未调度的delayCall误判为UPM同步阻塞。
+- 状态：观察测试已修正；工具错误提示改进未实施，不扩大本批范围。验收可用无效matchMode请求验证提示，确认不启动测试。
+
+## UPilot-20261014-RemainingObservationAudit：五项优化后剩余范围（建议，未实施）
+
+- 范围：本轮只读复查持续回调、UPM其他入口与等待；上一批五项按UpmAndServer验证记录已完成。旧IdleRefreshLifecycle表保留初次审计，不应把其中已由TimingAndTimeouts后续结项的项目重新列为未开发。
+- P1/中：Editor/Core/UPilotFeatureManager.cs:166 的 Flow Enable 依赖安装独立持有AddRequest，每帧检查IsCompleted，无本地期限；ClearFlowInstallState只在完成/失败/异常路径释放。仅用户确认启用后运行，不是后台主动安装。建议复用UPM共享有限观察及现有600秒/100ms项目参数，逐请求冻结，Reset/Reload/退出结束本地队列，未知结果不重发且不继续启用Flow。静态风险，未真实制造UPM挂起。
+- P1/中～高：Editor/Core/UPilotMcpServerManager.cs:1987 的 StopServerAndObserveExit 同步循环检查进程及端口，Thread.Sleep(50)，默认3000ms；MainWindow、PackageUpdateLifecycle、UpdateService有直接调用。建议改为有限异步停止观察，保留原退出/端口/代次独立证据与操作总预算，主线程只发起停止并挂活动观察，结束后解绑。不是常驻无限循环；未测真实界面停顿时长。
+- P2/低～中：Editor/Core/UPilotUpdateWindow.cs:837 的 RefreshAfterOperationAsync 固定10秒后CheckForUpdates，OnDisable只卸载Update，无该延后任务的取消/窗口代次检查。建议合并单份延后刷新并在窗口关闭/新代次/Reload后失效，开始固定期限；可维护时间参数放高级设置。未现场复现关闭后网络读取。
+- P2/低：同窗口OnEditorUpdate（约134行）仅打开时挂载，关闭解绑，但每帧读取更新与下载状态。建议复用已有界面刷新间隔或状态事件；后台更新继续独立推进。没有证据表明这里每帧读取文件。
+- P3/高，暂缓：Bridge/Server心跳双端快照持久化仍保留；需编译/Reload/顺序与恢复契约专项证据后再考虑减写。Bridge持久化IOException重试固定3次、5ms/10ms睡眠（最多15ms睡眠），不是无限等待，内部正确性参数按已选范围不开放。
+- 待补验收：真实长模态pending与终态解绑、真实UPM期限/更新跨Reload/Reset场景、生产SQL及CPU/GC计数、Unity2022对应定向兼容；这些是未测覆盖，不等同代码未实现。未运行新测试、修改产品实现或刷新服务。
+
+## UPilot-20261014-UpdateCenterAndAsyncStopPlan：更新中心与30秒异步停止（方案，未实施）
+
+- 用户要求：优化更新中心每帧状态读取及操作后延后检查；停止服务观察默认30秒，普通日志输出开始预算及最终耗时。当前源码StopServerAndObserveExit/StopServerAndWaitForExit仍默认3000ms，本记录为拟议修改。
+- 更新中心：复用已有高级设置/快速调试刷新间隔（默认300ms，100～5000），缓存界面快照，周期到达才读状态；打开、显式检查及通知可立即刷新。PlayMode等待改为事件驱动，窗口关闭卸载界面回调；后台更新不受窗口周期/关闭影响。周期修改只调下一次，不重建循环。
+- 延后检查：新增项目参数UpdateCenterPostOperationDelaySeconds默认10秒、1～60秒。窗口拥有最多一个有限延后任务，绑定operationId/窗口代次/服务生命周期，开始冻结截止；重复终态通知不续期；手动检查消费延后计划，新操作或关闭/Reload取消。网络返回及finally也核对代次，旧结果不能改写新界面；不宣称本地取消已物理取消HTTP。
+- 异步停止：新增项目参数ServiceStopObservationTimeoutSeconds默认30秒、1～600秒；ServiceStopCheckIntervalMs默认100ms、50～1000ms。此观察预算与AI维护总期限分开；父任务存在时deadline取两者较小值。准确目标预检及停止命令只发一次，主线程不Sleep；固定身份/进程创建时间/启动与重启代次，仅活动期间观察退出与端口。退出全部确认后再检查端口，取消/代次/到期先于节流。成功/失败/取消/超时/Reset统一结束并释放；重复请求共享原观察，不重新停止、不续期；新启动使旧观察失效，停止超时不自动再Kill/重启。
+- 日志：开始普通Debug.Log输出stopId、来源、默认30秒/实际配置/有效剩余预算；终态仅输出一次真实总耗时、进程退出与端口可用分别结果。两证据均真才写停止成功；进程退出但端口占用明确Warning，取消不写成功，无目标写无需停止。耗时从准入起包括身份检查/发送/观察，不能把30秒误写为固定睡眠。
+- 调用链：MainWindow、UpdateService、PrepareForPackageUpdate主动路径改为await或状态推进，确认停止后才下载/替换/启动UPM。OnRegisteringPackages是同步外部通知，不能用async void假装阻止UPM；只发起一次停止，持久化原身份/截止，登记后沿原恢复流程观察，不续期/重发。跨Reload仅恢复只读确认且严格PID创建时间/项目/代次校验，未知结果停止交接；服务硬Reset则结束旧观察且不恢复。
+- 复杂度/顺序：界面周期低～中、延后检查中、有限异步停止高（多调用方、外部注册、Reload身份）；先界面两项，再独立实施停止完整调用链，不能只把同步默认改为30秒。
+- 定向验收：状态读取计数/配置调整/关闭解绑、延后去重与关闭/新代次/手动刷新、停止单次派发/30秒固定截止/主线程推进/不同进程与端口结果/日志一次与真实耗时、Reload不续期/旧观察不能影响新启动。按原WriteBatch及规范项目直接EditMode验证。仅更新方案与TODO，未改产品代码或执行停止/测试。

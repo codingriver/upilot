@@ -53,6 +53,10 @@ def load_config() -> UPilotConfig:
         except (OSError, ValueError):
             raw = {}
 
+    return _config_from_raw(raw)
+
+
+def _config_from_raw(raw: dict[str, Any]) -> UPilotConfig:
     mcp = raw.get("mcp") if isinstance(raw.get("mcp"), dict) else {}
     cache = raw.get("cache") if isinstance(raw.get("cache"), dict) else {}
     features = raw.get("features") if isinstance(raw.get("features"), dict) else {}
@@ -96,6 +100,8 @@ _CONFIG_LOCK = threading.Lock()
 _CONFIG_LAST_DISK_HASH = ""
 _CONFIG_LAST_LOADED_AT = int(time.time() * 1000)
 _CONFIG_LOAD_ERROR = ""
+_CONFIG_RAW_CACHE: dict[str, Any] = {}
+_CONFIG_RAW_CACHE_KEY: tuple[str, str] | None = None
 
 
 def _config_file_hash(path: Path) -> str:
@@ -114,40 +120,44 @@ def _runtime_config_hash(config: UPilotConfig) -> str:
 def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
     """Hot-reload safe fields while reporting endpoint changes that need restart."""
     global _CONFIG_LAST_DISK_HASH, _CONFIG_LAST_LOADED_AT, _CONFIG_LOAD_ERROR
+    global _CONFIG_RAW_CACHE, _CONFIG_RAW_CACHE_KEY
     path = _project_config_path()
     with _CONFIG_LOCK:
+        content = None
         try:
-            disk_hash = _config_file_hash(path)
-        except OSError as ex:
-            _CONFIG_LOAD_ERROR = str(ex)
+            if path.is_file():
+                content = path.read_bytes()
+                disk_hash = hashlib.sha256(content).hexdigest()
+            else:
+                disk_hash = "missing"
+        except OSError:
+            # The existing loader treats unreadable/missing files as safe defaults.
             disk_hash = "unreadable"
-
-        disk_config = None
-        if force or disk_hash != _CONFIG_LAST_DISK_HASH:
+        cache_key = (str(path), disk_hash)
+        if force or cache_key != _CONFIG_RAW_CACHE_KEY:
             try:
-                disk_config = load_config()
+                parsed = json.loads(content.decode("utf-8-sig")) if content is not None else {}
+                raw_config = parsed if isinstance(parsed, dict) else {}
+            except (ValueError, UnicodeError):
+                raw_config = {}
+            _CONFIG_RAW_CACHE = raw_config
+            _CONFIG_RAW_CACHE_KEY = cache_key
+        try:
+            # Re-evaluate endpoint environment overrides even when file bytes did not change.
+            disk_config = _config_from_raw(_CONFIG_RAW_CACHE)
+            if force or disk_hash != _CONFIG_LAST_DISK_HASH:
                 for field in (
-                    "context_stale_ms",
-                    "flow_enabled",
-                    "write_access_approved",
-                    "unsaved_scene_policy",
-                    "automation_authorization_scopes",
-                    "automation_authorization_catalog_hash",
-                    "automation_authorization_scope_version",
-                    "automation_authorization_approved_at_utc",
+                    "context_stale_ms", "flow_enabled", "write_access_approved", "unsaved_scene_policy",
+                    "automation_authorization_scopes", "automation_authorization_catalog_hash",
+                    "automation_authorization_scope_version", "automation_authorization_approved_at_utc",
                 ):
                     setattr(CONFIG, field, getattr(disk_config, field))
                 _CONFIG_LAST_DISK_HASH = disk_hash
                 _CONFIG_LAST_LOADED_AT = int(time.time() * 1000)
                 _CONFIG_LOAD_ERROR = ""
-            except (OSError, ValueError, TypeError) as ex:
-                _CONFIG_LOAD_ERROR = str(ex)
-
-        if disk_config is None:
-            try:
-                disk_config = load_config()
-            except (OSError, ValueError, TypeError):
-                disk_config = CONFIG
+        except (OSError, ValueError, TypeError) as ex:
+            _CONFIG_LOAD_ERROR = str(ex)
+            disk_config = CONFIG
 
         restart_fields = ("http_host", "http_port", "ws_host", "ws_port")
         changed_restart_fields = [

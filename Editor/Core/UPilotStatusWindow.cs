@@ -33,6 +33,7 @@ namespace CodingRiver.UPilot
         private BridgeStatus         _guiStatusSnapshot;
         private McpServerStatus      _guiMcpStatusSnapshot;
         private ReloadRevalidationObservation _guiReloadObservation;
+        private UPilotUpmRequestObservation[] _guiUpmObservations = Array.Empty<UPilotUpmRequestObservation>();
         private AgentMcpConfigStatus[] _guiAgentConfigSnapshot = Array.Empty<AgentMcpConfigStatus>();
         private List<BridgeLogEntry> _guiLogsSnapshot = new();
         private string               _guiDiagResultSnapshot = "";
@@ -273,6 +274,7 @@ namespace CodingRiver.UPilot
                 _guiStatusSnapshot       = bridge.GetStatus();
                 _guiMcpStatusSnapshot    = UPilotMcpServerManager.Instance.GetStatus();
                 _guiReloadObservation = UPilotMcpServerManager.Instance.LaunchIdentity?.reloadRevalidation;
+                _guiUpmObservations = UPilotUpmRequestObservation.Diagnostics();
                 _guiLogsSnapshot         = bridge.GetLogsCopy();
                 _guiDiagResultSnapshot   = _diagResult;
                 _guiDiagRunningSnapshot  = _diagRunning;
@@ -379,6 +381,8 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.LabelField("本机当前项目保存；有限任务在开始时固定参数，修改只影响下一次任务。", EditorStyles.wordWrappedMiniLabel);
                 DrawTimingValue("Bridge 心跳间隔（秒）", UPilotBridge.Instance.HeartbeatIntervalSeconds, 1, 600, value => UPilotBridge.Instance.HeartbeatIntervalSeconds = value);
                 DrawTimingValue("HTTP Health 间隔（秒）", UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds, 1, 600, value => UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds = value);
+                DrawTimingValue("命令 Watchdog 检查间隔（秒）", UPilotTimingSettings.WatchdogIntervalSeconds, 1, 60, value => UPilotTimingSettings.WatchdogIntervalSeconds = value);
+                EditorGUILayout.LabelField("仅有活动命令时检查；此间隔不是命令超时。警告可能延后一个检查间隔，并受主线程调度延迟影响。", EditorStyles.wordWrappedMiniLabel);
                 EditorGUILayout.LabelField("服务重启总期限沿用上方 AI 服务维护设置。", EditorStyles.miniLabel);
                 EditorGUILayout.Space(4);
                 EditorGUILayout.LabelField("下次 Domain Reload 复核", EditorStyles.miniBoldLabel);
@@ -396,7 +400,24 @@ namespace CodingRiver.UPilot
                     EditorGUILayout.LabelField("结束／最近原因：" + (string.IsNullOrEmpty(active.endReason) ? active.lastReason : active.endReason), EditorStyles.wordWrappedMiniLabel);
                 }
                 EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("包请求与恢复（下次请求参数）", EditorStyles.miniBoldLabel);
+                DrawTimingValue("UPM 请求观察期限（秒，默认 600）", UPilotTimingSettings.UpmRequestObservationTimeoutSeconds, 30, 3600, value => UPilotTimingSettings.UpmRequestObservationTimeoutSeconds = value);
+                DrawTimingValue("UPM 完成检查间隔（ms，默认 100）", UPilotTimingSettings.UpmCompletionCheckIntervalMs, 50, 1000, value => UPilotTimingSettings.UpmCompletionCheckIntervalMs = value);
+                EditorGUILayout.LabelField("仅活动请求期间观察；检查间隔不重复启动 UPM。修改及恢复默认仅影响后续请求。", EditorStyles.wordWrappedMiniLabel);
+                EditorGUILayout.LabelField("Server 响应等待：包清单资源 30s；add/list/search 120s；remove 60s。本地观察期限不会扩大这些等待，超时不代表物理取消 UPM。", EditorStyles.wordWrappedMiniLabel);
+                foreach (var observation in _guiUpmObservations)
+                {
+                    EditorGUILayout.LabelField(observation.Kind + " · " + observation.Id, EditorStyles.wordWrappedMiniLabel);
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var elapsed = observation.StartedAtUtcMs == 0 ? 0 : Math.Max(0, (observation.IsEnded ? observation.EndedAtUtcMs : now) - observation.StartedAtUtcMs);
+                    var remaining = observation.Status == "observing" ? Math.Max(0, observation.DeadlineUtcMs - now) : 0;
+                    EditorGUILayout.LabelField($"本次冻结参数：{observation.TimeoutSeconds}s / {observation.CheckIntervalMs}ms；{observation.Status}；已用 {elapsed / 1000d:F1}s；剩余 {remaining / 1000d:F1}s", EditorStyles.wordWrappedMiniLabel);
+                    EditorGUILayout.LabelField("结束原因：" + observation.EndReason, EditorStyles.wordWrappedMiniLabel);
+                }
                 DrawTimingValue("包更新恢复等待（秒）", UPilotTimingSettings.PackageUpdateRecoveryTimeoutSeconds, 30, 3600, value => UPilotTimingSettings.PackageUpdateRecoveryTimeoutSeconds = value);
+                EditorGUILayout.LabelField("恢复等待默认 600s，独立限制请求成功后的 Reload／部署恢复阶段。", EditorStyles.wordWrappedMiniLabel);
+                DrawTimingValue("Profiler 默认采集时长（秒）", UPilotTimingSettings.ProfilerCaptureDefaultDurationSeconds, 1, 3600, value => UPilotTimingSettings.ProfilerCaptureDefaultDurationSeconds = value);
+                EditorGUILayout.LabelField("仅用于未指定时长的新采集；显式时长优先，运行中的采集时长不变。", EditorStyles.wordWrappedMiniLabel);
                 DrawTimingValue("窗口／模态观察（ms）", UPilotTimingSettings.WindowObservationTimeoutMs, 500, 30000, value => UPilotTimingSettings.WindowObservationTimeoutMs = value);
                 DrawTimingValue("模态检查间隔（ms）", UPilotTimingSettings.ModalCheckIntervalMs, 50, Math.Min(1000, UPilotTimingSettings.WindowObservationTimeoutMs / 2), value => UPilotTimingSettings.ModalCheckIntervalMs = value);
                 DrawTimingValue("Bridge 重连等待（秒）", UPilotTimingSettings.BridgeReconnectDelaySeconds, 1, 60, value => UPilotTimingSettings.BridgeReconnectDelaySeconds = value);

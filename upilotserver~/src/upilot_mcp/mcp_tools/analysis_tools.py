@@ -115,9 +115,9 @@ async def unity_navmesh_triangulation_summary():
     return _log_tool_result("unity_navmesh_triangulation_summary", _payload(result))
 
 
-@mcp.tool(description="启动结构化运行时 Profiler 采集，记录 CPU/GPU/GC/渲染计数及常见运行时组件规模，终态输出 JSON/CSV。")
+@mcp.tool(description="显式启动结构化运行时 Profiler 采集，终态输出 JSON/CSV。durationSec 省略或 null 时采用当前项目高级设置中的默认采集时长（初始 30 秒）；显式数值覆盖本次时长，开始后固定。")
 async def unity_profiler_capture_start(
-    durationSec: float = 30.0,
+    durationSec: Annotated[float | None, Field(description="采集秒数，显式值限制在 1～3600 秒并支持小数；省略或 null 使用项目配置，初始默认 30 秒。运行中修改默认值不改变本次时长。")] = None,
     sampleEveryFrames: int = 1,
     title: str = "runtime-profiler",
     outputDirectory: str = "",

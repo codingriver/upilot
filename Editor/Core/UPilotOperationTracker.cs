@@ -424,6 +424,7 @@ namespace CodingRiver.UPilot
             _activeContexts.Clear();
         }
 
+        internal bool HasActiveCommands => !_activeContexts.IsEmpty;
         public int ActiveCount   => _activeContexts.Count;
         public int TotalCount    { get { lock (_listLock) return _entries.Count; } }
         public int FailedCount   { get { lock (_listLock) return _entries.Count(e => e.Phase == "failed"); } }
