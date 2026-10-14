@@ -1064,3 +1064,29 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 已实施：Attach 创建／覆盖状态前先恢复持久观察，以有效 observationId 区分真实记录与空内联对象；保留原身份、轮数和绝对截止。现场还观察到 delayCall 超过 80 秒未执行，补一次性 Update 恢复入口；双入口共享一次恢复控制，迟到回调不能覆盖后继状态，不重放启动、不降低身份校验。
 - 验收：恢复顺序 14/14、最后首帧 fixture 10/10 均官方验收通过。最后批次 `wb-11d5d30c-9f01-4f42-a9fe-611134c6b270`，编译 Operation `29ef2badeab043e096435edc94bea0fb`，correlationVerified/errorsVerified=true，0 错误／1 条既有警告。实际 Reload 观察 `afbb07d6f5134e38b862a330b22fbd52` 在原 Server171612／Unity20628 上第 1 轮 succeeded，冻结总期限 120 秒，未以维护期限替代或重启服务。
 - 当前状态：**已修复，定向验收与现场 Reload 验证完成，关闭**。四阶段其余结果、服务刷新和未覆盖项见[周期与超时验证记录](Documentation~/TimingAndTimeouts-Validation-20261014.md)；各轮按自身源码身份解释，初次 staging 整体验收失败保留。本项不涉及 Release、Skill 或规则模板操作。
+
+## UPilot-20261014-HostPluginReferenceIsolation：执行核心隔离宿主预编译插件
+
+- 日期/触发：2026-10-14（Asia/Shanghai），trunk 安装本地 UPilot 0.3.46；用户提供 ReflectionEmitEngine.cs:883/942/950 的 CS0433，System.Reflection.Emit.ILGenerator 同时存在于宿主 0Harmony 2.3.5.0 与 mscorlib 4.0。这是 UPilot.Editor 未能生成的已证实编译阻塞，与旧 source.index 导入失败分别处理。
+- 最小修复/归属：UPilot 通用程序集隔离，P1；仅 Editor/Execution/Core/UPilot.Execution.Core.asmdef 的 overrideReferences false→true，保留空 precompiledReferences 和其余原设置。执行核心六个源码仅依赖 System 和自身类型，未修改 C# 命名空间、动态 Emit 行为或宿主 Harmony 插件。
+- 规范验收已完成：wb-30b6838d-d81c-433e-9938-b5f9c19df590，compileOperationId=4614decf663f4abb9e86ddb9ee7da193，terminal/errorsVerified/correlationVerified=true，0 错误/0 警告。Task task-13794bea-9d5b-4c41-b790-4e2dd3c164fc，runGuid=efc86bba-a7a8-4ea9-84ce-9bb9f8f99a98；ReflectionEmitCreatesInterfaceImplementationAndProperty、ReflectionEmitSupportsCustomPropertyAndBoundedCallbackDiagnostics、EmitBackendCachesValidatedProgram 三例 3/3 通过，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true，未运行全量。
+- 证据：Tests~/UPilotTest/Log/UPilotAcceptance/1791967130399_req-3b87e8c5-6c8e-449a-8ef9-ef5bfa2fb55f/summary.json，665265 bytes，SHA256=a5fba03687e5ade93d3fb8cfa866b52b3a0fd692b067fcba27e32f0693238db0；源字段差异、原编译基线和关联批次回执见 Tests~/UPilotTest/Log/P0P1/InstallHarmony20261014/。
+- 现场与状态边界：已对精确 trunk Unity PID 172508 请求 Assets/Refresh；本轮仍未取得 trunk 当前 Console/编译完成证据，不能把 Unity6 规范验收冒充 Unity2022.3 宿主现场通过。核心修复与规范定向验收完成，现场核验及防复发 fixture 待办；未提交、推送或发布。
+- 后续能力建议：为本地包安装提供预编译宿主插件冲突诊断，并在 Unity2022.3 专用验收 fixture 中覆盖同名 BCL 类型污染及必要依赖不被误排除的边界，减少首次安装时从 Burst 次生错误手动回溯首错。验收需实际宿主冲突输入下消除 CS0433、运行上述精确 Emit 用例并证明其它程序集仍可使用宿主插件；本轮未创建该 fixture。
+- 双向引用：F:\trunk\TODO_UPilot.mcd / UPilot-20261014-HostPluginReferenceIsolation；通用优先级与防复发实施状态以本根条目为准。
+
+- Tracing 补充（2026-10-14）：同类问题涉及 Editor/Optional/MonoHook.Tracing/UPilot.MonoHook.Tracing.Editor.asmdef。用户勾选 noEngineReferences 后，规范工程出现 255 条 UnityEngine/UnityEditor 依赖缺失错误。授权修复仅将 noEngineReferences true→false，保留已有 overrideReferences=true、空 precompiledReferences、GUID 引用及 autoReferenced=false；未改 C#、命名空间或宿主插件。
+- Tracing 本轮证据：wb-8016bb7e-70b8-45dd-8968-a27cb3dc7882，compileOperationId=e0452d17f4dd4a768f0bb86c03ac862a，writeBatchCreatedAt=1791967974524，lastCompileVerifiedAt=1791967990700，errorsVerified/correlationVerified=true，0 错误/0 警告。两条现有 UPilotMonoHookWindowTests（ShowInstallationDetailsDialogCreatesClosableScrollableDialog、InstallationDetailsTextGroupsAndSimplifiesEntries）2/2 通过；Task task-ccca1f6d-79b1-4dda-abc5-77b308bc2182，runGuid 4f3531ad-5c5c-4fed-90b3-664504296ddd，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true。未启用全局 Tracer，未运行全量测试，trunk Unity2022.3 现场尚未验收。
+- Tracing 产物：D:\upilot\Tests~\UPilotTest\Log\UPilotAcceptance\1791968052253_req-5a35c830-952c-4f3b-a2c0-b5b9601aa5bd\summary.json，662359 bytes，SHA256=06b59a1e5b79f4d72a53374ce1cb989313754428b539e631f99f20c5e8339bfc；最小字段备份和本轮 MCP 观察位于 Log/P0P1/TracingHarmony20261014/。
+- 防复发建议补充：宿主 DLL 冲突诊断应同时提示 Override References 与 No Engine References 的职责，并检查仍需 Unity 引用的 Editor 程序集，避免用禁用引擎引用解决插件污染而产生二次编译阻塞；沿用本条 P1 与双向引用，fixture 尚待实施。
+
+## UPilot-20261014-FirstInstallCompileBlocker：首次安装被宿主编译错误阻止加载（Open/P1）
+
+- 日期/触发：2026-10-14（Asia/Shanghai），trunk 本地 file:D:/upilot 安装；用户反馈 UPilot 编译错误已消除但服务未启动，Console 仍有宿主错误。
+- 现场证据：精确 trunk 主 Unity PID=172508，Unity2022.3.62f2。授权读取的 C:\Users\coding\AppData\Local\Unity\Editor\Editor.log 中，236 行记录 CopyFiles Library/ScriptAssemblies/UPilot.Editor.dll，6097 行记录 Tracing DLL 复制；9146 行整轮失败目标为 Assembly-CSharp-Editor.dll，最新错误位于 Assets/GameTools/XForge/Editor，涉及 ConfigClearAct.Current、Dao.ReloadInEditor 和 Do(throwOnError)。本次日志未找到 UPilotBootstrap 执行记录；进程/监听检查未发现 trunk 服务。DLL 生成不代表本次 Unity 已加载并执行初始化。
+- 第二阶段门槛：按 UPilotBridge.ComputeProjectPathHash 得到 trunk 后缀 4cfb380f2d30027f；只读查询 EditorPrefs 注册表，SetupCompleted、McpAutoStart、BridgeEnabled 三个当前项目键均未保存。对应源码默认分别 false/true/true；F:\trunk\.upilot\config.json 不存在，根规则未生成 UPilot 块。启动入口加载后仍须完成首次设置；目前没有证据表明自动启动被用户关闭、端口冲突或 Python 启动失败。
+- 原因/范围：现有证据指向首次安装期间宿主整轮编译失败，使新启动入口尚未执行；现有 UPilotBootstrap 为 InitializeOnLoad，首次向导和 Server 启动在加载后注册。调整程序集编译顺序或脚本执行顺序不能证明新程序集已加载；当前没有无源码重载的首次引导能力验收。
+- 建议/收益：安装诊断明确区分包 DLL 生成、程序集实际加载、Bootstrap 执行、首次设置与服务启动阶段，并显示宿主首错及阻塞目标；评估不依赖首次源码重载的最小引导方案，禁止仅调整 asmdef 或屏蔽宿主错误后宣称可用。减少在未初始化状态误查端口/解释器及重复重启。
+- 验收标准：在包授权 Unity2022.3 专用 fixture 预置无关宿主 CS 错误后首次安装，取得 DLL 生成/加载/Bootstrap/设置/服务五阶段的独立证据；如实现独立引导，证明服务可提供只读编译诊断且错误仍如实阻断 Editor 变更和测试，修复宿主错误后按正常加载流程恢复。未实施或运行该 fixture。
+- 本轮状态：原因诊断完成，仅记录 TODO；未修改业务或包源码、配置、EditorPrefs，未启动/重启服务、强制 Reload、编译或测试。
+- 双向引用：F:\trunk\TODO_UPilot.mcd / UPilot-20261014-FirstInstallCompileBlocker；通用能力优先级和实施状态以 D:\upilot\TODO_UPilot.mcd 为准。
