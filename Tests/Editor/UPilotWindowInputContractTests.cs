@@ -105,6 +105,29 @@ namespace CodingRiver.UPilot.Tests
             typeof(UPilotBridge).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
                 .SetValue(bridge, value);
 
+        [TestCase(3)]
+        [TestCase(600)]
+        public void HeartbeatPayloadCarriesIntervalWithoutExtendingMainThreadFreshness(int seconds)
+        {
+            var bridge = CreateIsolatedModeBridge();
+            SetIsolatedModeField(bridge, "_heartbeatIntervalMs", seconds * 1000);
+            var build = typeof(UPilotBridge).GetMethod("BuildExecutionStatePayload",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var snapshot = (EditorExecutionStatePayload)build.Invoke(bridge, new object[] { "heartbeat" });
+            var restored = JsonUtility.FromJson<EditorExecutionStatePayload>(JsonUtility.ToJson(snapshot));
+            Assert.That(restored.heartbeatIntervalMs, Is.EqualTo(seconds * 1000));
+            Assert.That(restored.authoritative, Is.True);
+            Assert.That(restored.isStale, Is.False);
+
+            SetIsolatedModeField(bridge, "_lastMainThreadPumpAt",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5001);
+            var stale = (EditorExecutionStatePayload)build.Invoke(bridge, new object[] { "heartbeat" });
+            Assert.That(stale.heartbeatIntervalMs, Is.EqualTo(seconds * 1000));
+            Assert.That(stale.authoritative, Is.False);
+            Assert.That(stale.isStale, Is.True);
+            Assert.That(stale.ready, Is.False);
+        }
+
         [TestCase(true)]
         [TestCase(false)]
         public void OrderedPauseResumeSnapshotsRetainIdentityAndMode(bool initiallyPaused)

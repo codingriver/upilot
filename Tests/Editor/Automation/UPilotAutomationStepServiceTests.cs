@@ -63,6 +63,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             StoreField.SetValue(null, _store);
             ErrorField.SetValue(null, "");
             ExecutorField.SetValue(null, new AutomationStepExecutor(registry, _store));
+            Invoke("RefreshUpdateSubscription");
         }
 
         [TearDown]
@@ -76,6 +77,7 @@ namespace CodingRiver.UPilot.Tests.Automation
                 RegistryField.SetValue(null, _originalRegistry);
                 StoreField.SetValue(null, _originalStore);
                 ErrorField.SetValue(null, _originalError);
+                Invoke("RefreshUpdateSubscription");
                 _isolated = false;
             }
             if (Directory.Exists(_directory)) Directory.Delete(_directory, true);
@@ -97,6 +99,9 @@ namespace CodingRiver.UPilot.Tests.Automation
             _reports.Add(state.reportDirectory);
             return state;
         }
+        private static int UpdateSubscriptions => EditorApplication.update?.GetInvocationList().Count(callback =>
+            callback.Method.DeclaringType == Service && callback.Method.Name == "Update") ?? 0;
+
         private static void AssertReadyIdle()
         {
             var snapshot = UPilotAutomationStepService.GetCurrentSnapshot();
@@ -104,6 +109,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(snapshot.busy, Is.False);
             Assert.That(snapshot.run, Is.Null);
             Assert.That(snapshot.error, Is.Empty);
+            Assert.That(UpdateSubscriptions, Is.Zero);
         }
 
         [TestCase(false)]
@@ -157,8 +163,7 @@ namespace CodingRiver.UPilot.Tests.Automation
                 Invoke("Initialize");
                 AssertReadyIdle();
             }
-            Assert.That(EditorApplication.update.GetInvocationList().Count(d =>
-                d.Method.DeclaringType == Service && d.Method.Name == "Update"), Is.EqualTo(1));
+            Assert.That(UpdateSubscriptions, Is.Zero);
         }
 
         [Test]
@@ -169,11 +174,14 @@ namespace CodingRiver.UPilot.Tests.Automation
             var run = Start(Item("probe", "new"));
             Assert.That(Executor, Is.SameAs(rebuilt));
             Assert.That(run.serviceLifecycleId, Is.EqualTo(UPilotServiceLifetime.Id));
+            Invoke("Initialize"); Invoke("Initialize");
+            Assert.That(UpdateSubscriptions, Is.EqualTo(1));
             for (int i = 0; i < 40; i++) Invoke("Update");
             Assert.That(Executor.State.terminal, Is.True);
             Assert.That(Executor.State.status, Is.EqualTo("Succeeded"));
             Assert.That(Executor.Busy, Is.False);
             Assert.That(Calls, Is.EqualTo(new[] { "execute:new" }));
+            Assert.That(UpdateSubscriptions, Is.Zero);
         }
 
         [Test]
@@ -186,6 +194,36 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(Executor.State.runId, Is.EqualTo(run.runId));
             Assert.That(Executor.Busy, Is.True);
             Assert.That(Calls, Is.EqualTo(new[] { "execute:wait", "restore:wait" }));
+            Assert.That(UpdateSubscriptions, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void TerminalImmediateStopKeepsTickUntilItsOriginalResourceReleaseDeadline()
+        {
+            long now = AutomationStepJson.Now;
+            Executor.Dispose();
+            ExecutorField.SetValue(null, new AutomationStepExecutor((AutomationStepRegistry)RegistryField.GetValue(null),
+                _store, () => now));
+            var run = Start(Item("probe", "wait"));
+            var live = (AutomationStepRun)typeof(AutomationStepExecutor).GetField("_run",
+                BindingFlags.Instance | BindingFlags.NonPublic).GetValue(Executor);
+            // An isolated missing private identity exercises pending framework release without touching a Capture.
+            live.captureOwned = true;
+            live.captureStartIntent = true;
+            live.captureSessionId = "unverified-private-owner";
+            var stopped = UPilotAutomationStepService.StopCurrentImmediately(run.runId, run.operationId, run.serviceLifecycleId);
+            Assert.That(stopped.changed, Is.True);
+            Assert.That(Executor.State.terminal, Is.True);
+            Assert.That(Executor.ReleasingImmediateStopResources, Is.True);
+            Assert.That(UpdateSubscriptions, Is.EqualTo(1));
+            long originalStop = Executor.State.immediateStopRequestedAtUtcMs;
+            now = originalStop + AutomationStepExecutor.ImmediateStopReleaseTimeoutMs;
+            Invoke("Update");
+            Assert.That(Executor.Busy, Is.False);
+            Assert.That(UpdateSubscriptions, Is.Zero);
+            Assert.That(Executor.State.immediateStopRequestedAtUtcMs, Is.EqualTo(originalStop));
+            Assert.That(Executor.State.resourceRecoveryError, Does.Contain("STEP_IMMEDIATE_STOP_RELEASE_TIMEOUT"));
+            Assert.That(Calls, Is.Empty);
         }
 
         [Test]

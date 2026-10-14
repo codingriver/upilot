@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -254,8 +254,14 @@ namespace CodingRiver.UPilot
         public bool verified, terminal;
         public bool readyVerified; // 身份确认与完整只读就绪分开保存，Reload 不延长未完成的启动。
         public string instanceId = "", error = "";
+        public ReloadRevalidationObservation reloadRevalidation;
 
-        internal ServerLaunchState Snapshot() => JsonUtility.FromJson<ServerLaunchState>(JsonUtility.ToJson(this));
+        internal ServerLaunchState Snapshot()
+        {
+            var snapshot = JsonUtility.FromJson<ServerLaunchState>(JsonUtility.ToJson(this));
+            if (reloadRevalidation == null || string.IsNullOrEmpty(reloadRevalidation.observationId)) snapshot.reloadRevalidation = null;
+            return snapshot;
+        }
         internal bool CanObserve(long now) => !terminal && (verified || now < deadlineUtcMs);
         internal bool TryConfirm(int pid, long createdAt, string instance, long now, bool stopping = false)
         {

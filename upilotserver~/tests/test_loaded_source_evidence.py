@@ -169,3 +169,19 @@ def test_write_batch_round_entries_have_loaded_code_evidence():
         ("upilot_mcp.domain.compile_service", "CompileDomainService._safe_compile_and_wait"),
     }
     assert required <= set(source_identity.SELECTED_CODE_ENTRIES)
+
+
+def test_idle_connection_and_history_pruning_have_real_loaded_code_evidence():
+    from upilot_mcp.server import WsOrchestratorServer
+    from upilot_mcp.state_store import StateStore
+
+    required = {
+        (WsOrchestratorServer.__module__, WsOrchestratorServer._handle.__qualname__),
+        (StateStore.__module__, StateStore._persist_execution_snapshot.__qualname__),
+    }
+    result = source_identity.selected_entry_code_evidence()
+    entries = {(item["module"], item["entry"]): item for item in result["entries"]}
+    assert required <= entries.keys()
+    for key in required:
+        assert entries[key]["status"] == "equivalent"
+        assert entries[key]["layers"][0]["sourceSha256"]

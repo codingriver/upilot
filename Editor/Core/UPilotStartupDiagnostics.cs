@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -47,17 +47,6 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
-    internal sealed class UPilotBackgroundExecutionEvidence
-    {
-        public string status = "not_started";
-        public long observedAtUtcMs;
-        public long elapsedFromReadyMs;
-        public int sampleCount;
-        public UPilotStartupFocusSnapshot focus;
-        public string statement;
-    }
-
-    [Serializable]
     internal sealed class UPilotStartupRecord
     {
         public int schemaVersion = 2;
@@ -80,7 +69,6 @@ namespace CodingRiver.UPilot
         public long lastServerStartAttemptAtUtcMs;
         public long nextServerStartAttemptAtUtcMs;
         public string lastServerStartReason = "";
-        public UPilotBackgroundExecutionEvidence backgroundExecution = new();
         public bool failureSummaryLogged;
         public bool recoverySummaryLogged;
     }
@@ -99,26 +87,24 @@ namespace CodingRiver.UPilot
             "editor_ready",
         };
 
-        private const long StartupObservationWindowMs = 5 * 60 * 1000;
-        private const long BackgroundSampleIntervalMs = 10 * 1000;
-        private const long BackgroundSampleWindowMs = 5 * 60 * 1000;
 
         private static UPilotStartupRecord s_record;
         private static string s_path;
         private static int s_mainThreadId;
         private static long s_updateCount;
-        private static long s_observationDeadlineUtcMs;
         private static long s_healthObservationStartedUtcMs;
         private static int s_healthProbeIndex;
         private static bool s_healthProbeRunning;
         private static bool s_supplementalHealthPending;
         private static bool s_supplementalHealthUsed;
         private static UPilotMcpServerManager s_serverManager;
-        private static long s_readyAtUtcMs;
-        private static long s_nextBackgroundSampleUtcMs;
-        private static int s_backgroundSampleCount;
         private static bool s_updateHooked;
         private static bool s_writeFailureReported;
+
+        internal static bool NeedsEditorStateObservation
+        {
+            get { lock (Sync) return s_updateHooked || (s_supplementalHealthPending && !s_supplementalHealthUsed); }
+        }
 
         internal static string RecordPath => Path.Combine(
             Directory.GetParent(Application.dataPath)?.FullName ?? ".",
@@ -134,7 +120,6 @@ namespace CodingRiver.UPilot
                 var now = UtcNowMs();
                 if (s_record.diagnosticsStartedAtUtcMs <= 0)
                     s_record.diagnosticsStartedAtUtcMs = now;
-                s_observationDeadlineUtcMs = s_record.diagnosticsStartedAtUtcMs + StartupObservationWindowMs;
                 RecordMilestoneLocked("bootstrap_entered", "UPilotBootstrap.static_constructor", 0, "", now);
                 EnsureUpdateHookLocked();
             }
@@ -327,28 +312,21 @@ namespace CodingRiver.UPilot
             lock (Sync)
             {
                 EnsureRecordLocked();
-                if (s_supplementalHealthPending) EnsureUpdateHookLocked();
+                if (s_supplementalHealthPending && !s_supplementalHealthUsed && s_serverManager != null &&
+                    !string.Equals(s_record.healthObservationStatus, "healthy", StringComparison.Ordinal))
+                    EnsureUpdateHookLocked();
                 if (!ready || !authoritative || isStale || HasMilestoneLocked("editor_ready"))
                     return;
 
                 var now = UtcNowMs();
                 if (!RecordMilestoneLocked("editor_ready", "bridge.editor_execution_state", 0, sessionId ?? "", now))
                     return;
-                s_readyAtUtcMs = now;
-                s_nextBackgroundSampleUtcMs = now + BackgroundSampleIntervalMs;
-                s_backgroundSampleCount = 0;
-                s_record.backgroundExecution = new UPilotBackgroundExecutionEvidence
-                {
-                    status = "pending",
-                    statement = "Waiting for a sampled main-thread update while the Unity process is not foreground.",
-                };
                 if (s_record.failureSummaryLogged && !s_record.recoverySummaryLogged)
                 {
                     s_record.recoverySummaryLogged = true;
                     Logger.AppendLine("[INFO ] [STARTUP ] startup_recovered stage=editor_ready");
                 }
                 PersistLocked();
-                EnsureUpdateHookLocked();
             }
         }
 
@@ -385,11 +363,10 @@ namespace CodingRiver.UPilot
                         s_healthProbeRunning = true;
                         manager = s_serverManager;
                         launchHealthProbe = true;
-                        finalHealthProbe = true;
+                        finalHealthProbe = s_healthProbeIndex >= HealthProbeOffsetsMs.Length;
                     }
                 }
 
-                ObserveBackgroundExecutionLocked(now);
                 if (s_healthObservationStartedUtcMs > 0 &&
                     now >= s_healthObservationStartedUtcMs + HealthProbeOffsetsMs[HealthProbeOffsetsMs.Length - 1] + 5000 &&
                     string.Equals(s_record.healthObservationStatus, "observing", StringComparison.Ordinal))
@@ -397,7 +374,7 @@ namespace CodingRiver.UPilot
                     s_record.healthObservationStatus = "incomplete";
                     PersistLocked();
                 }
-                RemoveUpdateHookIfFinishedLocked(now);
+                RemoveUpdateHookIfFinishedLocked();
             }
 
             if (launchHealthProbe)
@@ -444,40 +421,6 @@ namespace CodingRiver.UPilot
                     PersistLocked();
                 }
             }
-        }
-
-        private static void ObserveBackgroundExecutionLocked(long now)
-        {
-            if (s_readyAtUtcMs <= 0 || s_record.backgroundExecution == null ||
-                !string.Equals(s_record.backgroundExecution.status, "pending", StringComparison.Ordinal))
-                return;
-            if (now - s_readyAtUtcMs >= BackgroundSampleWindowMs)
-            {
-                s_record.backgroundExecution.status = "not_observed";
-                s_record.backgroundExecution.sampleCount = s_backgroundSampleCount;
-                s_record.backgroundExecution.statement =
-                    "No sampled unfocused main-thread execution was observed before the bounded window elapsed; this is not evidence that background execution is unsupported.";
-                PersistLocked();
-                return;
-            }
-            if (now < s_nextBackgroundSampleUtcMs) return;
-
-            s_nextBackgroundSampleUtcMs = now + BackgroundSampleIntervalMs;
-            s_backgroundSampleCount++;
-            var focus = CaptureFocusSnapshot(Process.GetCurrentProcess().Id, s_updateCount, s_mainThreadId);
-            if (!string.Equals(focus.state, "unfocused", StringComparison.Ordinal)) return;
-
-            s_record.backgroundExecution.status = "observed";
-            s_record.backgroundExecution.observedAtUtcMs = now;
-            s_record.backgroundExecution.elapsedFromReadyMs = Math.Max(0, now - s_readyAtUtcMs);
-            s_record.backgroundExecution.sampleCount = s_backgroundSampleCount;
-            s_record.backgroundExecution.focus = focus;
-            s_record.backgroundExecution.statement =
-                "At this sample, Unity executed the Editor update on the main thread while its process did not own the foreground window.";
-            Logger.AppendLine(
-                $"[INFO ] [STARTUP ] unfocused_execution_observed targetPid={focus.targetProcessId} " +
-                $"foregroundPid={focus.foregroundProcessId} updateCount={focus.updateCount}");
-            PersistLocked();
         }
 
         private static bool RecordMilestoneLocked(
@@ -548,13 +491,6 @@ namespace CodingRiver.UPilot
             s_updateCount = LatestUpdateCount(s_record);
             s_healthObservationStartedUtcMs = s_record.healthObservationStartedAtUtcMs;
             s_healthProbeIndex = Math.Max(0, Math.Min(s_record.healthProbeCount, HealthProbeOffsetsMs.Length));
-            var ready = s_record.milestones.Find(item => string.Equals(item.name, "editor_ready", StringComparison.Ordinal));
-            if (ready != null)
-            {
-                s_readyAtUtcMs = ready.observedAtUtcMs;
-                if (string.Equals(s_record.backgroundExecution?.status, "pending", StringComparison.Ordinal))
-                    s_nextBackgroundSampleUtcMs = UtcNowMs() + BackgroundSampleIntervalMs;
-            }
             if (restoredExistingRecord)
                 PersistLocked();
         }
@@ -648,7 +584,6 @@ namespace CodingRiver.UPilot
                 }
                 loaded.milestones ??= new List<UPilotStartupMilestone>();
                 loaded.blockingReasons ??= new List<UPilotStartupBlockingReason>();
-                loaded.backgroundExecution ??= new UPilotBackgroundExecutionEvidence();
                 loaded.schemaVersion = Math.Max(2, loaded.schemaVersion);
                 loaded.serverStartRetryStatus = string.IsNullOrWhiteSpace(loaded.serverStartRetryStatus)
                     ? "not_started"
@@ -735,16 +670,14 @@ namespace CodingRiver.UPilot
             s_updateHooked = true;
         }
 
-        private static void RemoveUpdateHookIfFinishedLocked(long now)
+        private static void RemoveUpdateHookIfFinishedLocked()
         {
-            var healthFinished = string.Equals(s_record.healthObservationStatus, "healthy", StringComparison.Ordinal) ||
-                                 string.Equals(s_record.healthObservationStatus, "incomplete", StringComparison.Ordinal) ||
-                                 string.Equals(s_record.serverStartRetryStatus, "blocked", StringComparison.Ordinal) ||
-                                 string.Equals(s_record.serverStartRetryStatus, "exhausted", StringComparison.Ordinal);
-            var backgroundFinished = s_readyAtUtcMs <= 0
-                ? now >= s_observationDeadlineUtcMs
-                : !string.Equals(s_record.backgroundExecution?.status, "pending", StringComparison.Ordinal);
-            if (!healthFinished || !backgroundFinished || s_healthProbeRunning) return;
+            var healthPending = s_healthProbeRunning ||
+                (s_serverManager != null &&
+                 !string.Equals(s_record.healthObservationStatus, "healthy", StringComparison.Ordinal) &&
+                 (string.Equals(s_record.healthObservationStatus, "observing", StringComparison.Ordinal) ||
+                  (s_supplementalHealthPending && !s_supplementalHealthUsed)));
+            if (healthPending) return;
             EditorApplication.update -= OnEditorUpdate;
             s_updateHooked = false;
         }
@@ -817,9 +750,6 @@ namespace CodingRiver.UPilot
             out UPilotStartupRecord record,
             out string reason) =>
             TryLoadRecord(path, projectPath, processId, processCreatedAt, out record, out reason);
-
-        internal static bool ShouldTakeBackgroundSampleForTests(long now, long nextSampleAt) =>
-            now >= nextSampleAt;
 
         internal static bool TryBeginServerStartAttemptForTests(
             UPilotStartupRecord record,

@@ -75,6 +75,8 @@ UPilot 会自动选择可用端口、写入所选 Agent 的 MCP 配置，并同�
 
 现在可以开始使用 UPilot。
 
+在 **高级设置 → 常规 → 周期与超时** 中，可配置心跳、Health、Domain Reload 复核、窗口观察、包更新恢复、重连和界面刷新。详见[周期与超时配置及四阶段实施清单](Documentation~/TimingAndTimeouts.md)。Bridge 心跳默认 3 秒，HTTP Health 默认 10 秒；服务验证就绪后，Health 由服务统一持有，所有窗口关闭后仍运行，多开窗口不增加检查器。周期设置调整后续调度，有限观察保留开始时固定的期限；长心跳间隔不会放宽 Editor 主线程新鲜度要求。四阶段实现、规范项目定向验收和服务刷新已完成，证据及未覆盖范围见[2026-10-14 验证记录](Documentation~/TimingAndTimeouts-Validation-20261014.md)。
+
 ## UPilot 能做什么
 
 UPilot 是 AI Agent 与 Unity Editor 之间的桥梁：Agent 通过 MCP 工具读取真实的 Unity 状态，并在授权后执行修改，而不只是生成一段代码供你手动粘贴。

@@ -153,7 +153,7 @@ namespace CodingRiver.UPilot
                 _setupCompletionMessageType = MessageType.Info;
                 _setupInitialized = false;
                 _mainView = UPilotMainView.Dashboard;
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 RefreshSnapshot();
                 ShowNotice(_setupStartAfterSetup ? "UPilot 配置完成并已启动" : "UPilot 配置已保存，未启动服务");
             }

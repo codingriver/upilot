@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -178,7 +178,9 @@ namespace CodingRiver.UPilot
         private static string WsHostPrefsKey => $"upilot.WsHost.{ProjectPathHashSuffix}";
         private static string WsPortPrefsKey => $"upilot.WsPort.{ProjectPathHashSuffix}";
         private static string HttpPortPrefsKey => $"upilot.HttpPort.{ProjectPathHashSuffix}";
-        private const int    HeartbeatIntervalMs = 2000;
+        internal const int   DefaultHeartbeatIntervalSeconds = 3;
+        private const int    MainThreadContextFreshnessMs = 5000;
+        private int          _heartbeatIntervalMs = DefaultHeartbeatIntervalSeconds * 1000;
         internal const int   IdentityContractVersion = 1;
         private const int    MaxLogEntries    = 1000;
         private const int    ExecutionStatePersistenceAttempts = 3;
@@ -199,6 +201,9 @@ namespace CodingRiver.UPilot
         private readonly object _queueObservationLock = new();
         private Action _executingQueueAction;
         private readonly SemaphoreSlim             _sendLock          = new(1, 1);
+        private readonly SemaphoreSlim             _heartbeatIntervalChanged = new(0, 1);
+        private readonly SemaphoreSlim _reconnectIntervalChanged = new(0, 1);
+        private int _reconnectDelayMs = 1000;
         private readonly object                    _executionStatePublicationLock = new();
         private static readonly object             ExecutionStatePersistenceLock = new();
         private readonly object                    _logLock           = new();
@@ -337,6 +342,9 @@ namespace CodingRiver.UPilot
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             RestoreExecutionStateIdentity();
             LoadDefaultEndpoints();
+            LoadHeartbeatIntervalPreference();
+            ApplyTimingPreferenceChange("");
+            UPilotTimingSettings.Changed += ApplyTimingPreferenceChange;
             _debugWireLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.DebugWireLogsKey, false);
             _verboseLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.VerboseLogsKey, false);
             Logger.SetRuntimeLogOptions(_debugWireLogsEnabled, _verboseLogsEnabled);
@@ -361,6 +369,51 @@ namespace CodingRiver.UPilot
         // ── Public status API (called by status window on main thread) ──────────
 
         public string WsHost => _wsHost;
+        public int HeartbeatIntervalSeconds
+        {
+            get => HeartbeatIntervalMs / 1000;
+            set
+            {
+                var seconds = Math.Max(1, Math.Min(600, value));
+                var milliseconds = seconds * 1000;
+                if (Interlocked.Exchange(ref _heartbeatIntervalMs, milliseconds) == milliseconds) return;
+                EditorPrefs.SetInt(UPilotPreferences.BridgeHeartbeatIntervalSecondsKey, seconds);
+                SignalHeartbeatIntervalChanged();
+            }
+        }
+
+        internal int HeartbeatIntervalMs => Volatile.Read(ref _heartbeatIntervalMs);
+        internal int HeartbeatTimeoutMs => HeartbeatIntervalMs * 3;
+
+        private void LoadHeartbeatIntervalPreference()
+        {
+            var seconds = EditorPrefs.GetInt(UPilotPreferences.BridgeHeartbeatIntervalSecondsKey,
+                DefaultHeartbeatIntervalSeconds);
+            _heartbeatIntervalMs = Math.Max(1, Math.Min(600, seconds)) * 1000;
+        }
+
+        internal void ResetHeartbeatIntervalToDefault()
+        {
+            var milliseconds = DefaultHeartbeatIntervalSeconds * 1000;
+            if (Interlocked.Exchange(ref _heartbeatIntervalMs, milliseconds) != milliseconds)
+                SignalHeartbeatIntervalChanged();
+        }
+
+        internal int ReconnectDelayMs => Volatile.Read(ref _reconnectDelayMs);
+        private void ApplyTimingPreferenceChange(string name)
+        {
+            if (name.Length != 0 && name != nameof(UPilotTimingSettings.BridgeReconnectDelaySeconds)) return;
+            var value = UPilotTimingSettings.BridgeReconnectDelaySeconds * 1000;
+            if (Interlocked.Exchange(ref _reconnectDelayMs, value) == value) return;
+            try { _reconnectIntervalChanged.Release(); } catch (SemaphoreFullException) { }
+        }
+
+        private void SignalHeartbeatIntervalChanged()
+        {
+            try { _heartbeatIntervalChanged.Release(); }
+            catch (SemaphoreFullException) { /* Coalesce changes until the existing loop consumes the signal. */ }
+        }
+
         public int WsPort => _wsPort;
         public int HttpPort
         {
@@ -709,12 +762,12 @@ namespace CodingRiver.UPilot
                 }
             }
 
-            var startupContext = BuildEditorContextPayload("startup-diagnostics");
-            UPilotStartupDiagnostics.ObserveEditorState(
-                startupContext.ready,
-                startupContext.authoritative,
-                startupContext.isStale,
-                _sessionId);
+            if (UPilotStartupDiagnostics.NeedsEditorStateObservation)
+            {
+                var startupContext = BuildEditorContextPayload("startup-diagnostics");
+                UPilotStartupDiagnostics.ObserveEditorState(
+                    startupContext.ready, startupContext.authoritative, startupContext.isStale, _sessionId);
+            }
 
             if (EditorApplication.timeSinceStartup - _lastWatchdogCheck > 2.0)
             {
@@ -821,7 +874,6 @@ namespace CodingRiver.UPilot
             }
         }
         private const int ConnectTimeoutMs = 3000;  // 连接超时 3s
-        private const int ReconnectDelayMs  = 1000;  // 失败后等待 1s 再重连
         private const int SocketTaskDrainTimeoutMs = 250;
 
         private async Task ConnectLoopAsync(CancellationToken token)
@@ -907,6 +959,7 @@ namespace CodingRiver.UPilot
                     _ws = null;
                     AbortAndDisposeWebSocket(wsToClose);
                     cycleCts.Cancel();
+                    UPilotQuickStart.NotifyDeploymentChanged();
 
                     var drainTask = Task.WhenAll(recvTask, hbTask);
                     if (await Task.WhenAny(drainTask, Task.Delay(SocketTaskDrainTimeoutMs)).ConfigureAwait(false) == drainTask)
@@ -917,7 +970,15 @@ namespace CodingRiver.UPilot
 
                 if (!token.IsCancellationRequested)
                 {
-                    try { await Task.Delay(ReconnectDelayMs, token).ConfigureAwait(false); }
+                    try
+                    {
+                        var waitStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        while (!token.IsCancellationRequested)
+                        {
+                            var remaining = ReconnectDelayMs - (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - waitStartedAt);
+                            if (remaining <= 0 || !await _reconnectIntervalChanged.WaitAsync((int)remaining, token).ConfigureAwait(false)) break;
+                        }
+                    }
                     catch (OperationCanceledException) { break; }
                 }
             }
@@ -976,6 +1037,7 @@ namespace CodingRiver.UPilot
                 payload = new HelloPayload
                 {
                     identityContractVersion = IdentityContractVersion,
+                    heartbeatIntervalMs = HeartbeatIntervalMs,
                     unityVersion = Application.unityVersion,
                     projectPath = projectRoot,
                     platform = Application.platform == RuntimePlatform.OSXEditor ? "macos" :
@@ -1086,7 +1148,7 @@ namespace CodingRiver.UPilot
                     if (!TryBuildAndPersistExecutionState("heartbeat", out var heartbeatPayload))
                     {
                         consecutiveFailures++;
-                        await Task.Delay(HeartbeatIntervalMs, token).ConfigureAwait(false);
+                        await _heartbeatIntervalChanged.WaitAsync(HeartbeatIntervalMs, token).ConfigureAwait(false);
                         continue;
                     }
                     var hb = new HeartbeatMessage
@@ -1121,7 +1183,7 @@ namespace CodingRiver.UPilot
                         throw new Exception($"Heartbeat failed {consecutiveFailures} times consecutively, forcing reconnect");
                     }
                 }
-                await Task.Delay(HeartbeatIntervalMs, token).ConfigureAwait(false);
+                await _heartbeatIntervalChanged.WaitAsync(HeartbeatIntervalMs, token).ConfigureAwait(false);
             }
         }
 
@@ -1215,6 +1277,7 @@ namespace CodingRiver.UPilot
                         UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.auth.rejected", "认证被拒绝",
                             $"sessionId={_sessionId}", "error");
+                        UPilotQuickStart.NotifyDeploymentChanged();
                         try { _ws?.Abort(); } catch { /* ignored */ }
                         return;
                     }
@@ -1229,6 +1292,7 @@ namespace CodingRiver.UPilot
                         UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.auth.contract_mismatch", "身份契约不匹配",
                             $"server={ack.payload.identityContractVersion} bridge={IdentityContractVersion}", "error");
+                        UPilotQuickStart.NotifyDeploymentChanged();
                         try { _ws?.Abort(); } catch { /* ignored */ }
                         return;
                     }
@@ -1255,6 +1319,7 @@ namespace CodingRiver.UPilot
                     _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     _authenticationErrorCode = "hello_payload_missing";
                     _authenticationError = "协议不兼容：Server 未返回 session.hello payload。";
+                    UPilotQuickStart.NotifyDeploymentChanged();
                     try { _ws?.Abort(); } catch { }
                     return;
                 }
@@ -1265,6 +1330,7 @@ namespace CodingRiver.UPilot
                 _isAuthenticated = true;
                 _lastAuthenticatedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 UPilotStartupDiagnostics.ObserveBridgeAuthenticated(_sessionId);
+                UPilotQuickStart.NotifyDeploymentChanged();
                 UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.auth.success", "认证成功",
                     $"sessionId={_sessionId} {FormatMcpServerHintForLog()}");
@@ -2122,7 +2188,7 @@ namespace CodingRiver.UPilot
             var updatedAt = _lastMainThreadPumpAt;
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var connected = _started && _isAuthenticated && _ws != null && _ws.State == WebSocketState.Open;
-            var authoritative = updatedAt > 0 && now - updatedAt <= Math.Max(HeartbeatIntervalMs * 2, 5000);
+            var authoritative = updatedAt > 0 && now - updatedAt <= MainThreadContextFreshnessMs;
             var playModeState = _cachedPlayModeState ?? "unknown";
             var editorIsCompiling = _cachedIsCompiling;
             var compilePhase = _compileService.Phase ?? "idle";
@@ -2165,6 +2231,7 @@ namespace CodingRiver.UPilot
             return new EditorContextPayload
             {
                 playModeTransition = UPilotPlayModeTransitions.Current,
+                heartbeatIntervalMs = HeartbeatIntervalMs,
                 stateContractVersion = 2,
                 projectId = ProjectPathHashSuffix,
                 producerEpoch = _producerEpoch,
@@ -2271,6 +2338,7 @@ namespace CodingRiver.UPilot
             return new EditorExecutionStatePayload
             {
                 stateContractVersion = context.stateContractVersion,
+                heartbeatIntervalMs = context.heartbeatIntervalMs,
                 projectId = context.projectId,
                 producerEpoch = context.producerEpoch,
                 domainGeneration = context.domainGeneration,

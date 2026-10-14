@@ -100,6 +100,7 @@ P0/P1 集中验收续记（2026-10-09）：V01 共享生产 pump/watchdog 与命
 - 剩余关闭条件：Server全模块实际加载源码身份仍unverified；磁盘源码哈希、进程时间、验收source gate和公开行为通过不能替代加载鉴证。当前版本上述在线对照子项已完成，不再列待验、不重复启动测试或编译；不外推全部Unity/UTF版本或所有历史产物。整项保持开放。
 
 ### D08 / P2：Console 观察范围细分到清理和场景恢复
+- 2026-10-13 SceneTool 命名空间统一续证：xclient 自动批次 `wb-88a73670-72d6-463f-b407-6a0ae4b539b8` verified、terminal/errorsVerified/correlationVerified=true，0 编译错误；按 `compileOperationId=8201bc9e7c4a4b70a341aefb4bbf225e` 查询 Console 返回 `CONSOLE_EVIDENCE_NOT_FOUND`（dispatchAttempted=false）。当前业务类型名 Error 筛选为0，不作为完整编译范围证据；定向 run `8fb7f604-28b2-47af-9a64-c63420a7e66d` 47/47、清理成功，rangeCoverage=complete / phaseCoverage=partial。沿用本项补齐自动 WriteBatch Console 边界与 gap/nextAction 的建议，在 `D:/upilot/Tests~/UPilotTest` 定向覆盖编译完成、Domain Reload、Console清空和阶段缺口，减少额外查询与人工归因。P2 / 待核实、父项开放，仅补现场未实施；双向引用 `D:/MA/xclient/TODO_UPilot.mcd` / “2026-10-12 P2：Console顶层与阶段覆盖口径（引用根D08）”。
 - 2026-10-13 GMPanel 小队 Gizmos 开关开发续证（既有 D08/P2，待核实，父项开放）：xclient 自动批次 wb-36f57826-e33b-4ad4-9ecb-431133b75f45 为 verified/passed，terminal/errorsVerified/correlationVerified=true、0 编译错误；按 compileOperationId=fc4534c788d14138b400ba71d867a6e3 调用 unity_console_search_logs 返回 CONSOLE_EVIDENCE_NOT_FOUND（dispatchAttempted=false）。按修改文件名查询当前 Error 为 matchedCount=0，不据此证明本次完整编译日志范围。期望沿用本项补齐自动 WriteBatch 的 Console 边界及明确 gap/nextAction，减少额外查询和人工核对；在 D:/upilot/Tests~/UPilotTest 定向覆盖编译完成、Domain Reload、Console 清空后的原身份边界或缺口诊断。本轮仅补现场，未修改或验收 UPilot 产品。双向引用：D:/MA/xclient/TODO_UPilot.mcd / “2026-10-12 P2：Console顶层与阶段覆盖口径（引用根D08）” ↔ 本根 D08。
 - 2026-10-13 PlayMode提示修复续证（P2 / 待核实，父项不关闭）：canonical编译05764a7e8aea4d6b8187347f33f7d1dc与xclient编译1a556967fa814bbe984d75b31f8c7464均verified/passed、0编译错误，但unity_console_search_logs(compileOperationId)返回CONSOLE_EVIDENCE_NOT_FOUND，无法取得对应持久Console边界。LifecycleHealthTests的官方Task/run仅63/63、清理成功；全Console查询2条UPilotPorts错误索引20/9低于run起点26，范围26→26无新增记录但coverage/phaseCoverage=partial，读取timestamp不是发生时间。期望补齐自动WriteBatch的可诊断Console边界，验收摘要显式区分历史/新增/预期自有日志计数、consoleGateStatus与覆盖缺口，减少读完整报告后手工核对，不能因历史错误而改写当前通过或放宽门禁。canonical验收标准：在原有WriteBatch与NUnit链覆盖Reload后边界保留/缺失、baseline前历史错误、运行中新错误及Console清空；按原compile/run身份查询返回冻结范围或明确gap，摘要口径可核对，当前源码测试与历史错误不混淆。证据及双向回链：本根UPilot-20261010-LifecycleHealthWaiting的Oct13子项 ↔ D:/MA/xclient/TODO_UPilot.mcd同ID；项目证据D:/MA/xclient/Log/UPilotDiagnostics/playmode-notice-fix-20261013-domain103.json。
 - 2026-10-13 xclient 五文件 Gizmos 续证：精确 SquadGizmosEditModeTests runGuid=03afa88c-66b5-4ecf-bdfd-f4110e434e04，14/14、resultAuthoritative 与 cleanupSucceeded=true；rangeCoverage=complete，phaseCoverage=partial，gapReason=console_cursor_clear_or_reload_not_detectable。本轮未修改或部署 UPilot、不关闭 D08；项目回链 D:/MA/xclient/TODO_UPilot.mcd“2026-10-12 P2：Console顶层与阶段覆盖口径”，证据目录 SquadGizmosFiveFiles_2026-10-13。
@@ -488,7 +489,10 @@ P0/P1 集中验收续记（2026-10-09）：V01 共享生产 pump/watchdog 与命
 - 预期收益：减少每个目录移动导致的重复编译/Reload、人工磁盘状态核对与临时 eval；降低脚本和 asmdef 暂时分离风险。
 - 可验收标准：仅在规范 `D:\upilot\Tests~\UPilotTest` 构造含脚本、asmdef、Prefab 与 meta 的多目录迁移；成功保持 GUID/资源哈希和程序集边界；冲突在写入前拒绝；中断或 Reload 后能按原批次查询结果，确保 StopAssetEditing 释放且未知项不重放。
 - 证据：`F:\xclient2\Log\ProjectileDirectoryMigration\20260930\baseline.json`、`directory-map.json`、`static-verification.json`；本任务只实施业务目录迁移，不代表上述通用能力已交付。
-- 双向引用：`F:\xclient2\TODO_UPilot.mcd` 与 `D:\upilot\TODO_UPilot.mcd` 的同 ID 条目。
+- 双向引用：`F:\xclient2\TODO_UPilot.mcd`、`D:\MA\xclient\TODO_UPilot.mcd` 与 `D:\upilot\TODO_UPilot.mcd` 的同 ID 条目。
+- 2026-10-13 xclient 增量证据：SceneTool 的 88 个 C# 与原 meta 分类迁移，未新增程序集。`csharp_eval` 使用 AssetDatabase.StartAssetEditing/MoveAsset/StopAssetEditing 的 try/finally；首请求 `cmd-4adcfef0-1c2a-434f-a60f-0f9fa3fec8ea` 在 30 秒响应等待预算内未返回，结果 unknown。只读磁盘逐项核对确认已移动 57 项、未开始 31 项，脚本及 meta 哈希一致；原调用结束且 Editor 恢复 Ready 后，仅提交剩余 31 项完成迁移，未重放已完成或未知项。
+- 本次补充期望：专用批次在执行前估算预算并提供有界分片；超时后仍能按原身份查询逐项已完成/未开始/未知结果及剩余清单，独立返回 StopAssetEditing 清理状态。关联 `UPilot-20261009-EvalAuthoringCleanupEvidence`，不扩大现有执行预算、权限或自动重试范围。
+- 增量验收/状态：在 `D:\upilot\Tests~\UPilotTest` 的脚本、Prefab 与 meta 迁移中受控触发超时，核对逐项持久化结果、GUID、资源哈希、程序集边界和导入释放；后续批次只接受明确未执行项。业务迁移已通过关联 WriteBatch `wb-1d04a14e-77d1-4eb1-9495-870c6fedacd1` 的编译验证及 25/25 定向测试，但通用能力仍为 P2 / 未实现、未验收。
 
 ## UPilot-20261008-OfflineWriteBatchRegistration：Bridge 离线时保存待编译写入清单
 
@@ -513,6 +517,8 @@ P0/P1 集中验收续记（2026-10-09）：V01 共享生产 pump/watchdog 与命
 - 双向引用：`F:\xclient2\TODO_UPilot.mcd` 同 ID；优先级和实施状态以本根条目为准。
 ## UPilot-20261009-AssetDependencyInventory：资源依赖盘点的主线程安全与批量查询
 
+- 2026-10-14 外部 xclient LevelEditor 路径验收续证：19 个精确资源路径的只读 eval 在选定 3 秒预算中止，EXECUTION_BUDGET_EXCEEDED/actual=3084ms，commandId=`cmd-b871f4a1-e444-4a28-8776-e705f92949ba`，无逐项结果；未重放或增加预算。原生单资源查询核验 15 个有效预制体绑定、配置/默认模型/场景目录并通过。沿用本 P2 批量/分页建议，优先复用或补充精确 paths 的元数据与脚本绑定查询，提供逐项完成/未开始/未知及剩余游标，减少循环超时和逐工具聚合；在 `D:/upilot/Tests~/UPilotTest` 定向验证预算中止部分结果、批量/单条等价及只读边界。不是 Unity API 或产品源码故障证明，候选待评估、未实施；双向引用：`D:/MA/xclient/TODO_UPilot.mcd` / 本 ID。
+
 - 日期/触发场景：2026-10-09，xclient旧s-team删除前确认Scene/Prefab/Asset无残留脚本引用。
 - 观察/痛点：unity_asset_dependencies反向查询返回“GetInt can only be called from the main thread”；逐路径有界eval遍历在30秒预算失败，数组Where扩展未绑定。随后单次AssetDatabase.GetDependencies批量查询成功，取得4,449候选的7,458依赖项；没有以失败/超时证明无引用，没有突破预算或访问磁盘二进制/缓存。
 - 期望能力：现有资源依赖语义工具安全调度Unity主线程并支持精确paths批量输入、只读分页/游标和清晰扫描完成/未完成边界，返回请求身份及路径/数量/依赖证据；先核实现场部署与既有能力，不以本次报错直接断言当前源码根因，不扩展eval子集或无界增加预算。
@@ -526,6 +532,8 @@ P0/P1 集中验收续记（2026-10-09）：V01 共享生产 pump/watchdog 与命
 - 本轮补充效率证据：只读解释器逐路径循环306次调用后在30秒预算中止（EXECUTION_BUDGET_EXCEEDED，actual=30075ms，commandId=`cmd-3ccd4041-4614-49d4-bfc5-52960dd48e6d`）；单次结构化批量API成功。该现象不证明Unity API本身超时，保持现有预算与权限边界，不通过扩大预算替代批量能力。
 - 本轮证据目录：`C:\Users\coding\AppData\Local\Temp\xclient-survivor-team-cs0246-20261009\`，重点为asset-dependencies-summary.json、asset-dependencies-typed-literals-current.json及失败回执；通用条目状态仍为P2候选待诊断/评估，未实施，双向引用沿用本ID。
 
+
+- 2026-10-13 续证（SceneTool 脚本反向引用清单）：当前 xclient Ready/EditMode 下，正确参数 evidenceMode=object、direction=reverse、referenceQuery={kind:guid,value:eced099b245933e4b8cae3afbe11ceb0}、scope=[Assets/]、maxNodes=5000、timeBudgetMs=1000 仍返回 GetInt 主线程错误；原 commandId=cmd-40ff506d-e230-43f9-9ff2-536a82921135，sideEffectsMayHaveOccurred=false。失败查询未重放。降级源码/GUID 静态扫描 37,290 个候选文件，确认 17 个直接 m_Script 资源均在 SceneTool/EditorRes，反向 Prefab/Scene 资源图无新增边；另用单次 AssetDatabase.GetDependencies(string[], bool) 读取 381 个动画/Controller/Playable 候选的 1,402 项递归依赖，SceneTool 命中 0。该证据覆盖当前候选集，不宣称所有二进制插件或动态生成引用均已排除；不扩展权限或执行预算。
 
 ## 2026-10-09 V01开发补记（既有父项进度，非新增项；未验收、未上线核验）
 
@@ -810,6 +818,7 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 下一步/状态：源码与定向测试已完成，等待经授权部署到外部项目后，以一次新的重启核验服务身份、新 Bridge、部署入口及实际只读往返；当前未发布、未更新 xclient 包、未停止其进程、未重启或重放原操作，不能报告现场修复验收完成。
 
 ### 2026-10-10 编译期间服务实例更换导致 WriteBatch 证据关联中断（待诊断/改进）
+- 2026-10-14 外部 xclient LevelEditor 目录迁移续证：自动批次 `wb-6ef7fd6c-e850-4440-b074-1954b3499ea9` 保持原请求 `req-f5e34a59-107c-4d37-b5a4-4b52991a7c1a`，queued 时主线程 pump 约 327 秒未推进，网络 heartbeat 持续、CPU 采样 0.52%、无已识别模态框；原因未知，无证据证明服务重启或归因于 UPilot。未重启、聚焦、续期或重复编译，原批次在 600 秒内自然恢复，verified/passed、0 错误/0 警告。既有诊断建议补充资产移动/导入分支：有界统一呈现生命周期、网络/主线程活性与阶段等待时间，避免把 heartbeat 的 lastProgressAt 当作编译进展；规范 `D:/upilot/Tests~/UPilotTest` 定向覆盖 queued 非推进、自然恢复和正常 Reload，保持原身份/期限，减少交叉查询。优先级/状态沿用本条目，未实施或关闭；双向引用：`D:/MA/xclient/TODO_UPilot.mcd` / “2026-08-04 P0：编译等待超时与编译阶段诊断不足导致验证阻塞”。
 - 外部项目补充（2026-10-10 Squad完整行为FSM验收补证，2026-10-10 20:05:35 +08:00，P0）：xclient E测试适配批次`wb-533b7b13-cf03-4dc0-955f-20565b1dd6dc`注册期限到期为timed_out/outcome=unknown；精确Unity PID109068仍存在，connected/serverReady=false、mainThreadUnresponsive=true、主线程心跳约89.8分钟未更新，缓存domain_reload及0错误/34警告非权威。本xclient现场的服务是否更换及具体因果未核实，不能套用本条默认测试项目的已观测服务更换事实，不把UPilot窗口认定为原因。
 - 同一条目现场续记（2026-10-10T20:48:22+08:00）：本次20:44:47/20:45:53实时MCP检查仍为xclient精确主Editor PID109068、UnityDisconnected，主线程心跳约130.09分钟未更新、CPU采样115.54%。未重放过期批次或发起编译/Step/重启；原因未知，服务重启不能中断同步Unity挂起。新证据`D:\MA\xclient\Tools\squad_fsm_resume_status_20261010_204446.json`、`D:\MA\xclient\Tools\squad_fsm_resume_hang_20261010_204553.json`；现有双向引用不变。
 - 改进能力/收益：在已有历史证据诊断中区分正常Domain Reload、服务更换与主线程长期挂起；有界查询统一呈现心跳/快照年龄、终态身份、原有dump及建议，避免反复等待或再次编译。旧终态不续命、不恢复活动、不重放，恢复后以新的当前源码验证取得证据；预计减少手工交叉查询并防止缓存误判成功。
@@ -1000,24 +1009,53 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 验收：D:/upilot/Tests~/UPilotTest 自有 fixture，16 个组件、每组件至多 4 个布尔显示字段、8 组组合。保存/恢复各在 5 秒内返回，各快照沿用现有有界标准；覆盖成功、读取失败、捕获失败、取消、超时、目标销毁、Reload 七分支。成功恢复率 100%，异常列出明确无法恢复项；业务计时继续推进。
 - 状态：本轮仅建议，未开发、部署或进行通用产品验收。xclient 证据 D:/MA/_AI_Docs/xclient/40_EVIDENCE/Diagnostics/SquadGizmosFiveFiles_2026-10-13/。
 
-## UPilot-20261013-IdleRefreshLifecycle：常驻刷新与任务终态卸载清单（待评估，未实施）
+## UPilot-20261013-IdleRefreshLifecycle：常驻刷新与任务终态卸载清单（本次五项已完成，其余待评估）
 
-- 触发与范围：2026-10-13 用户要求移除窗口历史，并盘点类似持续刷新。窗口历史处置归上方 V13/D12；本清单仅记录其他功能的源码审计与最小后续建议，不实施整改、不改变开关/授权、不停服务。行号为本次审计时位置；下列频率由代码得出，未进行 CPU/GC 或现场时序测量。
+- 触发与范围：2026-10-13 用户要求移除窗口历史，并盘点类似持续刷新；随后明确授权处理反向空心跳、主窗口配置巡检、心跳历史裁剪 SQL、启动后台焦点采样及 NavMesh 持续计数五项。窗口历史处置归上方 V13/D12。本次五项已实施、定向验收并刷新当前规范项目 Server/Bridge；其余仅保留源码审计与最小后续建议。审计行号为初次观察位置；未进行 CPU/GC 或性能时序测量，未改变任何授权或间隔配置。
 - 与既有项的关系：Health 间隔配置仍沿用 `UPilot-20261012-RestartInterpreterPreflight` 的已完成子项，本次仅补常驻生命周期缺口；启动恢复的原身份验证与固定预算要求不变。其他已关闭子项不因本清单重新打开。
 
-| 受影响功能/工具 | 观察、默认条件与源码证据 | 必要性与最小建议（全部待处理） |
+| 受影响功能/工具 | 观察、默认条件与源码证据 | 必要性、处理状态与最小后续建议 |
 | --- | --- | --- |
+| Server→Bridge 空心跳发送器 | 原 `_heartbeat_loop` 在认证后按握手间隔发送空 `session.heartbeat`；Bridge 已有状态心跳，另有 WebSocket Ping/Pong。 | 已删除发送协程及任务创建/取消。保留认证候选超时清理、入站状态心跳、超时判定和协议 Ping/Pong；回环测试覆盖认证、四个原间隔内无反向空消息、命令往返和断连清理。不能据此声称故障发现时延完全不变。 |
+| 主窗口每两秒 Agent 配置巡检 | 原 Dashboard Layout 中的 `RefreshAgentConfigs(force:false)` 定时读取 MCP/Rules/Skills 配置。 | 已删除 Layout 巡检、计时字段和 force 参数。打开窗口、检查配置以及配置/修复操作完成时仍显式刷新。真实 IMGUI 测试跨过原两秒间隔保持三个配置快照，手动检查再次读取。主窗口重绘和健康观察原有生命周期保留。 |
+| 心跳触发的重复历史裁剪 SQL | 原 `_persist_execution_snapshot` 在 heartbeat 不插入 `state_events` 时仍运行历史 DELETE。 | 已将裁剪放入非 heartbeat 历史写入分支，继续保留最新 500 条历史。heartbeat 仍保存 `project_state` 最新权威快照；SQL trace 证明不再对历史 INSERT/DELETE，501 条状态转换的保留边界通过。 |
 | Bridge 主线程 pump 的启动诊断上下文 | `Editor/Core/UPilotBridge.cs:668–738` 每帧处理队列、更新必要状态，同时无条件构建 `startup-diagnostics` 上下文并调用启动观察。 | 主线程队列与实时编辑器状态必要；诊断完成后停止构建专用上下文，仅在启动观察有效期间执行。验证空队列/诊断已结束不再生成该上下文，活动命令仍推进。 |
 | Bridge/Server 心跳快照落盘 | Bridge 开启且 WebSocket 连通时约每 2 秒构建并原子写 EditorExecutionState，Server 接收后再保存；`Editor/Core/UPilotBridge.cs:1078/2340–2396`、`upilotserver~/src/upilot_mcp/state_store.py:1221`。 | 通信心跳和新鲜度判断必要；评估仅状态变化及必要生命周期边界持久化，把例行心跳时间留内存。不得丢失 compile/reload 的权威快照、顺序/身份与断连恢复证据；先验证协议与恢复契约再改。 |
 | Server WriteBatch 过期扫描 | `upilotserver~/src/upilot_mcp/server.py:254–262` 每秒调用过期扫描；`state_store.py:626/891` 遍历批次并处理 SQL，终态历史仍参与遍历。 | 活动批次固定截止必要；仅扫描非终态/到期候选，无活动批次时停调度或等待最近截止。保留原 batch ID、期限、成员关联和终态查询，验证终态批次数增大不增加周期 SQL。 |
 | QuickStart 全局部署诊断/健康检查 | `Editor/Core/UPilotQuickStart.cs:101–171` 初始化后永久 Update，每 2 秒诊断；设置完成、Bridge 启用且未显式停止时调用 `GetStatus`，关闭主窗口仍运行。`UPilotMcpServerManager.cs:111/186/561/1000` 在服务已验证且无转换/维护时按默认 10 秒（可设 1–600 秒）做端口、进程身份及 HTTP 检查；并非每 2 秒都发 HTTP。 | 启动/重启身份核验必要；就绪后的全局重复扫描改为状态事件触发，或仅诊断/窗口观察期间挂载。保留已配置间隔、恢复判断与真实失败证据，验证关闭观察后不继续周期完整探测。 |
 | 关闭窗口的模态等待 | `Editor/Core/UPilotWindowService.cs:277/281/297` 名义 5 秒验证在 `HasActiveModal()` 为真时继续保留 Update，5.2 秒响应等待结束也不解除；`UPilotModalObserver.cs:95` 检查原生模态窗口。此为静态生命周期风险，未现场复现。 | 等待用户模态处置有必要；为原请求提供明确最终期限/结束控制并在终态卸载检查，不自动操作用户对话框。验证持续模态、窗口销毁、取消与超时均不残留回调。 |
 | Console Capture / Step / ServiceMaintenance 空闲回调 | `Editor/Core/UPilotConsoleCaptureService.cs:415/489` 订阅后无活动 Capture 仍保留日志 hook/update；`Editor/Automation/UPilotAutomationStepService.cs:64/109` 常驻 Tick；`Editor/Core/UPilotServiceMaintenance.cs:280/457` 常驻 Update，无活动维护时读取缓存即返回。空闲分支不是持续刷盘/重启。 | 功能内执行/采集必要；按 Capture/任务/维护开始或恢复挂载，全部终态后卸载，保留新任务重建入口与幂等注册。Console 普通事件记录和编译事件证据不应随专属空闲回调删除。 |
-| NavMesh pre-update 轻量记录 | `Editor/Core/UPilotRuntimeDiagnosticsService.cs:234/252` 静态订阅 `NavMesh.onPreUpdate`，每次仅更新时刻/版本，无独立开始/结束控制，供 NavMesh 诊断查询。 | 开销轻，非全对象扫描；评估是否确需全时段“最近更新”语义，否则只在显式 NavMesh 观察期间启用，未观察时返回未知，不能伪造历史时刻。 |
-| 启动诊断条件截止 | `UPilotStartupDiagnostics.cs:92/355/738` 每帧检查，健康观察位点 0/5/15/30 秒，Ready 后每 10 秒取前台焦点证据、最多 5 分钟。卸载要求 healthFinished 与 backgroundFinished 同时成立；`UPilotBootstrap.cs:131` 在 PlayMode 提前返回时可能仍为 not_started，超过最初 5 分钟仍挂载。AutoStart off、Bridge disabled、Setup incomplete 分支已标 blocked，不归为此问题。 | 启动诊断可保留有限窗口；增加未开始/等待 EditMode 分支的明确终态或独立截止，后台焦点证据考虑改显式诊断。验证未开始、blocked、成功、失败及后续重新开始；静态边界尚未实机复现。 |
+| NavMesh pre-update 轻量记录 | 原 `UPilotRuntimeDiagnosticsService` 静态订阅 `NavMesh.onPreUpdate`，每次更新时刻/计数，无独立开始/结束控制。 | 已完整删除订阅、回调、计数和四个输出字段：`lastPreUpdateAt`、`preUpdateVersion`、`transformObservedPreUpdateVersion`、`transformAwaitingPreUpdate`。保留 status/sample/triangulation 及查询时比较的 observation/surfaceTransform 版本；两项 EditMode 测试与刷新后真实查询通过。实际业务导航场景未验收。 |
+| 启动后台焦点采样与观察卸载 | 原 Ready 后每十秒采集前台焦点证据，后台状态、采样计数、日志和恢复逻辑共同延长 Update 挂载。 | 已删除背景采样整套逻辑和 `startup.backgroundExecution` 输出，旧 JSON 可读且重写不再输出；五个事件里程碑仍可记录一次焦点快照。首次 Update 或健康待办结束后卸载；实际启动重新挂载，保留自身 0/5/15/30 秒窗口与一次补充探测。删除与采样耦合的全进程五分钟截止，避免阻断长期 PlayMode 延迟及后续 Domain 周期；提前补充探测失败不截断剩余定时检查。隔离生命周期回归通过。 |
 | Domain Reload 后服务身份复核 | `UPilotMcpServerManager.Launch.cs:145–148/319–327` 的已完成启动恢复分支排除整体过期，每次 probe 重新分配 5 秒，失败后隔约 2 秒继续；成功或显式停止会卸载。 | 重载后核验必要；为此独立恢复观察增加固定整体截止，超时如实保留 unknown/failed，不能循环续期、自动重启或重放旧业务。验证不可达 Bridge/持续未知身份也能终止。 |
 | 包更新/延迟修复等待 | `UPilotPackageUpdateLifecycle.cs:391–411/495/545–560` 仅待更新/恢复时挂载，显式停止可取消，编译/PlayMode 等等待无独立总截止；`UPilotUpdateService.cs:1383–1399` 仅 UPM 请求期间挂载，完成后解除。 | 更新完成观察必要；后续给可能无限等待的修复分支明确取消与截止，保留原更新身份、错误和用户主动停止。不可将等待结束当更新成功。 |
 | 打开中的监控 UI | 主窗口每 0.4 秒 Repaint（`UPilotMainWindow.cs:131–175`）；Status/QuickDebug 每 0.3 秒（`UPilotStatusWindow.cs:150–198`、`Editor/QuickDebug/UPilotQuickDebugWindow.cs:133–148`）；Step 管理每秒刷新（`Editor/Automation/UPilotStepManagementWindow.cs:11/30–63`）。均关闭解绑；主窗口健康观察另有 Enable/Disable。 | 已有打开/关闭边界，可保留；后续仅在状态变化或活动任务耗时需要时刷新，空闲窗口减少无变化重绘，不影响运行中实时耗时。 |
 
 - 保留边界：通信队列/接收/重连、Console 与编译事件回调，以及已有显式开始、终态/取消清理的 Profiler/Test/Snapshot/Delay/Flow/诊断 session 不等同无期限全局采样。Profiler 默认 30 秒并具 stop/到期释放；Flow 的元素/IMGUI 等待有任务 timeout/cancellation，模态 watchdog 为单次 Timer；Tracer 自动注入默认关闭，等待 Editor Ready 的回调执行前解除。后续若优化，仅围绕上述已证实缺口做定向回归，不重写任务框架或批量移除必要回调。
-- 当前状态与验收：全表仅记录，未实施/部署/验收；未来各条分别以规范 `D:/upilot/Tests~/UPilotTest` 的最窄回归证明开始只订阅一次、正常/失败/取消/超时/Reload 的正确终止、空闲不继续相关采样或 I/O，不能把本次源码审计写成性能收益或产品通过。
+- 当前状态与验收：本次五项完成；其余表项仍未实施/部署/验收。Server 定向 Python 最终 89 项通过；规范 `D:/upilot/Tests~/UPilotTest` 两轮原批次均 verified、correlationVerified/errorsVerified=true，最后编译 0 错误、1 条原测试文件弃用警告。定向 EditMode 20/20，runGuid=`16864104-ba48-4419-a6c9-76841c924196`，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true，验收复用最新已验证编译。维护 `1570e4be-bbff-4e35-9476-54243b53e446` succeeded、queueReset/readOnlyVerified/healthVerified=true，Server171292→174856、Unity20628保持；修改过的两个 Server 函数加载证据为 equivalent，启动输出移除背景字段，NavMesh 三个查询仍可调用且移除四字段，例行入站 heartbeat 继续推进且 persistFailureCount=0。
+- 证据与限制：`Tests~/UPilotTest/Log/UPilotValidation/IdleRefreshRemoval_20261013/`；原验收 summary SHA256=`8b7a777a80f06365112b4f4d5558edc0816353f428e5a78745fc86df16715320` 已与本地文件核对。未跑全量、Unity2022 或外部客户端验收，未做性能基准；编译 Console 范围有 Domain Reload 缺口，测试 Console 范围覆盖不可确认，不宣称完整日志无错或全 Server 来源鉴证。未来其余各条分别以规范项目最窄回归证明生命周期；本次原始审计不能写成已测性能收益。
+
+
+## 2026-10-13 Bridge 心跳间隔配置
+
+- 已完成：高级设置 → 常规 → Python 与进程增加 Bridge 心跳间隔，默认 3 秒，范围 1～600 秒，按项目保存并支持当前连接即时生效。现有心跳循环以变更信号提前唤醒，不增加配置巡检、后台采样或空心跳发送器；hello 与接受的同会话权威顺序快照同步 Server 间隔，网络超时为 3 倍。重置当前工程偏好恢复 3 秒且不重建已删除的键。
+- 验证：规范项目原批次 wb-609338c5-e3a1-40c9-9a81-6de67b214ccf 关联编译通过，0 错误、4 条未改动代码警告；EditMode 11/11、Python 定向 104 项通过。维护 357373b4-d4ab-49e6-9084-cd10d4092dde succeeded，Unity PID20628 保持，Server174856→171612；相关入口加载证据 equivalent，实际间隔 3004/3014/3004ms，Server报告 3000ms/9000ms。证据：Tests~/UPilotTest/Log/UPilotValidation/HeartbeatInterval_20261013/。
+- 保持边界：主线程 5 秒权威性和 StateStore/CONFIG 就绪门槛独立；长间隔过期样本返回 unknown，不凭旧缓存声称当前卡顿或 ready。未跑全量、Unity2022 或外部客户端；Console 范围有既有覆盖缺口，加载证据仅涵盖选定函数。
+- 待优化：hang_status 与 compile diagnostics 的固定 10 秒缓存布尔诊断可能在长心跳间隔下将过期 pump 样本解释为当前卡顿。仅按需查询时统一接收样本年龄与 pump 年龄：过期证据为 unknown，新样本携带旧 pump 才证明停滞；保持现有卡顿阈值和就绪门槛，补充长间隔与真实停滞的窄回归。本次未扩改。
+- 后续完成（2026-10-14）：hang／compile／queued 已统一样本新鲜度与 `bool|null` 诊断，相关定向回归通过；临时 15 秒心跳／45 秒网络超时时，约 11.4 秒旧样本的 not-pumping 与 suspectedBusyLoop 均返回 `null`，现场验证后恢复 3 秒／9 秒。原卡顿阈值和 EditorReady 门槛保留，本项已完成；证据及范围见[周期与超时验证记录](Documentation~/TimingAndTimeouts-Validation-20261014.md)。
+
+## UPilot-20261014-StagingSourceImport：临时补丁副本避免被 Unity 当作源码导入
+
+- 观察问题：本轮周期与超时改造把 `.cs` 基线／修改副本暂存到包源码目录 `Log/UPilotValidation/TimingConfig_20261014/staging/`，该目录虽用于工作产物，副本仍会被 Unity 导入；不能把 `Log` 目录名或 Git 忽略规则当作 Unity 导入排除规则。
+- 影响：多 Agent 暂存、补丁准备及关联编译验收。临时副本可能进入实际编译输入，导致重复类型或使验收源码范围偏离预期；应先核对真实导入路径再归因产品代码。
+- 改进：临时 C# 补丁副本统一使用 `.cs.staged` 等非 C# 后缀，或放到仓库／Unity 导入范围之外；正式应用时才写入目标 `.cs`，随后按现有 WriteBatch 流程验证。本项不扩展 Skill 或 Agent 规则。
+- 当前状态：暂存生成扩展名已修复。`staging/observations/prepare.py` 和 `staging/lifecycle/prepare.py` 已生成 `.cs.staged`；原暂存目录的源码副本已改用该后缀，最终核查 staging 下 `*.cs` 数量为 0。清理批次 `wb-79db47cc-fcc1-41b7-aa85-d89c57506793` 关联编译 0 错误／0 警告、correlationVerified/errorsVerified=true，后续四轮定向验收通过；各轮源码身份和完整回执见[周期与超时验证记录](Documentation~/TimingAndTimeouts-Validation-20261014.md)。初次 7/7 因 staging 导入产生 121 条编译／Console 匹配而整体验收失败，原失败保留，不以生成脚本修复覆盖该结果。
+
+## UPilot-20261014-BootstrapRestoreOrdering：Attach 覆盖尚未恢复的 Reload 观察
+
+- 已证实问题：Manager 首次实例化把 `RestoreLaunchObservation` 排入 `EditorApplication.delayCall`，Bootstrap 同一轮 Update 已调用 `StartServer`；Attach 见 `_launchState == null` 后创建并持久化新状态，先覆盖原记录，随后 Restore 读到新记录并进入普通探测，绕过应恢复的有限 Reload 复核。
+- 现场证据：LaunchIdentity 最终 `readyVerified=true`，但 `reloadRevalidation.observationId` 为空、`JsonUtility` 恢复的嵌套对象字段为零，`_launchReloadRevalidation=false`；`deadlineUtcMs` 变成 `now + 600 秒`（现场有效维护配置），没有使用本次应冻结的 Reload 120 秒预算。不能把普通探测最终就绪当作 Reload 期限契约已验证。
+- 受影响流程：`UPilotBootstrap.TryStartMcpServer` → Manager `StartServer` / `AttachOrStartAfterIdentityProbeAsync` 与构造器 delayCall → `RestoreLaunchObservation` 的真实顺序。独立 Restore 方法测试尚不足以覆盖 Bootstrap 先 Attach 的现场路径。
+- 已实施：Attach 创建／覆盖状态前先恢复持久观察，以有效 observationId 区分真实记录与空内联对象；保留原身份、轮数和绝对截止。现场还观察到 delayCall 超过 80 秒未执行，补一次性 Update 恢复入口；双入口共享一次恢复控制，迟到回调不能覆盖后继状态，不重放启动、不降低身份校验。
+- 验收：恢复顺序 14/14、最后首帧 fixture 10/10 均官方验收通过。最后批次 `wb-11d5d30c-9f01-4f42-a9fe-611134c6b270`，编译 Operation `29ef2badeab043e096435edc94bea0fb`，correlationVerified/errorsVerified=true，0 错误／1 条既有警告。实际 Reload 观察 `afbb07d6f5134e38b862a330b22fbd52` 在原 Server171612／Unity20628 上第 1 轮 succeeded，冻结总期限 120 秒，未以维护期限替代或重启服务。
+- 当前状态：**已修复，定向验收与现场 Reload 验证完成，关闭**。四阶段其余结果、服务刷新和未覆盖项见[周期与超时验证记录](Documentation~/TimingAndTimeouts-Validation-20261014.md)；各轮按自身源码身份解释，初次 staging 整体验收失败保留。本项不涉及 Release、Skill 或规则模板操作。

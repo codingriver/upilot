@@ -14,6 +14,7 @@ def lifecycle(tmp_path, monkeypatch):
     clock = [100_000]
     monkeypatch.setattr(server_module, "now_ms", lambda: clock[0])
     monkeypatch.setattr(session_module, "now_ms", lambda: clock[0])
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: clock[0])
     monkeypatch.setattr(server_module, "process_exists", lambda pid: pid == 12)
     monkeypatch.setattr(server_module, "process_creation_time", lambda pid: 12345 if pid == 12 else 0)
     project = str(tmp_path / "project-a")
@@ -225,9 +226,11 @@ def test_stale_pump_is_not_misclassified_as_identity_failure(lifecycle):
     session = server.session_manager.active
     data = snapshot(server, clock)
     assert server.state.update_editor_execution_state(data)
-    server.state.editor.authoritative = False
     clock[0] += 10000
     session.last_heartbeat_at = clock[0]
+    # A new network snapshot still carries the old pump, proving current stalling.
+    data.update(sequence=2, snapshotId="epoch-a:1:2", observedAt=clock[0], authoritative=False)
+    assert server.state.update_editor_execution_state(data)
     result = server.editor_observation(observed_at_ms=clock[0], network_connected=True)
     assert result["status"] == "waiting_editor"
     assert result["reason"] == "main_thread_pump_stale"

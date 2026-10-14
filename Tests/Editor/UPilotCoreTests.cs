@@ -3648,11 +3648,87 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(keys, Does.Contain(UPilotPreferences.McpPythonEntryKey));
             Assert.That(keys, Does.Contain(UPilotPreferences.McpHealthCheckIntervalSecondsKey));
+            Assert.That(keys, Does.Contain(UPilotPreferences.BridgeHeartbeatIntervalSecondsKey));
             Assert.That(keys, Does.Contain(UPilotPreferences.SetupCompletedKey));
             Assert.That(keys.Distinct().Count(), Is.EqualTo(keys.Count));
             Assert.That(keys, Does.Not.Contain(UPilotBootstrap.EnabledPrefKey));
             Assert.That(keys, Does.Not.Contain(Logger.LogToUnityConsolePrefsKey));
             Assert.That(keys.Any(key => key.Contains("config.json")), Is.False);
+        }
+
+        [Test]
+        public async Task BridgeHeartbeatIntervalPersistsClampsWakesAndResets()
+        {
+            var key = UPilotPreferences.BridgeHeartbeatIntervalSecondsKey;
+            var hadKey = EditorPrefs.HasKey(key);
+            var original = EditorPrefs.GetInt(key);
+            using var changed = new SemaphoreSlim(0, 1);
+            using var cancellation = new CancellationTokenSource();
+            var bridge = (UPilotBridge)System.Runtime.Serialization.FormatterServices
+                .GetUninitializedObject(typeof(UPilotBridge));
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            typeof(UPilotBridge).GetField("_heartbeatIntervalChanged", flags).SetValue(bridge, changed);
+            typeof(UPilotBridge).GetField("_heartbeatIntervalMs", flags).SetValue(bridge, 3000);
+            Task<bool> pendingWait = null;
+            try
+            {
+                EditorPrefs.DeleteKey(key);
+                var reload = typeof(UPilotBridge).GetMethod("LoadHeartbeatIntervalPreference", flags);
+                reload.Invoke(bridge, null);
+                Assert.That(bridge.HeartbeatIntervalSeconds, Is.EqualTo(3));
+                Assert.That(bridge.HeartbeatIntervalMs, Is.EqualTo(3000));
+                Assert.That(bridge.HeartbeatTimeoutMs, Is.EqualTo(9000));
+                bridge.HeartbeatIntervalSeconds = 3;
+                Assert.That(changed.Wait(0), Is.False, "An unchanged setting must not wake the heartbeat loop.");
+
+                bridge.HeartbeatIntervalSeconds = 12;
+                Assert.That(EditorPrefs.GetInt(key), Is.EqualTo(12));
+                typeof(UPilotBridge).GetField("_heartbeatIntervalMs", flags).SetValue(bridge, 0);
+                reload.Invoke(bridge, null);
+                Assert.That(bridge.HeartbeatIntervalMs, Is.EqualTo(12000));
+                Assert.That(bridge.HeartbeatTimeoutMs, Is.EqualTo(36000));
+                Assert.That(changed.Wait(0), Is.True);
+                bridge.HeartbeatIntervalSeconds = int.MinValue;
+                Assert.That(bridge.HeartbeatIntervalSeconds, Is.EqualTo(1));
+                Assert.That(EditorPrefs.GetInt(key), Is.EqualTo(1));
+                Assert.That(changed.Wait(0), Is.True);
+                bridge.HeartbeatIntervalSeconds = int.MaxValue;
+                Assert.That(bridge.HeartbeatIntervalSeconds, Is.EqualTo(600));
+                Assert.That(EditorPrefs.GetInt(key), Is.EqualTo(600));
+                Assert.That(bridge.HeartbeatTimeoutMs, Is.EqualTo(1800000));
+                Assert.That(changed.Wait(0), Is.True);
+
+                pendingWait = changed.WaitAsync(bridge.HeartbeatIntervalMs, cancellation.Token);
+                Assert.That(pendingWait.IsCompleted, Is.False);
+                bridge.HeartbeatIntervalSeconds = 3;
+                Assert.That(await Task.WhenAny(pendingWait, Task.Delay(1000, cancellation.Token)),
+                    Is.SameAs(pendingWait), "Changing a long interval must wake the existing wait immediately.");
+                Assert.That(await pendingWait, Is.True);
+                Assert.That(changed.Wait(0), Is.False, "One change must not queue multiple wakes.");
+                bridge.HeartbeatIntervalSeconds = 3;
+                Assert.That(changed.Wait(0), Is.False);
+
+                bridge.HeartbeatIntervalSeconds = 9;
+                Assert.That(changed.Wait(0), Is.True);
+                UPilotPreferences.DeleteKeys(new[] { key });
+                bridge.ResetHeartbeatIntervalToDefault();
+                Assert.That(bridge.HeartbeatIntervalSeconds, Is.EqualTo(3));
+                Assert.That(bridge.HeartbeatIntervalMs, Is.EqualTo(3000));
+                Assert.That(bridge.HeartbeatTimeoutMs, Is.EqualTo(9000));
+                Assert.That(EditorPrefs.HasKey(key), Is.False, "Reset must not recreate a deleted preference.");
+                Assert.That(changed.Wait(0), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                if (pendingWait != null)
+                {
+                    try { await pendingWait; }
+                    catch (OperationCanceledException) { }
+                }
+                if (hadKey) EditorPrefs.SetInt(key, original);
+                else EditorPrefs.DeleteKey(key);
+            }
         }
 
         [Test]
@@ -3980,6 +4056,73 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(payload.failureSignature, Is.EqualTo("TestRunner.FirstProgressTimeout"));
             Assert.That(payload.nextAction, Does.Contain("unity_hang_status"));
             Assert.That(payload.lastProgressAt, Is.EqualTo(1000));
+        }
+
+        [Test]
+        public void NavMeshStatusReadsCurrentDataWithoutContinuousPreUpdateObserver()
+        {
+            var serviceType = typeof(UPilotRuntimeDiagnosticsService);
+            var build = serviceType.GetMethod("BuildNavMeshStatus", BindingFlags.NonPublic | BindingFlags.Static);
+            var result = (NavMeshStatusResultPayload)build.Invoke(null, new object[]
+            {
+                new NavMeshStatusPayload { includeSurfaces = false, includeAgents = false, includeTriangulation = true },
+            });
+
+            Assert.That(result.ok, Is.True);
+            Assert.That(result.observedAt, Is.GreaterThan(0));
+            Assert.That(result.observationVersion, Is.GreaterThan(0));
+            Assert.That(result.observationSignature, Is.Not.Empty);
+            Assert.That(result.triangulation, Is.Not.Null);
+            Assert.That(result.triangulation.vertexCount, Is.GreaterThanOrEqualTo(0));
+            Assert.That(result.triangulation.triangleCount, Is.GreaterThanOrEqualTo(0));
+            var wire = JsonUtility.ToJson(result);
+            Assert.That(wire, Does.Not.Contain("lastPreUpdateAt"));
+            Assert.That(wire, Does.Not.Contain("preUpdateVersion"));
+
+            var callbacksField = typeof(UnityEngine.AI.NavMesh).GetField(
+                "onPreUpdate", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(callbacksField, Is.Not.Null);
+            var callbacks = callbacksField.GetValue(null) as Delegate;
+            Assert.That(callbacks?.GetInvocationList().Any(callback =>
+                callback.Method.DeclaringType == serviceType) ?? false, Is.False,
+                "An on-demand NavMesh query must not install a continuous observer.");
+        }
+
+        [Test]
+        public void NavMeshTransformVersionsChangeOnlyWhenQueriedTransformChanges()
+        {
+            var target = new GameObject("__UPilotNavMeshObservationTest");
+            var serviceType = typeof(UPilotRuntimeDiagnosticsService);
+            var observe = serviceType.GetMethod("ApplyNavMeshTransformObservation",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var info = new NavMeshSurfaceInfoPayload { instanceId = UPilotEntityIds.ToWireId(target) };
+            try
+            {
+                observe.Invoke(null, new object[] { info, target.transform, null });
+                var firstVersion = info.surfaceTransformVersion;
+                var firstChangedAt = info.transformChangedAt;
+                Assert.That(firstVersion, Is.GreaterThan(0));
+                Assert.That(firstChangedAt, Is.GreaterThan(0));
+
+                observe.Invoke(null, new object[] { info, target.transform, null });
+                Assert.That(info.surfaceTransformVersion, Is.EqualTo(firstVersion));
+                Assert.That(info.transformChangedAt, Is.EqualTo(firstChangedAt));
+
+                target.transform.position = new Vector3(12f, 3f, -4f);
+                observe.Invoke(null, new object[] { info, target.transform, null });
+                Assert.That(info.surfaceTransformVersion, Is.EqualTo(firstVersion + 1));
+                Assert.That(info.transformChangedAt, Is.GreaterThanOrEqualTo(firstChangedAt));
+                var wire = JsonUtility.ToJson(info);
+                Assert.That(wire, Does.Not.Contain("transformObservedPreUpdateVersion"));
+                Assert.That(wire, Does.Not.Contain("transformAwaitingPreUpdate"));
+            }
+            finally
+            {
+                var observations = (IDictionary)serviceType.GetField("NavMeshTransformObservations",
+                    BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
+                observations.Remove(info.instanceId);
+                UnityEngine.Object.DestroyImmediate(target);
+            }
         }
 
         [Test]

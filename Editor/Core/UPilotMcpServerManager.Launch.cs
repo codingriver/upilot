@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -22,6 +22,35 @@ namespace CodingRiver.UPilot
         private long _launchNextProbeAt;
         private long _pendingLaunchDeadline;
         private int _stoppingHttpPort, _stoppingWsPort;
+        private bool _initialServiceRecoveryCompleted;
+        private bool _initialServiceRecoveryHadPersistedState;
+
+        internal bool InitialServiceRecoveryCompleted => _initialServiceRecoveryCompleted;
+        internal bool CanAutomaticallyStartServer =>
+            _initialServiceRecoveryCompleted && !_initialServiceRecoveryHadPersistedState;
+        internal bool CanAutomaticallyRepairDeployment => _initialServiceRecoveryCompleted &&
+            (!_initialServiceRecoveryHadPersistedState || (PeriodicHealthChecksAllowed &&
+             (string.IsNullOrEmpty(_launchState?.reloadRevalidation?.observationId) ||
+              _launchState.reloadRevalidation.status == "succeeded")));
+
+        // Called after Instance has been published, by the first Editor callback or an explicit action.
+        // Every route restores once before a new Start/Repair can replace the persisted identity.
+        internal void EnsureInitialServiceRecovery()
+        {
+            EditorApplication.update -= EnsureInitialServiceRecovery;
+            EditorApplication.delayCall -= EnsureInitialServiceRecovery;
+            if (_initialServiceRecoveryCompleted) return;
+            _initialServiceRecoveryHadPersistedState =
+                !string.IsNullOrEmpty(SessionState.GetString(LaunchSessionKey, "")) ||
+                UPilotServerRestartDiagnostics.TryGetActive(out _);
+            try
+            {
+                RestoreLaunchObservation();
+                ResumePersistedRestartObservation();
+            }
+            finally { _initialServiceRecoveryCompleted = true; }
+            NotifyStatusChanged();
+        }
 
         // 描述只通过副本暴露；调用方不能改变本次操作的身份依据。
         internal ServerLaunchState LaunchIdentity => _launchState?.Snapshot();
@@ -95,7 +124,10 @@ namespace CodingRiver.UPilot
 
         private void BeforeLaunchDomainReload()
         {
-            PersistLaunchState();
+            EditorApplication.update -= EnsureInitialServiceRecovery;
+            EditorApplication.delayCall -= EnsureInitialServiceRecovery;
+            // A second Reload can precede the first restore callback; preserve the saved identity.
+            if (_initialServiceRecoveryCompleted) PersistLaunchState();
             _lifecycleQueryCancellation?.Cancel();
             StopLaunchObservation();
             _launcherProcess?.Dispose();
@@ -124,6 +156,13 @@ namespace CodingRiver.UPilot
         {
             var state = _launchState;
             if (state == null || (state.verified && !_launchNeedsRevalidation && _lifecyclePhase == UPilotServerLifecyclePhase.None) || state.terminal) { StopLaunchObservation(); return; }
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (_launchReloadRevalidation && state.reloadRevalidation != null &&
+                (now >= state.reloadRevalidation.deadlineUtcMs || (!_launchProbeRunning && state.reloadRevalidation.attemptsUsed >= state.reloadRevalidation.maxAttempts)))
+            {
+                EndReloadRevalidation(state, state.reloadRevalidation.LimitReason(now));
+                return;
+            }
             // 重启使用原观察器及其验证门；普通/自动启动使用完全相同的身份解析器。
             if (IsRestartObservationActive() || _restartPending || _launchProbeRunning) return;
             if (IsLaunchVerificationExpired(state, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
@@ -142,20 +181,38 @@ namespace CodingRiver.UPilot
         }
 
         internal bool IsLaunchVerificationExpired(ServerLaunchState state, long nowUtcMs) =>
-            !_launchReloadRevalidation && nowUtcMs >= state.deadlineUtcMs;
+            nowUtcMs >= (_launchReloadRevalidation ? state.reloadRevalidation?.deadlineUtcMs ?? state.deadlineUtcMs : state.deadlineUtcMs);
 
         internal long LaunchProbeDeadline(ServerLaunchState state, long nowUtcMs) =>
-            _launchReloadRevalidation ? nowUtcMs + 5000 : state.deadlineUtcMs;
+            _launchReloadRevalidation ? state.reloadRevalidation?.RoundDeadline(nowUtcMs) ?? state.deadlineUtcMs : state.deadlineUtcMs;
+
+        private void EndReloadRevalidation(ServerLaunchState state, string reason)
+        {
+            if (!ReferenceEquals(state, _launchState)) return;
+            state.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), false, reason);
+            state.error = reason + ": " + state.error;
+            state.terminal = true;
+            _launchNeedsRevalidation = true;
+            EndLifecyclePhase(_lifecycleGeneration, state.error, reason == "reload_revalidation_timeout");
+            PersistLaunchState();
+            StopLaunchObservation();
+        }
 
         private async Task ProbeLaunchAsync(ServerLaunchState state, CancellationToken token)
         {
             try
             {
-                // 已完成启动的 Reload 只重新观察存活身份；不续期原启动操作。
-                var probeDeadline = LaunchProbeDeadline(state, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                // 生命周期延后不消耗轮数；观察总期限仍保持原值。
                 if (!await PrepareLifecycleProbeAsync(token)) return;
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (_launchReloadRevalidation && !state.reloadRevalidation.TryBeginRound(now)) return;
+                PersistLaunchState();
+                var probeDeadline = LaunchProbeDeadline(state, now);
+                using var roundCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+                roundCancellation.CancelAfter((int)Math.Max(1, Math.Min(int.MaxValue, probeDeadline - now)));
+                var roundToken = roundCancellation.Token;
                 var lifecycleGeneration = _lifecycleGeneration;
-                var status = await GetRestartStatusAsync(probeDeadline, token, state.spec);
+                var status = await GetRestartStatusAsync(probeDeadline, roundToken, state.spec, _launchReloadRevalidation);
                 if (token.IsCancellationRequested || lifecycleGeneration != _lifecycleGeneration || !ReferenceEquals(state, _launchState)) return;
                 if (!TryResolveStartedService(state, status, out var error))
                 {
@@ -163,7 +220,11 @@ namespace CodingRiver.UPilot
                     if (error == "process_exited" || status.ProcessOwnership == McpProcessOwnership.Foreign)
                         state.terminal = true;
                     PersistLaunchState();
-                    if (state.terminal) EndLifecyclePhase(lifecycleGeneration, state.error);
+                    if (state.terminal)
+                    {
+                        if (_launchReloadRevalidation) EndReloadRevalidation(state, state.error);
+                        else EndLifecyclePhase(lifecycleGeneration, state.error);
+                    }
                 }
                 else
                 {
@@ -171,13 +232,14 @@ namespace CodingRiver.UPilot
                     var bridge = UPilotBridge.Instance.GetStatus();
                     if (!bridge.IsWsOpen || !bridge.IsAuthenticated ||
                         UPilotDeploymentDiagnostics.Observe(bridge, status, state.spec).Length > 0) return;
-                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, probeDeadline, token);
+                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, probeDeadline, roundToken, _launchReloadRevalidation);
                     var after = UPilotBridge.Instance.GetStatus();
                     if (token.IsCancellationRequested || lifecycleGeneration != _lifecycleGeneration ||
                         !ReferenceEquals(state, _launchState) || !after.IsWsOpen || !after.IsAuthenticated ||
                         after.SessionId != bridge.SessionId) return;
                     if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= probeDeadline) return;
                     state.readyVerified = true;
+                    state.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), true, "verified");
                     PersistLaunchState();
                     _launchNeedsRevalidation = false;
                     if (EndLifecyclePhase(lifecycleGeneration))
@@ -199,7 +261,15 @@ namespace CodingRiver.UPilot
                 if (!token.IsCancellationRequested && ReferenceEquals(state, _launchState))
                 {
                     _launchProbeRunning = false;
-                    _launchNextProbeAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + RestartProbeIntervalMs;
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    _launchNextProbeAt = now + (_launchReloadRevalidation ? state.reloadRevalidation.intervalSeconds * 1000L : RestartProbeIntervalMs);
+                    if (_launchReloadRevalidation)
+                    {
+                        state.reloadRevalidation.RoundEnded(now, state.error);
+                        PersistLaunchState();
+                        if (state.reloadRevalidation.status == "observing" && state.reloadRevalidation.LimitReason(now).Length != 0)
+                            EndReloadRevalidation(state, state.reloadRevalidation.LimitReason(now));
+                    }
                 }
             }
         }
@@ -307,6 +377,17 @@ namespace CodingRiver.UPilot
                 if (state?.spec == null || state.spec.Validate().Length != 0 ||
                     !UPilotDeploymentDiagnostics.SamePath(state.spec.projectPath, UPilotProjectConfig.ProjectRoot)) return;
                 _launchState = state;
+                // 不更新期限，不重放启动，不恢复任何业务任务。
+                _launchNeedsRevalidation = state.verified;
+                _launchReloadRevalidation = HasCompletedLaunchVerification(state, UPilotServerRestartDiagnostics.Current);
+                if (_launchReloadRevalidation && !state.terminal)
+                {
+                    // Unity's inline class serialization can materialize null as an empty object.
+                    state.reloadRevalidation = ReloadRevalidationObservation.ForReload(state.reloadRevalidation,
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    if (state.reloadRevalidation.status != "observing") state.terminal = true;
+                    PersistLaunchState();
+                }
                 _launcherProcess = Process.GetProcessById(state.launcherPid);
                 var handle = _launcherProcess.Handle;
                 if (_launcherProcess.HasExited || _launcherProcess.StartTime.ToUniversalTime().Ticks != state.launcherCreatedAt)
@@ -317,18 +398,28 @@ namespace CodingRiver.UPilot
                 handle = _trackedProcess.Handle;
                 if (_trackedProcess.HasExited || _trackedProcess.StartTime.ToUniversalTime().Ticks != _trackedProcessCreatedAtTicks)
                     throw new InvalidOperationException("服务进程在 Reload 后身份不符");
-                // 不更新期限，不重放启动，不恢复任何业务任务。
-                _launchNeedsRevalidation = state.verified;
-                _launchReloadRevalidation = HasCompletedLaunchVerification(state, UPilotServerRestartDiagnostics.Current);
                 if (!state.terminal)
                     SetLifecyclePhase(state.verified ? UPilotServerLifecyclePhase.Verifying : UPilotServerLifecyclePhase.Starting,
-                        state.launcherPid, IsRestartObservationActive() ? _restartOperationId : Guid.NewGuid().ToString("N"),
-                        _launchReloadRevalidation ? 0 : state.deadlineUtcMs);
-                if (!state.terminal) BeginLaunchObservation();
+                        state.launcherPid, IsRestartObservationActive() ? _restartOperationId : _launchReloadRevalidation ? state.reloadRevalidation.observationId : Guid.NewGuid().ToString("N"),
+                        _launchReloadRevalidation ? state.reloadRevalidation.deadlineUtcMs : state.deadlineUtcMs);
+                if (!state.terminal)
+                {
+                    BeginLaunchObservation();
+                    if (_launchReloadRevalidation) _launchNextProbeAt = state.reloadRevalidation.nextProbeAtUtcMs;
+                }
             }
             catch (Exception ex)
             {
-                if (_launchState != null) { _launchState.error = "reload_identity_unverified: " + ex.Message; _launchState.terminal = true; }
+                StopLaunchObservation();
+                if (_launchState != null)
+                {
+                    _launchState.error = "reload_identity_unverified: " + ex.Message;
+                    _launchState.terminal = true;
+                    _launchNeedsRevalidation = true;
+                    _launchState.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        false, "reload_identity_unverified");
+                    EndLifecyclePhase(_lifecycleGeneration, _launchState.error);
+                }
                 _launcherProcess?.Dispose(); _launcherProcess = null;
                 DisposeTrackedProcess(); _trackedProcessId = null;
                 PersistLaunchState();
@@ -392,6 +483,7 @@ namespace CodingRiver.UPilot
 
         private void ReleaseLaunchAfterStop()
         {
+            _launchState?.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), false, "service_stopped");
             StopLaunchObservation();
             // 只观察启动器自然退出，不递归杀进程树；未退出会使原退出验证门失败。
             if (_launcherProcess != null)

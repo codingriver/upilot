@@ -143,7 +143,7 @@ namespace CodingRiver.UPilot
 
         private void OnEditorUpdate()
         {
-            if (EditorApplication.timeSinceStartup - _lastRepaint > 0.3)
+            if (EditorApplication.timeSinceStartup - _lastRepaint > UPilotTimingSettings.DebugWindowRefreshMs / 1000d)
             {
                 _lastRepaint = EditorApplication.timeSinceStartup;
                 Repaint();

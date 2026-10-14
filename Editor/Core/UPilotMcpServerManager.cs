@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — MCP Server Process Manager
 // Manages the external UPilot MCP server process independently of Unity.
 // SPDX-License-Identifier: MIT
@@ -178,6 +178,7 @@ namespace CodingRiver.UPilot
                     UpdateEditorHealthObservationScheduleLocked(_cachedStatus,
                         _lastRefreshMs > 0 ? _lastRefreshMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 }
+                SignalPeriodicHealthObservation();
                 SavePrefs();
             }
         }
@@ -200,6 +201,7 @@ namespace CodingRiver.UPilot
                 UpdateEditorHealthObservationScheduleLocked(_cachedStatus,
                     _lastRefreshMs > 0 ? _lastRefreshMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             }
+            SignalPeriodicHealthObservation();
         }
 
         // ── Cached status (background refresh) ────────────────────────────────
@@ -284,6 +286,8 @@ namespace CodingRiver.UPilot
         private Task _editorHealthObservationLoopTask;
         private CancellationTokenSource _editorHealthObservationLoopCancellation;
         private long _nextEditorHealthObservationAtUtcMs;
+        private SemaphoreSlim _editorHealthObservationSignal;
+        private bool _periodicHealthNeedsVerification;
 
         private static readonly System.Net.Http.HttpClient _httpClient = CreateLoopbackStatusClient();
 
@@ -495,11 +499,11 @@ namespace CodingRiver.UPilot
             try
             {
                 if (!AssetDatabase.IsAssetImportWorkerProcess())
-                    EditorApplication.delayCall += () =>
-                    {
-                        RestoreLaunchObservation();
-                        ResumePersistedRestartObservation();
-                    };
+                {
+                    EditorApplication.delayCall += EnsureInitialServiceRecovery;
+                    // delayCall can wait for Inspector updates while the Editor is unattended.
+                    EditorApplication.update += EnsureInitialServiceRecovery;
+                }
             }
             catch
             {
@@ -560,18 +564,12 @@ namespace CodingRiver.UPilot
 
         public McpServerStatus GetStatus()
         {
-            if (TryGetDeferredLifecycleStatus(out var deferred)) return deferred;
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            McpServerStatus status;
-            lock (_statusLock) status = _cachedStatus;
-            if (PeriodicHealthChecksAllowed && now - _lastRefreshMs >= HealthCheckIntervalMs &&
-                ShouldRequestFullStatusRefresh(status, Volatile.Read(ref _statusGeneration)))
-                RequestBackgroundStatusRefresh();
-            lock (_statusLock) status = _cachedStatus;
-            RequestEditorHealthObservationIfNeeded(status, now);
-            ObservePossibleRecovery(status);
-            lock (_statusLock) status.LifecyclePhase = _lifecyclePhase;
-            return status;
+            lock (_statusLock)
+            {
+                var status = _cachedStatus;
+                status.LifecyclePhase = _lifecyclePhase;
+                return status;
+            }
         }
 
         public void InvalidateStatusCache(string lifecycleReason = "")
@@ -587,17 +585,22 @@ namespace CodingRiver.UPilot
                     _lifecycleQueryCancellation = new CancellationTokenSource();
                     ++_lifecycleGeneration;
                     _restartProbeCancellation?.Cancel();
-                    _editorHealthObservationCancellation?.Cancel();
-                    _nextEditorHealthObservationAtUtcMs = 0;
+                    _periodicHealthNeedsVerification = true;
+                    PausePeriodicHealthObservation();
                 }
                 // A cache refresh must not erase an error or restart its deadline.
                 _lastRefreshMs = 0;
             }
+            NotifyStatusChanged();
         }
 
         public async Task<McpServerStatus> GetFreshStatusAsync(long deadlineUtcMs = 0)
         {
-            if (TryGetDeferredLifecycleStatus(out var deferred)) return deferred;
+            if (TryGetDeferredLifecycleStatus(out var deferred))
+            {
+                NotifyStatusChanged();
+                return deferred;
+            }
             RequestBackgroundStatusRefresh(supersedeEditorObservation: true);
             Task<McpServerStatus> task;
             lock (_statusLock) task = _statusRefreshTask;
@@ -608,37 +611,48 @@ namespace CodingRiver.UPilot
                     throw new TimeoutException("Maintenance status probe exceeded its remaining budget.");
             }
             var result = await task;
-            ObservePossibleRecovery(result);
+            NotifyStatusChanged();
             return result;
         }
 
-        internal void EnableEditorHealthObservation()
+        // Called by committed deployment notifications on the Editor thread, never by a window.
+        internal void ObserveDeploymentChange()
         {
+            if (PeriodicHealthChecksAllowed && !_periodicHealthNeedsVerification)
+                ResumePeriodicHealthObservation();
+            else
+                PausePeriodicHealthObservation();
+            ObservePossibleRecovery(GetStatus());
+        }
+
+        private void NotifyStatusChanged()
+        {
+            SignalPeriodicHealthObservation();
+            // Isolated diagnostic/test managers must not drive the real project's repair workflow.
+            if (ReferenceEquals(this, Instance)) UPilotQuickStart.NotifyDeploymentChanged();
+        }
+
+        internal void ResumePeriodicHealthObservation(System.Net.Http.HttpClient client = null)
+        {
+            if (!PeriodicHealthChecksAllowed || _periodicHealthNeedsVerification) return;
             lock (_statusLock)
             {
                 _editorHealthObservationEnabled = true;
                 if (_nextEditorHealthObservationAtUtcMs <= 0)
-                {
-                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    var lastObservedAt = Math.Max(
-                        _cachedStatus.LastSuccessfulStatusAtUtcMs,
-                        _cachedStatus.EditorObservationObservedAtUtcMs);
-                    _nextEditorHealthObservationAtUtcMs = lastObservedAt > 0
-                        ? Math.Max(lastObservedAt, _lastRefreshMs) + HealthCheckIntervalMs
-                        : now;
-                }
-
-                if (_editorHealthObservationLoopTask == null || _editorHealthObservationLoopTask.IsCompleted ||
-                    _editorHealthObservationLoopCancellation?.IsCancellationRequested == true)
-                {
-                    var cancellation = new CancellationTokenSource();
-                    _editorHealthObservationLoopCancellation = cancellation;
-                    _editorHealthObservationLoopTask = RunEditorHealthObservationLoopAsync(cancellation);
-                }
+                    UpdateEditorHealthObservationScheduleLocked(_cachedStatus,
+                        _lastRefreshMs > 0 ? _lastRefreshMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                if (_editorHealthObservationLoopTask != null && !_editorHealthObservationLoopTask.IsCompleted &&
+                    _editorHealthObservationLoopCancellation?.IsCancellationRequested != true) return;
+                var cancellation = new CancellationTokenSource();
+                var signal = new SemaphoreSlim(0, 1);
+                _editorHealthObservationLoopCancellation = cancellation;
+                _editorHealthObservationSignal = signal;
+                _editorHealthObservationLoopTask = Task.Run(() =>
+                    RunEditorHealthObservationLoopAsync(cancellation, signal, client));
             }
         }
 
-        internal void DisableEditorHealthObservation()
+        internal void PausePeriodicHealthObservation()
         {
             lock (_statusLock)
             {
@@ -649,27 +663,78 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task RunEditorHealthObservationLoopAsync(CancellationTokenSource cancellation)
+        private void SignalPeriodicHealthObservation()
         {
+            lock (_statusLock)
+            {
+                var signal = _editorHealthObservationSignal;
+                if (signal != null && signal.CurrentCount == 0) signal.Release();
+            }
+        }
+
+        private async Task RunEditorHealthObservationLoopAsync(CancellationTokenSource cancellation,
+            SemaphoreSlim signal, System.Net.Http.HttpClient client)
+        {
+            var token = cancellation.Token;
             try
             {
-                while (!cancellation.IsCancellationRequested)
+                while (!token.IsCancellationRequested)
                 {
                     McpServerStatus status;
+                    Task pending;
+                    long due;
                     lock (_statusLock)
                     {
-                        if (!_editorHealthObservationEnabled) break;
+                        if (!_editorHealthObservationEnabled || !PeriodicHealthChecksAllowed ||
+                            _periodicHealthNeedsVerification) break;
                         status = _cachedStatus;
+                        pending = _statusRefreshTask != null && !_statusRefreshTask.IsCompleted
+                            ? _statusRefreshTask : _editorHealthObservationTask;
+                        if (_nextEditorHealthObservationAtUtcMs <= 0)
+                            UpdateEditorHealthObservationScheduleLocked(status,
+                                _lastRefreshMs > 0 ? _lastRefreshMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                        due = _nextEditorHealthObservationAtUtcMs;
                     }
 
-                    RequestEditorHealthObservationIfNeeded(
-                        status, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                    await Task.Delay(200, cancellation.Token).ConfigureAwait(false);
+                    if (pending != null && !pending.IsCompleted)
+                    {
+                        // A single request owns this interval; configuration signals do not start another.
+                        var stopped = new TaskCompletionSource<bool>();
+                        using (token.Register(() => stopped.TrySetResult(true)))
+                            await Task.WhenAny(pending, stopped.Task).ConfigureAwait(false);
+                        token.ThrowIfCancellationRequested();
+                        continue;
+                    }
+
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    if (now < due)
+                    {
+                        await signal.WaitAsync((int)Math.Min(int.MaxValue, due - now), token).ConfigureAwait(false);
+                        continue;
+                    }
+                    lock (_statusLock)
+                    {
+                        // Admit the periodic request atomically with lifecycle pause/cancellation.
+                        token.ThrowIfCancellationRequested();
+                        if (!_editorHealthObservationEnabled || !PeriodicHealthChecksAllowed ||
+                            _periodicHealthNeedsVerification) break;
+                        status = _cachedStatus;
+                        if (ShouldRequestFullStatusRefresh(status, Volatile.Read(ref _statusGeneration)))
+                            RequestBackgroundStatusRefresh();
+                        else
+                            RequestEditorHealthObservationIfNeeded(status, now, client);
+                        // A skipped/instantaneous probe still observes the configured minimum interval.
+                        if (_nextEditorHealthObservationAtUtcMs <= now &&
+                            (_statusRefreshTask == null || _statusRefreshTask.IsCompleted) &&
+                            (_editorHealthObservationTask == null || _editorHealthObservationTask.IsCompleted))
+                            UpdateEditorHealthObservationScheduleLocked(_cachedStatus,
+                                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    }
                 }
             }
-            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                // Closing the window or reloading the domain stops the observer without changing service state.
+                // Service lifecycle transitions end this observer; windows have no ownership.
             }
             finally
             {
@@ -679,7 +744,11 @@ namespace CodingRiver.UPilot
                     {
                         _editorHealthObservationLoopCancellation = null;
                         _editorHealthObservationLoopTask = null;
+                        _editorHealthObservationSignal = null;
+                        _editorHealthObservationEnabled = false;
+                        _nextEditorHealthObservationAtUtcMs = 0;
                     }
+                    signal.Dispose();
                 }
                 cancellation.Dispose();
             }
@@ -769,7 +838,7 @@ namespace CodingRiver.UPilot
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested ||
                 TryGetDeferredLifecycleStatus(out _))
             {
-                // Window/lifecycle/service transitions invalidate this read-only observation.
+                // Lifecycle/service transitions invalidate this read-only observation.
             }
             catch (Exception ex)
             {
@@ -796,12 +865,14 @@ namespace CodingRiver.UPilot
                         _editorHealthObservationTask = null;
                         // 完整刷新和轻量 health 共用完成时间，失败也按配置间隔重试。
                         if (generation == Volatile.Read(ref _statusGeneration) && !cancellation.IsCancellationRequested)
+                        {
                             _lastRefreshMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        _nextEditorHealthObservationAtUtcMs = _editorHealthObservationEnabled
-                            ? _lastRefreshMs + HealthCheckIntervalMs : 0;
+                            UpdateEditorHealthObservationScheduleLocked(_cachedStatus, _lastRefreshMs);
+                        }
                     }
                 }
                 cancellation.Dispose();
+                NotifyStatusChanged();
             }
         }
 
@@ -874,7 +945,7 @@ namespace CodingRiver.UPilot
         private void UpdateEditorHealthObservationScheduleLocked(McpServerStatus status, long completedAtUtcMs)
         {
             _nextEditorHealthObservationAtUtcMs =
-                _editorHealthObservationEnabled && status.HealthEndpointResponded && status.HealthServerProcessId > 0
+                _editorHealthObservationEnabled
                     ? completedAtUtcMs + HealthCheckIntervalMs
                     : 0;
         }
@@ -891,8 +962,11 @@ namespace CodingRiver.UPilot
                 ApplyEditorObservation(ref status, status.Health?.editor_observation);
                 _cachedStatus = status;
                 _lastRefreshMs = now;
+                _periodicHealthNeedsVerification = false;
                 UpdateEditorHealthObservationScheduleLocked(status, now);
             }
+            ResumePeriodicHealthObservation();
+            NotifyStatusChanged();
         }
 
         private void ObservePossibleRecovery(McpServerStatus status)
@@ -985,7 +1059,9 @@ namespace CodingRiver.UPilot
                     _cachedStatus.FailureKind = McpStatusFailureKind.Transient;
                     _cachedStatus.StatusQueryCompleted = true;
                     _lastRefreshMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    UpdateEditorHealthObservationScheduleLocked(_cachedStatus, _lastRefreshMs);
                 }
+                NotifyStatusChanged();
                 return _cachedStatus;
             }
         }
@@ -1099,6 +1175,7 @@ namespace CodingRiver.UPilot
                 _lastRefreshMs = refreshedAt;
             }
 
+            NotifyStatusChanged();
             return status;
         }
 
@@ -1136,7 +1213,7 @@ namespace CodingRiver.UPilot
                 nowMs - _identityPendingSinceMs < IdentityGraceMs;
         }
 
-        private static async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort, CancellationToken token = default, bool includeStats = true, long deadlineUtcMs = 0, System.Net.Http.HttpClient client = null, UPilotMcpServerManager lifecycle = null)
+        private static async Task<ServerStatsProbe> FetchServerStatsAsync(int httpPort, CancellationToken token = default, bool includeStats = true, long deadlineUtcMs = 0, System.Net.Http.HttpClient client = null, UPilotMcpServerManager lifecycle = null, int requestTimeoutMs = 2000)
         {
             var queryGeneration = lifecycle?._lifecycleGeneration ?? -1;
             int wsCount = 0;
@@ -1168,8 +1245,8 @@ namespace CodingRiver.UPilot
             {
                 var url = $"http://127.0.0.1:{httpPort}/health";
                 using var response = lifecycle == null
-                    ? await SendBoundedStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token)
-                    : await lifecycle.SendLifecycleStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token, expectedGeneration: queryGeneration);
+                    ? await SendBoundedStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token, requestTimeoutMs)
+                    : await lifecycle.SendLifecycleStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token, requestTimeoutMs, expectedGeneration: queryGeneration);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -1235,8 +1312,8 @@ namespace CodingRiver.UPilot
             {
                 var url = $"http://127.0.0.1:{httpPort}/stats";
                 using var response = lifecycle == null
-                    ? await SendBoundedStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token)
-                    : await lifecycle.SendLifecycleStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token, expectedGeneration: queryGeneration);
+                    ? await SendBoundedStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token, requestTimeoutMs)
+                    : await lifecycle.SendLifecycleStatusAsync(client ?? _httpClient, url, deadlineUtcMs, token, requestTimeoutMs, expectedGeneration: queryGeneration);
                 if (response.IsSuccessStatusCode)
                 {
                     var json = await response.Content.ReadAsStringAsync();
@@ -1356,10 +1433,10 @@ namespace CodingRiver.UPilot
         }
 
         internal static async Task<McpServerStatus> GetRestartHealthAsync(System.Net.Http.HttpClient client, int httpPort,
-            long deadlineUtcMs, CancellationToken token = default, UPilotMcpServerManager lifecycle = null)
+            long deadlineUtcMs, CancellationToken token = default, UPilotMcpServerManager lifecycle = null, int requestTimeoutMs = 2000)
         {
             // No shared status-refresh task: optional /stats cannot delay this verification gate.
-            var stats = await FetchServerStatsAsync(httpPort, token, false, deadlineUtcMs, client, lifecycle);
+            var stats = await FetchServerStatsAsync(httpPort, token, false, deadlineUtcMs, client, lifecycle, requestTimeoutMs);
             var status = new McpServerStatus
             {
                 StatusQueryCompleted = true, HealthResponded = stats.Responded,
@@ -1374,7 +1451,7 @@ namespace CodingRiver.UPilot
             return status;
         }
 
-        internal async Task<McpServerStatus> GetRestartStatusAsync(long deadlineUtcMs, CancellationToken token = default, ServerLaunchSpec spec = null)
+        internal async Task<McpServerStatus> GetRestartStatusAsync(long deadlineUtcMs, CancellationToken token = default, ServerLaunchSpec spec = null, bool useRemainingRoundBudget = false)
         {
             if (!await PrepareLifecycleProbeAsync(token))
             {
@@ -1384,13 +1461,17 @@ namespace CodingRiver.UPilot
             var generation = _lifecycleGeneration;
             var httpPort = spec?.httpPort ?? HttpPort;
             var wsPort = spec?.wsPort ?? WsPort;
-            var status = await GetRestartHealthAsync(_httpClient, httpPort, deadlineUtcMs, token, this);
+            using var roundClient = useRemainingRoundBudget ? CreateLoopbackStatusClient() : null;
+            if (roundClient != null) roundClient.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
+            var roundBudget = useRemainingRoundBudget ? (int)Math.Max(1, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) : 2000;
+            var status = await GetRestartHealthAsync(roundClient ?? _httpClient, httpPort, deadlineUtcMs, token, this, roundBudget);
             token.ThrowIfCancellationRequested();
             if (!status.HealthEndpointResponded) return status;
             var remaining = deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (remaining <= 0) throw new TimeoutException("Restart identity deadline elapsed.");
-            var processTask = Task.Run(() => ProbeMcpProcessOwnership(httpPort, wsPort));
-            if (await Task.WhenAny(processTask, Task.Delay((int)Math.Min(2000, remaining), token)) != processTask)
+            var processTask = Task.Run(() => ProbeMcpProcessOwnership(httpPort, wsPort,
+                useRemainingRoundBudget ? deadlineUtcMs : 0));
+            if (await Task.WhenAny(processTask, Task.Delay((int)Math.Min(useRemainingRoundBudget ? remaining : 2000, remaining), token)) != processTask)
             {
                 _ = processTask.ContinueWith(t => { var ignored = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
                 token.ThrowIfCancellationRequested();
@@ -1509,6 +1590,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            EnsureInitialServiceRecovery();
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);
@@ -2008,6 +2090,7 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            EnsureInitialServiceRecovery();
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);
@@ -2724,12 +2807,13 @@ namespace CodingRiver.UPilot
             return client;
         }
 
-        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId, long deadlineUtcMs = 0, CancellationToken token = default)
+        internal async Task VerifyReadOnlyRoundTripAsync(McpServerStatus status, string bridgeSessionId, long deadlineUtcMs = 0, CancellationToken token = default, bool useRemainingRoundBudget = false)
         {
             var nonce = Guid.NewGuid().ToString("N");
-            var remaining = deadlineUtcMs <= 0 ? 7000 : Math.Min(7000, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            var remaining = deadlineUtcMs <= 0 ? 7000 : Math.Min(useRemainingRoundBudget ? long.MaxValue : 7000, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             if (remaining <= 0) throw new TimeoutException("Maintenance deadline elapsed.");
             using var client = CreateReadOnlyProbeClient();
+            if (useRemainingRoundBudget) client.Timeout = System.Threading.Timeout.InfiniteTimeSpan;
             using var response = await SendLifecycleStatusAsync(client,
                 $"http://127.0.0.1:{_launchState?.spec.httpPort ?? HttpPort}/health?probe=bridge&session={Uri.EscapeDataString(bridgeSessionId)}&nonce={nonce}",
                 deadlineUtcMs, token, (int)remaining);
@@ -2841,6 +2925,7 @@ namespace CodingRiver.UPilot
                 _restartObserveCallback = null;
             }
             ClearRestartObservationState();
+            NotifyStatusChanged();
         }
 
         internal void EndMaintenanceObservation(string restartId)
@@ -2936,9 +3021,9 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private McpProcessProbe ProbeMcpProcessOwnership(int httpPort, int wsPort)
+        private McpProcessProbe ProbeMcpProcessOwnership(int httpPort, int wsPort, long deadlineUtcMs = 0)
         {
-            var portsByPid = SafeGetListeningPortsByPid(out var ownerQuerySucceeded);
+            var portsByPid = SafeGetListeningPortsByPid(out var ownerQuerySucceeded, deadlineUtcMs);
             if (!ownerQuerySucceeded)
             {
                 return new McpProcessProbe(
@@ -2982,7 +3067,7 @@ namespace CodingRiver.UPilot
             var allCommandLinesReadable = true;
             foreach (var pid in candidatePids)
             {
-                var commandLine = GetProcessCommandLineForDiagnostics(pid);
+                var commandLine = GetProcessCommandLineForDiagnostics(pid, deadlineUtcMs);
                 if (!firstPid.HasValue)
                 {
                     firstPid = pid;
@@ -3326,10 +3411,16 @@ namespace CodingRiver.UPilot
                    commandLine != "(当前平台未实现命令行读取)";
         }
 
-        private static Dictionary<int, List<int>> SafeGetListeningPortsByPid(out bool success)
+        internal static int ProcessProbeWaitMs(long deadlineUtcMs, int ordinaryWaitMs) =>
+            deadlineUtcMs > 0
+                ? (int)Math.Max(0, Math.Min(int.MaxValue, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+                : ordinaryWaitMs;
+
+        private static Dictionary<int, List<int>> SafeGetListeningPortsByPid(out bool success, long deadlineUtcMs = 0)
         {
             var result = new Dictionary<int, List<int>>();
             success = false;
+            if (deadlineUtcMs > 0 && ProcessProbeWaitMs(deadlineUtcMs, 0) == 0) return result;
 
 #if UNITY_EDITOR_WIN
             try
@@ -3349,7 +3440,8 @@ namespace CodingRiver.UPilot
 
                 var stdout = proc.StandardOutput.ReadToEndAsync();
                 var stderr = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(2000) || !stdout.Wait(100))
+                if (!proc.WaitForExit(ProcessProbeWaitMs(deadlineUtcMs, 2000)) ||
+                    !stdout.Wait(ProcessProbeWaitMs(deadlineUtcMs, 100)))
                 {
                     try { proc.Kill(); } catch { }
                     return result;
@@ -3413,8 +3505,9 @@ namespace CodingRiver.UPilot
             return int.TryParse(portText, out var port) ? port : -1;
         }
 
-        internal static string GetProcessCommandLineForDiagnostics(int pid)
+        internal static string GetProcessCommandLineForDiagnostics(int pid, long deadlineUtcMs = 0)
         {
+            if (deadlineUtcMs > 0 && ProcessProbeWaitMs(deadlineUtcMs, 0) == 0) return "(读取命令行失败)";
 #if UNITY_EDITOR_WIN
             try
             {
@@ -3432,7 +3525,8 @@ namespace CodingRiver.UPilot
                 if (proc == null) return "(读取命令行失败)";
                 var stdout = proc.StandardOutput.ReadToEndAsync();
                 var stderr = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(1000) || !stdout.Wait(100))
+                if (!proc.WaitForExit(ProcessProbeWaitMs(deadlineUtcMs, 1000)) ||
+                    !stdout.Wait(ProcessProbeWaitMs(deadlineUtcMs, 100)))
                 {
                     try { proc.Kill(); } catch { }
                     return "(读取命令行失败)";

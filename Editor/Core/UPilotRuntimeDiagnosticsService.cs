@@ -49,8 +49,6 @@ namespace CodingRiver.UPilot
         public string registrationState;
         public long surfaceTransformVersion;
         public long transformChangedAt;
-        public long transformObservedPreUpdateVersion;
-        public bool transformAwaitingPreUpdate;
     }
     [Serializable] public class NavMeshAgentSummaryPayload { public int total; public int enabled; public int active; public int onNavMesh; public int offNavMesh; }
     [Serializable] public class NavMeshTriangulationPayload { public int vertexCount; public int triangleCount; public int areaCount; public NavMeshBoundsPayload worldBounds; }
@@ -58,8 +56,6 @@ namespace CodingRiver.UPilot
     {
         public bool ok = true;
         public long observedAt;
-        public long lastPreUpdateAt;
-        public long preUpdateVersion;
         public long observationVersion;
         public string observationSignature;
         public List<NavMeshSurfaceInfoPayload> surfaces = new();
@@ -198,8 +194,6 @@ namespace CodingRiver.UPilot
     public sealed class UPilotRuntimeDiagnosticsService
     {
         private readonly UPilotBridge _bridge;
-        private static long _lastNavMeshPreUpdateAt;
-        private static long _navMeshPreUpdateVersion;
         private static long _navMeshObservationVersion;
         private static string _lastNavMeshSignature = "";
         private static readonly Dictionary<ulong, NavMeshTransformObservation> NavMeshTransformObservations = new();
@@ -210,7 +204,6 @@ namespace CodingRiver.UPilot
             public string signature;
             public long version;
             public long changedAt;
-            public long preUpdateVersionAtChange;
         }
 
         private sealed class ProfilerCaptureState
@@ -231,12 +224,6 @@ namespace CodingRiver.UPilot
             public MethodInfo telemetryMethod;
         }
 
-        static UPilotRuntimeDiagnosticsService()
-        {
-            NavMesh.onPreUpdate -= OnNavMeshPreUpdate;
-            NavMesh.onPreUpdate += OnNavMeshPreUpdate;
-        }
-
         public UPilotRuntimeDiagnosticsService(UPilotBridge bridge) { _bridge = bridge; }
 
         public void RegisterCommands()
@@ -247,12 +234,6 @@ namespace CodingRiver.UPilot
             _bridge.Router.Register("profiler.capture.start", HandleProfilerStartAsync);
             _bridge.Router.Register("profiler.capture.status", HandleProfilerStatusAsync);
             _bridge.Router.Register("profiler.capture.stop", HandleProfilerStopAsync);
-        }
-
-        private static void OnNavMeshPreUpdate()
-        {
-            _lastNavMeshPreUpdateAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            _navMeshPreUpdateVersion++;
         }
 
         private async Task HandleNavMeshStatusAsync(string id, string json, CancellationToken token)
@@ -307,8 +288,6 @@ namespace CodingRiver.UPilot
             var result = new NavMeshStatusResultPayload
             {
                 observedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                lastPreUpdateAt = _lastNavMeshPreUpdateAt,
-                preUpdateVersion = _navMeshPreUpdateVersion,
             };
             if (options.includeSurfaces) result.surfaces = FindNavMeshSurfaces();
             if (options.includeAgents) result.agents = SummarizeAgents();
@@ -381,7 +360,6 @@ namespace CodingRiver.UPilot
                     signature = signature,
                     version = 1,
                     changedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    preUpdateVersionAtChange = _navMeshPreUpdateVersion,
                 };
                 NavMeshTransformObservations[info.instanceId] = observation;
             }
@@ -390,12 +368,9 @@ namespace CodingRiver.UPilot
                 observation.signature = signature;
                 observation.version++;
                 observation.changedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                observation.preUpdateVersionAtChange = _navMeshPreUpdateVersion;
             }
             info.surfaceTransformVersion = observation.version;
             info.transformChangedAt = observation.changedAt;
-            info.transformObservedPreUpdateVersion = _navMeshPreUpdateVersion;
-            info.transformAwaitingPreUpdate = _navMeshPreUpdateVersion <= observation.preUpdateVersionAtChange;
         }
 
         private static NavMeshAgentSummaryPayload SummarizeAgents()

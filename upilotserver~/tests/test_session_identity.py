@@ -81,8 +81,12 @@ def test_rejected_candidate_does_not_replace_active_session(tmp_path: Path) -> N
         }
         server._close_websocket = lambda *_args, **_kwargs: asyncio.sleep(0)
 
-        await server._handle_message(_hello(tmp_path), [None], candidate_socket)
+        rejected_hello = _hello(tmp_path)
+        rejected_hello.payload["heartbeatIntervalMs"] = 600000
+        await server._handle_message(rejected_hello, [None], candidate_socket)
 
+        assert server.heartbeat_interval_ms == 3000
+        assert server.session_manager.heartbeat_timeout_ms == 9000
         assert server._ws is active_socket
         assert server.session_manager.active.session_id == "active"
         assert server.session_identity_status()["latestRejection"]["code"] == "AUXILIARY_EDITOR_ROLE"
@@ -151,7 +155,7 @@ def test_stale_socket_message_cannot_touch_active_state(tmp_path: Path) -> None:
             id="hb-stale",
             type="heartbeat",
             name="session.heartbeat",
-            payload={"connected": False},
+            payload={"connected": False, "heartbeatIntervalMs": 600000},
             timestamp=2,
             session_id="stale",
         )
@@ -160,6 +164,8 @@ def test_stale_socket_message_cannot_touch_active_state(tmp_path: Path) -> None:
 
         assert session.last_heartbeat_at == original_heartbeat
         assert server.state.editor.connected is False
+        assert server.heartbeat_interval_ms == 3000
+        assert server.session_manager.heartbeat_timeout_ms == 9000
 
     asyncio.run(scenario())
 
@@ -545,6 +551,89 @@ def test_send_failure_converges_original_command_record(tmp_path, failure_kind):
     asyncio.run(scenario())
 
 
+def test_loopback_authenticated_idle_socket_has_no_server_heartbeats(tmp_path):
+    """The real socket keeps ping/pong, inbound state, commands and disconnect cleanup."""
+    import websockets
+    from upilot_mcp.protocol import to_wire
+
+    async def scenario():
+        server = WsOrchestratorServer(port=0, heartbeat_interval_ms=50, expected_project_path=str(tmp_path))
+        server._probe_candidate_identity = lambda payload: {
+            **payload, "accepted": True, "identityVerified": True, "verificationLevel": "test-verified",
+        }
+        candidate_cancelled = asyncio.Event()
+        heartbeat_received = asyncio.Event()
+        candidate_timeout = server._candidate_timeout
+
+        async def observe_candidate_timeout(*args):
+            try:
+                await candidate_timeout(*args)
+            except asyncio.CancelledError:
+                candidate_cancelled.set()
+                raise
+
+        server._candidate_timeout = observe_candidate_timeout
+        server.on_editor_execution_state = lambda _state: heartbeat_received.set()
+        serving = asyncio.create_task(server.start())
+        try:
+            await server.wait_until_listening(timeout_s=5)
+            port = server._server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as peer:
+                session = "idle-peer"
+                await peer.send(json.dumps(to_wire(_hello(tmp_path, session_id=session))))
+                ack = json.loads(await asyncio.wait_for(peer.recv(), timeout=3))
+                assert ack["payload"]["accepted"] is True
+                assert ack["payload"]["heartbeatIntervalMs"] == 50
+                await asyncio.wait_for(candidate_cancelled.wait(), timeout=3)
+
+                # Four former send intervals must produce no application messages.
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(peer.recv(), timeout=0.2)
+                pong = await server._ws.ping()
+                await asyncio.wait_for(pong, timeout=3)
+
+                now = int(time.time() * 1000)
+                await peer.send(json.dumps(to_wire(WsMessage(
+                    id="inbound-state", type="heartbeat", name="session.heartbeat",
+                    payload={
+                        "stateContractVersion": 2, "producerEpoch": "idle-peer-epoch",
+                        "domainGeneration": 0, "sequence": 1, "transition": "heartbeat",
+                        "sessionId": session, "connected": True, "authoritative": True,
+                        "playModeState": "edit", "observedAt": now, "updatedAt": now,
+                    },
+                    timestamp=now, session_id=session,
+                ))))
+                await asyncio.wait_for(heartbeat_received.wait(), timeout=3)
+                assert server.is_ready()
+                assert server.state.editor.authoritative and server.state.sequence == 1
+
+                dispatcher = CommandDispatcher(server, server.state)
+                request = asyncio.create_task(dispatcher.call(
+                    "idle-roundtrip", "resource.editorState", {}, timeout_ms=3000,
+                ))
+                command = json.loads(await asyncio.wait_for(peer.recv(), timeout=3))
+                assert command["type"] == "command" and command["name"] == "resource.editorState"
+                await peer.send(json.dumps(to_wire(WsMessage(
+                    id=command["id"], type="result", name=command["name"], payload={"fixture": "ok"},
+                    timestamp=now, session_id=session,
+                ))))
+                result = await asyncio.wait_for(request, timeout=3)
+                assert result.ok and result.data == {"fixture": "ok"}
+
+            async def disconnected():
+                while server._ws is not None:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(disconnected(), timeout=3)
+            assert not server.session_manager.active.connected
+            assert not server._pending and not server._suspended
+        finally:
+            server.stop()
+            await asyncio.wait_for(serving, timeout=3)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("boundary", ["response_lost", "reload_response_lost", "completed", "send_failure", "send_cancel"])
 def test_loopback_socket_loss_never_replays_mutation(tmp_path, boundary):
     """Real TCP/WebSocket + dispatcher; the Bridge and OS identity probe are fixtures."""
@@ -690,5 +779,118 @@ def test_send_interruption_keeps_reload_recovery_first_error(tmp_path, cancelled
         assert asdict(record) == frozen
         assert not server._pending and not server._suspended
         assert _wire_commands(server._ws) == []
+
+    asyncio.run(scenario())
+
+
+
+def test_heartbeat_defaults_and_explicit_constructor_interval() -> None:
+    from upilot_mcp.session_manager import SessionManager
+
+    server = WsOrchestratorServer()
+    assert server.heartbeat_interval_ms == 3000
+    assert server.session_manager.heartbeat_timeout_ms == 9000
+    assert SessionManager().heartbeat_timeout_ms == 9000
+    explicit = WsOrchestratorServer(heartbeat_interval_ms=50)
+    assert explicit.heartbeat_interval_ms == 50
+    assert explicit.session_manager.heartbeat_timeout_ms == 150
+
+
+@pytest.mark.parametrize("interval", [None, False, True, "3000", 3000.0, 0, -1000, 999, 600001, 1000, 3000, 600000])
+def test_verified_hello_negotiates_only_valid_heartbeat_interval(tmp_path, monkeypatch, interval):
+    async def scenario():
+        server = WsOrchestratorServer(heartbeat_interval_ms=50, expected_project_path=str(tmp_path))
+        socket = _Socket()
+        message = _hello(tmp_path, "interval-session")
+        if interval is not None:
+            message.payload["heartbeatIntervalMs"] = interval
+        server._probe_candidate_identity = lambda _payload: _accepted_probe(message)
+        auth = [None]
+
+        await server._handle_message(message, auth, socket)
+
+        expected = interval if type(interval) is int and 1000 <= interval <= 600000 else 50
+        assert auth == ["interval-session"]
+        assert server.heartbeat_interval_ms == expected
+        assert server.session_manager.heartbeat_timeout_ms == expected * 3
+        assert json.loads(socket.sent[-1])["payload"]["heartbeatIntervalMs"] == expected
+        received_at = server.session_manager.active.last_heartbeat_at
+        monkeypatch.setattr("upilot_mcp.session_manager.now_ms", lambda: received_at + expected * 3)
+        assert server.session_manager.is_connected()
+        monkeypatch.setattr("upilot_mcp.session_manager.now_ms", lambda: received_at + expected * 3 + 1)
+        assert not server.session_manager.is_connected()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("message_type", ["heartbeat", "event"])
+def test_heartbeat_interval_changes_only_from_accepted_current_authoritative_snapshots(tmp_path, monkeypatch, message_type):
+    from upilot_mcp.domain.status_service import StatusDomainService
+
+    async def scenario():
+        server = WsOrchestratorServer(expected_project_path=str(tmp_path))
+        socket = _Socket()
+        hello = _hello(tmp_path, "interval-session")
+        server._probe_candidate_identity = lambda _payload: _accepted_probe(hello)
+        auth = [None]
+        await server._handle_message(hello, auth, socket)
+
+        async def send_snapshot(sequence, interval, **changes):
+            payload = {
+                "stateContractVersion": 2, "projectId": "interval-project",
+                "producerEpoch": "interval-epoch", "domainGeneration": 1,
+                "sequence": sequence, "snapshotId": f"interval-epoch:1:{sequence}",
+                "transition": "heartbeat", "sessionId": "interval-session",
+                "connected": True, "authoritative": True, "isStale": False,
+                "playModeState": "edit", "heartbeatIntervalMs": interval,
+            }
+            payload.update(changes)
+            await server._handle_message(WsMessage(
+                id=f"interval-{sequence}", type=message_type,
+                name="session.heartbeat" if message_type == "heartbeat" else "editor.execution_state",
+                payload=payload, timestamp=sequence, session_id="interval-session",
+            ), auth, socket)
+
+        def assert_interval(value):
+            assert server.heartbeat_interval_ms == value
+            assert server.session_manager.heartbeat_timeout_ms == value * 3
+
+        await send_snapshot(1, 600000)
+        assert_interval(600000)
+        await send_snapshot(1, 1000)  # Duplicate ordered observation.
+        assert_interval(600000)
+        await send_snapshot(2, 1000, sessionId="other-session")
+        assert_interval(600000)
+        await send_snapshot(3, 1000, authoritative=False)
+        assert_interval(600000)
+        await send_snapshot(4, 1000, isStale=True)
+        assert_interval(600000)
+        await send_snapshot(5, 1000, authoritative=None)
+        assert_interval(600000)
+        await send_snapshot(6, True)
+        assert_interval(600000)
+        await send_snapshot(7, None)
+        assert_interval(600000)
+        await send_snapshot(8, 1000)
+        assert_interval(1000)
+
+        status = StatusDomainService.__new__(StatusDomainService)
+        status.server = server
+        status.dispatcher = CommandDispatcher(server, server.state)
+        result = await status.mcp_status(include_capabilities=False)
+        assert result.ok
+        assert result.data["timeouts"]["heartbeatIntervalMs"] == 1000
+        assert result.data["timeouts"]["heartbeatTimeoutMs"] == 3000
+
+        await server._handle_message(WsMessage(
+            id="ordinary-result", type="result", name="resource.editorState", payload={},
+            context={"heartbeatIntervalMs": 600000, "sessionId": "interval-session", "authoritative": True},
+            timestamp=9, session_id="interval-session",
+        ), auth, socket)
+        assert_interval(1000)
+
+        monkeypatch.setattr(server.state, "_persist_execution_snapshot", lambda _payload: False)
+        await send_snapshot(9, 600000)
+        assert_interval(1000)
 
     asyncio.run(scenario())

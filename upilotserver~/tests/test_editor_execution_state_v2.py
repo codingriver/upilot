@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -320,15 +321,41 @@ def test_v2_mismatched_compile_diagnostics_do_not_overwrite_authoritative_curren
     assert state.compile.warning_count == 7
 
 
-def test_state_events_keep_transitions_and_exclude_heartbeats(tmp_path: Path) -> None:
+def test_state_events_keep_transitions_and_exclude_heartbeats(tmp_path: Path, monkeypatch) -> None:
     state = StateStore()
     state.configure_project(str(tmp_path))
     assert state.update_editor_execution_state(_snapshot(1, transition="compile_queued", terminal=False))
+    statements: list[str] = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr("upilot_mcp.state_store.sqlite3.connect", traced_connect)
     assert state.update_editor_execution_state(_snapshot(2, transition="heartbeat"))
+    assert not any(statement.lstrip().upper().startswith((
+        "INSERT OR IGNORE INTO STATE_EVENTS", "DELETE FROM STATE_EVENTS",
+    )) for statement in statements)
+    assert any("insert into project_state" in statement.lower() for statement in statements)
     db_path = tmp_path / "Library" / "UPilot" / "ServerState" / "state-v2.sqlite3"
     with sqlite3.connect(db_path) as db:
         transitions = [row[0] for row in db.execute("SELECT transition FROM state_events")]
+        persisted = db.execute("SELECT snapshot_json FROM project_state").fetchone()[0]
     assert transitions == ["compile_queued"]
+    assert json.loads(persisted)["sequence"] == 2
+
+
+def test_state_event_transitions_still_retain_only_the_latest_500(tmp_path: Path) -> None:
+    state = StateStore()
+    state.configure_project(str(tmp_path))
+    for sequence in range(1, 502):
+        assert state.update_editor_execution_state(_snapshot(sequence))
+
+    with sqlite3.connect(state._db_path) as db:
+        sequences = [row[0] for row in db.execute("SELECT sequence FROM state_events ORDER BY rowid")]
+    assert sequences == list(range(2, 502))
 
 
 def test_v2_heartbeat_notifies_pending_batch_coordinator_in_same_lifetime(tmp_path: Path) -> None:
@@ -663,6 +690,7 @@ def test_verified_successor_supersedes_fully_covered_recovery_without_rewriting_
     assert historical["outcome"] == "unknown"
     assert historical["supersededBy"] == successor["writeBatchId"]
     assert state.pending_write_batches() == []
+    assert state.next_write_batch_deadline is None
 
     with sqlite3.connect(state._db_path) as db:
         db.execute(
@@ -1168,6 +1196,7 @@ def test_rejected_terminal_write_rolls_back_status_and_snapshot(tmp_path, phase)
         store.update_editor_execution_state(terminal)
     assert store.get_write_batch(identity) == original
     assert store.pending_write_batch_id == identity
+    assert store.next_write_batch_deadline == 601000
     assert not store.execution_state()["correlationVerified"]
     assert not store.execution_state()["ready"]
     with sqlite3.connect(store._db_path) as db:
@@ -1261,6 +1290,7 @@ def test_deferred_constraint_commit_failure_does_not_publish_verified_write_batc
     assert result["correlationVerified"] and result["terminalSnapshot"] == terminal
     assert result["writeBatchCreatedAt"] == 1000 and result["compileRequestId"] == "request-a"
     assert store.pending_write_batch_id == ""
+    assert store.next_write_batch_deadline is None
 
 
 

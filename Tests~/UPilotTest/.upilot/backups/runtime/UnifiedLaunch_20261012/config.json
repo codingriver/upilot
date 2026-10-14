@@ -1,0 +1,67 @@
+{
+    "schemaVersion": 2,
+    "mcp": {
+        "httpHost": "127.0.0.1",
+        "httpPort": 8011,
+        "wsHost": "127.0.0.1",
+        "wsPort": 8765
+    },
+    "cache": {
+        "contextStaleMs": 2000
+    },
+    "features": {
+        "flow": {
+            "enabled": true
+        }
+    },
+    "runtime": {
+        "mode": "python",
+        "pythonPath": "D:/upilot/upilotserver~/.venv/Scripts/python.exe",
+        "serverExePath": "",
+        "serverVersion": ""
+    },
+    "safety": {
+        "writeAccessApproved": true,
+        "writeAccessApprovedAtUtc": "2026-09-29T10:21:39.7208591+00:00",
+        "unsavedScenePolicy": "ignore",
+        "automationAuthorizationScopes": [
+            "editorModeTransition",
+            "scenePolicyExecution",
+            "captureForceStop",
+            "captureAcceptanceClearance",
+            "captureArtifactCleanup",
+            "destructiveProjectWrite",
+            "configCsvApply",
+            "prefabPatchApply",
+            "textureImporterApply",
+            "snapshotBaselineUpdate",
+            "assetMoveDelete",
+            "editorWindowForceDiscard",
+            "hangRestart"
+        ],
+        "automationAuthorizationCatalogHash": "9e7b0edd0bb04a2aa968fca44463b95e12042eb9678cc36ae2885dd9f4553263",
+        "automationAuthorizationScopeVersion": 1,
+        "automationAuthorizationApprovedAtUtc": "2026-09-18T15:32:07.5989703+00:00"
+    },
+    "aiServiceMaintenance": {
+        "approved": true,
+        "approvedAtUtc": "2026-09-22T09:17:37.1887819+00:00",
+        "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
+        "restartTimeoutSeconds": 600,
+        "autoHardStopOnSoftFailure": true
+    },
+    "aiQueueCleanupAllowed": true,
+    "updates": {
+        "manifestUrl": "",
+        "channel": "auto"
+    },
+    "agents": {
+        "selectionInitialized": true,
+        "enabledClients": [
+            "codex",
+            "claude-code",
+            "cursor",
+            "opencode"
+        ]
+    }
+}

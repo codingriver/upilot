@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -32,6 +32,7 @@ namespace CodingRiver.UPilot
         // ── GUI event-stable snapshots (Layout -> Repaint) ───────────────────
         private BridgeStatus         _guiStatusSnapshot;
         private McpServerStatus      _guiMcpStatusSnapshot;
+        private ReloadRevalidationObservation _guiReloadObservation;
         private AgentMcpConfigStatus[] _guiAgentConfigSnapshot = Array.Empty<AgentMcpConfigStatus>();
         private List<BridgeLogEntry> _guiLogsSnapshot = new();
         private string               _guiDiagResultSnapshot = "";
@@ -75,7 +76,6 @@ namespace CodingRiver.UPilot
         private UPilotServerRuntimeMode _runtimeSelectionMode;
         private string _runtimeSelectionPath = "";
         private int _selectedRestartHistory = -1;
-        private double _lastAgentConfigRefresh;
 
         // ── Styles (lazy-init on main thread) ─────────────────────────────────
         private GUIStyle _styleInfo;
@@ -141,6 +141,7 @@ namespace CodingRiver.UPilot
 
                 // Validate MCP server path once when the window is opened.
                 UPilotMcpServerManager.Instance.ValidateAndAutoFixPath();
+                RefreshAgentConfigSnapshot();
             }
             catch (Exception ex)
             {
@@ -187,7 +188,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                if (EditorApplication.timeSinceStartup - _lastRepaint > 0.3)
+                if (EditorApplication.timeSinceStartup - _lastRepaint > UPilotTimingSettings.DebugWindowRefreshMs / 1000d)
                 {
                     _lastRepaint = EditorApplication.timeSinceStartup;
                     Repaint();
@@ -271,17 +272,12 @@ namespace CodingRiver.UPilot
             {
                 _guiStatusSnapshot       = bridge.GetStatus();
                 _guiMcpStatusSnapshot    = UPilotMcpServerManager.Instance.GetStatus();
+                _guiReloadObservation = UPilotMcpServerManager.Instance.LaunchIdentity?.reloadRevalidation;
                 _guiLogsSnapshot         = bridge.GetLogsCopy();
                 _guiDiagResultSnapshot   = _diagResult;
                 _guiDiagRunningSnapshot  = _diagRunning;
                 _guiDiagResultAtMsSnapshot = _diagResultAtMs;
                 _guiOpLogsSnapshot       = UPilotOperationTracker.Instance.GetEntriesCopy();
-
-                if (_guiAgentConfigSnapshot.Length == 0 ||
-                    EditorApplication.timeSinceStartup - _lastAgentConfigRefresh > 2d)
-                {
-                    RefreshAgentConfigSnapshot();
-                }
 
                 _guiSnapshotInitialized = true;
             }
@@ -357,6 +353,8 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.Space(6);
                 DrawSharedEndpointSection(bridge, status);
                 EditorGUILayout.Space(6);
+                DrawTimingSettingsSection();
+                EditorGUILayout.Space(6);
                 DrawProcessSettingsSection(mcpStatus);
             }
             else if (_activeTab == 1)
@@ -371,6 +369,55 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.Space(4);
                 DrawLogFileSection();
             }
+        }
+
+        private void DrawTimingSettingsSection()
+        {
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("周期与超时", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("本机当前项目保存；有限任务在开始时固定参数，修改只影响下一次任务。", EditorStyles.wordWrappedMiniLabel);
+                DrawTimingValue("Bridge 心跳间隔（秒）", UPilotBridge.Instance.HeartbeatIntervalSeconds, 1, 600, value => UPilotBridge.Instance.HeartbeatIntervalSeconds = value);
+                DrawTimingValue("HTTP Health 间隔（秒）", UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds, 1, 600, value => UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds = value);
+                EditorGUILayout.LabelField("服务重启总期限沿用上方 AI 服务维护设置。", EditorStyles.miniLabel);
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("下次 Domain Reload 复核", EditorStyles.miniBoldLabel);
+                DrawTimingValue("复核间隔（秒）", UPilotTimingSettings.ReloadIntervalSeconds, 1, 60, value => UPilotTimingSettings.ReloadIntervalSeconds = value);
+                DrawTimingValue("单轮复核超时（秒）", UPilotTimingSettings.ReloadRoundTimeoutSeconds, 1, 60, value => UPilotTimingSettings.ReloadRoundTimeoutSeconds = value);
+                DrawTimingValue("复核总期限（秒）", UPilotTimingSettings.ReloadTotalTimeoutSeconds, 5, 600, value => UPilotTimingSettings.ReloadTotalTimeoutSeconds = value);
+                DrawTimingValue("最大复核次数", UPilotTimingSettings.ReloadMaxAttempts, 1, 100, value => UPilotTimingSettings.ReloadMaxAttempts = value);
+                if (_guiReloadObservation != null)
+                {
+                    var active = _guiReloadObservation;
+                    EditorGUILayout.LabelField("最近复核 " + active.observationId, EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField($"本次参数：间隔 {active.intervalSeconds}s，单轮 {active.roundTimeoutSeconds}s，总期限 {active.totalTimeoutSeconds}s，上限 {active.maxAttempts} 次", EditorStyles.wordWrappedMiniLabel);
+                    var remaining = Math.Max(0, active.deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    EditorGUILayout.LabelField($"{active.status} · 已用 {active.attemptsUsed}/{active.maxAttempts} 次 · 剩余 {(active.status == "observing" ? remaining / 1000d : 0):F1}s", EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField("结束／最近原因：" + (string.IsNullOrEmpty(active.endReason) ? active.lastReason : active.endReason), EditorStyles.wordWrappedMiniLabel);
+                }
+                EditorGUILayout.Space(4);
+                DrawTimingValue("包更新恢复等待（秒）", UPilotTimingSettings.PackageUpdateRecoveryTimeoutSeconds, 30, 3600, value => UPilotTimingSettings.PackageUpdateRecoveryTimeoutSeconds = value);
+                DrawTimingValue("窗口／模态观察（ms）", UPilotTimingSettings.WindowObservationTimeoutMs, 500, 30000, value => UPilotTimingSettings.WindowObservationTimeoutMs = value);
+                DrawTimingValue("模态检查间隔（ms）", UPilotTimingSettings.ModalCheckIntervalMs, 50, Math.Min(1000, UPilotTimingSettings.WindowObservationTimeoutMs / 2), value => UPilotTimingSettings.ModalCheckIntervalMs = value);
+                DrawTimingValue("Bridge 重连等待（秒）", UPilotTimingSettings.BridgeReconnectDelaySeconds, 1, 60, value => UPilotTimingSettings.BridgeReconnectDelaySeconds = value);
+                DrawTimingValue("主窗口刷新（ms）", UPilotTimingSettings.MainWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.MainWindowRefreshMs = value);
+                DrawTimingValue("高级设置／快速调试刷新（ms）", UPilotTimingSettings.DebugWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.DebugWindowRefreshMs = value);
+                DrawTimingValue("Step 管理窗口刷新（ms）", UPilotTimingSettings.StepWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.StepWindowRefreshMs = value);
+                if (GUILayout.Button("恢复周期与超时默认值"))
+                {
+                    UPilotTimingSettings.ResetDefaults();
+                    UPilotBridge.Instance.HeartbeatIntervalSeconds = UPilotBridge.DefaultHeartbeatIntervalSeconds;
+                    UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds = UPilotMcpServerManager.DefaultHealthCheckIntervalSeconds;
+                }
+                EditorGUILayout.LabelField("同步响应最多等待 5.2 秒；较长观察返回 pending 后继续使用原 commandId 查询。", EditorStyles.wordWrappedMiniLabel);
+            }
+        }
+
+        private static void DrawTimingValue(string label, int value, int min, int max, Action<int> save)
+        {
+            EditorGUI.BeginChangeCheck();
+            var selected = EditorGUILayout.DelayedIntField(new GUIContent(label, $"范围 {min}～{max}"), value);
+            if (EditorGUI.EndChangeCheck()) save(Math.Max(min, Math.Min(max, selected)));
         }
 
         private void DrawRuntimeSwitch(McpServerStatus server)
@@ -1000,7 +1047,6 @@ namespace CodingRiver.UPilot
         private void RefreshAgentConfigSnapshot()
         {
             _guiAgentConfigSnapshot = UPilotAgentSetup.GetMcpConfigStatuses();
-            _lastAgentConfigRefresh = EditorApplication.timeSinceStartup;
         }
 
         private void DrawIssueGuidanceSection(
@@ -1578,14 +1624,6 @@ namespace CodingRiver.UPilot
                         manager.LogLevel = levels[levelIndex];
                     }
                 }
-
-                EditorGUI.BeginChangeCheck();
-                var healthInterval = EditorGUILayout.IntField(
-                    new GUIContent("Health 检查间隔（秒）", "默认 10 秒，范围 1～600 秒；启动验证就绪后开始周期检查。"),
-                    manager.HealthCheckIntervalSeconds);
-                if (EditorGUI.EndChangeCheck())
-                    manager.HealthCheckIntervalSeconds = healthInterval;
-                EditorGUILayout.LabelField("周期检查在服务就绪后开始；启动、关闭期间暂停。", EditorStyles.miniLabel);
 
                 EditorGUILayout.LabelField("Python 入口", EditorStyles.miniBoldLabel);
                 using (new EditorGUILayout.HorizontalScope())
@@ -2209,7 +2247,7 @@ namespace CodingRiver.UPilot
                 text = "< 1 s 前";
             else
                 text = $"{elapsedMs / 1000.0:F1} s 前";
-            bool ok = elapsedMs < 5000;
+            bool ok = elapsedMs <= UPilotBridge.Instance.HeartbeatTimeoutMs;
             return (text, ok);
         }
 

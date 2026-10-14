@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - simple user-facing entry window.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -23,7 +23,6 @@ namespace CodingRiver.UPilot
         private UPilotMainSnapshot _snapshot;
         private UPilotMainState _lastState;
         private double _stateChangedAt;
-        private double _lastAgentRefresh;
         private double _lastRepaint;
 
         private bool _agentAdviceNoticeShown;
@@ -135,8 +134,7 @@ namespace CodingRiver.UPilot
                 minSize = new Vector2(440, 400);
                 if (UPilotServerRuntimeService.IsSourceUpdateChannel())
                     UPilotUpdateService.ResetSourceChannelState();
-                UPilotMcpServerManager.Instance.EnableEditorHealthObservation();
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 RefreshSnapshot();
                 EnforceUpdateMaintenanceStop();
                 if (UPilotPackageUpdateLifecycle.TryGetPendingPackageUpdateNotice(out var pendingUpdateNotice))
@@ -157,7 +155,6 @@ namespace CodingRiver.UPilot
             try
             {
                 EditorApplication.update -= OnEditorUpdate;
-                UPilotMcpServerManager.Instance.DisableEditorHealthObservation();
             }
             catch (Exception ex)
             {
@@ -169,7 +166,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                if (EditorApplication.timeSinceStartup - _lastRepaint < 0.4d)
+                if (EditorApplication.timeSinceStartup - _lastRepaint < UPilotTimingSettings.MainWindowRefreshMs / 1000d)
                     return;
 
                 _lastRepaint = EditorApplication.timeSinceStartup;
@@ -206,7 +203,6 @@ namespace CodingRiver.UPilot
 
             if (Event.current.type == EventType.Layout)
             {
-                RefreshAgentConfigs(force: false);
                 RefreshSnapshot();
                 EnforceUpdateMaintenanceStop();
             }
@@ -477,17 +473,13 @@ namespace CodingRiver.UPilot
             return mcpStatus.IsRunning;
         }
 
-        private void RefreshAgentConfigs(bool force)
+        private void RefreshAgentConfigs()
         {
-            if (!force && EditorApplication.timeSinceStartup - _lastAgentRefresh < 2d)
-                return;
-
-            _lastAgentRefresh = EditorApplication.timeSinceStartup;
             _agentConfigs = UPilotAgentSetup.GetMcpConfigStatuses();
             _ruleConfigs = UPilotAgentSetup.GetRuleConfigStatuses();
             _skillConfigs = UPilotAgentSetup.GetSkillConfigStatuses();
 
-            if (force && !_agentAdviceNoticeShown && HasAgentIntegrationIssues())
+            if (!_agentAdviceNoticeShown && HasAgentIntegrationIssues())
             {
                 _agentAdviceNoticeShown = true;
                 ShowNotice("检测到 Agent/MCP/Skill 配置不一致，可在 Agent 配置区域更新。", MessageType.Warning);
@@ -1229,7 +1221,7 @@ namespace CodingRiver.UPilot
 
         private void CheckAgentIntegrations()
         {
-            RefreshAgentConfigs(force: true);
+            RefreshAgentConfigs();
             var affectedAgentCount = CountAgentsNeedingUpdate();
             if (affectedAgentCount == 0)
             {
@@ -1996,7 +1988,7 @@ namespace CodingRiver.UPilot
                 UPilotAgentSetup.SetAgentEnabled(status.ClientName, true);
                 var result = UPilotAgentSetup.WriteAgentMcpConfig(status.ClientName, promptBeforeOverwrite: false);
                 Debug.Log($"[UPilot] {status.ClientName} MCP config:\n{result}");
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 RefreshSnapshot();
                 ShowNotice(status.HasUPilotEntry ? "Agent 配置已更新" : "Agent 配置已写入");
             }
@@ -2013,7 +2005,7 @@ namespace CodingRiver.UPilot
             {
                 var result = UPilotAgentSetup.UpdateAgentRules(status.ClientName);
                 Debug.Log($"[UPilot] {status.ClientName} rules:\n{result}");
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 ShowNotice(BuildAgentIntegrationSuccessNotice(result, "Agent 规则已更新"));
             }
             catch (Exception ex)
@@ -2032,7 +2024,7 @@ namespace CodingRiver.UPilot
             {
                 var result = UPilotAgentSetup.UpdateAgentSkill(status.ClientName, forceOverwrite: false);
                 Debug.Log($"[UPilot] {status.ClientName} Skill:\n{result}");
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 ShowNotice(BuildAgentIntegrationSuccessNotice(result, "Skill 已更新"));
             }
             catch (Exception ex)
@@ -2051,7 +2043,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 var hasCustomizedContent = false;
                 foreach (var status in _ruleConfigs)
                 {
@@ -2123,7 +2115,7 @@ namespace CodingRiver.UPilot
                 }
                 result += UPilotAgentSetup.UpdateAllAgentRules(forceCodexSkillOverwrite: false) + "\n";
                 Debug.Log("[UPilot] Updated all Agent integrations:\n" + result.TrimEnd());
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 RefreshSnapshot();
 
                 var verificationFailures = GetUnconfiguredAgentMcpTargets(
@@ -2234,7 +2226,7 @@ namespace CodingRiver.UPilot
                 var message = await UPilotQuickStart.AutoRepairAsync(_agentConfigs);
                 if (this == null)
                     return;
-                RefreshAgentConfigs(force: true);
+                RefreshAgentConfigs();
                 RefreshSnapshot();
                 _stateChangedAt = EditorApplication.timeSinceStartup;
                 ShowNotice(message, UPilotQuickStart.LastRepairSucceeded ? MessageType.Info : MessageType.Error);

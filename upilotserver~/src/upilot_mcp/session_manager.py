@@ -5,7 +5,7 @@ from .protocol import now_ms
 
 
 class SessionManager:
-    def __init__(self, heartbeat_timeout_ms: int = 6000) -> None:
+    def __init__(self, heartbeat_timeout_ms: int = 9000) -> None:
         self._active: SessionState | None = None
         self.heartbeat_timeout_ms = heartbeat_timeout_ms
 

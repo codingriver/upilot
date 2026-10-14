@@ -52,6 +52,7 @@ namespace CodingRiver.UPilot.Automation
             public string outcome;
         }
         private static AutomationStepExecutor s_executor;
+        private static bool s_updateSubscribed;
         private static AutomationStepRegistry s_registry;
         private static string s_storePath = Path.Combine(Application.dataPath, "../Library/UPilot/step-run.json");
         private static string s_initializationError = "";
@@ -60,15 +61,16 @@ namespace CodingRiver.UPilot.Automation
         private readonly UPilotBridge _bridge;
         static UPilotAutomationStepService()
         {
-            // Service hooks belong to the Domain, not to replaceable executor instances.
-            EditorApplication.update += Update;
+            // The service owns one Tick subscription only while executor work remains.
             AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
+            EditorApplication.quitting += BeforeAssemblyReload;
             EditorApplication.delayCall += Initialize;
         }
         private static void Initialize()
         {
             RequireMainThread();
-            if (s_executor == null) CreateExecutor(true);
+            try { if (s_executor == null) CreateExecutor(true); }
+            finally { RefreshUpdateSubscription(); }
         }
         private static void CreateExecutor(bool restoreStored)
         {
@@ -94,6 +96,7 @@ namespace CodingRiver.UPilot.Automation
             RequireMainThread();
             var previous = s_executor;
             s_executor = null;
+            RefreshUpdateSubscription();
             var errors = new System.Collections.Generic.List<Exception>();
             try { previous?.Finish("Aborted", "SERVICE_HARD_STOP", "UPilot service lifetime ended."); }
             catch (Exception ex) { errors.Add(ex); }
@@ -103,10 +106,38 @@ namespace CodingRiver.UPilot.Automation
             // Old finalization failures are diagnostic, not a prerequisite for rebuilding.
             try { CreateExecutor(false); }
             catch (Exception ex) { errors.Add(ex); }
+            finally { RefreshUpdateSubscription(); }
             if (errors.Count > 0) throw new AggregateException("STEP_EXECUTOR_RESET_FAILED", errors);
         }
-        private static void BeforeAssemblyReload() => s_executor?.Dispose();
-        private static void Update() => s_executor?.Tick();
+        private static void BeforeAssemblyReload()
+        {
+            EditorApplication.delayCall -= Initialize;
+            RemoveUpdateSubscription();
+            s_executor?.Dispose();
+        }
+        private static void Update()
+        {
+            try { s_executor?.Tick(); }
+            finally { RefreshUpdateSubscription(); }
+        }
+        private static void RefreshUpdateSubscription()
+        {
+            RequireMainThread();
+            // Busy also covers bounded resource release after the business result is terminal.
+            if (s_executor?.Busy != true)
+            {
+                RemoveUpdateSubscription();
+                return;
+            }
+            if (s_updateSubscribed) return;
+            EditorApplication.update += Update;
+            s_updateSubscribed = true;
+        }
+        private static void RemoveUpdateSubscription()
+        {
+            EditorApplication.update -= Update;
+            s_updateSubscribed = false;
+        }
         private static AutomationStepRegistry Registry
         {
             get { RequireMainThread(); return s_registry ??= new AutomationStepRegistry(); }
@@ -192,7 +223,8 @@ namespace CodingRiver.UPilot.Automation
             var validation = ValidatePlanJson(planJson, out var plan);
             if (!validation.ok) throw new InvalidOperationException("STEP_PLAN_INVALID: " + JsonUtility.ToJson(validation));
             Initialize();
-            return Public(s_executor.Start(plan, operationId, captureSessionId));
+            try { return Public(s_executor.Start(plan, operationId, captureSessionId)); }
+            finally { RefreshUpdateSubscription(); }
         }
         private static AutomationStepRun State(string runId)
         {
@@ -239,7 +271,8 @@ namespace CodingRiver.UPilot.Automation
                 return new StopReply { status = "not_found" };
             if (run.terminal)
                 return new StopReply { status = s_executor.ReleasingImmediateStopResources ? "ending" : "not_found" };
-            return new StopReply { changed = s_executor.StopImmediately(), status = "stopped" };
+            try { return new StopReply { changed = s_executor.StopImmediately(), status = "stopped" }; }
+            finally { RefreshUpdateSubscription(); }
         }
         public static string StateJson(string runId) => JsonUtility.ToJson(Public(State(runId)));
         [Serializable] internal sealed class StopReply
@@ -255,8 +288,12 @@ namespace CodingRiver.UPilot.Automation
                 return new StopReply { status = "not_found" };
             if (run.cancelRequested || run.stage == "Finalizing")
                 return new StopReply { status = "ending" };
-            s_executor.RequestCancel();
-            return new StopReply { status = "ending", changed = true };
+            try
+            {
+                s_executor.RequestCancel();
+                return new StopReply { status = "ending", changed = true };
+            }
+            finally { RefreshUpdateSubscription(); }
         }
         public static string CancelJson(string runId) => JsonUtility.ToJson(Stop(runId));
         public static string ArtifactsJson(string runId) => JsonUtility.ToJson(PublicArtifacts(State(runId)));

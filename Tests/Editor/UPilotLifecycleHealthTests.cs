@@ -330,7 +330,7 @@ namespace CodingRiver.UPilot.Tests
                 case "auth-failed": bridge.AuthenticationErrorCode = "TOKEN_REJECTED"; break;
                 case "auth-pending": bridge.IsAuthenticated = false; break;
                 case "wrong-session": bridge.SessionId = "old-session"; break;
-                case "heartbeat-expired": status.EditorObservationHeartbeatAgeMs = 6001; break;
+                case "heartbeat-expired": status.EditorObservationHeartbeatAgeMs = UPilotBridge.Instance.HeartbeatTimeoutMs + 1; break;
                 case "pump-expired": status.EditorObservationPumpAgeMs = 5001; break;
                 case "observation-expired": status.EditorObservationObservedAtUtcMs -= UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 6001; break;
                 case "observation-missing": status.EditorObservationAvailable = false; break;
@@ -354,8 +354,35 @@ namespace CodingRiver.UPilot.Tests
             var message = UPilotQuickStart.BuildRepairMessage(bridge, status, "fixture", now);
             Assert.That(message, Does.Contain("Server：正常").And.Contain("Bridge：已连接（心跳新鲜）").And.Contain("Unity：响应正常"));
             Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.True);
-            status.EditorObservationHeartbeatAgeMs = 6001;
+            status.EditorObservationHeartbeatAgeMs = UPilotBridge.Instance.HeartbeatTimeoutMs + 1;
             Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.False);
+        }
+
+        [TestCase(false, TestName = "ConfiguredHeartbeatTimeoutKeepsPumpFreshnessIndependent_Fresh")]
+        [TestCase(true, TestName = "ConfiguredHeartbeatTimeoutKeepsPumpFreshnessIndependent_Cached")]
+        public void ConfiguredHeartbeatTimeoutKeepsPumpFreshnessIndependent(bool cached)
+        {
+            const long now = 1000000;
+            var heartbeatTimeoutMs = UPilotBridge.Instance.HeartbeatTimeoutMs;
+            var cacheAge = cached ? UPilotMcpServerManager.Instance.HealthCheckIntervalMs : 0;
+            var status = Responsive(now - cacheAge);
+            var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+            // Read the active budget without changing settings or waking the running heartbeat loop.
+            status.EditorObservationHeartbeatAgeMs = heartbeatTimeoutMs;
+            Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.True);
+            var message = UPilotQuickStart.BuildRepairMessage(bridge, status, "fixture", now);
+            Assert.That(message, Does.Contain("Bridge：已连接（心跳新鲜）").And.Contain("Unity：响应正常"));
+
+            status.EditorObservationPumpAgeMs = 5001;
+            Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.False);
+            message = UPilotQuickStart.BuildRepairMessage(bridge, status, "fixture", now);
+            Assert.That(message, Does.Contain("Bridge：已连接（心跳新鲜）").And.Contain("Unity：待确认"));
+
+            status.EditorObservationPumpAgeMs = 100;
+            status.EditorObservationHeartbeatAgeMs = heartbeatTimeoutMs + 1;
+            Assert.That(UPilotHealthAssessment.CanVerifyRecovery(bridge, status, now), Is.False);
+            message = UPilotQuickStart.BuildRepairMessage(bridge, status, "fixture", now);
+            Assert.That(message, Does.Contain("Bridge：已连接（心跳待确认）").And.Contain("Unity：待确认"));
         }
 
         [Test]

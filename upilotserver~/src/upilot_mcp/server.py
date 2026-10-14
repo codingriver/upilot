@@ -68,7 +68,7 @@ class WsOrchestratorServer(WsTransport):
         self,
         host: str = "127.0.0.1",
         port: int = 8765,
-        heartbeat_interval_ms: int = 2000,
+        heartbeat_interval_ms: int = 3000,
         mcp_label: str = "",
         expected_project_path: str = "",
     ) -> None:
@@ -92,6 +92,10 @@ class WsOrchestratorServer(WsTransport):
         self._listening_event = asyncio.Event()
         self._stop_event = asyncio.Event()
         self._shutting_down = False
+        self._write_batch_deadline_timer: asyncio.TimerHandle | None = None
+        self._write_batch_deadline_at: int | None = None
+        self._write_batch_deadline_loop: asyncio.AbstractEventLoop | None = None
+        self._expiring_write_batches = False
         self._reconnect_grace_task: asyncio.Task[None] | None = None
         self._grace_deadline_monotonic: float | None = None
         self._active_ws_connections: set[WebSocketServerProtocol] = set()
@@ -200,7 +204,7 @@ class WsOrchestratorServer(WsTransport):
     async def start(self) -> None:
         self._stop_event.clear()
         self._listening_event.clear()
-        expiry = None
+        self._shutting_down = False
         try:
             self._server = await websockets.serve(
                 self._handle, self.host, self.port, max_size=_MAX_BRIDGE_MESSAGE_BYTES,
@@ -219,15 +223,16 @@ class WsOrchestratorServer(WsTransport):
             await self._server.start_serving()
             self._listening_event.set()
             logger.info("WebSocket server listening on %s:%s", self.host, self.port)
-            expiry = asyncio.create_task(self._expire_write_batches(), name="write-batch-deadlines")
+            self._write_batch_deadline_loop = asyncio.get_running_loop()
+            self.state.write_batch_deadline_changed = self._schedule_write_batch_deadline
+            self._schedule_write_batch_deadline()
             await self._stop_event.wait()
         except Exception:
             logger.exception("WebSocket server failed on %s:%s", self.host, self.port)
             raise
         finally:
             self._listening_event.clear()
-            if expiry is not None:
-                expiry.cancel()
+            self._stop_write_batch_deadlines()
             logger.info("WebSocket server shutting down on %s:%s", self.host, self.port)
             self._shutting_down = True
             self._cancel_reconnect_grace()
@@ -251,15 +256,49 @@ class WsOrchestratorServer(WsTransport):
             self._fail_all_pending_and_suspended("SERVER_STOPPED", "MCP 服务器已关闭")
             logger.info("WebSocket server stopped")
 
-    async def _expire_write_batches(self) -> None:
-        # Independent of Bridge heartbeat and client polling (including PlayMode
-        # and disconnection). The original registration deadline never renews.
-        while True:
-            await asyncio.sleep(1)
-            try:
-                self.state.expire_write_batches()
-            except Exception:
-                logger.exception("Write batch deadline persistence failed")
+    def _schedule_write_batch_deadline(self, retry_delay: float = 0.0) -> None:
+        if self._expiring_write_batches:
+            return
+        deadline = self.state.next_write_batch_deadline
+        if deadline == self._write_batch_deadline_at and self._write_batch_deadline_timer is not None:
+            return
+        if self._write_batch_deadline_timer is not None:
+            self._write_batch_deadline_timer.cancel()
+        self._write_batch_deadline_timer = None
+        self._write_batch_deadline_at = None
+        loop = self._write_batch_deadline_loop
+        if deadline is None or loop is None or loop.is_closed() or self._shutting_down:
+            return
+        self._write_batch_deadline_at = deadline
+        self._write_batch_deadline_timer = loop.call_later(
+            max(retry_delay, (deadline - now_ms()) / 1000.0), self._expire_due_write_batches
+        )
+
+    def _expire_due_write_batches(self) -> None:
+        self._write_batch_deadline_timer = None
+        self._write_batch_deadline_at = None
+        if self._shutting_down or self._write_batch_deadline_loop is None:
+            return
+        self._expiring_write_batches = True
+        retry_delay = 0.0
+        try:
+            # A single nearest-deadline timer works in PlayMode/disconnection,
+            # independently of Bridge heartbeat and client polling.
+            self.state.expire_write_batches()
+        except Exception:
+            logger.exception("Write batch deadline persistence failed")
+            retry_delay = 1.0  # Avoid spinning if an active deadline cannot be processed.
+        finally:
+            self._expiring_write_batches = False
+            self._schedule_write_batch_deadline(retry_delay)
+
+    def _stop_write_batch_deadlines(self) -> None:
+        self.state.write_batch_deadline_changed = None
+        self._write_batch_deadline_loop = None
+        if self._write_batch_deadline_timer is not None:
+            self._write_batch_deadline_timer.cancel()
+        self._write_batch_deadline_timer = None
+        self._write_batch_deadline_at = None
 
     async def wait_until_listening(self, timeout_s: float | None = None) -> bool:
         if self._listening_event.is_set():
@@ -275,6 +314,7 @@ class WsOrchestratorServer(WsTransport):
 
     def stop(self) -> None:
         self._shutting_down = True
+        self._stop_write_batch_deadlines()
         self._stop_event.set()
 
     def _cancel_reconnect_grace(self) -> None:
@@ -475,6 +515,8 @@ class WsOrchestratorServer(WsTransport):
         domain_generation = int(getattr(state, "domain_generation", 0) or 0)
         pump_at = int(getattr(editor, "last_main_thread_pump_at", 0) or 0) if editor else 0
         pump_age = max(0, observed_at - pump_at) if pump_at else None
+        snapshot_received_at = int(getattr(state, "received_at", 0) or 0)
+        snapshot_age = max(0, observed_at - snapshot_received_at) if snapshot_received_at else None
         identity_consistent = bool(
             session_id
             and state_session_id == session_id
@@ -497,6 +539,10 @@ class WsOrchestratorServer(WsTransport):
             reason = "identity_transition_or_missing"
         elif not pump_at:
             reason = "main_thread_pump_missing"
+        elif snapshot_age is None or snapshot_age > _EDITOR_PUMP_STALE_MS:
+            # A long configured heartbeat interval leaves old pump samples in the
+            # cache. Only a newly received sample can evidence a current stall.
+            reason = "editor_snapshot_not_fresh"
         elif pump_age > _EDITOR_PUMP_STALE_MS:
             status = "waiting_editor"
             reason = "main_thread_pump_stale"
@@ -521,6 +567,8 @@ class WsOrchestratorServer(WsTransport):
             "pump_age_ms": pump_age,
             "heartbeat_at_ms": heartbeat_at,
             "heartbeat_age_ms": heartbeat_age,
+            "snapshot_received_at_ms": snapshot_received_at,
+            "snapshot_age_ms": snapshot_age,
             "main_thread_queue_depth": int(getattr(editor, "main_thread_queue_depth", 0) or 0) if editor else 0,
             "last_dequeued_command_id": str(getattr(editor, "last_dequeued_command_id", "") or "")[:128] if editor else "",
             "waiting_since_ms": 0,
@@ -1110,7 +1158,6 @@ class WsOrchestratorServer(WsTransport):
         remote = websocket.remote_address
         logger.info("Unity client connected from %s (total ws=%d)", remote, len(self._active_ws_connections))
         auth_box: list[str | None] = [None]
-        heartbeat_task: asyncio.Task[None] | None = None
         candidate_timeout_task = asyncio.create_task(self._candidate_timeout(websocket, auth_box))
         try:
             try:
@@ -1124,9 +1171,8 @@ class WsOrchestratorServer(WsTransport):
                         name=incoming.name,
                     )
                     await self._handle_message(incoming, auth_box, websocket)
-                    if auth_box[0] and heartbeat_task is None:
+                    if auth_box[0] and not candidate_timeout_task.done():
                         candidate_timeout_task.cancel()
-                        heartbeat_task = asyncio.create_task(self._heartbeat_loop(websocket, auth_box[0]))
             except (ConnectionClosed, ConnectionResetError, OSError) as ex:
                 received_close_code = getattr(getattr(ex, "rcvd", None), "code", None)
                 sent_close_code = getattr(getattr(ex, "sent", None), "code", None)
@@ -1154,8 +1200,6 @@ class WsOrchestratorServer(WsTransport):
         finally:
             self._active_ws_connections.discard(websocket)
             candidate_timeout_task.cancel()
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
             auth_session_id = auth_box[0]
             sid_log = auth_session_id or (
                 self.session_manager.active.session_id if self.session_manager.active else "unknown"
@@ -1198,6 +1242,13 @@ class WsOrchestratorServer(WsTransport):
                 self._fail_all_pending_and_suspended("SERVER_STOPPED", "MCP 服务器已关闭")
             else:
                 self._suspend_or_fail_pending_on_disconnect(sid_log)
+
+    def _apply_heartbeat_interval(self, payload: dict[str, Any]) -> None:
+        interval = payload.get("heartbeatIntervalMs")
+        if type(interval) is not int or not 1000 <= interval <= 600000:
+            return
+        self.heartbeat_interval_ms = interval
+        self.session_manager.heartbeat_timeout_ms = interval * 3
 
     def _notify_editor_execution_state(self) -> None:
         callback = getattr(self, "on_editor_execution_state", None)
@@ -1261,6 +1312,7 @@ class WsOrchestratorServer(WsTransport):
                 })
                 await self._close_websocket(candidate, reason=f"identity rejected: {code}")
                 return
+            self._apply_heartbeat_interval(message.payload)
             self._cancel_reconnect_grace()
             preserve_compile_snapshot = self._domain_reloading
             if preserve_compile_snapshot:
@@ -1390,6 +1442,10 @@ class WsOrchestratorServer(WsTransport):
                 if int(heartbeat_context.get("stateContractVersion") or 0) >= 2:
                     accepted = self.state.update_editor_execution_state(heartbeat_context)
                     if accepted:
+                        if (heartbeat_context.get("sessionId") == message.session_id
+                                and heartbeat_context.get("authoritative") is True
+                                and heartbeat_context.get("isStale") is not True):
+                            self._apply_heartbeat_interval(heartbeat_context)
                         self._observe_editor_lifecycle(heartbeat_context)
                         self.editor_observation()
                         self._notify_editor_execution_state()
@@ -1443,6 +1499,10 @@ class WsOrchestratorServer(WsTransport):
                 if not accepted:
                     logger.debug("Rejected stale/duplicate execution snapshot: %s", message.payload.get("snapshotId"))
                     return
+                if (message.payload.get("sessionId") == message.session_id
+                        and message.payload.get("authoritative") is True
+                        and message.payload.get("isStale") is not True):
+                    self._apply_heartbeat_interval(message.payload)
                 self._observe_editor_lifecycle(message.payload)
                 phase = str(self.state.compile.phase or "").lower()
                 self._note_compile_busy(phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"})
@@ -1508,31 +1568,3 @@ class WsOrchestratorServer(WsTransport):
                             "sessionId": message.session_id,
                         }
                     )
-
-    async def _heartbeat_loop(
-        self,
-        websocket: WebSocketServerProtocol,
-        session_id: str,
-    ) -> None:
-        while True:
-            try:
-                await asyncio.sleep(self.heartbeat_interval_ms / 1000)
-                active = self.session_manager.active
-                if websocket is not self._ws or active is None or active.session_id != session_id:
-                    return
-                hb = {
-                    "id": f"hb-{now_ms()}",
-                    "type": "heartbeat",
-                    "name": "session.heartbeat",
-                    "payload": {},
-                    "timestamp": now_ms(),
-                    "sessionId": session_id,
-                    "protocolVersion": PROTOCOL_VERSION,
-                }
-                hb_raw = json.dumps(hb, ensure_ascii=False)
-                await websocket.send(hb_raw)
-            except asyncio.CancelledError:
-                raise
-            except (ConnectionClosed, ConnectionResetError, OSError) as ex:
-                logger.debug("Heartbeat loop stopping after socket close: %s", ex)
-                return

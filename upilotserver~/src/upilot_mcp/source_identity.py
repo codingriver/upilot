@@ -94,7 +94,10 @@ def diff_acceptance_import_inputs(before: dict, after: dict, limit: int = 200) -
 # Deliberately limited to this reliability batch, not proof of every loaded module.
 # Discovery uses sys.modules only: diagnostics must not import tool registration.
 SELECTED_CODE_ENTRIES = (
+    ("upilot_mcp.server", "WsOrchestratorServer._handle"),
     ("upilot_mcp.server", "WsOrchestratorServer._handle_message"),
+    ("upilot_mcp.server", "WsOrchestratorServer._schedule_write_batch_deadline"),
+    ("upilot_mcp.server", "WsOrchestratorServer._expire_due_write_batches"),
     ("upilot_mcp.server", "WsOrchestratorServer._suspend_or_fail_pending_on_disconnect"),
     ("upilot_mcp.server", "WsOrchestratorServer._resend_pending_commands"),
     ("upilot_mcp.server", "WsOrchestratorServer.send_command"),
@@ -107,6 +110,8 @@ SELECTED_CODE_ENTRIES = (
     ("upilot_mcp.domain.queue_service", "QueueDomainService.queue_inventory"),
     ("upilot_mcp.state_store", "StateStore.save_test_job"),
     ("upilot_mcp.state_store", "StateStore.command_observation"),
+    ("upilot_mcp.state_store", "StateStore._persist_execution_snapshot"),
+    ("upilot_mcp.state_store", "StateStore.expire_write_batches"),
     ("upilot_mcp.state_store", "StateStore.freeze_write_batch_round"),
     ("upilot_mcp.state_store", "StateStore.record_write_batch_round_dispatch"),
     ("upilot_mcp.state_store", "StateStore._persist_round_evidence"),
@@ -115,6 +120,10 @@ SELECTED_CODE_ENTRIES = (
     ("upilot_mcp.domain.resource_service", "ResourceDomainService._resume_pending_write_batches"),
     ("upilot_mcp.domain.compile_service", "CompileDomainService.compile"),
     ("upilot_mcp.domain.compile_service", "CompileDomainService._safe_compile_and_wait"),
+    ("upilot_mcp.domain.compile_service", "CompileDomainService._compile_diagnostics"),
+    ("upilot_mcp.domain.analysis_service", "ProjectAnalysisDomainService.hang_status"),
+    ("upilot_mcp.domain.status_service", "StatusDomainService._queued_editor_diagnostics"),
+    ("upilot_mcp.editor_diagnostics", "main_thread_observation"),
     ("upilot_mcp.mcp_stdio_server", "_call_tool_with_strict_arguments"),
     ("upilot_mcp.operation_context", "request_origin_from_context"),
 )

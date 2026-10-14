@@ -171,7 +171,7 @@ Snapshot 深度 v1 支持 Built-in 与 URP 的 Raw Depth/Linear Depth Float EXR�
 
 | 工具名 | 开发完成 | 验收通过 | 可用状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `unity_navmesh_status` | 是 | Unity 2022 编译通过，场景待补 | 是 | 返回 Surface/DataInstance 可观测信息、Agent 统计、preUpdate/观察版本和 triangulation；注册矩阵不可观测时明确使用推导 Bounds。 |
+| `unity_navmesh_status` | 是 | UPilotTest 定向 2/2，业务导航场景待补 | 是 | 按需返回 Surface/DataInstance 可观测信息、Agent 统计、观察版本和 triangulation；Transform 版本只在查询时比较，不订阅持续 pre-update 计数。注册矩阵不可观测时明确使用推导 Bounds。 |
 | `unity_navmesh_sample` | 是 | Unity 2022 编译通过，场景待补 | 是 | 支持批量点、半径、areaMask/agentType，返回命中、距离、最近边缘和推导 Surface 匹配。 |
 | `unity_navmesh_triangulation_summary` | 是 | Unity 2022 编译通过，场景待补 | 是 | 返回顶点/三角形/区域数和世界 Bounds。 |
 | `unity_profiler_capture_start` | 是 | Unity 2022 编译通过，战场待补 | 是 | 支持 marker 白名单/正则、最大 marker 数、项目 telemetry 静态采样器和 baseline JSON；不可用计数器写入 `unavailableCounters`。 |

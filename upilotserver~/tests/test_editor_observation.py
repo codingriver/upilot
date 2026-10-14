@@ -34,6 +34,8 @@ def _server_with_snapshot(*, now: int, pump_at: int, heartbeat_at: int | None = 
         "mainThreadQueueDepth": 2,
         "lastDequeuedCommandId": "command-a",
     })
+    # Keep the receiver clock in the same synthetic timeline as the pump sample.
+    server.state.received_at = now - 1000
     return server
 
 
@@ -79,6 +81,7 @@ def test_http_success_without_pump_progress_stays_waiting_then_real_progress_rec
         "playModeState": "edit",
         "lastMainThreadPumpAt": now + 1400,
     })
+    server.state.received_at = now + 1500
     recovered = server.editor_observation(observed_at_ms=now + 1600, network_connected=True)
 
     assert recovered["status"] == "responsive"
@@ -106,8 +109,11 @@ def test_stall_warning_is_rate_limited_and_recovery_is_logged_once(caplog) -> No
 
     server.editor_observation(observed_at_ms=now, network_connected=True)
     server.session_manager.active.last_heartbeat_at = now + 4500
+    # New snapshots keep reporting the same stalled pump; this is not old cache.
+    server.state.received_at = now + 4500
     server.editor_observation(observed_at_ms=now + 5000, network_connected=True)
     server.session_manager.active.last_heartbeat_at = now + 9500
+    server.state.received_at = now + 9500
     server.editor_observation(observed_at_ms=now + 10000, network_connected=True)
 
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
@@ -132,7 +138,68 @@ def test_stall_warning_is_rate_limited_and_recovery_is_logged_once(caplog) -> No
         "playModeState": "edit",
         "lastMainThreadPumpAt": now + 10_400,
     })
+    server.state.received_at = now + 10_500
     server.editor_observation(observed_at_ms=now + 10_600, network_connected=True)
     recovered = [record for record in caplog.records
                  if record.levelno == logging.INFO and "resumed" in record.getMessage()]
     assert len(recovered) == 1
+
+
+
+def test_long_heartbeat_interval_keeps_old_editor_evidence_unknown_and_not_ready(monkeypatch) -> None:
+    now = 500_000
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: now - 1000)
+    server = _server_with_snapshot(now=now, pump_at=now - 1000)
+    server._apply_heartbeat_interval({"heartbeatIntervalMs": 600000})
+    # An unrelated response can keep the network fresh without sampling the Editor.
+    server.session_manager.active.last_heartbeat_at = now + 5500
+    monkeypatch.setattr("upilot_mcp.state_store._now_ms", lambda: now + 6000)
+
+    observation = server.editor_observation(observed_at_ms=now + 6000, network_connected=True)
+    execution = server.state.execution_state(stale_after_ms=2000)
+
+    assert observation["status"] == "unknown"
+    assert observation["reason"] == "editor_snapshot_not_fresh"
+    assert observation["snapshot_age_ms"] == 7000
+    assert observation["recent_stall"] is None
+    assert execution["isStale"] is True
+    assert execution["ready"] is False
+    assert server.session_manager.heartbeat_timeout_ms == 1800000
+
+
+def test_long_heartbeat_interval_does_not_relax_real_pump_stall_threshold() -> None:
+    now = 600_000
+    server = _server_with_snapshot(now=now, pump_at=now - 5001)
+    server._apply_heartbeat_interval({"heartbeatIntervalMs": 600000})
+
+    observation = server.editor_observation(observed_at_ms=now, network_connected=True)
+
+    assert observation["status"] == "waiting_editor"
+    assert observation["reason"] == "main_thread_pump_stale"
+    assert observation["snapshot_age_ms"] == 1000
+
+
+def test_stall_evidence_expiry_interrupts_without_claiming_recovery() -> None:
+    now = 700_000
+    server = _server_with_snapshot(now=now, pump_at=now - 8000)
+    server._apply_heartbeat_interval({"heartbeatIntervalMs": 600000})
+    assert server.editor_observation(observed_at_ms=now, network_connected=True)["status"] == "waiting_editor"
+    server.session_manager.active.last_heartbeat_at = now + 5500
+
+    observation = server.editor_observation(observed_at_ms=now + 6000, network_connected=True)
+
+    assert observation["status"] == "unknown"
+    assert observation["recent_stall"]["outcome"] == "interrupted"
+    assert observation["recent_stall"]["reason"] == "editor_snapshot_not_fresh"
+
+
+def test_missing_received_snapshot_cannot_evidence_current_stall() -> None:
+    now = 800_000
+    server = _server_with_snapshot(now=now, pump_at=now - 8000)
+    server.state.received_at = 0
+
+    observation = server.editor_observation(observed_at_ms=now, network_connected=True)
+
+    assert observation["status"] == "unknown"
+    assert observation["reason"] == "editor_snapshot_not_fresh"
+    assert observation["snapshot_age_ms"] is None

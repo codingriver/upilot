@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - registered EditorPrefs keys and reset operations.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -20,6 +20,7 @@ namespace CodingRiver.UPilot
         public static string McpLogLevelKey => $"{McpManagerPrefix}LogLevel.{ProjectSuffix}";
         public static string McpAutoStartKey => $"{McpManagerPrefix}AutoStart.{ProjectSuffix}";
         public static string McpHealthCheckIntervalSecondsKey => $"{McpManagerPrefix}HealthCheckIntervalSeconds.{ProjectSuffix}";
+        public static string BridgeHeartbeatIntervalSecondsKey => ProjectKey("upilot.HeartbeatIntervalSeconds");
         public static string SetupCompletedKey => SetupCompletedPrefix + ProjectSuffix;
         public static string BridgeEnabledKey => ProjectKey("CodingRiver.UPilot.BridgeEnabled");
         public static string DebugWireLogsKey => ProjectKey("upilot.DebugWireLogs");
@@ -43,6 +44,7 @@ namespace CodingRiver.UPilot
                     McpLogLevelKey,
                     McpAutoStartKey,
                     McpHealthCheckIntervalSecondsKey,
+                    BridgeHeartbeatIntervalSecondsKey,
                     SetupCompletedKey,
                     BridgeEnabledKey,
                     DebugWireLogsKey,
@@ -56,6 +58,7 @@ namespace CodingRiver.UPilot
                     $"upilot.WsPort.{ProjectSuffix}",
                     $"upilot.HttpPort.{ProjectSuffix}",
                 };
+                keys.AddRange(UPilotTimingSettings.PreferenceKeys);
                 keys.AddRange(UPilotAgentSetup.GetAgentRulesPreferenceKeysForCurrentProject());
                 keys.AddRange(UPilotUpdateService.GetPreferenceKeysForCurrentProject());
                 keys.AddRange(UPilotPackageUpdateLifecycle.GetPreferenceKeysForCurrentProject());
@@ -68,6 +71,8 @@ namespace CodingRiver.UPilot
             var manager = UPilotMcpServerManager.Instance;
             int deletedCount = DeleteKeys(CurrentProjectKeys);
             manager.ResetPreferencesToDefaultsInMemory();
+            UPilotBridge.Instance.ResetHeartbeatIntervalToDefault();
+            UPilotTimingSettings.PreferencesReset();
             return deletedCount;
         }
 

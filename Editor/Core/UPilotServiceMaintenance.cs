@@ -256,6 +256,7 @@ namespace CodingRiver.UPilot
     {
         private static ServiceMaintenanceJournal _journal;
         private static bool _executing, _probeRunning, _recoveryChecked;
+        private static bool _updateSubscribed, _shuttingDown;
         private static long _dispatchAfter, _nextProbe, _recoveryCheckedAt;
         private static CancellationTokenSource _probeCancellation;
         private static string _storageError = "";
@@ -280,10 +281,30 @@ namespace CodingRiver.UPilot
         static UPilotServiceMaintenance()
         {
             if (!UPilotBridge.IsMainEditorProcess()) return;
-            EditorApplication.update += Update;
-            AssemblyReloadEvents.beforeAssemblyReload += () => _probeCancellation?.Cancel();
-            EditorApplication.quitting += () => _probeCancellation?.Cancel();
+            RefreshUpdateSubscription();
+            AssemblyReloadEvents.beforeAssemblyReload += StopObservation;
+            EditorApplication.quitting += StopObservation;
             EditorApplication.delayCall += Recover;
+        }
+
+        private static void RefreshUpdateSubscription()
+        {
+            // Before recovery, one Update is the unattended-Editor fallback for delayCall.
+            // Use the already loaded journal: observing subscriptions must not load history.
+            bool required = !_shuttingDown && (!_recoveryChecked || _journal?.Current?.Active == true);
+            if (required == _updateSubscribed) return;
+            if (required) EditorApplication.update += Update;
+            else EditorApplication.update -= Update;
+            _updateSubscribed = required;
+            if (!required && !_shuttingDown) UPilotQuickStart.NotifyDeploymentChanged();
+        }
+
+        private static void StopObservation()
+        {
+            _shuttingDown = true;
+            EditorApplication.delayCall -= Recover;
+            RefreshUpdateSubscription();
+            _probeCancellation?.Cancel();
         }
 
         internal static UPilotAiServiceMaintenanceConfig ReadSettings()
@@ -334,6 +355,7 @@ namespace CodingRiver.UPilot
                     completion.SetResult(result);
                 }
                 catch (Exception ex) { completion.TrySetException(ex); }
+                finally { RefreshUpdateSubscription(); }
             });
             try { await bridge.SendResultAsync(id, "service.restart", await completion.Task, token); }
             catch (ServiceMaintenanceException ex)
@@ -355,7 +377,11 @@ namespace CodingRiver.UPilot
         // Human confirmation is supplied only by the local settings button, never by MCP payload.
         internal static ServiceMaintenanceRecord HardStopFromSettings()
         {
-            if (IsActive) return Current;
+            if (IsActive)
+            {
+                RefreshUpdateSubscription();
+                return Current;
+            }
             var bridge = UPilotBridge.Instance;
             var manager = UPilotMcpServerManager.Instance;
             int timeout = 120;
@@ -372,6 +398,7 @@ namespace CodingRiver.UPilot
             Journal.Save();
             _recoveryChecked = true;
             _dispatchAfter = Now;
+            RefreshUpdateSubscription();
             return record;
         }
 
@@ -414,7 +441,13 @@ namespace CodingRiver.UPilot
                     Fail("SERVICE_RESTART_RECOVERY_REQUIRED", "Replacement restart identity is missing; inspect original evidence.");
             }
             catch (Exception ex) { _storageError = ex.Message; }
-            finally { _recoveryCheckedAt = Now; _recoveryChecked = true; }
+            finally
+            {
+                _recoveryCheckedAt = Now;
+                _recoveryChecked = true;
+                EditorApplication.delayCall -= Recover;
+                RefreshUpdateSubscription();
+            }
         }
 
         // This check must also work while the Bridge is intentionally disconnected.
@@ -464,7 +497,11 @@ namespace CodingRiver.UPilot
             }
             // Journal errors are displayed, never used as an activity lease.
             var r = Current;
-            if (r?.Active != true) return;
+            if (r?.Active != true)
+            {
+                RefreshUpdateSubscription();
+                return;
+            }
             try
             {
                 var observedRestart = UPilotServerRestartDiagnostics.Current;
@@ -536,6 +573,7 @@ namespace CodingRiver.UPilot
                 }
                 Fail((ex as ServiceMaintenanceException)?.Code ?? "SERVICE_RESTART_FAILED", ex.Message);
             }
+            finally { RefreshUpdateSubscription(); }
         }
 
         // Missing identity is retryable; only positive, conflicting evidence is a mismatch.
@@ -614,6 +652,7 @@ namespace CodingRiver.UPilot
                     }
                 }
                 cancellation.Dispose();
+                RefreshUpdateSubscription();
             }
         }
 
@@ -625,7 +664,8 @@ namespace CodingRiver.UPilot
             r.Finish(code == "SERVICE_RESTART_TIMEOUT" ? "timed_out" : "failed", code, message, Now);
             try { Journal.Save(); }
             catch (Exception ex) { _storageError = ex.Message; }
-            UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId);
+            try { UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId); }
+            finally { RefreshUpdateSubscription(); }
         }
     }
 }

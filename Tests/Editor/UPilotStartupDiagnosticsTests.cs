@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.IO;
 using System.Reflection;
@@ -248,13 +248,15 @@ namespace CodingRiver.UPilot.Tests
                 record.serverStartAttemptCount = 2;
                 record.lastServerStartAttemptAtUtcMs = 1007;
                 record.nextServerStartAttemptAtUtcMs = 9007;
-                record.backgroundExecution.status = "pending";
                 UPilotStartupDiagnostics.AddMilestoneForTests(
                     record,
                     "bootstrap_entered",
                     1010,
                     new UPilotStartupFocusSnapshot { state = "unknown" });
                 Assert.That(UPilotStartupDiagnostics.TryWriteRecordForTests(record, path, out var writeError), Is.True, writeError);
+                // Older records remain readable, but removed sampling state is not restored or serialized again.
+                File.WriteAllText(path, File.ReadAllText(path).Insert(1,
+                    "\"backgroundExecution\":{\"status\":\"pending\",\"sampleCount\":12},"));
 
                 Assert.That(UPilotStartupDiagnostics.TryLoadRecordForTests(
                     path, directory, 42, 123, out var restored, out var reason), Is.True, reason);
@@ -265,7 +267,9 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(restored.serverStartRetryStatus, Is.EqualTo("observing"));
                 Assert.That(restored.serverStartAttemptCount, Is.EqualTo(2));
                 Assert.That(restored.nextServerStartAttemptAtUtcMs, Is.EqualTo(9007));
-                Assert.That(restored.backgroundExecution.status, Is.EqualTo("pending"));
+                Assert.That(restored.milestones[0].focus.state, Is.EqualTo("unknown"));
+                Assert.That(UPilotStartupDiagnostics.TryWriteRecordForTests(restored, path, out writeError), Is.True, writeError);
+                Assert.That(File.ReadAllText(path), Does.Not.Contain("backgroundExecution"));
 
                 Assert.That(UPilotStartupDiagnostics.TryLoadRecordForTests(
                     path, directory, 42, 124, out _, out reason), Is.False);
@@ -322,11 +326,225 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(snapshot.updateCount, Is.EqualTo(9));
         }
 
-        [Test]
-        public void BackgroundSamplingHonorsTheTenSecondBoundary()
+        private static FieldInfo StartupDiagnosticsField(string name) =>
+            typeof(UPilotStartupDiagnostics).GetField(name, BindingFlags.Static | BindingFlags.NonPublic);
+
+        private static void InvokeStartupDiagnostics(string name, params object[] arguments) =>
+            typeof(UPilotStartupDiagnostics).GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)
+                .Invoke(null, arguments);
+
+        private static void WithIsolatedStartupObservation(Action<UPilotStartupRecord> action)
         {
-            Assert.That(UPilotStartupDiagnostics.ShouldTakeBackgroundSampleForTests(19999, 20000), Is.False);
-            Assert.That(UPilotStartupDiagnostics.ShouldTakeBackgroundSampleForTests(20000, 20000), Is.True);
+            var fields = typeof(UPilotStartupDiagnostics).GetFields(BindingFlags.Static | BindingFlags.NonPublic)
+                .Where(field => !field.IsInitOnly && !field.IsLiteral).ToArray();
+            var saved = fields.ToDictionary(field => field, field => field.GetValue(null));
+            var previousUpdates = UnityEditor.EditorApplication.update;
+            var callback = (UnityEditor.EditorApplication.CallbackFunction)Delegate.CreateDelegate(
+                typeof(UnityEditor.EditorApplication.CallbackFunction),
+                typeof(UPilotStartupDiagnostics).GetMethod("OnEditorUpdate", BindingFlags.Static | BindingFlags.NonPublic));
+            try
+            {
+                // Synchronous isolation: no service calls, real process changes or project journal writes.
+                UnityEditor.EditorApplication.update -= callback;
+                var record = UPilotStartupDiagnostics.CreateRecordForTests("C:/isolated-startup", 42, 123, 1000);
+                record.diagnosticsStartedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 600000;
+                StartupDiagnosticsField("s_record").SetValue(null, record);
+                StartupDiagnosticsField("s_path").SetValue(null, "");
+                StartupDiagnosticsField("s_updateHooked").SetValue(null, false);
+                StartupDiagnosticsField("s_updateCount").SetValue(null, 0L);
+                StartupDiagnosticsField("s_healthProbeRunning").SetValue(null, false);
+                StartupDiagnosticsField("s_supplementalHealthPending").SetValue(null, false);
+                StartupDiagnosticsField("s_supplementalHealthUsed").SetValue(null, false);
+                StartupDiagnosticsField("s_serverManager").SetValue(null, null);
+                action(record);
+            }
+            finally
+            {
+                UnityEditor.EditorApplication.update = previousUpdates;
+                foreach (var entry in saved) entry.Key.SetValue(null, entry.Value);
+            }
+        }
+
+        [TestCase("not_started", false, false, false, false)]
+        [TestCase("healthy", false, false, false, false)]
+        [TestCase("incomplete", false, false, false, false)]
+        [TestCase("observing", false, false, false, true)]
+        [TestCase("incomplete", true, false, false, true)]
+        [TestCase("incomplete", true, true, false, false)]
+        [TestCase("healthy", true, false, false, false)]
+        [TestCase("incomplete", false, false, true, true)]
+        public void StartupObservationUpdateFollowsOnlyPendingHealthWork(
+            string healthStatus, bool supplementalPending, bool supplementalUsed, bool probeRunning, bool expectedHooked)
+        {
+            WithIsolatedStartupObservation(record =>
+            {
+                record.healthObservationStatus = healthStatus;
+                record.serverStartRetryStatus = "observing";
+                record.serverStartAttemptCount = 2;
+                record.nextServerStartAttemptAtUtcMs = 9007;
+                StartupDiagnosticsField("s_serverManager").SetValue(null, IsolatedStatusManager());
+                StartupDiagnosticsField("s_supplementalHealthPending").SetValue(null, supplementalPending);
+                StartupDiagnosticsField("s_supplementalHealthUsed").SetValue(null, supplementalUsed);
+                StartupDiagnosticsField("s_healthProbeRunning").SetValue(null, probeRunning);
+                InvokeStartupDiagnostics("EnsureUpdateHookLocked");
+                var bootstrapCallback = (UnityEditor.EditorApplication.CallbackFunction)Delegate.CreateDelegate(
+                    typeof(UnityEditor.EditorApplication.CallbackFunction),
+                    typeof(UPilotBootstrap).GetMethod("TryStartMcpServer", BindingFlags.Static | BindingFlags.NonPublic));
+                UnityEditor.EditorApplication.update += bootstrapCallback;
+
+                InvokeStartupDiagnostics("RemoveUpdateHookIfFinishedLocked");
+
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.EqualTo(expectedHooked));
+                Assert.That(UnityEditor.EditorApplication.update.GetInvocationList(), Has.Member(bootstrapCallback));
+                Assert.That(record.serverStartRetryStatus, Is.EqualTo("observing"));
+                Assert.That(record.serverStartAttemptCount, Is.EqualTo(2));
+                Assert.That(record.nextServerStartAttemptAtUtcMs, Is.EqualTo(9007));
+            });
+        }
+
+        [Test]
+        public void StartupObservationFirstUpdateAndRealHealthAttemptsOwnTheUpdateHook()
+        {
+            WithIsolatedStartupObservation(record =>
+            {
+                InvokeStartupDiagnostics("EnsureUpdateHookLocked");
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(record.milestones.Single(item => item.name == "first_editor_update").focus, Is.Not.Null);
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False);
+
+                var manager = IsolatedStatusManager();
+                UPilotStartupDiagnostics.BeginServerObservation(manager);
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.True);
+                Assert.That(record.healthObservationStatus, Is.EqualTo("observing"));
+                record.healthObservationStatus = "incomplete";
+                InvokeStartupDiagnostics("RemoveUpdateHookIfFinishedLocked");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False);
+                UPilotStartupDiagnostics.BeginServerObservation(manager, restartProbeWindow: true);
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.True);
+
+                record.healthObservationStatus = "healthy";
+                InvokeStartupDiagnostics("RemoveUpdateHookIfFinishedLocked");
+                StartupDiagnosticsField("s_supplementalHealthPending").SetValue(null, true);
+                UPilotStartupDiagnostics.ObserveEditorState(true, true, false, "test-session");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False);
+                Assert.That(record.milestones.Single(item => item.name == "editor_ready").focus, Is.Not.Null);
+                Assert.That(record.milestones.Any(item => item.name == "server_healthy"), Is.False,
+                    "Editor ready must not invent independent health evidence.");
+
+                record.healthObservationStatus = "incomplete";
+                UPilotStartupDiagnostics.ObserveBridgeAuthenticated("test-session");
+                UPilotStartupDiagnostics.ObserveEditorState(true, true, false, "test-session");
+                InvokeStartupDiagnostics("RemoveUpdateHookIfFinishedLocked");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.True,
+                    "A pending supplemental health probe must survive an already recorded ready milestone.");
+
+            });
+        }
+
+        [Test]
+        public void EarlySupplementalHealthFailureKeepsScheduledProbesUntilBoundedCompletion()
+        {
+            WithIsolatedStartupObservation(record =>
+            {
+                var manager = IsolatedStatusManager();
+                // Return an unverified fixture snapshot directly, without network requests or recovery work.
+                SetManagerField(manager, "_lifecyclePhase", UPilotServerLifecyclePhase.Verifying);
+                UPilotStartupDiagnostics.BeginServerStartCycle("supplemental-test");
+                UPilotStartupDiagnostics.BeginServerObservation(manager);
+
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(record.healthProbeCount, Is.EqualTo(1), "The scheduled zero-second probe must run first.");
+                Assert.That(record.healthObservationStatus, Is.EqualTo("observing"));
+
+                UPilotStartupDiagnostics.ObserveBridgeAuthenticated("supplemental-session");
+                UPilotStartupDiagnostics.ObserveEditorState(false, true, false, "supplemental-session");
+                StartupDiagnosticsField("s_healthObservationStartedUtcMs").SetValue(null,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(StartupDiagnosticsField("s_supplementalHealthUsed").GetValue(null), Is.True);
+                Assert.That(StartupDiagnosticsField("s_supplementalHealthPending").GetValue(null), Is.False);
+                Assert.That(record.healthProbeCount, Is.EqualTo(1), "The supplemental probe must not consume a scheduled slot.");
+                Assert.That(record.healthObservationStatus, Is.EqualTo("observing"),
+                    "An early supplemental failure must leave the scheduled health window open.");
+                InvokeStartupDiagnostics("RemoveUpdateHookIfFinishedLocked");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.True);
+
+                var expectedProbeCount = 1;
+                foreach (var offset in new[] { 5000L, 15000L, 30000L })
+                {
+                    // Advance only the isolated observation clock; no sleeps or live Editor timing changes.
+                    StartupDiagnosticsField("s_healthObservationStartedUtcMs").SetValue(null,
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - offset);
+                    InvokeStartupDiagnostics("OnEditorUpdate");
+                    Assert.That(record.healthProbeCount, Is.EqualTo(++expectedProbeCount));
+                    Assert.That(record.healthObservationStatus,
+                        Is.EqualTo(offset == 30000 ? "incomplete" : "observing"));
+                }
+
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(record.healthProbeCount, Is.EqualTo(4));
+                Assert.That(record.healthObservationStatus, Is.EqualTo("incomplete"));
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False);
+                UPilotStartupDiagnostics.ObserveBridgeAuthenticated("supplemental-session");
+                UPilotStartupDiagnostics.ObserveEditorState(false, true, false, "supplemental-session");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False,
+                    "A consumed supplemental probe must not restart observation.");
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void DelayedStartupAndLaterDomainCyclesStillObserveVerifiedHealth(bool laterDomainCycle)
+        {
+            WithIsolatedStartupObservation(record =>
+            {
+                var diagnosticsStarted = record.diagnosticsStartedAtUtcMs;
+                if (laterDomainCycle)
+                {
+                    record.serverStartCycleId = "old-domain";
+                    record.serverStartRetryStatus = "succeeded";
+                    record.healthObservationStatus = "healthy";
+                    record.healthObservationStartedAtUtcMs = diagnosticsStarted;
+                    record.healthProbeCount = 4;
+                    UPilotStartupDiagnostics.AddMilestoneForTests(record, "server_healthy", diagnosticsStarted,
+                        new UPilotStartupFocusSnapshot { state = "unknown" });
+                }
+                UPilotStartupDiagnostics.BeginServerStartCycle("current-domain");
+                InvokeStartupDiagnostics("EnsureUpdateHookLocked");
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False);
+
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                Assert.That(now - diagnosticsStarted, Is.GreaterThanOrEqualTo(600000));
+                Assert.That(UPilotStartupDiagnostics.TryBeginServerStartAttempt(
+                    now, 4, new[] { 2000, 8000, 20000 }, out var attempt), Is.True);
+                Assert.That(attempt, Is.EqualTo(1));
+                var manager = IsolatedStatusManager();
+                // A deferred lifecycle status returns only this fixture cache; no health requests or recovery work run.
+                SetManagerField(manager, "_lifecyclePhase", UPilotServerLifecyclePhase.Verifying);
+                SetManagerField(manager, "_cachedStatus", new McpServerStatus
+                {
+                    HealthEndpointResponded = true,
+                    HealthIdentifiesUPilot = true,
+                    HealthServerProcessId = 77,
+                    ProcessId = 77,
+                    ProcessOwnership = McpProcessOwnership.CurrentUPilot,
+                    ProcessOwnershipEvidence = "tracked fixture process",
+                });
+                UPilotStartupDiagnostics.BeginServerObservation(manager);
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.True);
+                Assert.That(record.healthObservationStartedAtUtcMs, Is.GreaterThanOrEqualTo(now));
+                Assert.That(record.healthProbeCount, Is.Zero);
+
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(record.healthObservationStatus, Is.EqualTo("healthy"));
+                Assert.That(record.serverStartRetryStatus, Is.EqualTo("succeeded"));
+                Assert.That(record.healthProbeCount, Is.EqualTo(1));
+                Assert.That(UPilotStartupDiagnostics.IsServerStartRetryFinished, Is.True);
+                InvokeStartupDiagnostics("OnEditorUpdate");
+                Assert.That(StartupDiagnosticsField("s_updateHooked").GetValue(null), Is.False);
+                Assert.That(record.diagnosticsStartedAtUtcMs, Is.EqualTo(diagnosticsStarted));
+            });
         }
 
         [Test]
@@ -1089,21 +1307,34 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void VerifiedStartupCachesReadyStatusAndWaitsBeforeFirstPeriodicHealth()
+        public async Task VerifiedStartupCachesReadyStatusAndWaitsBeforeFirstPeriodicHealth()
         {
             var manager = IsolatedStatusManager();
             SetManagerField(manager, "_healthCheckIntervalSeconds", 10);
             SetManagerField(manager, "_launchState", new ServerLaunchState { verified = true, readyVerified = true });
             SetManagerField(manager, "_editorHealthObservationEnabled", true);
-            var before = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", BindingFlags.Instance | BindingFlags.NonPublic)
-                .Invoke(manager, new object[] { new McpServerStatus { IsRunning = true, ProcessId = 42,
-                    HealthEndpointResponded = true, HealthServerProcessId = 42 } });
-            Assert.That(manager.PeriodicHealthChecksAllowed, Is.True);
-            Assert.That(manager.GetStatus().ProcessId, Is.EqualTo(42));
-            Assert.That(typeof(UPilotMcpServerManager).GetField("_nextEditorHealthObservationAtUtcMs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager),
-                Is.GreaterThanOrEqualTo(before + 10000));
-            Assert.That(typeof(UPilotMcpServerManager).GetField("_statusRefreshTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager), Is.Null);
+            try
+            {
+                var before = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(manager, new object[] { new McpServerStatus { IsRunning = true, ProcessId = 42,
+                        HealthEndpointResponded = true, HealthServerProcessId = 42 } });
+                Assert.That(manager.PeriodicHealthChecksAllowed, Is.True);
+                Assert.That(manager.GetStatus().ProcessId, Is.EqualTo(42));
+                Assert.That(typeof(UPilotMcpServerManager).GetField("_nextEditorHealthObservationAtUtcMs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager),
+                    Is.GreaterThanOrEqualTo(before + 10000));
+                Assert.That(typeof(UPilotMcpServerManager).GetField("_statusRefreshTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager), Is.Null);
+            }
+            finally
+            {
+                var loop = (Task)typeof(UPilotMcpServerManager).GetField("_editorHealthObservationLoopTask", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager);
+                manager.PausePeriodicHealthObservation();
+                if (loop != null)
+                {
+                    Assert.That(await Task.WhenAny(loop, Task.Delay(2000)), Is.SameAs(loop));
+                    await loop;
+                }
+            }
         }
 
         [Test]
@@ -1469,8 +1700,10 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(manager.LaunchProbeDeadline(state, 999), Is.EqualTo(1000));
             Assert.That(manager.IsLaunchVerificationExpired(state, 1000), Is.True);
             SetManagerField(manager, "_launchReloadRevalidation", true);
-            Assert.That(manager.LaunchProbeDeadline(state, 2000), Is.EqualTo(7000));
+            state.reloadRevalidation = new ReloadRevalidationObservation { deadlineUtcMs = 6000, roundTimeoutSeconds = 5 };
+            Assert.That(manager.LaunchProbeDeadline(state, 2000), Is.EqualTo(6000));
             Assert.That(manager.IsLaunchVerificationExpired(state, 2000), Is.False);
+            Assert.That(manager.IsLaunchVerificationExpired(state, 6000), Is.True);
             Assert.That(state.deadlineUtcMs, Is.EqualTo(1000));
         }
 

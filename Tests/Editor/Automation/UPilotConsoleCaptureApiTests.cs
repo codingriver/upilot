@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CodingRiver.UPilot.Automation;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -136,6 +137,71 @@ namespace CodingRiver.UPilot.Tests.Automation
             CleanupOwnCapture();
             Assert.That(Directory.Exists(directory), Is.False);
             Assert.That(UPilotConsoleCaptureApi.GetBoundary().ok, Is.False);
+        }
+
+        private static void AssertCaptureSubscriptions(bool active)
+        {
+            var service = typeof(UPilotConsoleCaptureService);
+            int updates = EditorApplication.update?.GetInvocationList().Count(callback =>
+                callback.Method.DeclaringType == service && callback.Method.Name == "FlushOnEditorUpdate") ?? 0;
+            Assert.That(updates, Is.EqualTo(active ? 1 : 0));
+            Assert.That(service.GetField("s_logSubscribed", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null),
+                Is.EqualTo(active));
+        }
+
+        [Test]
+        public void CaptureSubscriptionsExistOnlyWhileOwnedCaptureIsActive()
+        {
+            AssertCaptureSubscriptions(false);
+            var started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            for (int i = 0; i < 3; i++)
+            {
+                Assert.That(UPilotConsoleCaptureApi.Status(_sessionId).session.active, Is.True);
+                AssertCaptureSubscriptions(true);
+            }
+            Assert.That(UPilotConsoleCaptureApi.Stop(_sessionId, "wrong-owner").ok, Is.False);
+            AssertCaptureSubscriptions(true);
+            const string marker = "UPILOT_CAPTURE_SUBSCRIPTION_SINGLE_RECORD";
+            Debug.Log(marker);
+            var stopped = UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken);
+            Assert.That(stopped.ok, Is.True, stopped.error);
+            AssertCaptureSubscriptions(false);
+            Assert.That(File.ReadAllLines(stopped.session.jsonlPath).Count(line => line.Contains(marker)), Is.EqualTo(1));
+            Assert.That(UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken).ok, Is.True);
+            AssertCaptureSubscriptions(false);
+        }
+
+        [Test]
+        public void FailedCaptureFinalizationUnsubscribesAndOwnerCanFinishAfterUnlock()
+        {
+            var started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            using (new FileStream(started.session.summaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                Assert.Throws<IOException>(() => UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken));
+                AssertCaptureSubscriptions(false);
+                Assert.That(UPilotConsoleCaptureApi.Status(_sessionId).session.active, Is.False);
+                AssertCaptureSubscriptions(false);
+            }
+            Assert.That(UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken).ok, Is.True);
+            AssertCaptureSubscriptions(false);
+        }
+
+        [Test]
+        public void CaptureResetUnsubscribesEvenWhenItsManifestCannotBeArchived()
+        {
+            var started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            using (new FileStream(started.session.manifestPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Assert.Throws<IOException>(() => UPilotConsoleCaptureService.ResetActive());
+                AssertCaptureSubscriptions(false);
+                Assert.That(UPilotConsoleCaptureApi.GetBoundary().ok, Is.False);
+            }
+            // The original owner finishes its persisted record; reset did not adopt or delete it.
+            Assert.That(UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken).ok, Is.True);
+            AssertCaptureSubscriptions(false);
         }
 
         [Test]
@@ -571,6 +637,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             // No Editor update can flush between these synchronous calls.
             Assert.That(File.ReadAllText(started.session.jsonlPath), Does.Not.Contain(marker));
             flush.Invoke(null, null);
+            AssertCaptureSubscriptions(false);
             byte[] first = File.ReadAllBytes(started.session.jsonlPath);
             Assert.That(Encoding.UTF8.GetString(first), Does.Contain(marker));
             var persisted = JsonUtility.FromJson<ConsoleCaptureManifest>(File.ReadAllText(started.session.manifestPath));
@@ -583,6 +650,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             active.SetValue(null, null);
             var restored = UPilotConsoleCaptureApi.Status(_sessionId);
             Assert.That(restored.ok && restored.session.active, Is.True);
+            AssertCaptureSubscriptions(true);
             Assert.That(restored.session.nextSequence, Is.EqualTo(persisted.nextSequence));
             Assert.That(UPilotConsoleCaptureApi.Stop(_sessionId, "not-the-owner").ok, Is.False);
             receive.Invoke(null, new object[] { "UPILOT_OWNED_AFTER_RECOVERY", string.Empty, LogType.Log });
@@ -608,8 +676,10 @@ namespace CodingRiver.UPilot.Tests.Automation
             // Only this fixture's JSONL is locked. No physical disk failure is claimed.
             using (new FileStream(started.session.jsonlPath, FileMode.Open, FileAccess.Read, FileShare.None))
                 Assert.DoesNotThrow(() => flush.Invoke(null, null));
+            AssertCaptureSubscriptions(false);
             var observed = UPilotConsoleCaptureApi.Status(_sessionId);
             Assert.That(observed.ok && observed.session.active, Is.True);
+            AssertCaptureSubscriptions(true);
             Assert.That(observed.session.lastError, Is.Not.Empty);
             Assert.That(observed.session.droppedCount, Is.EqualTo(1));
             Assert.That(observed.session.nextSequence, Is.EqualTo(1));

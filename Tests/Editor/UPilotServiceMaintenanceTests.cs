@@ -1,7 +1,9 @@
 ﻿using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
+using UnityEditor;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -49,7 +51,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotServiceMaintenance.IsActive, Is.False, "Do not isolate an active maintenance request.");
             var type = typeof(UPilotServiceMaintenance);
             const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
-            var names = new[] { "_journal", "_recoveryChecked", "_storageError", "_recoveryCheckedAt" };
+            var names = new[] { "_journal", "_recoveryChecked", "_storageError", "_recoveryCheckedAt", "_shuttingDown" };
             var previous = new object[names.Length];
             for (var i = 0; i < names.Length; i++) previous[i] = type.GetField(names[i], flags).GetValue(null);
             try
@@ -57,13 +59,19 @@ namespace CodingRiver.UPilot.Tests
                 type.GetField("_journal", flags).SetValue(null, _journal);
                 type.GetField("_recoveryChecked", flags).SetValue(null, false);
                 type.GetField("_storageError", flags).SetValue(null, "");
+                type.GetField("_shuttingDown", flags).SetValue(null, false);
+                type.GetMethod("RefreshUpdateSubscription", flags).Invoke(null, null);
                 test(type, flags);
             }
             finally
             {
                 for (var i = 0; i < names.Length; i++) type.GetField(names[i], flags).SetValue(null, previous[i]);
+                type.GetMethod("RefreshUpdateSubscription", flags).Invoke(null, null);
             }
         }
+
+        private static int MaintenanceUpdates => EditorApplication.update?.GetInvocationList().Count(callback =>
+            callback.Method.DeclaringType == typeof(UPilotServiceMaintenance) && callback.Method.Name == "Update") ?? 0;
 
         [Test]
         public void UpdateInitializesRecoveryWithoutInspectorDelayCall()
@@ -75,6 +83,7 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(UPilotServiceMaintenance.StorageError, Is.Empty);
                 Assert.That(_journal.Current, Is.Null);
                 Assert.That(File.Exists(_path), Is.False, "No request was accepted or dispatched.");
+                Assert.That(MaintenanceUpdates, Is.Zero);
             });
         }
 
@@ -111,8 +120,58 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(initialization.storageError, Is.Not.Empty);
                 Assert.That(initialization.source, Is.EqualTo("unity-maintenance-initialization"));
                 Assert.That(File.ReadAllText(_path), Is.EqualTo("{"));
+                Assert.That(MaintenanceUpdates, Is.Zero);
                 Assert.That(Assert.Throws<ServiceMaintenanceException>(() =>
                     _journal.Accept(Request(), 120, 456, null)).Code, Is.EqualTo("SERVICE_RESTART_RECOVERY_REQUIRED"));
+            });
+        }
+
+        [TestCase("succeeded")]
+        [TestCase("failed")]
+        [TestCase("timed_out")]
+        public void RecoveredMaintenanceObservesOnlyUntilItsOriginalRecordIsTerminal(string terminal)
+        {
+            _now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var request = Request();
+            request.expectedProjectPath = UPilotProjectConfig.ProjectRoot;
+            var record = _journal.Accept(request, 120, System.Diagnostics.Process.GetCurrentProcess().Id, null);
+            record.status = "running";
+            record.serverRestartId = "isolated-existing-restart";
+            long deadline = record.deadlineAtUtcMs;
+            WithIsolatedRecovery((type, flags) =>
+            {
+                type.GetMethod("Update", flags).Invoke(null, null); // Recovery only; no maintenance dispatch.
+                type.GetMethod("Recover", flags).Invoke(null, null);
+                type.GetMethod("RefreshUpdateSubscription", flags).Invoke(null, null);
+                Assert.That(MaintenanceUpdates, Is.EqualTo(1));
+                Assert.That(record.deadlineAtUtcMs, Is.EqualTo(deadline));
+                Assert.That(record.stopAttempted || record.startAttempted, Is.False);
+                record.Finish(terminal, "fixture", "isolated terminal", _now);
+                type.GetMethod("Update", flags).Invoke(null, null);
+                Assert.That(MaintenanceUpdates, Is.Zero);
+                Assert.That(record.status, Is.EqualTo(terminal));
+                Assert.That(record.stopAttempted || record.startAttempted, Is.False);
+            });
+        }
+
+        [Test]
+        public void DomainShutdownCannotReattachAnActiveMaintenanceObserver()
+        {
+            _now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var request = Request();
+            request.expectedProjectPath = UPilotProjectConfig.ProjectRoot;
+            var record = _journal.Accept(request, 120, System.Diagnostics.Process.GetCurrentProcess().Id, null);
+            record.status = "running";
+            record.serverRestartId = "isolated-existing-restart";
+            WithIsolatedRecovery((type, flags) =>
+            {
+                type.GetMethod("Update", flags).Invoke(null, null);
+                Assert.That(MaintenanceUpdates, Is.EqualTo(1));
+                type.GetMethod("StopObservation", flags).Invoke(null, null);
+                type.GetMethod("RefreshUpdateSubscription", flags).Invoke(null, null);
+                Assert.That(MaintenanceUpdates, Is.Zero);
+                Assert.That(record.Active, Is.True, "Shutdown preserves the original record for legitimate recovery.");
+                Assert.That(record.stopAttempted || record.startAttempted, Is.False);
             });
         }
 

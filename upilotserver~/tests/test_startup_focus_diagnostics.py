@@ -269,7 +269,6 @@ def _write_startup(
         "lastServerStartAttemptAtUtcMs": 900,
         "nextServerStartAttemptAtUtcMs": 2900,
         "lastServerStartReason": "server_update_blocked",
-        "backgroundExecution": {"status": "not_observed"},
     }), encoding="utf-8")
     return path
 
@@ -285,6 +284,25 @@ def test_startup_summary_does_not_promote_historical_ready(tmp_path):
     assert historical["current"] is False
     assert historical["historicalEditorReady"] is True
     assert "server_healthy" in historical["missingStages"]
+
+
+@pytest.mark.parametrize("legacy_background", [None, {"status": "pending"}, {"status": "observed"}])
+def test_startup_summary_ignores_legacy_background_evidence_and_keeps_milestone_focus(tmp_path, legacy_background):
+    service = _service(tmp_path)
+    path = _write_startup(tmp_path)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["milestones"][0]["focus"] = {"state": "unfocused", "targetProcessId": 42}
+    if legacy_background is not None:
+        record["backgroundExecution"] = legacy_background
+    path.write_text(json.dumps(record), encoding="utf-8")
+    service._process_exists = lambda pid: True
+
+    summary = service._read_startup_summary(tmp_path, _identity(tmp_path))
+
+    assert summary["recordStatus"] == "current"
+    assert "backgroundExecution" not in summary
+    assert summary["milestones"][0]["focus"] == {"state": "unfocused", "targetProcessId": 42}
+    assert summary["serverStartRetry"]["attemptCount"] == 2
 
 
 def test_startup_summary_distinguishes_current_exited_and_corrupt(tmp_path):
@@ -337,6 +355,8 @@ def test_startup_summary_keeps_health_handshake_and_ready_as_independent_evidenc
 
 def test_queued_diagnostics_are_observations_and_revalidate_identity(monkeypatch, tmp_path):
     service = _service(tmp_path)
+    service.server.session_manager.active.session_id = "session"
+    monkeypatch.setattr("upilot_mcp.domain.status_service.now_ms", lambda: 10002)
     target = {"ok": True, "hwnd": 10, "targetPid": 42}
     monkeypatch.setattr(service, "_resolve_verified_unity_window", lambda: target)
     monkeypatch.setattr(service, "_revalidate_window_target", lambda _: (True, ""))
@@ -346,7 +366,9 @@ def test_queued_diagnostics_are_observations_and_revalidate_identity(monkeypatch
     ])
     monkeypatch.setattr(service, "_foreground_window", lambda: 999)
     monkeypatch.setattr(service, "_window_process_id", lambda _: 9)
-    result = service._queued_editor_diagnostics({"authoritative": True, "isUpdating": True, "compilePhase": "queued"})
+    result = service._queued_editor_diagnostics({"authoritative": True, "isUpdating": True, "compilePhase": "queued",
+        "sessionId": "session", "producerEpoch": "epoch", "unityConnected": True,
+        "receivedAt": 10002, "lastMainThreadPumpAt": 10002})
     assert set(result["hints"]) == {"asset_import_in_progress", "queued_with_main_thread_pumping", "editor_in_background", "possible_modal_window"}
     assert result["causalAttribution"] == "unverified"
     monkeypatch.setattr(service, "_revalidate_window_target", lambda _: (False, "process_identity_changed"))
@@ -393,6 +415,10 @@ def test_queued_diagnostics_discard_unverifiable_window_observations(monkeypatch
 ])
 def test_queued_hints_do_not_promote_stale_import_or_queue_state(monkeypatch, tmp_path, execution, expected):
     service = _service(tmp_path)
+    service.server.session_manager.active.session_id = "session"
+    monkeypatch.setattr("upilot_mcp.domain.status_service.now_ms", lambda: 10002)
+    execution = {"sessionId": "session", "producerEpoch": "epoch", "unityConnected": True,
+                 "receivedAt": 10002, "lastMainThreadPumpAt": 10002, **execution}
     monkeypatch.setattr(service, "_resolve_verified_unity_window", lambda: {"ok": False, "reason": "identity_unverified"})
     result = service._queued_editor_diagnostics(execution)
     assert result["hints"] == expected

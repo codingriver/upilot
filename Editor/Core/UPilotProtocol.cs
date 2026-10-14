@@ -26,6 +26,7 @@ namespace CodingRiver.UPilot
     public class HelloPayload
     {
         public int identityContractVersion;
+        public int heartbeatIntervalMs;
         public string unityVersion;
         public string projectPath;
         public string platform;
@@ -46,6 +47,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class HeartbeatPayload
     {
+        public int heartbeatIntervalMs;
         public PlayModeTransitionRecord playModeTransition;
         public int stateContractVersion;
         public string projectId;

@@ -24,6 +24,7 @@ from ..automation_authorization import authorization_status
 from ..service_maintenance import read_summary as read_maintenance_summary, same_path as maintenance_same_path
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
+from ..editor_diagnostics import main_thread_observation
 from ..models import ToolResponse
 from ..console_evidence import public_console_evidence
 from ..protocol import new_id, now_ms
@@ -362,7 +363,11 @@ class StatusDomainService:
                 "aiServiceMaintenance": {**read_maintenance_summary(startup_root, session),
                     "initialization": execution.get("maintenanceInitialization"),
                     "initializationStatus": "observed" if execution.get("maintenanceInitialization") is not None else "unknown"},
-                "timeouts": self.dispatcher.timeout_policy_snapshot(),
+                "timeouts": {
+                    **self.dispatcher.timeout_policy_snapshot(),
+                    "heartbeatIntervalMs": getattr(self.server, "heartbeat_interval_ms", None),
+                    "heartbeatTimeoutMs": getattr(self.server.session_manager, "heartbeat_timeout_ms", None),
+                },
                 "mcp": {
                     "label": self.server.mcp_label,
                     "host": self.server.host,
@@ -930,10 +935,12 @@ class StatusDomainService:
                                   "possibleModalWindows": candidates[:8], "candidatesTruncated": len(candidates) > 8}
         except Exception as exc:
             window = {"status": "unknown", "reason": "window_query_failed", "error": str(exc)[:512]}
+        session = self.server.session_manager.active
+        observation = main_thread_observation(execution, getattr(session, "session_id", ""), now_ms())
         hints = []
-        if execution.get("lastMainThreadPumpAt") and (execution.get("editorPumpAgeMs") or 0) > 10000:
+        if observation["notPumping"] is True:
             hints.append("main_thread_not_advancing")
-        elif execution.get("authoritative") and not execution.get("isStale"):
+        elif observation["notPumping"] is False and execution.get("authoritative") and not execution.get("isStale"):
             if execution.get("isUpdating") is True:
                 hints.append("asset_import_in_progress")
             if execution.get("compilePhase") == "queued":
@@ -944,6 +951,7 @@ class StatusDomainService:
             if window.get("mainWindowEnabled") is False or window.get("possibleModalWindows"):
                 hints.append("possible_modal_window")
         return {"isUpdating": execution.get("isUpdating"), "windowObservation": window,
+                "editorNotPumping": observation["notPumping"], "mainThreadObservation": observation,
                 "hints": hints or ["insufficient_evidence"], "causalAttribution": "unverified"}
 
     async def editor_focus_state(self) -> ToolResponse:
@@ -1066,7 +1074,6 @@ class StatusDomainService:
                 "nextAttemptAtUtcMs": int(record.get("nextServerStartAttemptAtUtcMs") or 0),
                 "lastReason": str(record.get("lastServerStartReason") or ""),
             },
-            "backgroundExecution": record.get("backgroundExecution") if isinstance(record.get("backgroundExecution"), dict) else {},
             "observedAtUtcMs": int(record.get("observedAtUtcMs") or 0),
             "historicalEditorReady": "editor_ready" in observed,
         }

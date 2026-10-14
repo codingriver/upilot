@@ -281,12 +281,14 @@ def test_terminal_transaction_failure_does_not_partially_settle_round(setup):
     with pytest.raises(sqlite3.Error, match="evidence failure"):
         publish(state, round_state)
     assert not state.get_write_batch_round(round_state["roundId"])["correlationVerified"]
+    assert set(state._write_batch_deadlines) == {a["writeBatchId"], b["writeBatchId"]}
     for batch in (a, b):
         assert state.get_write_batch(batch["writeBatchId"])["terminalSnapshot"] is None
     with sqlite3.connect(state._db_path) as db:
         db.execute("DROP TRIGGER deny_member")
     publish(state, round_state)  # Same operation, fresh publication, no new request.
     assert state.get_write_batch(b["writeBatchId"])["correlationVerified"]
+    assert state.next_write_batch_deadline is None
 
 
 def test_coordinator_drains_later_work_without_another_heartbeat(setup, monkeypatch):

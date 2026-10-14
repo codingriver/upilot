@@ -8,7 +8,7 @@ namespace CodingRiver.UPilot.Automation
     /// <summary>Current-run memory monitor. Sampling never advances execution.</summary>
     public sealed class UPilotStepManagementWindow : EditorWindow
     {
-        internal const double RefreshIntervalSeconds = 1;
+        internal static double RefreshIntervalSeconds => UPilotTimingSettings.StepWindowRefreshMs / 1000d;
         private const float StartTimeColumnWidth = 110, DurationColumnWidth = 100;
         internal Func<UPilotAutomationStepService.CurrentSnapshot> ReadCurrent = UPilotAutomationStepService.GetCurrentSnapshot;
         internal UPilotAutomationStepService.CurrentSnapshot Latest { get; private set; }
@@ -16,7 +16,7 @@ namespace CodingRiver.UPilot.Automation
         private UPilotAutomationStepService.CurrentSnapshot _gui;
         private string _observedKey = "", _notice = "", _guiNotice = "";
         private bool _guiInitialized;
-        private double _nextRefreshAt;
+        private double _lastRefreshAt;
         private long _guiNow;
 
         [MenuItem("UPilot/Step管理", false, 401)]
@@ -48,11 +48,11 @@ namespace CodingRiver.UPilot.Automation
         private void SampleOnUpdate() => RefreshIfDue(EditorApplication.timeSinceStartup);
         internal void RefreshIfDue(double now)
         {
-            if (now >= _nextRefreshAt) Refresh(now);
+            if (now >= _lastRefreshAt + RefreshIntervalSeconds) Refresh(now);
         }
         internal void Refresh(double now)
         {
-            _nextRefreshAt = now + RefreshIntervalSeconds; // No catch-up burst after a blocked main thread.
+            _lastRefreshAt = now; // No catch-up burst after a blocked main thread.
             try { AcceptSnapshot(ReadCurrent()); }
             catch (Exception ex)
             {

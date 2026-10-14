@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 import uuid
 
 
@@ -93,6 +93,8 @@ class StateStore:
         self.commands: dict[str, CommandRecord] = {}
         self.lifecycle_id = uuid.uuid4().hex
         self._current_write_batches: set[str] = set()
+        self._write_batch_deadlines: dict[str, int] = {}
+        self.write_batch_deadline_changed: Callable[[], None] | None = None
         self._current_compile_rounds: set[str] = set()
         self._compile_round_runtime: dict[str, dict] = {}
         self._write_batch_runtime: dict[str, dict] = {}
@@ -237,6 +239,7 @@ class StateStore:
             row = db.execute("SELECT snapshot_json FROM project_state WHERE project_path = ?", (resolved,)).fetchone()
         # History is evidence, never an active queue for a new Server instance.
         self._current_write_batches.clear()
+        self._remove_write_batch_deadlines(set(self._write_batch_deadlines))
         self._current_compile_rounds.clear()
         self._compile_round_runtime.clear()
         self._write_batch_runtime.clear()
@@ -278,6 +281,7 @@ class StateStore:
             ).fetchone()
             coalesced = bool(
                 row and row[0] in self._current_write_batches and now - int(row[3]) <= 500
+                and not self._write_batch_runtime.get(row[0], {}).get("terminal")
                 and (row[5] is None) == (changes is None)
                 and bool(row[6]) == compile_when_edit_mode
             )
@@ -325,6 +329,9 @@ class StateStore:
 
         self._write_batch_runtime.setdefault(batch_id, dict(result, status="pending", storedStatus="pending",
             terminal=False, errorsVerified=False, correlationVerified=False, outcome="unknown"))
+        self._write_batch_deadlines[batch_id] = created_at + 600000
+        if self.write_batch_deadline_changed:
+            self.write_batch_deadline_changed()
         return result
 
     @staticmethod
@@ -623,10 +630,23 @@ class StateStore:
             return None
         return value if isinstance(value, dict) else None
 
+    @property
+    def next_write_batch_deadline(self) -> int | None:
+        return min(self._write_batch_deadlines.values(), default=None)
+
+    def _remove_write_batch_deadlines(self, batch_ids: set[str]) -> None:
+        changed = False
+        for batch_id in batch_ids:
+            changed = self._write_batch_deadlines.pop(batch_id, None) is not None or changed
+        if changed and self.write_batch_deadline_changed:
+            self.write_batch_deadline_changed()
+
     def expire_write_batches(self) -> None:
-        for batch_id in tuple(self._current_write_batches):
-            batch = self.get_write_batch(batch_id)
-            if batch and not batch.get("terminal") and _now_ms() >= batch["writeBatchCreatedAt"] + 600000:
+        # Only live deadlines need inspection. Lifetime identities also include
+        # terminal history and must never become an idle database polling list.
+        now = _now_ms()
+        for batch_id, deadline in tuple(self._write_batch_deadlines.items()):
+            if now >= deadline:
                 self.mark_write_batch(batch_id, "timed_out", error="Write batch exceeded 600 seconds from registration.")
 
     def pending_write_batches(self) -> list[dict[str, Any]]:
@@ -830,6 +850,7 @@ class StateStore:
         terminal = bool(payload.get("terminal") is True and payload.get("errorsVerified") is True
                         and payload.get("compilePhase") in {"completed", "failed"}
                         and int(payload.get("lastCompileVerifiedAt") or 0) >= round_state["deadlineAt"] - 600000 > 0)
+        ended_members: set[str] = set()
         with sqlite3.connect(self._db_path) as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE write_batch_compile_rounds SET compile_operation_id=? WHERE round_id=? AND compile_operation_id=''",
@@ -844,15 +865,18 @@ class StateStore:
                     # Preserve cancellations/timeouts even when their archival write failed.
                     if self._write_batch_runtime.get(member, {}).get("terminal"):
                         continue
-                    db.execute(
+                    cursor = db.execute(
                         "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=?,error='' "
                         "WHERE project_path=? AND write_batch_id=? AND terminal_snapshot_json IS NULL AND disposition_json IS NULL "
                         "AND status NOT IN ('verified','failed','canceled','aborted','timed_out')",
                         ("verified" if payload["compilePhase"] == "completed" else "failed", _now_ms(), raw, self._project_path, member),
                     )
+                    if cursor.rowcount == 1:
+                        ended_members.add(member)
             else:
                 db.execute("UPDATE write_batches SET status='compiling' WHERE project_path=? AND compile_round_id=? "
                            "AND status IN ('syncing','pending','deferred')", (self._project_path, round_id))
+        self._remove_write_batch_deadlines(ended_members)
         return True
 
     def mark_write_batch(self, write_batch_id: str, status: str, *, compile_operation_id: str = "", error: str = "") -> None:
@@ -862,6 +886,7 @@ class StateStore:
             raise ValueError("Verified write batches require a correlated persisted terminal snapshot.")
         previous = self.get_write_batch(write_batch_id)
         if previous and previous.get("terminal"):
+            self._remove_write_batch_deadlines({write_batch_id})
             return
         updated_at = _now_ms()
         terminal = status in {"failed", "canceled", "aborted", "timed_out"}
@@ -873,6 +898,7 @@ class StateStore:
             # Release the logical slot before best-effort archival. Disk failure
             # cannot leave an expired batch in the active queue.
             self._write_batch_runtime[write_batch_id] = candidate
+            self._remove_write_batch_deadlines({write_batch_id})
             if self.pending_write_batch_id == write_batch_id:
                 self.pending_write_batch_id = ""
                 self.compile_deferred_reason = ""
@@ -1055,6 +1081,7 @@ class StateStore:
         if self.pending_write_batch_id == write_batch_id:
             self.pending_write_batch_id = next_pending[0] if next_pending else ""
             self.compile_deferred_reason = ""
+        self._remove_write_batch_deadlines({write_batch_id})
         return disposition
 
     def persist_write_batch_warnings(
@@ -1137,6 +1164,7 @@ class StateStore:
             and payload.get("compilePhase") in {"completed", "failed"}
         ):
             return
+        superseded: set[str] = set()
         with sqlite3.connect(self._db_path) as db:
             cursor = db.execute(
                 "UPDATE write_batches SET status=?,updated_at=?,terminal_snapshot_json=?,error='' "
@@ -1146,9 +1174,11 @@ class StateStore:
             )
             if cursor.rowcount == 1 and payload["compilePhase"] == "completed":
                 superseded = self._supersede_covered_recovery_batches(db, batch)
-                if self.pending_write_batch_id in superseded:
-                    self.pending_write_batch_id = ""
-                    self.compile_deferred_reason = ""
+        if cursor.rowcount == 1:
+            self._remove_write_batch_deadlines({batch_id, *superseded})
+            if self.pending_write_batch_id in superseded:
+                self.pending_write_batch_id = ""
+                self.compile_deferred_reason = ""
 
     def _supersede_covered_recovery_batches(self, db: sqlite3.Connection, successor: dict[str, Any]) -> set[str]:
         successor_changes = successor.get("changes")
@@ -1234,10 +1264,10 @@ class StateStore:
                         "INSERT OR IGNORE INTO state_events(project_path,producer_epoch,domain_generation,sequence,transition,observed_at,snapshot_json) VALUES(?,?,?,?,?,?,?)",
                         (self._project_path, self.producer_epoch, self.domain_generation, self.sequence, self.transition, self.observed_at, raw),
                     )
-                db.execute(
-                    "DELETE FROM state_events WHERE rowid IN (SELECT rowid FROM state_events WHERE project_path=? ORDER BY rowid DESC LIMIT -1 OFFSET 500)",
-                    (self._project_path,),
-                )
+                    db.execute(
+                        "DELETE FROM state_events WHERE rowid IN (SELECT rowid FROM state_events WHERE project_path=? ORDER BY rowid DESC LIMIT -1 OFFSET 500)",
+                        (self._project_path,),
+                    )
             return True
         except sqlite3.Error:
             self.persist_failure_count += 1

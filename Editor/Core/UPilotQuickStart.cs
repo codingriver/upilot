@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — simplified main-window state and actions.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 
@@ -80,7 +81,7 @@ namespace CodingRiver.UPilot
         private static Task<string> _repairTask;
         private static string _repairPhase = "";
         private static string _repairCause = "";
-        private static double _nextDiagnosticAt;
+        private static int _deploymentNotificationPending;
         private static bool _explicitlyStopped;
         private static Action _afterRepairStart;
         private static bool _recoveryProbeRunning;
@@ -105,8 +106,11 @@ namespace CodingRiver.UPilot
             if (UPilotBridge.IsMainEditorProcess())
             {
                 var loadedVersion = UPilotDeploymentDiagnostics.Version;
-                EditorApplication.update += ObserveDeployment;
-                EditorApplication.delayCall += RecoverRepairObservation;
+                EditorApplication.delayCall += () =>
+                {
+                    RecoverRepairObservation();
+                    NotifyDeploymentChanged();
+                };
             }
         }
 
@@ -127,15 +131,34 @@ namespace CodingRiver.UPilot
             SessionState.EraseString(PendingAttemptKey);
         }
 
+        // Producers may run on HTTP/WebSocket workers; all Editor work stays in the control queue.
+        internal static void NotifyDeploymentChanged()
+        {
+            if (Interlocked.Exchange(ref _deploymentNotificationPending, 1) != 0) return;
+            try { UPilotBridge.Instance.EnqueueControl(ProcessDeploymentNotification); }
+            catch
+            {
+                Interlocked.Exchange(ref _deploymentNotificationPending, 0);
+                throw;
+            }
+        }
+
+        private static void ProcessDeploymentNotification()
+        {
+            Interlocked.Exchange(ref _deploymentNotificationPending, 0);
+            UPilotMcpServerManager.Instance.ObserveDeploymentChange();
+            ObserveDeployment();
+        }
+
         private static void ObserveDeployment()
         {
             if (UPilotServiceMaintenance.IsActive) return;
-            if (EditorApplication.timeSinceStartup < _nextDiagnosticAt) return;
-            _nextDiagnosticAt = EditorApplication.timeSinceStartup + 2;
             if (!UPilotSetupState.IsCompleted || !UPilotBootstrap.IsEnabled || _explicitlyStopped) return;
             try
             {
-                var server = UPilotMcpServerManager.Instance.GetStatus();
+                var manager = UPilotMcpServerManager.Instance;
+                if (!manager.CanAutomaticallyRepairDeployment) return;
+                var server = manager.GetStatus();
                 var bridge = UPilotBridge.Instance.GetStatus();
                 var issues = UPilotDeploymentDiagnostics.Observe(bridge, server);
                 TrackLifecycleRecovery(server);
@@ -330,9 +353,10 @@ namespace CodingRiver.UPilot
             var observationMatches = server.EditorObservationAvailable && server.EditorObservationObservedAtUtcMs > 0 &&
                                      sameSession && server.EditorObservationSessionId == bridge.SessionId;
             var observationAge = Math.Max(0, now - server.EditorObservationObservedAtUtcMs);
+            var heartbeatTimeoutMs = UPilotBridge.Instance.HeartbeatTimeoutMs;
             var heartbeatFresh = observationMatches && server.EditorObservationHeartbeatAgeMs >= 0 &&
-                                 server.EditorObservationHeartbeatAgeMs <= 6000 &&
-                                  server.EditorObservationHeartbeatAgeMs + observationAge <= cacheAllowanceMs + 6000;
+                                 server.EditorObservationHeartbeatAgeMs <= heartbeatTimeoutMs &&
+                                 server.EditorObservationHeartbeatAgeMs + observationAge <= cacheAllowanceMs + heartbeatTimeoutMs;
             var bridgeText = !string.IsNullOrEmpty(bridge.AuthenticationError) || !string.IsNullOrEmpty(bridge.AuthenticationErrorCode)
                 ? "认证失败" : !bridge.IsStarted ? "未启动" : !bridge.IsWsOpen ? "未连接" : !bridge.IsAuthenticated
                     ? "等待认证" : !serverHealthy || !sameSession ? "已连接（服务身份待确认）"
@@ -551,6 +575,7 @@ namespace CodingRiver.UPilot
         {
             if (UPilotServiceMaintenance.IsActive) return;
             _explicitlyStopped = false;
+            NotifyDeploymentChanged();
             if (UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 Logger.LogWarning("SYSTEM", UPilotUpdateService.ServiceStartBlockedMessage);
@@ -559,6 +584,7 @@ namespace CodingRiver.UPilot
 
             BeginOperation(UPilotServiceOperation.Starting);
             var manager = UPilotMcpServerManager.Instance;
+            manager.EnsureInitialServiceRecovery();
             manager.ValidateAndAutoFixPath();
             UPilotBridge.Instance.EnsureStarted();
             if (!manager.GetStatus().IsRunning)
@@ -575,6 +601,7 @@ namespace CodingRiver.UPilot
         {
             if (UPilotServiceMaintenance.IsActive) return;
             _explicitlyStopped = true;
+            NotifyDeploymentChanged();
             UPilotPackageUpdateLifecycle.CancelDeferredRepairForUserStop();
             BeginOperation(UPilotServiceOperation.Stopping);
             UPilotBridge.Instance.Stop();
@@ -626,6 +653,7 @@ namespace CodingRiver.UPilot
         {
             _repairGeneration++;
             _explicitlyStopped = false;
+            NotifyDeploymentChanged();
             EditorPrefs.SetBool(AutoAttemptKey, true);
             _repairTask = RepairCoreAsync(prepareRuntime);
             return _repairTask;
@@ -641,6 +669,7 @@ namespace CodingRiver.UPilot
             try
             {
                 var manager = UPilotMcpServerManager.Instance;
+                manager.EnsureInitialServiceRecovery();
                 _repairPhase = "确认项目、进程与真实来源";
                 var status = await manager.GetFreshStatusAsync();
                 if (_explicitlyStopped) return "已按请求停止 UPilot 服务。";
@@ -703,6 +732,7 @@ namespace CodingRiver.UPilot
                 SessionState.EraseString(PendingAttemptKey);
                 SessionState.EraseString(PendingCauseKey);
                 ClearOperation();
+                NotifyDeploymentChanged();
             }
         }
 

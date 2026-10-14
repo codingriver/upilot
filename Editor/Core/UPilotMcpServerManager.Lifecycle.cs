@@ -33,7 +33,8 @@ namespace CodingRiver.UPilot
                 _lifecycleQueryCancellation?.Dispose();
                 _lifecycleQueryCancellation = new CancellationTokenSource();
                 _activeStatusRefresh?.Cancel("lifecycle_phase");
-                _editorHealthObservationCancellation?.Cancel();
+                _periodicHealthNeedsVerification = true;
+                PausePeriodicHealthObservation();
                 ++_statusGeneration;
                 ++_lifecycleGeneration;
                 _lifecyclePhase = phase;
@@ -53,6 +54,7 @@ namespace CodingRiver.UPilot
                 UnityEngine.Debug.Log($"[UPilotMcpServerManager] 生命周期：{LifecycleTitle(phase)}；PID={processId}；operationId={operationId}。");
                 if (phase != UPilotServerLifecyclePhase.None && UPilotServerRestartDiagnostics.IsActive(operationId))
                     UPilotServerRestartDiagnostics.RecordPhase(operationId, phase.ToString().ToLowerInvariant());
+                NotifyStatusChanged();
                 return _lifecycleGeneration;
             }
         }
@@ -77,6 +79,7 @@ namespace CodingRiver.UPilot
                     else
                         UnityEngine.Debug.Log($"[UPilotMcpServerManager] 生命周期结束 source=Unity客户端 PID={pid} operationId={operationId} phase={phase} reason={reason}。");
                 }
+                NotifyStatusChanged();
                 return true;
             }
         }

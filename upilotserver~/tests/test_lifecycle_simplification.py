@@ -277,6 +277,7 @@ def test_write_batch_deadline_releases_slot_even_when_database_unavailable(tmp_p
         assert result["terminal"] and result["status"] == "timed_out"
         assert "fixture disk unavailable" in result["persistenceError"]
         assert not store.pending_write_batch_id
+        assert store.next_write_batch_deadline is None
         assert store.pending_write_batches() == []
     # Even when disk is available again, the old nonterminal row cannot revive it.
     assert store.get_write_batch(identity)["status"] == "timed_out"

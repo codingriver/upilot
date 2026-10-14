@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import CONFIG
+from ..editor_diagnostics import main_thread_observation
 from ..protocol import new_id, now_ms
 from ..process_identity import (
     classify_unity_process as shared_classify_unity_process,
@@ -656,32 +657,41 @@ class ProjectAnalysisDomainService:
 
     async def hang_status(self, sample_window_sec: float = 0.5):
         request_id = new_id("req")
-        session = self.server.session_manager.active
         pid, pid_diagnostics = await asyncio.to_thread(self._resolve_live_unity_pid)
         if pid <= 0:
             return fail(request_id, "UNITY_PROCESS_UNKNOWN", "A live Unity processId matching the connected project was not found.", pid_diagnostics)
-        editor = self.server.state.editor
-        now = now_ms()
+        sampled_session_id = getattr(self.server.session_manager.active, "session_id", "")
         cpu_percent = await asyncio.to_thread(self._sample_process_cpu_percent, pid, max(0.1, min(sample_window_sec, 3.0)))
-        pump_age = max(0, now - int(editor.last_main_thread_pump_at or 0)) if editor.last_main_thread_pump_at else None
+        # CPU sampling awaits another thread. Read time, identity and snapshot
+        # together afterwards rather than mixing pre-sample time with new state.
+        now = now_ms()
+        session = self.server.session_manager.active
+        execution = self.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
+        session_id = getattr(session, "session_id", "")
+        if session_id != sampled_session_id or execution.get("processId") != pid:
+            session_id = ""
+        observation = main_thread_observation(execution, session_id, now)
         heartbeat_age = max(0, now - int(session.last_heartbeat_at or 0)) if session else None
-        main_thread_unresponsive = pump_age is None or pump_age > 10000
+        main_thread_unresponsive = observation["notPumping"]
         return ok(
             request_id,
             {
                 "processId": pid,
                 **pid_diagnostics,
                 "processCpuPercent": cpu_percent,
-                "mainThreadHeartbeatAt": editor.last_main_thread_pump_at,
-                "mainThreadHeartbeatAgeMs": pump_age,
+                "mainThreadHeartbeatAt": execution["lastMainThreadPumpAt"],
+                "mainThreadHeartbeatAgeMs": observation["pumpAgeMs"],
                 "networkHeartbeatAgeMs": heartbeat_age,
                 "mainThreadUnresponsive": main_thread_unresponsive,
+                "mainThreadObservation": observation,
                 "cpuBusy": cpu_percent is not None and cpu_percent >= 80.0,
-                "suspectedBusyLoop": bool(main_thread_unresponsive and cpu_percent is not None and cpu_percent >= 80.0),
-                "mainThreadQueueDepth": editor.main_thread_queue_depth,
-                "lastDequeuedCommandId": editor.last_dequeued_command_id,
+                "suspectedBusyLoop": (None if main_thread_unresponsive is None or cpu_percent is None
+                                      else main_thread_unresponsive and cpu_percent >= 80.0),
+                "mainThreadQueueDepth": execution["mainThreadQueueDepth"],
+                "lastDequeuedCommandId": execution["lastDequeuedCommandId"],
                 "lastCompile": self._compile_diagnostics(),
-                "nextAction": "Call unity_hang_capture before restarting Unity." if main_thread_unresponsive else "",
+                "nextAction": ("Call unity_hang_capture before restarting Unity." if main_thread_unresponsive is True
+                               else "Wait for a fresh same-session Editor snapshot." if main_thread_unresponsive is None else ""),
             },
         )
 

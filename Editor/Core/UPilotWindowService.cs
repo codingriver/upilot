@@ -144,6 +144,9 @@ namespace CodingRiver.UPilot
 
         private async Task HandleWindowCloseAsync(string id, string json, CancellationToken token)
         {
+            long responseDeadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5200;
+            int startClaim = 0;
+            int closeSubmitted = 0;
             var msg = JsonUtility.FromJson<EditorWindowCloseMessage>(json);
             var payload = msg?.payload ?? new EditorWindowClosePayload();
             if (payload.closeMode != "requestUserClose" && payload.closeMode != "forceClose")
@@ -153,8 +156,10 @@ namespace CodingRiver.UPilot
             }
 
             var tcs = new TaskCompletionSource<EditorWindowCloseResultPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observationStarted = new TaskCompletionSource<UPilotModalObserver.Watch>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
+                if (Interlocked.CompareExchange(ref startClaim, 1, 0) != 0) return;
                 try
                 {
                     var result = string.IsNullOrWhiteSpace(payload.instanceId)
@@ -268,32 +273,35 @@ namespace CodingRiver.UPilot
                     response.windowHandle = handle.ToInt64();
                     response.mappingEvidence = mapping;
                     var watch = UPilotModalObserver.Arm(id, window);
+                    observationStarted.TrySetResult(watch);
                     if (!PostMessage(handle, 0x0010, IntPtr.Zero, IntPtr.Zero))
                     {
                         watch.Complete(null, new InvalidOperationException("WM_CLOSE post failed."));
                         throw new InvalidOperationException("WM_CLOSE post failed: " + Marshal.GetLastWin32Error());
                     }
-                    double deadline = EditorApplication.timeSinceStartup + 5;
-                    EditorApplication.CallbackFunction verify = null;
-                    verify = () =>
-                    {
-                        if (window != null && (EditorApplication.timeSinceStartup < deadline || watch.HasActiveModal())) return;
-                        EditorApplication.update -= verify;
-                        response.closeVerified = window == null;
-                        response.ok = response.closeVerified;
-                        response.terminal = true;
-                        response.state = response.closeVerified ? "closed" : "not_closed";
-                        watch.Complete(response);
-                        tcs.TrySetResult(response);
-                    };
-                    EditorApplication.update += verify;
+                    Volatile.Write(ref closeSubmitted, 1);
+                    _ = new WindowCloseObservation(window, watch, response, tcs, token);
                 }
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
 
             try
             {
-                if (await Task.WhenAny(tcs.Task, Task.Delay(5200)).ConfigureAwait(false) == tcs.Task)
+                int remaining = (int)Math.Max(0, responseDeadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                await Task.WhenAny(tcs.Task, observationStarted.Task, Task.Delay(remaining)).ConfigureAwait(false);
+                bool prevented = false;
+                if (!tcs.Task.IsCompleted && observationStarted.Task.IsCompleted)
+                {
+                    var watch = await observationStarted.Task.ConfigureAwait(false);
+                    var frozen = watch.Snapshot();
+                    remaining = (int)Math.Max(0, responseDeadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    int responseWaitMs = Math.Min(remaining, frozen.observationTimeoutMs + 2 * frozen.checkIntervalMs);
+                    await Task.WhenAny(tcs.Task, watch.ObservationEnded, Task.Delay(responseWaitMs)).ConfigureAwait(false);
+                    if (watch.Snapshot().commandReturned) await tcs.Task.ConfigureAwait(false);
+                }
+                else if (!tcs.Task.IsCompleted)
+                    prevented = Interlocked.CompareExchange(ref startClaim, 2, 0) == 0;
+                if (tcs.Task.IsCompleted)
                     await _bridge.SendResultAsync(id, "editor.window.close", await tcs.Task, token);
                 else
                 {
@@ -302,15 +310,94 @@ namespace CodingRiver.UPilot
                     {
                         commandId = id, instanceId = modal?.targetInstanceId ?? payload.instanceId,
                         windowHandle = modal?.ownerWindowHandle ?? 0,
-                        waitingForModalUi = modal?.waitingForModalUi ?? false, terminal = false,
+                        waitingForModalUi = modal?.waitingForModalUi ?? false, terminal = prevented || modal?.terminal == true,
                         discardRisk = payload.closeMode == "forceClose",
-                        state = modal?.waitingForModalUi == true ? "waitingForModalUi" : "close_pending",
+                        state = prevented ? "command_not_started" : "close_pending",
+                        observationStatus = prevented ? "observation_timed_out" : modal?.state ?? "command_pending",
+                        commandSubmitted = Volatile.Read(ref closeSubmitted) == 1,
+                        sideEffectsMayHaveOccurred = !prevented,
+                        nextAction = "Inspect the original command and exact window state; do not repeat the close command automatically.",
                     }, token);
                 }
             }
             catch (Exception ex)
             {
                 await _bridge.SendErrorAsync(id, "WINDOW_CLOSE_FAILED", ex.Message, token, "editor.window.close");
+            }
+        }
+
+        internal sealed class WindowCloseObservation : IDisposable
+        {
+            private readonly EditorWindow _window;
+            private readonly UPilotModalObserver.Watch _watch;
+            private readonly EditorWindowCloseResultPayload _response;
+            private readonly TaskCompletionSource<EditorWindowCloseResultPayload> _completion;
+            private readonly long _deadline;
+            private CancellationTokenRegistration _cancellation;
+            private bool _disposed;
+
+            internal WindowCloseObservation(EditorWindow window, UPilotModalObserver.Watch watch,
+                EditorWindowCloseResultPayload response, TaskCompletionSource<EditorWindowCloseResultPayload> completion,
+                CancellationToken token)
+            {
+                _window = window;
+                _watch = watch;
+                _response = response;
+                _completion = completion;
+                _deadline = watch.Snapshot().observationDeadlineUtcMs;
+                EditorApplication.update += Observe;
+                EditorApplication.quitting += Dispose;
+                AssemblyReloadEvents.beforeAssemblyReload += Dispose;
+                _cancellation = token.Register(watch.Dispose);
+            }
+
+            private void Observe()
+            {
+                if (_disposed) return;
+                var modal = _watch.Snapshot();
+                if (modal.terminal || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _deadline)
+                {
+                    FinishPending(modal.budgetElapsed || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= _deadline
+                        ? "observation_timed_out" : "observation_stopped");
+                    return;
+                }
+                if (_window != null) return;
+                _response.closeVerified = true;
+                _response.ok = true;
+                _response.terminal = true;
+                _response.state = "closed";
+                _completion.TrySetResult(_response);
+                try { _watch.Complete(_response); }
+                finally { Detach(); }
+            }
+
+            private void FinishPending(string reason)
+            {
+                if (_disposed) return;
+                var modal = _watch.Snapshot();
+                _response.closeVerified = false;
+                _response.ok = false;
+                _response.terminal = true;
+                _response.waitingForModalUi = modal.waitingForModalUi;
+                _response.state = "close_pending";
+                _response.observationStatus = reason;
+                _response.commandSubmitted = true;
+                _response.sideEffectsMayHaveOccurred = true;
+                _response.nextAction = "Observation ended without confirming closure. Inspect the exact window state; do not repeat the close command automatically.";
+                _completion.TrySetResult(_response);
+                try { _watch.EndObservation(reason, _response); }
+                finally { Detach(); }
+            }
+
+            public void Dispose() => FinishPending("observation_stopped");
+
+            private void Detach()
+            {
+                _disposed = true;
+                EditorApplication.update -= Observe;
+                EditorApplication.quitting -= Dispose;
+                AssemblyReloadEvents.beforeAssemblyReload -= Dispose;
+                _cancellation.Dispose();
             }
         }
 

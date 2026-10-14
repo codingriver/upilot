@@ -29,6 +29,9 @@ namespace CodingRiver.UPilot
         public bool actionAttempted;
         public bool actionPosted;
         public bool budgetElapsed;
+        public int observationTimeoutMs;
+        public int checkIntervalMs;
+        public long observationDeadlineUtcMs;
         public string state = "command_pending";
         public string targetInstanceId;
         public string targetTitle;
@@ -58,18 +61,26 @@ namespace CodingRiver.UPilot
             private readonly ModalObservationPayload _state;
             private Timer _timer;
             private bool _disposed;
+            private readonly TaskCompletionSource<bool> _observationEnded =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            internal Watch(string id, IntPtr owner, string targetId, string targetTitle, ExpectedModalPayload expected, bool escapeMenu, int budgetMs)
+            internal Task ObservationEnded => _observationEnded.Task;
+
+            internal Watch(string id, IntPtr owner, string targetId, string targetTitle, ExpectedModalPayload expected, bool escapeMenu, int budgetMs, int checkIntervalMs)
             {
                 _expected = expected;
                 _escapeMenu = escapeMenu;
-                _deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + Math.Max(500, Math.Min(budgetMs, 30000));
+                budgetMs = Math.Max(500, Math.Min(budgetMs, 30000));
+                checkIntervalMs = Math.Min(budgetMs / 2, Math.Max(50, Math.Min(checkIntervalMs, 1000)));
+                _deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + budgetMs;
                 _state = new ModalObservationPayload
                 {
                     commandId = id, processId = Process.GetCurrentProcess().Id,
                     ownerWindowHandle = owner.ToInt64(), targetInstanceId = targetId ?? "", targetTitle = targetTitle ?? "",
+                    observationTimeoutMs = budgetMs, checkIntervalMs = checkIntervalMs,
+                    observationDeadlineUtcMs = _deadline,
                 };
-                _timer = new Timer(_ => Observe(), null, 100, 100);
+                _timer = new Timer(_ => Observe(), null, checkIntervalMs, checkIntervalMs);
             }
 
             public ModalObservationPayload Snapshot()
@@ -79,16 +90,39 @@ namespace CodingRiver.UPilot
 
             public void Complete(object result, Exception error = null)
             {
-                lock (_gate)
+                try
                 {
-                    _state.commandReturned = true;
-                    _state.terminal = true;
-                    _state.waitingForModalUi = false;
-                    _state.state = error == null ? "command_returned" : "command_failed";
-                    _state.error = error?.Message ?? "";
-                    _state.resultJson = result == null ? "" : JsonUtility.ToJson(result);
+                    lock (_gate)
+                    {
+                        if (_state.terminal) return;
+                        _state.commandReturned = true;
+                        _state.terminal = true;
+                        _state.waitingForModalUi = false;
+                        _state.state = error == null ? "command_returned" : "command_failed";
+                        _state.error = error?.Message ?? "";
+                        _state.resultJson = result == null ? "" : JsonUtility.ToJson(result);
+                    }
                 }
-                Dispose();
+                finally { StopTimer(); }
+            }
+
+            internal void EndObservation(string state, object result = null)
+            {
+                try
+                {
+                    lock (_gate)
+                    {
+                        if (!_state.terminal)
+                        {
+                            _state.terminal = true;
+                            _state.budgetElapsed = state == "observation_timed_out";
+                            _state.state = state;
+                            _state.nextAction = "Observation ended without confirming the command outcome. Inspect the exact target state; do not repeat the command automatically.";
+                            _state.resultJson = result == null ? "" : JsonUtility.ToJson(result);
+                        }
+                    }
+                }
+                finally { StopTimer(); }
             }
 
             public void RecoverGenericMenu() => Observe(true);
@@ -131,13 +165,16 @@ namespace CodingRiver.UPilot
                                 }
                             }
                         }
-                        if (_state.budgetElapsed) Dispose();
+                        if (_state.budgetElapsed) EndObservation("observation_timed_out");
+                        else if (_state.actionAttempted && _escapeMenu) _observationEnded.TrySetResult(true);
                     }
-                    catch (Exception ex) { _state.error = ex.Message; Dispose(); }
+                    catch (Exception ex) { _state.error = ex.Message; EndObservation("observation_failed"); }
                 }
             }
 
-            public void Dispose()
+            public void Dispose() => EndObservation("observation_stopped");
+
+            private void StopTimer()
             {
                 lock (_gate)
                 {
@@ -145,6 +182,7 @@ namespace CodingRiver.UPilot
                     _disposed = true;
                     _timer?.Dispose();
                     _timer = null;
+                    _observationEnded.TrySetResult(true);
                 }
             }
         }
@@ -186,8 +224,11 @@ namespace CodingRiver.UPilot
         }
 
         public static Watch Arm(string commandId, EditorWindow target = null, ExpectedModalPayload expected = null,
-            bool escapeGenericMenu = false, int budgetMs = 5000)
+            bool escapeGenericMenu = false, int budgetMs = 0)
         {
+            // Preferences are read on the main thread when this observation starts.
+            budgetMs = budgetMs > 0 ? budgetMs : UPilotTimingSettings.WindowObservationTimeoutMs;
+            int checkIntervalMs = UPilotTimingSettings.ModalCheckIntervalMs;
             IntPtr owner = IntPtr.Zero;
             string targetId = "";
             string targetTitle = "";
@@ -213,7 +254,7 @@ namespace CodingRiver.UPilot
                     Watches.Remove(key);
                 if (Watches.Count >= Capacity)
                     throw new InvalidOperationException("MODAL_OBSERVER_CAPACITY: resolve pending commands before starting another.");
-                var watch = new Watch(commandId, owner, targetId, targetTitle, expected, escapeGenericMenu, budgetMs);
+                var watch = new Watch(commandId, owner, targetId, targetTitle, expected, escapeGenericMenu, budgetMs, checkIntervalMs);
                 Watches[commandId] = watch;
                 return watch;
             }
@@ -227,16 +268,21 @@ namespace CodingRiver.UPilot
         public static async Task<object> RunAsync<T>(UPilotBridge bridge, string commandId, Func<T> action,
             ExpectedModalPayload expected = null, bool escapeGenericMenu = false, Func<EditorWindow> target = null)
         {
+            long responseDeadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5200;
+            int startClaim = 0;
             if (IsEmptyExpectedModal(expected)) expected = null;
             if (expected != null && !MatchesExpectedModal(expected, expected.title, expected.buttons))
                 throw new ArgumentException("expectedModal requires an exact title, distinct button whitelist and one clickButton.");
             var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var started = new TaskCompletionSource<Watch>(TaskCreationOptions.RunContinuationsAsynchronously);
             bridge.EnqueueTracked(commandId, () =>
             {
+                if (Interlocked.CompareExchange(ref startClaim, 1, 0) != 0) return;
                 Watch watch = null;
                 try
                 {
                     watch = Arm(commandId, target?.Invoke(), expected, escapeGenericMenu);
+                    started.TrySetResult(watch);
                     var result = action();
                     if (escapeGenericMenu)
                         _ = CompleteAfterGenericMenuRecoveryAsync(watch, result, completion);
@@ -248,9 +294,29 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex) { watch?.Complete(null, ex); completion.TrySetException(ex); }
             });
-            if (await Task.WhenAny(completion.Task, Task.Delay(5200)).ConfigureAwait(false) == completion.Task)
-                return await completion.Task.ConfigureAwait(false);
-            return (object)Get(commandId) ?? new ModalObservationPayload { commandId = commandId };
+            int remaining = (int)Math.Max(0, responseDeadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            await Task.WhenAny(completion.Task, started.Task, Task.Delay(remaining)).ConfigureAwait(false);
+            if (completion.Task.IsCompleted) return await completion.Task.ConfigureAwait(false);
+            if (!started.Task.IsCompleted)
+            {
+                bool prevented = Interlocked.CompareExchange(ref startClaim, 2, 0) == 0;
+                return new ModalObservationPayload
+                {
+                    commandId = commandId, terminal = prevented,
+                    state = prevented ? "command_not_started" : "command_pending",
+                    budgetElapsed = prevented,
+                    nextAction = "Inspect the original command and exact target state; do not repeat the command automatically.",
+                };
+            }
+            var activeWatch = await started.Task.ConfigureAwait(false);
+            var frozen = activeWatch.Snapshot();
+            remaining = (int)Math.Max(0, responseDeadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            int responseWaitMs = Math.Min(remaining, frozen.observationTimeoutMs + 2 * frozen.checkIntervalMs);
+            await Task.WhenAny(completion.Task, activeWatch.ObservationEnded, Task.Delay(responseWaitMs)).ConfigureAwait(false);
+            if (completion.Task.IsCompleted) return await completion.Task.ConfigureAwait(false);
+            var observed = activeWatch.Snapshot();
+            if (observed.commandReturned) return await completion.Task.ConfigureAwait(false);
+            return observed;
         }
 
         private static async Task CompleteAfterGenericMenuRecoveryAsync<T>(
@@ -258,18 +324,12 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                while (true)
-                {
-                    var state = watch.Snapshot();
-                    if (state.actionAttempted || state.budgetElapsed || !string.IsNullOrEmpty(state.error))
-                    {
-                        watch.Complete(result, string.IsNullOrEmpty(state.error) ? null : new InvalidOperationException(state.error));
-                        if (string.IsNullOrEmpty(state.error)) completion.TrySetResult(result);
-                        else completion.TrySetException(new InvalidOperationException(state.error));
-                        return;
-                    }
-                    await Task.Delay(50).ConfigureAwait(false);
-                }
+                await watch.ObservationEnded.ConfigureAwait(false);
+                var state = watch.Snapshot();
+                var error = string.IsNullOrEmpty(state.error) ? null : new InvalidOperationException(state.error);
+                watch.Complete(result, error);
+                if (error == null) completion.TrySetResult(result);
+                else completion.TrySetException(error);
             }
             catch (Exception ex)
             {

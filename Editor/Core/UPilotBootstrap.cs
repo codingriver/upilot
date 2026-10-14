@@ -175,6 +175,16 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
+                // Initial recovery owns the saved process/restart identity and its original budget.
+                // Waiting for its delayCall must not consume one of the cold-start attempts.
+                if (!mgr.InitialServiceRecoveryCompleted) return;
+                if (!mgr.CanAutomaticallyStartServer)
+                {
+                    UPilotStartupDiagnostics.MarkServerStartRetryBlocked("server_reload_observation_owned");
+                    EditorApplication.update -= TryStartMcpServer;
+                    return;
+                }
+
                 if (UPilotStartupDiagnostics.IsServerStartRetryFinished)
                 {
                     EditorApplication.update -= TryStartMcpServer;

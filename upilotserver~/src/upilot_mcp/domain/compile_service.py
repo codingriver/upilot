@@ -18,6 +18,7 @@ from pathlib import Path
 from ..config import CONFIG, diagnose_client_configs
 from ..dispatcher import CommandDispatcher
 from ..env import getenv
+from ..editor_diagnostics import main_thread_observation
 from ..models import ToolResponse
 from ..protocol import new_id, now_ms
 from ..console_evidence import begin_console_evidence, finish_console_evidence, public_console_evidence
@@ -149,6 +150,8 @@ class CompileDomainService:
         execution = self.server.state.execution_state(
             stale_after_ms=CONFIG.context_stale_ms
         )
+        session = getattr(getattr(self.server, "session_manager", None), "active", None)
+        observation = main_thread_observation(execution, getattr(session, "session_id", ""), now_ms())
         return {
             "executionState": execution,
             "queuedDiagnostics": self._queued_editor_diagnostics(execution) if hasattr(self, "_queued_editor_diagnostics") else {"isUpdating": execution.get("isUpdating"), "hints": ["insufficient_evidence"]},
@@ -162,10 +165,8 @@ class CompileDomainService:
             "lastProgressAt": execution["lastProgressAt"],
             "lastEditorUpdateAt": execution["lastMainThreadPumpAt"],
             "editorPumpAgeMs": execution["editorPumpAgeMs"],
-            "editorNotPumping": bool(
-                execution["lastMainThreadPumpAt"]
-                and execution["editorPumpAgeMs"] > 10000
-            ),
+            "editorNotPumping": observation["notPumping"],
+            "mainThreadObservation": observation,
             "mainThreadQueueDepth": execution["mainThreadQueueDepth"],
             "lastDequeuedCommandId": execution["lastDequeuedCommandId"],
             "suspectedStuck": execution["suspectedStuck"],

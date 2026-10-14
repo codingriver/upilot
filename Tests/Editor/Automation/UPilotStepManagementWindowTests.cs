@@ -11,8 +11,21 @@ namespace CodingRiver.UPilot.Tests.Automation
     public sealed class UPilotStepManagementWindowTests
     {
         private UPilotStepManagementWindow _window;
-        [SetUp] public void SetUp() => _window = ScriptableObject.CreateInstance<UPilotStepManagementWindow>();
-        [TearDown] public void TearDown() { if (_window != null) UnityEngine.Object.DestroyImmediate(_window); }
+        private bool _hadRefreshPreference;
+        private int _refreshPreference;
+        [SetUp] public void SetUp()
+        {
+            string key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.StepWindowRefreshMs));
+            _hadRefreshPreference = EditorPrefs.HasKey(key); _refreshPreference = EditorPrefs.GetInt(key);
+            EditorPrefs.DeleteKey(key);
+            _window = ScriptableObject.CreateInstance<UPilotStepManagementWindow>();
+        }
+        [TearDown] public void TearDown()
+        {
+            if (_window != null) UnityEngine.Object.DestroyImmediate(_window);
+            string key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.StepWindowRefreshMs));
+            if (_hadRefreshPreference) EditorPrefs.SetInt(key, _refreshPreference); else EditorPrefs.DeleteKey(key);
+        }
         private static UPilotAutomationStepService.CurrentSnapshot Running(string id) => new()
         {
             initialized = true, busy = true,
@@ -35,6 +48,18 @@ namespace CodingRiver.UPilot.Tests.Automation
             _window.RefreshIfDue(30); _window.RefreshIfDue(30); Assert.That(reads, Is.EqualTo(3));
             _window.Refresh(30.1); Assert.That(reads, Is.EqualTo(4));
             _window.RefreshIfDue(31); Assert.That(reads, Is.EqualTo(4));
+        }
+        [Test] public void ChangedRefreshPeriodAdjustsNextReadWithoutCatchUpOrTaskProgression()
+        {
+            int reads = 0;
+            _window.ReadCurrent = () => { reads++; return Running("original"); };
+            _window.Refresh(10);
+            UPilotTimingSettings.StepWindowRefreshMs = 3000;
+            _window.RefreshIfDue(11); Assert.That(reads, Is.EqualTo(1));
+            UPilotTimingSettings.StepWindowRefreshMs = 500;
+            _window.RefreshIfDue(11); Assert.That(reads, Is.EqualTo(2));
+            _window.RefreshIfDue(11); Assert.That(reads, Is.EqualTo(2));
+            Assert.That(_window.Latest.run.runId, Is.EqualTo("original")); Assert.That(_window.Latest.run.terminal, Is.False);
         }
         [Test] public void OpeningReadsImmediatelyAndClosingUnsubscribesWithoutStoppingTask()
         {

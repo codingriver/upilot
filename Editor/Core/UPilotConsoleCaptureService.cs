@@ -395,7 +395,6 @@ namespace CodingRiver.UPilot
         public UPilotConsoleCaptureService(UPilotBridge bridge)
         {
             _bridge = bridge;
-            EnsureSubscriptions();
             TryRecoverActiveSession();
             Automation.UPilotConsoleCaptureApi.Bind(this);
         }
@@ -414,6 +413,14 @@ namespace CodingRiver.UPilot
 
         private static void EnsureSubscriptions()
         {
+            bool active;
+            lock (CaptureLock) active = s_active?.Manifest.active == true;
+            if (!active)
+            {
+                RemoveSubscriptions();
+                return;
+            }
+            if (s_logSubscribed && s_updateSubscribed) return;
             s_isPlaying = Application.isPlaying;
             if (!s_logSubscribed)
             {
@@ -425,6 +432,8 @@ namespace CodingRiver.UPilot
             // Unity unloads it; recovery keeps the same manifest, owner and sequence.
             AssemblyReloadEvents.beforeAssemblyReload -= FlushBeforeAssemblyReload;
             AssemblyReloadEvents.beforeAssemblyReload += FlushBeforeAssemblyReload;
+            EditorApplication.quitting -= FlushBeforeAssemblyReload;
+            EditorApplication.quitting += FlushBeforeAssemblyReload;
 
             if (!s_updateSubscribed)
             {
@@ -432,6 +441,16 @@ namespace CodingRiver.UPilot
                 EditorApplication.update -= FlushOnEditorUpdate;
                 EditorApplication.update += FlushOnEditorUpdate;
             }
+        }
+
+        private static void RemoveSubscriptions()
+        {
+            Application.logMessageReceivedThreaded -= OnLogMessageReceived;
+            EditorApplication.update -= FlushOnEditorUpdate;
+            AssemblyReloadEvents.beforeAssemblyReload -= FlushBeforeAssemblyReload;
+            EditorApplication.quitting -= FlushBeforeAssemblyReload;
+            s_logSubscribed = false;
+            s_updateSubscribed = false;
         }
 
         private static void FlushBeforeAssemblyReload()
@@ -447,6 +466,7 @@ namespace CodingRiver.UPilot
                         s_active.Manifest.lastError = "Reload flush failed: " + ex.GetType().Name;
                 }
             }
+            finally { RemoveSubscriptions(); }
         }
 
         private static void OnLogMessageReceived(string condition, string stackTrace, LogType logType)
@@ -703,6 +723,7 @@ namespace CodingRiver.UPilot
             {
                 s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
             }
+            EnsureSubscriptions();
             SessionState.SetString(ProjectSessionKey(ActiveDirectorySessionKey), directory);
             RegisterCustomSession(manifest);
             if (payload.clearUnityConsole)
@@ -1064,6 +1085,8 @@ namespace CodingRiver.UPilot
                 if (active != null)
                     active.Manifest.active = false;
             }
+            // Finalization may fail, but a stopped capture must no longer receive logs or ticks.
+            RemoveSubscriptions();
             if (active == null)
             {
                 var existing = LoadManifestBySessionId(sessionId);
@@ -1254,26 +1277,31 @@ namespace CodingRiver.UPilot
                 s_active = null;
                 SessionState.EraseString(ProjectSessionKey(ActiveDirectorySessionKey));
             }
+            RemoveSubscriptions();
             // Best-effort archive is not a prerequisite for releasing the active slot.
             if (manifest != null) WriteManifest(manifest);
         }
 
         private static void TryRecoverActiveSession()
         {
-            lock (CaptureLock)
+            try
             {
-                if (s_active != null) return;
-                string directory = SessionState.GetString(ProjectSessionKey(ActiveDirectorySessionKey), string.Empty);
-                if (string.IsNullOrEmpty(directory)) return;
-                string manifestPath = Path.Combine(directory, "session.json");
-                var manifest = LoadManifest(manifestPath);
-                if (manifest == null || !manifest.active)
+                lock (CaptureLock)
                 {
-                    SessionState.EraseString(ProjectSessionKey(ActiveDirectorySessionKey));
-                    return;
+                    if (s_active != null) return;
+                    string directory = SessionState.GetString(ProjectSessionKey(ActiveDirectorySessionKey), string.Empty);
+                    if (string.IsNullOrEmpty(directory)) return;
+                    string manifestPath = Path.Combine(directory, "session.json");
+                    var manifest = LoadManifest(manifestPath);
+                    if (manifest == null || !manifest.active)
+                    {
+                        SessionState.EraseString(ProjectSessionKey(ActiveDirectorySessionKey));
+                        return;
+                    }
+                    s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
                 }
-                s_active = new ActiveCapture { Manifest = manifest, LastFlushTime = EditorApplication.timeSinceStartup };
             }
+            finally { EnsureSubscriptions(); }
         }
 
         private static void FlushActiveCapture(bool force)
