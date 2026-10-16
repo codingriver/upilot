@@ -106,7 +106,7 @@ Use persistent capture when logs must survive long waits, Console clears, or Age
 6. Use `unity_console_capture_attach` and `unity_console_capture_detach` for a fixed, read-only range of another capture. Detach never stops or adopts the source; paginate an export with the same attachment request key and continuation token.
 7. Cleanup is two-phase: call `unity_console_capture_cleanup(dryRun=true)` first, inspect the returned directories, then pass its `confirmToken` with the same conditions and `dryRun=false` only when deletion is authorized.
 
-Default captures belong under `Log/UPilotConsole/<timestamp>_<title>/`. Keep raw Console capture separate from domain-specific reports such as battle smoke-test reports. Prefer a project-relative custom path; do not set `allowOutsideProject=true` unless the user explicitly needs an external directory.
+Default captures belong under `Logs/UPilot/Console/<timestamp>_<title>/`. Keep raw Console capture separate from domain-specific reports such as battle smoke-test reports. Prefer a project-relative custom path; do not set `allowOutsideProject=true` unless the user explicitly needs an external directory.
 
 Exception: canonical UPilot package acceptance should use `unity_upilot_acceptance_run`. It blocks on an active Capture with another or unknown owner before ConsoleCaptureService self-tests and writes a structured hashed report; do not wrap it in another persistent capture.
 

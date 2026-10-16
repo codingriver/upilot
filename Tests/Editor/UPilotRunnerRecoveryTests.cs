@@ -268,6 +268,8 @@ namespace CodingRiver.UPilot.Tests
             SetField(service, "_activeRunGuid", "api-release-failure-run");
             service.ApiDestroyerForTests = _ =>
                 throw new InvalidOperationException("P0_EXPECTED_API_RELEASE_FAILURE");
+            service.FailureDiagnosticForTests = null;
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("stage=api-release[\\s\\S]*P0_EXPECTED_API_RELEASE_FAILURE"));
 
             Assert.That(service.ReleaseOwnedRunnerResources(), Is.False);
             Assert.That(GetField(service, "_activeApi"), Is.SameAs(api));
@@ -1602,6 +1604,7 @@ namespace CodingRiver.UPilot.Tests
         private static UPilotTestService DetachedService(TestRunResultPayload snapshot)
         {
             var service = (UPilotTestService)FormatterServices.GetUninitializedObject(typeof(UPilotTestService));
+            service.FailureDiagnosticForTests = (message, error) => TestContext.WriteLine(message + "\n" + error);
             SetField(service, "_lastResults", snapshot);
             SetField(service, "_isRunning", true);
             return service;

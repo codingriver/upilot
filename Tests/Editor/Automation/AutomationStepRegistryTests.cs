@@ -147,7 +147,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(originalExecutor?.Busy ?? false, Is.False, "Do not replace an active official run.");
             var registry = Registry(Entry<SuspensionProbe>("upilot.test.suspension_probe"));
             var directory = Path.Combine("Library/UPilot/step-facade-tests", Guid.NewGuid().ToString("N"));
-            using var executor = new AutomationStepExecutor(registry, Path.Combine(directory, "run.json"));
+            using var executor = new AutomationStepExecutor(registry, Path.Combine(directory, "run.json"), failureDiagnostic: message => TestContext.WriteLine(message));
             var plan = "{\"version\":1,\"steps\":[{\"instanceId\":\"probe\",\"stepId\":\"upilot.test.suspension_probe\"}]}";
             var operationId = "facade-unit-" + Guid.NewGuid().ToString("N");
             var executed = SuspensionProbe.Executed;

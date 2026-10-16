@@ -1,10 +1,11 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - user-facing update center.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using System;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
@@ -29,6 +30,14 @@ namespace CodingRiver.UPilot
         private string _notice = "";
         private MessageType _noticeType = MessageType.Info;
         private static bool _packageRevisionReflectionErrorLogged;
+        private readonly UPilotUpdateWindowObservation _observation = new UPilotUpdateWindowObservation();
+        private UPilotUpdateOperationStatus _operationSnapshot;
+        private UPilotDownloadState _downloadSnapshot;
+        private UPilotUpdateReloadGuardStatus _guardSnapshot;
+        internal int SnapshotReadCount { get; private set; }
+        private int _refreshIntervalMs;
+        private CancellationTokenSource _checkCancellation;
+        private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         public static void Open(Action<string, MessageType> notice = null)
         {
@@ -120,30 +129,89 @@ namespace CodingRiver.UPilot
 
         private void OnEnable()
         {
+            _observation.Open(UPilotServiceLifetime.Id);
+            _refreshIntervalMs = UPilotTimingSettings.DebugWindowRefreshMs;
+            _isChecking = false;
             _sourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
             if (_sourceChannel)
                 UPilotUpdateService.ResetSourceChannelState();
             EditorApplication.update += OnEditorUpdate;
+            EditorApplication.playModeStateChanged += OnPlayModeChanged;
+            UPilotTimingSettings.Changed += OnTimingChanged;
+            UPilotUpdateService.OperationStatusChanged += OnOperationChanged;
+            CaptureSnapshot(scheduleCompletion: false);
         }
 
         private void OnDisable()
         {
             EditorApplication.update -= OnEditorUpdate;
+            EditorApplication.playModeStateChanged -= OnPlayModeChanged;
+            UPilotTimingSettings.Changed -= OnTimingChanged;
+            UPilotUpdateService.OperationStatusChanged -= OnOperationChanged;
+            _observation.Close();
+            CancelManifestCheck();
+            _isChecking = false;
+            _pendingUpdateAfterPlayModeExit = false;
+        }
+
+        private void OnOperationChanged()
+        {
+            if (!_observation.Enabled) return;
+            CaptureSnapshot();
+            _observation.Dirty();
+        }
+        private void CancelManifestCheck()
+        {
+            var cancellation = _checkCancellation;
+            _checkCancellation = null;
+            cancellation?.Cancel();
+            _isChecking = false;
+        }
+        private void OnTimingChanged(string name)
+        {
+            if (name.Length == 0 || name == nameof(UPilotTimingSettings.DebugWindowRefreshMs))
+            {
+                _refreshIntervalMs = UPilotTimingSettings.DebugWindowRefreshMs;
+                _observation.AdjustInterval(_refreshIntervalMs);
+            }
+        }
+        private void OnPlayModeChanged(PlayModeStateChange state)
+        {
+            if (state == PlayModeStateChange.EnteredEditMode && _pendingUpdateAfterPlayModeExit)
+                TryStartPendingUpdateAfterPlayModeExit();
+            _observation.Dirty();
+        }
+        private void CaptureSnapshot(bool scheduleCompletion = true)
+        {
+            ++SnapshotReadCount;
+            _operationSnapshot = UPilotUpdateService.Instance.GetOperationStatus();
+            _downloadSnapshot = UPilotServerRuntimeService.Instance.DownloadState;
+            _guardSnapshot = UPilotUpdateService.GetReloadGuardStatus();
+            var previousGeneration = _observation.Generation;
+            _observation.ObserveOperation(_operationSnapshot.OperationId, _operationSnapshot.IsRunning);
+            if (_operationSnapshot.IsRunning || previousGeneration != _observation.Generation) CancelManifestCheck();
+            if (_operationSnapshot.Phase == UPilotUpdateOperationPhase.Completed)
+            {
+                if (scheduleCompletion) _observation.Schedule(_operationSnapshot.OperationId, Now, UPilotTimingSettings.UpdateCenterPostOperationDelaySeconds);
+                else _observation.DiscardCompletion(_operationSnapshot.OperationId);
+            }
         }
 
         private void OnEditorUpdate()
         {
             try
             {
-                if (_pendingUpdateAfterPlayModeExit)
+                if (_observation.Lifetime != UPilotServiceLifetime.Id)
                 {
-                    TryStartPendingUpdateAfterPlayModeExit();
-                    Repaint();
-                    return;
+                    _observation.Open(UPilotServiceLifetime.Id);
+                    CancelManifestCheck();
+                    CaptureSnapshot(scheduleCompletion: false);
                 }
-
-                var status = UPilotUpdateService.Instance.GetOperationStatus();
-                var downloadRunning = UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
+                if (_observation.ConsumeDue(Now)) CheckForUpdates();
+                if (!_observation.ShouldRead(Now, _refreshIntervalMs)) return;
+                CaptureSnapshot();
+                var status = _operationSnapshot;
+                var downloadRunning = _downloadSnapshot.IsRunning;
                 var previousPhase = _lastObservedOperationPhase;
                 var operationWasRunning = _operationRunning;
                 _lastObservedOperationPhase = status.Phase;
@@ -170,7 +238,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                EditorApplication.update -= OnEditorUpdate;
+                OnDisable();
                 ReportUpdateWindowException("UPilot 更新中心刷新回调失败：" + ex.Message, ex);
             }
         }
@@ -234,7 +302,7 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
+                var operationStatus = _operationSnapshot;
                 if (operationStatus.Phase == UPilotUpdateOperationPhase.Completed)
                 {
                     _isChecking = false;
@@ -278,8 +346,8 @@ namespace CodingRiver.UPilot
 
         private void DrawActiveUpdateContent()
         {
-            var status = UPilotUpdateService.Instance.GetOperationStatus();
-            var download = UPilotServerRuntimeService.Instance.DownloadState;
+            var status = _operationSnapshot;
+            var download = _downloadSnapshot;
             var label = download.IsRunning
                 ? UPilotUpdateService.FormatDownloadProgressLabel(download)
                 : string.IsNullOrWhiteSpace(status.Label) ? "正在准备更新" : status.Label;
@@ -299,7 +367,7 @@ namespace CodingRiver.UPilot
             if (!string.IsNullOrWhiteSpace(download.WarningMessage))
                 EditorGUILayout.HelpBox(download.WarningMessage, MessageType.Warning);
 
-            var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
+            var operationStatus = _operationSnapshot;
             if (!string.IsNullOrWhiteSpace(operationStatus.TargetUpmVersion) ||
                 !string.IsNullOrWhiteSpace(operationStatus.TargetServerVersion))
             {
@@ -458,7 +526,7 @@ namespace CodingRiver.UPilot
         private void DrawUpdateContent()
         {
             var runtime = UPilotServerRuntimeService.Instance;
-            var operationStatus = UPilotUpdateService.Instance.GetOperationStatus();
+            var operationStatus = _operationSnapshot;
             var mode = runtime.GetConfiguredMode();
             var package = PackageInfo.FindForAssembly(typeof(UPilotBridge).Assembly);
             var currentUpm = UPilotServerRuntimeService.UpmVersion;
@@ -593,7 +661,7 @@ namespace CodingRiver.UPilot
 
         private void DrawDownloadProgress()
         {
-            var state = UPilotServerRuntimeService.Instance.DownloadState;
+            var state = _downloadSnapshot;
             if (!state.IsRunning)
                 return;
 
@@ -620,8 +688,12 @@ namespace CodingRiver.UPilot
 
         private async void CheckForUpdates()
         {
+            if (!_observation.Enabled) return;
             if (_isChecking)
                 return;
+            var lifetime = UPilotServiceLifetime.Id;
+            CaptureSnapshot();
+            var ticket = _observation.BeginCheck();
             if (HasActiveUpdate())
             {
                 _isChecking = false;
@@ -632,6 +704,8 @@ namespace CodingRiver.UPilot
             }
 
             _isChecking = true;
+            var cancellation = new CancellationTokenSource();
+            _checkCancellation = cancellation;
             _error = "";
             _notice = "";
             _sourceChannel = false;
@@ -649,18 +723,27 @@ namespace CodingRiver.UPilot
 
                 var manifestUrl = UPilotServerRuntimeService.ResolveManifestUrl();
                 Debug.Log($"[UPilot] CheckForUpdates channel={channel}, manifestUrl={manifestUrl}");
-                _manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync(manifestUrl);
+                var manifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync(manifestUrl, cancellation.Token);
+                if (!_observation.IsCurrent(ticket, UPilotServiceLifetime.Id)) return;
+                _manifest = manifest;
             }
             catch (Exception ex)
             {
+                if (cancellation.IsCancellationRequested) return;
+                if (!_observation.IsCurrent(ticket, UPilotServiceLifetime.Id)) return;
                 _manifest = null;
                 _error = ex.Message;
                 ReportUpdateWindowException("检查 UPilot 更新失败：" + ex.Message, ex);
             }
             finally
             {
-                _isChecking = false;
-                Repaint();
+                if (ReferenceEquals(_checkCancellation, cancellation)) _checkCancellation = null;
+                cancellation.Dispose();
+                if (_observation.IsCurrent(ticket, UPilotServiceLifetime.Id) && lifetime == UPilotServiceLifetime.Id)
+                {
+                    _isChecking = false;
+                    Repaint();
+                }
             }
         }
 
@@ -807,8 +890,6 @@ namespace CodingRiver.UPilot
 
         private void HandleOperationNotice(string message, MessageType type)
         {
-            _notice = message ?? "";
-            _noticeType = type;
             try
             {
                 _externalNotice?.Invoke(message, type);
@@ -818,7 +899,12 @@ namespace CodingRiver.UPilot
                 ReportUpdateWindowException("更新中心外部通知失败：" + ex.Message, ex);
             }
 
-            var status = UPilotUpdateService.Instance.GetOperationStatus();
+            if (!_observation.Enabled) return;
+            CaptureSnapshot();
+            _notice = message ?? "";
+            _noticeType = type;
+
+            var status = _operationSnapshot;
             if (type == MessageType.Error ||
                 (type == MessageType.Warning && !status.IsRunning) ||
                 (!string.IsNullOrWhiteSpace(message) &&
@@ -827,17 +913,9 @@ namespace CodingRiver.UPilot
                   message.IndexOf("已取消", StringComparison.Ordinal) >= 0)))
             {
                 _operationRunning = false;
-                if (type != MessageType.Error && message.IndexOf("已取消", StringComparison.Ordinal) < 0)
-                    _ = RefreshAfterOperationAsync();
             }
 
             Repaint();
-        }
-
-        private async Task RefreshAfterOperationAsync()
-        {
-            await Task.Delay(10000);
-            CheckForUpdates();
         }
 
         private bool NeedsPackageUpdate(
@@ -968,7 +1046,7 @@ namespace CodingRiver.UPilot
 
         private void DrawReloadGuardNotice(UPilotUpdateOperationStatus status)
         {
-            var guardStatus = UPilotUpdateService.GetReloadGuardStatus();
+            var guardStatus = _guardSnapshot;
             var message = UPilotUpdateService.GetReloadGuardNotice(guardStatus, compact: false);
             if (!string.IsNullOrWhiteSpace(message))
             {
@@ -1018,8 +1096,7 @@ namespace CodingRiver.UPilot
 
         private bool HasActiveUpdate()
         {
-            return UPilotUpdateService.Instance.GetOperationStatus().IsRunning ||
-                   UPilotServerRuntimeService.Instance.DownloadState.IsRunning;
+            return _operationSnapshot.IsRunning || _downloadSnapshot?.IsRunning == true;
         }
 
         private void DrawCopyableAddressRow()

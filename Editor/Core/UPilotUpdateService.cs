@@ -41,13 +41,14 @@ namespace CodingRiver.UPilot
             string label,
             string message,
             string targetUpmVersion,
-            string targetServerVersion)
+            string targetServerVersion, string operationId = "")
         {
             Phase = phase;
             Label = label ?? "";
             Message = message ?? "";
             TargetUpmVersion = targetUpmVersion ?? "";
             TargetServerVersion = targetServerVersion ?? "";
+            OperationId = operationId ?? "";
         }
 
         public UPilotUpdateOperationPhase Phase { get; }
@@ -55,6 +56,7 @@ namespace CodingRiver.UPilot
         public string Message { get; }
         public string TargetUpmVersion { get; }
         public string TargetServerVersion { get; }
+        public string OperationId { get; }
 
         public bool IsRunning =>
             Phase != UPilotUpdateOperationPhase.None &&
@@ -115,6 +117,8 @@ namespace CodingRiver.UPilot
         private const string OperationTargetUpmKey = "CodingRiver.UPilot.UpdateService.TargetUpm";
         private const string OperationTargetServerKey = "CodingRiver.UPilot.UpdateService.TargetServer";
         private const string OperationRuntimeIdKey = "CodingRiver.UPilot.UpdateService.RuntimeId";
+        private const string OperationIdKey = "CodingRiver.UPilot.UpdateService.OperationId";
+        internal static event Action OperationStatusChanged;
         private const string ReloadGuardActiveKey = "CodingRiver.UPilot.UpdateService.ReloadGuardActive";
         private const string ReloadGuardRuntimeIdKey = "CodingRiver.UPilot.UpdateService.ReloadGuardRuntimeId";
         private const string ReloadGuardPhaseKey = "CodingRiver.UPilot.UpdateService.ReloadGuardPhase";
@@ -173,14 +177,14 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 var message = "打开更新中心失败：" + ex.Message;
-                Debug.LogError("[UPilot] " + message + "\n" + ex);
+                ReportUpdateFailure(message, ex);
                 try
                 {
                     notice?.Invoke(message, MessageType.Error);
                 }
                 catch (Exception noticeEx)
                 {
-                    Debug.LogError("[UPilot] 更新错误通知失败：" + noticeEx);
+                    ReportUpdateFailure("更新错误通知失败", noticeEx);
                 }
             }
         }
@@ -225,7 +229,7 @@ namespace CodingRiver.UPilot
                 UPilotServerRuntimeService.Instance.CancelDownload();
             }
 
-            Debug.LogError(
+            ReportUpdateFailure(
                 "[UPilot] External Package Manager update started during an active UPilot update." +
                 $"\nTargetVersion={targetText}; phase={status.Phase}; label={status.Label}; downloadRunning={downloadState.IsRunning}" +
                 $"\nreloadGuardActive={guard.IsActive}; reloadGuardCurrentRuntime={guard.IsCurrentRuntime}; reloadGuardPhase={guard.Phase}" +
@@ -274,7 +278,7 @@ namespace CodingRiver.UPilot
             SessionState.SetString(ProjectKey(OccupancyRecoveryKindKey), retryKind.ToString());
             SessionState.SetString(ProjectKey(OccupancyRecoveryIdentifierKey), retryIdentifier ?? "");
             SessionState.SetString(ProjectKey(OccupancyRecoveryMessageKey), failureMessage ?? "");
-            Debug.LogError(
+            ReportUpdateFailure(
                 "[UPilot] 更新被占用进程阻止，等待用户二次确认后统一结束并重试。" +
                 $"\nReason={failureMessage}\nRetry={retryKind}" +
                 "\nProcesses=" + string.Join(", ", scan.Processes.Select(process =>
@@ -311,7 +315,7 @@ namespace CodingRiver.UPilot
             {
                 message = "检测到占用进程，但当前用户没有权限结束它们。请关闭相关程序后重新更新。";
                 SetOperationFailed(message);
-                Debug.LogError("[UPilot] " + message + "\n" + UPilotProcessOccupancyService.BuildConfirmationMessage(scan));
+                ReportUpdateFailure("[UPilot] " + message + "\n" + UPilotProcessOccupancyService.BuildConfirmationMessage(scan));
                 return false;
             }
 
@@ -335,7 +339,7 @@ namespace CodingRiver.UPilot
                 message = "结束占用进程后仍无法继续更新：" +
                           string.Join("；", termination.Failed.Concat(stillRunning));
                 SetOperationFailed(message);
-                Debug.LogError("[UPilot] " + message);
+                ReportUpdateFailure("[UPilot] " + message);
                 return false;
             }
 
@@ -370,14 +374,14 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private void RetryExternalPackageManagerUpdate(string identifier)
+        private async void RetryExternalPackageManagerUpdate(string identifier)
         {
             if (string.IsNullOrWhiteSpace(identifier))
             {
                 SetOperationFailed("无法读取 Unity Package Manager 的原始更新目标，请在 Package Manager 中重新更新。");
                 return;
             }
-            if (!UPilotPackageUpdateLifecycle.PrepareForPackageUpdate(
+            if (!await UPilotPackageUpdateLifecycle.PrepareForPackageUpdateAsync(
                     "", null, false, "", "",
                     UPilotOccupancyRetryKind.ExternalPackageManager, identifier))
                 return;
@@ -389,7 +393,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 SetOperationFailed("重试 Unity Package Manager 更新失败：" + ex.Message);
-                Debug.LogError("[UPilot] Retry external Package Manager update failed.\n" + ex);
+                ReportUpdateFailure("Retry external Package Manager update failed.", ex);
             }
         }
 
@@ -405,7 +409,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError("[UPilot] 取消占用恢复后恢复服务失败。\n" + ex);
+                ReportUpdateFailure("取消占用恢复后恢复服务失败。", ex);
             }
         }
 
@@ -487,7 +491,8 @@ namespace CodingRiver.UPilot
                 BuildOperationLabel(phase),
                 message,
                 SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
-                SessionState.GetString(ProjectKey(OperationTargetServerKey), ""));
+                SessionState.GetString(ProjectKey(OperationTargetServerKey), ""),
+                SessionState.GetString(ProjectKey(OperationIdKey), ""));
         }
 
         internal static UPilotUpdateReloadGuardStatus GetReloadGuardStatus()
@@ -653,13 +658,24 @@ namespace CodingRiver.UPilot
             }
             catch (Exception noticeEx)
             {
-                Debug.LogError("[UPilot] 更新错误通知失败：" + noticeEx);
+                ReportUpdateFailure("更新错误通知失败", noticeEx);
             }
         }
 
         private static void LogUpdateError(string message, Exception ex)
         {
-            Debug.LogError("[UPilot] " + message + "\n" + ex);
+            ReportUpdateFailure(message, ex);
+        }
+
+        private static string UpdateDiagnosticScope => "update|" + SessionState.GetString(ProjectKey(OperationIdKey), "");
+
+        private static void ReportUpdateFailure(string message, Exception exception = null)
+        {
+            string operationId = SessionState.GetString(ProjectKey(OperationIdKey), "");
+            var phase = ReadOperationPhase();
+            Logger.ReportFailure("UPDATE", (operationId.Length == 0 ? "" : "operationId=" + operationId + " ") + message,
+                exception, UpdateDiagnosticScope,
+                terminal: phase == UPilotUpdateOperationPhase.Completed || phase == UPilotUpdateOperationPhase.Failed);
         }
 
         public async void UpdateManagedServerAndRestart(Action<string, MessageType> notice)
@@ -762,7 +778,7 @@ namespace CodingRiver.UPilot
                     preparedServerPath = prepared.TargetPath;
                 }
 
-                StartPackageUpdate(manifest, updateManagedServer, notice, preparedServerPath);
+                await StartPackageUpdateAsync(manifest, updateManagedServer, notice, preparedServerPath);
                 return;
             }
 
@@ -985,6 +1001,15 @@ namespace CodingRiver.UPilot
             string targetServerVersion,
             bool applyReloadGuard)
         {
+            var previous = ReadOperationPhase();
+            if (phase != UPilotUpdateOperationPhase.None &&
+                (previous == UPilotUpdateOperationPhase.None ||
+                 ((previous == UPilotUpdateOperationPhase.Completed || previous == UPilotUpdateOperationPhase.Failed) &&
+                  phase != UPilotUpdateOperationPhase.Completed && phase != UPilotUpdateOperationPhase.Failed)))
+            {
+                Logger.CloseDiagnostics(UpdateDiagnosticScope);
+                SessionState.SetString(ProjectKey(OperationIdKey), Guid.NewGuid().ToString("N"));
+            }
             SessionState.SetString(ProjectKey(OperationPhaseKey), phase.ToString());
             SessionState.SetString(ProjectKey(OperationMessageKey), message ?? "");
             if (targetUpmVersion != null)
@@ -993,6 +1018,9 @@ namespace CodingRiver.UPilot
                 SessionState.SetString(ProjectKey(OperationTargetServerKey), targetServerVersion);
             if (IsMemoryBoundUpdatePhase(phase))
                 SessionState.SetString(ProjectKey(OperationRuntimeIdKey), RuntimeId);
+            if (phase == UPilotUpdateOperationPhase.Completed || phase == UPilotUpdateOperationPhase.Failed)
+                Logger.CloseDiagnostics(UpdateDiagnosticScope);
+            OperationStatusChanged?.Invoke();
 
             if (!applyReloadGuard)
                 return;
@@ -1003,7 +1031,7 @@ namespace CodingRiver.UPilot
 
             var failure = "拦截 Unity 脚本重载失败：" + guardError + "。已取消更新，请重新更新。";
             SetReloadGuardFailure(failure);
-            Debug.LogError("[UPilot] " + failure);
+            ReportUpdateFailure("[UPilot] " + failure);
             UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
             EndUpdateReloadGuard("guard enable failed", force: true, clearFailure: false);
             SetOperationPhaseCore(
@@ -1034,13 +1062,17 @@ namespace CodingRiver.UPilot
 
         internal static void ClearOperationStatus()
         {
+            string diagnosticScope = UpdateDiagnosticScope;
             SessionState.EraseString(ProjectKey(OperationPhaseKey));
             SessionState.EraseString(ProjectKey(OperationMessageKey));
             SessionState.EraseString(ProjectKey(OperationTargetUpmKey));
             SessionState.EraseString(ProjectKey(OperationTargetServerKey));
             SessionState.EraseString(ProjectKey(OperationRuntimeIdKey));
+            OperationStatusChanged?.Invoke();
             SessionState.EraseBool(ProjectKey(ExternalPackageManagerAbortKey));
             EndUpdateReloadGuard("operation status cleared", force: false, clearFailure: true);
+            Logger.CloseDiagnostics(diagnosticScope);
+            SessionState.EraseString(ProjectKey(OperationIdKey));
         }
 
         internal static void ResetSourceChannelState()
@@ -1095,7 +1127,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex)
                 {
                     var warning = "更新状态已修复，但服务恢复失败：" + ex.Message;
-                    Debug.LogWarning("[UPilot] " + warning + "\n" + ex);
+                    ReportUpdateFailure(warning, ex);
                     notice?.Invoke(warning, MessageType.Warning);
                     return warning;
                 }
@@ -1179,7 +1211,11 @@ namespace CodingRiver.UPilot
                     targetServerVersion: expectedServerVersion);
                 notice?.Invoke("正在停止 MCP 服务…", MessageType.Info);
                 UPilotBridge.Instance.Stop();
-                if (!manager.StopServerAndWaitForExit(UPilotServerStopOrigin.ManagedServerUpdate))
+                var stopLifetime = UPilotServiceLifetime.Id;
+                var stopOperationId = GetOperationStatus().OperationId;
+                var stopResult = await manager.StopServerAndObserveExitAsync(UPilotServerStopOrigin.ManagedServerUpdate);
+                if (stopLifetime != UPilotServiceLifetime.Id || stopOperationId != GetOperationStatus().OperationId) return false;
+                if (!stopResult.StopConfirmed || !stopResult.PortsAvailable || !manager.IsStopResultCurrent(stopResult))
                 {
                     var message = "无法停止 MCP 服务，已取消更新以避免文件占用";
                     SetOperationFailed(message);
@@ -1187,11 +1223,6 @@ namespace CodingRiver.UPilot
                         UPilotOccupancyRetryKind.ManagedServer,
                         "",
                         message);
-                    if (!recoveryStarted)
-                    {
-                        manager.StartServer();
-                        UPilotBridge.Instance.EnsureStarted();
-                    }
                     notice?.Invoke(
                         recoveryStarted ? message + "。请在更新中心结束全部占用进程并重试。" : message,
                         MessageType.Error);
@@ -1296,14 +1327,14 @@ namespace CodingRiver.UPilot
                 return;
             }
 
-            StartPackageUpdate(
+            await StartPackageUpdateAsync(
                 manifest,
                 installManagedServerAfterUpdate: false,
                 notice,
                 preparedServerPath: "");
         }
 
-        private void StartPackageUpdate(
+        private async Task StartPackageUpdateAsync(
             UPilotReleaseManifest manifest,
             bool installManagedServerAfterUpdate,
             Action<string, MessageType> notice,
@@ -1342,7 +1373,7 @@ namespace CodingRiver.UPilot
                     : "正在停止服务，准备更新 UPilot 包…",
                 manifest.UpmVersion,
                 installManagedServerAfterUpdate ? manifest.ServerVersion : "");
-            if (!UPilotPackageUpdateLifecycle.PrepareForPackageUpdate(
+            if (!await UPilotPackageUpdateLifecycle.PrepareForPackageUpdateAsync(
                     manifest.UpmVersion,
                     notice,
                     installManagedServerAfterUpdate,
@@ -1510,7 +1541,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 var message = ex.Message;
-                Debug.LogError(
+                ReportUpdateFailure(
                     "[UPilot] Failed to enable update reload guard." +
                     $" autoRefreshBlocked={autoRefreshBlocked}; assemblyReloadLocked={reloadLocked}\n" + ex);
                 SetReloadGuardFailure(message);
@@ -1572,9 +1603,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning(
-                        "[UPilot] Failed to unlock assemblies after update guard." +
-                        $" reason={reason}; error={ex.Message}");
+                    ReportUpdateFailure("Failed to unlock assemblies after update guard. reason=" + reason, ex);
                 }
             }
 
@@ -1587,9 +1616,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogWarning(
-                    "[UPilot] Failed to allow auto refresh after update guard." +
-                    $" reason={reason}; error={ex.Message}");
+                ReportUpdateFailure("Failed to allow auto refresh after update guard. reason=" + reason, ex);
             }
         }
 
@@ -1619,7 +1646,7 @@ namespace CodingRiver.UPilot
                 ? guard.FailureMessage
                 : $"更新任务在 {phaseText} 阶段被 Unity 脚本重载中断，已解除更新保护，请修复更新状态后重新更新。";
             SetReloadGuardFailure(message);
-            Debug.LogError(
+            ReportUpdateFailure(
                 "[UPilot] Recovering stale update reload guard after domain reload." +
                 $"\nphase={phase}; guardPhase={guard.Phase}; runtime={RuntimeId}; sinceUnixMs={guard.SinceUnixMs}" +
                 "\n" + message);
@@ -1634,7 +1661,7 @@ namespace CodingRiver.UPilot
                 ? guard.FailureMessage
                 : $"更新任务在 {phaseText} 阶段被 Unity 脚本重载中断，请修复更新状态后重新更新。";
             SetReloadGuardFailure(message);
-            Debug.LogError(
+            ReportUpdateFailure(
                 "[UPilot] " + message +
                 $"\nphase={phase}; guardActive={guard.IsActive}; guardPhase={guard.Phase}; guardRuntimeCurrent={guard.IsCurrentRuntime}");
             UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
@@ -1674,7 +1701,7 @@ namespace CodingRiver.UPilot
                 SessionState.GetString(ProjectKey(OperationTargetUpmKey), ""),
                 SessionState.GetString(ProjectKey(OperationTargetServerKey), ""),
                 applyReloadGuard: false);
-            Debug.LogError(
+            ReportUpdateFailure(
                 "[UPilot] Domain reload occurred while update reload guard was active." +
                 $"\nphase={guard.Phase}; runtime={RuntimeId}; guardRuntimeCurrent={guard.IsCurrentRuntime}" +
                 "\n" + message);

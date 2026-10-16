@@ -34,7 +34,7 @@ namespace CodingRiver.UPilot
         public int defaultTimeoutMs = UPilotFlowSchema.DefaultStepTimeoutMs;
         public bool enableVerboseLog = false;
         public bool debugOnFailure = false;
-        public string reportPath = "Reports/UPilot/Flow";
+        public string reportPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowReports);
         public int batchSize = 10;
         public int batchOffset = 0;
         public int totalAll = 0;
@@ -297,7 +297,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", ex.Message, token, "upilot_flow.migrate");
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", ex.Message, token, "upilot_flow.migrate", errorDetail: null, exception: ex);
                 return;
             }
 
@@ -316,7 +316,26 @@ namespace CodingRiver.UPilot
             }
 
             if (!payload.dryRun && batch.changed > 0)
-                AssetDatabase.Refresh();
+            {
+                var imported = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _bridge.EnqueueTracked(id, () =>
+                {
+                    try
+                    {
+                        foreach (var result in batch.results.Where(item => item.changed && string.IsNullOrEmpty(item.error)))
+                        {
+                            string assetPath = MakeProjectRelative(result.targetPath).Replace('\\', '/');
+                            // Migration changes known YAML only; never refresh unrelated pending code.
+                            if (assetPath.StartsWith("Assets/", StringComparison.Ordinal) &&
+                                assetPath.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
+                                AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+                        }
+                        imported.TrySetResult(true);
+                    }
+                    catch (Exception ex) { imported.TrySetException(ex); }
+                });
+                await imported.Task;
+            }
             await _bridge.SendResultAsync(id, "upilot_flow.migrate", batch, token);
         }
 
@@ -345,7 +364,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", ex.Message, token, "upilot_flow.run");
+                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", ex.Message, token, "upilot_flow.run", errorDetail: null, exception: ex);
                 return;
             }
 
@@ -852,6 +871,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
+                Logger.ReportFailure("FLOW", $"Flow execution failed executionId={executionId}", ex, executionId, terminal: true);
                 UpdateExecution(executionId, execution =>
                 {
                     execution.status = "failed";
@@ -882,6 +902,7 @@ namespace CodingRiver.UPilot
                     }
                 }
 
+                Logger.CloseDiagnostics(executionId);
                 if (_executionCts.TryRemove(executionId, out CancellationTokenSource cts))
                 {
                     cts.Dispose();
@@ -980,7 +1001,8 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("UPilot.Flow", $"发送 case_finished 事件失败: {ex.Message}");
+                if (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+                    Logger.ReportFailure("FLOW", $"发送 case_finished 事件失败 executionId={executionId}", ex, executionId);
             }
         }
 
@@ -1216,7 +1238,8 @@ namespace CodingRiver.UPilot
 
         public static string BuildExecutionReportPath(string baseReportPath, string executionId)
         {
-            string root = string.IsNullOrWhiteSpace(baseReportPath) ? "Reports/UPilot/Flow" : baseReportPath;
+            string root = string.IsNullOrWhiteSpace(baseReportPath) || baseReportPath == UPilotOutputPaths.FlowReports
+                ? UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowReports) : baseReportPath;
             return Path.Combine(root, executionId);
         }
 
@@ -1262,7 +1285,7 @@ namespace CodingRiver.UPilot
             }
 
             string fullPath = Path.GetFullPath(path);
-            string projectRoot = Path.GetFullPath(Directory.GetCurrentDirectory());
+            string projectRoot = UPilotProjectConfig.ProjectRoot;
             string rootWithSeparator = projectRoot.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
                 ? projectRoot
                 : projectRoot + Path.DirectorySeparatorChar;

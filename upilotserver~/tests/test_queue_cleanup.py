@@ -271,7 +271,7 @@ def test_operation_uses_existing_cancel_not_new_start_and_grant_is_independent(t
 def test_capture_adapter_stops_only_exact_session_without_logging_owner(tmp_path, caplog):
     async def run():
         service = Service(tmp_path)
-        directory = tmp_path / "Log/UPilotConsole/fixture"
+        directory = tmp_path / "Logs/UPilot/Console/fixture"
         directory.mkdir(parents=True)
         (directory / "session.json").write_text(json.dumps({
             "sessionId": "capture-exact", "active": True, "ownerTokenSha256": "PRIVATE_HASH",

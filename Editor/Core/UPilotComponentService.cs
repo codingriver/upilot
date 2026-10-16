@@ -256,7 +256,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "COMPONENT_ADD_FAILED", ex.Message, token, "component.add");
+                await _bridge.SendErrorAsync(id, "COMPONENT_ADD_FAILED", ex.Message, token, "component.add", errorDetail: null, exception: ex);
             }
         }
 
@@ -339,7 +339,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "COMPONENT_REMOVE_FAILED", ex.Message, token, "component.remove");
+                await _bridge.SendErrorAsync(id, "COMPONENT_REMOVE_FAILED", ex.Message, token, "component.remove", errorDetail: null, exception: ex);
             }
         }
 
@@ -392,7 +392,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "COMPONENT_GET_FAILED", ex.Message, token, "component.get");
+                await _bridge.SendErrorAsync(id, "COMPONENT_GET_FAILED", ex.Message, token, "component.get", errorDetail: null, exception: ex);
             }
         }
 
@@ -466,7 +466,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "COMPONENT_MODIFY_FAILED", ex.Message, token, "component.modify");
+                await _bridge.SendErrorAsync(id, "COMPONENT_MODIFY_FAILED", ex.Message, token, "component.modify", errorDetail: null, exception: ex);
             }
         }
 
@@ -507,7 +507,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "COMPONENT_LIST_FAILED", ex.Message, token, "component.list");
+                await _bridge.SendErrorAsync(id, "COMPONENT_LIST_FAILED", ex.Message, token, "component.list", errorDetail: null, exception: ex);
             }
         }
 

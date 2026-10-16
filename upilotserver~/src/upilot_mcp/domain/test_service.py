@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from ..output_paths import ACCEPTANCE_REPORTS, FLOW_REPORTS, output_path
 from ..queue_audit import audited, observed_test
 
 import asyncio
@@ -1165,7 +1167,7 @@ class TestDomainService:
         if report.get("writeArtifact"):
             temporary_path = None
             try:
-                artifact_dir = Path(report["expectedProject"]) / "Log" / "UPilotAcceptance" / (str(report["startedAt"]) + "_" + report["requestId"])
+                artifact_dir = output_path(report["expectedProject"], ACCEPTANCE_REPORTS) / (str(report["startedAt"]) + "_" + report["requestId"])
                 artifact_dir.mkdir(parents=True, exist_ok=True)
                 artifact_path = artifact_dir / "summary.json"
                 report.pop("artifact", None)
@@ -1598,7 +1600,7 @@ class TestDomainService:
         if not Path(resolved_yaml).is_file():
             return fail(new_id("upilot_flow"), "UIFLOW_YAML_NOT_FOUND",
                         f"YAML file not found: {resolved_yaml}", {"yamlPath": resolved_yaml})
-        report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+        report_root = report_output_path.strip() or FLOW_REPORTS.as_posix()
         run = await self.upilot_flow_run(
             yaml_paths=[resolved_yaml], headed=headed, stop_on_first_failure=stop_on_first_failure,
             continue_on_step_failure=continue_on_step_failure, screenshot_on_failure=screenshot_on_failure,
@@ -1644,7 +1646,7 @@ class TestDomainService:
         if not Path(resolved_dir).is_dir():
             return fail(new_id("upilot_flow"), "UIFLOW_SUITE_DIR_NOT_FOUND",
                         f"Suite directory not found: {resolved_dir}", {"directoryPath": resolved_dir})
-        report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+        report_root = report_output_path.strip() or FLOW_REPORTS.as_posix()
         run = await self.upilot_flow_run(
             yaml_directory=resolved_dir, headed=headed, stop_on_first_failure=stop_on_first_failure,
             continue_on_step_failure=continue_on_step_failure, screenshot_on_failure=screenshot_on_failure,
@@ -1693,7 +1695,7 @@ class TestDomainService:
                 return fail(new_id("upilot_flow"), "UIFLOW_YAML_NOT_FOUND",
                             f"YAML file not found: {path}", {"yamlPath": path})
             resolved.append(path)
-        report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+        report_root = report_output_path.strip() or FLOW_REPORTS.as_posix()
         run = await self.upilot_flow_run(
             yaml_paths=resolved, headed=headed, stop_on_first_failure=stop_on_first_failure,
             continue_on_step_failure=continue_on_step_failure, screenshot_on_failure=screenshot_on_failure,
@@ -1726,7 +1728,7 @@ class TestDomainService:
         screenshot_on_failure: bool = True,
         default_timeout_ms: int = 10000,
         enable_verbose_log: bool = False,
-        report_path: str = "Reports/UPilot/Flow",
+        report_path: str = FLOW_REPORTS.as_posix(),
         debug_on_failure: bool = False,
         batch_size: int = 10,
         batch_offset: int = 0,

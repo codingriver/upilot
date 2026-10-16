@@ -13,6 +13,8 @@ upilotserver~/.venv/
 
 # Logs & runtime artifacts
 /log/
+/Log/
+/Logs/
 *.log
 temp_*.cs
 *.tmp
@@ -84,3 +86,4 @@ Documentation~/Unity-Startup-Focus-Analysis-*.md
 !.uiflow.json
 /Tests~/MonoHook2022Acceptance
 /Tests~/UPilotTest/.upilot/diagnostic-modules
+/Tests~/UPilotTest/Assets/_Recovery

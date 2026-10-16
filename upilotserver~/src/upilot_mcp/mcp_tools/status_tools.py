@@ -558,7 +558,7 @@ async def unity_console_search_logs(
 @mcp.tool(
     description=(
         "开始将 Unity Console 新日志持续写入独立 JSONL 会话目录。"
-        "默认目录为工程内 Log/UPilotConsole/<时间戳_标题>；同一时间只允许一个活跃会话。"
+        "默认目录为工程内 Logs/UPilot/Console/<时间戳_标题>；同一时间只允许一个活跃会话。"
     )
 )
 async def unity_console_capture_start(
@@ -700,7 +700,7 @@ async def unity_console_capture_detach(
     )
     return _log_tool_result("unity_console_capture_detach", _payload(r))
 
-@mcp.tool(description="列出工程默认 Log/UPilotConsole 目录中的近期持久化采集会话；activeOnly=true 仅返回活动会话，响应包含 activeCount/returnedCount。activeOnly=true 与 includeActive=false 互斥。")
+@mcp.tool(description="列出工程默认 Logs/UPilot/Console 目录中的近期持久化采集会话；activeOnly=true 仅返回活动会话，响应包含 activeCount/returnedCount。activeOnly=true 与 includeActive=false 互斥。")
 async def unity_console_capture_list(
     count: int = 20, includeActive: bool = True, activeOnly: bool = False
 ):

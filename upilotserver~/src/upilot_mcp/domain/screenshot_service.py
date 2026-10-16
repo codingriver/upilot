@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..output_paths import SCREENSHOTS, output_path
+
 import asyncio
 import base64
 import binascii
@@ -483,7 +485,7 @@ class ScreenshotDomainService:
             safe_source = "".join(
                 ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in normalized_source
             )
-            target_path = project_root / "Log" / "UPilotScreenshots" / f"{timestamp}_{safe_source}.png"
+            target_path = output_path(project_root, SCREENSHOTS) / f"{timestamp}_{safe_source}.png"
             return target_path.expanduser().resolve()
 
         target_path = Path(raw_path)

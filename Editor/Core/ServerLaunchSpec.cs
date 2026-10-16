@@ -43,6 +43,31 @@ namespace CodingRiver.UPilot
 
         private static bool Absolute(string path) => !string.IsNullOrWhiteSpace(path) && Path.IsPathRooted(path);
 
+        internal bool TryGetLogFilePath(out string logPath)
+        {
+            logPath = null;
+            if (!Absolute(projectPath) || string.IsNullOrWhiteSpace(arguments)) return false;
+            var options = Regex.Matches(arguments, @"(?:^|\s)--log-file(?=\s|=|$)", RegexOptions.IgnoreCase);
+            if (options.Count != 1) return false;
+            var match = Regex.Match(arguments,
+                "(?:^|\\s)--log-file(?:\\s+|=)(?:\"([^\"]+)\"|([^\"\\s]+))(?=\\s|$)",
+                RegexOptions.IgnoreCase);
+            if (!match.Success) return false;
+            var value = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+            if (!Absolute(value)) return false;
+            try
+            {
+                var root = Path.GetFullPath(projectPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                var candidate = Path.GetFullPath(value);
+                var comparison = Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                if (!candidate.StartsWith(root, comparison)) return false;
+                logPath = candidate;
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
         internal ProcessStartInfo StartInfo()
         {
             var error = Validate();
@@ -68,7 +93,7 @@ namespace CodingRiver.UPilot
                 expectedModuleRoot = "", environmentKeys = new[] { "UPILOT_BUILD_CHANNEL", "UPILOT_INSTALL_SOURCE" },
                 environmentValues = new[] { channel, installSource },
             };
-            var common = $"--transport http --http-port {http} --port {ws} --log-file \"{Path.Combine(spec.projectPath, "log", "mcp-server.log")}\" --log-level {logLevel}";
+            var common = $"--transport http --http-port {http} --port {ws} --log-file \"{UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, spec.projectPath)}\" --log-level {logLevel}";
             if (mode == UPilotServerRuntimeMode.Python)
             {
                 if (string.IsNullOrWhiteSpace(python)) python = FindPython();
@@ -221,7 +246,7 @@ namespace CodingRiver.UPilot
 
         internal static bool MatchesCommandLine(ServerLaunchSpec spec, string command)
         {
-            if (spec == null || string.IsNullOrWhiteSpace(command)) return false;
+            if (spec == null || !spec.TryGetLogFilePath(out var expectedLogPath) || string.IsNullOrWhiteSpace(command)) return false;
             string Argument(string name)
             {
                 var matches = Regex.Matches(command, "(?:^|\\s)" + Regex.Escape(name) + "(?:\\s+|=)(?:\"([^\"]+)\"|(\\S+))");
@@ -230,7 +255,7 @@ namespace CodingRiver.UPilot
             }
             var log = Argument("--log-file");
             return Argument("--http-port") == spec.httpPort.ToString() && Argument("--port") == spec.wsPort.ToString() &&
-                Path.IsPathRooted(log) && UPilotDeploymentDiagnostics.SamePath(log, Path.Combine(spec.projectPath, "log", "mcp-server.log"));
+                Path.IsPathRooted(log) && UPilotDeploymentDiagnostics.SamePath(log, expectedLogPath);
         }
 
         internal static string VerifyUnchanged(ServerProcessIdentity launch, ServerProcessIdentity launchAfter,

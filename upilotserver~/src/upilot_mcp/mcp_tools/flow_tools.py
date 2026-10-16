@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..output_paths import FLOW_REPORTS
+
 import asyncio
 import json
 import logging
@@ -372,7 +374,7 @@ async def _run_unity_upilot_flow_batch(
     # If not provided by caller, infer: resolved list is all files (no external slicing).
     effective_total_all = total_all if total_all > 0 else len(resolved)
 
-    report_root = report_output_path.strip() or "Reports/UPilot/Flow"
+    report_root = report_output_path.strip() or FLOW_REPORTS.as_posix()
     run_resp = await _get_facade().upilot_flow_run(
         yaml_paths=resolved,
         headed=headed,
@@ -404,7 +406,6 @@ async def _run_unity_upilot_flow_batch(
     deadline = time.monotonic() + max(120.0, default_timeout_ms / 1000.0 * batch_size + 180.0)
     last_data = run_data
     last_status = ""
-    last_progress_log = time.monotonic()
     while time.monotonic() < deadline:
         await asyncio.sleep(0.5)
         status_resp = await _get_facade().upilot_flow_results(execution_id)
@@ -415,11 +416,6 @@ async def _run_unity_upilot_flow_batch(
         if status != last_status:
             logger.info("[UPilot Flow] execution %s status %s -> %s", execution_id[:8], last_status or "queued", status)
             last_status = status
-        elif time.monotonic() - last_progress_log >= 10.0:
-            current_yaml = last_data.get("currentYamlPath") or ""
-            current_case = last_data.get("currentCaseName") or ""
-            logger.info("[UPilot Flow] execution %s polling 已等待=%.0fs 状态=%s 当前用例=%s", execution_id[:8], time.monotonic() - (deadline - max(120.0, default_timeout_ms / 1000.0 * batch_size + 120.0)), status, current_case or Path(current_yaml).name if current_yaml else "")
-            last_progress_log = time.monotonic()
         if status in {"completed", "failed", "aborted"}:
             report_path = str(last_data.get("reportPath") or report_root)
             screenshots_root = screenshot_path.strip() or str(

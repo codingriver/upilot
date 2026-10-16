@@ -1589,7 +1589,8 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(Directory.GetFiles(directory, "*.tmp", SearchOption.AllDirectories), Is.Empty);
                 Assert.That(Directory.GetFiles(directory, "*.log", SearchOption.AllDirectories), Has.Length.EqualTo(3));
                 Assert.That(UPilotQuickDebugToolCheck.RelativeLogPath("csharp_object_dump"),
-                    Is.Not.EqualTo("Logs/UPilot/csharp_object_dump.log"));
+                    Is.EqualTo("Logs/UPilot/Diagnostics/QuickDebug/ToolChecks/csharp_object_dump.log")
+                        .And.Not.EqualTo(UPilotOutputPaths.QuickDebugObjectDump));
                 Assert.Throws<ArgumentOutOfRangeException>(() => UPilotQuickDebugToolCheck.RelativeLogPath("../escape"));
                 var pathMethod = typeof(UPilotQuickDebugWindow).GetMethod("GetDiagnosticLogPath", BindingFlags.Static | BindingFlags.NonPublic);
                 var projectRoot = Directory.GetParent(Application.dataPath).FullName;

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // upilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -13,15 +13,9 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
-    /// <summary>
-    /// 将 upilot 编辑器日志写入项目根目录下 <c>Logs/UPilot/upilot.log</c>。
-    /// 每次打开 Unity 编辑器（新会话）首次写入前会将上一会话日志轮转为备份并写入新会话头；
-    /// 同一会话内脚本域重载不轮转，继续追加。
-    /// 所有写入均立即落盘（无缓冲），时间戳精确到毫秒（本地时区）。
-    /// 支持标签、主线程帧号检测、LogLevel 过滤、日志按大小滚动，并双写到 Unity Editor Console。
-    /// </summary>
+    /// <summary>Daily append-only diagnostics; retention follows the project logging setting.</summary>
     [InitializeOnLoad]
-    public static class Logger
+    public static partial class Logger
     {
         private static readonly object FileLock = new object();
         private static readonly int MainThreadId;
@@ -31,10 +25,7 @@ namespace CodingRiver.UPilot
 
         private static readonly string SessionMarkerPath;
         private static bool _sessionPrepared;
-        private static bool _fileFailureReportedToConsole;
 
-        internal const long MaxLogSizeBytes = 10L * 1024 * 1024;
-        internal const int MaxBackupFiles = 2;
         internal const int MaxLogEntryChars = 64 * 1024;
 
         public static string LastFileError { get; private set; } = string.Empty;
@@ -43,12 +34,13 @@ namespace CodingRiver.UPilot
         {
             get
             {
-                var root = Path.GetDirectoryName(Application.dataPath) ?? Application.dataPath;
-                return Path.Combine(root, "Logs", "UPilot");
+                return UPilotOutputPaths.Resolve(UPilotOutputPaths.Root);
             }
         }
 
-        public static string LogFilePath => Path.Combine(ProjectLogsDirectory, "upilot.log");
+        private static string BaseLogPath => UPilotOutputPaths.Resolve(UPilotOutputPaths.UnityLog);
+        private static readonly UPilotDailyLogFile DailyFile = new(BaseLogPath);
+        public static string LogFilePath => UPilotDailyLogFile.ResolveExisting(BaseLogPath);
 
         /// <summary>
         /// 最低输出日志级别。低于此级别的日志将被忽略。默认 Debug。
@@ -58,7 +50,7 @@ namespace CodingRiver.UPilot
         public const string LogToUnityConsolePrefsKey = "CodingRiver.UPilot.Logger.LogToUnityConsole";
 
         /// <summary>
-        /// 是否同时将日志输出到 Unity Editor Console。默认开启。
+        /// 是否同时将普通信息日志输出到 Unity Editor Console。默认开启；警告、错误和异常不受此开关影响。
         /// </summary>
         public static bool LogToUnityConsole = EditorPrefs.GetBool(UPilotPreferences.LogToUnityConsoleKey, true);
         private static bool _debugWireLogsEnabled = EditorPrefs.GetBool(UPilotPreferences.DebugWireLogsKey, false);
@@ -81,6 +73,12 @@ namespace CodingRiver.UPilot
             IsAssetImportWorker = AssetDatabase.IsAssetImportWorkerProcess();
 
             SessionMarkerPath = Path.Combine(ProjectLogsDirectory, ".session");
+            if (!IsAssetImportWorker)
+            {
+                EditorApplication.update += PollDiagnostics;
+                EditorApplication.quitting += FlushDiagnostics;
+                AssemblyReloadEvents.beforeAssemblyReload += FlushDiagnostics;
+            }
 
             if (IsAssetImportWorker)
             {
@@ -125,9 +123,9 @@ namespace CodingRiver.UPilot
                     return pid != CurrentProcessId || processStartTime.ToUniversalTime() != CurrentProcessStartTime.ToUniversalTime();
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // 标记文件异常时视为新会话
+                ReportFileFailure("read session marker", ex);
             }
             return true;
         }
@@ -138,6 +136,7 @@ namespace CodingRiver.UPilot
             {
                 lock (FileLock)
                 {
+                    UPilotDailyLogFile.RequireSafePath(SessionMarkerPath);
                     Directory.CreateDirectory(ProjectLogsDirectory);
                     File.WriteAllText(SessionMarkerPath, $"{CurrentProcessId}|{CurrentProcessStartTime:O}", Encoding.UTF8);
 
@@ -153,16 +152,7 @@ namespace CodingRiver.UPilot
                     header.AppendLine("════════════════════════════════════════════════════════════");
 
                     var headerText = header.ToString() + Environment.NewLine;
-                    try
-                    {
-                        RotateLogForNewSession(LogFilePath, MaxBackupFiles);
-                        File.WriteAllText(LogFilePath, headerText, Encoding.UTF8);
-                    }
-                    catch (Exception ex)
-                    {
-                        ReportFileFailure("初始化新会话日志", ex);
-                        File.AppendAllText(LogFilePath, Environment.NewLine + headerText, Encoding.UTF8);
-                    }
+                    DailyFile.Append(headerText, DateTime.Now.Date, ReportFileFailure);
 
                     if (LogToUnityConsole)
                         UnityEngine.Debug.Log(header.ToString());
@@ -173,7 +163,6 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 ReportFileFailure("准备日志文件", ex);
-                Debug.LogError($"[UPilot] 无法准备日志文件: {ex.Message}");
             }
         }
 
@@ -213,47 +202,14 @@ namespace CodingRiver.UPilot
                 UPilotTestService.Instance?.IsRunning == true);
         }
 
-        // ── 日志滚动 ──────────────────────────────────────────────────────────
+        // ── 文件故障 ──────────────────────────────────────────────────────────
 
-        internal static void RotateLogIfNeeded(
-            string logFilePath,
-            long incomingByteCount,
-            long maxLogSizeBytes = MaxLogSizeBytes,
-            int maxBackupFiles = MaxBackupFiles)
+        private static void ReportFileFailure(string operation, Exception ex) => ReportFileFailure(operation, BaseLogPath, ex);
+
+        private static void ReportFileFailure(string operation, string path, Exception ex)
         {
-            if (!File.Exists(logFilePath)) return;
-            var info = new FileInfo(logFilePath);
-            if (info.Length == 0 || info.Length + Math.Max(0, incomingByteCount) <= maxLogSizeBytes) return;
-
-            RotateLogFiles(logFilePath, maxBackupFiles);
-        }
-
-        internal static void RotateLogForNewSession(string logFilePath, int maxBackupFiles = MaxBackupFiles)
-        {
-            if (!File.Exists(logFilePath) || new FileInfo(logFilePath).Length == 0) return;
-            RotateLogFiles(logFilePath, maxBackupFiles);
-        }
-
-        private static void RotateLogFiles(string logFilePath, int maxBackupFiles)
-        {
-            for (int i = maxBackupFiles; i > 0; i--)
-            {
-                var src = i == 1 ? logFilePath : $"{logFilePath}.{i - 1}";
-                var dst = $"{logFilePath}.{i}";
-                if (File.Exists(dst))
-                    File.Delete(dst);
-                if (File.Exists(src))
-                    File.Move(src, dst);
-            }
-        }
-
-        private static void ReportFileFailure(string operation, Exception ex)
-        {
-            LastFileError = $"{operation}: {ex.Message}";
-            if (_fileFailureReportedToConsole) return;
-
-            _fileFailureReportedToConsole = true;
-            UnityEngine.Debug.LogWarning($"[UPilot] 日志文件异常（本会话后续同类异常不再刷屏）: {LastFileError}");
+            LastFileError = $"{operation} path={path}: {ex}";
+            UPilotDailyLogFile.ReportError(operation, path, ex);
         }
 
         internal static string TruncateLogEntry(string value, int maxChars = MaxLogEntryChars)
@@ -293,29 +249,26 @@ namespace CodingRiver.UPilot
                 sb.Append($" [{string.Join(",", tags)}]");
             }
 
-            var entry = TruncateLogEntry(sb.ToString()) + Environment.NewLine;
-            var incomingByteCount = Encoding.UTF8.GetByteCount(entry);
+            DailyFile.Append(sb.ToString() + Environment.NewLine, DateTime.Now.Date, ReportFileFailure);
+        }
 
-            lock (FileLock)
+        /// <summary>File-only on success; IO failures always enter the Unity Console as errors.</summary>
+        internal static bool TryAppendFileOnly(string line, string path = null)
+        {
+            if (path == null)
+                return DailyFile.Append($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {line}\n", DateTime.Now.Date, ReportFileFailure);
+            try
             {
-                try
+                lock (FileLock)
                 {
-                    RotateLogIfNeeded(LogFilePath, incomingByteCount);
+                    UPilotDailyLogFile.RequireSafePath(path);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    UPilotDailyLogFile.RequireSafePath(path);
+                    File.AppendAllText(path, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {line}\n", new UTF8Encoding(false));
                 }
-                catch (Exception ex)
-                {
-                    ReportFileFailure("滚动日志文件", ex);
-                }
-
-                try
-                {
-                    File.AppendAllText(LogFilePath, entry, Encoding.UTF8);
-                }
-                catch (Exception ex)
-                {
-                    ReportFileFailure("追加日志文件", ex);
-                }
+                return true;
             }
+            catch (Exception ex) { ReportFileFailure("write", path, ex); return false; }
         }
 
         private static void EnsureSessionLogFile()
@@ -340,7 +293,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    UnityEngine.Debug.LogError($"[UPilot] 无法准备日志文件: {ex.Message}");
+                    ReportFileFailure("prepare session", ex);
                     _sessionPrepared = true;
                 }
             }
@@ -350,7 +303,8 @@ namespace CodingRiver.UPilot
 
         private static void WriteToUnityConsole(string line, LogType logType, params string[] tags)
         {
-            if (IsAssetImportWorker || !LogToUnityConsole) return;
+            if (IsAssetImportWorker) return;
+            if (!LogToUnityConsole && logType != LogType.Warning && logType != LogType.Error && logType != LogType.Exception) return;
             if (string.IsNullOrEmpty(line)) return;
 
             var sb = new StringBuilder();
@@ -530,14 +484,17 @@ namespace CodingRiver.UPilot
         {
             try
             {
-                EnsureSessionLogFile();
-                Directory.CreateDirectory(ProjectLogsDirectory);
-                if (!File.Exists(LogFilePath))
-                    File.WriteAllText(LogFilePath, "", Encoding.UTF8);
-                EditorUtility.RevealInFinder(LogFilePath);
+                var path = LogFilePath;
+                if (!File.Exists(path))
+                {
+                    EditorUtility.DisplayDialog("UPilot", "日志尚未生成。", "确定");
+                    return;
+                }
+                EditorUtility.RevealInFinder(path);
             }
             catch (Exception ex)
             {
+                ReportFileFailure("reveal", ex);
                 EditorUtility.DisplayDialog("UPilot", $"无法打开日志: {ex.Message}", "确定");
             }
         }

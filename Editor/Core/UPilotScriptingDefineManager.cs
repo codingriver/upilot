@@ -11,17 +11,11 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
-    [InitializeOnLoad]
     internal static class UPilotScriptingDefineManager
     {
         internal const string Define = "UPILOT";
 
         private const string OwnedTargetsKeyPrefix = "CodingRiver.UPilot.ScriptingDefine.OwnedTargets.";
-
-        static UPilotScriptingDefineManager()
-        {
-            EditorApplication.delayCall += EnsureForActiveBuildTarget;
-        }
 
         internal static void EnsureForActiveBuildTarget()
         {

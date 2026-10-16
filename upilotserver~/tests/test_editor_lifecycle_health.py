@@ -247,6 +247,133 @@ def test_wrong_compile_terminal_cannot_end_wait(lifecycle):
     assert server.editor_observation(network_connected=True)["status"] == "waiting_lifecycle"
 
 
+@pytest.mark.parametrize("event,phase", [
+    ("compile_queued", "queued"), ("compiling", "compiling"),
+    ("compile_started", "compiling"), ("domain_reload_starting", "domain_reload"),
+])
+def test_later_compile_start_supersedes_missing_old_terminal_and_remains_waiting(lifecycle, event, phase):
+    server, clock = lifecycle
+    start = snapshot(server, clock, compilePhase="compiling", compileOperationId="compile-a")
+    start["transition"] = "compile_started"
+    publish(server, start)
+    old_wait = dict(server._editor_lifecycle)
+    clock[0] += 1000
+    successor_started = clock[0]
+    successor = snapshot(server, clock, sequence=2, compilePhase=phase, compileOperationId="compile-b",
+                         lastCompileRequestedAt=successor_started, isCompiling=False)
+    successor["transition"] = event
+    publish(server, successor)
+    result = server.editor_observation(network_connected=True)
+    assert result["status"] == "waiting_lifecycle"
+    assert result["lifecycle_id"] == "compile-b"
+    assert result["lifecycle_started_at_ms"] == successor_started
+    assert old_wait["compile_id"] == "compile-a"
+    clock[0] += 1000
+    end = snapshot(server, clock, sequence=3, compilePhase="completed", compileOperationId="compile-b",
+                   terminal=True, errorsVerified=True, lastCompileStartedAt=successor_started,
+                   lastCompileVerifiedAt=clock[0])
+    end["transition"] = "compile_completed"
+    publish(server, end)
+    assert server.editor_observation(network_connected=True)["status"] == "responsive"
+    assert server.state.compile.compile_operation_id == "compile-b"
+
+
+@pytest.mark.parametrize("phase", ["completed", "failed"])
+def test_verified_later_compile_terminal_recovers_wait_when_its_start_event_was_lost(lifecycle, phase):
+    server, clock = lifecycle
+    start = snapshot(server, clock, compilePhase="compiling", compileOperationId="compile-a")
+    start["transition"] = "compile_started"
+    publish(server, start)
+    old_started = clock[0]
+    old_wait = server._editor_lifecycle
+    clock[0] += 10000
+    end = snapshot(server, clock, sequence=2, compilePhase=phase, compileOperationId="compile-b",
+                   terminal=True, errorsVerified=True, lastCompileStartedAt=old_started + 1000,
+                   lastCompileVerifiedAt=clock[0])
+    end.update(domainGeneration=3, transition="connected_snapshot")
+    publish(server, end)
+    server.session_manager.active.last_heartbeat_at = clock[0]
+    result = server.editor_observation(network_connected=True)
+    assert result["status"] == ("responsive" if phase == "completed" else "unknown")
+    assert result["lifecycle_phase"] == "verifying_recovery"
+    assert server._editor_lifecycle is None
+    assert old_wait["compile_id"] == "compile-a", "Convergence must not rename the historical compile."
+    assert server.state.compile.compile_operation_id == "compile-b"
+    assert server.state.compile.phase == phase
+    assert server.state.compile.terminal and server.state.compile.errors_verified
+
+
+@pytest.mark.parametrize("invalid", [
+    "no-start-time", "old-start-time", "no-verification-time", "old-verification-time",
+    "future-verification-time", "not-terminal", "errors-unverified", "not-authoritative",
+    "stale", "old-domain", "old-epoch", "wrong-process", "duplicate",
+])
+def test_unproven_or_stale_different_compile_terminal_cannot_clear_existing_wait(lifecycle, invalid):
+    server, clock = lifecycle
+    start = snapshot(server, clock, compilePhase="compiling", compileOperationId="compile-a")
+    start["transition"] = "compile_started"
+    publish(server, start)
+    old_started = clock[0]
+    clock[0] += 10000
+    end = snapshot(server, clock, sequence=2, compilePhase="completed", compileOperationId="compile-b",
+                   terminal=True, errorsVerified=True, lastCompileStartedAt=old_started + 1000,
+                   lastCompileVerifiedAt=clock[0])
+    end["transition"] = "connected_snapshot"
+    if invalid == "no-start-time": end.pop("lastCompileStartedAt")
+    if invalid == "old-start-time": end["lastCompileStartedAt"] = old_started - 1
+    if invalid == "no-verification-time": end.pop("lastCompileVerifiedAt")
+    if invalid == "old-verification-time": end["lastCompileVerifiedAt"] = old_started - 1
+    if invalid == "future-verification-time": end["lastCompileVerifiedAt"] = clock[0] + 1
+    if invalid == "not-terminal": end["terminal"] = False
+    if invalid == "errors-unverified": end["errorsVerified"] = False
+    if invalid == "not-authoritative": end["authoritative"] = False
+    if invalid == "stale": end["isStale"] = True
+    if invalid == "old-domain": end["domainGeneration"] = 0
+    if invalid == "old-epoch": end["producerEpoch"] = "old-epoch"
+    if invalid == "wrong-process": end["processCreatedAt"] += 1
+    if invalid == "duplicate": end["sequence"] = 1
+    publish(server, end)
+    result = server.editor_observation(network_connected=True)
+    assert result["status"] == "waiting_lifecycle"
+    assert result["lifecycle_id"] == "compile-a"
+
+
+@pytest.mark.parametrize("phase", ["queued", "compiling", "compiler_finished", "domain_reload", "verifying"])
+def test_later_nonterminal_snapshot_never_turns_raw_not_compiling_into_ready(lifecycle, phase):
+    server, clock = lifecycle
+    start = snapshot(server, clock, compilePhase="compiling", compileOperationId="compile-a")
+    start["transition"] = "compile_started"
+    publish(server, start)
+    clock[0] += 1000
+    current = snapshot(server, clock, sequence=2, compilePhase=phase, compileOperationId="compile-b",
+                       isCompiling=False, terminal=False, errorsVerified=False,
+                       lastCompileStartedAt=clock[0])
+    current["transition"] = "heartbeat"
+    publish(server, current)
+    assert server.editor_observation(network_connected=True)["status"] == "waiting_lifecycle"
+
+
+@pytest.mark.parametrize("invalid", ["stale", "not-authoritative", "old-start-time", "future-start-time"])
+def test_untrusted_later_compile_start_cannot_replace_the_current_wait(lifecycle, invalid):
+    server, clock = lifecycle
+    start = snapshot(server, clock, compilePhase="compiling", compileOperationId="compile-a")
+    start["transition"] = "compile_started"
+    publish(server, start)
+    old_started = clock[0]
+    clock[0] += 1000
+    successor = snapshot(server, clock, sequence=2, compilePhase="compiling", compileOperationId="compile-b",
+                         lastCompileStartedAt=clock[0])
+    successor["transition"] = "compile_started"
+    if invalid == "stale": successor["isStale"] = True
+    if invalid == "not-authoritative": successor["authoritative"] = False
+    if invalid == "old-start-time": successor["lastCompileStartedAt"] = old_started - 1
+    if invalid == "future-start-time": successor["lastCompileStartedAt"] = clock[0] + 1
+    publish(server, successor)
+    result = server.editor_observation(network_connected=True)
+    assert result["status"] == "waiting_lifecycle"
+    assert result["lifecycle_id"] == "compile-a"
+
+
 def test_ended_transition_cannot_be_resurrected_by_old_start(lifecycle):
     server, clock = lifecycle
     start = transition(server, clock)

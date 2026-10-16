@@ -76,7 +76,7 @@ namespace CodingRiver.UPilot
     internal sealed class ServiceMaintenanceException : Exception
     {
         internal readonly string Code;
-        internal ServiceMaintenanceException(string code, string message) : base(message) { Code = code; }
+        internal ServiceMaintenanceException(string code, string message, Exception innerException = null) : base(message, innerException) { Code = code; }
     }
 
     // The journal and deadline rules are independent of Unity so tests never stop real services.
@@ -86,6 +86,7 @@ namespace CodingRiver.UPilot
         private readonly Func<long> _now;
         internal ServiceMaintenanceRecord Current { get; private set; }
         internal string LoadError { get; private set; }
+        private string DiagnosticScope => "maintenance-journal|" + _path;
 
         internal ServiceMaintenanceJournal(string path, Func<long> now)
         {
@@ -100,7 +101,12 @@ namespace CodingRiver.UPilot
                     !new[] { "accepted", "running", "succeeded", "failed", "timed_out" }.Contains(Current.status))
                     throw new InvalidDataException("Invalid maintenance record.");
             }
-            catch (Exception ex) { Current = null; LoadError = ex.Message; }
+            catch (Exception ex)
+            {
+                Current = null;
+                LoadError = ex.Message;
+                ReportStorageFailure("read", ex);
+            }
         }
 
         internal ServiceMaintenanceRecord FindDuplicate(ServiceRestartRequest request)
@@ -148,9 +154,10 @@ namespace CodingRiver.UPilot
             return record;
         }
 
-        internal bool Expire()
+        internal bool Expire(bool reportFailure = true)
         {
             if (Current?.Expire(_now()) != true) return false;
+            if (reportFailure) ReportTerminal(Current);
             Save();
             return true;
         }
@@ -158,8 +165,32 @@ namespace CodingRiver.UPilot
         internal void Save()
         {
             if (Current == null) return;
-            try { Write(Current); }
-            catch (Exception ex) { Current.queueResetError = "Journal: " + ex.Message; }
+            try
+            {
+                Write(Current);
+                Logger.CloseDiagnostics(DiagnosticScope);
+            }
+            catch (Exception ex)
+            {
+                Current.queueResetError = "Journal: " + ex.Message;
+                ReportStorageFailure("write", ex);
+            }
+        }
+
+        private void ReportStorageFailure(string operation, Exception exception) =>
+            Logger.ReportFailure("SERVICE", $"维护记录{operation}失败 path={_path} maintenanceId={Current?.maintenanceId ?? "unknown"}",
+                exception, DiagnosticScope, fingerprint: operation + "|" + Current?.maintenanceId);
+
+        internal static string MaintenanceScope(ServiceMaintenanceRecord record) => "maintenance|" + record.maintenanceId;
+
+        internal static void ReportTerminal(ServiceMaintenanceRecord record, Exception exception = null)
+        {
+            if (record.Active) return;
+            var scope = MaintenanceScope(record);
+            if (record.status == "succeeded") Logger.CloseDiagnostics(scope);
+            else Logger.ReportFailure("SERVICE", $"维护失败 maintenanceId={record.maintenanceId} target={record.target} " +
+                $"status={record.status} phase={record.failurePhase} code={record.errorCode} error={record.error}",
+                exception, scope, terminal: true, fingerprint: record.errorCode);
         }
 
         internal bool Dispatch(Action validate, Action<ServiceMaintenanceRecord> execute)
@@ -188,12 +219,16 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                throw new ServiceMaintenanceException("SERVICE_RESTART_PERSIST_FAILED", ex.Message);
+                throw new ServiceMaintenanceException("SERVICE_RESTART_PERSIST_FAILED", ex.Message, ex);
             }
             finally
             {
                 try { if (File.Exists(temp)) File.Delete(temp); }
-                catch { /* Preserve the original persistence failure. */ }
+                catch (Exception ex)
+                {
+                    Logger.ReportWarning("SERVICE", $"维护记录临时文件清理失败 path={temp} maintenanceId={record.maintenanceId}\n{ex}",
+                        DiagnosticScope, fingerprint: "temporary-cleanup|" + record.maintenanceId + "|" + ex.GetType().FullName + "|" + ex.HResult);
+                }
             }
         }
 
@@ -240,7 +275,7 @@ namespace CodingRiver.UPilot
                     autoHardStopOnSoftFailure = section.Element("autoHardStopOnSoftFailure")?.Value == "true",
                 };
             }
-            catch (Exception ex) { throw new ServiceMaintenanceException("SERVICE_MAINTENANCE_CONFIG_INVALID", ex.Message); }
+            catch (Exception ex) { throw new ServiceMaintenanceException("SERVICE_MAINTENANCE_CONFIG_INVALID", ex.Message, ex); }
         }
 
         internal static void RequireAuthorization(UPilotAiServiceMaintenanceConfig config, string project)
@@ -315,7 +350,7 @@ namespace CodingRiver.UPilot
                     ? File.ReadAllText(UPilotProjectConfig.ConfigPath) : "{}");
             }
             catch (ServiceMaintenanceException) { throw; }
-            catch (Exception ex) { throw new ServiceMaintenanceException("SERVICE_MAINTENANCE_CONFIG_INVALID", ex.Message); }
+            catch (Exception ex) { throw new ServiceMaintenanceException("SERVICE_MAINTENANCE_CONFIG_INVALID", ex.Message, ex); }
         }
 
         internal static void Register(UPilotBridge bridge)
@@ -358,6 +393,7 @@ namespace CodingRiver.UPilot
                 finally { RefreshUpdateSubscription(); }
             });
             try { await bridge.SendResultAsync(id, "service.restart", await completion.Task, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (ServiceMaintenanceException ex)
             {
                 await bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "service.restart",
@@ -366,11 +402,11 @@ namespace CodingRiver.UPilot
                         stage = Current?.phase ?? "preflight",
                         sideEffectsMayHaveOccurred = false,
                         nextAction = "Inspect aiServiceMaintenance in unity_mcp_status; do not replay the request.",
-                    });
+                    }, exception: ex);
             }
             catch (Exception ex)
             {
-                await bridge.SendErrorAsync(id, "SERVICE_RESTART_REQUEST_FAILED", ex.Message, token, "service.restart");
+                await bridge.SendErrorAsync(id, "SERVICE_RESTART_REQUEST_FAILED", ex.Message, token, "service.restart", errorDetail: null, exception: ex);
             }
         }
 
@@ -384,11 +420,17 @@ namespace CodingRiver.UPilot
             }
             var bridge = UPilotBridge.Instance;
             var manager = UPilotMcpServerManager.Instance;
+            var maintenanceId = Guid.NewGuid().ToString("D");
             int timeout = 120;
-            try { timeout = ReadSettings().restartTimeoutSeconds; } catch { /* Human control remains available. */ }
+            try { timeout = ReadSettings().restartTimeoutSeconds; }
+            catch (Exception ex)
+            {
+                Logger.ReportWarning("SERVICE", $"维护配置读取失败，人工硬停止沿用默认期限 maintenanceId={maintenanceId} timeoutSeconds={timeout} path={UPilotProjectConfig.ConfigPath}\n{ex}",
+                    "maintenance|" + maintenanceId, fingerprint: "human-timeout-fallback|" + ex.GetType().FullName + "|" + ex.Message);
+            }
             var record = Journal.Accept(new ServiceRestartRequest
             {
-                maintenanceId = Guid.NewGuid().ToString("D"), target = "server",
+                maintenanceId = maintenanceId, target = "server",
                 reason = "Human-confirmed project hard stop", expectedProjectPath = UPilotProjectConfig.ProjectRoot,
                 expectedBridgeSessionId = bridge.GetStatus().SessionId ?? "",
                 expectedServerProcessId = manager.GetStatus().ProcessId ?? 0,
@@ -402,16 +444,15 @@ namespace CodingRiver.UPilot
             return record;
         }
 
-        private static void RequireGate(ServiceRestartRequest request)
+        private static void RequireGate(ServiceRestartRequest request, long deadlineUtcMs = 0)
         {
             ServiceMaintenanceJournal.RequireAuthorization(ReadSettings(), UPilotProjectConfig.ProjectRoot);
             if (!ServiceMaintenanceJournal.SamePath(request.expectedProjectPath, UPilotProjectConfig.ProjectRoot))
                 throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Project identity changed.");
             var bridge = UPilotBridge.Instance;
-            var status = UPilotMcpServerManager.Instance.GetStatus();
             if (!UPilotBridge.IsMainEditorProcess() || bridge.GetStatus().SessionId != request.expectedBridgeSessionId ||
-                status.ProcessId != request.expectedServerProcessId || status.ProcessOwnership != McpProcessOwnership.CurrentUPilot)
-                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Server/Bridge identity or current-project process ownership changed.");
+                !UPilotMcpServerManager.Instance.VerifyMaintenanceEndpointIdentity(request.expectedServerProcessId, deadlineUtcMs))
+                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Server/Bridge endpoint identity or configured Server entry and ports changed.");
         }
 
         private static ServiceRestartRequest OriginalRequest(ServiceMaintenanceRecord r) => new()
@@ -429,7 +470,7 @@ namespace CodingRiver.UPilot
             {
                 var r = Current;
                 if (r?.Active != true) return;
-                if (Journal.Expire()) return;
+                if (ExpireMaintenance(r)) return;
                 if (!ServiceMaintenanceJournal.SamePath(r.projectPath, UPilotProjectConfig.ProjectRoot) ||
                     r.unityProcessId != System.Diagnostics.Process.GetCurrentProcess().Id || r.status == "accepted")
                 {
@@ -440,7 +481,12 @@ namespace CodingRiver.UPilot
                 if ((r.target == "server" || r.target == "bridge") && string.IsNullOrEmpty(r.serverRestartId))
                     Fail("SERVICE_RESTART_RECOVERY_REQUIRED", "Replacement restart identity is missing; inspect original evidence.");
             }
-            catch (Exception ex) { _storageError = ex.Message; }
+            catch (Exception ex)
+            {
+                _storageError = ex.Message;
+                Logger.ReportFailure("SERVICE", $"维护恢复异常 path={RecordPath} maintenanceId={_journal?.Current?.maintenanceId ?? "unknown"}",
+                    ex, "maintenance-recovery|" + RecordPath, terminal: true);
+            }
             finally
             {
                 _recoveryCheckedAt = Now;
@@ -451,9 +497,11 @@ namespace CodingRiver.UPilot
         }
 
         // This check must also work while the Bridge is intentionally disconnected.
-        internal static void RequireContinuation()
+        internal static void RequireContinuation(string expectedMaintenanceId = "")
         {
             var r = Current;
+            if (!string.IsNullOrEmpty(expectedMaintenanceId) && r?.maintenanceId != expectedMaintenanceId)
+                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "The original maintenance request is no longer current.");
             if (r?.Active != true || Now >= r.deadlineAtUtcMs)
                 throw new ServiceMaintenanceException("SERVICE_RESTART_TIMEOUT", "Maintenance is no longer active.");
             if (!r.humanConfirmed) ServiceMaintenanceJournal.RequireAuthorization(ReadSettings(), UPilotProjectConfig.ProjectRoot);
@@ -471,7 +519,13 @@ namespace CodingRiver.UPilot
                 var resetError = UPilotBridge.Instance.ResetActiveWork();
                 r.queueReset = string.IsNullOrEmpty(resetError);
                 if (!string.IsNullOrEmpty(resetError)) r.queueResetError += resetError;
-                try { Journal.Save(); } catch (Exception ex) { r.queueResetError += ex.Message; }
+                try { Journal.Save(); }
+                catch (Exception ex)
+                {
+                    r.queueResetError += ex.Message;
+                    Logger.ReportFailure("SERVICE", $"维护队列重置记录保存失败 maintenanceId={r.maintenanceId}", ex,
+                        ServiceMaintenanceJournal.MaintenanceScope(r));
+                }
                 {
                     UPilotMcpServerManager.Instance.RestartPreparedServer(
                         maintenanceDeadlineUtcMs: r.deadlineAtUtcMs, expectedProcessId: r.oldServerProcessId, acceptedAtUtcMs: r.acceptedAtUtcMs);
@@ -515,12 +569,12 @@ namespace CodingRiver.UPilot
                     r.healthProbeError = observedRestart.statusProbeError;
                     if (observedRestart.status == "failed")
                     {
-                        Fail(observedRestart.errorCode, observedRestart.error);
+                        Fail(observedRestart.errorCode, observedRestart.error, reportedByRestart: true);
                         return;
                     }
                     if (observedRestart.newProcessId > 0 && !r.healthVerified) r.phase = "health_query";
                 }
-                if (Journal.Expire())
+                if (ExpireMaintenance(r))
                 {
                     _probeCancellation?.Cancel();
                     UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId);
@@ -531,7 +585,7 @@ namespace CodingRiver.UPilot
                     if (Now < _dispatchAfter) return;
                     if (!Journal.Dispatch(() =>
                     {
-                        if (!r.humanConfirmed) RequireGate(OriginalRequest(r));
+                        if (!r.humanConfirmed) RequireGate(OriginalRequest(r), r.deadlineAtUtcMs);
                         if (UPilotQuickStart.IsRepairing || UPilotMcpServerManager.Instance.IsServiceTransitionActive)
                             throw new ServiceMaintenanceException("SERVICE_RESTART_BUSY", "Another service transition began before dispatch.");
                     }, Execute)) return;
@@ -553,10 +607,15 @@ namespace CodingRiver.UPilot
                     {
                         r.readOnlyVerified = restart.readOnlyVerified;
                         r.Finish("succeeded", "", "", Now);
+                        ServiceMaintenanceJournal.ReportTerminal(r);
                     }
                     else if (restart.status != "running")
+                    {
                         r.Finish(restart.errorCode == "SERVICE_RESTART_TIMEOUT" ? "timed_out" : "failed",
                             restart.errorCode, restart.error, Now);
+                        // The Manager owns the original restart diagnostic, including cancellation.
+                        Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(r));
+                    }
                     if (changed || !r.Active) Journal.Save();
                 }
                 else if (!_probeRunning && Now >= _nextProbe)
@@ -571,7 +630,7 @@ namespace CodingRiver.UPilot
                     _storageError = ex.Message;
                     UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId);
                 }
-                Fail((ex as ServiceMaintenanceException)?.Code ?? "SERVICE_RESTART_FAILED", ex.Message);
+                Fail((ex as ServiceMaintenanceException)?.Code ?? "SERVICE_RESTART_FAILED", ex.Message, ex);
             }
             finally { RefreshUpdateSubscription(); }
         }
@@ -597,8 +656,9 @@ namespace CodingRiver.UPilot
                     if (process.HasExited) throw new ServiceMaintenanceException("SERVICE_RESTART_PROCESS_EXITED", "The original Server exited.");
                 var manager = UPilotMcpServerManager.Instance;
                 var status = await manager.GetRestartStatusAsync(r.deadlineAtUtcMs, cancellation.Token);
-                if (!ReferenceEquals(Current, r) || !r.Active || Journal.Expire() || cancellation.IsCancellationRequested) return;
+                if (!ReferenceEquals(Current, r) || !r.Active || ExpireMaintenance(r) || cancellation.IsCancellationRequested) return;
                 r.healthProbeError = status.ErrorMessage ?? "";
+                if (string.IsNullOrEmpty(r.healthProbeError)) Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(r));
                 if (status.HealthEndpointResponded && !r.healthVerified) { r.healthVerified = true; r.phase = "identity"; }
                 r.healthProbeElapsedMs = Math.Max(0, Now - r.healthProbeStartedAtUtcMs);
                 Journal.Save();
@@ -618,13 +678,14 @@ namespace CodingRiver.UPilot
                 if (issues.Length > 0) return;
                 r.phase = "readonly";
                 await manager.VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, r.deadlineAtUtcMs, cancellation.Token);
-                if (!ReferenceEquals(Current, r) || !r.Active || Journal.Expire() || cancellation.IsCancellationRequested) return;
+                if (!ReferenceEquals(Current, r) || !r.Active || ExpireMaintenance(r) || cancellation.IsCancellationRequested) return;
                 var verifiedBridge = UPilotBridge.Instance.GetStatus();
                 if (!verifiedBridge.IsWsOpen || !verifiedBridge.IsAuthenticated || verifiedBridge.SessionId != bridge.SessionId) return;
                 r.newServerProcessId = status.ProcessId ?? 0;
                 r.newBridgeSessionId = bridge.SessionId;
                 r.readOnlyVerified = true;
                 r.Finish("succeeded", "", "", Now);
+                ServiceMaintenanceJournal.ReportTerminal(r);
                 Journal.Save();
             }
             catch (Exception ex)
@@ -632,11 +693,17 @@ namespace CodingRiver.UPilot
                 if (!ReferenceEquals(Current, r) || !r.Active || cancellation.IsCancellationRequested) return;
                 r.healthProbeError = UPilotMcpServerManager.DescribeProbeException(ex);
                 r.healthProbeElapsedMs = Math.Max(0, Now - r.healthProbeStartedAtUtcMs);
-                if (Journal.Expire()) return;
-                if (ex is ServiceMaintenanceException specific) Fail(specific.Code, specific.Message);
-                else if (ex is ArgumentException) Fail("SERVICE_RESTART_PROCESS_EXITED", "The original Server process no longer exists.");
-                else if (ex is InvalidOperationException) Fail("SERVICE_RESTART_VALIDATION_FAILED", r.healthProbeError);
-                else Journal.Save(); // Transient transport errors consume only the original budget.
+                if (ExpireMaintenance(r)) return;
+                if (ex is ServiceMaintenanceException specific) Fail(specific.Code, specific.Message, ex);
+                else if (ex is ArgumentException) Fail("SERVICE_RESTART_PROCESS_EXITED", "The original Server process no longer exists.", ex);
+                else if (ex is InvalidOperationException) Fail("SERVICE_RESTART_VALIDATION_FAILED", r.healthProbeError, ex);
+                else
+                {
+                    // Transient transport errors consume only the original budget.
+                    Logger.ReportWarning("SERVICE", $"维护验证暂时失败，将在原期限内继续观察 maintenanceId={r.maintenanceId} phase={r.phase}\n{ex}",
+                        ServiceMaintenanceJournal.MaintenanceScope(r), fingerprint: "probe|" + ex.GetType().FullName + "|" + ex.Message);
+                    Journal.Save();
+                }
             }
             finally
             {
@@ -648,7 +715,12 @@ namespace CodingRiver.UPilot
                     if (ReferenceEquals(Current, r) && r.Active)
                     {
                         try { Journal.Save(); }
-                        catch (Exception ex) { _storageError = ex.Message; }
+                        catch (Exception ex)
+                        {
+                            _storageError = ex.Message;
+                            Logger.ReportFailure("SERVICE", $"维护观察记录保存失败 maintenanceId={r.maintenanceId}", ex,
+                                ServiceMaintenanceJournal.MaintenanceScope(r));
+                        }
                     }
                 }
                 cancellation.Dispose();
@@ -656,14 +728,32 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static void Fail(string code, string message)
+        private static bool ExpireMaintenance(ServiceMaintenanceRecord record)
+        {
+            var restart = UPilotServerRestartDiagnostics.Current;
+            bool managerOwnsDiagnostic = !string.IsNullOrEmpty(record.serverRestartId) &&
+                restart?.operationId == record.serverRestartId && restart.status != "succeeded" &&
+                (restart.status != "running" || UPilotMcpServerManager.Instance.IsServiceTransitionActive);
+            if (!Journal.Expire(reportFailure: !managerOwnsDiagnostic)) return false;
+            Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(record));
+            return true;
+        }
+
+        private static void Fail(string code, string message, Exception exception = null, bool reportedByRestart = false)
         {
             var r = Current;
             if (r?.Active != true) return;
             _probeCancellation?.Cancel();
             r.Finish(code == "SERVICE_RESTART_TIMEOUT" ? "timed_out" : "failed", code, message, Now);
+            if (reportedByRestart) Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(r));
+            else ServiceMaintenanceJournal.ReportTerminal(r, exception);
             try { Journal.Save(); }
-            catch (Exception ex) { _storageError = ex.Message; }
+            catch (Exception ex)
+            {
+                _storageError = ex.Message;
+                Logger.ReportFailure("SERVICE", $"维护终态记录保存失败 maintenanceId={r.maintenanceId}", ex,
+                    ServiceMaintenanceJournal.MaintenanceScope(r));
+            }
             try { UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId); }
             finally { RefreshUpdateSubscription(); }
         }

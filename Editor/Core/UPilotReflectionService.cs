@@ -169,7 +169,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "TYPE_QUERY_FAILED", ex.Message, token, "reflection.typeExists");
+                await _bridge.SendErrorAsync(id, "TYPE_QUERY_FAILED", ex.Message, token, "reflection.typeExists", errorDetail: null, exception: ex);
             }
         }
 
@@ -250,7 +250,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "REFLECTION_FIND_FAILED", ex.Message, token, "reflection.find");
+                await _bridge.SendErrorAsync(id, "REFLECTION_FIND_FAILED", ex.Message, token, "reflection.find", errorDetail: null, exception: ex);
             }
         }
 

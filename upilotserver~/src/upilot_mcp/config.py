@@ -22,6 +22,7 @@ class UPilotConfig:
     ws_port: int = 8765
     context_stale_ms: int = 5000
     flow_enabled: bool = False
+    log_retention_days: int = 3
     write_access_approved: bool = False
     unsaved_scene_policy: str = "block"
     automation_authorization_scopes: tuple[str, ...] = ()
@@ -62,6 +63,9 @@ def _config_from_raw(raw: dict[str, Any]) -> UPilotConfig:
     features = raw.get("features") if isinstance(raw.get("features"), dict) else {}
     flow = features.get("flow") if isinstance(features.get("flow"), dict) else {}
     safety = raw.get("safety") if isinstance(raw.get("safety"), dict) else {}
+    logging_config = raw.get("logging") if isinstance(raw.get("logging"), dict) else {}
+    days = logging_config.get("retentionDays", 3)
+    days = days if type(days) is int and 1 <= days <= 365 else 3
     requested_unsaved_scene_policy = str(safety.get("unsavedScenePolicy") or "block").strip().lower()
     unsaved_scene_policy = (
         "autoSave" if requested_unsaved_scene_policy == "autosave"
@@ -86,6 +90,7 @@ def _config_from_raw(raw: dict[str, Any]) -> UPilotConfig:
         ws_port=env_int("UPILOT_PORT", int(mcp.get("wsPort") or 8765)),
         context_stale_ms=max(250, int(cache.get("contextStaleMs") or 5000)),
         flow_enabled=bool(flow.get("enabled", False)),
+        log_retention_days=days,
         write_access_approved=bool(safety.get("writeAccessApproved", False)),
         unsaved_scene_policy=unsaved_scene_policy,
         automation_authorization_scopes=normalize_scopes(safety.get("automationAuthorizationScopes")),
@@ -147,7 +152,7 @@ def refresh_config_if_changed(force: bool = False) -> dict[str, Any]:
             disk_config = _config_from_raw(_CONFIG_RAW_CACHE)
             if force or disk_hash != _CONFIG_LAST_DISK_HASH:
                 for field in (
-                    "context_stale_ms", "flow_enabled", "write_access_approved", "unsaved_scene_policy",
+                    "context_stale_ms", "flow_enabled", "log_retention_days", "write_access_approved", "unsaved_scene_policy",
                     "automation_authorization_scopes", "automation_authorization_catalog_hash",
                     "automation_authorization_scope_version", "automation_authorization_approved_at_utc",
                 ):

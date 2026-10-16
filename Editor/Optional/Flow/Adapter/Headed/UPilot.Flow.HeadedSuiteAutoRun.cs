@@ -47,7 +47,7 @@ namespace CodingRiver.UPilot.Flow.EditorAutomation
             string requestPath = GetRequestPath();
             string resultPath = GetResultPath();
             string errorPath = GetErrorPath();
-            string reportRoot = Path.Combine(GetProjectRoot(), "Reports", "HeadedAll");
+            string reportRoot = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHeadedReports, GetProjectRoot());
             string screenshotRoot = Path.Combine(reportRoot, "Screenshots");
 
             try
@@ -107,7 +107,6 @@ namespace CodingRiver.UPilot.Flow.EditorAutomation
             {
                 SessionState.EraseBool(SessionKey);
                 _scheduled = false;
-                AssetDatabase.Refresh();
             }
         }
 
@@ -146,12 +145,12 @@ namespace CodingRiver.UPilot.Flow.EditorAutomation
 
         private static string GetResultPath()
         {
-            return Path.Combine(GetProjectRoot(), "Reports", "HeadedAll", "headed-suite-summary.txt");
+            return Path.Combine(UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHeadedReports, GetProjectRoot()), "headed-suite-summary.txt");
         }
 
         private static string GetErrorPath()
         {
-            return Path.Combine(GetProjectRoot(), "Reports", "HeadedAll", "headed-suite-error.txt");
+            return Path.Combine(UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHeadedReports, GetProjectRoot()), "headed-suite-error.txt");
         }
     }
 }

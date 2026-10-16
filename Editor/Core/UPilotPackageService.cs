@@ -99,7 +99,7 @@ namespace CodingRiver.UPilot
             }
             catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_ADD_FAILED" : ex.Code, ex.Message, token, "package.add");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_ADD_FAILED" : ex.Code, ex.Message, token, "package.add", errorDetail: null, exception: ex);
                 return;
             }
 
@@ -130,7 +130,7 @@ namespace CodingRiver.UPilot
             }
             catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_REMOVE_FAILED" : ex.Code, ex.Message, token, "package.remove");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_REMOVE_FAILED" : ex.Code, ex.Message, token, "package.remove", errorDetail: null, exception: ex);
                 return;
             }
 
@@ -153,7 +153,7 @@ namespace CodingRiver.UPilot
             }
             catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_LIST_FAILED" : ex.Code, ex.Message, token, "package.list");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_LIST_FAILED" : ex.Code, ex.Message, token, "package.list", errorDetail: null, exception: ex);
                 return;
             }
 
@@ -185,7 +185,7 @@ namespace CodingRiver.UPilot
             }
             catch (UPilotUpmRequestException ex)
             {
-                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_SEARCH_FAILED" : ex.Code, ex.Message, token, "package.search");
+                await _bridge.SendErrorAsync(id, ex.Code == "UPM_REQUEST_FAILED" ? "PACKAGE_SEARCH_FAILED" : ex.Code, ex.Message, token, "package.search", errorDetail: null, exception: ex);
                 return;
             }
 

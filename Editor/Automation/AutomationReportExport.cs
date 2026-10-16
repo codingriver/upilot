@@ -31,6 +31,15 @@ namespace CodingRiver.UPilot.Automation
                 Field("Console blocked / allowed / ignored / lost", Number(log.blockedCount) + " / "
                     + Number(log.allowedCount) + " / " + Number(log.ignoredCount) + " / " + Number(log.lostRecordCount));
             }
+            if (summary.gizmos?.policyVersion > 0)
+            {
+                Field("Gizmos initialization completed", summary.gizmos.initializationCompleted ? "true" : "false");
+                Field("Gizmos final close verified", summary.gizmos.finalCloseVerified ? "true" : "false");
+                foreach (var item in summary.gizmos.observations)
+                    Field("Gizmos", item.phase + " | " + item.view + " | " + item.windowId + " | desired=" + item.desired
+                        + " | actual=" + (item.actualKnown ? item.actual.ToString() : "unknown") + " | " + item.status
+                        + " | " + item.code + " | " + item.message);
+            }
             text.Append("\r\nSteps / Cases\r\n");
             foreach (var item in summary.cases ?? Array.Empty<AutomationReportCase>())
                 text.Append(Line(item.id)).Append(" | ").Append(Line(item.stepId)).Append(" | ")

@@ -397,7 +397,7 @@ namespace CodingRiver.UPilot
             });
 
             try { await _bridge.SendResultAsync(id, "snapshot.cameraList", await completion.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SNAPSHOT_CAMERA_LIST_FAILED", ex.Message, token, "snapshot.cameraList"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SNAPSHOT_CAMERA_LIST_FAILED", ex.Message, token, "snapshot.cameraList", errorDetail: null, exception: ex); }
         }
 
         private async Task HandleStartAsync(string id, string json, CancellationToken token)
@@ -412,8 +412,8 @@ namespace CodingRiver.UPilot
             });
 
             try { await _bridge.SendResultAsync(id, "snapshot.start", await accepted.Task, token); }
-            catch (SnapshotRequestException ex) { await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "snapshot.start"); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SNAPSHOT_START_FAILED", ex.Message, token, "snapshot.start"); }
+            catch (SnapshotRequestException ex) { await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "snapshot.start", errorDetail: null, exception: ex); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SNAPSHOT_START_FAILED", ex.Message, token, "snapshot.start", errorDetail: null, exception: ex); }
         }
 
         private async Task HandleStatusAsync(string id, string json, CancellationToken token)
@@ -2039,7 +2039,7 @@ namespace CodingRiver.UPilot
         {
             var root = ProjectRoot();
             var value = string.IsNullOrWhiteSpace(raw)
-                ? Path.Combine("Log", "UPilotSnapshots", DateTime.UtcNow.ToString("yyyyMMdd", CultureInfo.InvariantCulture), snapshotId)
+                ? Path.Combine(UPilotOutputPaths.Snapshots, DateTime.UtcNow.ToString("yyyyMMdd", CultureInfo.InvariantCulture), snapshotId)
                 : raw.Trim();
             var full = Path.GetFullPath(Path.IsPathRooted(value) ? value : Path.Combine(root, value));
             var rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
@@ -2248,7 +2248,7 @@ namespace CodingRiver.UPilot
             // State loss is recoverable only from the product-owned output roots.
             // We intentionally do not scan Assets, Packages, or arbitrary caller
             // directories and never consider temporary files authoritative.
-            foreach (var rootName in new[] { "Log", "Temp" })
+            foreach (var rootName in new[] { UPilotOutputPaths.Snapshots })
             {
                 var root = ProjectAbsolute(rootName);
                 if (!Directory.Exists(root)) continue;

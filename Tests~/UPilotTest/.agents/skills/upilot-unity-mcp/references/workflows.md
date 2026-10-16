@@ -84,7 +84,7 @@ UPilot Step is the default testing framework, not mandatory for every business t
 
 1. In the canonical `./Tests~/UPilotTest` project call `unity_upilot_acceptance_run` and retain the immediately returned `taskId`; `preflightOnly=true` remains a synchronous, read-only preflight.
 2. Poll that Task with `unity_task_status` until terminal. Submission `ok=true` means queued, not accepted; the background Task verifies project identity, checks captures, compiles, discovers/runs tests, and checks compile/Console errors.
-3. Preserve the final Task's `Log/UPilotAcceptance/<timestamp>/summary.json` metadata and SHA256.
+3. Preserve the final Task's `Logs/UPilot/Reports/Acceptance/<timestamp>/summary.json` metadata and SHA256.
 4. Do not start a persistent capture around this workflow because ConsoleCaptureService self-tests require no live capture.
 
 ### Observe By Original Identity

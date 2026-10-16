@@ -24,13 +24,18 @@ namespace CodingRiver.UPilot
         private int _stoppingHttpPort, _stoppingWsPort;
         private bool _initialServiceRecoveryCompleted;
         private bool _initialServiceRecoveryHadPersistedState;
+        private CancellationTokenSource _stoppedIdentityRecoveryCancellation;
+        private Task _stoppedIdentityRecoveryTask;
 
         internal bool InitialServiceRecoveryCompleted => _initialServiceRecoveryCompleted;
+        internal Task StoppedIdentityRecovery => _stoppedIdentityRecoveryTask ?? Task.CompletedTask;
         internal bool CanAutomaticallyStartServer =>
-            _initialServiceRecoveryCompleted && !_initialServiceRecoveryHadPersistedState;
-        internal bool CanAutomaticallyRepairDeployment => _initialServiceRecoveryCompleted &&
+            _initialServiceRecoveryCompleted && !_initialServiceRecoveryHadPersistedState &&
+            !ExistingServiceRecoveryOwnsStartup && !StopBlocksAutomaticRecovery;
+        internal bool CanAutomaticallyRepairDeployment => _initialServiceRecoveryCompleted && !StopBlocksAutomaticRecovery &&
+            (!ExistingServiceRecoveryOwnsStartup || HasVerifiedRecoveredAttachment) &&
             (!_initialServiceRecoveryHadPersistedState || (PeriodicHealthChecksAllowed &&
-             (string.IsNullOrEmpty(_launchState?.reloadRevalidation?.observationId) ||
+             (HasVerifiedAttachment || string.IsNullOrEmpty(_launchState?.reloadRevalidation?.observationId) ||
               _launchState.reloadRevalidation.status == "succeeded")));
 
         // Called after Instance has been published, by the first Editor callback or an explicit action.
@@ -40,11 +45,27 @@ namespace CodingRiver.UPilot
             EditorApplication.update -= EnsureInitialServiceRecovery;
             EditorApplication.delayCall -= EnsureInitialServiceRecovery;
             if (_initialServiceRecoveryCompleted) return;
+            if (BeginCurrentEditorRecoverySession())
+            {
+                // Disk history belongs to the former Unity process. It is evidence, not a task
+                // to resume in this Editor; live discovery below does not need a former PID.
+                if (UPilotServerRestartDiagnostics.TryGetActive(out var formerRestart))
+                    UPilotServerRestartDiagnostics.RecordCanceled(formerRestart.operationId,
+                        "Unity Editor 会话已变化；保留旧重启记录，新会话独立检查当前配置的遗留服务。");
+                UPilotQuickStart.ClearPriorEditorRecoveryFailures();
+            }
+            RestoreExistingServiceRecovery();
             _initialServiceRecoveryHadPersistedState =
                 !string.IsNullOrEmpty(SessionState.GetString(LaunchSessionKey, "")) ||
                 UPilotServerRestartDiagnostics.TryGetActive(out _);
             try
             {
+                if (RestoreStopObservation())
+                {
+                    _initialServiceRecoveryHadPersistedState = true;
+                    RestoreRestartStopObservation();
+                    return;
+                }
                 RestoreLaunchObservation();
                 ResumePersistedRestartObservation();
             }
@@ -54,7 +75,7 @@ namespace CodingRiver.UPilot
 
         // 描述只通过副本暴露；调用方不能改变本次操作的身份依据。
         internal ServerLaunchState LaunchIdentity => _launchState?.Snapshot();
-        internal ServerLaunchSpec LaunchSpec => _launchState?.spec?.Snapshot();
+        internal ServerLaunchSpec LaunchSpec => (_launchState?.spec ?? _recoveredServiceSpec)?.Snapshot();
 
         private ServerLaunchSpec PrepareLaunchSpec(long deadline)
         {
@@ -80,6 +101,7 @@ namespace CodingRiver.UPilot
         /// <summary>所有启动描述共用唯一服务启动入口。</summary>
         private void LaunchServer(ServerLaunchSpec spec, long deadline)
         {
+            ReleaseRecoveredServiceAttachment(resetPriorRecovery: true);
             spec = spec.Snapshot();
             if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= deadline)
                 throw new TimeoutException("本次启动期限已到，未启动服务");
@@ -103,6 +125,7 @@ namespace CodingRiver.UPilot
                 spec = spec, launcherPid = process.Id,
                 launcherCreatedAt = process.StartTime.ToUniversalTime().Ticks, deadlineUtcMs = deadline,
             };
+            RecordExistingServiceReplacement(process.Id);
             _pendingLaunchDeadline = 0;
             _launchNeedsRevalidation = false;
             _trackedProcess = Process.GetProcessById(process.Id);
@@ -119,16 +142,23 @@ namespace CodingRiver.UPilot
             BeginLaunchObservation();
         }
 
-        private void PersistLaunchState() => SessionState.SetString(LaunchSessionKey,
-            _launchState == null ? "" : JsonUtility.ToJson(_launchState));
+        private void PersistLaunchState()
+        {
+            SessionState.SetString(LaunchSessionKey, _launchState == null ? "" : JsonUtility.ToJson(_launchState));
+            ObserveExistingServiceReplacementOutcome();
+        }
 
         private void BeforeLaunchDomainReload()
         {
             EditorApplication.update -= EnsureInitialServiceRecovery;
             EditorApplication.delayCall -= EnsureInitialServiceRecovery;
             // A second Reload can precede the first restore callback; preserve the saved identity.
-            if (_initialServiceRecoveryCompleted) PersistLaunchState();
+            if (_initialServiceRecoveryCompleted && (_launchState != null ||
+                (_stopObservation?.status != "failed" && _stopObservation?.status != "timed_out")))
+                PersistLaunchState();
             _lifecycleQueryCancellation?.Cancel();
+            _stoppedIdentityRecoveryCancellation?.Cancel();
+            BeforeExistingServiceRecoveryReload();
             StopLaunchObservation();
             _launcherProcess?.Dispose();
             _launcherProcess = null;
@@ -297,6 +327,9 @@ namespace CodingRiver.UPilot
                 var serviceAfter = ServerProcessIdentity.Read(candidate);
                 error = ServerProcessIdentity.VerifyUnchanged(launcher, launchAfter, service, serviceAfter);
                 if (error.Length != 0) return false;
+                if (state.servicePid > 0 && state.serviceCreatedAt > 0 &&
+                    (service.pid != state.servicePid || service.createdAt != state.serviceCreatedAt))
+                { error = "service_identity_changed_or_expired"; return false; }
                 if (!state.TryConfirm(service.pid, service.createdAt, status.Health.server_instance_id,
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), stopping)) { error = "service_identity_changed_or_expired"; return false; }
                 DisposeTrackedProcess();
@@ -367,7 +400,95 @@ namespace CodingRiver.UPilot
                  record.launcherProcessId == state.launcherPid && record.launcherProcessCreatedAtTicks == state.launcherCreatedAt &&
                  record.newProcessId == state.servicePid && record.newProcessCreatedAtTicks == state.serviceCreatedAt));
 
-        private void RestoreLaunchObservation()
+        private void RestoreLaunchObservation() => RestoreLaunchState(observe: true);
+
+        internal static bool TryCreateStoppedIdentityRecoveryCandidate(UPilotServerRestartRecord record,
+            ServiceStopObservationRecord stop, out ServerLaunchState candidate)
+        {
+            candidate = null;
+            if (stop == null || (stop.status != "failed" && stop.status != "timed_out") ||
+                !stop.MatchesScope(UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id, Process.GetCurrentProcess().Id) ||
+                record?.status != "succeeded" || !record.healthVerified || !record.projectIdentityVerified ||
+                !record.bridgeVerified || !record.deploymentVerified || !record.readOnlyVerified ||
+                record.launcherProcessId <= 0 || record.launcherProcessCreatedAtTicks <= 0 ||
+                record.newProcessId <= 0 || record.newProcessCreatedAtTicks <= 0 || record.healthProcessId != record.newProcessId ||
+                record.launchSpec == null || record.launchSpec.Validate().Length != 0 ||
+                !UPilotDeploymentDiagnostics.SamePath(record.projectPath, stop.project) ||
+                !UPilotDeploymentDiagnostics.SamePath(record.healthProjectPath, stop.project) ||
+                !UPilotDeploymentDiagnostics.SamePath(record.launchSpec.projectPath, stop.project) ||
+                record.launchSpec.httpPort != stop.httpPort || record.launchSpec.wsPort != stop.wsPort ||
+                !record.launchSpec.TryGetLogFilePath(out _) ||
+                !UPilotDeploymentDiagnostics.SamePath(record.actualEntry, record.launchSpec.expectedEntry) ||
+                (!string.IsNullOrEmpty(record.launchSpec.expectedModuleRoot) &&
+                 !UPilotDeploymentDiagnostics.SamePath(record.actualModule, record.launchSpec.expectedModuleRoot))) return false;
+            candidate = new ServerLaunchState { spec = record.launchSpec.Snapshot(), launcherPid = record.launcherProcessId,
+                launcherCreatedAt = record.launcherProcessCreatedAtTicks, servicePid = record.newProcessId,
+                serviceCreatedAt = record.newProcessCreatedAtTicks,
+                deadlineUtcMs = record.deadlineAtUtcMs > 0 ? record.deadlineAtUtcMs : record.maintenanceDeadlineUtcMs };
+            return true; // Historical evidence selects a candidate; only fresh OS/health can verify it.
+        }
+
+        private async Task RestoreStoppedIdentityFromHistoryAsync(ServerLaunchState candidate,
+            ServiceStopObservationRecord stop, int startGeneration, long restartGeneration,
+            CancellationTokenSource cancellation)
+        {
+            bool Current() => ReferenceEquals(_stopObservation, stop) && _launchState == null &&
+                _startAttemptGeneration == startGeneration && _restartGeneration == restartGeneration &&
+                stop.MatchesScope(UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id, Process.GetCurrentProcess().Id);
+            Process launcher = null;
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 8000;
+            try
+            {
+                cancellation.CancelAfter(8000);
+                var status = await GetRestartStatusAsync(deadline,
+                    cancellation.Token, candidate.spec);
+                if (!Current() || cancellation.IsCancellationRequested) return;
+                if (status.ProcessId != candidate.servicePid)
+                    throw new InvalidOperationException("停止失败后的历史服务候选与当前端口或 health PID 不符");
+                launcher = Process.GetProcessById(candidate.launcherPid);
+                var launcherHandle = launcher.Handle;
+                if (launcher.HasExited || launcher.StartTime.ToUniversalTime().Ticks != candidate.launcherCreatedAt ||
+                    !UPilotDeploymentDiagnostics.SamePath(launcher.MainModule.FileName, candidate.spec.executablePath))
+                    throw new InvalidOperationException("停止失败后的历史启动器候选已退出或身份变化");
+                using var service = Process.GetProcessById(candidate.servicePid);
+                var serviceHandle = service.Handle;
+                var expectedCreatedAt = candidate.serviceCreatedAt;
+                if (service.HasExited || service.StartTime.ToUniversalTime().Ticks != expectedCreatedAt)
+                    throw new InvalidOperationException("停止失败后的历史服务候选已退出或创建时间变化");
+                _launcherProcess = launcher;
+                _launchState = candidate;
+                if (!TryResolveStartedService(candidate, status, out var error, stopping: true) ||
+                    candidate.serviceCreatedAt != expectedCreatedAt)
+                    throw new InvalidOperationException("停止失败后的历史候选未通过完整实时身份核验：" + error);
+                launcher = null;
+                _launchNeedsRevalidation = true;
+                NotifyStatusChanged();
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested &&
+                (!Current() || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < deadline)) { }
+            catch (Exception ex)
+            {
+                if (ReferenceEquals(_launchState, candidate))
+                {
+                    _launchState = null;
+                    _launcherProcess = null;
+                    DisposeTrackedProcess();
+                    _trackedProcessId = null;
+                }
+                if (ReferenceEquals(_stopObservation, stop) && _startAttemptGeneration == startGeneration &&
+                    _restartGeneration == restartGeneration)
+                    Logger.ReportFailure("SERVER", "停止失败后的历史候选实时核验失败；未重放停启，也未修改历史结果。", ex,
+                        scope: stop.id, terminal: true);
+            }
+            finally
+            {
+                launcher?.Dispose();
+                if (ReferenceEquals(_stoppedIdentityRecoveryCancellation, cancellation)) _stoppedIdentityRecoveryCancellation = null;
+                cancellation.Dispose();
+            }
+        }
+
+        private void RestoreLaunchState(bool observe)
         {
             var json = SessionState.GetString(LaunchSessionKey, "");
             if (string.IsNullOrEmpty(json)) return;
@@ -376,10 +497,12 @@ namespace CodingRiver.UPilot
                 var state = JsonUtility.FromJson<ServerLaunchState>(json);
                 if (state?.spec == null || state.spec.Validate().Length != 0 ||
                     !UPilotDeploymentDiagnostics.SamePath(state.spec.projectPath, UPilotProjectConfig.ProjectRoot)) return;
+                if (!observe && !TryGetVerifiedOwnershipLogPath(state, UPilotProjectConfig.ProjectRoot,
+                    _stopObservation.httpPort, _stopObservation.wsPort, out _)) return;
                 _launchState = state;
                 // 不更新期限，不重放启动，不恢复任何业务任务。
                 _launchNeedsRevalidation = state.verified;
-                _launchReloadRevalidation = HasCompletedLaunchVerification(state, UPilotServerRestartDiagnostics.Current);
+                _launchReloadRevalidation = observe && HasCompletedLaunchVerification(state, UPilotServerRestartDiagnostics.Current);
                 if (_launchReloadRevalidation && !state.terminal)
                 {
                     // Unity's inline class serialization can materialize null as an empty object.
@@ -392,17 +515,22 @@ namespace CodingRiver.UPilot
                 var handle = _launcherProcess.Handle;
                 if (_launcherProcess.HasExited || _launcherProcess.StartTime.ToUniversalTime().Ticks != state.launcherCreatedAt)
                     throw new InvalidOperationException("启动进程在 Reload 后身份不符");
+                if (!observe && !UPilotDeploymentDiagnostics.SamePath(_launcherProcess.MainModule.FileName, state.spec.executablePath))
+                    throw new InvalidOperationException("启动进程可执行文件在 Reload 后身份不符");
                 _trackedProcessId = state.verified ? state.servicePid : state.launcherPid;
                 _trackedProcessCreatedAtTicks = state.verified ? state.serviceCreatedAt : state.launcherCreatedAt;
                 _trackedProcess = Process.GetProcessById(_trackedProcessId.Value);
                 handle = _trackedProcess.Handle;
                 if (_trackedProcess.HasExited || _trackedProcess.StartTime.ToUniversalTime().Ticks != _trackedProcessCreatedAtTicks)
                     throw new InvalidOperationException("服务进程在 Reload 后身份不符");
-                if (!state.terminal)
+                if (!observe && !Array.Exists(state.spec.serviceExecutablePaths,
+                    path => UPilotDeploymentDiagnostics.SamePath(path, _trackedProcess.MainModule.FileName)))
+                    throw new InvalidOperationException("服务进程可执行文件在 Reload 后身份不符");
+                if (observe && !state.terminal)
                     SetLifecyclePhase(state.verified ? UPilotServerLifecyclePhase.Verifying : UPilotServerLifecyclePhase.Starting,
                         state.launcherPid, IsRestartObservationActive() ? _restartOperationId : _launchReloadRevalidation ? state.reloadRevalidation.observationId : Guid.NewGuid().ToString("N"),
                         _launchReloadRevalidation ? state.reloadRevalidation.deadlineUtcMs : state.deadlineUtcMs);
-                if (!state.terminal)
+                if (observe && !state.terminal)
                 {
                     BeginLaunchObservation();
                     if (_launchReloadRevalidation) _launchNextProbeAt = state.reloadRevalidation.nextProbeAtUtcMs;
@@ -411,7 +539,13 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 StopLaunchObservation();
-                if (_launchState != null)
+                if (!observe)
+                {
+                    _launchState = null;
+                    Logger.ReportFailure("SERVER", "停止失败后恢复冻结启动身份失败；未恢复进程归属或重放停启。", ex,
+                        scope: _stopObservation.id, terminal: true);
+                }
+                else if (_launchState != null)
                 {
                     _launchState.error = "reload_identity_unverified: " + ex.Message;
                     _launchState.terminal = true;
@@ -422,75 +556,17 @@ namespace CodingRiver.UPilot
                 }
                 _launcherProcess?.Dispose(); _launcherProcess = null;
                 DisposeTrackedProcess(); _trackedProcessId = null;
-                PersistLaunchState();
+                if (observe) PersistLaunchState();
             }
-        }
-
-        private PreparedProcessStop PrepareTrackedServiceStop(PreparedProcessStop prepared, int expectedProcessId)
-        {
-            var state = _launchState;
-            if (!state.verified && _launcherProcess != null && !_launcherProcess.HasExited)
-            {
-                // 新的显式停止只观察旧服务身份，不复活已失败维护、不修改旧操作/截止时间。
-                var status = GetStatus();
-                if (expectedProcessId > 0 && status.ProcessId != expectedProcessId)
-                    throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "停止观察与期望服务不符");
-                if (!TryResolveStartedService(state, status, out var error, stopping: true))
-                    throw new InvalidOperationException("停止前服务身份仍未核实：" + error);
-            }
-            var ports = SafeGetListeningPortsByPid(out var portsKnown);
-            if (!state.verified)
-            {
-                // 失败且启动器已经退出时，只允许无监听的空停止；不猜测子进程。
-                if (_launcherProcess == null || !_launcherProcess.HasExited || expectedProcessId > 0)
-                    throw new InvalidOperationException("服务身份尚未核实，拒绝停止未知服务进程：" + state.error);
-                ValidateStopPortOwnership(ports, portsKnown, Array.Empty<int>(), prepared.HttpPort, prepared.WsPort);
-                return prepared;
-            }
-            ValidateStopPortOwnership(ports, portsKnown, new[] { state.servicePid }, prepared.HttpPort, prepared.WsPort);
-            if (expectedProcessId > 0 && expectedProcessId != state.servicePid)
-                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "服务身份与停止请求不符");
-            if (_trackedProcess == null || _trackedProcess.Id != state.servicePid ||
-                _trackedProcess.StartTime.ToUniversalTime().Ticks != state.serviceCreatedAt)
-                throw new InvalidOperationException("服务句柄身份已变化，未执行停止");
-            if (_trackedProcess.HasExited)
-            {
-                ValidateStopPortOwnership(ports, portsKnown, Array.Empty<int>(), prepared.HttpPort, prepared.WsPort);
-                if (expectedProcessId > 0) throw new InvalidOperationException("期望服务已退出");
-                return prepared;
-            }
-            Process service = null;
-            try
-            {
-                service = Process.GetProcessById(state.servicePid);
-                var handle = service.Handle;
-                var identity = ServerProcessIdentity.Read(service);
-                if (!identity.alive || identity.createdAt != state.serviceCreatedAt ||
-                    !Array.Exists(state.spec.serviceExecutablePaths, path => UPilotDeploymentDiagnostics.SamePath(path, identity.executable)))
-                    throw new InvalidOperationException("服务创建时间或可执行文件与冻结身份不符");
-                var command = GetProcessCommandLineForDiagnostics(service.Id);
-                if (!ServerProcessIdentity.MatchesCommandLine(state.spec, command))
-                    throw new InvalidOperationException("服务启动参数与冻结身份不符");
-                service.Refresh();
-                if (service.HasExited || service.StartTime.ToUniversalTime().Ticks != state.serviceCreatedAt)
-                    throw new InvalidOperationException("停止证据采集期间服务身份变化");
-                prepared.Add(service, command);
-                service = null;
-                return prepared;
-            }
-            finally { service?.Dispose(); }
         }
 
         private void ReleaseLaunchAfterStop()
         {
             _launchState?.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), false, "service_stopped");
             StopLaunchObservation();
-            // 只观察启动器自然退出，不递归杀进程树；未退出会使原退出验证门失败。
-            if (_launcherProcess != null)
-            {
-                _stoppingProcesses.Add(_launcherProcess);
-                _launcherProcess = null;
-            }
+            // The current entry/ports discovery owns every stop handle, including launchers.
+            _launcherProcess?.Dispose();
+            _launcherProcess = null;
             _launchState = null;
             PersistLaunchState();
         }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..output_paths import DUMPS, output_path as project_output_path
+
 import asyncio
 from collections import Counter
 import csv
@@ -962,7 +964,7 @@ class ProjectAnalysisDomainService:
         root = self._analysis_project_root()
         if root is None:
             return fail(request_id, "UNITY_PROJECT_UNKNOWN", "Unity project path is not available.")
-        target = Path(output_path) if output_path else root / "Log" / "UPilotDiagnostics" / f"unity-{pid}-{now_ms()}.dmp"
+        target = Path(output_path) if output_path else project_output_path(root, DUMPS) / f"unity-{pid}-{now_ms()}.dmp"
         if not target.is_absolute():
             target = root / target
         try:

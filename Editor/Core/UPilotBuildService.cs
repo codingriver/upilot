@@ -137,6 +137,9 @@ namespace CodingRiver.UPilot
             }
 
             var lifetime = UPilotServiceLifetime.Id;
+            var buildStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            Exception buildException = null;
+            bool buildCancelled = false;
             opCtx?.Step("开始构建", $"target={target} scenes={scenes.Length}");
             _buildCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             _isBuildingAsync = true;
@@ -182,6 +185,7 @@ namespace CodingRiver.UPilot
                             result.summary = $"Build failed with {report.summary.totalErrors} error(s).";
                             break;
                         case BuildResult.Cancelled:
+                            buildCancelled = true;
                             result.status  = "failed";
                             result.summary = "Build was cancelled.";
                             break;
@@ -195,6 +199,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
+                    buildException = ex;
                     tcs.SetResult(new BuildStatusPayload
                     {
                         status      = "failed",
@@ -214,12 +219,13 @@ namespace CodingRiver.UPilot
                 if (lifetime != UPilotServiceLifetime.Id) return;
                 if (completed == timeoutTask && !tcs.Task.IsCompleted)
                 {
+                    buildCancelled = _buildCts.IsCancellationRequested;
                     _lastBuildStatus = new BuildStatusPayload
                     {
                         status      = "failed",
                         buildTarget = target.ToString(),
                         outputPath  = p.outputPath,
-                        summary     = "Build timed out after 600s.",
+                        summary     = buildCancelled ? "Build was cancelled." : "Build timed out after 600s.",
                     };
                 }
                 else
@@ -230,6 +236,7 @@ namespace CodingRiver.UPilot
             catch (OperationCanceledException)
             {
                 if (lifetime != UPilotServiceLifetime.Id) return;
+                buildCancelled = true;
                 _lastBuildStatus = new BuildStatusPayload
                 {
                     status      = "failed",
@@ -247,7 +254,17 @@ namespace CodingRiver.UPilot
                 }
             }
 
+            ReportBuildFailure(_lastBuildStatus, id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - buildStartedAt,
+                buildException, buildCancelled);
             await _bridge.SendResultAsync(id, "build.start", _lastBuildStatus, token);
+        }
+
+        internal static void ReportBuildFailure(BuildStatusPayload result, string requestId, long elapsedMs,
+            Exception exception = null, bool cancelled = false)
+        {
+            if (cancelled || result?.status != "failed") return;
+            Logger.ReportFailure("BUILD", $"构建失败 requestId={requestId} target={result.buildTarget} output={result.outputPath} " +
+                $"elapsedMs={elapsedMs}: {result.summary}", exception, requestId, terminal: true);
         }
 
         // ── build.status ────────────────────────────────────────────────────────
@@ -347,7 +364,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "BUILD_TARGETS_FAILED", ex.Message, token, "build.targets");
+                await _bridge.SendErrorAsync(id, "BUILD_TARGETS_FAILED", ex.Message, token, "build.targets", errorDetail: null, exception: ex);
             }
         }
 

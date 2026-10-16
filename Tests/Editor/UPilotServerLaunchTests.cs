@@ -2,8 +2,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -30,15 +36,17 @@ namespace CodingRiver.UPilot.Tests
         {
             var root = Path.Combine(Path.GetTempPath(), "upilot-launch-tests");
             var executable = Path.Combine(root, mode == "python" ? "venv/python.exe" : "upilot-mcp-server.exe");
-            return new ServerLaunchSpec
+            var spec = new ServerLaunchSpec
             {
                 executablePath = executable, projectPath = Path.Combine(root, "project"),
                 expectedEntry = mode == "python" ? Path.Combine(root, "run_upilot_mcp.py") : executable,
                 expectedModuleRoot = mode == "python" ? Path.Combine(root, "src/upilot_mcp") : "",
                 serviceExecutablePaths = mode == "python" ? new[] { executable, Path.Combine(root, "base/python.exe") } : new[] { executable },
-                httpPort = 18011, wsPort = 18765, arguments = "test",
+                httpPort = 18011, wsPort = 18765,
                 environmentKeys = new[] { "UPILOT_INSTALL_SOURCE" }, environmentValues = new[] { "Local" },
             };
+            spec.arguments = $"--http-port {spec.httpPort} --port {spec.wsPort} --log-file \"{UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, spec.projectPath)}\"";
+            return spec;
         }
 
         private static void Evidence(ServerLaunchSpec spec, bool child, out ServerProcessIdentity launch,
@@ -48,17 +56,233 @@ namespace CodingRiver.UPilot.Tests
                 alive = true, executable = spec.executablePath };
             service = child ? new ServerProcessIdentity { pid = 43, parentPid = 42, createdAt = 102,
                 alive = true, executable = spec.serviceExecutablePaths[spec.serviceExecutablePaths.Length - 1] } : launch;
+            Assert.That(spec.TryGetLogFilePath(out var logPath), Is.True);
             status = new McpServerStatus
             {
                 ProcessId = service.pid, ProcessOwnership = McpProcessOwnership.CurrentUPilot,
                 ProcessOwnershipEvidence = "监听端口与启动参数匹配", HttpPortListening = true, WsPortListening = true,
                 HealthEndpointResponded = true, HealthIdentifiesUPilot = true, HealthServerProcessId = service.pid,
                 HealthProjectPath = spec.projectPath,
-                ProcessCommandLine = $"\"{service.executable}\" \"{spec.expectedEntry}\" --http-port {spec.httpPort} --port {spec.wsPort} --log-file \"{Path.Combine(spec.projectPath, "log", "mcp-server.log")}\"",
+                ProcessCommandLine = $"\"{service.executable}\" \"{spec.expectedEntry}\" --http-port {spec.httpPort} --port {spec.wsPort} --log-file \"{logPath}\"",
                 Health = new UPilotServerHealth { server_pid = service.pid, server_instance_id = "instance",
                     configured_project_path = spec.projectPath, server_entry_path = spec.expectedEntry,
                     server_module_root = spec.expectedModuleRoot }
             };
+        }
+
+        [Test]
+        public void FrozenLogIdentityKeepsOneExactPathWhenOutputDefaultsChange()
+        {
+            var spec = Spec("python");
+            var currentPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, spec.projectPath);
+            var frozenPath = Path.Combine(spec.projectPath, "log", "mcp-server.log");
+            spec.arguments = spec.arguments.Replace(currentPath, frozenPath);
+            var snapshot = spec.Snapshot();
+            spec.arguments = spec.arguments.Replace(frozenPath, currentPath);
+
+            Assert.That(snapshot.TryGetLogFilePath(out var observed), Is.True);
+            Assert.That(observed, Is.EqualTo(frozenPath));
+            Evidence(snapshot, false, out var launch, out var service, out var status);
+            Assert.That(ServerProcessIdentity.Verify(snapshot, launch.pid, launch.createdAt, launch, service, status), Is.Empty);
+            Assert.That(ServerProcessIdentity.MatchesCommandLine(snapshot, status.ProcessCommandLine.Replace(frozenPath, currentPath)), Is.False);
+            Assert.That(ServerProcessIdentity.MatchesCommandLine(spec, status.ProcessCommandLine), Is.False);
+
+            var actualLegacyPath = Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
+            var oldCommand = $"run_upilot_mcp.py --http-port 18011 --port 18765 --log-file \"{actualLegacyPath}\"";
+            Assert.That(UPilotMcpServerManager.IsCurrentProjectMcpCommandLine(oldCommand, 18011, 18765), Is.False);
+        }
+
+        [TestCase("missing")]
+        [TestCase("relative")]
+        [TestCase("duplicate")]
+        [TestCase("duplicate_without_value")]
+        [TestCase("unclosed_quote")]
+        [TestCase("quoted_suffix")]
+        [TestCase("sibling_project")]
+        [TestCase("escaped_project")]
+        public void FrozenLogIdentityRejectsIncompleteAmbiguousOrForeignPaths(string scenario)
+        {
+            var spec = Spec("python");
+            var stable = UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, spec.projectPath);
+            switch (scenario)
+            {
+                case "missing": spec.arguments = "--http-port 18011 --port 18765"; break;
+                case "relative": spec.arguments = "--log-file log/mcp-server.log"; break;
+                case "duplicate": spec.arguments += $" --log-file \"{stable}\""; break;
+                case "duplicate_without_value": spec.arguments += " --log-file"; break;
+                case "unclosed_quote": spec.arguments = $"--log-file \"{stable}"; break;
+                case "quoted_suffix": spec.arguments = $"--log-file \"{stable}\"suffix"; break;
+                case "sibling_project": spec.arguments = $"--log-file \"{Path.Combine(spec.projectPath + "-other", "mcp-server.log")}\""; break;
+                case "escaped_project": spec.arguments = $"--log-file \"{Path.Combine(spec.projectPath, "..", "mcp-server.log")}\""; break;
+            }
+            Assert.That(spec.TryGetLogFilePath(out var observed), Is.False);
+            Assert.That(observed, Is.Null);
+            Assert.That(ServerProcessIdentity.MatchesCommandLine(spec,
+                $"--http-port 18011 --port 18765 --log-file \"{stable}\""), Is.False);
+        }
+
+        [TestCase("verified", true)]
+        [TestCase("unverified", false)]
+        [TestCase("missing_created_at", false)]
+        [TestCase("missing_instance", false)]
+        [TestCase("different_project", false)]
+        [TestCase("different_port", false)]
+        public void PeriodicOwnershipUsesFrozenPathOnlyForVerifiedExactServiceScope(string scenario, bool accepted)
+        {
+            var spec = Spec("python");
+            var currentPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, spec.projectPath);
+            var frozenPath = Path.Combine(spec.projectPath, "log", "mcp-server.log");
+            spec.arguments = spec.arguments.Replace(currentPath, frozenPath);
+            var state = new ServerLaunchState { spec = spec, verified = true, launcherPid = 42,
+                launcherCreatedAt = 100, servicePid = 42, serviceCreatedAt = 100, instanceId = "verified-instance" };
+            var intendedProject = spec.projectPath;
+            var intendedHttpPort = spec.httpPort;
+            switch (scenario)
+            {
+                case "unverified": state.verified = false; break;
+                case "missing_created_at": state.serviceCreatedAt = 0; break;
+                case "missing_instance": state.instanceId = ""; break;
+                case "different_project": intendedProject += "-other"; break;
+                case "different_port": intendedHttpPort++; break;
+            }
+            Assert.That(UPilotMcpServerManager.TryGetVerifiedOwnershipLogPath(state, intendedProject,
+                intendedHttpPort, spec.wsPort, out var observed), Is.EqualTo(accepted));
+            Assert.That(observed, accepted ? Is.EqualTo(frozenPath) : Is.Null);
+        }
+
+        [TestCase("same_state", true)]
+        [TestCase("same_values_new_state", false)]
+        [TestCase("changed_service_pid", false)]
+        [TestCase("changed_service_creation", false)]
+        [TestCase("changed_instance", false)]
+        [TestCase("changed_spec", false)]
+        public void ExplicitAttachmentProofKeepsHistoryAndBindsExactServiceIdentity(string scenario, bool expected)
+        {
+            var state = new ServerLaunchState { spec = Spec("python"), verified = true,
+                launcherPid = 42, launcherCreatedAt = 100, servicePid = 42, serviceCreatedAt = 100,
+                instanceId = "original-instance", deadlineUtcMs = 5000, terminal = true, error = "original terminal" };
+            var original = JsonUtility.ToJson(state);
+            var verification = new UPilotMcpServerManager.ServerAttachmentVerification(state);
+            Assert.That(verification.Matches(state), Is.True);
+            Assert.That(JsonUtility.ToJson(state), Is.EqualTo(original));
+            var candidate = state;
+            switch (scenario)
+            {
+                case "same_values_new_state": candidate = state.Snapshot(); break;
+                case "changed_service_pid": state.servicePid++; break;
+                case "changed_service_creation": state.serviceCreatedAt++; break;
+                case "changed_instance": state.instanceId = "replacement"; break;
+                case "changed_spec": state.spec = state.spec.Snapshot(); break;
+            }
+            Assert.That(verification.Matches(candidate), Is.EqualTo(expected));
+            Assert.That(state.deadlineUtcMs, Is.EqualTo(5000));
+            Assert.That(state.terminal, Is.True);
+            Assert.That(state.error, Is.EqualTo("original terminal"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ExplicitAttachmentTerminalFailureRetainsClassificationAndDoesNotWaitForever(bool timedOut)
+        {
+            var state = new ServerLaunchState { spec = Spec("python"), verified = true,
+                launcherPid = 42, launcherCreatedAt = 100, servicePid = 42, serviceCreatedAt = 100,
+                instanceId = "attachment-terminal", deadlineUtcMs = 5000, terminal = true, error = "original terminal" };
+            var original = JsonUtility.ToJson(state);
+            var manager = (UPilotMcpServerManager)FormatterServices.GetUninitializedObject(typeof(UPilotMcpServerManager));
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            void Set(string name, object value) => typeof(UPilotMcpServerManager).GetField(name, flags).SetValue(manager, value);
+            Set("_statusLock", new object());
+            Set("_launchState", state);
+            Set("_startAttemptGeneration", 7);
+            var operation = "attachment-terminal-" + Guid.NewGuid().ToString("N");
+            Exception exception = timedOut ? new TimeoutException("只读往返期限已到") :
+                new InvalidOperationException("实际只读往返身份不符");
+            var lifecycle = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, 42, operation,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 120000);
+            try
+            {
+                Assert.That(UPilotQuickStart.EvaluateAttachmentFailure(
+                    new UPilotMcpServerManager.ServerAttachmentFailure(state, 7, operation, exception),
+                    new McpServerStatus { LifecyclePhase = UPilotServerLifecyclePhase.Verifying }, true), Is.Null);
+                LogAssert.Expect(LogType.Error, new Regex("显式附着失败；operationId=" + operation + ".*"));
+                Assert.That(manager.CompleteExplicitAttachmentFailure(state, 7, lifecycle, operation, exception), Is.True);
+                var status = (McpServerStatus)typeof(UPilotMcpServerManager).GetField("_cachedStatus", flags).GetValue(manager);
+                Assert.That(status.FailureKind, Is.EqualTo(timedOut ? McpStatusFailureKind.Transient : McpStatusFailureKind.Confirmed));
+                Assert.That(UPilotHealthAssessment.Classify(default, status), Is.EqualTo(timedOut
+                    ? UPilotHealthDisposition.Unconfirmed : UPilotHealthDisposition.ConfirmedFailure));
+                for (var i = 0; i < 2; i++)
+                {
+                    var view = UPilotQuickStart.EvaluateAttachmentFailure(manager.AttachmentFailure, status, true);
+                    Assert.That(view.HasValue, Is.True);
+                    Assert.That(view.Value.State, Is.EqualTo(UPilotMainState.NeedsRepair));
+                    Assert.That(view.Value.Title, Is.EqualTo(timedOut ? "附着验证超时" : "附着验证失败"));
+                    Assert.That(view.Value.Message, Does.Contain("服务健康仍待确认"));
+                    Assert.That(view.Value.Message, Does.Contain(exception.Message));
+                    Assert.That(view.Value.Message, Does.Contain(operation));
+                }
+                Assert.That(manager.CompleteExplicitAttachmentFailure(state, 7, lifecycle, operation, exception), Is.False);
+                Assert.That(JsonUtility.ToJson(state), Is.EqualTo(original));
+                typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", flags).Invoke(manager, new object[] { status });
+                Assert.That(manager.AttachmentFailure, Is.Null);
+                Assert.That(JsonUtility.ToJson(state), Is.EqualTo(original));
+            }
+            finally
+            {
+                ((CancellationTokenSource)typeof(UPilotMcpServerManager).GetField("_lifecycleQueryCancellation", flags)
+                    .GetValue(manager))?.Dispose();
+            }
+        }
+
+        [TestCase("current", true)]
+        [TestCase("new_operation", false)]
+        [TestCase("new_state", false)]
+        [TestCase("new_spec", false)]
+        [TestCase("new_instance", false)]
+        [TestCase("new_service_pid", false)]
+        [TestCase("new_service_creation", false)]
+        public void ExplicitAttachmentTerminalFailureBindsOnlyItsOperationAndExactService(string scenario, bool expected)
+        {
+            var state = new ServerLaunchState { spec = Spec("python"), verified = true,
+                launcherPid = 42, launcherCreatedAt = 100, servicePid = 42, serviceCreatedAt = 100,
+                instanceId = "terminal-instance", deadlineUtcMs = 5000, terminal = true, error = "original terminal" };
+            var failure = new UPilotMcpServerManager.ServerAttachmentFailure(state, 7, "terminal-operation",
+                new TimeoutException("fixture timeout"));
+            var generation = 7;
+            var candidate = state;
+            switch (scenario)
+            {
+                case "new_operation": generation++; break;
+                case "new_state": candidate = state.Snapshot(); break;
+                case "new_spec": state.spec = state.spec.Snapshot(); break;
+                case "new_instance": state.instanceId += "-replaced"; break;
+                case "new_service_pid": state.servicePid++; break;
+                case "new_service_creation": state.serviceCreatedAt++; break;
+            }
+            Assert.That(failure.Matches(candidate, generation), Is.EqualTo(expected));
+            Assert.That(state.deadlineUtcMs, Is.EqualTo(5000));
+            Assert.That(state.terminal, Is.True);
+            Assert.That(state.error, Is.EqualTo("original terminal"));
+        }
+
+        [Test]
+        public async Task ExplicitStartAndFreshStatusWaitForTheOriginalIdentityRecovery()
+        {
+            var recovery = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var waiting = UPilotMcpServerManager.AwaitStoppedIdentityRecoveryAsync(recovery.Task);
+            Assert.That(waiting.IsCompleted, Is.False);
+            recovery.SetResult(true);
+            await waiting;
+            Assert.That(waiting.Status, Is.EqualTo(TaskStatus.RanToCompletion));
+        }
+
+        [Test]
+        public void FreshStatusIdentityWaitKeepsItsOriginalDeadline()
+        {
+            var recovery = new TaskCompletionSource<bool>();
+            Assert.ThrowsAsync<TimeoutException>(async () =>
+                await UPilotMcpServerManager.AwaitStoppedIdentityRecoveryAsync(recovery.Task,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1));
+            Assert.That(recovery.Task.IsCompleted, Is.False);
         }
 
         [TestCaseSource(nameof(IdentityCases))]

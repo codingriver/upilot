@@ -66,7 +66,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { completion.SetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "prefab.patch", await completion.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "PREFAB_PATCH_FAILED", ex.Message, token, "prefab.patch"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "PREFAB_PATCH_FAILED", ex.Message, token, "prefab.patch", errorDetail: null, exception: ex); }
         }
 
         // ── prefab.create ───────────────────────────────────────────────────────
@@ -128,7 +128,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "PREFAB_CREATE_FAILED", ex.Message, token, "prefab.create");
+                await _bridge.SendErrorAsync(id, "PREFAB_CREATE_FAILED", ex.Message, token, "prefab.create", errorDetail: null, exception: ex);
             }
         }
 
@@ -191,7 +191,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "PREFAB_INSTANTIATE_FAILED", ex.Message, token, "prefab.instantiate");
+                await _bridge.SendErrorAsync(id, "PREFAB_INSTANTIATE_FAILED", ex.Message, token, "prefab.instantiate", errorDetail: null, exception: ex);
             }
         }
 
@@ -238,7 +238,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "PREFAB_OPEN_FAILED", ex.Message, token, "prefab.open");
+                await _bridge.SendErrorAsync(id, "PREFAB_OPEN_FAILED", ex.Message, token, "prefab.open", errorDetail: null, exception: ex);
             }
         }
 
@@ -277,7 +277,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "PREFAB_CLOSE_FAILED", ex.Message, token, "prefab.close");
+                await _bridge.SendErrorAsync(id, "PREFAB_CLOSE_FAILED", ex.Message, token, "prefab.close", errorDetail: null, exception: ex);
             }
         }
 
@@ -308,7 +308,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "PREFAB_SAVE_FAILED", ex.Message, token, "prefab.save");
+                await _bridge.SendErrorAsync(id, "PREFAB_SAVE_FAILED", ex.Message, token, "prefab.save", errorDetail: null, exception: ex);
             }
         }
 

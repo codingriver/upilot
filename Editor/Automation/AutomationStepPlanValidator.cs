@@ -51,6 +51,15 @@ namespace CodingRiver.UPilot.Automation
                         AutomationCatalog.Add(result.diagnostics, "STEP_FIELD_TYPE_INVALID", "allowSkipped must be boolean.", "", index);
                         element.Element("allowSkipped").Remove();
                     }
+                    var gizmos = element.Element("gizmos");
+                    if (gizmos != null && ((string)gizmos.Attribute("type") != "object"
+                        || gizmos.Elements().Any(e => (e.Name.LocalName != "scene" && e.Name.LocalName != "game")
+                            || (string)e.Attribute("type") != "boolean")))
+                    {
+                        AutomationCatalog.Add(result.diagnostics, "STEP_GIZMOS_INVALID",
+                            "gizmos must be an object containing only boolean scene/game fields.", "", index);
+                        gizmos.Remove();
+                    }
                     index++;
                 }
                 result.ok = result.diagnostics.Count == 0;

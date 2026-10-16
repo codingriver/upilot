@@ -14,9 +14,38 @@ namespace CodingRiver.UPilot.Flow.Tests
 {
     public sealed class UPilotFlowLoggingTests
     {
+        [TestCase(false)]
+        [TestCase(true)]
+        public void WarningsErrorsAndExceptionsBypassConsoleToggle(bool mirrorToConsole)
+        {
+            var previousConsole = CodingRiver.UPilot.Logger.LogToUnityConsole;
+            var previousLevel = CodingRiver.UPilot.Logger.MinLevel;
+            var marker = "flow-console-toggle-" + Guid.NewGuid().ToString("N");
+            var exception = new InvalidOperationException(marker + "-exception");
+            try
+            {
+                CodingRiver.UPilot.Logger.LogToUnityConsole = mirrorToConsole;
+                CodingRiver.UPilot.Logger.MinLevel = CodingRiver.UPilot.Logger.LogLevel.Warning;
+                LogAssert.Expect(LogType.Warning, "[WARN ] [UPilot.Flow] " + marker + " [console-test]");
+                LogAssert.Expect(LogType.Error, "[ERROR] [UPilot.Flow] " + marker + " [console-test]");
+                LogAssert.Expect(LogType.Error, "[ERROR] [UPilot.Flow] Exception: " + exception + " [console-test]");
+
+                Codingriver.Logger.LogWarning(marker, "console-test");
+                Codingriver.Logger.LogError(marker, "console-test");
+                Codingriver.Logger.LogException(exception, "console-test");
+
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                CodingRiver.UPilot.Logger.LogToUnityConsole = previousConsole;
+                CodingRiver.UPilot.Logger.MinLevel = previousLevel;
+            }
+        }
+
         [TestCase(TestStatus.Passed, LogType.Log)]
         [TestCase(TestStatus.Skipped, LogType.Log)]
-        [TestCase(TestStatus.Failed, LogType.Warning)]
+        [TestCase(TestStatus.Failed, LogType.Error)]
         [TestCase(TestStatus.Error, LogType.Error)]
         public void CompletionSummaryUsesStatusSpecificLogLevel(TestStatus status, LogType expectedLogType)
         {

@@ -18,7 +18,7 @@ namespace CodingRiver.UPilot
     public sealed class UPilotQuickDebugWindow : EditorWindow
     {
         private const int MaxLogEntries = 200;
-        private const string ObjectDumpLogRelativePath = "Logs/UPilot/csharp_object_dump.log";
+        private const string ObjectDumpLogRelativePath = UPilotOutputPaths.QuickDebugObjectDump;
 
         private static readonly string[] EvalModeValues = { "auto", "expression", "statements" };
         private static readonly GUIContent[] EvalModeOptions =
@@ -898,7 +898,7 @@ namespace CodingRiver.UPilot
                 HelpLabel(
                     "<b>csharp_object_dump</b> 用于查看对象图，可显示为 JSON 树或缩进文本。\n" +
                     "<b>前置条件：</b>需要持久 sessionId，以及 csharp_eval 通过 resultMode=handle 返回的 handle。\n\n" +
-                    "<b>结果文件：</b>每次开始执行时清空 <i>Logs/UPilot/csharp_object_dump.log</i>，完成后仅保存本次结果。\n\n" +
+                    "<b>结果文件：</b>每次开始执行时清空 <i>Logs/UPilot/Diagnostics/QuickDebug/csharp_object_dump.log</i>，完成后仅保存本次结果。\n\n" +
                     "<b>快捷流程：</b>\n" +
                     "  1. 点击下方“一键运行并查看列表”\n" +
                     "  2. 或先在“运行 C# 代码”页签以 resultMode=handle 执行，\n" +

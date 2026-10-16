@@ -222,7 +222,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "scene.prepareForAutomation", await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SCENE_PREPARATION_FAILED", ex.Message, token, "scene.prepareForAutomation"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SCENE_PREPARATION_FAILED", ex.Message, token, "scene.prepareForAutomation", errorDetail: null, exception: ex); }
         }
 
         /// <summary>Must run on Unity's main thread. It is shared by Server preflight and TestRunner's final preflight.</summary>
@@ -255,7 +255,7 @@ namespace CodingRiver.UPilot
                         if (!EditorSceneManager.SaveScene(scene, path)) throw new InvalidOperationException("Could not save scene: " + path);
                         sideEffects = true; item.action = "saved"; item.savedPath = path; item.scenePath = path;
                     }
-                    AssetDatabase.Refresh(); result.action = "autoSaved";
+                    result.action = "autoSaved";
                 }
                 else
                 {
@@ -347,7 +347,6 @@ namespace CodingRiver.UPilot
                             return;
                         }
 
-                        AssetDatabase.Refresh();
                         var active = SceneManager.GetActiveScene();
                         result = new SceneEnsureTestResultPayload
                         {
@@ -372,7 +371,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_ENSURE_TEST_FAILED", ex.Message, token, "scene.ensureTest");
+                await _bridge.SendErrorAsync(id, "SCENE_ENSURE_TEST_FAILED", ex.Message, token, "scene.ensureTest", errorDetail: null, exception: ex);
             }
         }
 
@@ -438,7 +437,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_CREATE_FAILED", ex.Message, token, "scene.create");
+                await _bridge.SendErrorAsync(id, "SCENE_CREATE_FAILED", ex.Message, token, "scene.create", errorDetail: null, exception: ex);
             }
         }
 
@@ -485,7 +484,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_OPEN_FAILED", ex.Message, token, "scene.open");
+                await _bridge.SendErrorAsync(id, "SCENE_OPEN_FAILED", ex.Message, token, "scene.open", errorDetail: null, exception: ex);
             }
         }
 
@@ -540,7 +539,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_SAVE_FAILED", ex.Message, token, "scene.save");
+                await _bridge.SendErrorAsync(id, "SCENE_SAVE_FAILED", ex.Message, token, "scene.save", errorDetail: null, exception: ex);
             }
         }
 
@@ -587,7 +586,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_LOAD_FAILED", ex.Message, token, "scene.load");
+                await _bridge.SendErrorAsync(id, "SCENE_LOAD_FAILED", ex.Message, token, "scene.load", errorDetail: null, exception: ex);
             }
         }
 
@@ -632,7 +631,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_SET_ACTIVE_FAILED", ex.Message, token, "scene.setActive");
+                await _bridge.SendErrorAsync(id, "SCENE_SET_ACTIVE_FAILED", ex.Message, token, "scene.setActive", errorDetail: null, exception: ex);
             }
         }
 
@@ -668,7 +667,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_LIST_FAILED", ex.Message, token, "scene.list");
+                await _bridge.SendErrorAsync(id, "SCENE_LIST_FAILED", ex.Message, token, "scene.list", errorDetail: null, exception: ex);
             }
         }
 
@@ -730,7 +729,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENE_UNLOAD_FAILED", ex.Message, token, "scene.unload");
+                await _bridge.SendErrorAsync(id, "SCENE_UNLOAD_FAILED", ex.Message, token, "scene.unload", errorDetail: null, exception: ex);
             }
         }
 

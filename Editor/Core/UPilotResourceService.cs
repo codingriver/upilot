@@ -210,7 +210,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { completion.SetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "resource.sceneSummary", await completion.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SCENE_SUMMARY_FAILED", ex.Message, token, "resource.sceneSummary"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SCENE_SUMMARY_FAILED", ex.Message, token, "resource.sceneSummary", errorDetail: null, exception: ex); }
         }
 
         // ── resource.sceneHierarchy ─────────────────────────────────────────────
@@ -255,7 +255,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.sceneHierarchy");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.sceneHierarchy", errorDetail: null, exception: ex);
             }
         }
 
@@ -358,7 +358,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.consoleLogs");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.consoleLogs", errorDetail: null, exception: ex);
             }
         }
 
@@ -420,7 +420,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.editorState");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.editorState", errorDetail: null, exception: ex);
             }
         }
 
@@ -446,7 +446,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 var code = ex is UPilotUpmRequestException upm ? upm.Code : "RESOURCE_FAILED";
-                await _bridge.SendErrorAsync(id, code, ex.Message, token, "resource.packages");
+                await _bridge.SendErrorAsync(id, code, ex.Message, token, "resource.packages", errorDetail: null, exception: ex);
             }
         }
 
@@ -477,7 +477,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.buildStatus");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.buildStatus", errorDetail: null, exception: ex);
             }
         }
 
@@ -522,7 +522,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.upilotLogsTab");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.upilotLogsTab", errorDetail: null, exception: ex);
             }
         }
 
@@ -572,7 +572,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.windowDiagnostics");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.windowDiagnostics", errorDetail: null, exception: ex);
             }
         }
 
@@ -597,7 +597,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.consoleSummary");
+                await _bridge.SendErrorAsync(id, "RESOURCE_FAILED", ex.Message, token, "resource.consoleSummary", errorDetail: null, exception: ex);
             }
         }
 

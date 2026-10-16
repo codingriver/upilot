@@ -69,7 +69,7 @@ namespace CodingRiver.UPilot
                 if (result is TestAbandonProof proof) await _bridge.SendResultAsync(id, route, proof, token);
                 else await _bridge.SendResultAsync(id, route, (TestRunResultPayload)result, token);
             }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "TEST_ABANDON_REFUSED", ex.Message, token, route); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "TEST_ABANDON_REFUSED", ex.Message, token, route, errorDetail: null, exception: ex); }
         }
 
         internal TestAbandonProof PreviewAbandonReloadedRun(string runGuid)

@@ -238,7 +238,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"读取控制台日志失败：{ex.Message}", token, "console.logs.get");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"读取控制台日志失败：{ex.Message}", token, "console.logs.get", errorDetail: null, exception: ex);
             }
         }
 
@@ -265,7 +265,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"清空控制台失败：{ex.Message}", token, "console.clear");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"清空控制台失败：{ex.Message}", token, "console.clear", errorDetail: null, exception: ex);
             }
         }
 
@@ -292,7 +292,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"标记控制台日志游标失败：{ex.Message}", token, "console.logs.mark");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"标记控制台日志游标失败：{ex.Message}", token, "console.logs.mark", errorDetail: null, exception: ex);
             }
         }
 
@@ -322,7 +322,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"读取控制台增量日志失败：{ex.Message}", token, "console.logs.tail");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"读取控制台增量日志失败：{ex.Message}", token, "console.logs.tail", errorDetail: null, exception: ex);
             }
         }
 
@@ -352,7 +352,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"搜索控制台日志失败：{ex.Message}", token, "console.logs.search");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"搜索控制台日志失败：{ex.Message}", token, "console.logs.search", errorDetail: null, exception: ex);
             }
         }
 

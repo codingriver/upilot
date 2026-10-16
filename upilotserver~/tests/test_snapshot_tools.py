@@ -457,7 +457,8 @@ def test_snapshot_public_tools_are_registered_with_correct_idempotency() -> None
     assert descriptors["unity_snapshot_baseline_update"].requires_write_access is True
 
 
-def test_snapshot_baseline_update_requires_current_confirm_token_and_compare_emits_evidence(tmp_path) -> None:
+@pytest.mark.parametrize("comparison_directory", ["", "Temp/comparison"])
+def test_snapshot_baseline_update_requires_current_confirm_token_and_compare_emits_evidence(tmp_path, comparison_directory) -> None:
     candidate = tmp_path / "Temp" / "snapshot" / "candidate.png"
     candidate.parent.mkdir(parents=True)
     image = Image.new("RGBA", (16, 16), (32, 96, 160, 255))
@@ -528,13 +529,16 @@ def test_snapshot_baseline_update_requires_current_confirm_token_and_compare_emi
         "ui/main",
         "snapshot-baseline",
         "main",
-        output_directory="Temp/comparison",
+        output_directory=comparison_directory,
     ))
     assert compared.ok is True
     assert compared.data["passed"] is True
     assert compared.data["metrics"]["differentPixelRatio"] == 0.0
     assert compared.data["metrics"]["ssim"] == 1.0
     assert {item["role"] for item in compared.data["artifacts"]} == {"diff", "heatmap"}
+    expected_root = tmp_path / (comparison_directory or "Logs/UPilot/Diagnostics/SnapshotComparisons")
+    for item in compared.data["artifacts"]:
+        assert (tmp_path / item["path"]).resolve().is_relative_to(expected_root.resolve())
 
 
 def test_snapshot_baseline_rejects_unsafe_key_and_unaccepted_artifact(tmp_path) -> None:

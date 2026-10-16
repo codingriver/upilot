@@ -43,7 +43,7 @@ async def unity_asset_create_folder(parentFolder: str, newFolderName: str):
     return _log_tool_result("unity_asset_create_folder", _payload(r))
 
 @mcp.tool(
-    description="复制 Unity 资源到指定路径。会在项目磁盘创建新资源和 .meta；确认 destinationPath 不覆盖重要资源。"
+    description="复制 Unity 资源到指定路径。播放、暂停和模式切换时拒绝代码资产或含代码目录；同时检查源和目标。会在项目磁盘创建新资源和 .meta；确认 destinationPath 不覆盖重要资源。"
 )
 async def unity_asset_copy(sourcePath: str, destinationPath: str):
     _log_tool_call(
@@ -56,7 +56,7 @@ async def unity_asset_copy(sourcePath: str, destinationPath: str):
     return _log_tool_result("unity_asset_copy", _payload(r))
 
 @mcp.tool(
-    description="移动 Unity 资源到指定路径。会改动项目磁盘资源和 .meta/GUID 引用关系；sourcePath/destinationPath 应在 Assets 或 Packages 可写范围内，调用前确认路径。"
+    description="移动 Unity 资源到指定路径。播放、暂停和模式切换时拒绝代码资产或含代码目录；同时检查源和目标。会改动项目磁盘资源和 .meta/GUID 引用关系；sourcePath/destinationPath 应在 Assets 或 Packages 可写范围内，调用前确认路径。"
 )
 async def unity_asset_move(sourcePath: str, destinationPath: str):
     _log_tool_call(
@@ -69,16 +69,19 @@ async def unity_asset_move(sourcePath: str, destinationPath: str):
     return _log_tool_result("unity_asset_move", _payload(r))
 
 @mcp.tool(
-    description="删除指定路径的 Unity 资源。破坏性磁盘操作：调用前先用 unity_asset_get_info/find 确认路径，不要删除未确认的目录或共享资源。"
+    description="删除指定路径的 Unity 资源。播放、暂停和模式切换时拒绝代码资产及含代码目录；脚本延期删除使用 unity_script_delete。破坏性磁盘操作：调用前先用 unity_asset_get_info/find 确认路径，不要删除未确认的目录或共享资源。"
 )
 async def unity_asset_delete(assetPath: str):
     _log_tool_call("unity_asset_delete", {"assetPath": assetPath})
     r = await _get_facade().asset_delete(asset_path=assetPath)
     return _log_tool_result("unity_asset_delete", _payload(r))
 
-@mcp.tool(description="触发 Unity 资源数据库刷新（AssetDatabase.Refresh）。")
+@mcp.tool(description="触发 Unity 资源数据库刷新（AssetDatabase.Refresh）。仅稳定 EditMode 允许；播放、暂停或模式切换时拒绝，防止隐式编译。")
 async def unity_asset_refresh():
     _log_tool_call("unity_asset_refresh", {})
+    rejected = await _reject_compile_in_playmode("unity_asset_refresh", allow_compile_recovery=False)
+    if rejected is not None:
+        return rejected
     r = await _get_facade().asset_refresh()
     return _log_tool_result("unity_asset_refresh", _payload(r))
 
@@ -117,6 +120,7 @@ async def unity_write_batch_register(
         "在 Cursor/IDE 中改完或新建完本轮所有脚本并全部保存后，再调用一次（不要每文件一调）："
         "先等待 delayS 秒（默认 2，缓解落盘延迟），再 AssetDatabase.Refresh；"
         "triggerCompile=true 时再触发 unity_compile（含 Refresh+脚本编译）。"
+        "包括 triggerCompile=false 也仅允许稳定 EditMode；播放、暂停、模式切换时拒绝全局 Refresh。"
         "随后可 unity_compile_wait 确认编译结束。避免 Unity 无焦点时迟迟不导入。"
     ),
 )
@@ -137,10 +141,10 @@ async def unity_sync_after_disk_write(
             "compileOperationId": compileOperationId,
         },
     )
-    if triggerCompile:
-        rejected = await _reject_compile_in_playmode("unity_sync_after_disk_write")
-        if rejected is not None:
-            return rejected
+    rejected = (await _reject_compile_in_playmode("unity_sync_after_disk_write") if triggerCompile
+                else await _reject_compile_in_playmode("unity_sync_after_disk_write", allow_compile_recovery=False))
+    if rejected is not None:
+        return rejected
     r = await _get_facade().sync_after_disk_write(
         delay_s=delayS,
         trigger_compile=triggerCompile,
@@ -246,7 +250,7 @@ async def unity_texture_importer_patch(assetPath: str, changes: dict, dryRun: bo
     r = await _get_facade().texture_importer_patch(asset_path=assetPath, changes=changes, dry_run=dryRun, confirm_token=confirmToken, reimport=reimport)
     return _log_tool_result("unity_texture_importer_patch", _payload(r))
 
-@mcp.tool(description="强制重导入一个现有 Assets/... 资源。会改变导入产物，需项目写权限。")
+@mcp.tool(description="强制重导入一个现有 Assets/... 资源。会改变导入产物，需项目写权限。播放、暂停或模式切换时拒绝代码资产及含代码目录，普通非代码资源仍可导入。")
 async def unity_asset_reimport(assetPath: str):
     _log_tool_call("unity_asset_reimport", {"assetPath": assetPath})
     r = await _get_facade().asset_reimport(asset_path=assetPath)
@@ -555,7 +559,7 @@ async def unity_script_read(scriptPath: str):
     return _log_tool_result("unity_script_read", _payload(r))
 
 @mcp.tool(
-    description="在 Unity 项目中创建新的 C# 脚本文件。写磁盘操作：scriptPath 应位于 Assets 下并以 .cs 结尾；整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
+    description="在 Unity 项目中创建新的 C# 脚本文件。写磁盘操作：scriptPath 应位于 Assets 下并以 .cs 结尾；整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。稳定 PlayMode/暂停时仅在实际编译偏好=RecompileAfterFinishedPlaying 时允许写盘，返回 importDeferred=true；不导入、不编译、不同步项目文件。模式切换时拒绝写盘。登记的 WriteBatch 保留至权威 EditMode 后完成，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
 )
 async def unity_script_create(scriptPath: str, content: str = ""):
     _log_tool_call(
@@ -565,7 +569,7 @@ async def unity_script_create(scriptPath: str, content: str = ""):
     return _log_tool_result("unity_script_create", _payload(r))
 
 @mcp.tool(
-    description="更新 Unity 项目中已有 C# 脚本文件。会覆盖文件内容；调用前读取或确认目标文件。整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
+    description="更新 Unity 项目中已有 C# 脚本文件。会覆盖文件内容；调用前读取或确认目标文件。整批代码落盘后仅调用一次 unity_write_batch_register(paths, compileWhenEditMode=true)，用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。稳定 PlayMode/暂停时仅在实际编译偏好=RecompileAfterFinishedPlaying 时允许写盘，返回 importDeferred=true；不导入、不编译、不同步项目文件。模式切换时拒绝写盘。登记的 WriteBatch 保留至权威 EditMode 后完成，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
 )
 async def unity_script_update(scriptPath: str, content: str):
     _log_tool_call(
@@ -575,7 +579,7 @@ async def unity_script_update(scriptPath: str, content: str):
     return _log_tool_result("unity_script_update", _payload(r))
 
 @mcp.tool(
-    description="删除 Unity 项目中指定路径的 C# 脚本文件。破坏性磁盘操作：调用前确认路径和影响。整批完成后登记一次 unity_write_batch_register(paths, compileWhenEditMode=true, deletedPaths=已删除路径)；paths 只放仍存在的代码文件，仅删除代码时 paths=[]。用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。PlayMode、暂停或模式切换时等待权威 EditMode，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
+    description="删除 Unity 项目中指定路径的 C# 脚本文件。破坏性磁盘操作：调用前确认路径和影响。播放中只删除已校验的项目内 .cs 和对应 .meta；返回实际 deletedPaths，部分失败需检查磁盘，禁止自动重试。整批完成后登记一次 unity_write_batch_register(paths, compileWhenEditMode=true, deletedPaths=已删除路径)；paths 只放仍存在的代码文件，仅删除代码时 paths=[]。用原 writeBatchId 调用 unity_write_batch_status 观察；自动批次不得另行 sync/compile。稳定 PlayMode/暂停时仅在实际编译偏好=RecompileAfterFinishedPlaying 时允许写盘，返回 importDeferred=true；不导入、不编译、不同步项目文件。模式切换时拒绝写盘。登记的 WriteBatch 保留至权威 EditMode 后完成，不主动退出 PlayMode。仅未启用自动批次的旧版/手动流程使用 unity_sync_after_disk_write 和 unity_safe_compile_and_wait。"
 )
 async def unity_script_delete(scriptPath: str):
     _log_tool_call("unity_script_delete", {"scriptPath": scriptPath})
@@ -970,7 +974,7 @@ _DESTRUCTIVE_TOOLS = {
     "unity_prefab_patch",
 }
 _HIDDEN_PUBLIC_TOOLS = {"unity_upilot_flow_run_batch"}
-_PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait"}
+_PLAYMODE_BLOCKED = {"unity_compile", "unity_auto_fix_start", "unity_safe_compile_and_wait", "unity_asset_refresh", "unity_sync_after_disk_write"}
 for _name, _value in list(globals().items()):
     if not callable(_value) or not _name.startswith("unity_"):
         continue

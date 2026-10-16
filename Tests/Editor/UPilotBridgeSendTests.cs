@@ -236,10 +236,11 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 string expected = priorFailure ? "FIXTURE_FIRST_ERROR" : "BRIDGE_RESPONSE_TOO_LARGE";
-                if (Logger.LogToUnityConsole && Logger.MinLevel <= Logger.LogLevel.Error)
+                if (Logger.MinLevel <= Logger.LogLevel.Error)
                     LogAssert.Expect(LogType.Error, new Regex("FAIL fixture.result id=" + id + ".*" + expected));
                 if (priorFailure)
                 {
+                    LogAssert.Expect(LogType.Error, new Regex("\\[COMMAND .*FIXTURE_FIRST_ERROR"));
                     context.Fail(expected, "original failure");
                     await wire.Bridge.SendErrorAsync(id, expected, "original failure", wire.Deadline.Token, "fixture.result");
                 }
@@ -287,6 +288,7 @@ namespace CodingRiver.UPilot.Tests
         public async Task OversizeErrorPreservesCodeInOneBoundedDiagnostic()
         {
             using var wire = await Wire.Open();
+            LogAssert.Expect(LogType.Error, new Regex("FIXTURE_ERROR"));
             await wire.Bridge.SendErrorAsync("error", "FIXTURE_ERROR", new string('中', Limit / 3 + 1), wire.Deadline.Token, "fixture.error");
             var messages = await wire.Finish();
             Assert.That(messages.Count, Is.EqualTo(1));

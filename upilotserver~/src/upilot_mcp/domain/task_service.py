@@ -2929,6 +2929,8 @@ class TaskDomainService:
                     return
                 if not done:
                     state.update(status="timed_out", cleanupSucceeded=False)
+                    logger.error("Background task timed out taskId=%s tool=%s", task_id, tool_name,
+                                 extra={"diagnostic_scope": task_id, "diagnostic_terminal": True})
                     work.cancel()
                 else:
                     result = work.result()
@@ -2939,6 +2941,9 @@ class TaskDomainService:
                             "code": result.error.code if result.error else "TASK_FAILED",
                             "message": result.error.message if result.error else "Task failed",
                             "detail": result.error.detail if result.error else {}})
+                        if state["error"]["code"] not in {"EXECUTION_CANCELLED", "OPERATION_CANCELLED"}:
+                            logger.error("Background task failed taskId=%s tool=%s error=%s", task_id, tool_name, state["error"],
+                                         extra={"diagnostic_scope": task_id, "diagnostic_terminal": True})
             except asyncio.CancelledError:
                 work.cancel()
                 if not state.get("terminal"):
@@ -2947,6 +2952,8 @@ class TaskDomainService:
             except Exception as exc:
                 if not state.get("terminal"):
                     state.update(status="failed", error={"code": "TASK_EXCEPTION", "message": str(exc)})
+                    logger.exception("Background task exception taskId=%s tool=%s", task_id, tool_name,
+                                     extra={"diagnostic_scope": task_id, "diagnostic_terminal": True})
             finally:
                 if not state.get("terminal"):
                     state.update(terminal=True, phase=state["status"], endedAt=now_ms(), updatedAt=now_ms())
@@ -3099,6 +3106,8 @@ class TaskDomainService:
             if not state.get("terminal"):
                 state.update(status="timed_out", terminal=True)
                 self._set_test_task_cleanup(state)
+                logger.exception("Background test task timed out taskId=%s runGuid=%s", state["taskId"], state.get("runGuid", ""),
+                                 extra={"diagnostic_scope": state["taskId"], "diagnostic_terminal": True})
         except TestJobCancelledBeforeStart:
             if state.get("terminal"):
                 return
@@ -3119,6 +3128,8 @@ class TaskDomainService:
         except Exception as exc:
             if not state.get("terminal"):
                 state.update(status="aborted", terminal=True, error={"code": "TEST_TASK_EXCEPTION", "message": str(exc)})
+                logger.exception("Background test task exception taskId=%s runGuid=%s", state["taskId"], state.get("runGuid", ""),
+                                 extra={"diagnostic_scope": state["taskId"], "diagnostic_terminal": True})
         finally:
             TEST_JOB_CONTEXT.reset(token)
             if not state.get("terminal"):
@@ -3132,6 +3143,8 @@ class TaskDomainService:
                 store.save_test_job(state)
             except Exception as exc:
                 state["persistenceError"] = str(exc)
+                logger.exception("Background test task persistence failed taskId=%s runGuid=%s", state["taskId"], state.get("runGuid", ""),
+                                 extra={"diagnostic_scope": state["taskId"], "diagnostic_fingerprint": "test-task-final-persistence"})
             observe(self, "Task", state)
 
     async def _observe_test_recovery(self, state: dict) -> None:

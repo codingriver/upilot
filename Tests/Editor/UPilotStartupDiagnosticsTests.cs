@@ -751,7 +751,7 @@ namespace CodingRiver.UPilot.Tests
         public void CandidateSelectionQueriesOnceAndRejectsChangedIdentityOrMissingEvidence()
         {
             const int http = 8012, ws = 8766;
-            var log = Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
+            var log = UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog);
             var same = "python \"C:/中文 目录/run_upilot_mcp.py\" --http-port=8012 --port=8766 --log-file \"" + log + "\"";
             var other = same.Replace("8012", "8013");
             var before = new System.Collections.Generic.Dictionary<int, long> { [41] = 100, [42] = 200, [43] = 300 };
@@ -791,8 +791,10 @@ namespace CodingRiver.UPilot.Tests
                 ports, true, new[] { 10 }, 8017, 8770));
             ports[20] = new() { 8017 };
             ports[30] = new() { 8770 };
-            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+            Assert.DoesNotThrow(() => UPilotMcpServerManager.ValidateStopPortOwnership(
                 ports, true, new[] { 20, 30 }, 8017, 8770));
+            Assert.Throws<InvalidOperationException>(() => UPilotMcpServerManager.ValidateStopPortOwnership(
+                ports, true, new[] { 20 }, 8017, 8770), "Every target-port owner still requires exact entry and port verification.");
         }
 
         [Test]
@@ -1653,7 +1655,7 @@ namespace CodingRiver.UPilot.Tests
             {
                 Logger.LogToUnityConsole = true;
                 Logger.MinLevel = Logger.LogLevel.Info;
-                if (expired) LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(".*生命周期终态超时 source=Unity客户端.*"));
+                LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(expired ? ".*生命周期终态超时 source=Unity客户端.*" : ".*生命周期失败 source=Unity客户端.*"));
                 Assert.That(manager.AdvanceStartingPhase(generation, alive, true, true, expired ? 1000 : 999), Is.False);
                 Assert.That(manager.EndLifecyclePhase(generation), Is.False);
             }

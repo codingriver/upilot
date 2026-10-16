@@ -240,6 +240,9 @@ namespace CodingRiver.UPilot
         public bool stateObserved;
         public bool changed;
         public int writeCount;
+        public bool importDeferred;
+        public string[] changedPaths = Array.Empty<string>();
+        public string[] deletedPaths = Array.Empty<string>();
         public string stage;
         public string blockedReason;
         public string nextAction;

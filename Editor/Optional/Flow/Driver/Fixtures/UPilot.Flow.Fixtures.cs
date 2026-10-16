@@ -71,8 +71,8 @@ namespace CodingRiver.UPilot.Flow
             return new TestOptions
             {
                 Headed = false,
-                ReportOutputPath = "Reports",
-                ScreenshotPath = "Reports/Screenshots",
+                ReportOutputPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports),
+                ScreenshotPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports + "/Screenshots"),
                 ScreenshotOnFailure = true,
             };
         }

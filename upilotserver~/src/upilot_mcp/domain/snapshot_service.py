@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..output_paths import SNAPSHOT_COMPARISONS, output_path
+
 import asyncio
 import hashlib
 import hmac
@@ -427,7 +429,7 @@ class SnapshotDomainService:
                 return fail(request_id, "SNAPSHOT_COMPARISON_PATH_OUTSIDE_PROJECT", "outputDirectory must stay under the Unity project.", {"outputDirectory": output_directory})
         else:
             safe_key = (self._normalize_baseline_key(baseline_key) or "baseline").replace("/", "_")
-            output_root = root / ".upilot" / "snapshots" / "comparisons" / f"{int(time.time() * 1000)}-{safe_key}"
+            output_root = output_path(root, SNAPSHOT_COMPARISONS) / f"{int(time.time() * 1000)}-{safe_key}"
         tolerance = max(0, min(int(channel_tolerance), 255))
         ratio_threshold = max(0.0, min(float(max_different_pixel_ratio), 1.0))
         ssim_threshold = max(-1.0, min(float(min_ssim), 1.0))

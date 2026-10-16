@@ -1017,10 +1017,8 @@ namespace CodingRiver.UPilot.Flow
             string stepSummary = $"通过={result.StepResults.Count(s => s.Status == TestStatus.Passed)} 失败={result.StepResults.Count(s => s.Status == TestStatus.Failed)} 错误={result.StepResults.Count(s => s.Status == TestStatus.Error)} 跳过={result.StepResults.Count(s => s.Status == TestStatus.Skipped)}";
             string progressPrefix = options.TotalCases > 1 ? $"[{options.CaseIndex}/{options.TotalCases}]" : "";
             string completionMessage = $"[UPilot Flow] {progressPrefix}用例 \"{definition.Name}\" 完成 状态={result.Status} 耗时={result.DurationMs}ms | {stepSummary}";
-            if (result.Status == TestStatus.Error)
+            if (result.Status == TestStatus.Error || result.Status == TestStatus.Failed)
                 Codingriver.Logger.LogError(completionMessage);
-            else if (result.Status == TestStatus.Failed)
-                Codingriver.Logger.LogWarning(completionMessage);
             else
                 Codingriver.Logger.Log(completionMessage);
         }

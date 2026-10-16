@@ -72,7 +72,7 @@ namespace CodingRiver.UPilot
                 (end.toState == "play" || end.toState == "edit");
         }
 
-        // 仅由真实 Editor update 调用；连续两次稳定事实用于补齐 Reload 后遗漏的进入通知。
+        // 仅由真实 Editor update 调用；连续两次稳定事实用于补齐 Reload 后遗漏的终态通知。
         internal static bool ReconcileEditorUpdate(bool isPlaying, bool willPlay, bool isBusy, string sessionId)
         {
             var recovered = RecoverOnEditorUpdate(Current, ref recoveryCandidateKey,
@@ -89,9 +89,11 @@ namespace CodingRiver.UPilot
         internal static PlayModeTransitionRecord RecoverOnEditorUpdate(PlayModeTransitionRecord pending,
             ref string candidateKey, bool isPlaying, bool willPlay, bool isBusy, string sessionId, long observedAt)
         {
-            if (!IsCurrentProcessRecord(pending) || pending.toState != "enteringPlay" ||
+            bool entering = pending?.toState == "enteringPlay";
+            bool exiting = pending?.toState == "exitingPlay";
+            if (!IsCurrentProcessRecord(pending) || (!entering && !exiting) ||
                 string.IsNullOrEmpty(pending.transitionId) || string.IsNullOrEmpty(sessionId) ||
-                !isPlaying || !willPlay || isBusy || pending.at <= 0 || observedAt <= pending.at)
+                isPlaying != entering || willPlay != entering || isBusy || pending.at <= 0 || observedAt <= pending.at)
             {
                 candidateKey = null;
                 return null;
@@ -104,7 +106,7 @@ namespace CodingRiver.UPilot
             }
             candidateKey = null;
             // 沿用已记录的请求归属，不从可能已过期的 intent 重新推断。
-            return Build("enteringPlay", "play", sessionId, observedAt, pending);
+            return Build(pending.toState, entering ? "play" : "edit", sessionId, observedAt, pending);
         }
 
         public static void RequestProjectExit(string operationId = "")

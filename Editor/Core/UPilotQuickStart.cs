@@ -78,6 +78,7 @@ namespace CodingRiver.UPilot
         private static UPilotServiceOperation _operation;
         private static double _operationStartedAt;
         private static long _operationStartedAtUtcMs;
+        private static string _operationStopObservationId = "";
         private static Task<string> _repairTask;
         private static string _repairPhase = "";
         private static string _repairCause = "";
@@ -129,6 +130,19 @@ namespace CodingRiver.UPilot
             if (record?.status != "succeeded" || record.operationId != pending)
                 ShowRepairFailureOnce(pending, "重载中断了修复准备或验证；没有重放停启。请检查状态后点击“重新启动”。");
             SessionState.EraseString(PendingAttemptKey);
+        }
+
+        // Called only for a new Unity process, never for Domain Reload or reconnect.
+        internal static void ClearPriorEditorRecoveryFailures()
+        {
+            EditorPrefs.DeleteKey(FailureKey);
+            EditorPrefs.DeleteKey(AutoAttemptKey);
+            SessionState.EraseString(PendingAttemptKey);
+            SessionState.EraseString(PendingCauseKey);
+            SessionState.EraseString(HealthRecoveryKey);
+            var history = UPilotServerRestartDiagnostics.Current;
+            if (!string.IsNullOrEmpty(history?.operationId))
+                SessionState.SetString(VerifiedRestartHistoryKey, history.operationId);
         }
 
         // Producers may run on HTTP/WebSocket workers; all Editor work stays in the control queue.
@@ -264,8 +278,18 @@ namespace CodingRiver.UPilot
                     activeRestart?.status == "running"
                         ? UPilotServerRestartDiagnostics.WaitingMessage(activeRestart, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
                         : _repairPhase + "\n" + _repairCause, bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            var stopFailure = EvaluateStopFailure(UPilotMcpServerManager.Instance.StopObservation,
+                bridgeStatus.IsStarted, mcpStatus.IsRunning);
+            if (stopFailure.HasValue) return stopFailure.Value;
             TrackLifecycleRecovery(mcpStatus);
             var disposition = UPilotHealthAssessment.Classify(bridgeStatus, mcpStatus);
+            var attachmentFailure = EvaluateAttachmentFailure(UPilotMcpServerManager.Instance.AttachmentFailure,
+                mcpStatus, bridgeStatus.IsStarted);
+            if (attachmentFailure.HasValue) return attachmentFailure.Value;
+            var recoveryFailure = UPilotMcpServerManager.Instance.ExistingServiceRecoveryFailure;
+            if (!string.IsNullOrEmpty(recoveryFailure))
+                return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "遗留服务恢复失败",
+                    recoveryFailure + "\n本次恢复已结束，可检查原因后手动启动或重新启动。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
             var failure = EditorPrefs.GetString(FailureKey, "");
             if (issues.Any(issue => issue.Confirmed) || disposition == UPilotHealthDisposition.ConfirmedFailure ||
                 (!string.IsNullOrEmpty(failure) && disposition == UPilotHealthDisposition.Normal && !IsHealthRecoveryPending))
@@ -302,6 +326,26 @@ namespace CodingRiver.UPilot
             }
 
             return EvaluateServiceState(bridgeStatus, mcpStatus);
+        }
+
+        internal static UPilotMainSnapshot? EvaluateAttachmentFailure(UPilotMcpServerManager.ServerAttachmentFailure failure,
+            McpServerStatus server, bool bridgeStarted)
+        {
+            if (failure == null || server.LifecyclePhase != UPilotServerLifecyclePhase.None) return null;
+            return new UPilotMainSnapshot(UPilotMainState.NeedsRepair,
+                failure.TimedOut ? "附着验证超时" : "附着验证失败",
+                "本次启动的显式附着验证已结束；服务健康仍待确认。\n" + failure.Reason +
+                "\noperationId=" + failure.OperationId, bridgeStarted, server.IsRunning);
+        }
+
+        internal static UPilotMainSnapshot? EvaluateStopFailure(ServiceStopObservationRecord stop,
+            bool bridgeStarted, bool serverRunning)
+        {
+            if (stop == null || stop.Active || (stop.status != "failed" && stop.status != "timed_out") ||
+                !stop.MatchesScope(UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id,
+                    System.Diagnostics.Process.GetCurrentProcess().Id)) return null;
+            return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "停止未确认", stop.TerminalMessage,
+                bridgeStarted, serverRunning);
         }
 
         internal static UPilotMainSnapshot? EvaluateLifecycle(McpServerStatus status, bool bridgeStarted)
@@ -587,8 +631,7 @@ namespace CodingRiver.UPilot
             manager.EnsureInitialServiceRecovery();
             manager.ValidateAndAutoFixPath();
             UPilotBridge.Instance.EnsureStarted();
-            if (!manager.GetStatus().IsRunning)
-                manager.StartServer();
+            manager.StartServer();
             manager.InvalidateStatusCache();
         }
 
@@ -607,6 +650,7 @@ namespace CodingRiver.UPilot
             UPilotBridge.Instance.Stop();
             var manager = UPilotMcpServerManager.Instance;
             manager.StopServer();
+            _operationStopObservationId = manager.StopObservation?.id ?? "";
             manager.InvalidateStatusCache();
         }
 
@@ -805,6 +849,18 @@ namespace CodingRiver.UPilot
             var elapsed = EditorApplication.timeSinceStartup - _operationStartedAt;
             if (_operation == UPilotServiceOperation.Stopping)
             {
+                var stop = UPilotMcpServerManager.Instance.StopObservation;
+                if (stop != null && (stop.id == _operationStopObservationId || stop.startedAt >= _operationStartedAtUtcMs))
+                {
+                    if (stop.Active)
+                        return new UPilotMainSnapshot(UPilotMainState.Stopping, "正在停止 UPilot",
+                            $"已用 {(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - stop.startedAt) / 1000d:F1} 秒；本次最多 {stop.timeoutSeconds} 秒。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
+                    ClearOperation();
+                    if (stop.status != "succeeded")
+                        return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "停止未确认", stop.reason,
+                            bridgeStatus.IsStarted, mcpStatus.IsRunning);
+                    return new UPilotMainSnapshot(UPilotMainState.Stopped, "UPilot 已停止", "进程退出与端口释放已确认。", false, false);
+                }
                 if (!bridgeStatus.IsStarted && !mcpStatus.IsRunning)
                 {
                     ClearOperation();
@@ -896,6 +952,7 @@ namespace CodingRiver.UPilot
 
         private static void ClearOperation()
         {
+            _operationStopObservationId = "";
             _operation = UPilotServiceOperation.None;
             _operationStartedAt = 0d;
             _operationStartedAtUtcMs = 0;

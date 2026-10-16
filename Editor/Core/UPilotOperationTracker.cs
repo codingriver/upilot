@@ -159,6 +159,9 @@ namespace CodingRiver.UPilot
         }
 
         public void Fail(string code, string message)
+            => Fail(code, message, true);
+
+        internal void Fail(string code, string message, bool emitDiagnostic)
         {
             lock (_entry)
             {
@@ -170,8 +173,9 @@ namespace CodingRiver.UPilot
             _entry.ErrorMessage = message;
             _entry.CurrentStep  = $"失败: {code}";
             _entry.AddStep($"失败: {code}", message);
-            _tracker.WriteLogLine("ERROR", "COMMAND",
-                $"FAIL {_entry.CommandName} id={_entry.CommandId} | {code}: {message} | elapsed={_entry.ElapsedMs}ms");
+            if (emitDiagnostic)
+                _tracker.WriteLogLine("ERROR", "COMMAND",
+                    $"FAIL {_entry.CommandName} id={_entry.CommandId} | {code}: {message} | elapsed={_entry.ElapsedMs}ms");
             }
         }
 

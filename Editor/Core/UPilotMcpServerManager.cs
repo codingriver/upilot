@@ -102,9 +102,10 @@ namespace CodingRiver.UPilot
         private static string DefaultPythonEntry => ResolveDefaultPythonEntry();
         private const string DefaultLogLevel = "INFO";
         private const string PackageName = "io.github.codingriver.upilot";
+        private static readonly string CurrentProjectRoot = UPilotProjectConfig.ProjectRoot;
         private static readonly string CurrentProjectLogPath =
-            Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
-        internal static string ServerLogPath => CurrentProjectLogPath;
+            UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, CurrentProjectRoot);
+        internal static string ServerLogPath => UPilotDailyLogFile.ResolveExisting(CurrentProjectLogPath);
         private string _pythonEntryPath = DefaultPythonEntry;
         private string _logLevel = DefaultLogLevel;
         private bool _autoStart = true;
@@ -113,10 +114,12 @@ namespace CodingRiver.UPilot
         private bool _pythonEntryManaged = true;
         private string EntryManagedKey => UPilotPreferences.McpPythonEntryKey + ".Managed";
 
+        // Internal dependency for isolated process acceptance; the real manager uses Bridge ports.
+        internal ServerStopScope EndpointOverride;
         /// <summary>HTTP port is stored and managed by UPilotBridge (single source of truth).</summary>
-        public int HttpPort => UPilotBridge.Instance?.HttpPort ?? 8011;
+        public int HttpPort => EndpointOverride?.HttpPort ?? UPilotBridge.Instance?.HttpPort ?? 8011;
         /// <summary>WS port is stored and managed by UPilotBridge (single source of truth).</summary>
-        public int WsPort => UPilotBridge.Instance?.WsPort ?? 8765;
+        public int WsPort => EndpointOverride?.WsPort ?? UPilotBridge.Instance?.WsPort ?? 8765;
         public string PythonEntryPath => _pythonEntryPath;
 
         public bool IsPythonEntryValid(out string absolutePath)
@@ -184,9 +187,16 @@ namespace CodingRiver.UPilot
         }
 
         internal int HealthCheckIntervalMs => HealthCheckIntervalSeconds * 1000;
+        private ServerAttachmentVerification _attachmentVerification;
+        private ServerAttachmentFailure _attachmentFailure;
+        internal bool HasVerifiedAttachment => _attachmentVerification?.Matches(_launchState) == true || HasVerifiedRecoveredAttachment;
+        internal ServerAttachmentFailure AttachmentFailure =>
+            _attachmentFailure?.Matches(_launchState, Volatile.Read(ref _startAttemptGeneration)) == true &&
+            !HasVerifiedAttachment ? _attachmentFailure : null;
         internal bool PeriodicHealthChecksAllowed =>
-            _lifecyclePhase == UPilotServerLifecyclePhase.None && _launchState?.verified == true &&
-            _launchState.readyVerified && !_launchState.terminal && !_launchNeedsRevalidation &&
+            !StopBlocksAutomaticRecovery && _lifecyclePhase == UPilotServerLifecyclePhase.None &&
+            (HasVerifiedRecoveredAttachment || (_launchState?.verified == true &&
+            (_attachmentVerification?.Matches(_launchState) == true || (_launchState.readyVerified && !_launchState.terminal)) && !_launchNeedsRevalidation)) &&
             !IsServiceTransitionActive && !UPilotServiceMaintenance.IsActive && !UPilotQuickStart.IsExplicitlyStopped;
 
         internal void ResetPreferencesToDefaultsInMemory()
@@ -265,6 +275,8 @@ namespace CodingRiver.UPilot
         private Process _trackedProcess;
         private long _trackedProcessCreatedAtTicks;
         private readonly List<Process> _stoppingProcesses = new();
+        private List<ServerStopTarget> _stoppingTargets = new();
+        private List<ServerStopTarget> StoppingTargets => _stoppingTargets ??= new List<ServerStopTarget>();
         private EditorApplication.CallbackFunction _restartWaitCallback;
         private EditorApplication.CallbackFunction _restartObserveCallback;
         private Action _afterRestartStarted;
@@ -414,7 +426,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UPilotMcpServerManager] ResolveDefaultPythonEntry exception: {ex}");
+                Logger.ReportFailure("SERVER", "ResolveDefaultPythonEntry exception", ex);
             }
             // Missing package identity is not permission to select an arbitrary cached checkout.
             return Path.Combine(UPilotProjectConfig.ProjectRoot, "Packages", PackageName,
@@ -486,11 +498,13 @@ namespace CodingRiver.UPilot
             LoadPrefs();
             AssemblyReloadEvents.beforeAssemblyReload += () =>
             {
+                BeforeStopDomainReload();
                 BeforeLaunchDomainReload();
                 InvalidateStatusCache("domain_reload");
             };
             EditorApplication.quitting += () =>
             {
+                ResetStopObservation("editor_quitting");
                 CancelPendingRestart(true, UPilotServerStopOrigin.EditorShutdown, Guid.NewGuid().ToString("N"),
                     _restartOperationId, _restartGeneration);
                 StopLaunchObservation();
@@ -594,8 +608,20 @@ namespace CodingRiver.UPilot
             NotifyStatusChanged();
         }
 
+        internal static async Task AwaitStoppedIdentityRecoveryAsync(Task recovery, long deadlineUtcMs = 0)
+        {
+            if (!recovery.IsCompleted && deadlineUtcMs > 0)
+            {
+                var remaining = deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (remaining <= 0 || await Task.WhenAny(recovery, Task.Delay((int)Math.Min(remaining, 30000))) != recovery)
+                    throw new TimeoutException("Stopped-service identity recovery exceeded the original status deadline.");
+            }
+            await recovery;
+        }
+
         public async Task<McpServerStatus> GetFreshStatusAsync(long deadlineUtcMs = 0)
         {
+            await AwaitStoppedIdentityRecoveryAsync(StoppedIdentityRecovery, deadlineUtcMs);
             if (TryGetDeferredLifecycleStatus(out var deferred))
             {
                 NotifyStatusChanged();
@@ -954,6 +980,7 @@ namespace CodingRiver.UPilot
         {
             lock (_statusLock)
             {
+                _attachmentFailure = null;
                 var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 status.LifecyclePhase = _lifecyclePhase;
                 status.StatusGeneration = _statusGeneration;
@@ -1096,11 +1123,14 @@ namespace CodingRiver.UPilot
                 {
                     stage = "process_identity";
                     TrackStatusRefreshStage(generation, stage);
-                    var process = ProbeMcpProcessOwnership(httpPort, wsPort);
-                    status.ProcessOwnership = process.Ownership;
-                    status.ProcessId = process.ProcessId;
-                    status.ProcessCommandLine = process.CommandLine;
-                    status.ProcessOwnershipEvidence = process.Evidence;
+                    if (!HasVerifiedRecoveredAttachment)
+                    {
+                        var process = ProbeMcpProcessOwnership(httpPort, wsPort);
+                        status.ProcessOwnership = process.Ownership;
+                        status.ProcessId = process.ProcessId;
+                        status.ProcessCommandLine = process.CommandLine;
+                        status.ProcessOwnershipEvidence = process.Evidence;
+                    }
 
                     stage = "health_query";
                     TrackStatusRefreshStage(generation, stage);
@@ -1123,6 +1153,7 @@ namespace CodingRiver.UPilot
                     status.HealthIdentifiesUPilot = stats.IdentifiesUPilot;
                     status.HealthServerProcessId = stats.HealthServerProcessId;
                     status.HealthProjectPath = stats.HealthProjectPath;
+                    TryApplyRecoveredProcessOwnership(ref status);
                     status.Health = stats.Health;
                     status.FailureKind = stats.FailureKind;
                     ApplyEditorObservation(ref status, stats.Health?.editor_observation);
@@ -1152,7 +1183,7 @@ namespace CodingRiver.UPilot
                 else if (status.FailureKind == McpStatusFailureKind.Transient)
                     Logger.Log("SERVER", $"Status not yet confirmed at {stage}: {ex.GetType().Name}");
                 else
-                    Debug.LogError($"[UPilotMcpServerManager] Status refresh failed at {stage} (generation {generation}): {ex}");
+                    Logger.ReportFailure("SERVER", $"Status refresh failed at {stage} generation={generation}", ex, fingerprint: "status-refresh|" + stage);
             }
 
             var refreshedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -1466,15 +1497,29 @@ namespace CodingRiver.UPilot
             var roundBudget = useRemainingRoundBudget ? (int)Math.Max(1, deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) : 2000;
             var status = await GetRestartHealthAsync(roundClient ?? _httpClient, httpPort, deadlineUtcMs, token, this, roundBudget);
             token.ThrowIfCancellationRequested();
+            if (generation != _lifecycleGeneration) throw new LifecycleProbeDeferredException();
             if (!status.HealthEndpointResponded) return status;
+            if (TryApplyRecoveredProcessOwnership(ref status))
+            {
+                status.HttpPortListening = await IsPortListeningAsync("127.0.0.1", httpPort);
+                status.WsPortListening = await IsPortListeningAsync("127.0.0.1", wsPort);
+                token.ThrowIfCancellationRequested();
+                if (generation != _lifecycleGeneration) throw new LifecycleProbeDeferredException();
+                return status;
+            }
             var remaining = deadlineUtcMs - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (remaining <= 0) throw new TimeoutException("Restart identity deadline elapsed.");
+            string expectedLogPath = null;
+            if (spec != null && (!SameProjectPath(spec.projectPath, CurrentProjectRoot) ||
+                !spec.TryGetLogFilePath(out expectedLogPath)))
+                throw new InvalidOperationException("冻结启动描述的项目或日志路径无效，未核实进程归属。");
             var processTask = Task.Run(() => ProbeMcpProcessOwnership(httpPort, wsPort,
-                useRemainingRoundBudget ? deadlineUtcMs : 0));
+                useRemainingRoundBudget ? deadlineUtcMs : 0, expectedLogPath));
             if (await Task.WhenAny(processTask, Task.Delay((int)Math.Min(useRemainingRoundBudget ? remaining : 2000, remaining), token)) != processTask)
             {
                 _ = processTask.ContinueWith(t => { var ignored = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
                 token.ThrowIfCancellationRequested();
+                if (generation != _lifecycleGeneration) throw new LifecycleProbeDeferredException();
                 status.StatusFailureStage = "process_identity";
                 status.ErrorMessage = "Process ownership probe timed out; ownership unconfirmed.";
                 return status;
@@ -1602,7 +1647,6 @@ namespace CodingRiver.UPilot
                     UPilotUpdateService.ServiceStartBlockedMessage);
                 return;
             }
-
             if (_restartPending)
             {
                 Debug.Log("[UPilotMcpServerManager] MCP server restart is already pending; start request merged.");
@@ -1612,10 +1656,16 @@ namespace CodingRiver.UPilot
             // Startup must not reuse the stop-grade global process scan: an unrelated process with
             // unreadable identity evidence must not block this project from starting. Port conflicts
             // are handled below by the health-based attach probe and the availability recheck.
-            if (_startInProgress || IsTrackedProcessAlive())
+            if (_startInProgress)
             {
-                Debug.Log("[UPilotMcpServerManager] MCP server start is already in progress or the project service is running; start request merged.");
+                Debug.Log("[UPilotMcpServerManager] MCP server start is already in progress; start request merged.");
                 return;
+            }
+            _attachmentFailure = null;
+            var trackedProcessAlive = IsTrackedProcessAlive();
+            if (trackedProcessAlive || !UPilotPortAllocator.IsPortAvailable(HttpPort) || !UPilotPortAllocator.IsPortAvailable(WsPort))
+            {
+                if (TryBeginExistingServiceRecovery(null)) return;
             }
 
             try { _pendingLaunchSpec ??= PrepareLaunchSpec(LaunchDeadline()); }
@@ -1627,21 +1677,170 @@ namespace CodingRiver.UPilot
                 _pendingLaunchDeadline = 0;
                 return;
             }
-            if (!UPilotPortAllocator.IsPortAvailable(HttpPort) ||
+            if (trackedProcessAlive || !UPilotPortAllocator.IsPortAvailable(HttpPort) ||
                 !UPilotPortAllocator.IsPortAvailable(WsPort))
             {
+                if (TryBeginExistingServiceRecovery(_pendingLaunchSpec)) return;
+                var attachSpec = _pendingLaunchSpec;
+                if (trackedProcessAlive && TryGetVerifiedOwnershipLogPath(_launchState, CurrentProjectRoot, HttpPort, WsPort, out _))
+                    attachSpec = _launchState.spec;
                 _startInProgress = true;
                 var generation = Interlocked.Increment(ref _startAttemptGeneration);
-                _ = AttachOrStartAfterIdentityProbeAsync(generation);
+                _ = AttachOrStartAfterIdentityProbeAsync(generation, attachSpec.Snapshot());
                 return;
             }
 
             StartNewServer();
         }
 
-        private async Task AttachOrStartAfterIdentityProbeAsync(int generation)
+        private async Task StartAfterStoppedIdentityRecoveryAsync(Task recovery, int startGeneration, long restartGeneration)
         {
-            var spec = _pendingLaunchSpec.Snapshot();
+            try
+            {
+                await AwaitStoppedIdentityRecoveryAsync(recovery);
+                if (startGeneration != _startAttemptGeneration || restartGeneration != _restartGeneration || !_startInProgress) return;
+                _startInProgress = false;
+                StartServer();
+            }
+            catch (Exception ex)
+            {
+                if (startGeneration != _startAttemptGeneration || restartGeneration != _restartGeneration) return;
+                _startInProgress = false;
+                Logger.ReportFailure("SERVER", "启动前的原停止身份恢复失败；未启动新服务。", ex,
+                    "server-start-recovery-" + startGeneration, terminal: true);
+            }
+        }
+
+        internal sealed class ServerAttachmentVerification
+        {
+            private readonly ServerLaunchState _state;
+            private readonly ServerLaunchSpec _spec;
+            private readonly int _launcherPid, _servicePid;
+            private readonly long _launcherCreatedAt, _serviceCreatedAt;
+            private readonly string _instanceId;
+
+            internal ServerAttachmentVerification(ServerLaunchState state)
+            {
+                _state = state; _spec = state?.spec;
+                _launcherPid = state?.launcherPid ?? 0; _servicePid = state?.servicePid ?? 0;
+                _launcherCreatedAt = state?.launcherCreatedAt ?? 0; _serviceCreatedAt = state?.serviceCreatedAt ?? 0;
+                _instanceId = state?.instanceId;
+            }
+
+            internal bool Matches(ServerLaunchState state) =>
+                state != null && ReferenceEquals(state, _state) && ReferenceEquals(state.spec, _spec) && state.verified &&
+                _launcherPid > 0 && _servicePid > 0 && _launcherCreatedAt > 0 && _serviceCreatedAt > 0 &&
+                !string.IsNullOrEmpty(_instanceId) && state.launcherPid == _launcherPid && state.servicePid == _servicePid &&
+                state.launcherCreatedAt == _launcherCreatedAt && state.serviceCreatedAt == _serviceCreatedAt &&
+                state.instanceId == _instanceId;
+        }
+
+        internal sealed class ServerAttachmentFailure
+        {
+            private readonly ServerAttachmentVerification _identity;
+            private readonly int _generation;
+            internal readonly string OperationId, Reason;
+            internal readonly bool TimedOut;
+
+            internal ServerAttachmentFailure(ServerLaunchState state, int generation, string operationId, Exception exception)
+            {
+                _identity = new ServerAttachmentVerification(state);
+                _generation = generation;
+                OperationId = operationId;
+                Reason = exception.Message;
+                TimedOut = exception is TimeoutException;
+            }
+
+            internal bool Matches(ServerLaunchState state, int generation) =>
+                generation == _generation && _identity.Matches(state);
+        }
+
+        internal bool CompleteExplicitAttachmentFailure(ServerLaunchState state, int generation, long lifecycleGeneration,
+            string operationId, Exception exception)
+        {
+            if (generation != Volatile.Read(ref _startAttemptGeneration) || lifecycleGeneration != _lifecycleGeneration ||
+                _lifecyclePhase == UPilotServerLifecyclePhase.None || !ReferenceEquals(state, _launchState)) return false;
+            _launchNeedsRevalidation = true;
+            _attachmentFailure = new ServerAttachmentFailure(state, generation, operationId, exception);
+            EndLifecyclePhase(lifecycleGeneration, exception.Message, exception is TimeoutException,
+                emitDiagnostic: false, failureException: exception);
+            Logger.ReportFailure("SERVER", $"显式附着失败；operationId={operationId}；PID={state.servicePid}。", exception,
+                operationId, terminal: true);
+            return true;
+        }
+
+        private async Task VerifyExplicitAttachmentAsync(ServerLaunchState state, int generation, long deadline)
+        {
+            var observationId = Guid.NewGuid().ToString("N");
+            var identity = new ServerAttachmentVerification(state);
+            var lifecycleGeneration = SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, state.servicePid, observationId, deadline);
+            Exception lastException = null;
+            var lastReason = "等待 Bridge 握手和实际只读往返";
+            bool OwnsObservation() => generation == Volatile.Read(ref _startAttemptGeneration) &&
+                lifecycleGeneration == _lifecycleGeneration && ReferenceEquals(state, _launchState);
+            try
+            {
+                while (OwnsObservation() && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < deadline)
+                {
+                    try
+                    {
+                        var status = await GetRestartStatusAsync(deadline, default, state.spec);
+                        if (!OwnsObservation()) return;
+                        if (!identity.Matches(state))
+                            throw new InvalidOperationException("显式附着期间冻结服务身份发生变化。");
+                        if (!TryResolveStartedService(state, status, out lastReason, stopping: true))
+                        {
+                            if (ClassifyLaunchIdentityProbe(status, false, lastReason) == "process_identity_mismatch" ||
+                                lastReason == "process_exited")
+                                throw new InvalidOperationException("显式附着身份核验失败：" + lastReason);
+                        }
+                        else
+                        {
+                            var bridge = UPilotBridge.Instance.GetStatus();
+                            if (bridge.IsWsOpen && bridge.IsAuthenticated &&
+                                UPilotDeploymentDiagnostics.Observe(bridge, status, state.spec).Length == 0)
+                            {
+                                await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, deadline);
+                                var after = UPilotBridge.Instance.GetStatus();
+                                if (!OwnsObservation()) return;
+                                if (!identity.Matches(state))
+                                    throw new InvalidOperationException("实际只读往返后冻结服务身份发生变化。");
+                                if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= deadline)
+                                    throw new TimeoutException("显式附着的实际只读往返超过本次原定期限。");
+                                if (after.IsWsOpen && after.IsAuthenticated && after.SessionId == bridge.SessionId)
+                                {
+                                    _attachmentVerification = identity;
+                                    _launchNeedsRevalidation = false;
+                                    state.readyVerified = true;
+                                    PersistLaunchState();
+                                    if (EndLifecyclePhase(lifecycleGeneration)) CacheVerifiedStartupStatus(status);
+                                    return;
+                                }
+                                lastReason = "实际只读往返后 Bridge 会话发生变化";
+                            }
+                        }
+                    }
+                    catch (LifecycleProbeDeferredException) { if (!OwnsObservation()) return; }
+                    catch (Exception ex)
+                    {
+                        if (!OwnsObservation()) return;
+                        if (ClassifyStatusException(ex) == McpStatusFailureKind.Confirmed) throw;
+                        lastException = ex; lastReason = ex.Message;
+                    }
+                    var remaining = deadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    if (remaining > 0) await Task.Delay((int)Math.Min(RestartProbeIntervalMs, remaining));
+                }
+                if (OwnsObservation()) throw new TimeoutException("显式附着验证未在本次原定期限内完成：" + lastReason, lastException);
+            }
+            catch (Exception ex)
+            {
+                if (OwnsObservation())
+                    CompleteExplicitAttachmentFailure(state, generation, lifecycleGeneration, observationId, ex);
+            }
+        }
+
+        private async Task AttachOrStartAfterIdentityProbeAsync(int generation, ServerLaunchSpec spec)
+        {
             var deadline = LaunchDeadline();
             try
             {
@@ -1661,12 +1860,16 @@ namespace CodingRiver.UPilot
                     if (generation != Volatile.Read(ref _startAttemptGeneration) || !_startInProgress) return;
                     identityError = "service_ownership_unverified";
                     if (IsVerifiedExistingProjectService(status, spec.projectPath) &&
-                        TryTrackExistingProcess(status, spec, deadline, out identityError))
+                        (_launchState != null
+                            ? TryResolveStartedService(_launchState, status, out identityError, stopping: true)
+                            : TryTrackExistingProcess(status, spec, deadline, out identityError)))
                     {
-                        Debug.Log($"[UPilotMcpServerManager] 已附着当前工程的 MCP 服务 PID={status.HealthServerProcessId}；合并启动请求。");
-                        SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, status.HealthServerProcessId,
-                            Guid.NewGuid().ToString("N"), deadline);
-                        BeginLaunchObservation();
+                        Debug.Log($"[UPilotMcpServerManager] 已认领当前工程的 MCP 服务 PID={status.HealthServerProcessId}；开始本次独立只读附着验证。");
+                        StopLaunchObservation();
+                        _attachmentVerification = null;
+                        _launchNeedsRevalidation = true;
+                        ResetStopObservation("new_service_start_or_restart");
+                        await VerifyExplicitAttachmentAsync(_launchState, generation, deadline);
                         return;
                     }
                     if (status.HealthEndpointResponded && !SameProjectPath(status.HealthProjectPath, spec.projectPath))
@@ -1690,8 +1893,10 @@ namespace CodingRiver.UPilot
                 var message = $"已有监听服务身份未确认；阶段={stage}，分类={status.FailureKind}，归属={status.ProcessOwnership}，" +
                     $"身份依据={identityError}；{status.ErrorMessage}。HTTP={spec.httpPort} / WS={spec.wsPort} 仍不可绑定，本次不启动新服务。";
                 UPilotStartupDiagnostics.RecordBlockingReason("server_existing_identity_unverified", message);
-                RecordRestartStartFailure("server_existing_identity_unverified", message);
-                Debug.LogWarning("[UPilotMcpServerManager] " + message);
+                if (IsRestartObservationActive())
+                    RecordRestartStartFailure("server_existing_identity_unverified", message);
+                else
+                    Logger.ReportFailure("SERVER", message, scope: "server-start-" + generation, terminal: true);
             }
             finally
             {
@@ -1757,11 +1962,12 @@ namespace CodingRiver.UPilot
                     throw new InvalidOperationException("启动描述冻结后端口配置已变更，停止本次启动");
                 _pendingLaunchSpec = null;
                 LaunchServer(spec, LaunchDeadline());
+                ResetStopObservation("new_service_start_or_restart");
             }
             catch (Exception ex)
             {
-                EndLifecyclePhase(_lifecycleGeneration, "server_start_exception: " + ex.Message);
-                Debug.LogError($"[UPilotMcpServerManager] Failed to start server: {ex.Message}");
+                EndLifecyclePhase(_lifecycleGeneration, "server_start_exception: " + ex.Message, emitDiagnostic: false);
+                Logger.ReportFailure("SERVER", "Failed to start server", ex);
                 UPilotStartupDiagnostics.RecordBlockingReason("server_start_exception", ex.Message);
                 RecordRestartStartFailure("server_start_exception", ex.Message);
             }
@@ -1793,78 +1999,31 @@ namespace CodingRiver.UPilot
 
         public void StopServer() => StopServer(UPilotServerStopOrigin.User);
 
-        internal void StopServer(UPilotServerStopOrigin origin, string requestId = "")
-        {
-            var result = StopServerAndObserveExit(origin, requestId);
-            if (!result.StopConfirmed || !result.PortsAvailable)
-            {
-                var message = $"停止尚未确认：服务/启动器退出={result.StopConfirmed}；端口释放={result.PortsAvailable}。不会停止未知进程。";
-                UPilotStartupDiagnostics.RecordBlockingReason("server_stop_unconfirmed", message);
-                Debug.LogWarning("[UPilotMcpServerManager] " + message);
-            }
-        }
+        internal void StopServer(UPilotServerStopOrigin origin, string requestId = "") => _ = StopServerAndObserveExitAsync(origin, requestId);
 
-        private bool TryStopServer(UPilotServerStopOrigin origin, string requestId)
+        internal sealed class PreparedProcessStop : IDisposable
         {
-            if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return false;
-            var operationId = _restartOperationId;
-            var generation = _restartGeneration;
-            // Capture verified process handles before ending this restart. A delayed stop must
-            // never rediscover and kill a replacement started by another generation.
-            using var prepared = PrepareCurrentProjectStop();
-            if (generation != _restartGeneration || operationId != _restartOperationId) return false;
-            if (string.IsNullOrEmpty(requestId)) requestId = Guid.NewGuid().ToString("N");
-            var target = prepared.Processes.FirstOrDefault();
-            CancelPendingRestart(recordCancellation: true, origin, requestId, operationId, generation,
-                target.pid, target.createdAtTicks);
-            InvalidateStatusCache(origin == UPilotServerStopOrigin.User ? "explicit_stop" : "lifecycle_stop");
-            StopPreparedProcesses(prepared, 0);
-            return true;
-        }
-
-        private sealed class PreparedProcessStop : IDisposable
-        {
-            internal readonly List<(Process process, int pid, long createdAtTicks, string commandLine)> Processes = new();
+            internal readonly List<ServerStopTarget> Processes = new();
             internal readonly HashSet<int> Transferred = new();
+            internal Dictionary<int, List<int>> VerifiedPorts;
+            internal ServerStopScope Scope;
+            internal int[] UnmatchedPortOwners = Array.Empty<int>();
             internal int HttpPort, WsPort;
-            internal void Add(Process process, string commandLine) =>
-                Processes.Add((process, process.Id, process.StartTime.ToUniversalTime().Ticks, commandLine));
             public void Dispose()
             {
                 foreach (var entry in Processes)
-                    if (!Transferred.Contains(entry.pid)) entry.process.Dispose();
+                    if (!Transferred.Contains(entry.ProcessId)) entry.Dispose();
                 Processes.Clear();
             }
         }
 
-        private PreparedProcessStop PrepareCurrentProjectStop(int expectedProcessId = 0)
+        private PreparedProcessStop PrepareCurrentProjectStop(int expectedProcessId = 0, long deadlineUtcMs = 0)
         {
-            var prepared = new PreparedProcessStop { HttpPort = _launchState?.spec.httpPort ?? HttpPort,
-                WsPort = _launchState?.spec.wsPort ?? WsPort };
-            try
-            {
-                if (_launchState != null) return PrepareTrackedServiceStop(prepared, expectedProcessId);
-                var processes = FindCurrentProjectMcpProcesses(out var portsByPid, out var portQuerySucceeded, stopTargetsOnly: true);
-                ValidateStopPortOwnership(portsByPid, portQuerySucceeded,
-                    processes.Select(process => process.pid), HttpPort, WsPort);
-                if (expectedProcessId > 0 && (processes.Count != 1 || processes[0].pid != expectedProcessId))
-                    throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Expected Server process changed before stop.");
-                foreach (var entry in processes)
-                {
-                    var process = Process.GetProcessById(entry.pid);
-                    try
-                    {
-                        // Retain a handle to the verified process so a reused PID cannot be terminated.
-                        var handle = process.Handle;
-                        if (process.HasExited || process.StartTime.ToUniversalTime().Ticks != entry.createdAtTicks)
-                            throw new InvalidOperationException("Server process identity changed while preparing stop.");
-                        prepared.Add(process, entry.cmdLine);
-                    }
-                    catch { process.Dispose(); throw; }
-                }
-                return prepared;
-            }
-            catch { prepared.Dispose(); throw; }
+            var deadline = deadlineUtcMs > 0 ? deadlineUtcMs : _restartVerificationDeadlineUtcMs > 0 ? _restartVerificationDeadlineUtcMs :
+                StopNow + UPilotTimingSettings.ServiceStopObservationTimeoutSeconds * 1000L;
+            // The accepted RPC endpoint identity is separate from residual stop targets.
+            // It may already have exited while matching listeners still require cleanup.
+            return PrepareStopScope(GetStopScope(), new[] { expectedProcessId, _trackedProcessId ?? 0 }, deadline);
         }
 
         internal static void ValidateStopPortOwnership(Dictionary<int, List<int>> portsByPid,
@@ -1874,11 +2033,11 @@ namespace CodingRiver.UPilot
                 throw new InvalidOperationException("无法安全停止 Server：监听端口归属查询失败。");
             var owners = portsByPid.Where(entry => entry.Value.Contains(httpPort) || entry.Value.Contains(wsPort))
                 .Select(entry => entry.Key).Distinct().ToArray();
-            if (owners.Length > 1 || owners.Any(pid => !verifiedProcessIds.Contains(pid)))
+            if (owners.Any(pid => !verifiedProcessIds.Contains(pid)))
                 throw new InvalidOperationException("无法安全停止 Server：端口进程不属于当前项目或身份未知。");
             // A reserved/permission-denied port can be unbindable without a listener.
             // Bindability gates startup/restart, not an identity-verified stop (or an empty no-op).
-            // Handles, creation times and a fresh owner query are still checked before termination.
+            // Retained OS handles identify the termination targets; old launch history is not a stop gate.
         }
 
         private void StopCurrentProjectProcesses(int expectedProcessId = 0)
@@ -1888,61 +2047,67 @@ namespace CodingRiver.UPilot
             StopPreparedProcesses(prepared, expectedProcessId);
         }
 
-        private void StopPreparedProcesses(PreparedProcessStop prepared, int expectedProcessId, Action onStopAttempt = null)
+        private void StopPreparedProcesses(PreparedProcessStop prepared, int expectedProcessId, Action onStopAttempt = null, Dictionary<int, List<int>> verifiedPorts = null, string stopObservationId = "", long stopDeadline = 0, bool initialDispatch = true, string maintenanceId = "")
         {
-            Debug.Log($"[UPilotMcpServerManager] 正在关闭 MCP Server；目标 PID=[{string.Join(", ", prepared.Processes.Select(entry => entry.pid))}]；目标进程数={prepared.Processes.Count}；HTTP={prepared.HttpPort}；WS={prepared.WsPort}。");
-            Interlocked.Increment(ref _startAttemptGeneration);
-            _startInProgress = false;
-            if (expectedProcessId > 0 && (prepared.Processes.Count != 1 || prepared.Processes[0].pid != expectedProcessId))
-                throw new ServiceMaintenanceException("SERVICE_RESTART_IDENTITY_CHANGED", "Expected Server process changed before stop.");
-            // Check every handle before causing any termination. No PID-only lookup is used here.
-            foreach (var entry in prepared.Processes)
-            {
-                if (entry.process.HasExited || entry.process.Id != entry.pid ||
-                    entry.process.StartTime.ToUniversalTime().Ticks != entry.createdAtTicks ||
-                    !IsCurrentProjectMcpCommandLine(entry.commandLine, prepared.HttpPort, prepared.WsPort))
-                    throw new InvalidOperationException("Server process identity changed before stop.");
-            }
-            var currentPorts = SafeGetListeningPortsByPid(out var portQuerySucceeded);
-            if (!portQuerySucceeded)
-                throw new InvalidOperationException("Server port ownership became unknown before stop.");
-            var owners = currentPorts.Where(item => item.Value.Contains(prepared.HttpPort) || item.Value.Contains(prepared.WsPort))
-                .Select(item => item.Key).Distinct().ToArray();
-            if (owners.Any(pid => !prepared.Processes.Any(entry => entry.pid == pid)))
-                throw new InvalidOperationException("Server ports changed owner before stop.");
+            if (initialDispatch || prepared.Processes.Any(x => !StoppingTargets.Any(t => t.ProcessId == x.ProcessId && !t.HasExited)))
+                Debug.Log($"[UPilotMcpServerManager] 正在关闭 MCP Server；目标 PID=[{string.Join(", ", prepared.Processes.Select(entry => entry.ProcessId))}]；目标进程数={prepared.Processes.Count}；HTTP={prepared.HttpPort}；WS={prepared.WsPort}。");
+            if (initialDispatch) { Interlocked.Increment(ref _startAttemptGeneration); _startInProgress = false; }
             _stoppingHttpPort = prepared.HttpPort;
             _stoppingWsPort = prepared.WsPort;
-            var stopOperationId = string.IsNullOrEmpty(_restartOperationId) ? Guid.NewGuid().ToString("N") : _restartOperationId;
+            var stopOperationId = !string.IsNullOrEmpty(stopObservationId) ? stopObservationId :
+                string.IsNullOrEmpty(_restartOperationId) ? Guid.NewGuid().ToString("N") : _restartOperationId;
             long stopLifecycleGeneration = 0;
             try
             {
                 foreach (var entry in prepared.Processes)
                 {
-                    if (expectedProcessId > 0) UPilotServiceMaintenance.RequireContinuation();
+                    if (entry.HasExited || StoppingTargets.Any(t => t.ProcessId == entry.ProcessId && !t.HasExited)) continue;
+                    if (stopDeadline > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= stopDeadline)
+                        throw new TimeoutException("Stop deadline elapsed before dispatch.");
+                    if (!string.IsNullOrEmpty(maintenanceId)) UPilotServiceMaintenance.RequireContinuation(maintenanceId);
                     onStopAttempt?.Invoke();
                     if (stopLifecycleGeneration == 0)
-                        stopLifecycleGeneration = SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, entry.pid, stopOperationId);
+                        stopLifecycleGeneration = SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, entry.ProcessId, stopOperationId, stopDeadline);
                     if (_restartOperationId.Length > 0 && UPilotServerRestartDiagnostics.IsActive(_restartOperationId))
                         UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, serverAttempted: true);
                     try
                     {
-                        entry.process.Kill();
-                        _stoppingProcesses.Add(entry.process);
-                        prepared.Transferred.Add(entry.pid);
-                        UnityEngine.Debug.Log($"[UPilotMcpServerManager] 已请求关闭 MCP Server 进程 PID={entry.pid}。");
+                        if (StopTerminationOverride != null) StopTerminationOverride(entry);
+                        else entry.Terminate();
+                        StoppingTargets.Add(entry);
+                        prepared.Transferred.Add(entry.ProcessId);
+                        UnityEngine.Debug.Log($"[UPilotMcpServerManager] 已请求关闭 MCP Server 进程 PID={entry.ProcessId}；入口={entry.EntryPath}。");
+                    }
+                    catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 5 &&
+                        _stopObservation?.Active == true && _stopObservation.id == stopObservationId)
+                    {
+                        // A process that is terminating can reject TerminateProcess before its
+                        // handle is signaled. Keep that original handle, never dispatch again,
+                        // and let the same observer prove exit/ports or fail at its deadline.
+                        StoppingTargets.Add(entry);
+                        prepared.Transferred.Add(entry.ProcessId);
+                        var diagnostic = $"Win32={ex.NativeErrorCode}；PID={entry.ProcessId}；入口={entry.EntryPath}；stopId={stopObservationId}\n{ex}";
+                        _stopObservation.pendingTerminationDiagnostic += diagnostic + "\n";
+                        _stopObservation.failureException = _stopObservation.failureException == null ? ex :
+                            new AggregateException(_stopObservation.failureException, ex);
+                        Logger.ReportWarning("SERVER", "Server 终止调用被 OS 拒绝，继续按原期限观察同一句柄；" + diagnostic,
+                            stopObservationId, fingerprint: "termination-pending|" + entry.ProcessId);
                     }
                     catch (InvalidOperationException)
                     {
                         // Exited after the preflight; the handle identifies the old process, not a replacement.
-                        if (!entry.process.HasExited) throw;
+                        if (!entry.HasExited) throw;
                     }
                 }
-                if (stopLifecycleGeneration == 0)
+                if (stopLifecycleGeneration == 0 && initialDispatch)
                     stopLifecycleGeneration = SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, 0, stopOperationId);
-                ReleaseLaunchAfterStop();
-                _trackedProcessId = null;
-                DisposeTrackedProcess();
-                InvalidateStatusCache();
+                if (initialDispatch)
+                {
+                    ReleaseLaunchAfterStop();
+                    _trackedProcessId = null;
+                    DisposeTrackedProcess();
+                    InvalidateStatusCache();
+                }
             }
             catch
             {
@@ -1951,28 +2116,21 @@ namespace CodingRiver.UPilot
             }
         }
 
-        public bool StopServerAndWaitForExit(int timeoutMs = 3000) =>
-            StopServerAndWaitForExit(UPilotServerStopOrigin.User, "", timeoutMs);
-
-        internal bool StopServerAndWaitForExit(UPilotServerStopOrigin origin, string requestId = "", int timeoutMs = 3000)
-        {
-            var result = StopServerAndObserveExit(origin, requestId, timeoutMs);
-            return result.StopConfirmed && result.PortsAvailable;
-        }
-
         internal readonly struct ServerStopResult
         {
             internal readonly bool StopConfirmed;
             internal readonly bool PortsAvailable;
+            internal readonly bool ObservationSucceeded;
             internal readonly int StatusGeneration;
             internal readonly int StartGeneration;
             internal readonly long RestartGeneration;
 
             internal ServerStopResult(bool stopConfirmed, bool portsAvailable, int statusGeneration,
-                int startGeneration, long restartGeneration)
+                int startGeneration, long restartGeneration, bool observationSucceeded = true)
             {
                 StopConfirmed = stopConfirmed;
                 PortsAvailable = portsAvailable;
+                ObservationSucceeded = observationSucceeded;
                 StatusGeneration = statusGeneration;
                 StartGeneration = startGeneration;
                 RestartGeneration = restartGeneration;
@@ -1980,48 +2138,9 @@ namespace CodingRiver.UPilot
         }
 
         internal bool IsStopResultCurrent(ServerStopResult result) =>
-            result.StopConfirmed && result.RestartGeneration == _restartGeneration &&
+            result.StopConfirmed && result.ObservationSucceeded && result.RestartGeneration == _restartGeneration &&
             result.StartGeneration == _startAttemptGeneration && !_startInProgress && !_restartPending &&
             !_trackedProcessId.HasValue;
-
-        internal ServerStopResult StopServerAndObserveExit(UPilotServerStopOrigin origin,
-            string requestId = "", int timeoutMs = 3000)
-        {
-            // A skipped stop (maintenance ownership or changed identity) is not success.
-            if (!TryStopServer(origin, requestId)) return default;
-            var stopLifecycleGeneration = _lifecycleGeneration;
-            var stoppedGeneration = _restartGeneration;
-            var stoppedStartGeneration = _startAttemptGeneration;
-            try
-            {
-                var stopwatch = Stopwatch.StartNew();
-                bool exited;
-                bool portsAvailable;
-                while (true)
-                {
-                    if (stoppedGeneration != _restartGeneration || stoppedStartGeneration != _startAttemptGeneration)
-                        return default;
-                    exited = StoppedProcessesExited();
-                    portsAvailable = UPilotPortAllocator.IsPortAvailable(_stoppingHttpPort > 0 ? _stoppingHttpPort : HttpPort) &&
-                        UPilotPortAllocator.IsPortAvailable(_stoppingWsPort > 0 ? _stoppingWsPort : WsPort);
-                    if ((exited && portsAvailable) || stopwatch.ElapsedMilliseconds >= timeoutMs) break;
-                    System.Threading.Thread.Sleep(50);
-                }
-
-                EndLifecyclePhase(stopLifecycleGeneration, exited && portsAvailable ? "" : "server_stop_unconfirmed", !(exited && portsAvailable));
-                // Preserve separate evidence: stopped processes do not imply bindable ports.
-                InvalidateStatusCache();
-                Debug.Log($"[UPilotMcpServerManager] Server 关闭检查结束；进程退出={exited}；HTTP/WS 端口可绑定={portsAvailable}。");
-                return new ServerStopResult(exited && stoppedGeneration == _restartGeneration &&
-                    stoppedStartGeneration == _startAttemptGeneration, portsAvailable,
-                    Volatile.Read(ref _statusGeneration), stoppedStartGeneration, stoppedGeneration);
-            }
-            catch
-            {
-                EndLifecyclePhase(stopLifecycleGeneration, "stop_observation_failed");
-                throw;
-            }
-        }
 
         internal string[] GetUpdateOccupancyResourcePaths()
         {
@@ -2081,6 +2200,8 @@ namespace CodingRiver.UPilot
             if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
             if (maintenanceDeadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= maintenanceDeadlineUtcMs)
                 throw new ServiceMaintenanceException("SERVICE_RESTART_TIMEOUT", "Maintenance expired before stopping services.");
+            var maintenanceId = maintenanceDeadlineUtcMs > 0 ? UPilotServiceMaintenance.Current?.maintenanceId ?? "" : "";
+            if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation(maintenanceId);
             var processRole = UPilotBridge.DetermineProcessRole();
             if (!UPilotBridge.IsMainEditorProcess(processRole))
             {
@@ -2096,7 +2217,6 @@ namespace CodingRiver.UPilot
                 Debug.LogWarning("[UPilotMcpServerManager] " + UPilotUpdateService.ServiceStartBlockedMessage);
                 return;
             }
-
             if (_restartPending || IsRestartObservationActive())
             {
                 if (afterStart != null)
@@ -2104,6 +2224,8 @@ namespace CodingRiver.UPilot
                 Debug.Log("[UPilotMcpServerManager] MCP server restart is already active; restart request merged without replaying it.");
                 return;
             }
+
+            ResetStopObservation("new_service_start_or_restart");
 
             CancelPendingRestart(recordCancellation: false);
             var bridge = UPilotBridge.Instance;
@@ -2122,7 +2244,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError("[UPilotMcpServerManager] MCP restart was not started: " + ex.Message);
+                Logger.ReportFailure("SERVER", "MCP restart was not started", ex);
                 return;
             }
             _restartGeneration = Math.Max(_restartGeneration + 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
@@ -2137,6 +2259,9 @@ namespace CodingRiver.UPilot
             _restartHealthProbeRunning = false;
 
             PreparedProcessStop prepared = null;
+            Task<ServerStopResult> stopping = null;
+            var stopDeadline = Math.Min(StopNow + UPilotTimingSettings.ServiceStopObservationTimeoutSeconds * 1000L,
+                _restartVerificationDeadlineUtcMs);
             try
             {
                 RunVerifiedStopSequence(() =>
@@ -2146,7 +2271,7 @@ namespace CodingRiver.UPilot
                     _pendingLaunchSpec = PrepareLaunchSpec(_restartVerificationDeadlineUtcMs);
                     UPilotServerRestartDiagnostics.RecordLaunchSpec(_restartOperationId, _pendingLaunchSpec);
                     RequireRestartBudget();
-                    prepared = PrepareCurrentProjectStop(expectedProcessId);
+                    prepared = PrepareCurrentProjectStop(expectedProcessId, stopDeadline);
                     bridge.ResetActiveWork();
                     UPilotServerRestartDiagnostics.MarkGate(_restartOperationId, "old_identity", "passed",
                         prepared.Processes.Count == 0 ? "no_old_process" : "identity_verified",
@@ -2156,11 +2281,11 @@ namespace CodingRiver.UPilot
                             "no_old_bridge", "旧 Bridge 未启动，无需停止");
                     if (oldProcessId == 0 && prepared.Processes.Count == 1)
                     {
-                        oldProcessId = prepared.Processes[0].pid;
+                        oldProcessId = prepared.Processes[0].ProcessId;
                         UPilotServerRestartDiagnostics.RecordOldProcessId(_restartOperationId, oldProcessId);
                     }
                     RequireRestartBudget();
-                    if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
+                    if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation(maintenanceId);
                     UPilotServerRestartDiagnostics.RecordPhase(_restartOperationId, "stopping_old_services");
                 }, bridgeWasStarted, () =>
                 {
@@ -2169,28 +2294,26 @@ namespace CodingRiver.UPilot
                     bridge.Stop();
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId,
                         bridgeConfirmed: !bridge.GetStatus().IsStarted);
-                }, onAttempt => StopPreparedProcesses(prepared, expectedProcessId, () =>
+                }, onAttempt =>
                 {
                     RequireRestartBudget();
                     onAttempt();
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, serverAttempted: true);
-                }), () =>
+                    stopping = StopServerAndObserveExitAsync(UPilotServerStopOrigin.User, _restartOperationId,
+                        parentDeadlineUtcMs: stopDeadline, scope: prepared.Scope, prepared: prepared, preserveRestart: true,
+                        maintenanceId: maintenanceId);
+                    prepared = null; // Ownership moved to the one stop observer, including residual sweeps.
+                }, () =>
                 {
                     if (oldProcessId <= 0) return false;
-                    var ownership = ProbeMcpProcessOwnership(HttpPort, WsPort);
                     var health = GetHealthForRecovery(oldProcessId, _restartExpectedProjectPath, _restartVerificationDeadlineUtcMs);
-                    using var original = Process.GetProcessById(oldProcessId);
-                    return ownership.Ownership == McpProcessOwnership.CurrentUPilot &&
-                        ownership.ProcessId == oldProcessId && health &&
-                        prepared.Processes.Any(entry => entry.pid == oldProcessId &&
-                            !original.HasExited && original.StartTime.ToUniversalTime().Ticks == entry.createdAtTicks);
+                    return health && prepared?.Processes.Any(entry => entry.ProcessId == oldProcessId && !entry.HasExited) == true;
                 }, () => { RequireRestartBudget(); bridge.EnsureStarted(); }, (attempted, result, error) =>
                     UPilotServerRestartDiagnostics.RecordBridgeRestore(_restartOperationId, attempted, result, error));
-                UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, exitConfirmed: StoppedProcessesExited());
                 _afterRestartStarted += () =>
                 {
                     RequireRestartBudget();
-                    if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
+                    if (maintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation(maintenanceId);
                     bridge.EnsureStarted();
                 };
                 if (afterStart != null) _afterRestartStarted += afterStart;
@@ -2209,7 +2332,6 @@ namespace CodingRiver.UPilot
             _restartPending = true;
             var waitingOperationId = _restartOperationId;
             var waitingGeneration = _restartGeneration;
-            var deadline = EditorApplication.timeSinceStartup + 4d;
             _restartWaitCallback = () =>
             {
                 if (waitingGeneration != _restartGeneration || waitingOperationId != _restartOperationId ||
@@ -2228,14 +2350,14 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                var portsAvailable = StoppedProcessesExited() &&
-                    UPilotPortAllocator.IsPortAvailable(_stoppingHttpPort > 0 ? _stoppingHttpPort : HttpPort) &&
-                    UPilotPortAllocator.IsPortAvailable(_stoppingWsPort > 0 ? _stoppingWsPort : WsPort);
+                if (stopping?.IsCompleted != true) return;
+                var stopped = stopping.GetAwaiter().GetResult();
+                var portsAvailable = stopped.ObservationSucceeded && stopped.StopConfirmed && stopped.PortsAvailable;
                 if (portsAvailable)
                 {
                     if (_restartMaintenanceDeadlineUtcMs > 0)
                     {
-                        try { UPilotServiceMaintenance.RequireContinuation(); }
+                        try { UPilotServiceMaintenance.RequireContinuation(maintenanceId); }
                         catch (ServiceMaintenanceException ex)
                         {
                             RecordRestartStartFailure(ex.Code, ex.Message);
@@ -2268,9 +2390,6 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
-                if (restart.deadlineAtUtcMs > 0 || _restartMaintenanceDeadlineUtcMs > 0 || EditorApplication.timeSinceStartup < deadline)
-                    return;
-
                 var timedOutCallback = _restartWaitCallback;
                 if (timedOutCallback != null)
                     EditorApplication.update -= timedOutCallback;
@@ -2278,17 +2397,17 @@ namespace CodingRiver.UPilot
                 _restartPending = false;
                 _afterRestartStarted = null;
                 InvalidateStatusCache();
-                var message =
-                    $"MCP restart timed out waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.";
+                var message = _stopObservation?.TerminalMessage ??
+                    $"MCP restart failed waiting for ports HTTP={HttpPort}, WS={WsPort} to be released.";
                 UPilotServerRestartDiagnostics.RecordFailure(
                     _restartOperationId,
                     "port_release_timeout",
                     message,
-                    UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
-                    "log/mcp-server.log",
+                    UPilotServerRestartDiagnostics.ReadServerLogTail(ServerLogPath),
+                    ServerLogPath,
                     "Inspect the process owning the configured ports before requesting one new restart.");
                 FinishRestartObservation();
-                Debug.LogError("[UPilotMcpServerManager] " + message);
+                Logger.ReportFailure("SERVER", message);
             };
             EditorApplication.update += _restartWaitCallback;
         }
@@ -2330,12 +2449,12 @@ namespace CodingRiver.UPilot
                     {
                         restoreResult = "failed";
                         restoreError = recoveryError.Message;
-                        UnityEngine.Debug.LogWarning("[UPilotMcpServerManager] Bridge recovery unconfirmed: " + recoveryError.Message);
+                        Logger.ReportFailure("SERVER", "Bridge recovery unconfirmed", recoveryError);
                     }
                     try { onBridgeRestore?.Invoke(restoreAttempted, restoreResult, restoreError); }
                     catch (Exception diagnosticError)
                     {
-                        UnityEngine.Debug.LogWarning("[UPilotMcpServerManager] Bridge recovery diagnostic failed: " + diagnosticError.Message);
+                        Logger.ReportFailure("SERVER", "Bridge recovery diagnostic failed", diagnosticError);
                     }
                 }
                 throw;
@@ -2368,7 +2487,7 @@ namespace CodingRiver.UPilot
                 UPilotServerRestartDiagnostics.RecordStop(operationId, _restartGeneration, origin,
                     requestId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), targetProcessId, targetCreatedAtTicks);
             }
-            if (_lifecycleOperationId == operationId) EndLifecyclePhase(_lifecycleGeneration, "restart_canceled");
+            if (_lifecycleOperationId == operationId) EndLifecyclePhase(_lifecycleGeneration, "restart_canceled", emitDiagnostic: false);
             ClearRestartObservationState();
         }
 
@@ -2387,7 +2506,7 @@ namespace CodingRiver.UPilot
             {
                 if (_restartMaintenanceDeadlineUtcMs > 0)
                     RecordRestartStartFailure((ex as ServiceMaintenanceException)?.Code ?? "SERVICE_RESTART_FAILED", ex.Message);
-                Debug.LogError("[UPilotMcpServerManager] Restart callback failed: " + ex);
+                Logger.ReportFailure("SERVER", "Restart callback failed", ex);
             }
         }
 
@@ -2400,8 +2519,8 @@ namespace CodingRiver.UPilot
                 _restartOperationId,
                 code,
                 message,
-                UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
-                "log/mcp-server.log");
+                UPilotServerRestartDiagnostics.ReadServerLogTail(ServerLogPath),
+                ServerLogPath);
         }
 
         private int ResolveCurrentProjectProcessId()
@@ -2463,8 +2582,8 @@ namespace CodingRiver.UPilot
                     _restartOperationId,
                     "restart_recovery_required",
                     "A persisted restart intent has no established replacement process identity; start is not replayed.",
-                    UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
-                    "log/mcp-server.log",
+                    UPilotServerRestartDiagnostics.ReadServerLogTail(ServerLogPath),
+                    ServerLogPath,
                     "Inspect the prior restart evidence and request one explicit restart if still needed.");
                 ClearRestartObservationState();
                 return;
@@ -2509,8 +2628,8 @@ namespace CodingRiver.UPilot
                         operationId,
                         processId,
                         exitCode,
-                        UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
-                        "log/mcp-server.log");
+                        UPilotServerRestartDiagnostics.ReadServerLogTail(ServerLogPath),
+                        ServerLogPath);
                     FinishRestartObservation();
                     return;
                 }
@@ -2521,8 +2640,8 @@ namespace CodingRiver.UPilot
                     operationId,
                     "server_process_observation_failed",
                     ex.Message,
-                    UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
-                    "log/mcp-server.log");
+                    UPilotServerRestartDiagnostics.ReadServerLogTail(ServerLogPath),
+                    ServerLogPath);
                 FinishRestartObservation();
                 return;
             }
@@ -2562,8 +2681,8 @@ namespace CodingRiver.UPilot
                     operationId,
                     _restartMaintenanceDeadlineUtcMs > 0 ? "SERVICE_RESTART_TIMEOUT" : "restart_verification_timeout",
                     UPilotServerRestartDiagnostics.TimeoutMessage(pending, now),
-                    UPilotServerRestartDiagnostics.ReadServerLogTail(CurrentProjectLogPath),
-                    "log/mcp-server.log",
+                    UPilotServerRestartDiagnostics.ReadServerLogTail(ServerLogPath),
+                    ServerLogPath,
                     "Inspect health, exact projectPath, and Bridge session diagnostics before requesting one new restart.");
                 FinishRestartObservation();
                 return;
@@ -2719,7 +2838,7 @@ namespace CodingRiver.UPilot
                 var elapsed = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedAtUtcMs);
                 Logger.LogWarning("SERVER",
                     $"重启/查询诊断 source=Unity客户端 PID={_lifecycleProcessId} operation={operationId} phase={phase} elapsedMs={elapsed} " +
-                    $"outcome={outcome} error={TruncateDiagnostic(error, 1024)} " +
+                    $"outcome={outcome} error={error} " +
                     BuildEditorObservationDiagnostic(status));
             }
             catch
@@ -2969,17 +3088,23 @@ namespace CodingRiver.UPilot
 
         private bool StoppedProcessesExited()
         {
+            var allExited = true;
+            for (var i = StoppingTargets.Count - 1; i >= 0; i--)
+            {
+                if (!StoppingTargets[i].HasExited) { allExited = false; continue; }
+                StoppingTargets[i].Dispose(); StoppingTargets.RemoveAt(i);
+            }
             for (var i = _stoppingProcesses.Count - 1; i >= 0; i--)
             {
                 try
                 {
-                    if (!_stoppingProcesses[i].HasExited) return false;
+                    if (!_stoppingProcesses[i].HasExited) { allExited = false; continue; }
                 }
-                catch { return false; }
+                catch { allExited = false; continue; }
                 _stoppingProcesses[i].Dispose();
                 _stoppingProcesses.RemoveAt(i);
             }
-            return true;
+            return allExited;
         }
 
         // ── Port & Process Helpers ─────────────────────────────────────────
@@ -3021,8 +3146,27 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private McpProcessProbe ProbeMcpProcessOwnership(int httpPort, int wsPort, long deadlineUtcMs = 0)
+        internal static bool TryGetVerifiedOwnershipLogPath(ServerLaunchState state, string projectPath,
+            int httpPort, int wsPort, out string logPath)
         {
+            logPath = null;
+            return state?.verified == true && state.launcherPid > 0 && state.launcherCreatedAt > 0 &&
+                state.servicePid > 0 && state.serviceCreatedAt > 0 && !string.IsNullOrEmpty(state.instanceId) &&
+                state.spec != null && state.spec.Validate().Length == 0 &&
+                SameProjectPath(state.spec.projectPath, projectPath) &&
+                state.spec.httpPort == httpPort && state.spec.wsPort == wsPort &&
+                state.spec.TryGetLogFilePath(out logPath);
+        }
+
+        private McpProcessProbe ProbeMcpProcessOwnership(int httpPort, int wsPort, long deadlineUtcMs = 0,
+            string expectedLogPath = null)
+        {
+            var launch = _launchState;
+            var hasVerifiedLaunch = TryGetVerifiedOwnershipLogPath(launch, CurrentProjectRoot, httpPort, wsPort, out var frozenLogPath);
+            expectedLogPath ??= hasVerifiedLaunch ? frozenLogPath : CurrentProjectLogPath;
+            var constrainService = hasVerifiedLaunch && UPilotDeploymentDiagnostics.SamePath(expectedLogPath, frozenLogPath);
+            var expectedPid = constrainService ? launch.servicePid : 0;
+            var expectedCreatedAt = constrainService ? launch.serviceCreatedAt : 0;
             var portsByPid = SafeGetListeningPortsByPid(out var ownerQuerySucceeded, deadlineUtcMs);
             if (!ownerQuerySucceeded)
             {
@@ -3080,8 +3224,24 @@ namespace CodingRiver.UPilot
                     continue;
                 }
 
-                if (IsCurrentProjectMcpCommandLine(commandLine, httpPort, wsPort))
+                if (IsCurrentProjectMcpCommandLine(commandLine, httpPort, wsPort, expectedLogPath))
                 {
+                    if (constrainService)
+                    {
+                        try
+                        {
+                            using var candidate = Process.GetProcessById(pid);
+                            if (pid != expectedPid || candidate.HasExited ||
+                                candidate.StartTime.ToUniversalTime().Ticks != expectedCreatedAt)
+                                return new McpProcessProbe(McpProcessOwnership.Foreign, pid, commandLine,
+                                    "监听进程与已核实的冻结服务身份不符");
+                        }
+                        catch (Exception)
+                        {
+                            allCommandLinesReadable = false;
+                            continue;
+                        }
+                    }
                     return new McpProcessProbe(
                         McpProcessOwnership.CurrentUPilot,
                         pid,
@@ -3205,7 +3365,7 @@ namespace CodingRiver.UPilot
         internal static List<(int pid, string cmdLine, long createdAtTicks)> ResolveVerifiedCandidates(
             Dictionary<int, long> before, Func<IEnumerable<int>, Dictionary<int, string>> query,
             Func<int, long> createdAtTicks, int httpPort, int wsPort,
-            Func<bool> budgetExpired, out int verified)
+            Func<bool> budgetExpired, out int verified, Func<string, bool> belongs = null)
         {
             verified = 0;
             var commands = query(before.Keys);
@@ -3221,7 +3381,7 @@ namespace CodingRiver.UPilot
                 if (after != entry.Value)
                     throw new InvalidOperationException("候选进程身份在核验期间发生变化。");
                 verified++;
-                if (IsCurrentProjectMcpCommandLine(cmdLine, httpPort, wsPort))
+                if (belongs != null ? belongs(cmdLine) : IsCurrentProjectMcpCommandLine(cmdLine, httpPort, wsPort))
                     selected.Add((entry.Key, cmdLine, entry.Value));
             }
             return selected;
@@ -3355,15 +3515,15 @@ namespace CodingRiver.UPilot
             return false;
         }
 
-        internal static bool IsCurrentProjectMcpCommandLine(string cmdLine, int httpPort, int wsPort)
+        internal static bool IsCurrentProjectMcpCommandLine(string cmdLine, int httpPort, int wsPort, string expectedLogPath = null)
         {
             return IsUPilotMcpLike(cmdLine) &&
                    HasCommandLinePort(cmdLine, "--http-port", httpPort) &&
                    HasCommandLinePort(cmdLine, "--port", wsPort) &&
-                   HasCurrentProjectLogPath(cmdLine);
+                   HasCurrentProjectLogPath(cmdLine, expectedLogPath);
         }
 
-        private static bool HasCurrentProjectLogPath(string cmdLine)
+        private static bool HasCurrentProjectLogPath(string cmdLine, string expectedLogPath)
         {
             var match = Regex.Match(cmdLine,
                 "(?:^|\\s)--log-file(?:\\s+|=)(?:\"([^\"]+)\"|(\\S+))",
@@ -3373,7 +3533,7 @@ namespace CodingRiver.UPilot
             if (!Path.IsPathRooted(path)) return false;
             try
             {
-                return string.Equals(Path.GetFullPath(path), Path.GetFullPath(CurrentProjectLogPath),
+                return string.Equals(Path.GetFullPath(path), Path.GetFullPath(expectedLogPath ?? CurrentProjectLogPath),
                     Path.DirectorySeparatorChar == '\\'
                         ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
             }

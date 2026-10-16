@@ -49,7 +49,7 @@ namespace CodingRiver.UPilot.Flow
         public bool RequireOfficialHost;
         public bool RequireOfficialPointerDriver;
         public bool RequireInputSystemKeyboardDriver;
-        public string ReportOutputPath = "Reports/UPilot/Flow";
+        public string ReportOutputPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports);
         public string ScreenshotPath;
         public bool GenerateSingleReport = true;
     }
@@ -60,7 +60,7 @@ namespace CodingRiver.UPilot.Flow
         {
             settings ??= new UPilotFlowExecutionSettings();
             string reportPath = string.IsNullOrWhiteSpace(settings.ReportOutputPath)
-                ? "Reports/UPilot/Flow"
+                ? UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports)
                 : settings.ReportOutputPath;
             string screenshotPath = string.IsNullOrWhiteSpace(settings.ScreenshotPath)
                 ? Path.Combine(reportPath, "Screenshots")

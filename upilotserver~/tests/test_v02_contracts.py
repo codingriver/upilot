@@ -2465,7 +2465,7 @@ def test_console_capture_recovery_does_not_bypass_owner_token(tmp_path) -> None:
     from types import SimpleNamespace
     from upilot_mcp.domain.status_service import StatusDomainService
 
-    capture = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    capture = tmp_path / "Logs" / "UPilot" / "Console" / "capture-1"
     capture.mkdir(parents=True)
     (capture / "summary.json").write_text("{}", encoding="utf-8")
     (capture / "session.json").write_text(json.dumps({

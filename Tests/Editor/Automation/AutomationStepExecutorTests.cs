@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections;
 using System.IO;
@@ -178,7 +178,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             _store = Path.Combine(Application.dataPath, "../Library/UPilot/StepTests/" + Guid.NewGuid().ToString("N") + ".json");
             _registry = Registry(Entry<BaseProbe>("base"), Entry<DirectProbe>("direct"), Entry<RestoreProbe>("restore"),
                 Entry<JsonProbe>("json"), Entry<ArtifactProbe>("artifact"), Entry<RecoverCleanupProbe>("recover"));
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
         }
         [TearDown]
         public void TearDown()
@@ -194,6 +194,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         {
             var state = _executor.Start(Plan(items), "test-operation");
             _reports.Add(state.reportDirectory);
+            Assert.That(state.reportDirectory, Is.EqualTo("Logs/UPilot/Reports/Steps/" + state.runId));
         }
         private void Pump(int ticks = 50) { for (int i = 0; i < ticks; i++) _executor.Tick(); }
         [Test]
@@ -284,7 +285,7 @@ namespace CodingRiver.UPilot.Tests.Automation
                 Assert.That(summary.artifacts.Single(a => a.kind == "consolePolicy").sha256, Is.EqualTo(artifact.sha256));
                 Assert.That(UPilotConsoleCaptureApi.Status(owned.SessionId).session.active, Is.True);
                 _executor.Dispose();
-                _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+                _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
                 _executor.RestoreStored();
                 Pump();
                 Assert.That(_executor.State.logSummary.blockedCount, Is.EqualTo(2));
@@ -293,6 +294,200 @@ namespace CodingRiver.UPilot.Tests.Automation
                     .Single(a => a.artifactKind == "consolePolicy").sha256, Is.EqualTo(artifact.sha256));
             }
             finally { Assert.That(owned.StopOwned().ok, Is.True); }
+        }
+
+        [Test]
+        public void TextArtifactIsUtf8WithoutBomDurableAndIdempotent()
+        {
+            string path = "";
+            const string content = "{\"value\":\"中文\"}\n";
+            RegisterAttachment = (run, item, args) =>
+            {
+                path = UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", content);
+                var saved = new AutomationStepRunStore(_store).Load().registeredArtifacts.Single();
+                Assert.That(saved.path, Is.EqualTo(path));
+                var modified = File.GetLastWriteTimeUtc(path);
+                Assert.That(UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", content), Is.EqualTo(path));
+                Assert.That(File.GetLastWriteTimeUtc(path), Is.EqualTo(modified));
+            };
+            var item = Item("artifact"); item.instanceId = "../危险\\实例:1";
+            Start(item); Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(new System.Text.UTF8Encoding(false).GetBytes(content)));
+            Assert.That(Path.GetFileName(Path.GetDirectoryName(path)), Is.EqualTo(AutomationStepRunStore.HashText(item.instanceId)));
+            Assert.That(_executor.State.registeredArtifacts.Count, Is.EqualTo(1));
+            Assert.That(UPilotAutomationStepService.Public(_executor.State).artifacts.attachments.Single(a => a.artifactKind == "evidence").bytes,
+                Is.EqualTo(File.ReadAllBytes(path).LongLength));
+        }
+        [TestCase("../escape.json")] [TestCase("folder/file.json")] [TestCase("folder\\file.json")]
+        [TestCase("C:\\escape.json")] [TestCase("evidence.json:stream")] [TestCase(".")] [TestCase("..")]
+        [TestCase("")] [TestCase("CON")] [TestCase("nul.json")] [TestCase("COM1.txt")] [TestCase("LPT9")]
+        [TestCase("bad.")] [TestCase("bad ")] [TestCase("bad\n.json")] [TestCase("AUX .txt")]
+        public void TextArtifactRejectsUnsafeNamesBeforeAnyFileEffects(string fileName)
+        {
+            RegisterAttachment = (run, item, args) =>
+            {
+                try { UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", fileName, "{}"); }
+                catch (AutomationStepException) { }
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            Assert.That(Directory.Exists(Path.Combine(_executor.State.reportDirectory, "attachments")), Is.False);
+        }
+        [TestCase("owner")] [TestCase("kind")] [TestCase("content")] [TestCase("unregistered")] [TestCase("directory")]
+        public void TextArtifactConflictsPreserveOriginalBytesAndCannotBeCaughtAsSuccess(string mode)
+        {
+            string path = "";
+            RegisterAttachment = (run, item, args) =>
+            {
+                path = Path.GetFullPath(Path.Combine(_executor.State.reportDirectory, "attachments",
+                    AutomationStepRunStore.HashText(item), "evidence.json"));
+                if (mode == "unregistered" || mode == "directory")
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    if (mode == "directory") Directory.CreateDirectory(path); else File.WriteAllText(path, "original");
+                }
+                else
+                {
+                    UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "original");
+                    if (mode == "owner")
+                    {
+                        var live = (AutomationStepRun)typeof(AutomationStepExecutor).GetField("_run",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(_executor);
+                        live.registeredArtifacts[0].instanceId = "another-owner";
+                    }
+                }
+                try { UPilotAutomationStepService.WriteTextArtifact(run, item, mode == "kind" ? "other" : "evidence",
+                    "evidence.json", mode == "content" ? "changed" : "original"); }
+                catch (AutomationStepException) { }
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            if (mode == "directory") Assert.That(Directory.Exists(path), Is.True);
+            else Assert.That(File.ReadAllText(path), Is.EqualTo("original"));
+        }
+        [Test]
+        public void TextArtifactsFromDifferentInstancesHaveIndependentNamesAndFinallyCanWrite()
+        {
+            var paths = new List<string>();
+            RegisterAttachment = (run, item, args) => paths.Add(
+                UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "same.json", args));
+            Start(Item("artifact", "first"), Item("artifact", "last", "Finally")); Pump();
+            Assert.That(paths.Distinct().Count(), Is.EqualTo(2));
+            Assert.That(paths.Select(File.ReadAllText), Is.EqualTo(new[] { "first", "last" }));
+            Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
+        }
+        [TestCase("wrong-run")] [TestCase("wrong-item")] [TestCase("empty-kind")] [TestCase("null-content")]
+        public void TextArtifactRejectsBadIdentityAndPayloadBeforeCreatingDirectories(string mode)
+        {
+            RegisterAttachment = (run, item, args) => UPilotAutomationStepService.WriteTextArtifact(
+                mode == "wrong-run" ? "wrong" : run, mode == "wrong-item" ? "wrong" : item,
+                mode == "empty-kind" ? "" : "evidence", "evidence.json", mode == "null-content" ? null : "{}");
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            Assert.That(Directory.Exists(Path.Combine(_executor.State.reportDirectory, "attachments")), Is.False);
+        }
+        [TestCase(false)] [TestCase(true)]
+        public void ReusingRegisteredTextDetectsChangedOrMissingEvidence(bool missing)
+        {
+            RegisterAttachment = (run, item, args) =>
+            {
+                string path = UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "original");
+                if (missing) File.Delete(path); else File.WriteAllText(path, "tampered");
+                try { UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "original"); }
+                catch (AutomationStepException) { }
+                Assert.That(File.Exists(path), Is.EqualTo(!missing));
+                if (!missing) Assert.That(File.ReadAllText(path), Is.EqualTo("tampered"));
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+        }
+        [Test] public void InvalidUnicodeTextIsRejectedBeforeDirectoriesAreCreated()
+        {
+            RegisterAttachment = (run, item, args) => UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "\ud800");
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            Assert.That(Directory.Exists(Path.Combine(_executor.State.reportDirectory, "attachments")), Is.False);
+        }
+        [Test]
+        public void TextArtifactRequiresWritableMainThreadCallback()
+        {
+            Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.WriteTextArtifact("run", "item", "evidence", "file.json", "{}"));
+            using (UPilotAutomationStepService.EnterCallback(_executor, false))
+                Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.WriteTextArtifact("run", "item", "evidence", "file.json", "{}"));
+            string error = System.Threading.Tasks.Task.Run(() =>
+            {
+                try { UPilotAutomationStepService.WriteTextArtifact("run", "item", "evidence", "file.json", "{}"); return ""; }
+                catch (InvalidOperationException ex) { return ex.Message; }
+            }).GetAwaiter().GetResult();
+            Assert.That(error, Is.EqualTo("STEP_MAIN_THREAD_REQUIRED"));
+            Assert.That(File.Exists(_store), Is.False);
+        }
+        [Test] public void TextArtifactWriteFailureLeavesNoRegistrationOrTemporaryFile()
+        {
+            string blocker = "";
+            RegisterAttachment = (run, item, args) =>
+            {
+                blocker = Path.Combine(_executor.State.reportDirectory, "attachments");
+                File.WriteAllText(blocker, "parent is a file");
+                UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "{}");
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            Assert.That(_executor.State.registeredArtifacts, Is.Empty);
+            Assert.That(File.ReadAllText(blocker), Is.EqualTo("parent is a file"));
+        }
+        [Test] public void TextArtifactRejectsAnActualDirectoryJunctionBeforeWriting()
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor) Assert.Ignore("Windows junction regression.");
+            Start(Item("artifact"));
+            string root = Path.GetFullPath(_executor.State.reportDirectory);
+            string target = Path.Combine(root, "junction-target"), link = Path.Combine(root, "attachments");
+            Directory.CreateDirectory(target);
+            string command = "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '"
+                + link.Replace("'", "''") + "' -Target '" + target.Replace("'", "''") + "' | Out-Null";
+            var info = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                Arguments = "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(command)),
+                UseShellExecute = false, CreateNoWindow = true, WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+            };
+            try
+            {
+                using (var process = System.Diagnostics.Process.Start(info))
+                {
+                    if (!process.WaitForExit(10000)) { process.Kill(); Assert.Fail("Junction creation timed out."); }
+                    Assert.That(process.ExitCode, Is.Zero);
+                }
+                RegisterAttachment = (run, item, args) => UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "{}");
+                Pump();
+                Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+                Assert.That(Directory.GetFileSystemEntries(target), Is.Empty);
+                Assert.That(_executor.State.registeredArtifacts, Is.Empty);
+            }
+            finally
+            {
+                Assert.That(Path.GetDirectoryName(link), Is.EqualTo(root));
+                if (Directory.Exists(link)) Directory.Delete(link, false);
+            }
+        }
+        [Test]
+        public void PublishedTextWithFailedRegistrationSaveNeverReturnsSuccess()
+        {
+            string path = "";
+            RegisterAttachment = (run, item, args) =>
+            {
+                path = Path.Combine(_executor.State.reportDirectory, "attachments", AutomationStepRunStore.HashText(item), "evidence.json");
+                Directory.CreateDirectory(_store + ".tmp");
+                UPilotAutomationStepService.WriteTextArtifact(run, item, "evidence", "evidence.json", "orphan evidence");
+                Calls.Add("after-text-write");
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(Calls, Does.Not.Contain("after-text-write"));
+            Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
+            Assert.That(File.ReadAllText(path), Is.EqualTo("orphan evidence"));
+            Assert.That(new AutomationStepRunStore(_store).Load().registeredArtifacts, Is.Empty);
+            Assert.That(Directory.GetFiles(Path.GetDirectoryName(path), "*.tmp"), Is.Empty);
         }
 
         [Test]
@@ -310,7 +505,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(UPilotAutomationStepService.Public(_executor.State).artifacts.attachments.Single().sha256,
                 Is.EqualTo(saved.sha256));
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored();
             Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
@@ -497,7 +692,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             state.terminal = false; state.stage = "Finalizing"; state.artifacts = Array.Empty<AutomationReportArtifact>();
             new AutomationStepRunStore(_store).Save(state);
             _executor.Dispose(); _now += 1000;
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Failed"));
             Assert.That(_executor.State.terminal, Is.True);
@@ -546,7 +741,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             if (mutation == "missing") File.Delete(target);
             else if (mutation == "modified") File.WriteAllText(target, "tampered");
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             var recovered = _executor.State;
             Assert.That(recovered.reportCommitJson, Is.EqualTo(frozenIntent));
@@ -638,7 +833,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(Calls.Count(c => c == "execute:finally"), Is.EqualTo(1));
             Assert.That(Calls.Count(c => c.StartsWith("recover-restore:")), Is.Zero);
             Assert.That(File.ReadAllText(Path.Combine(before.reportDirectory, "summary.json")), Is.EqualTo(report));
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(_executor.Busy, Is.False);
             Start(Item("base", "next")); Pump();
@@ -658,7 +853,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             if (fault == "missing-report") File.Delete(Path.Combine(state.reportDirectory, "summary.json"));
             new AutomationStepRunStore(_store).Save(state);
             int calls = Calls.Count;
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
             Assert.That(_executor.State.terminal, Is.True);
@@ -677,7 +872,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             int calls = Calls.Count;
             RecoverCleanupProbe.Released = !throws; RecoverCleanupProbe.ThrowOnCleanup = throws;
             _now += 11000; _executor.RequestCancel(); Pump();
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(JsonUtility.ToJson(_executor.State), Is.EqualTo(before));
             Assert.That(Calls.Count, Is.EqualTo(calls));
@@ -724,7 +919,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             if (fault == "missing") File.Delete(path); else File.AppendAllText(path, "modified");
             int calls = Calls.Count;
             var before = JsonUtility.ToJson(_executor.State);
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); _executor.RequestCancel(); Pump();
             Assert.That(JsonUtility.ToJson(_executor.State), Is.EqualTo(before));
             Assert.That(Calls.Count, Is.EqualTo(calls));
@@ -740,7 +935,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             var state = _executor.State; state.serviceLifecycleId = "previous-service";
             new AutomationStepRunStore(_store).Save(state);
             string history = File.ReadAllText(_store); int calls = Calls.Count;
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); _executor.RequestCancel(); Pump();
             Assert.That(_executor.State, Is.Null);
             Assert.That(_executor.Busy, Is.False);
@@ -806,7 +1001,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         {
             Start(Item("restore", "wait")); _executor.Tick();
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(Calls.Count(x => x == "execute:wait"), Is.EqualTo(1));
             Assert.That(Calls, Does.Contain("restore"));
@@ -817,7 +1012,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         {
             Start(Item("base", "wait"), Item("base", "last", "Finally")); _executor.Tick();
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(Calls.Count(x => x == "execute:wait"), Is.EqualTo(1));
             Assert.That(Calls, Does.Contain("execute:last"));
@@ -830,7 +1025,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             var persisted = _executor.State; persisted.editorIdentity = "another-process";
             new AutomationStepRunStore(_store).Save(persisted);
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
             Assert.That(Calls, Does.Not.Contain("restore"));
@@ -894,7 +1089,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Pump(2);
             Assert.That(_executor.State.steps[0].stage, Is.EqualTo("Cleaning"));
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(Calls.Count(x => x == "execute:last"), Is.EqualTo(1));
             Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
@@ -909,7 +1104,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             state.steps[0].stage = "ResourceCleaning";
             new AutomationStepRunStore(_store).Save(state);
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
             Assert.That(Calls.Count(c => c == "execute:last"), Is.EqualTo(1));
@@ -927,7 +1122,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             { instanceId = state.steps[0].instanceId, evidenceKey = "bad", requestKey = "x", requestedAt = 1 });
             new AutomationStepRunStore(_store).Save(state);
             _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump();
             Assert.That(_executor.State.status, Is.EqualTo("Aborted"));
             Assert.That(_executor.State.error.code, Is.EqualTo("TEST_FAILURE"));

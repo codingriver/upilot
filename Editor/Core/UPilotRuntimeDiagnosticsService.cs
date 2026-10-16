@@ -281,7 +281,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, command, await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "RUNTIME_DIAGNOSTICS_FAILED", ex.Message, token, command); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "RUNTIME_DIAGNOSTICS_FAILED", ex.Message, token, command, errorDetail: null, exception: ex); }
         }
 
         private static NavMeshStatusResultPayload BuildNavMeshStatus(NavMeshStatusPayload options)
@@ -953,7 +953,7 @@ namespace CodingRiver.UPilot
 
         private static void WriteProfilerArtifacts(ProfilerCaptureResultPayload result)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(result.jsonPath) ?? "Log/UPilotProfiler");
+            Directory.CreateDirectory(Path.GetDirectoryName(result.jsonPath) ?? UPilotOutputPaths.Resolve(UPilotOutputPaths.Profiler));
             long serializeStart = System.Diagnostics.Stopwatch.GetTimestamp();
             JsonUtility.ToJson(result, true);
             result.serializationMs = ElapsedMilliseconds(serializeStart);
@@ -970,8 +970,8 @@ namespace CodingRiver.UPilot
 
         private static string ResolveProfilerPath(string directory, string title, string extension)
         {
-            var projectRoot = Path.GetFullPath(Directory.GetCurrentDirectory());
-            var root = string.IsNullOrWhiteSpace(directory) ? Path.Combine(projectRoot, "Log", "UPilotProfiler") : directory;
+            var projectRoot = UPilotProjectConfig.ProjectRoot;
+            var root = string.IsNullOrWhiteSpace(directory) ? UPilotOutputPaths.Resolve(UPilotOutputPaths.Profiler) : directory;
             if (!Path.IsPathRooted(root)) root = Path.Combine(projectRoot, root);
             root = Path.GetFullPath(root);
             var projectPrefix = projectRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;

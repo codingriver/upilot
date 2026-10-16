@@ -91,7 +91,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "UNDO_FAILED", ex.Message, token, "editor.undo");
+                await _bridge.SendErrorAsync(id, "UNDO_FAILED", ex.Message, token, "editor.undo", errorDetail: null, exception: ex);
             }
         }
 
@@ -122,7 +122,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "REDO_FAILED", ex.Message, token, "editor.redo");
+                await _bridge.SendErrorAsync(id, "REDO_FAILED", ex.Message, token, "editor.redo", errorDetail: null, exception: ex);
             }
         }
 
@@ -151,7 +151,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "EXECUTE_COMMAND_FAILED", ex.Message, token, "editor.executeCommand");
+                await _bridge.SendErrorAsync(id, "EXECUTE_COMMAND_FAILED", ex.Message, token, "editor.executeCommand", errorDetail: null, exception: ex);
             }
         }
 
@@ -240,7 +240,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCENEVIEW_NAVIGATE_FAILED", ex.Message, token, "sceneview.navigate");
+                await _bridge.SendErrorAsync(id, "SCENEVIEW_NAVIGATE_FAILED", ex.Message, token, "sceneview.navigate", errorDetail: null, exception: ex);
             }
         }
     }

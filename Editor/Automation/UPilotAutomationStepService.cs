@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.Compilation;
 using UnityEngine;
 
 namespace CodingRiver.UPilot.Automation
@@ -52,6 +53,7 @@ namespace CodingRiver.UPilot.Automation
             public string outcome;
         }
         private static AutomationStepExecutor s_executor;
+        private static AutomationStepExecutor s_initializingExecutor;
         private static bool s_updateSubscribed;
         private static AutomationStepRegistry s_registry;
         private static string s_storePath = Path.Combine(Application.dataPath, "../Library/UPilot/step-run.json");
@@ -63,7 +65,8 @@ namespace CodingRiver.UPilot.Automation
         {
             // The service owns one Tick subscription only while executor work remains.
             AssemblyReloadEvents.beforeAssemblyReload += BeforeAssemblyReload;
-            EditorApplication.quitting += BeforeAssemblyReload;
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
+            EditorApplication.quitting += BeforeEditorQuit;
             EditorApplication.delayCall += Initialize;
         }
         private static void Initialize()
@@ -77,7 +80,8 @@ namespace CodingRiver.UPilot.Automation
             AutomationStepExecutor executor = null;
             try
             {
-                executor = new AutomationStepExecutor(Registry, s_storePath);
+                executor = new AutomationStepExecutor(Registry, s_storePath, gizmosAccess: new UnityAutomationGizmosAccess());
+                s_initializingExecutor = executor;
                 if (restoreStored) executor.RestoreStored();
                 // Publish only a fully initialized executor.
                 s_executor = executor;
@@ -90,6 +94,7 @@ namespace CodingRiver.UPilot.Automation
                 catch (Exception disposeError) { s_initializationError += "; " + disposeError.Message; }
                 throw;
             }
+            finally { s_initializingExecutor = null; }
         }
         internal static void ResetActive()
         {
@@ -98,10 +103,12 @@ namespace CodingRiver.UPilot.Automation
             s_executor = null;
             RefreshUpdateSubscription();
             var errors = new System.Collections.Generic.List<Exception>();
+            previous?.TraceInterruption("run.service_stopping", "服务硬停止");
             try { previous?.Finish("Aborted", "SERVICE_HARD_STOP", "UPilot service lifetime ended."); }
             catch (Exception ex) { errors.Add(ex); }
             try { previous?.Dispose(); }
             catch (Exception ex) { errors.Add(ex); }
+            previous?.FinishExecutionLog("服务硬停止，资源释放结果未验证");
             // Hard reset creates an empty executor; stored work belongs to the old lifetime.
             // Old finalization failures are diagnostic, not a prerequisite for rebuilding.
             try { CreateExecutor(false); }
@@ -109,8 +116,24 @@ namespace CodingRiver.UPilot.Automation
             finally { RefreshUpdateSubscription(); }
             if (errors.Count > 0) throw new AggregateException("STEP_EXECUTOR_RESET_FAILED", errors);
         }
+        private static void OnCompilationStarted(object context)
+        {
+            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
+            // Restore callbacks can run before a newly constructed executor is published.
+            var executor = s_callback?.Executor ?? s_initializingExecutor ?? s_executor;
+            try { executor?.InterruptForCompilation(); }
+            finally { RefreshUpdateSubscription(); }
+        }
         private static void BeforeAssemblyReload()
         {
+            s_executor?.TraceInterruption("run.reloading", "脚本域重载，暂停观察");
+            EditorApplication.delayCall -= Initialize;
+            RemoveUpdateSubscription();
+            s_executor?.Dispose();
+        }
+        private static void BeforeEditorQuit()
+        {
+            s_executor?.TraceInterruption("run.editor_quitting", "Editor 正在退出，任务结束未验证");
             EditorApplication.delayCall -= Initialize;
             RemoveUpdateSubscription();
             s_executor?.Dispose();
@@ -194,6 +217,9 @@ namespace CodingRiver.UPilot.Automation
         /// <summary>Durably register an immutable project file during the current writable Step callback.</summary>
         public static void RegisterArtifact(string runId, string instanceId, string kind, string path) =>
             WritableExecutor().RegisterArtifact(runId, instanceId, kind, path);
+        /// <summary>安全写入并持久登记文本附件；项目负责内容的结构与序列化。</summary>
+        public static string WriteTextArtifact(string runId, string instanceId, string kind, string fileName, string content) =>
+            WritableExecutor().WriteTextArtifact(runId, instanceId, kind, fileName, content);
         /// <summary>Read-only discovered directory, including registration diagnostics.</summary>
         public static string CatalogJson()
         {
@@ -220,6 +246,8 @@ namespace CodingRiver.UPilot.Automation
         // Both the public C# facade and Bridge use this admission path and the same executor.
         internal static StateResult StartPlan(string operationId, string captureSessionId, string planJson)
         {
+            RequireMainThread();
+            if (EditorApplication.isCompiling) throw new InvalidOperationException("STEP_EDITOR_COMPILING");
             var validation = ValidatePlanJson(planJson, out var plan);
             if (!validation.ok) throw new InvalidOperationException("STEP_PLAN_INVALID: " + JsonUtility.ToJson(validation));
             Initialize();
@@ -349,7 +377,7 @@ namespace CodingRiver.UPilot.Automation
             {
                 string code = ex is InvalidOperationException && ex.Message == "STEP_SERVICE_INITIALIZING"
                     ? "STEP_SERVICE_INITIALIZING" : "STEP_REQUEST_FAILED";
-                await _bridge.SendErrorAsync(id, code, ex.Message, token, route);
+                await _bridge.SendErrorAsync(id, code, ex.Message, token, route, errorDetail: null, exception: ex);
             }
         }
         internal static StateResult Public(AutomationStepRun run) => new()

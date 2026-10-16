@@ -19,6 +19,7 @@ namespace CodingRiver.UPilot
         public int schemaVersion = 2;
         public UPilotMcpConfig mcp = new();
         public UPilotCacheConfig cache = new();
+        public UPilotLoggingConfig logging = new();
         public UPilotFeaturesConfig features = new();
         public UPilotRuntimeConfig runtime = new();
         public UPilotSafetyConfig safety = new();
@@ -26,6 +27,14 @@ namespace CodingRiver.UPilot
         public bool aiQueueCleanupAllowed = true;
         public UPilotUpdateConfig updates = new();
         public UPilotAgentsConfig agents = new();
+    }
+
+    [Serializable]
+    public sealed class UPilotLoggingConfig
+    {
+        public const int DefaultRetentionDays = 3;
+        public int retentionDays = DefaultRetentionDays;
+        public static int Normalize(int days) => days >= 1 && days <= 365 ? days : DefaultRetentionDays;
     }
 
     [Serializable]
@@ -183,6 +192,8 @@ namespace CodingRiver.UPilot
             // Overwrite explicit defaults: legacy missing fields must not become false.
             var result = new UPilotProjectConfigData();
             JsonUtility.FromJsonOverwrite(json, result);
+            result.logging ??= new UPilotLoggingConfig();
+            result.logging.retentionDays = UPilotLoggingConfig.Normalize(result.logging.retentionDays);
             return result;
         }
 
@@ -195,6 +206,8 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                config.logging ??= new UPilotLoggingConfig();
+                config.logging.retentionDays = UPilotLoggingConfig.Normalize(config.logging.retentionDays);
                 config = UPilotPortRegistry.ValidateConfig(ProjectRoot, config,
                     preserveExistingPorts: !updateEndpoints);
                 UPilotPortRegistry.AtomicWrite(ConfigPath, JsonUtility.ToJson(config, true));

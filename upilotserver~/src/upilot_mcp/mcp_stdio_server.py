@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .output_paths import MCP_CALLS, output_path
+
 import asyncio
 import contextlib
 import json
@@ -9,6 +11,8 @@ import socket
 import sys
 import threading
 import time
+import traceback
+from datetime import datetime
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,7 +44,9 @@ from .tool_registry import (
 )
 from .version import version_payload
 from .wire_ids import stringify_wire_ids
-from .operation_context import REQUEST_ORIGIN, request_origin_from_context
+from .operation_context import OPERATION_ID, REQUEST_ORIGIN, request_origin_from_context
+from .daily_logs import DailyLogWriter, report_log_failure
+from .diagnostic_logs import RepeatDiagnosticFilter
 
 logger = logging.getLogger("upilot.mcp")
 stdio_logger = logging.getLogger("upilot.stdio")
@@ -800,7 +806,7 @@ async def _unity_is_playmode() -> bool:
     return _state_is_playmode(editor.play_mode_state)
 
 
-async def _reject_compile_in_playmode(tool_name: str):
+async def _reject_compile_in_playmode(tool_name: str, *, allow_compile_recovery: bool = True):
     execution = (
         _facade.server.state.execution_state(stale_after_ms=CONFIG.context_stale_ms)
         if _facade is not None
@@ -817,7 +823,8 @@ async def _reject_compile_in_playmode(tool_name: str):
         and (not execution.get("authoritative") or execution.get("isStale"))
     )
     safe_compile_recovery = (
-        tool_name in {"unity_safe_compile_and_wait", "unity_sync_after_disk_write"}
+        allow_compile_recovery
+        and tool_name in {"unity_safe_compile_and_wait", "unity_sync_after_disk_write"}
         and (active_compile_recovery or completed_reload_recovery)
         and not _state_is_playmode(str(execution.get("playModeState") or ""))
     )
@@ -844,7 +851,7 @@ async def _reject_compile_in_playmode(tool_name: str):
                 fail(
                     new_id("req"),
                     "EDITOR_IN_PLAY_MODE",
-                    "Unity 正在 PlayMode 或暂停状态，MCP 不允许触发 Unity 编译。",
+                    "Unity 正在 PlayMode 或暂停状态，MCP 不允许全局资源刷新或触发 Unity 编译。",
                     detail,
                 )
             ),
@@ -1278,7 +1285,7 @@ _MCP_TOOL_LOG_FILES = {
     "unity_reflection_call": "unity_reflection_call.log",
     "csharp_object_dump": "csharp_object_dump.log",
 }
-_MCP_TOOL_LOG_MAX_BYTES = 10 * 1024 * 1024
+_MCP_TOOL_LOG_WRITERS: dict[Path, DailyLogWriter] = {}
 _MCP_TOOL_LOG_LOCK = threading.Lock()
 
 
@@ -1307,87 +1314,209 @@ def _mcp_tool_log_json_default(value: Any) -> Any:
     return str(value)
 
 
-def _bounded_mcp_tool_log_line(record: dict[str, Any]) -> bytes:
-    line = (json.dumps(
-        record,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        default=_mcp_tool_log_json_default,
-    ) + "\n").encode("utf-8")
-    if len(line) <= _MCP_TOOL_LOG_MAX_BYTES:
-        return line
+def _mcp_result_failed(result: Any) -> bool:
+    if getattr(result, "isError", False):
+        return True
+    if isinstance(result, dict):
+        return result.get("ok") is False or result.get("isError") is True
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict) and structured.get("ok") is False:
+        return True
+    # FastMCP may return content blocks, or (content, structuredContent).
+    if isinstance(result, tuple) and len(result) == 2:
+        return _mcp_result_failed(result[1]) or _mcp_result_failed(result[0])
+    content = getattr(result, "content", result if isinstance(result, list) else [])
+    for item in content or []:
+        text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+        if isinstance(text, str):
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                return True
+    return False
 
-    serialized = line.decode("utf-8", errors="replace")
-    preview_budget = min(4 * 1024 * 1024, max(0, _MCP_TOOL_LOG_MAX_BYTES // 3))
-    preview_bytes = serialized.encode("utf-8")[:preview_budget]
-    preview = preview_bytes.decode("utf-8", errors="ignore") + "[TRUNCATED]"
-    truncated_record = {
-        "time": record.get("time", ""),
-        "tool": record.get("tool", ""),
-        "truncated": True,
-        "originalBytes": len(line),
-        "preview": preview,
-    }
-    truncated_line = (json.dumps(
-        truncated_record,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ) + "\n").encode("utf-8")
-    if len(truncated_line) <= _MCP_TOOL_LOG_MAX_BYTES:
-        return truncated_line
 
-    # Keep the hard file-size limit even when tests or future configuration use
-    # an unusually small maximum.
-    minimal = {
-        "time": record.get("time", ""),
-        "tool": record.get("tool", ""),
-        "truncated": True,
-        "originalBytes": len(line),
-        "preview": "[TRUNCATED]",
-    }
-    return (json.dumps(minimal, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+def _mcp_result_cancelled(result: Any) -> bool:
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return _mcp_result_cancelled(structured)
+    if isinstance(result, dict):
+        error = result.get("error") or {}
+        return isinstance(error, dict) and error.get("code") in {"EXECUTION_CANCELLED", "OPERATION_CANCELLED"}
+    if isinstance(result, tuple) and len(result) == 2:
+        return _mcp_result_cancelled(result[1]) or _mcp_result_cancelled(result[0])
+    content = getattr(result, "content", result if isinstance(result, list) else [])
+    for item in content or []:
+        text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+        if isinstance(text, str):
+            try:
+                if _mcp_result_cancelled(json.loads(text)):
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def _mcp_result_payload(result: Any) -> dict:
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict) and structured:
+        return structured
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, tuple) and len(result) == 2:
+        return _mcp_result_payload(result[1]) or _mcp_result_payload(result[0])
+    content = getattr(result, "content", result if isinstance(result, list) else [])
+    for item in content or []:
+        text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+        if isinstance(text, str):
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and any(key in payload for key in ("ok", "error", "isError")):
+                return payload
+    return {}
+
+
+def _mcp_failure_summary(result: Any) -> str:
+    payload = _mcp_result_payload(result)
+    error = payload.get("error") or {}
+    if isinstance(error, dict) and error:
+        detail = error.get("detail") or {}
+        detail = detail if isinstance(detail, dict) else {}
+        summary = {"requestId": payload.get("requestId"), "code": error.get("code"),
+                   "message": error.get("message")}
+        for key in ("operationId", "taskId", "runGuid", "compileOperationId", "writeBatchId",
+                    "exceptionType", "exceptionMessage"):
+            if key in detail:
+                summary[key] = detail[key]
+        text = json.dumps(summary, ensure_ascii=False)
+        stack = detail.get("stackTrace")
+        return text + "\n" + stack if isinstance(stack, str) and stack else text
+    return "isError=true; inspect the original tool result"
+
+
+# Only read-only observations may share a diagnostic scope across MCP calls.
+# An execute/start with an existing ID is still a separate user invocation.
+_MCP_OBSERVATION_SCOPES = {
+    "unity_reflection_operation_status": ("reflection", "operationId"),
+    "unity_reflection_operation_wait": ("reflection", "operationId"),
+    "unity_operation_status": ("operation", "operationId"),
+    "unity_operation_wait": ("operation", "operationId"),
+    "unity_task_status": ("task", "taskId"),
+    "unity_write_batch_status": ("write-batch", "writeBatchId"),
+    "unity_snapshot_status": ("snapshot", "snapshotId"),
+    "unity_test_status": ("test", "runGuid"),
+    "unity_test_results": ("test", "runGuid"),
+    "unity_compile_status": ("compile", "compileRequestId"),
+    "unity_compile_wait": ("compile", "compileRequestId"),
+}
+
+
+def _mcp_diagnostic_identity(name, arguments, call_id, *, result=None, error=None):
+    observation = _MCP_OBSERVATION_SCOPES.get(name)
+    payload = _mcp_result_payload(result)
+    failure = payload.get("error") or {}
+    failure = failure if isinstance(failure, dict) else {}
+    detail = failure.get("detail") or {}
+    detail = detail if isinstance(detail, dict) else {}
+    data = payload.get("data") or {}
+    data = data if isinstance(data, dict) else {}
+    if observation:
+        family, field = observation
+        identity = next((source[field] for source in (arguments, detail, data)
+                         if isinstance(source.get(field), str) and source[field]), None)
+        if identity:
+            root = (family, failure.get("code"), failure.get("message"),
+                    detail.get("exceptionType"), detail.get("stackTrace"))
+            if error is not None:
+                root = (family, type(error).__qualname__, str(error))
+            # Task producers already own this scope and flush observations at finalization.
+            scope = identity if family == "task" else f"mcp:{family}|{field}={identity}"
+            return {"diagnostic_scope": scope,
+                    "diagnostic_fingerprint": json.dumps(root, ensure_ascii=False),
+                    "diagnostic_terminal": detail.get("terminal") is True or data.get("terminal") is True}
+    return {"diagnostic_scope": call_id, "diagnostic_terminal": True}
+
+
+def _flush_mcp_observation_diagnostics(scope):
+    # Use the existing bounded filter's recovery path, once for the shared pair.
+    seen = set()
+    for handler in logging.getLogger("upilot").handlers:
+        for diagnostic_filter in handler.filters:
+            if isinstance(diagnostic_filter, RepeatDiagnosticFilter) and id(diagnostic_filter) not in seen:
+                seen.add(id(diagnostic_filter))
+                diagnostic_filter.flush(scope)
+
+
+def _report_mcp_call_log_failure(operation, path, error):
+    try:
+        if not logging.getLogger("upilot").handlers:
+            report_log_failure(operation, path, error)
+            return
+        # This independent sink may use the general Server file; its own file-fault
+        # handler still writes directly to stderr and never reenters logging.
+        logger.error("[UPilot] ERROR log MCP call %s path=%s", operation, path,
+                     exc_info=(type(error), error, error.__traceback__),
+                     extra={"diagnostic_fingerprint": f"mcp-call-log|{operation}|{path}"})
+    except Exception:
+        report_log_failure(operation, path, error)
 
 
 def _write_mcp_tool_call_log(
     tool_name: str,
     parameters: dict[str, Any],
     *,
+    call_id: str,
+    started_at: str,
+    started_clock: float,
+    event: str,
+    context=None,
     result: Any = None,
     error: BaseException | None = None,
 ) -> None:
     file_name = _MCP_TOOL_LOG_FILES.get(tool_name)
     if not file_name:
         return
-
+    log_path: Path | str = file_name
     try:
         project_root = _mcp_tool_log_project_root()
         if project_root is None:
-            logger.warning("Skipping MCP tool call log for %s: project path unavailable", tool_name)
-            return
-
+            raise RuntimeError("MCP tool call log project path unavailable")
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
         record: dict[str, Any] = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "tool": tool_name,
-            "parameters": parameters,
+            "time": now, "tool": tool_name, "callId": call_id,
+            "event": event, "startedAt": started_at, "parameters": parameters,
+            "status": "running",
         }
-        if error is None:
-            record["result"] = result
-        else:
-            record["error"] = {
-                "type": type(error).__name__,
-                "message": str(error),
-            }
-
-        line = _bounded_mcp_tool_log_line(record)
-        log_path = project_root / "Logs" / "UPilot" / "McpCalls" / file_name
+        request_id = getattr(getattr(context, "request_context", None), "request_id", None)
+        if request_id is not None:
+            record["requestId"] = request_id
+        if OPERATION_ID.get():
+            record["operationId"] = OPERATION_ID.get()
+        if event == "call.end":
+            record["endedAt"] = now
+            record["durationMs"] = round((time.perf_counter() - started_clock) * 1000, 3)
+            record["status"] = ("cancelled" if isinstance(error, asyncio.CancelledError) or (error is None and _mcp_result_cancelled(result))
+                                else "failed" if error is not None or _mcp_result_failed(result)
+                                else "succeeded")
+            if error is None:
+                record["result"] = result
+            else:
+                record["error"] = {
+                    "type": type(error).__name__, "message": str(error),
+                    "stackTrace": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+                }
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"),
+                          default=_mcp_tool_log_json_default) + "\n"
+        log_path = output_path(project_root, MCP_CALLS) / file_name
         with _MCP_TOOL_LOG_LOCK:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            current_size = log_path.stat().st_size if log_path.exists() else 0
-            mode = "wb" if current_size + len(line) > _MCP_TOOL_LOG_MAX_BYTES else "ab"
-            with log_path.open(mode) as stream:
-                stream.write(line)
+            writer = _MCP_TOOL_LOG_WRITERS.setdefault(log_path, DailyLogWriter(log_path, report=_report_mcp_call_log_failure))
+        writer.append(line)
     except Exception as ex:
-        logger.warning("Failed to write MCP tool call log for %s: %s", tool_name, ex)
+        _report_mcp_call_log_failure(event, log_path, ex)
 
 
 async def _call_tool_with_strict_arguments(
@@ -1399,6 +1528,9 @@ async def _call_tool_with_strict_arguments(
     origin_token = REQUEST_ORIGIN.set(request_origin_from_context(context))
     try:
         original_arguments = dict(arguments or {})
+        log_identity = dict(call_id=new_id("call"), started_at=datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                            started_clock=time.perf_counter(), context=context)
+        _write_mcp_tool_call_log(name, original_arguments, event="call.start", **log_identity)
         try:
             tool = mcp._tool_manager.get_tool(name)
             if tool is not None:
@@ -1411,12 +1543,24 @@ async def _call_tool_with_strict_arguments(
                 name, arguments, context=context, convert_result=convert_result
             )
         except asyncio.CancelledError as ex:
-            _write_mcp_tool_call_log(name, original_arguments, error=ex)
+            _write_mcp_tool_call_log(name, original_arguments, error=ex, event="call.end", **log_identity)
+            diagnostic = _mcp_diagnostic_identity(name, original_arguments, log_identity["call_id"], error=ex)
+            if diagnostic["diagnostic_scope"] != log_identity["call_id"]:
+                _flush_mcp_observation_diagnostics(diagnostic["diagnostic_scope"])
             raise
         except Exception as ex:
-            _write_mcp_tool_call_log(name, original_arguments, error=ex)
+            _write_mcp_tool_call_log(name, original_arguments, error=ex, event="call.end", **log_identity)
+            diagnostic = _mcp_diagnostic_identity(name, original_arguments, log_identity["call_id"], error=ex)
+            logger.error("MCP tool failed name=%s callId=%s scope=%s", name, log_identity["call_id"], diagnostic["diagnostic_scope"],
+                         exc_info=True, extra=diagnostic)
             raise
-        _write_mcp_tool_call_log(name, original_arguments, result=result)
+        _write_mcp_tool_call_log(name, original_arguments, result=result, event="call.end", **log_identity)
+        diagnostic = _mcp_diagnostic_identity(name, original_arguments, log_identity["call_id"], result=result)
+        if _mcp_result_failed(result) and not _mcp_result_cancelled(result):
+            logger.error("MCP tool returned failure name=%s callId=%s scope=%s error=%s", name, log_identity["call_id"], diagnostic["diagnostic_scope"], _mcp_failure_summary(result),
+                         extra=diagnostic)
+        elif diagnostic["diagnostic_scope"] != log_identity["call_id"]:
+            _flush_mcp_observation_diagnostics(diagnostic["diagnostic_scope"])
         return result
     finally:
         REQUEST_ORIGIN.reset(origin_token)

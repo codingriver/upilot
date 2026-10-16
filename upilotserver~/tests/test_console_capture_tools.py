@@ -132,7 +132,7 @@ def test_console_capture_public_tools_are_registered_with_safety_metadata() -> N
 
 def test_console_capture_stop_recovers_completed_persisted_terminal(tmp_path) -> None:
     session_id = "console-stop-recovered"
-    directory = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    directory = tmp_path / "Logs" / "UPilot" / "Console" / "capture-1"
     directory.mkdir(parents=True)
     summary_path = directory / "summary.json"
     summary_path.write_text('{"ok":true}', encoding="utf-8")
@@ -194,7 +194,7 @@ def test_console_capture_stop_marks_normal_completed_response_terminal() -> None
 
 def test_console_capture_stop_does_not_recover_incomplete_manifest(tmp_path) -> None:
     session_id = "console-stop-incomplete"
-    directory = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    directory = tmp_path / "Logs" / "UPilot" / "Console" / "capture-1"
     directory.mkdir(parents=True)
     (directory / "session.json").write_text(
         json.dumps({"sessionId": session_id, "active": False}),
@@ -272,7 +272,7 @@ def test_console_capture_list_forwards_active_only_without_changing_legacy_filte
 
 def test_console_capture_force_stop_observes_persisted_terminal_without_second_stop(tmp_path) -> None:
     session_id = "already-ended"
-    directory = tmp_path / "Log" / "UPilotConsole" / "capture-1"
+    directory = tmp_path / "Logs" / "UPilot" / "Console" / "capture-1"
     directory.mkdir(parents=True)
     (directory / "summary.json").write_text('{"ok":true}', encoding="utf-8")
     (directory / "session.json").write_text(json.dumps({

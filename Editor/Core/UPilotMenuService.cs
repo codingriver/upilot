@@ -81,7 +81,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "MENU_EXECUTE_FAILED", ex.Message, token, "menu.execute");
+                await _bridge.SendErrorAsync(id, "MENU_EXECUTE_FAILED", ex.Message, token, "menu.execute", errorDetail: null, exception: ex);
             }
         }
 
@@ -141,7 +141,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "MENU_LIST_FAILED", ex.Message, token, "menu.list");
+                await _bridge.SendErrorAsync(id, "MENU_LIST_FAILED", ex.Message, token, "menu.list", errorDetail: null, exception: ex);
             }
         }
     }

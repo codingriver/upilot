@@ -317,6 +317,7 @@ namespace CodingRiver.UPilot
         internal Action<UnityEngine.Object> ApiDestroyerForTests;
         internal Action<TestRunResultPayload, bool, bool> SnapshotSaverForTests;
         internal string PersistenceDirectoryForTests;
+        internal Action<string, Exception> FailureDiagnosticForTests;
         private string _recoveryStorageError;
         private string RunPersistenceDirectory => PersistenceDirectoryForTests ?? PersistenceDirectory;
 
@@ -424,7 +425,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "TEST_SELECTORS_INVALID", ex.Message, token, "test.run");
+                await _bridge.SendErrorAsync(id, "TEST_SELECTORS_INVALID", ex.Message, token, "test.run", errorDetail: null, exception: ex);
                 return;
             }
             if (p.testNames != null || p.fixtures != null || p.assemblies != null || p.categories != null || p.matchMode != "union"
@@ -436,7 +437,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    await _bridge.SendErrorAsync(id, "TEST_SELECTORS_INVALID", ex.Message, token, "test.run");
+                    await _bridge.SendErrorAsync(id, "TEST_SELECTORS_INVALID", ex.Message, token, "test.run", errorDetail: null, exception: ex);
                     return;
                 }
                 if (p.requireAllSelectorsMatch && !selection.selectionValid)
@@ -719,7 +720,7 @@ namespace CodingRiver.UPilot
                         {
                             stage = "persistence_admission", runnerStartAttempted = false,
                             nextAction = "Inspect the active TestRuns owner and persistence diagnostics before requesting a new run.",
-                        });
+                        }, exception: admissionError);
                     return;
                 }
                 if (root is TestRunPreflightException preflight)
@@ -732,7 +733,7 @@ namespace CodingRiver.UPilot
                     await SendSelectionStaleErrorAsync(id, stale.Selection, token, stale.Message);
                     return;
                 }
-                await _bridge.SendErrorAsync(id, "TEST_RUN_FAILED", root.Message, token, "test.run");
+                await _bridge.SendErrorAsync(id, "TEST_RUN_FAILED", root.Message, token, "test.run", errorDetail: null, exception: root);
             }
         }
 
@@ -965,7 +966,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "TEST_LIST_FAILED", ex.Message, token, "test.list");
+                await _bridge.SendErrorAsync(id, "TEST_LIST_FAILED", ex.Message, token, "test.list", errorDetail: null, exception: ex);
             }
         }
 
@@ -1872,12 +1873,15 @@ namespace CodingRiver.UPilot
                 _lastResults.intermediate = false;
                 _lastResults.outcomeStatus = _pendingTerminalStatus;
                 _lastResults.resultAuthoritative = true;
+                if (_lastResults.outcomeStatus == "failed")
+                    ReportTestFailure("run-result", reason: $"failed={_lastResults.failed} firstFailure={_lastResults.firstFailure}", terminal: true);
             }
             catch (Exception ex)
             {
                 _pendingTerminalStatus = null;
                 _lastResults.outcomeStatus = "unknown";
                 _lastResults.resultAuthoritative = false;
+                ReportTestFailure("result-decode", ex);
                 _lastResults.recoveryDiagnostic = "RunFinished result decode failed: " + ex;
             }
             finally
@@ -2270,6 +2274,7 @@ namespace CodingRiver.UPilot
                 _pendingTerminalStatus = null;
                 _forceStopRequested = false;
                 StopCleanupScheduling();
+                Logger.CloseDiagnostics(candidate.runGuid);
             }
             catch (Exception ex)
             {
@@ -2384,10 +2389,23 @@ namespace CodingRiver.UPilot
             return _activeCallback == null && ReferenceEquals(_activeApi, null);
         }
 
+        private void ReportTestFailure(string stage, Exception error = null, string reason = "", bool terminal = false)
+        {
+            string run = _lastResults?.runGuid ?? _activeRunGuid ?? "";
+            string message = $"runGuid={run} stage={stage} {reason}";
+            try
+            {
+                if (FailureDiagnosticForTests != null) FailureDiagnosticForTests(message, error);
+                else Logger.ReportFailure("TEST", message, error, run, terminal, fingerprint: stage + "|" + reason);
+            }
+            catch (Exception diagnosticError) { Logger.ReportFailure("TEST", "Test diagnostic callback failed", diagnosticError, run); }
+        }
+
         private void AddCleanupError(string stage, Exception error)
         {
             if (_lastResults == null) return;
             string message = stage + ": " + error.GetType().Name + ": " + error.Message;
+            ReportTestFailure(stage, error);
             if (!_lastResults.cleanupErrors.Contains(message)) _lastResults.cleanupErrors.Add(message);
         }
 
@@ -2490,6 +2508,7 @@ namespace CodingRiver.UPilot
                 Exception root = ex is TargetInvocationException invocation && invocation.InnerException != null
                     ? invocation.InnerException
                     : ex;
+                ReportTestFailure("force-stop", root);
                 _lastResults.forceStopError = root.Message;
                 _lastResults.lastProgressAt = NowMs();
             }
@@ -2589,6 +2608,7 @@ namespace CodingRiver.UPilot
             try { UPilotTestRunStore.RetirePreviousLifetime(RunPersistenceDirectory, UPilotServiceLifetime.Id); }
             catch (Exception ex)
             {
+                ReportTestFailure("recover-state", ex);
                 _recoveryStorageError = ex.GetType().Name + ": " + ex.Message;
                 return; // An unreadable/unknown owner is not an empty TestRuns store.
             }
@@ -2714,9 +2734,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                string error = $"callback-reattach: {ex.GetType().Name}: {ex.Message}";
-                if (!_lastResults.cleanupErrors.Contains(error))
-                    _lastResults.cleanupErrors.Add(error);
+                AddCleanupError("callback-reattach", ex);
                 PersistSnapshot();
             }
         }
@@ -2781,6 +2799,7 @@ namespace CodingRiver.UPilot
                 return;
 
             EditorApplication.update -= TestProgressWatchdog;
+            ReportTestFailure("first-progress-timeout", reason: _lastResults.failureSignature);
             PersistSnapshot();
             try
             {
@@ -2788,7 +2807,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                _lastResults.cleanupErrors.Add($"first-progress-watchdog: {ex.GetType().Name}: {ex.Message}");
+                AddCleanupError("first-progress-watchdog", ex);
                 _pendingTerminalStatus = "aborted";
                 FinalizeCancelledRun();
             }
@@ -2809,6 +2828,7 @@ namespace CodingRiver.UPilot
         private string ProbeFrameworkRun(out object runner)
         {
             runner = null;
+            Exception observationFailure = null;
             try
             {
                 Type apiType = !ReferenceEquals(_activeApi, null) ? _activeApi.GetType() : FindType("UnityEditor.TestTools.TestRunner.Api.TestRunnerApi");
@@ -2818,10 +2838,12 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 _lastResults.runnerState = "unknown";
+                observationFailure = ex;
                 _lastResults.recoveryDiagnostic = ex.GetType().Name + ": " + ex.Message;
             }
             if (_lastResults.runnerState == "unknown")
             {
+                ReportTestFailure("runner-observation", observationFailure, _lastResults.recoveryDiagnostic);
                 string error = "runner-observation: " + _lastResults.recoveryDiagnostic;
                 if (!_lastResults.cleanupErrors.Contains(error)) _lastResults.cleanupErrors.Add(error);
             }

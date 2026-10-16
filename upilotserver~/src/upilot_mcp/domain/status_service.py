@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from ..output_paths import CONSOLE_CAPTURES, output_path
 from ..queue_audit import audited
 
 import asyncio
@@ -2683,7 +2685,7 @@ class StatusDomainService:
             project_path = str(getattr(state, "_project_path", "") or "").strip()
         if not project_path:
             return False
-        capture_root = Path(project_path) / "Log" / "UPilotConsole"
+        capture_root = output_path(project_path, CONSOLE_CAPTURES)
         if not capture_root.is_dir():
             return False
         for manifest_path in capture_root.glob("*/session.json"):
@@ -2716,7 +2718,7 @@ class StatusDomainService:
         if not project_path:
             return None
 
-        capture_root = Path(project_path) / "Log" / "UPilotConsole"
+        capture_root = output_path(project_path, CONSOLE_CAPTURES)
         if not capture_root.is_dir():
             return None
 

@@ -348,6 +348,40 @@ static constraints, not whether a future login panel or runtime object already e
 Operation timeout must cover the summed step/cleanup budgets plus the evidence margin;
 do not shorten it to a single tool wait window.
 
+## Task-owned Gizmos
+
+New Step tasks check all existing SceneView and GameView windows once before the first
+business Execute and disable Gizmos. Ordinary Steps, polling and step transitions do not
+inspect Gizmos; there is no timer or window-change listener. Same-lifetime Domain Reload
+does not repeat task-start initialization. Newly created windows are not automatically
+managed during the run.
+
+A Step item may explicitly request temporary Gizmos with the optional plan field
+`"gizmos":{"scene":true,"game":false}`. Omission, an empty object and omitted view
+fields mean false and perform no per-Step check. Only boolean scene/game fields are
+accepted; null, other types and unknown nested fields fail validation without effects.
+Explicit true targets all currently existing windows of that view, keeps Gizmos enabled
+through execution, Snapshot completion and Cleanup, then disables only those exact
+targets. No target is recorded as NoTargets; no window is created. Business Step classes
+and IAutomationStep signatures do not change.
+
+Task finalization attempts one close-and-verify pass over existing Scene/Game Gizmos,
+including windows created during execution. It leaves Gizmos disabled rather than
+restoring user settings. This framework-owned pass covers ordinary completion, failure,
+cancel, timeout and immediate stop without relying on business Finally or extending
+deadlines. Hard stop is best effort; crashes, unavailable Editor execution and interrupted
+attempts cannot be reported as verified. Dispose during Domain Reload does not close or
+replay the active task's explicit request.
+
+Gizmos read/set/verification failures are deduplicated framework warnings and do not
+prevent business execution or replace earlier failures. Otherwise successful runs become
+SucceededWithWarnings. State and frozen reports include policy version, initialization,
+final close verification and per-window observations; unknown actual values stay unknown.
+These diagnostics do not enter Console policy or weaken existing assertions/log gates.
+Legacy stored runs retain their original policy and hash contract. Validate success alone
+does not prove deployment: require gizmosPolicyVersion=1 and actual observations from
+the running Bridge. This policy never opens/closes/resizes a window or changes layouts.
+
 ## Bounded Lifecycle
 
 - These lifecycle contracts apply to authorized public runs, existing same-lifetime work and isolated executor fixtures; live capability discovery determines whether new admission is available.

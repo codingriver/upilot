@@ -544,7 +544,7 @@ namespace CodingRiver.UPilot.Flow
                 {
                     string screenshot = string.IsNullOrWhiteSpace(entry.ScreenshotPath)
                         ? string.Empty
-                        : $"[View]({entry.ScreenshotPath.Replace('\\', '/')})";
+                        : $"[View]({UPilotFlowUtility.EnsureRelativeTo(Path.GetDirectoryName(markdownPath), Path.Combine(_options.ReportRootPath, entry.ScreenshotPath)).Replace('\\', '/')})";
                     string details = string.IsNullOrWhiteSpace(entry.DriverDetails) ? string.Empty : entry.DriverDetails.Replace("|", "/");
                     markdown.AppendLine($"| {entry.StepName} | {entry.Status} | {entry.DurationMs} | {BuildDriverSummary(entry.Attachments)} | {details} | {entry.ErrorCode ?? string.Empty} | {entry.ScreenshotSource ?? string.Empty} | {screenshot} |");
                 }
@@ -584,15 +584,15 @@ namespace CodingRiver.UPilot.Flow
         }
 
         /// <summary>
-        /// Writes or appends to the unified suite report at Reports/full_reports.md.
+        /// Writes or appends to the unified suite report in the project Flow/History output directory.
         /// When overwrite is true, clears history and writes only the provided cases.
         /// When overwrite is false, appends cases to existing history (deduplicated by CaseName).
         /// </summary>
         public static void WriteUnifiedSuiteReport(TestSuiteResult result, bool overwrite)
         {
-            string unifiedJsonPath = Path.Combine("Reports", "Cases", "unified-history.json");
+            string unifiedJsonPath = Path.Combine(UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHistory), "Cases", "unified-history.json");
             var pathBuilder = new ReportPathBuilder();
-            pathBuilder.EnsureDirectory(Path.GetDirectoryName(unifiedJsonPath) ?? Path.Combine("Reports", "Cases"));
+            pathBuilder.EnsureDirectory(Path.GetDirectoryName(unifiedJsonPath) ?? Path.Combine(UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHistory), "Cases"));
 
             TestSuiteResult targetSuite;
             var jsonWriter = new JsonResultWriter();
@@ -635,8 +635,8 @@ namespace CodingRiver.UPilot.Flow
 
             var reporter = new MarkdownReporter(new ReporterOptions
             {
-                ReportRootPath = "Reports",
-                ScreenshotRootPath = Path.Combine("Reports", "Screenshots"),
+                ReportRootPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHistory),
+                ScreenshotRootPath = Path.Combine(UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowHistory), "Screenshots"),
                 SuiteName = "unified",
             });
             reporter.WriteSuiteReport(targetSuite);
@@ -659,12 +659,8 @@ namespace CodingRiver.UPilot.Flow
         {
             if (!string.IsNullOrWhiteSpace(caseResult.ReportMarkdownPath))
             {
-                string linkPath = caseResult.ReportMarkdownPath.Replace('\\', '/');
-                string reportRoot = _options.ReportRootPath?.Replace('\\', '/').TrimEnd('/') ?? string.Empty;
-                if (!string.IsNullOrEmpty(reportRoot) && linkPath.StartsWith(reportRoot + "/", StringComparison.OrdinalIgnoreCase))
-                {
-                    linkPath = linkPath.Substring(reportRoot.Length + 1);
-                }
+                string linkPath = UPilotFlowUtility.EnsureRelativeTo(
+                    _options.ReportRootPath, caseResult.ReportMarkdownPath).Replace('\\', '/');
                 string linkText = Path.GetFileName(caseResult.ReportMarkdownPath);
                 return $"[{linkText}]({linkPath})";
             }
@@ -698,7 +694,7 @@ namespace CodingRiver.UPilot.Flow
                 {
                     string screenshot = string.IsNullOrWhiteSpace(entry.ScreenshotPath)
                         ? string.Empty
-                        : $"[View]({entry.ScreenshotPath.Replace('\\', '/')})";
+                        : $"[View]({UPilotFlowUtility.EnsureRelativeTo(Path.GetDirectoryName(markdownPath), Path.Combine(_options.ReportRootPath, entry.ScreenshotPath)).Replace('\\', '/')})";
                     string details = string.IsNullOrWhiteSpace(entry.DriverDetails) ? string.Empty : entry.DriverDetails.Replace("|", "/");
                     markdown.AppendLine($"| {entry.StepName} | {entry.Status} | {entry.DurationMs} | {BuildDriverSummary(entry.Attachments)} | {details} | {entry.ErrorCode ?? string.Empty} | {entry.ScreenshotSource ?? string.Empty} | {screenshot} |");
                 }

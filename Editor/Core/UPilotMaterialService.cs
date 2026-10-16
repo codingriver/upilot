@@ -154,7 +154,7 @@ namespace CodingRiver.UPilot
             });
 
             try { await _bridge.SendResultAsync(id, command, await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SHADER_DIAGNOSTICS_FAILED", ex.Message, token, command); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "SHADER_DIAGNOSTICS_FAILED", ex.Message, token, command, errorDetail: null, exception: ex); }
         }
 
         internal static void ReadShaderMessages(Shader shader, bool includeWarnings, ShaderDiagnosticResultPayload result)
@@ -242,7 +242,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "MATERIAL_CREATE_FAILED", ex.Message, token, "material.create");
+                await _bridge.SendErrorAsync(id, "MATERIAL_CREATE_FAILED", ex.Message, token, "material.create", errorDetail: null, exception: ex);
             }
         }
 
@@ -295,7 +295,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "MATERIAL_MODIFY_FAILED", ex.Message, token, "material.modify");
+                await _bridge.SendErrorAsync(id, "MATERIAL_MODIFY_FAILED", ex.Message, token, "material.modify", errorDetail: null, exception: ex);
             }
         }
 
@@ -361,7 +361,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "MATERIAL_ASSIGN_FAILED", ex.Message, token, "material.assign");
+                await _bridge.SendErrorAsync(id, "MATERIAL_ASSIGN_FAILED", ex.Message, token, "material.assign", errorDetail: null, exception: ex);
             }
         }
 
@@ -457,7 +457,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "MATERIAL_GET_FAILED", ex.Message, token, "material.get");
+                await _bridge.SendErrorAsync(id, "MATERIAL_GET_FAILED", ex.Message, token, "material.get", errorDetail: null, exception: ex);
             }
         }
 
@@ -492,7 +492,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SHADER_LIST_FAILED", ex.Message, token, "shader.list");
+                await _bridge.SendErrorAsync(id, "SHADER_LIST_FAILED", ex.Message, token, "shader.list", errorDetail: null, exception: ex);
             }
         }
 

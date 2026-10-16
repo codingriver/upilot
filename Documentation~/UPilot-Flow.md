@@ -57,7 +57,7 @@ Flow 关闭时这些工具不注册。通过 `unity_capabilities_get` 查看关�
 - 步骤、等待、用例和套件超时分别管理。
 - 执行状态包含当前文件、用例、步骤、阶段耗时、最后进展和疑似卡住信息。
 - JSON 报告是权威数据源，Markdown 和 Headed 界面从 JSON 生成。
-- 默认报告目录：`Reports/UPilot/Flow`。
+- 默认报告根目录：`<Unity 工程>/Logs/UPilot/Reports/Flow/`。MCP 按次输出到 `<executionId>/`，其他固定输出分别为 `Default/`、`TestRunner/`、`HeadedAll/`，聚合历史为 `History/`；截图和附件跟随所属报告。显式输出设置保持原值，不读取或迁移旧目录。
 
 ## Actions
 

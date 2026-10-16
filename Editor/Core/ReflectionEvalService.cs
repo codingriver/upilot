@@ -123,7 +123,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "REFLECTION_EVAL_FAILED", ex.Message, token, "reflection.eval");
+                await _bridge.SendErrorAsync(id, "REFLECTION_EVAL_FAILED", ex.Message, token, "reflection.eval", errorDetail: null, exception: ex);
             }
         }
 

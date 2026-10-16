@@ -107,7 +107,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"枚举窗口失败：{ex.Message}", token, "editor.windows.list");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"枚举窗口失败：{ex.Message}", token, "editor.windows.list", errorDetail: null, exception: ex);
             }
         }
 
@@ -322,7 +322,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "WINDOW_CLOSE_FAILED", ex.Message, token, "editor.window.close");
+                await _bridge.SendErrorAsync(id, "WINDOW_CLOSE_FAILED", ex.Message, token, "editor.window.close", errorDetail: null, exception: ex);
             }
         }
 
@@ -553,7 +553,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "WINDOW_SET_RECT_FAILED", ex.Message, token, "editor.window.setRect");
+                await _bridge.SendErrorAsync(id, "WINDOW_SET_RECT_FAILED", ex.Message, token, "editor.window.setRect", errorDetail: null, exception: ex);
             }
         }
 
@@ -594,7 +594,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { completion.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "editor.window.open", await completion.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "WINDOW_OPEN_FAILED", ex.Message, token, "editor.window.open"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "WINDOW_OPEN_FAILED", ex.Message, token, "editor.window.open", errorDetail: null, exception: ex); }
         }
 
         private async Task HandleWindowFocusAsync(string id, string json, CancellationToken token)
@@ -655,7 +655,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { completion.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "editor.window.focus", await completion.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "WINDOW_FOCUS_FAILED", ex.Message, token, "editor.window.focus"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "WINDOW_FOCUS_FAILED", ex.Message, token, "editor.window.focus", errorDetail: null, exception: ex); }
         }
 
         private async Task HandleSceneViewSetMaximizedAsync(string id, string json, CancellationToken token)
@@ -941,7 +941,7 @@ namespace CodingRiver.UPilot
                             ? "Inspect the original command and exact SceneView state; do not retry automatically."
                             : "The SceneView setter was not reached; inspect the rejection and correct the target before retrying.",
                         sideEffectsMayHaveOccurred = setterMayHaveRun,
-                    });
+                    }, exception: ex);
             }
         }
 

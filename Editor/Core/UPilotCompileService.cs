@@ -128,7 +128,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("COMPILE", $"持久化编译错误失败: {ex.Message}");
+                Logger.ReportFailure("COMPILE", "持久化编译错误失败", ex);
             }
         }
 
@@ -202,7 +202,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("COMPILE", $"恢复编译错误失败: {ex.Message}");
+                Logger.ReportFailure("COMPILE", "恢复编译错误失败", ex);
             }
         }
 
@@ -221,7 +221,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("COMPILE", $"清除持久化编译错误失败: {ex.Message}");
+                Logger.ReportFailure("COMPILE", "清除持久化编译错误失败", ex);
             }
         }
 
@@ -251,17 +251,16 @@ namespace CodingRiver.UPilot
             Func<bool> beforeRequest = null)
         {
             LastStartFailureCode = string.Empty;
-            if (EditorApplication.isPlayingOrWillChangePlaymode)
+            if (UPilotPlayModeCompilePolicy.CurrentMode != "edit")
             {
                 LastStartFailureCode = "EditorInPlayMode";
-                Logger.LogWarning("COMPILE", $"编译失败: Unity 正在 PlayMode 或切换 PlayMode，跳过脚本编译 requestId={requestId}");
+                // The command response reports this once, with its WriteBatch diagnostic scope.
                 return false;
             }
 
             if (IsCompiling || EditorApplication.isCompiling)
             {
                 LastStartFailureCode = "EditorBusy";
-                Logger.LogWarning("COMPILE", $"编译失败: 已在编译中 requestId={requestId}");
                 return false;
             }
 

@@ -6,10 +6,13 @@ import json
 import logging
 import os
 import sys
+import atexit
 
 from .env import getenv
 from .mcp_stdio_server import main
 from .version import version_payload
+from .daily_logs import DailyLogHandler
+from .diagnostic_logs import RepeatDiagnosticFilter
 
 
 def _setup_logging() -> None:
@@ -28,18 +31,22 @@ def _setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     root.setLevel(numeric_level)
+    root.propagate = False  # The configured stderr/file pair owns UPilot diagnostics.
+    diagnostics = RepeatDiagnosticFilter()
+    atexit.register(diagnostics.flush)
 
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setLevel(numeric_level)
     stderr_handler.setFormatter(fmt)
+    stderr_handler.addFilter(diagnostics)
     root.addHandler(stderr_handler)
 
     log_file = getenv("UPILOT_LOG_FILE", "")
     if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = DailyLogHandler(log_file)
         file_handler.setLevel(numeric_level)
         file_handler.setFormatter(fmt)
-        file_handler.stream.reconfigure(write_through=True)
+        file_handler.addFilter(diagnostics)
         root.addHandler(file_handler)
 
 

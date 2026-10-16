@@ -37,13 +37,13 @@ namespace CodingRiver.UPilot.Tests.Automation
         public void TearDown() => CleanupOwnCapture();
 
         private static string NewTestDirectory() =>
-            Path.Combine("Log", "UPilotConsole", "AutomationCaptureApiTests", Guid.NewGuid().ToString("N"));
+            Path.Combine(UPilotOutputPaths.ConsoleCaptures, "AutomationCaptureApiTests", Guid.NewGuid().ToString("N"));
 
         private static string GetOwnedDirectory(string relativeDirectory)
         {
             if (string.IsNullOrEmpty(relativeDirectory)) return null;
             string project = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
-            string root = Path.Combine(project, "Log", "UPilotConsole", "AutomationCaptureApiTests");
+            string root = Path.GetFullPath(Path.Combine(project, UPilotOutputPaths.ConsoleCaptures, "AutomationCaptureApiTests"));
             string full = Path.GetFullPath(Path.Combine(project, relativeDirectory));
             if (!string.Equals(Path.GetDirectoryName(full), root, StringComparison.OrdinalIgnoreCase)
                 || !Guid.TryParseExact(Path.GetFileName(full), "N", out _))
@@ -84,8 +84,8 @@ namespace CodingRiver.UPilot.Tests.Automation
 
         [TestCase(".")]
         [TestCase("..")]
-        [TestCase("Log/UPilotConsole/AutomationCaptureApiTests")]
-        [TestCase("Log/UPilotConsole/AutomationCaptureApiTests/not-owned")]
+        [TestCase("Logs/UPilot/Console/AutomationCaptureApiTests")]
+        [TestCase("Logs/UPilot/Console/AutomationCaptureApiTests/not-owned")]
         public void UnsafeCleanupDirectoryIsRejected(string path)
         {
             Assert.Throws<InvalidOperationException>(() => GetOwnedDirectory(path));
@@ -94,7 +94,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         [Test]
         public void RepeatedCleanupPreservesCustomSessionIndex()
         {
-            string index = Path.GetFullPath(Path.Combine(Application.dataPath, "../Log/UPilotConsole/session-index.json"));
+            string index = Path.GetFullPath(Path.Combine(Application.dataPath, "../Logs/UPilot/Console/session-index.json"));
             byte[] before = File.Exists(index) ? File.ReadAllBytes(index) : null;
             for (int iteration = 0; iteration < 2; iteration++)
             {

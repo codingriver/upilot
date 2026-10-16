@@ -478,6 +478,7 @@ namespace CodingRiver.UPilot
             await RunAssetCommand(id, "asset.reimport", token, () =>
             {
                 RequireAssetPath(path);
+                UPilotPlayModeCompilePolicy.RequireAssetMutation(path);
                 AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
                 return new GenericOkPayload { ok = true, state = path };
             });
@@ -495,8 +496,9 @@ namespace CodingRiver.UPilot
             // useful partial result. Do not discard that evidence merely because the request token fired.
             var responseToken = token.IsCancellationRequested ? CancellationToken.None : token;
             try { await _bridge.SendResultAsync(id, command, await tcs.Task, responseToken); }
-            catch (AssetDependencyQueryException ex) { await _bridge.SendErrorAsync(id, ex.errorCode, ex.Message, responseToken, command); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ASSET_IMPORTER_FAILED", ex.Message, responseToken, command); }
+            catch (UPilotCompilePolicyException ex) { await _bridge.SendErrorAsync(id, ex.Code, ex.Message, responseToken, command, ex.Detail, exception: ex); }
+            catch (AssetDependencyQueryException ex) { await _bridge.SendErrorAsync(id, ex.errorCode, ex.Message, responseToken, command, errorDetail: null, exception: ex); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ASSET_IMPORTER_FAILED", ex.Message, responseToken, command, errorDetail: null, exception: ex); }
         }
 
         private static TextureImporterSettingsResultPayload ReadTextureImporterSettings(string assetPath)
@@ -618,7 +620,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_FIND_FAILED", ex.Message, token, "asset.find");
+                await _bridge.SendErrorAsync(id, "ASSET_FIND_FAILED", ex.Message, token, "asset.find", errorDetail: null, exception: ex);
             }
         }
 
@@ -667,7 +669,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "CREATE_FOLDER_FAILED", ex.Message, token, "asset.createFolder");
+                await _bridge.SendErrorAsync(id, "CREATE_FOLDER_FAILED", ex.Message, token, "asset.createFolder", errorDetail: null, exception: ex);
             }
         }
 
@@ -698,9 +700,13 @@ namespace CodingRiver.UPilot
             {
                 await _bridge.SendResultAsync(id, "asset.copy", await tcs.Task, token);
             }
+            catch (UPilotCompilePolicyException ex)
+            {
+                await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "asset.copy", ex.Detail, exception: ex);
+            }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_COPY_FAILED", ex.Message, token, "asset.copy");
+                await _bridge.SendErrorAsync(id, "ASSET_COPY_FAILED", ex.Message, token, "asset.copy", errorDetail: null, exception: ex);
             }
         }
 
@@ -731,9 +737,13 @@ namespace CodingRiver.UPilot
             {
                 await _bridge.SendResultAsync(id, "asset.move", await tcs.Task, token);
             }
+            catch (UPilotCompilePolicyException ex)
+            {
+                await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "asset.move", ex.Detail, exception: ex);
+            }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_MOVE_FAILED", ex.Message, token, "asset.move");
+                await _bridge.SendErrorAsync(id, "ASSET_MOVE_FAILED", ex.Message, token, "asset.move", errorDetail: null, exception: ex);
             }
         }
 
@@ -765,9 +775,13 @@ namespace CodingRiver.UPilot
                 var result = await tcs.Task;
                 await _bridge.SendResultAsync(id, "asset.delete", result, token);
             }
+            catch (UPilotCompilePolicyException ex)
+            {
+                await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "asset.delete", ex.Detail, exception: ex);
+            }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_DELETE_FAILED", ex.Message, token, "asset.delete");
+                await _bridge.SendErrorAsync(id, "ASSET_DELETE_FAILED", ex.Message, token, "asset.delete", errorDetail: null, exception: ex);
             }
         }
 
@@ -780,6 +794,7 @@ namespace CodingRiver.UPilot
             {
                 try
                 {
+                    UPilotPlayModeCompilePolicy.RequireEditMode("asset.refresh");
                     AssetDatabase.Refresh();
                     tcs.SetResult(true);
                 }
@@ -791,9 +806,13 @@ namespace CodingRiver.UPilot
                 await tcs.Task;
                 await _bridge.SendResultAsync(id, "asset.refresh", new GenericOkPayload { ok = true, status = "ok" }, token);
             }
+            catch (UPilotCompilePolicyException ex)
+            {
+                await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, "asset.refresh", ex.Detail, exception: ex);
+            }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_REFRESH_FAILED", ex.Message, token, "asset.refresh");
+                await _bridge.SendErrorAsync(id, "ASSET_REFRESH_FAILED", ex.Message, token, "asset.refresh", errorDetail: null, exception: ex);
             }
         }
 
@@ -834,7 +853,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_INFO_FAILED", ex.Message, token, "asset.getInfo");
+                await _bridge.SendErrorAsync(id, "ASSET_INFO_FAILED", ex.Message, token, "asset.getInfo", errorDetail: null, exception: ex);
             }
         }
 
@@ -895,7 +914,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_GET_DATA_FAILED", ex.Message, token, "asset.getData");
+                await _bridge.SendErrorAsync(id, "ASSET_GET_DATA_FAILED", ex.Message, token, "asset.getData", errorDetail: null, exception: ex);
             }
         }
 
@@ -1008,7 +1027,7 @@ namespace CodingRiver.UPilot
                         {
                             // The isolated Prefab may still be loaded even though the query result was otherwise usable.
                             // Do not advertise a clean read-only result in that case.
-                            Debug.LogWarning($"[UPilot] Failed to unload prefab contents: {unloadEx.Message}");
+                            Logger.ReportFailure("ASSET", $"Failed to unload prefab contents path={p.prefabPath}", unloadEx, id);
                             if (result != null)
                                 MarkCleanupFailure(result, p.prefabPath, unloadEx);
                         }
@@ -1027,7 +1046,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "PREFAB_QUERY_COMPONENTS_FAILED", ex.Message, token, "prefab.queryComponents");
+                await _bridge.SendErrorAsync(id, "PREFAB_QUERY_COMPONENTS_FAILED", ex.Message, token, "prefab.queryComponents", errorDetail: null, exception: ex);
             }
         }
 
@@ -1099,7 +1118,7 @@ namespace CodingRiver.UPilot
                     "PREFAB_PHYSICS_AUDIT_FAILED",
                     ex.Message,
                     token,
-                    "prefab.physicsAudit");
+                    "prefab.physicsAudit", errorDetail: null, exception: ex);
             }
         }
 
@@ -1161,7 +1180,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_MODIFY_DATA_FAILED", ex.Message, token, "asset.modifyData");
+                await _bridge.SendErrorAsync(id, "ASSET_MODIFY_DATA_FAILED", ex.Message, token, "asset.modifyData", errorDetail: null, exception: ex);
             }
         }
 
@@ -1200,7 +1219,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "asset.subresourcesList", await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ASSET_SUBRESOURCES_FAILED", ex.Message, token, "asset.subresourcesList"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ASSET_SUBRESOURCES_FAILED", ex.Message, token, "asset.subresourcesList", errorDetail: null, exception: ex); }
         }
 
         private async Task HandleAssetDependenciesAsync(string id, string json, CancellationToken token)
@@ -1779,7 +1798,7 @@ namespace CodingRiver.UPilot
                     result.coverageComplete = false;
                     result.truncated = true;
                     result.truncationReason = "serializedObjectUnavailable";
-                    Debug.LogWarning("[UPilot] Literal dependency query could not inspect " + assetPath + ": " + ex.Message);
+                    Logger.ReportFailure("ASSET", "Literal dependency query could not inspect " + assetPath, ex, scope: "asset-query|" + System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(result));
                 }
                 finally
                 {
@@ -2099,7 +2118,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "animator.controllerInspect", await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ANIMATOR_INSPECT_FAILED", ex.Message, token, "animator.controllerInspect"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "ANIMATOR_INSPECT_FAILED", ex.Message, token, "animator.controllerInspect", errorDetail: null, exception: ex); }
         }
 
         private static void AppendAnimatorStates(
@@ -2156,7 +2175,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "animator.avatarMaskInspect", await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "AVATAR_MASK_INSPECT_FAILED", ex.Message, token, "animator.avatarMaskInspect"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "AVATAR_MASK_INSPECT_FAILED", ex.Message, token, "animator.avatarMaskInspect", errorDetail: null, exception: ex); }
         }
 
         private async Task HandleModelImporterInspectAsync(string id, string json, CancellationToken token)
@@ -2213,7 +2232,7 @@ namespace CodingRiver.UPilot
                 catch (Exception ex) { tcs.TrySetException(ex); }
             });
             try { await _bridge.SendResultAsync(id, "model.importerInspect", await tcs.Task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "MODEL_IMPORTER_INSPECT_FAILED", ex.Message, token, "model.importerInspect"); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "MODEL_IMPORTER_INSPECT_FAILED", ex.Message, token, "model.importerInspect", errorDetail: null, exception: ex); }
         }
 
         // ── asset.findBuiltIn ───────────────────────────────────────────────────
@@ -2277,7 +2296,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "ASSET_FIND_BUILTIN_FAILED", ex.Message, token, "asset.findBuiltIn");
+                await _bridge.SendErrorAsync(id, "ASSET_FIND_BUILTIN_FAILED", ex.Message, token, "asset.findBuiltIn", errorDetail: null, exception: ex);
             }
         }
 
@@ -2371,6 +2390,7 @@ namespace CodingRiver.UPilot
 
         internal static AssetMutationResultPayload CopyAsset(string sourcePath, string destinationPath)
         {
+            UPilotPlayModeCompilePolicy.RequireAssetMutation(sourcePath, destinationPath);
             EnsureAssetExists(sourcePath, "Source");
             if (AssetExists(destinationPath))
                 throw new InvalidOperationException($"Destination already exists: {destinationPath}");
@@ -2405,6 +2425,7 @@ namespace CodingRiver.UPilot
 
         internal static AssetMutationResultPayload MoveAsset(string sourcePath, string destinationPath)
         {
+            UPilotPlayModeCompilePolicy.RequireAssetMutation(sourcePath, destinationPath);
             EnsureAssetExists(sourcePath, "Source");
             if (AssetExists(destinationPath))
                 throw new InvalidOperationException($"Destination already exists: {destinationPath}");
@@ -2467,6 +2488,7 @@ namespace CodingRiver.UPilot
             if (string.IsNullOrWhiteSpace(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.Ordinal)
                 || assetPath.Contains("..") || assetPath.Contains("\\"))
                 throw new ArgumentException("Delete requires an exact project-relative Assets/ path.", nameof(assetPath));
+            UPilotPlayModeCompilePolicy.RequireAssetMutation(assetPath);
             EnsureAssetExists(assetPath, "Asset");
             var sourceGuid = AssetDatabase.AssetPathToGUID(assetPath);
             try
@@ -3282,7 +3304,7 @@ namespace CodingRiver.UPilot
                 result.truncated = true;
                 result.truncationReason = "prefabLoadFailed";
                 AddPrefabNotSearchedReason(result, "prefabLoadFailed");
-                Debug.LogWarning("[UPilot] Object reference traversal could not load " + prefabPath + ": " + ex.Message);
+                Logger.ReportFailure("ASSET", "Object reference traversal could not load " + prefabPath, ex, scope: "asset-query|" + System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(result));
             }
             finally
             {
@@ -3292,7 +3314,7 @@ namespace CodingRiver.UPilot
                     catch (Exception ex)
                     {
                         MarkCleanupFailure(result, prefabPath, ex);
-                        Debug.LogWarning("[UPilot] Object reference traversal could not unload " + prefabPath + ": " + ex.Message);
+                        Logger.ReportFailure("ASSET", "Object reference traversal could not unload " + prefabPath, ex, scope: "asset-query|" + System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(result));
                     }
                 }
                 MarkInspectionStateChanged(prefabPath, sourceFingerprint, result);
@@ -3340,7 +3362,7 @@ namespace CodingRiver.UPilot
                 result.truncated = true;
                 result.truncationReason = "serializedObjectUnavailable";
                 AddPrefabNotSearchedReason(result, "serializedObjectUnavailable");
-                Debug.LogWarning("[UPilot] Object reference traversal could not inspect " + sourceAssetPath + ": " + ex.Message);
+                Logger.ReportFailure("ASSET", "Object reference traversal could not inspect " + sourceAssetPath, ex, scope: "asset-query|" + System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(result));
             }
         }
 

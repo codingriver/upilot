@@ -34,6 +34,7 @@ namespace CodingRiver.UPilot
         private bool _updateStopScheduled;
         private bool _updateStopInProgress;
         private bool _updateStopFailed;
+        private string _updateStopOperationId = "", _updateStopLifetime = "";
         private UPilotMcpServerManager.ServerStopResult _updateStopResult;
         private bool _runtimeDetailsExpanded;
         private bool _repairInProgress;
@@ -155,6 +156,8 @@ namespace CodingRiver.UPilot
             try
             {
                 EditorApplication.update -= OnEditorUpdate;
+                EditorApplication.delayCall -= ForceStopServicesForUpdate;
+                _updateStopScheduled = false;
             }
             catch (Exception ex)
             {
@@ -372,12 +375,28 @@ namespace CodingRiver.UPilot
         private void EnforceUpdateMaintenanceStop()
         {
             var updateService = UPilotUpdateService.Instance;
+            var operationId = updateService.GetOperationStatus().OperationId;
+            var lifetime = UPilotServiceLifetime.Id;
+            if (_updateStopOperationId != operationId || _updateStopLifetime != lifetime)
+            {
+                EditorApplication.delayCall -= ForceStopServicesForUpdate;
+                _updateStopScheduled = _updateStopInProgress = _updateStopFailed = false;
+                _updateStopResult = default;
+                _updateStopOperationId = operationId; _updateStopLifetime = lifetime;
+            }
             if (!updateService.IsServiceStartBlocked)
             {
                 _updateStopScheduled = false;
                 _updateStopInProgress = false;
                 _updateStopFailed = false;
                 _updateStopResult = default;
+                return;
+            }
+
+            var stopRecord = UPilotMcpServerManager.Instance.StopObservation;
+            if (stopRecord?.PreventsAutomaticUpdateRetry(updateService.GetOperationStatus().OperationId) == true)
+            {
+                _updateStopFailed = stopRecord.status != "succeeded";
                 return;
             }
 
@@ -405,10 +424,13 @@ namespace CodingRiver.UPilot
             EditorApplication.delayCall += ForceStopServicesForUpdate;
         }
 
-        private void ForceStopServicesForUpdate()
+        private async void ForceStopServicesForUpdate()
         {
             _updateStopScheduled = false;
-            if (!UPilotUpdateService.Instance.IsServiceStartBlocked)
+            var operationId = _updateStopOperationId;
+            var lifetime = _updateStopLifetime;
+            if (lifetime != UPilotServiceLifetime.Id || operationId != UPilotUpdateService.Instance.GetOperationStatus().OperationId ||
+                !UPilotUpdateService.Instance.IsServiceStartBlocked)
             {
                 _updateStopInProgress = false;
                 _updateStopFailed = false;
@@ -422,7 +444,9 @@ namespace CodingRiver.UPilot
             {
                 UPilotBridge.Instance.Stop();
                 var manager = UPilotMcpServerManager.Instance;
-                _updateStopResult = manager.StopServerAndObserveExit(UPilotServerStopOrigin.UpdateWindow);
+                var result = await manager.StopServerAndObserveExitAsync(UPilotServerStopOrigin.UpdateWindow);
+                if (this == null || lifetime != UPilotServiceLifetime.Id || operationId != UPilotUpdateService.Instance.GetOperationStatus().OperationId) return;
+                _updateStopResult = result;
                 RefreshSnapshot();
                 stopped = IsUpdateStopConfirmed(_bridgeStatus, _updateStopResult,
                     manager.IsStopResultCurrent(_updateStopResult));
@@ -697,9 +721,8 @@ namespace CodingRiver.UPilot
         private void RevealServerLog()
         {
             var logPath = UPilotMcpServerManager.ServerLogPath;
-            var target = File.Exists(logPath) ? logPath : Path.GetDirectoryName(logPath);
-            if (!string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)))
-                EditorUtility.RevealInFinder(target);
+            if (File.Exists(logPath))
+                EditorUtility.RevealInFinder(logPath);
             else
                 ShowNotice("Server 日志尚未生成", MessageType.Info);
         }

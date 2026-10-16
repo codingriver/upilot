@@ -143,7 +143,7 @@ namespace CodingRiver.UPilot.Tests
             entry.ReceivedAt = DateTime.Now.AddSeconds(-305);
             if (failed)
             {
-                if (Logger.LogToUnityConsole && Logger.MinLevel <= Logger.LogLevel.Error)
+                if (Logger.MinLevel <= Logger.LogLevel.Error)
                     LogAssert.Expect(LogType.Error, new Regex("FAIL fixture.watchdog_terminal id=" + context.CommandId));
                 context.Fail("fixture_failure", "owned terminal filter fixture");
             }
@@ -267,6 +267,36 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(entry.Phase, Is.EqualTo("completed"));
             Assert.That(entry.CompletedAt, Is.EqualTo(completedAt));
             Assert.That(entry.Steps.Count, Is.EqualTo(steps));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public async System.Threading.Tasks.Task RouterRecordsAndRethrowsOriginalFailureWithoutDuplicatingBridgeDiagnostics(bool cancelled)
+        {
+            var router = new UPilotCommandRouter();
+            var id = "router-failure-" + Guid.NewGuid().ToString("N");
+            Exception expected = cancelled
+                ? new OperationCanceledException(new System.Threading.CancellationToken(true))
+                : new InvalidOperationException("router original failure");
+            router.Register("fixture.router-failure", (_, __, ___) =>
+                System.Threading.Tasks.Task.FromException(expected));
+            Exception actual = null;
+            try
+            {
+                await router.TryHandleAsync("fixture.router-failure", id, "{}", default);
+            }
+            catch (Exception ex)
+            {
+                actual = ex;
+            }
+            Assert.That(actual, Is.SameAs(expected));
+            var entry = UPilotOperationTracker.Instance.GetEntriesCopy().Single(value => value.CommandId == id);
+            Assert.That(entry.Phase, Is.EqualTo("failed"));
+            Assert.That(entry.ErrorCode, Is.EqualTo(cancelled ? "CANCELLED" : "EXCEPTION"));
+            Assert.That(entry.CompletedAt.HasValue, Is.True);
+            Assert.That(entry.ExecutionCount, Is.EqualTo(1));
+            Assert.That(UPilotOperationTracker.Instance.GetContext(id), Is.Null);
+            LogAssert.NoUnexpectedReceived();
         }
 
         [Test]

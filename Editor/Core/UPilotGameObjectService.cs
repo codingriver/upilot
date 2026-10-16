@@ -282,7 +282,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"创建 GameObject 失败：{ex.Message}", token, "gameobject.create");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"创建 GameObject 失败：{ex.Message}", token, "gameobject.create", errorDetail: null, exception: ex);
             }
         }
 
@@ -351,7 +351,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"查找 GameObject 失败：{ex.Message}", token, "gameobject.find");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"查找 GameObject 失败：{ex.Message}", token, "gameobject.find", errorDetail: null, exception: ex);
             }
         }
 
@@ -422,7 +422,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"修改 GameObject 失败：{ex.Message}", token, "gameobject.modify");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"修改 GameObject 失败：{ex.Message}", token, "gameobject.modify", errorDetail: null, exception: ex);
             }
         }
 
@@ -500,7 +500,7 @@ namespace CodingRiver.UPilot
                     {
                         commandSubmitted = true,
                         sideEffectsMayHaveOccurred = mutationStarted,
-                    });
+                    }, exception: ex);
             }
         }
 
@@ -553,7 +553,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"移动 GameObject 失败：{ex.Message}", token, "gameobject.move");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"移动 GameObject 失败：{ex.Message}", token, "gameobject.move", errorDetail: null, exception: ex);
             }
         }
 
@@ -603,7 +603,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"复制 GameObject 失败：{ex.Message}", token, "gameobject.duplicate");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"复制 GameObject 失败：{ex.Message}", token, "gameobject.duplicate", errorDetail: null, exception: ex);
             }
         }
 

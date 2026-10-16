@@ -925,6 +925,13 @@ class ResourceDomainService:
             msg = refresh_r.error.message if refresh_r.error else "AssetDatabase.Refresh failed"
             payload["failureSignature"] = refresh_r.error.code if refresh_r.error else "ASSET_REFRESH_FAILED"
             payload["refreshError"] = msg
+            if refresh_r.error and refresh_r.error.detail:
+                payload["refreshErrorDetail"] = refresh_r.error.detail
+                for key in ("blockedReason", "nextAction", "stage"):
+                    if key in refresh_r.error.detail:
+                        payload[key] = refresh_r.error.detail[key]
+            if payload["failureSignature"] == "EDITOR_IN_PLAY_MODE":
+                payload.update(status="blocked", blocked=True, playModeBlocked=True)
             return fail(
                 request_id,
                 payload["failureSignature"],
@@ -1104,7 +1111,7 @@ class ResourceDomainService:
                     }
                 )
                 return ok(request_id, payload)
-            logger.warning("sync_after_disk_write: compile failed: %s", msg)
+            logger.error("sync_after_disk_write: compile failed: %s", msg)
             payload.update(
                 {
                     "status": "compile_failed",

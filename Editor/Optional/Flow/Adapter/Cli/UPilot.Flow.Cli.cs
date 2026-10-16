@@ -147,7 +147,7 @@ namespace CodingRiver.UPilot.Flow
                 YamlPath = ReadString(raw, environment, config, "upilotFlow.yamlPath", "yamlPath", null),
                 YamlDirectory = ReadString(raw, environment, config, "upilotFlow.yamlDirectory", "yamlDirectory", null),
                 Headed = ReadBool(raw, environment, config, "upilotFlow.headed", "headed", true),
-                ReportPath = ReadString(raw, environment, config, "upilotFlow.reportPath", "reportPath", "Reports"),
+                ReportPath = ReadString(raw, environment, config, "upilotFlow.reportPath", "reportPath", UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports)),
                 ScreenshotOnFailure = ReadBool(raw, environment, config, "upilotFlow.screenshotOnFailure", "screenshotOnFailure", true),
                 ScreenshotPath = ReadString(raw, environment, config, "upilotFlow.screenshotPath", "screenshotPath", null),
                 TestFilter = ReadString(raw, environment, config, "upilotFlow.testFilter", "testFilter", null),

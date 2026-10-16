@@ -34,6 +34,38 @@ namespace CodingRiver.UPilot.Tests
             return status;
         }
 
+        [TestCase("User")]
+        [TestCase("EditorShutdown")]
+        public void CancelingRestartEndsLifecycleWithoutReportingAnError(string origin)
+        {
+            var type = typeof(UPilotMcpServerManager);
+            var manager = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            string operationId = "cancel-restart-" + Guid.NewGuid().ToString("N");
+            type.GetField("_statusLock", fields).SetValue(manager, new object());
+            type.GetField("_restartOperationId", fields).SetValue(manager, operationId);
+            type.GetField("_lifecycleOperationId", fields).SetValue(manager, operationId);
+            type.GetField("_lifecyclePhase", fields).SetValue(manager, UPilotServerLifecyclePhase.Verifying);
+            type.GetField("_lifecycleGeneration", fields).SetValue(manager, 1L);
+            type.GetField("_lifecycleStartedAtUtcMs", fields).SetValue(manager, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            try
+            {
+                LogAssert.Expect(UnityEngine.LogType.Log,
+                    $"[UPilotMcpServerManager] 生命周期：生命周期操作结束；PID=0；operationId={operationId}。");
+                type.GetMethod("CancelPendingRestart", fields).Invoke(manager, new object[]
+                    { false, Enum.Parse(typeof(UPilotServerStopOrigin), origin), "", null, 0L, 0, 0L });
+                Assert.That(type.GetField("_lifecyclePhase", fields).GetValue(manager), Is.EqualTo(UPilotServerLifecyclePhase.None));
+                Assert.That(type.GetField("_restartOperationId", fields).GetValue(manager), Is.Empty);
+                Assert.That(((McpServerStatus)type.GetField("_cachedStatus", fields).GetValue(manager)).ErrorMessage, Is.EqualTo("restart_canceled"));
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                (type.GetField("_lifecycleQueryCancellation", fields).GetValue(manager) as CancellationTokenSource)?.Dispose();
+                Logger.CloseDiagnostics(operationId);
+            }
+        }
+
         [TestCase("enteringPlay", 120000)]
         [TestCase("enteringPlay", 180000)]
         [TestCase("enteringPlay", 600000)]
@@ -385,21 +417,24 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(message, Does.Contain("Bridge：已连接（心跳待确认）").And.Contain("Unity：待确认"));
         }
 
-        [Test]
-        public void StableEditorUpdatesRecoverEntryWithoutChangingRequestProvenance()
+        [TestCase("enteringPlay", true, "play")]
+        [TestCase("exitingPlay", false, "edit")]
+        public void StableEditorUpdatesRecoverTransitionWithoutChangingRequestProvenance(string transition, bool playing, string terminal)
         {
             var intent = new PlayModeTransitionRecord { origin = "upilot", requestId = "request-a",
                 commandId = "command-a", operationId = "operation-a", toolName = "playmode.set", runGuid = "run-a" };
-            var start = UPilotPlayModeTransitions.Build("edit", "enteringPlay", "old-session", 100000, intent);
+            var start = UPilotPlayModeTransitions.Build(playing ? "edit" : "play", transition, "old-session", 100000, intent);
             var original = UnityEngine.JsonUtility.ToJson(start);
             string candidate = null;
             Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
-                true, true, false, "new-session", 700000), Is.Null);
+                playing, playing, false, "new-session", 700000), Is.Null);
+            Assert.Throws<UPilotCompilePolicyException>(() => UPilotPlayModeCompilePolicy.RequireEditMode("compile",
+                UPilotPlayModeCompilePolicy.ClassifyMode(playing, false, playing, start.toState)));
             var end = UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
-                true, true, false, "new-session", 700001);
+                playing, playing, false, "new-session", 700001);
             Assert.That(end, Is.Not.Null);
-            Assert.That(end.toState, Is.EqualTo("play"));
-            Assert.That(end.fromState, Is.EqualTo("enteringPlay"));
+            Assert.That(end.toState, Is.EqualTo(terminal));
+            Assert.That(end.fromState, Is.EqualTo(transition));
             Assert.That(end.transitionId, Is.Not.EqualTo(start.transitionId));
             Assert.That(end.at, Is.EqualTo(700001));
             Assert.That(end.unitySessionId, Is.EqualTo("new-session"));
@@ -411,7 +446,69 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(end.runGuid, Is.EqualTo(start.runGuid));
             Assert.That(UnityEngine.JsonUtility.ToJson(start), Is.EqualTo(original));
             Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(end, ref candidate,
-                true, true, false, "new-session", 700002), Is.Null);
+                playing, playing, false, "new-session", 700002), Is.Null);
+            if (!playing) Assert.DoesNotThrow(() => UPilotPlayModeCompilePolicy.RequireEditMode("compile",
+                UPilotPlayModeCompilePolicy.ClassifyMode(false, false, false, end.toState)));
+        }
+
+        [TestCase(true, false, false)]
+        [TestCase(false, true, false)]
+        [TestCase(true, true, false)]
+        [TestCase(false, false, true)]
+        public void InterruptedExitRecoveryRequiresTwoMoreStableEditorUpdates(bool playing, bool willPlay, bool busy)
+        {
+            var start = UPilotPlayModeTransitions.Build("play", "exitingPlay", "session-a", 100000, null);
+            string candidate = null;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, "session-a", 100001), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                playing, willPlay, busy, "session-a", 700002), Is.Null);
+            Assert.That(candidate, Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, "session-a", 700003), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, "session-a", 700004)?.toState, Is.EqualTo("edit"));
+        }
+
+        [TestCase("session")]
+        [TestCase("transition")]
+        public void ExitRecoveryCannotReuseObservationFromAnotherSessionOrTransition(string change)
+        {
+            var start = UPilotPlayModeTransitions.Build("play", "exitingPlay", "session-a", 100000, null);
+            string candidate = null;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, "session-a", 100001), Is.Null);
+            var session = change == "session" ? "session-b" : "session-a";
+            if (change == "transition") start = UPilotPlayModeTransitions.Build("play", "exitingPlay", session, 100001, null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, session, 100002), Is.Null);
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, session, 100003)?.toState, Is.EqualTo("edit"));
+        }
+
+        [TestCase("pid")]
+        [TestCase("creation")]
+        [TestCase("project")]
+        [TestCase("id")]
+        [TestCase("session")]
+        [TestCase("terminal")]
+        [TestCase("timestamp")]
+        public void ExitRecoveryRejectsUnknownIdentityAndUnstableEvidence(string invalid)
+        {
+            var start = UPilotPlayModeTransitions.Build("play", "exitingPlay", "session-a", 100000, null);
+            string candidate = null, session = "session-a";
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, session, 100001), Is.Null);
+            if (invalid == "pid") start.processId++;
+            if (invalid == "creation") start.processCreatedAt++;
+            if (invalid == "project") start.projectPath += "/other-project";
+            if (invalid == "id") start.transitionId = "";
+            if (invalid == "session") session = "";
+            if (invalid == "terminal") start.toState = "edit";
+            if (invalid == "timestamp") start.at = 700000;
+            Assert.That(UPilotPlayModeTransitions.RecoverOnEditorUpdate(start, ref candidate,
+                false, false, false, session, 700000), Is.Null);
+            Assert.That(candidate, Is.Null);
         }
 
         [TestCase(false, true, false)]

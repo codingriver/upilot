@@ -1240,7 +1240,7 @@ namespace CodingRiver.UPilot
         {
             return _bridge.SendErrorAsync(id, ex.Code, ex.Message,
                 ex.Code == "EXECUTION_CANCELLED" ? CancellationToken.None : token,
-                command, ToErrorDetail(ex, id, command));
+                command, ToErrorDetail(ex, id, command), exception: ex);
         }
 
         private static ExecutionVariablesEnvelope ValidateVariableStructure(string json)
@@ -1734,7 +1734,7 @@ namespace CodingRiver.UPilot
             {
                 await _bridge.SendErrorAsync(id, ex.Code, ex.Message,
                     ex.Code == "EXECUTION_CANCELLED" ? CancellationToken.None : token,
-                    command, ToErrorDetail(ex, id, command));
+                    command, ToErrorDetail(ex, id, command), exception: ex);
             }
             catch (OperationCanceledException)
             {
@@ -1745,9 +1745,9 @@ namespace CodingRiver.UPilot
             catch (TargetInvocationException ex)
             {
                 var inner = ex.InnerException ?? ex;
-                await _bridge.SendErrorAsync(id, "EXECUTION_RUNTIME_ERROR", inner.GetType().FullName + ": " + inner.Message, token, command);
+                await _bridge.SendErrorAsync(id, "EXECUTION_RUNTIME_ERROR", inner.GetType().FullName + ": " + inner.Message, token, command, errorDetail: null, exception: inner);
             }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "EXECUTION_RUNTIME_ERROR", ex.GetType().FullName + ": " + ex.Message, token, command); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "EXECUTION_RUNTIME_ERROR", ex.GetType().FullName + ": " + ex.Message, token, command, errorDetail: null, exception: ex); }
         }
 
         internal static ErrorDetailPayload ToErrorDetail(ExecutionContractException ex, string id, string command)

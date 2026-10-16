@@ -58,6 +58,37 @@ namespace CodingRiver.UPilot.Tests.Automation
         public void RestoreRejectsSuccessAndMissingFailureCode(string json)
         { Assert.Catch(() => AutomationStepJsonCodec.Restore(json, out _)); }
 
+        private sealed class RestoreHelperProbe : AutomationStepBase
+        {
+            internal bool Running => IsRunning;
+            internal static string Build(string status, string code) => RestoreResultJson(status, code);
+            internal void SetFailure() => Fail("ORIGINAL", "原始错误", "原始诊断");
+            public override void Execute(string runId, string instanceId, string contextJson, string arguments) { }
+        }
+        [TestCase("Restored", "")] [TestCase("Unsupported", "")]
+        [TestCase("Unsupported", "DETAIL")] [TestCase("Failed", "quote\"\\\n中")]
+        public void RestoreHelperUsesRealParserAndDoesNotChangeExecutionCache(string status, string code)
+        {
+            var probe = new RestoreHelperProbe();
+            foreach (bool failed in new[] { false, true })
+            {
+                if (failed) probe.SetFailure();
+                string result = probe.Poll("", "", "{}", "");
+                string error = probe.GetError("", "", "{}", "ORIGINAL", "");
+                bool running = probe.Running;
+                string json = RestoreHelperProbe.Build(status, code);
+                Assert.That(AutomationStepJsonCodec.Restore(json, out var parsedCode), Is.EqualTo(status));
+                Assert.That(parsedCode, Is.EqualTo(code));
+                Assert.That(probe.Poll("", "", "{}", ""), Is.EqualTo(result));
+                Assert.That(probe.GetError("", "", "{}", "ORIGINAL", ""), Is.EqualTo(error));
+                Assert.That(probe.Running, Is.EqualTo(running));
+            }
+        }
+        [TestCase(null, "")] [TestCase("", "")] [TestCase("Succeeded", "")]
+        [TestCase("restored", "")] [TestCase("Failed", "")] [TestCase("Failed", " ")]
+        public void RestoreHelperRejectsInvalidProtocol(string status, string code)
+        { Assert.Catch(() => RestoreHelperProbe.Build(status, code)); }
+
         [Test]
         public void ErrorDescriptionCannotReplaceFrozenCodeAndEscapesDynamicText()
         {

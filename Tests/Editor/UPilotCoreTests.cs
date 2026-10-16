@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -158,6 +158,80 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(contextField.GetValue(service), Is.Null);
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void LoggerConsoleTogglePreservesWarningsErrorsAndFileLogging(bool mirrorToConsole)
+        {
+            var previousConsole = Logger.LogToUnityConsole;
+            var previousLevel = Logger.MinLevel;
+            var marker = "logger-console-toggle-" + Guid.NewGuid().ToString("N");
+            var messages = new List<string>();
+            Application.LogCallback capture = (message, stack, type) =>
+            {
+                if (message.Contains(marker)) messages.Add(message);
+            };
+            Exception exception = null;
+            try { throw new InvalidOperationException(marker + "-exception"); }
+            catch (InvalidOperationException ex) { exception = ex; }
+            var info = "[INFO ] [SYSTEM  ] " + marker + "-info";
+            var warnings = new[]
+            {
+                "[WARN ] [SYSTEM  ] " + marker + "-warning",
+                "[WARN ] [SYSTEM  ] " + marker + "-warning-tagged [console-test]",
+                "[WARN ] " + marker + "-warning-legacy",
+                "[WARN ] " + marker + "-warning-legacy-tagged [console-test]",
+            };
+            var errors = new[]
+            {
+                "[ERROR] [NETWORK ] " + marker + "-category",
+                "[ERROR] [NETWORK ] " + marker + "-category-tagged [console-test]",
+                "[ERROR] " + marker + "-legacy",
+                "[ERROR] " + marker + "-legacy-tagged [console-test]",
+                "[ERROR] Exception: " + exception,
+                "[ERROR] Exception: " + exception + " [console-test]",
+            };
+            Application.logMessageReceived += capture;
+            try
+            {
+                Logger.LogToUnityConsole = mirrorToConsole;
+                Logger.MinLevel = Logger.LogLevel.Info;
+                if (mirrorToConsole)
+                    LogAssert.Expect(LogType.Log, info);
+                foreach (var warning in warnings) LogAssert.Expect(LogType.Warning, warning);
+                foreach (var error in errors) LogAssert.Expect(LogType.Error, error);
+
+                Logger.Log("SYSTEM", marker + "-info");
+                Logger.LogWarning("SYSTEM", marker + "-warning");
+                Logger.LogWarning("SYSTEM", marker + "-warning-tagged", "console-test");
+                Logger.LogWarning(marker + "-warning-legacy");
+                Logger.LogWarning(marker + "-warning-legacy-tagged", new[] { "console-test" });
+                Logger.LogError("NETWORK", marker + "-category");
+                Logger.LogError("NETWORK", marker + "-category-tagged", "console-test");
+                Logger.LogError(marker + "-legacy");
+                Logger.LogError(marker + "-legacy-tagged", new[] { "console-test" });
+                Logger.LogException(exception);
+                Logger.LogException(exception, "console-test");
+
+                var expected = new List<string>();
+                if (mirrorToConsole) expected.Add(info);
+                expected.AddRange(warnings);
+                expected.AddRange(errors);
+                Assert.That(messages, Is.EqualTo(expected));
+                Assert.That(exception.StackTrace, Is.Not.Empty);
+                var fileLog = File.ReadAllText(Logger.LogFilePath);
+                foreach (var entry in new[] { info }.Concat(warnings).Concat(errors))
+                    Assert.That(fileLog, Does.Contain(entry));
+                Assert.That(Logger.LogToUnityConsole, Is.EqualTo(mirrorToConsole));
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                Application.logMessageReceived -= capture;
+                Logger.LogToUnityConsole = previousConsole;
+                Logger.MinLevel = previousLevel;
+            }
+        }
+
         [Test]
         public void LoggerInfoConsolePolicyKeepsRoutineTransportQuietByDefault()
         {
@@ -247,51 +321,6 @@ namespace CodingRiver.UPilot.Tests
             finally
             {
                 Logger.SetLogToUnityConsole(previous);
-            }
-        }
-
-        [Test]
-        public void LoggerRotationAccountsForIncomingEntryAndRetainsTwoBackups()
-        {
-            var directory = Path.Combine(Path.GetTempPath(), "upilot-logger-" + Guid.NewGuid().ToString("N"));
-            var logPath = Path.Combine(directory, "upilot.log");
-            Directory.CreateDirectory(directory);
-            try
-            {
-                File.WriteAllBytes(logPath, new byte[8]);
-                File.WriteAllText(logPath + ".1", "previous");
-                File.WriteAllText(logPath + ".2", "oldest");
-
-                Logger.RotateLogIfNeeded(logPath, incomingByteCount: 3, maxLogSizeBytes: 10, maxBackupFiles: 2);
-
-                Assert.That(File.Exists(logPath), Is.False);
-                Assert.That(new FileInfo(logPath + ".1").Length, Is.EqualTo(8));
-                Assert.That(File.ReadAllText(logPath + ".2"), Is.EqualTo("previous"));
-            }
-            finally
-            {
-                if (Directory.Exists(directory)) Directory.Delete(directory, true);
-            }
-        }
-
-        [Test]
-        public void LoggerNewSessionRotatesCurrentLogInsteadOfOverwritingIt()
-        {
-            var directory = Path.Combine(Path.GetTempPath(), "upilot-logger-session-" + Guid.NewGuid().ToString("N"));
-            var logPath = Path.Combine(directory, "upilot.log");
-            Directory.CreateDirectory(directory);
-            try
-            {
-                File.WriteAllText(logPath, "previous session");
-
-                Logger.RotateLogForNewSession(logPath, maxBackupFiles: 2);
-
-                Assert.That(File.Exists(logPath), Is.False);
-                Assert.That(File.ReadAllText(logPath + ".1"), Is.EqualTo("previous session"));
-            }
-            finally
-            {
-                if (Directory.Exists(directory)) Directory.Delete(directory, true);
             }
         }
 
@@ -2805,6 +2834,40 @@ namespace CodingRiver.UPilot.Tests
             }
         }
 
+        [TestCase("Completed")]
+        [TestCase("Failed")]
+        [TestCase("None")]
+        public void UpdateDiagnosticsKeepSeparateAttemptsVisibleAndFlushOnCompletionOrRecovery(string terminal)
+        {
+            var type = typeof(UPilotUpdateService);
+            const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
+            var setPhase = type.GetMethod("SetOperationPhaseCore", flags);
+            var report = type.GetMethod("LogUpdateError", flags);
+            string marker = "update-diagnostic-" + Guid.NewGuid().ToString("N");
+            var error = new InvalidOperationException(marker);
+            string idKey = GetUpdateServiceProjectKey("CodingRiver.UPilot.UpdateService.OperationId");
+            try
+            {
+                UPilotUpdateService.ClearOperationStatus();
+                setPhase.Invoke(null, new object[] { UPilotUpdateOperationPhase.StoppingService, "fixture", null, null, false });
+                string firstId = SessionState.GetString(idKey, "");
+                Assert.That(firstId, Is.Not.Empty);
+                LogAssert.Expect(LogType.Error, new Regex("operationId=" + firstId + " " + marker));
+                report.Invoke(null, new object[] { marker, error });
+                report.Invoke(null, new object[] { marker, error });
+                LogAssert.Expect(LogType.Error, new Regex("operationId=" + firstId + @"[\s\S]*合并重复日志 count=1"));
+                if (terminal == "None") UPilotUpdateService.ClearOperationStatus();
+                else setPhase.Invoke(null, new object[] { Enum.Parse(typeof(UPilotUpdateOperationPhase), terminal), "fixture terminal", null, null, false });
+                setPhase.Invoke(null, new object[] { UPilotUpdateOperationPhase.StoppingService, "second fixture", null, null, false });
+                string secondId = SessionState.GetString(idKey, "");
+                Assert.That(secondId, Is.Not.Empty.And.Not.EqualTo(firstId));
+                LogAssert.Expect(LogType.Error, new Regex("operationId=" + secondId + " " + marker));
+                report.Invoke(null, new object[] { marker, error });
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally { UPilotUpdateService.ClearOperationStatus(); }
+        }
+
         [Test]
         public void UpdateWindowRefreshesWhenRestartTransitionsToCompleted()
         {
@@ -3290,7 +3353,7 @@ namespace CodingRiver.UPilot.Tests
                 Is.Not.Null);
 
             var prepareMethod = typeof(UPilotPackageUpdateLifecycle).GetMethod(
-                "PrepareForPackageUpdate",
+                "PrepareForPackageUpdateAsync",
                 BindingFlags.Public | BindingFlags.Static);
             Assert.That(prepareMethod, Is.Not.Null);
             Assert.That(

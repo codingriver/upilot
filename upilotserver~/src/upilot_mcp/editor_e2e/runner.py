@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..output_paths import E2E_REPORTS, output_path
+
 import asyncio
 import json
 import logging
@@ -96,7 +98,14 @@ async def run_editor_e2e_from_path(
 
     spec_dir = path.parent
     run_id = uuid.uuid4().hex[:12]
-    art = Path(artifact_dir).expanduser().resolve() if artifact_dir else (spec_dir / ".upilot-e2e-artifacts" / run_id)
+    if artifact_dir:
+        art = Path(artifact_dir).expanduser().resolve()
+    else:
+        project_root = getattr(getattr(facade, "server", None), "expected_project_path", None)
+        if not isinstance(project_root, (str, Path)) or not str(project_root).strip() or not Path(project_root).is_absolute():
+            return fail(new_id("e2e"), "PROJECT_PATH_UNAVAILABLE",
+                        "Default E2E output requires an absolute Unity project path.", {})
+        art = output_path(project_root, E2E_REPORTS) / run_id
     art.mkdir(parents=True, exist_ok=True)
 
     started = iso_now()

@@ -173,7 +173,7 @@ namespace CodingRiver.UPilot
         internal static string RelativeLogPath(string toolId)
         {
             DisplayName(toolId);
-            return "Logs/UPilot/Diagnostics/" + toolId + ".log";
+            return UPilotOutputPaths.QuickDebugChecks + "/" + toolId + ".log";
         }
 
         internal static string PendingReport(UPilotToolCheckResult result) =>

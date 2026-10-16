@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using UnityEditor;
@@ -24,10 +24,16 @@ namespace CodingRiver.UPilot.Automation
         private bool _ticking;
         private readonly int _mainThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
         private Exception _writeFailure;
-        internal AutomationStepExecutor(AutomationStepRegistry registry, string storePath, Func<long> clock = null)
+        private readonly Action<string> _failureDiagnostic;
+        internal AutomationStepExecutor(AutomationStepRegistry registry, string storePath, Func<long> clock = null,
+            AutomationStepExecutionLog textLog = null, IAutomationGizmosAccess gizmosAccess = null,
+            Action<string> failureDiagnostic = null)
         {
             _registry = registry; _store = new AutomationStepRunStore(storePath); _clock = clock ?? (() => AutomationStepJson.Now);
             _captureStorePath = storePath + ".capture";
+            _textLog = textLog;
+            _gizmosAccess = gizmosAccess;
+            _failureDiagnostic = failureDiagnostic;
         }
         public AutomationStepRun State => _run == null ? null : AutomationStepJson.Copy(_run);
         internal string OperationId => _run?.operationId ?? "";
@@ -36,6 +42,7 @@ namespace CodingRiver.UPilot.Automation
 
         public AutomationStepRun Start(AutomationStepPlan plan, string operationId, string captureSessionId = "")
         {
+            if (EditorApplication.isCompiling) throw new InvalidOperationException("STEP_EDITOR_COMPILING");
             if (!string.IsNullOrWhiteSpace(operationId) && (_store.Disposed(operationId) != null
                 || (_run?.operationId == operationId && !string.IsNullOrEmpty(_run.disposition?.requestId))))
                 throw new InvalidOperationException("STEP_RUN_RELEASED");
@@ -59,7 +66,8 @@ namespace CodingRiver.UPilot.Automation
             {
                 runId = Guid.NewGuid().ToString("N"), operationId = operationId,
                 serviceLifecycleId = UPilotServiceLifetime.Id, editorIdentity = AutomationStepRunStore.EditorIdentity, plan = frozen,
-                planHash = AutomationStepRunStore.Hash(frozen), startedAtUtcMs = _clock(), captureSessionId = captureSessionId ?? "",
+                gizmosPolicyVersion = _gizmosAccess == null ? 0 : 1,
+                planHash = AutomationStepRunStore.Hash(frozen, _gizmosAccess == null ? 0 : 1), startedAtUtcMs = _clock(), captureSessionId = captureSessionId ?? "",
                 captureOwned = ownsCapture, cleanupTrackingVersion = 1,
             };
             foreach (var item in frozen.steps)
@@ -67,8 +75,10 @@ namespace CodingRiver.UPilot.Automation
                 _registry.TryGet(item.stepId, out var descriptor);
                 _run.steps.Add(new AutomationStepRecord { instanceId = item.instanceId, typeIdentity = descriptor.typeIdentity, cleanupState = "NotStarted" });
             }
-            _step = null; _evidence = null; _ownedCapture = null; _collector?.Dispose(); _collector = null; _nextPoll = 0;
-            _run.reportDirectory = "Log/UPilotSteps/" + _run.runId;
+            _step = null; _evidence = null; _ownedCapture = null; _collector?.Dispose(); _collector = null; _report = null; _nextPoll = 0;
+            _run.reportDirectory = UPilotOutputPaths.StepReports + "/" + _run.runId;
+            StartExecutionLog();
+            if (_run.terminal) return State;
             Save();
             try
             {
@@ -81,8 +91,9 @@ namespace CodingRiver.UPilot.Automation
                 _report = AutomationReportWriter.Create(new AutomationReportCreateRequest
                 { runId = _run.runId, outputDirectory = _run.reportDirectory, startedAtUtcMs = _run.startedAtUtcMs });
                 Save();
+                InitializeGizmos();
             }
-            catch (Exception ex) { Recovery("STEP_EVIDENCE_START_FAILED", ex.Message); }
+            catch (Exception ex) { Recovery("STEP_EVIDENCE_START_FAILED", ex.Message, ex.ToString()); }
             return State;
         }
 
@@ -95,6 +106,10 @@ namespace CodingRiver.UPilot.Automation
                 _run = _store.Load();
                 if (_run != null && _run.serviceLifecycleId != UPilotServiceLifetime.Id) _run = null;
                 if (_run == null) return;
+                // An Editor-session fence precedes disk persistence and every business restoration path.
+                var compilationFence = _store.CompilationFence(_run);
+                if (compilationFence != null) _run = compilationFence;
+                RestoreExecutionLog();
                 if (ReleasingImmediateStopResources)
                 {
                     // Same-lifetime reload resumes framework release only, never Step callbacks.
@@ -105,6 +120,12 @@ namespace CodingRiver.UPilot.Automation
                     }
                     return;
                 }
+                if (_run.terminal)
+                {
+                    if (_run.compilationStartedAtUtcMs > 0) CompleteCompilationInterruption();
+                    return;
+                }
+                ObserveInterruptedGizmosInitialization();
                 if (_run.terminal) return;
                 if (_run.status == "RecoveryRequired")
                 {
@@ -142,7 +163,7 @@ namespace CodingRiver.UPilot.Automation
                     catch (Exception ex)
                     {
                         _run.recoveryBlockedReason = "STEP_CAPTURE_RECOVERY_FAILED";
-                        RecordError("STEP_CAPTURE_RECOVERY_FAILED", ex.Message);
+                        RecordError("STEP_CAPTURE_RECOVERY_FAILED", ex.Message, ex.ToString());
                         _run.recoveryRequired = true; _run.cleanupPending = true;
                         _ownedCapture = null; _evidence = null;
                         Save(); // Preserve safe business Finally work, without adopting unknown ownership.
@@ -154,13 +175,14 @@ namespace CodingRiver.UPilot.Automation
                 var record = Current;
                 if (record.stage == "Pending" || record.stage == "Completed" || record.stage == "ResourceCleaning") return;
                 _step = _registry.Create(Item.stepId);
+                if (_run.terminal) return;
                 string restored, restoreCode = "";
                 try { restored = AutomationStepJsonCodec.Restore(Invoke(_step.Restore), out restoreCode); }
                 catch (Exception ex)
                 {
                     if (_run.terminal) return;
                     restoreCode = ex is FormatException ? "STEP_RESTORE_INVALID" : "STEP_RESTORE_EXCEPTION";
-                    RecordError(restoreCode, ex.Message);
+                    RecordError(restoreCode, ex.Message, ex.ToString());
                     restored = "Unsupported";
                 }
                 if (_run.terminal) return;
@@ -176,16 +198,21 @@ namespace CodingRiver.UPilot.Automation
                     record.cleanupState = "Unknown";
                     CompleteCurrent();
                 }
-                else Save();
+                else { TraceStep("step.restored", "步骤恢复观察"); Save(); }
             }
-            catch (Exception ex) { Recovery("STEP_STORE_RECOVERY_FAILED", ex.Message); }
-            finally { _ticking = false; }
+            catch (Exception ex) { Recovery("STEP_STORE_RECOVERY_FAILED", ex.Message, ex.ToString()); }
+            finally
+            {
+                _ticking = false;
+                if (_run?.terminal == true && !ReleasingImmediateStopResources) FinishExecutionLog();
+            }
         }
 
         public void RequestCancel()
         {
             if (_run == null || _run.terminal || _run.cancelRequested || _run.stage == "Finalizing") return;
             _run.cancelRequested = true;
+            Trace("run.cancel_requested", "任务取消请求");
             RecordError("STEP_CANCELED", "Operation cancellation requested.");
             Save();
         }
@@ -210,7 +237,7 @@ namespace CodingRiver.UPilot.Automation
                     return;
                 }
                 if (_run.stage == "Finalizing") { FinalizeEvidence(); return; }
-                if (_run.cursor >= _run.steps.Count) { _run.stage = "Finalizing"; Save(); return; }
+                if (_run.cursor >= _run.steps.Count) { _run.stage = "Finalizing"; Trace("run.finalizing", "任务收尾开始"); Save(); return; }
                 var record = Current;
                 if (record.stage == "ResourceCleaning")
                 {
@@ -225,18 +252,25 @@ namespace CodingRiver.UPilot.Automation
                     if (HasError && Item.phase == "Normal")
                     {
                         record.outcome = AutomationStepStatus.Skipped; record.stage = "Completed"; record.cleanupState = "NotRequired";
-                        record.finishedAtUtcMs = _clock(); Advance(); return;
+                        record.finishedAtUtcMs = _clock();
+                        TraceStep("step.skipped", "步骤未执行", () => "原因=前序任务错误", record.finishedAtUtcMs);
+                        TraceStepFinished(_run.cursor, record.finishedAtUtcMs, "未执行"); Advance(); return;
                     }
                     try { _step = _registry.Create(Item.stepId); }
-                    catch (Exception ex) { if (_run.terminal) return; RecordError("STEP_CONSTRUCTION_FAILED", ex.GetBaseException().Message); record.outcome = AutomationStepStatus.Failed; record.stage = "Completed"; record.cleanupState = "NotRequired"; Advance(); return; }
+                    catch (Exception ex) { if (_run.terminal) return; RecordError("STEP_CONSTRUCTION_FAILED", ex.GetBaseException().Message, ex.ToString()); record.outcome = AutomationStepStatus.Failed; record.stage = "Completed"; record.cleanupState = "NotRequired";
+                        TraceStep("step.construction_failed", "步骤构造失败", () => ErrorFields(_run.error));
+                        TraceStepFinished(_run.cursor, _clock(), "Failed（未执行）"); Advance(); return; }
+                    if (_run.terminal) return;
+                    EnableStepGizmos();
                     if (_run.terminal) return;
                     record.stage = "Executing"; record.startedAtUtcMs = _clock();
                     Save(); // Durable intent precedes the only Execute call.
                     _report.Append(new AutomationReportEvent
                     { eventType = "step.execute_intent", phaseId = Item.phase, caseId = Item.instanceId });
+                    TraceStep("step.started", "步骤开始", at: record.startedAtUtcMs);
                     try { Invoke((run, instance, context, arguments) => { _step.Execute(run, instance, context, arguments); return ""; }); }
                     catch (Exception ex) { FailCurrent(AutomationStepStatus.Failed,
-                        ex is AutomationStepException stepError ? stepError.Code : "STEP_EXECUTE_EXCEPTION", ex.GetBaseException().Message); }
+                        ex is AutomationStepException stepError ? stepError.Code : "STEP_EXECUTE_EXCEPTION", ex.GetBaseException().Message, diagnostic: ex.ToString()); }
                     return;
                 }
                 if (record.stage == "Executing")
@@ -249,9 +283,9 @@ namespace CodingRiver.UPilot.Automation
                     _nextPoll = _clock() + (long)(Item.pollIntervalSeconds * 1000);
                     AutomationStepResult result;
                     try { result = AutomationStepJsonCodec.Result(Invoke(_step.Poll)); }
-                    catch (FormatException ex) { FailCurrent(AutomationStepStatus.Failed, "STEP_RESULT_INVALID", ex.Message); return; }
+                    catch (FormatException ex) { FailCurrent(AutomationStepStatus.Failed, "STEP_RESULT_INVALID", ex.Message, diagnostic: ex.ToString()); return; }
                     catch (Exception ex) { FailCurrent(AutomationStepStatus.Failed,
-                        ex is AutomationStepException stepError ? stepError.Code : "STEP_POLL_EXCEPTION", ex.GetBaseException().Message); return; }
+                        ex is AutomationStepException stepError ? stepError.Code : "STEP_POLL_EXCEPTION", ex.GetBaseException().Message, diagnostic: ex.ToString()); return; }
                     if (_run.terminal) return; // A reentrant immediate stop fences the returned Poll result.
                     if (!ValidResult(result))
                     { FailCurrent(AutomationStepStatus.Failed, "STEP_RESULT_INVALID", "Invalid Poll result."); return; }
@@ -275,8 +309,8 @@ namespace CodingRiver.UPilot.Automation
                     _nextPoll = _clock() + (long)(Item.pollIntervalSeconds * 1000);
                     AutomationStepResult result;
                     try { result = AutomationStepJsonCodec.Result(Invoke(_step.Cleanup), true); }
-                    catch (FormatException ex) { CleanupFailed("STEP_CLEANUP_RESULT_INVALID", ex.Message); return; }
-                    catch (Exception ex) { CleanupFailed("STEP_CLEANUP_EXCEPTION", ex.GetBaseException().Message); return; }
+                    catch (FormatException ex) { CleanupFailed("STEP_CLEANUP_RESULT_INVALID", ex.Message, diagnostic: ex.ToString()); return; }
+                    catch (Exception ex) { CleanupFailed("STEP_CLEANUP_EXCEPTION", ex.GetBaseException().Message, diagnostic: ex.ToString()); return; }
                     if (_run.terminal) return;
                     if (result?.status == AutomationStepStatus.Running) return;
                     if (result == null || (result.status != AutomationStepStatus.Succeeded && result.status != AutomationStepStatus.SucceededWithWarnings))
@@ -284,11 +318,16 @@ namespace CodingRiver.UPilot.Automation
                     if (result.status == AutomationStepStatus.SucceededWithWarnings && Current.outcome == AutomationStepStatus.Succeeded)
                         Current.outcome = AutomationStepStatus.SucceededWithWarnings;
                     record.cleanupState = "Verified";
+                    TraceCleanupFinished(result.status.ToString());
                     CompleteCurrent();
                 }
             }
-            catch (Exception ex) { Recovery("STEP_EXECUTOR_EXCEPTION", ex.GetBaseException().Message); }
-            finally { _ticking = false; }
+            catch (Exception ex) { Recovery("STEP_EXECUTOR_EXCEPTION", ex.GetBaseException().Message, ex.ToString()); }
+            finally
+            {
+                _ticking = false;
+                if (_run?.terminal == true && !ReleasingImmediateStopResources) FinishExecutionLog();
+            }
         }
         private int CallbackIndex => _run.cursor;
         private AutomationStepRecord Current => _run.steps[CallbackIndex];
@@ -359,31 +398,39 @@ namespace CodingRiver.UPilot.Automation
             _run.sharedCheckpointJson = AutomationStepJsonCodec.WriteJson(shared);
         });
         internal void RegisterArtifact(string runId, string instanceId, string kind, string path) =>
-            WriteCheckpoint(runId, instanceId, () =>
+            WriteCheckpoint(runId, instanceId, () => RegisterArtifactCore(instanceId, kind, path), "STEP_ARTIFACT_REGISTER_FAILED");
+
+        private void RequireArtifactRegistration(string kind)
+        {
+            if (_run.status == "RecoveryRequired" || _run.stage == "Finalizing" || _report == null || _report.IsComplete)
+                throw new InvalidOperationException("STEP_ARTIFACT_REGISTRATION_CLOSED");
+            if (string.IsNullOrWhiteSpace(kind)) throw new ArgumentException("Artifact kind is required.");
+        }
+
+        private AutomationReportArtifact RegisterArtifactCore(string instanceId, string kind, string path)
+        {
+            RequireArtifactRegistration(kind);
+            var artifact = AutomationReportWriter.GetArtifactMetadata(kind, path);
+            artifact.instanceId = instanceId;
+            string reportPath = Path.GetFullPath(_run.reportDirectory);
+            if (SamePath(artifact.path, Path.Combine(reportPath, "events.jsonl"))
+                || SamePath(artifact.path, Path.Combine(reportPath, "summary.json"))
+                || SamePath(artifact.path, Path.Combine(reportPath, AutomationReportWriter.TextReportFileName))
+                || SamePath(artifact.path, Path.Combine(reportPath, AutomationReportWriter.TimingFileName))
+                || SamePath(artifact.path, Path.Combine(reportPath, AutomationReportWriter.ConsolePolicyFileName)))
+                throw new InvalidOperationException("Step cannot register the executor's own report files.");
+            _run.registeredArtifacts ??= new();
+            var existing = _run.registeredArtifacts.FirstOrDefault(a => SamePath(a.path, artifact.path));
+            if (existing != null)
             {
-                if (_run.status == "RecoveryRequired" || _run.stage == "Finalizing" || _report == null || _report.IsComplete)
-                    throw new InvalidOperationException("STEP_ARTIFACT_REGISTRATION_CLOSED");
-                if (string.IsNullOrWhiteSpace(kind)) throw new ArgumentException("Artifact kind is required.");
-                var artifact = AutomationReportWriter.GetArtifactMetadata(kind, path);
-                artifact.instanceId = instanceId;
-                string reportPath = Path.GetFullPath(_run.reportDirectory);
-                if (SamePath(artifact.path, Path.Combine(reportPath, "events.jsonl"))
-                    || SamePath(artifact.path, Path.Combine(reportPath, "summary.json"))
-                    || SamePath(artifact.path, Path.Combine(reportPath, AutomationReportWriter.TextReportFileName))
-                    || SamePath(artifact.path, Path.Combine(reportPath, AutomationReportWriter.TimingFileName))
-                    || SamePath(artifact.path, Path.Combine(reportPath, AutomationReportWriter.ConsolePolicyFileName)))
-                    throw new InvalidOperationException("Step cannot register the executor's own report files.");
-                _run.registeredArtifacts ??= new();
-                var existing = _run.registeredArtifacts.FirstOrDefault(a => SamePath(a.path, artifact.path));
-                if (existing != null)
-                {
-                    if (existing.kind != kind || existing.instanceId != instanceId
-                        || existing.bytes != artifact.bytes || existing.sha256 != artifact.sha256)
-                        throw new InvalidOperationException("Artifact registration conflicts with the saved owner or content.");
-                    return;
-                }
-                _run.registeredArtifacts.Add(artifact);
-            }, "STEP_ARTIFACT_REGISTER_FAILED");
+                if (existing.kind != kind || existing.instanceId != instanceId
+                    || existing.bytes != artifact.bytes || existing.sha256 != artifact.sha256)
+                    throw new InvalidOperationException("Artifact registration conflicts with the saved owner or content.");
+                return existing;
+            }
+            _run.registeredArtifacts.Add(artifact);
+            return artifact;
+        }
 
         private static bool SamePath(string left, string right) => string.Equals(left, right,
             Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
@@ -401,25 +448,33 @@ namespace CodingRiver.UPilot.Automation
             }
             catch (Exception ex)
             {
-                _writeFailure = new AutomationStepException(failureCode, ex.Message);
+                _writeFailure = new AutomationStepException(failureCode, ex.Message, ex);
                 throw _writeFailure;
             }
         }
         private static bool ValidResult(AutomationStepResult result) => result != null
             && Enum.IsDefined(typeof(AutomationStepStatus), result.status) && result.status != AutomationStepStatus.TimedOut;
         private void BeginCleanup()
-        { if (_run.terminal) return; Current.cleanupState = "Pending"; Current.stage = "Cleaning"; Current.cleanupStartedAtUtcMs = _clock(); _nextPoll = 0; Save(); }
+        {
+            if (_run.terminal) return;
+            Current.cleanupState = "Pending"; Current.stage = "Cleaning"; Current.cleanupStartedAtUtcMs = _clock(); _nextPoll = 0;
+            TraceExecutionFinished(Current.cleanupStartedAtUtcMs);
+            TraceStep("step.cleanup_started", "步骤清理开始", at: Current.cleanupStartedAtUtcMs);
+            Save();
+        }
         private void FailCurrent(AutomationStepStatus status, string code, string message, string diagnostic = "", bool readError = false)
         {
             if (_run == null || _run.terminal) return;
+            if (status == AutomationStepStatus.TimedOut) TraceStep("step.timed_out", "步骤执行超时", () => "错误码=" + AutomationStepExecutionLog.Quote(code));
             if (status == AutomationStepStatus.TimedOut && Item.phase == "Finally")
             {
                 Current.outcome = status;
+                TraceExecutionFinished(_clock());
                 Finish("TimedOut", code, message);
                 return; // No second cleanup pass or remaining Finally steps.
             }
             Current.outcome = status;
-            Current.error = RecordError(code, message, diagnostic);
+            Current.error = RecordError(code, message, diagnostic, deferLog: readError);
             Save(); // Freeze the machine-readable failure before calling project diagnostic code.
             if (readError) ReadError(Current.error);
             if (_run.terminal) return;
@@ -427,11 +482,12 @@ namespace CodingRiver.UPilot.Automation
             if (!Current.cancelSent)
             {
                 Current.cancelSent = true; Save();
+                TraceStep("step.cancel_requested", "步骤取消请求");
                 try { Invoke((run, instance, context, arguments) => { _step.Cancel(run, instance, context, arguments); return ""; }); }
                 catch (Exception ex)
                 {
                     if (_run.terminal) return;
-                    RecordError("STEP_CANCEL_EXCEPTION", ex.GetBaseException().Message);
+                    RecordError("STEP_CANCEL_EXCEPTION", ex.GetBaseException().Message, ex.ToString());
                     // Cleanup can still authoritatively establish release.
                 }
             }
@@ -445,20 +501,22 @@ namespace CodingRiver.UPilot.Automation
                 if (_run.terminal) return;
                 frozen.message = error.message; frozen.diagnostic = error.diagnostic;
             }
-            catch (Exception ex) { if (_run.terminal) return; RecordError(ex is FormatException ? "STEP_ERROR_INVALID" : "STEP_ERROR_EXCEPTION", ex.Message); }
+            catch (Exception ex) { if (_run.terminal) return; RecordError(ex is FormatException ? "STEP_ERROR_INVALID" : "STEP_ERROR_EXCEPTION", ex.Message, ex.ToString()); }
+            ReportStepError(frozen);
             if (!_run.terminal) Save();
         }
-        private void CleanupFailed(string code, string message, bool readError = false)
+        private void CleanupFailed(string code, string message, bool readError = false, string diagnostic = "")
         {
             if (_run == null || _run.terminal) return;
             Current.cleanupState = code == "STEP_CLEANUP_EXCEPTION" || code == "STEP_CLEANUP_RESULT_INVALID"
                 ? "Uncertain" : "Unresolved";
-            var error = RecordError(string.IsNullOrWhiteSpace(code) ? "STEP_CLEANUP_FAILED" : code, message);
+            var error = RecordError(string.IsNullOrWhiteSpace(code) ? "STEP_CLEANUP_FAILED" : code, message, diagnostic, deferLog: readError);
             Save();
             if (readError) ReadError(error);
             if (_run.terminal) return;
             if (string.IsNullOrEmpty(Current.error?.code))
             { Current.error = error; Current.outcome = AutomationStepStatus.Failed; }
+            TraceCleanupFinished(code == "STEP_CLEANUP_TIMEOUT" ? "TimedOut" : "Failed");
             if (code == "STEP_CLEANUP_TIMEOUT")
             {
                 Current.outcome = AutomationStepStatus.TimedOut;
@@ -466,6 +524,7 @@ namespace CodingRiver.UPilot.Automation
             }
             // This step exhausted its one cleanup attempt. Do not wait on its resources again.
             Current.stage = "Completed"; Current.finishedAtUtcMs = _clock();
+            TraceStepFinished(_run.cursor, Current.finishedAtUtcMs);
             Advance();
         }
         private void CompleteCurrent()
@@ -474,7 +533,10 @@ namespace CodingRiver.UPilot.Automation
             bool snapshotsComplete = Snapshots.CompleteItem(Item.instanceId);
             if (_run.terminal) return;
             if (!snapshotsComplete)
-            { Current.stage = "ResourceCleaning"; Save(); return; }
+            {
+                if (Current.stage != "ResourceCleaning") TraceStep("step.resources_started", "步骤框架资源收尾开始");
+                Current.stage = "ResourceCleaning"; Save(); return;
+            }
             foreach (var snapshot in _run.snapshots.Where(s => s.instanceId == Item.instanceId))
             {
                 if (snapshot.status == "Failed")
@@ -487,7 +549,9 @@ namespace CodingRiver.UPilot.Automation
                     Current.outcome = AutomationStepStatus.SucceededWithWarnings;
                 if (snapshot.unresolved) { _run.recoveryRequired = true; _run.cleanupPending = true; }
             }
+            if (Current.stage == "ResourceCleaning") TraceStep("step.resources_finished", "步骤框架资源收尾结束");
             Current.stage = "Completed"; Current.finishedAtUtcMs = _clock();
+            TraceStepFinished(_run.cursor, Current.finishedAtUtcMs);
             if (_evidence != null)
             {
                 try
@@ -497,7 +561,7 @@ namespace CodingRiver.UPilot.Automation
                     AutomationEvidenceSession.AddInterval(_run.intervals, Item.phase, Item.instanceId, _run.intervalStartSequence, boundary);
                     _run.intervalStartSequence = boundary;
                 }
-                catch (Exception ex) { RecordError("STEP_CAPTURE_BOUNDARY_FAILED", ex.Message); }
+                catch (Exception ex) { RecordError("STEP_CAPTURE_BOUNDARY_FAILED", ex.Message, ex.ToString()); }
             }
             if (_run.terminal) return;
             _report.Append(new AutomationReportEvent
@@ -507,8 +571,10 @@ namespace CodingRiver.UPilot.Automation
         private void Advance()
         {
             if (_run == null || _run.terminal) return;
+            CloseStepGizmos();
+            if (_run.terminal) return;
             _run.cursor++; _step = null; _nextPoll = 0;
-            if (_run.cursor >= _run.steps.Count) _run.stage = "Finalizing";
+            if (_run.cursor >= _run.steps.Count) { _run.stage = "Finalizing"; Trace("run.finalizing", "任务收尾开始"); }
             Save();
         }
         private void FinalizeEvidence()
@@ -519,6 +585,8 @@ namespace CodingRiver.UPilot.Automation
             if (_clock() >= _run.finalizationDeadlineUtcMs)
             { Finish("TimedOut", "STEP_FINALIZATION_TIMEOUT", "Evidence finalization exceeded its 60 second budget."); return; }
             if (!string.IsNullOrEmpty(_run.reportCommitJson)) { CommitReport(); return; }
+            FinalizeGizmos();
+            if (_run.terminal) return;
             AutomationLogPolicyResult policy = null;
             bool captureReady = true;
             if (_run.captureOwned && _run.captureStartIntent && !_run.captureStopVerified)
@@ -541,7 +609,7 @@ namespace CodingRiver.UPilot.Automation
                 catch (Exception ex)
                 {
                     if (_run.terminal) return;
-                    RecordError("STEP_CAPTURE_RELEASE_UNCONFIRMED", ex.Message);
+                    RecordError("STEP_CAPTURE_RELEASE_UNCONFIRMED", ex.Message, ex.ToString());
                     _run.recoveryRequired = true; _run.cleanupPending = true; captureReady = false;
                 }
             }
@@ -577,7 +645,7 @@ namespace CodingRiver.UPilot.Automation
                 catch (Exception ex)
                 {
                     reference.diagnostic = ex.Message;
-                    RecordError("STEP_ARTIFACT_VERIFICATION_FAILED", artifact.projectRelativePath + ": " + ex.Message);
+                    RecordError("STEP_ARTIFACT_VERIFICATION_FAILED", artifact.projectRelativePath + ": " + ex.Message, ex.ToString());
                 }
                 references.Add(reference);
             }
@@ -591,7 +659,7 @@ namespace CodingRiver.UPilot.Automation
             if (_run.terminal) return;
             _run.status = _run.steps.Any(s => s.outcome == AutomationStepStatus.TimedOut) ? "TimedOut"
                 : _run.recoveryRequired ? "Aborted" : !HasError
-                ? (_run.steps.Any(s => s.outcome == AutomationStepStatus.Skipped || s.outcome == AutomationStepStatus.SucceededWithWarnings)
+                ? (HasGizmosWarnings || _run.steps.Any(s => s.outcome == AutomationStepStatus.Skipped || s.outcome == AutomationStepStatus.SucceededWithWarnings)
                     ? "SucceededWithWarnings" : "Succeeded")
                 : _run.error.code == "STEP_CANCELED" ? "Canceled" : _run.error.code == "STEP_TIMEOUT" ? "TimedOut" : "Failed";
             _run.finishedAtUtcMs = _clock();
@@ -608,6 +676,7 @@ namespace CodingRiver.UPilot.Automation
                     errorCode = s.error?.code, detail = s.error?.message
                 }).ToArray(),
                 logSummary = _run.logSummary,
+                gizmos = _run.gizmosState,
                 artifacts = references.ToArray(),
             });
             Save(); // Freeze the exact export content and timestamp before creating any terminal files.
@@ -638,35 +707,57 @@ namespace CodingRiver.UPilot.Automation
                 }
             }
             _report.Complete(summary);
+            Trace("run.report_committed", "最终报告已提交");
+            if (_run.terminal) return; // A reentrant compilation interruption owns the terminal state and report.
             _run.artifacts = _report.GetArtifacts().Concat(_run.registeredArtifacts ?? new()).ToArray();
             _run.stage = "Completed"; _run.terminal = true; _run.recoveryRequired = false; _run.cleanupPending = false;
             _collector?.Dispose(); _collector = null; Save();
+            FinishExecutionLog();
         }
         // Historical evidence is read-only and never schedules execution or cleanup.
         internal AutomationStepRun Historical(string runId, string operationId = null) => _store.Historical(runId, operationId);
 
-        private AutomationStepError RecordError(string code, string message, string diagnostic = "")
+        private AutomationStepError RecordError(string code, string message, string diagnostic = "", bool deferLog = false)
         {
             var error = new AutomationStepError { code = code, message = message, diagnostic = diagnostic };
             if (!HasError) _run.error = error;
             else _run.secondaryErrors.Add(error);
+            if (!deferLog) ReportStepError(error);
             return error;
+        }
+        private void ReportStepError(AutomationStepError error)
+        {
+            if (error.code == "STEP_CANCELED" || error.code == "STEP_STOPPED_IMMEDIATELY") return;
+            string step = _run.cursor >= 0 && _run.cursor < _run.plan.steps.Length ? _run.plan.steps[_run.cursor].instanceId : "";
+            string message = $"{error.code} runId={_run.runId} operationId={_run.operationId} step={step} stage={_run.stage}: " +
+                error.message + (string.IsNullOrEmpty(error.diagnostic) ? "" : "\n" + error.diagnostic);
+            try
+            {
+                if (_failureDiagnostic != null) _failureDiagnostic(message);
+                else Logger.ReportFailure("STEP", message, scope: _run.runId);
+            }
+            catch (Exception ex) { UnityEngine.Debug.LogError("[UPilot] Step 诊断输出失败\n" + ex); }
         }
         // JsonUtility materializes null serializable objects during reload; code is the presence marker.
         private bool HasError => !string.IsNullOrEmpty(_run.error?.code);
-        private void Recovery(string code, string message) => Finish("Aborted", code, message);
+        private void Recovery(string code, string message, string diagnostic = "") => Finish("Aborted", code, message, diagnostic);
 
         // One terminal write. Persistence is evidence, never a lease on the active slot.
-        internal void Finish(string status, string code, string message)
+        internal void Finish(string status, string code, string message, string diagnostic = "")
         {
             if (_run == null || _run.terminal) return;
-            if (!string.IsNullOrEmpty(code)) RecordError(code, message);
+            try { FinalizeGizmos(); }
+            catch (Exception ex) { RecordError("STEP_STORE_FAILED", ex.Message, ex.ToString()); }
+            if (_run.terminal) return;
+            if (!string.IsNullOrEmpty(code)) RecordError(code, message, diagnostic);
+            if (_run.terminal) return;
             _run.status = status; _run.stage = "Completed"; _run.terminal = true;
             _run.finishedAtUtcMs = _clock(); _run.recoveryRequired = false; _run.cleanupPending = false;
             _step = null;
-            try { _collector?.Dispose(); } catch (Exception ex) { RecordError("STEP_DISPOSE_FAILED", ex.Message); }
+            try { _collector?.Dispose(); } catch (Exception ex) { RecordError("STEP_DISPOSE_FAILED", ex.Message, ex.ToString()); }
             _collector = null;
-            try { _store.Save(_run); } catch (Exception ex) { RecordError("STEP_STORE_FAILED", ex.Message); }
+            try { _store.Save(_run); } catch (Exception ex) { RecordError("STEP_STORE_FAILED", ex.Message, ex.ToString()); }
+            FinishExecutionLog();
         }
         private void Save()
         {
@@ -674,7 +765,7 @@ namespace CodingRiver.UPilot.Automation
             catch (Exception ex)
             {
                 _storageFailed = true;
-                Finish("Aborted", "STEP_STORE_FAILED", ex.Message);
+                Finish("Aborted", "STEP_STORE_FAILED", ex.Message, ex.ToString());
                 throw;
             }
         }

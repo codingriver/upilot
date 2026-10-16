@@ -28,12 +28,18 @@
             AutomationStepJsonCodec.ValidationErrorJson(code, message);
         protected static string ResultJson(string status, string errorCode = "") =>
             AutomationStepJsonCodec.ResultJson(status, errorCode);
+        /// <summary>构造并校验 Restore 协议，不改变当前执行结果或错误缓存。</summary>
+        protected static string RestoreResultJson(string status, string errorCode = "") =>
+            AutomationStepJsonCodec.RestoreResultJson(status, errorCode);
         protected static void SaveCheckpoint(string runId, string instanceId, string checkpointJson) =>
             UPilotAutomationStepService.SaveCheckpoint(runId, instanceId, checkpointJson);
         protected static void SaveSharedValue(string runId, string instanceId, string key, string valueJson) =>
             UPilotAutomationStepService.SaveSharedValue(runId, instanceId, key, valueJson);
         protected static void RegisterArtifact(string runId, string instanceId, string kind, string path) =>
             UPilotAutomationStepService.RegisterArtifact(runId, instanceId, kind, path);
+        /// <summary>在当前可写回调中安全发布并持久登记 UTF-8 文本附件。</summary>
+        protected static string WriteTextArtifact(string runId, string instanceId, string kind, string fileName, string content) =>
+            UPilotAutomationStepService.WriteTextArtifact(runId, instanceId, kind, fileName, content);
         protected static string BeginSnapshotJson(string runId, string instanceId, string evidenceKey, string arguments) =>
             UPilotAutomationStepService.BeginSnapshotJson(runId, instanceId, evidenceKey, arguments);
         protected static string PollSnapshotJson(string runId, string instanceId, string evidenceKey) =>

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - coordinates service shutdown across UPM package updates.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -103,14 +103,16 @@ namespace CodingRiver.UPilot
             TryRestoreAfterUpdate();
         }
 
-        public static bool PrepareForPackageUpdate(
+        private const string PackageStopKey = "UPilot.PackageStopObservationId";
+
+        public static Task<bool> PrepareForPackageUpdateAsync(
             string targetVersion,
             Action<string, MessageType> notice = null,
             bool installManagedServerAfterUpdate = false,
             string targetServerVersion = "",
             string preparedServerPath = "")
         {
-            return PrepareForPackageUpdate(
+            return PrepareForPackageUpdateAsync(
                 targetVersion,
                 notice,
                 installManagedServerAfterUpdate,
@@ -120,7 +122,7 @@ namespace CodingRiver.UPilot
                 "");
         }
 
-        internal static bool PrepareForPackageUpdate(
+        internal static async Task<bool> PrepareForPackageUpdateAsync(
             string targetVersion,
             Action<string, MessageType> notice,
             bool installManagedServerAfterUpdate,
@@ -140,7 +142,12 @@ namespace CodingRiver.UPilot
                         SetSessionString(PreparedServerPathKey, preparedServerPath);
                 }
 
-                return true;
+                if (UPilotMcpServerManager.Instance.HasActiveStopObservation)
+                {
+                    var pending = await UPilotMcpServerManager.Instance.StopServerAndObserveExitAsync(UPilotServerStopOrigin.PackageUpdate);
+                    return pending.StopConfirmed && pending.PortsAvailable && UPilotMcpServerManager.Instance.IsStopResultCurrent(pending);
+                }
+                return PackageStopAllowsRecovery(out _);
             }
 
             var manager = UPilotMcpServerManager.Instance;
@@ -151,6 +158,7 @@ namespace CodingRiver.UPilot
             var shouldRestart = UPilotSetupState.IsCompleted;
 
             SetSessionBool(UpdateInProgressKey, true);
+            EraseSessionString(PackageStopKey);
             SetSessionBool(RestartPendingKey, shouldRestart);
             SetSessionBool(UpdateCompletedKey, false);
             SetSessionString(TargetVersionKey, targetVersion ?? "");
@@ -170,7 +178,13 @@ namespace CodingRiver.UPilot
 
             notice?.Invoke("正在停止 MCP 服务以更新 UPilot 包…", MessageType.Info);
             UPilotBridge.Instance.Stop();
-            if (manager.StopServerAndWaitForExit(UPilotServerStopOrigin.PackageUpdate))
+            var lifetime = UPilotServiceLifetime.Id;
+            var operationId = UPilotUpdateService.Instance.GetOperationStatus().OperationId;
+            var stopTask = manager.StopServerAndObserveExitAsync(UPilotServerStopOrigin.PackageUpdate);
+            SetSessionString(PackageStopKey, manager.StopObservation.id);
+            var stop = await stopTask;
+            if (lifetime != UPilotServiceLifetime.Id || operationId != UPilotUpdateService.Instance.GetOperationStatus().OperationId) return false;
+            if (stop.StopConfirmed && stop.PortsAvailable && manager.IsStopResultCurrent(stop))
                 return true;
 
             ClearUpdateState();
@@ -179,11 +193,6 @@ namespace CodingRiver.UPilot
                 occupancyRetryKind,
                 occupancyRetryIdentifier,
                 message);
-            if (!recoveryStarted)
-            {
-                manager.StartServer();
-                UPilotBridge.Instance.EnsureStarted();
-            }
             UPilotUpdateService.SetOperationFailed(message);
             notice?.Invoke(
                 recoveryStarted ? message + "。请在更新中心结束全部占用进程并重试。" : message,
@@ -354,8 +363,7 @@ namespace CodingRiver.UPilot
                         SetSessionString(DeploymentSupersededOperationKey, activeRestart.operationId);
                     // No business-idle gate. Keep intent across removal and the next installation.
                     UPilotBridge.Instance.Stop();
-                    if (!UPilotMcpServerManager.Instance.StopServerAndWaitForExit(UPilotServerStopOrigin.PackageRegistration))
-                        Debug.LogError("[UPilot] 包来源切换：旧 Server 未在期限内退出；重装后保留错误并进入统一修复。");
+                    _ = ObserveExternalStopAsync();
                     return;
                 }
                 if (currentPackage == null || targetPackage == null)
@@ -377,28 +385,41 @@ namespace CodingRiver.UPilot
                 }
 
                 var installManagedServer = ShouldInstallManagedServerAfterPackageUpdate();
-                if (!PrepareForPackageUpdate(
-                        targetVersion,
-                        null,
-                        installManagedServer,
-                        "",
-                        "",
-                        UPilotOccupancyRetryKind.ExternalPackageManager,
-                        targetPackage.packageId ?? ""))
-                {
-                    var message =
-                        "Package Manager 正在更新 UPilot，但 MCP 服务无法在包注册前停止。请等待 Package Manager 完成后打开 UPilot 更新中心修复状态。";
-                    if (!string.IsNullOrWhiteSpace(externalConflictMessage))
-                        message = externalConflictMessage + "\n" + message;
-                    Debug.LogError("[UPilot] " + message);
-                    UPilotMainWindow.OpenWithNotice(message, MessageType.Error);
-                }
+                _ = ObserveExternalPackagePreparationAsync(targetVersion, installManagedServer, targetPackage.packageId ?? "");
             }
             catch (Exception ex)
             {
                 _registrationInProgress = false;
                 ReportLifecycleError("UPilot 包注册前处理失败", ex);
             }
+        }
+
+        private static async Task ObserveExternalStopAsync()
+        {
+            try
+            {
+                var manager = UPilotMcpServerManager.Instance;
+                var task = manager.StopServerAndObserveExitAsync(UPilotServerStopOrigin.PackageRegistration);
+                SetSessionString(PackageStopKey, manager.StopObservation.id);
+                await task; // External registration cannot be paused; the recovery gate reads this result.
+            }
+            catch (Exception ex) { ReportLifecycleError("外部包注册停止观察失败", ex); }
+        }
+
+        private static async Task ObserveExternalPackagePreparationAsync(string version, bool managed, string identifier)
+        {
+            try { await PrepareForPackageUpdateAsync(version, null, managed, "", "", UPilotOccupancyRetryKind.ExternalPackageManager, identifier); }
+            catch (Exception ex) { ReportLifecycleError("外部包更新停止观察失败", ex); }
+        }
+
+        private static bool PackageStopAllowsRecovery(out bool pending)
+        {
+            var id = GetSessionString(PackageStopKey, "");
+            var manager = UPilotMcpServerManager.Instance;
+            manager.EnsureInitialServiceRecovery();
+            var record = manager.StopObservation;
+            pending = id.Length > 0 && record?.id == id && record.Active;
+            return id.Length == 0 || record?.id == id && record.status == "succeeded";
         }
 
         private static void OnRegisteredPackages(PackageRegistrationEventArgs args)
@@ -460,6 +481,11 @@ namespace CodingRiver.UPilot
             }
             // Keep the same bounded observer during awaits so stop and deadline do not
             // depend on a potentially late network/repair continuation.
+            if (!PackageStopAllowsRecovery(out var stopPending))
+            {
+                if (!stopPending) { ClearDeferredRepair(); UPilotUpdateService.SetOperationFailed("旧服务停止未确认，包修复已结束，请检查原停止记录。"); }
+                return;
+            }
             if (_deferredRepairRunning || _registrationInProgress || EditorApplication.isCompiling || EditorApplication.isUpdating ||
                 EditorApplication.isPlayingOrWillChangePlaymode || UPilotQuickStart.IsRepairing ||
                 UPilotServiceMaintenance.IsActive) return;
@@ -646,6 +672,11 @@ namespace CodingRiver.UPilot
                 UPilotUpdateService.SetOperationFailed("Package update recovery timed out while waiting for the Editor. Inspect the current package and service state before retrying.");
                 return;
             }
+            if (!PackageStopAllowsRecovery(out var stopPending))
+            {
+                if (!stopPending) { ClearUpdateState(); UPilotUpdateService.SetOperationFailed("旧服务停止未确认，包恢复已结束，请检查原停止记录。"); }
+                return;
+            }
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
                 return;
 
@@ -678,6 +709,12 @@ namespace CodingRiver.UPilot
                 bool expired = HasRecoveryWaitExpired(_restoreWait);
                 ClearUpdateState();
                 if (expired) UPilotUpdateService.SetOperationFailed("Package update recovery timed out while waiting for the Editor.");
+                return;
+            }
+            if (!PackageStopAllowsRecovery(out var stopPending))
+            {
+                if (stopPending) ScheduleRestore();
+                else { ClearUpdateState(); UPilotUpdateService.SetOperationFailed("旧服务停止未确认，包恢复已结束，请检查原停止记录。"); }
                 return;
             }
             if (EditorApplication.isCompiling || EditorApplication.isUpdating)
@@ -803,6 +840,7 @@ namespace CodingRiver.UPilot
 
         private static void ClearUpdateState(bool preserveRecoveryWait = false)
         {
+            EraseSessionString(PackageStopKey);
             EditorApplication.update -= WaitForEditorReady;
             _restartScheduled = false;
             if (!preserveRecoveryWait)

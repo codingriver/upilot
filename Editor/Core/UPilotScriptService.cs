@@ -55,23 +55,13 @@ namespace CodingRiver.UPilot
 
         private static bool ValidateScriptPath(string path, out string error)
         {
-            error = null;
-            if (string.IsNullOrEmpty(path))
+            try
             {
-                error = "scriptPath is required.";
-                return false;
+                UPilotPlayModeCompilePolicy.ValidateScriptPath(Path.GetDirectoryName(Application.dataPath), path);
+                error = null;
+                return true;
             }
-            if (!path.StartsWith("Assets/") && !path.StartsWith("Assets\\"))
-            {
-                error = "scriptPath must start with 'Assets/'.";
-                return false;
-            }
-            if (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-            {
-                error = "scriptPath must end with '.cs'.";
-                return false;
-            }
-            return true;
+            catch (Exception ex) { error = ex.Message; return false; }
         }
 
         private static string ToAbsolutePath(string assetPath)
@@ -113,166 +103,158 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCRIPT_READ_FAILED", ex.Message, token, "script.read");
+                await _bridge.SendErrorAsync(id, "SCRIPT_READ_FAILED", ex.Message, token, "script.read", errorDetail: null, exception: ex);
             }
         }
 
-        // ── script.create ───────────────────────────────────────────────────────
-
-        private async Task HandleCreateAsync(string id, string json, CancellationToken token)
+        private Task HandleCreateAsync(string id, string json, CancellationToken token)
         {
-            var msg = JsonUtility.FromJson<ScriptCreateMessage>(json);
-            var p   = msg?.payload ?? new ScriptCreatePayload();
-
-            if (!ValidateScriptPath(p.scriptPath, out string error))
-            {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", error, token, "script.create");
-                return;
-            }
-
-            try
-            {
-                string absPath = ToAbsolutePath(p.scriptPath);
-                if (File.Exists(absPath))
-                {
-                    await _bridge.SendErrorAsync(id, "FILE_ALREADY_EXISTS", $"Script already exists: {p.scriptPath}", token, "script.create");
-                    return;
-                }
-
-                // Ensure directory exists
-                string dir = Path.GetDirectoryName(absPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                string content = string.IsNullOrEmpty(p.content)
-                    ? "// Auto-generated script placeholder\n"
-                    : p.content;
-
-                File.WriteAllText(absPath, content, System.Text.Encoding.UTF8);
-
-                // Import into AssetDatabase on main thread
-                var tcs = new TaskCompletionSource<bool>();
-                _bridge.EnqueueTracked(id, () =>
-                {
-                    try
-                    {
-                        AssetDatabase.ImportAsset(p.scriptPath, ImportAssetOptions.ForceUpdate);
-                        tcs.SetResult(true);
-                    }
-                    catch (Exception ex) { tcs.SetException(ex); }
-                });
-                await tcs.Task;
-
-                var payload = new ScriptContentPayload
-                {
-                    scriptPath = p.scriptPath,
-                    content    = content,
-                };
-                await _bridge.SendResultAsync(id, "script.create", payload, token);
-            }
-            catch (Exception ex)
-            {
-                await _bridge.SendErrorAsync(id, "SCRIPT_CREATE_FAILED", ex.Message, token, "script.create");
-            }
+            var p = JsonUtility.FromJson<ScriptCreateMessage>(json)?.payload ?? new ScriptCreatePayload();
+            return HandleMutationAsync(id, "script.create", p.scriptPath,
+                string.IsNullOrEmpty(p.content) ? "// Auto-generated script placeholder\n" : p.content, token);
         }
 
-        // ── script.update ───────────────────────────────────────────────────────
-
-        private async Task HandleUpdateAsync(string id, string json, CancellationToken token)
+        private Task HandleUpdateAsync(string id, string json, CancellationToken token)
         {
-            var msg = JsonUtility.FromJson<ScriptUpdateMessage>(json);
-            var p   = msg?.payload ?? new ScriptUpdatePayload();
-
-            if (!ValidateScriptPath(p.scriptPath, out string error))
-            {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", error, token, "script.update");
-                return;
-            }
-
-            try
-            {
-                string absPath = ToAbsolutePath(p.scriptPath);
-                if (!File.Exists(absPath))
-                {
-                    await _bridge.SendErrorAsync(id, "FILE_NOT_FOUND", $"Script not found: {p.scriptPath}", token, "script.update");
-                    return;
-                }
-
-                File.WriteAllText(absPath, p.content ?? "", System.Text.Encoding.UTF8);
-
-                // Re-import on main thread
-                var tcs = new TaskCompletionSource<bool>();
-                _bridge.EnqueueTracked(id, () =>
-                {
-                    try
-                    {
-                        AssetDatabase.ImportAsset(p.scriptPath, ImportAssetOptions.ForceUpdate);
-                        tcs.SetResult(true);
-                    }
-                    catch (Exception ex) { tcs.SetException(ex); }
-                });
-                await tcs.Task;
-
-                var payload = new ScriptContentPayload
-                {
-                    scriptPath = p.scriptPath,
-                    content    = p.content ?? "",
-                };
-                await _bridge.SendResultAsync(id, "script.update", payload, token);
-            }
-            catch (Exception ex)
-            {
-                await _bridge.SendErrorAsync(id, "SCRIPT_UPDATE_FAILED", ex.Message, token, "script.update");
-            }
+            var p = JsonUtility.FromJson<ScriptUpdateMessage>(json)?.payload ?? new ScriptUpdatePayload();
+            return HandleMutationAsync(id, "script.update", p.scriptPath, p.content ?? "", token);
         }
 
-        // ── script.delete ───────────────────────────────────────────────────────
-
-        private async Task HandleDeleteAsync(string id, string json, CancellationToken token)
+        private Task HandleDeleteAsync(string id, string json, CancellationToken token)
         {
-            var msg = JsonUtility.FromJson<ScriptDeleteMessage>(json);
-            var p   = msg?.payload ?? new ScriptDeletePayload();
+            var p = JsonUtility.FromJson<ScriptDeleteMessage>(json)?.payload ?? new ScriptDeletePayload();
+            return HandleMutationAsync(id, "script.delete", p.scriptPath, null, token);
+        }
 
-            if (!ValidateScriptPath(p.scriptPath, out string error))
-            {
-                await _bridge.SendErrorAsync(id, "INVALID_PARAMS", error, token, "script.delete");
-                return;
-            }
-
-            var tcs = new TaskCompletionSource<bool>();
+        private async Task HandleMutationAsync(string id, string command, string path, string content, CancellationToken token)
+        {
+            var tcs = new TaskCompletionSource<ScriptMutationPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
             _bridge.EnqueueTracked(id, () =>
             {
                 try
                 {
-                    bool ok = AssetDatabase.DeleteAsset(p.scriptPath);
-                    if (ok)
-                    {
-                        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                        RefreshGeneratedProjectFiles();
-                    }
-                    tcs.SetResult(ok);
+                    token.ThrowIfCancellationRequested();
+                    tcs.TrySetResult(MutateScript(Path.GetDirectoryName(Application.dataPath), path, content, command));
                 }
-                catch (Exception ex) { tcs.SetException(ex); }
+                catch (Exception ex) { tcs.TrySetException(ex); }
             });
-
-            try
+            try { await _bridge.SendResultAsync(id, command, await tcs.Task, token); }
+            catch (UPilotCompilePolicyException ex)
             {
-                bool deleted = await tcs.Task;
-                if (!deleted)
-                {
-                    await _bridge.SendErrorAsync(id, "SCRIPT_DELETE_FAILED", $"Failed to delete: {p.scriptPath}", token, "script.delete");
-                    return;
-                }
-                await _bridge.SendResultAsync(id, "script.delete", new GenericOkPayload
-                {
-                    ok = true,
-                    state = "deleted_project_files_refreshed",
-                }, token);
+                await _bridge.SendErrorAsync(id, ex.Code, ex.Message, token, command, ex.Detail, exception: ex);
+            }
+            catch (ScriptMutationException ex)
+            {
+                await _bridge.SendErrorAsync(id, "SCRIPT_MUTATION_FAILED", ex.Message, token, command,
+                    new ErrorDetailPayload { changed = ex.Result.saved, sideEffectsMayHaveOccurred = true,
+                        importDeferred = ex.Result.importDeferred, changedPaths = ex.Result.changedPaths,
+                        deletedPaths = ex.Result.deletedPaths, stage = ex.Stage,
+                        exceptionType = ex.InnerException?.GetType().FullName, exceptionMessage = ex.InnerException?.Message,
+                        stackTrace = ex.InnerException?.StackTrace, nextAction = "Inspect actual disk state; do not retry automatically." }, exception: ex);
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SCRIPT_DELETE_FAILED", ex.Message, token, "script.delete");
+                await _bridge.SendErrorAsync(id, "SCRIPT_MUTATION_FAILED", ex.Message, token, command, errorDetail: null, exception: ex);
             }
+        }
+
+        // Production calls this only within the queued main-thread action. Injected side effects keep tests isolated.
+        internal static ScriptMutationPayload MutateScript(string projectRoot, string path, string content, string command,
+            Func<bool> deferImport = null, Action<string> import = null, Func<string, bool> deleteAsset = null,
+            Func<bool> syncProjectFiles = null, Action<string> deleteFile = null)
+        {
+            string absolute = UPilotPlayModeCompilePolicy.ValidateScriptPath(projectRoot, path);
+            path = path.Replace('\\', '/');
+            bool deferred = (deferImport ?? UPilotPlayModeCompilePolicy.RequireScriptWrite)();
+            bool deleting = command == "script.delete";
+            if (command == "script.create" && File.Exists(absolute)) throw new IOException("Script already exists: " + path);
+            if (command != "script.create" && !File.Exists(absolute)) throw new FileNotFoundException("Script not found", path);
+            var deletedPaths = new System.Collections.Generic.List<string>();
+            bool metaExisted = deleting && File.Exists(absolute + ".meta");
+            var result = new ScriptMutationPayload { scriptPath = path, content = content, importDeferred = deferred };
+            string stage = "disk_write";
+            try
+            {
+                if (deleting)
+                {
+                    if (deferred)
+                    {
+                        (deleteFile ?? File.Delete)(absolute);
+                        if (File.Exists(absolute)) throw new IOException("Script deletion could not be verified");
+                        deletedPaths.Add(path); result.saved = true;
+                        if (File.Exists(absolute + ".meta"))
+                        {
+                            (deleteFile ?? File.Delete)(absolute + ".meta");
+                            if (File.Exists(absolute + ".meta")) throw new IOException("Meta deletion could not be verified");
+                            deletedPaths.Add(path + ".meta");
+                        }
+                    }
+                    else
+                    {
+                        stage = "asset_delete";
+                        bool hadMeta = File.Exists(absolute + ".meta");
+                        bool reported = (deleteAsset ?? AssetDatabase.DeleteAsset)(path);
+                        if (!File.Exists(absolute)) deletedPaths.Add(path);
+                        if (hadMeta && !File.Exists(absolute + ".meta")) deletedPaths.Add(path + ".meta");
+                        result.saved = deletedPaths.Count > 0;
+                        if (!reported || File.Exists(absolute) || File.Exists(absolute + ".meta"))
+                            throw new IOException("AssetDatabase deletion postconditions failed");
+                        stage = "project_file_sync";
+                        result.projectFilesSynchronized = (syncProjectFiles ?? RefreshGeneratedProjectFiles)();
+                    }
+                    result.deleted = !File.Exists(absolute);
+                    result.deletedPaths = deletedPaths.ToArray();
+                    result.changedPaths = result.deletedPaths;
+                    result.state = deferred ? "deleted_import_deferred" : "deleted";
+                }
+                else
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(absolute));
+                    // Once an OS write is attempted, a failure can still leave partial disk effects.
+                    File.WriteAllText(absolute, content ?? "", System.Text.Encoding.UTF8);
+                    result.saved = true; result.changedPaths = new[] { path };
+                    if (!deferred)
+                    {
+                        stage = "asset_import";
+                        (import ?? (asset => AssetDatabase.ImportAsset(asset, ImportAssetOptions.ForceUpdate)))(path);
+                        result.imported = true;
+                    }
+                    result.state = deferred ? "saved_import_deferred" : "saved_and_imported";
+                }
+                result.ok = true;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                if (deleting)
+                {
+                    // An IO/callback may throw after deleting a file. Report observed state, not just completed calls.
+                    deletedPaths.Clear();
+                    if (!File.Exists(absolute)) deletedPaths.Add(path);
+                    if (metaExisted && !File.Exists(absolute + ".meta")) deletedPaths.Add(path + ".meta");
+                }
+                result.deleted = deleting && !File.Exists(absolute);
+                result.deletedPaths = deletedPaths.ToArray();
+                if (deleting) { result.changedPaths = result.deletedPaths; result.saved = deletedPaths.Count > 0; }
+                throw new ScriptMutationException(stage, result, ex);
+            }
+        }
+
+        [Serializable]
+        internal sealed class ScriptMutationPayload
+        {
+            public bool ok, saved, imported, importDeferred, deleted, projectFilesSynchronized;
+            public string scriptPath, content, state;
+            public string[] changedPaths = Array.Empty<string>();
+            public string[] deletedPaths = Array.Empty<string>();
+        }
+
+        internal sealed class ScriptMutationException : IOException
+        {
+            internal readonly ScriptMutationPayload Result;
+            internal readonly string Stage;
+            internal ScriptMutationException(string stage, ScriptMutationPayload result, Exception inner)
+                : base("Script mutation failed at " + stage + ": " + inner.Message, inner) { Result = result; Stage = stage; }
         }
 
         internal static bool RefreshGeneratedProjectFiles()

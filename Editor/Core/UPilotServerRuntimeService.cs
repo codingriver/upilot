@@ -504,18 +504,27 @@ namespace CodingRiver.UPilot
             return FetchReleaseManifestAsync(ResolveManifestUrl());
         }
 
-        public async Task<UPilotReleaseManifest> FetchReleaseManifestAsync(string url)
+        public Task<UPilotReleaseManifest> FetchReleaseManifestAsync(string url) => FetchReleaseManifestAsync(url, CancellationToken.None);
+
+        internal async Task<UPilotReleaseManifest> FetchReleaseManifestAsync(string url, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var resolvedUrl = string.IsNullOrWhiteSpace(url) ? ResolveManifestUrl() : url;
-            try
+            async Task<UPilotReleaseManifest> ReadManifest(string requestUrl)
             {
-                var json = await Http.GetStringAsync(resolvedUrl);
+                using var response = await Http.GetAsync(requestUrl, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                var json = await response.Content.ReadAsStringAsync();
+                cancellationToken.ThrowIfCancellationRequested();
                 return ParseManifest(json);
             }
-            catch when (CanFallbackToLegacyManifest(resolvedUrl))
+            try
             {
-                var json = await Http.GetStringAsync(ToLegacyManifestUrl(resolvedUrl));
-                return ParseManifest(json);
+                return await ReadManifest(resolvedUrl);
+            }
+            catch when (!cancellationToken.IsCancellationRequested && CanFallbackToLegacyManifest(resolvedUrl))
+            {
+                return await ReadManifest(ToLegacyManifestUrl(resolvedUrl));
             }
         }
 

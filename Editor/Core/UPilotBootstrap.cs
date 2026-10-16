@@ -106,6 +106,13 @@ namespace CodingRiver.UPilot
                     return;
                 }
 
+                var manager = UPilotMcpServerManager.Instance;
+                manager.EnsureInitialServiceRecovery();
+                if (manager.StopBlocksAutomaticRecovery)
+                {
+                    EditorApplication.update -= TryStartBridge;
+                    return;
+                }
                 UnityEngine.Debug.Log("[UPilotBootstrap] TryStartBridge -> EnsureStarted");
                 EditorApplication.update -= TryStartBridge;
                 UPilotBridge.Instance.EnsureStarted();
@@ -225,7 +232,7 @@ namespace CodingRiver.UPilot
                 UnityEngine.Debug.Log($"[UPilotBootstrap] TryStartMcpServer attempt {attemptNumber}/{ServerStartMaxAttempts} -> StartServer");
                 mgr.ValidateAndAutoFixPath();
                 UPilotStartupDiagnostics.BeginServerObservation(mgr, restartProbeWindow: attemptNumber > 1);
-                mgr.StartServer();
+                mgr.StartServerAutomatically();
             }
             catch (Exception ex)
             {

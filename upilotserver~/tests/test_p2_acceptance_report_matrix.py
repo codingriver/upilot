@@ -115,6 +115,7 @@ def test_success_archives_bounded_old_errors_and_atomically_receipts_real_file(t
     assert not {"failureCode", "failureMessage", "nextAction"}.intersection(result.data)
     artifact = result.data["artifact"]
     path = Path(artifact["path"])
+    assert path.parent.parent == Path(report["expectedProject"]) / "Logs" / "UPilot" / "Reports" / "Acceptance"
     raw = path.read_bytes()
     assert artifact["bytes"] == len(raw)
     assert artifact["sha256"] == hashlib.sha256(raw).hexdigest()
@@ -130,7 +131,7 @@ def test_success_archives_bounded_old_errors_and_atomically_receipts_real_file(t
 def test_artifact_failure_preserves_first_error_previous_report_and_unknown_files(
         tmp_path, monkeypatch, failure_stage, business_failed):
     report = _report(tmp_path, write_artifact=True)
-    folder = Path(report["expectedProject"]) / "Log" / "UPilotAcceptance" / "100_req-own"
+    folder = Path(report["expectedProject"]) / "Logs" / "UPilot" / "Reports" / "Acceptance" / "100_req-own"
     folder.mkdir(parents=True)
     artifact = folder / "summary.json"
     artifact.write_bytes(b"previous complete report")

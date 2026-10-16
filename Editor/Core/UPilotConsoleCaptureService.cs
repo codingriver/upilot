@@ -331,7 +331,7 @@ namespace CodingRiver.UPilot
             uint size);
 #endif
 
-        private const string CaptureRootRelative = "Log/UPilotConsole";
+        private const string CaptureRootRelative = UPilotOutputPaths.ConsoleCaptures;
         private const string ActiveDirectorySessionKey = "UPilot.ConsoleCapture.ActiveDirectory";
         private const string CleanupTokenSessionKey = "UPilot.ConsoleCapture.CleanupToken";
         private const string CleanupTargetsSessionKey = "UPilot.ConsoleCapture.CleanupTargets";
@@ -595,7 +595,7 @@ namespace CodingRiver.UPilot
                     "INTERNAL_ERROR",
                     $"Console Capture 操作失败：{ex.Message}",
                     token,
-                    "console.capture.read");
+                    "console.capture.read", errorDetail: null, exception: ex);
             }
         }
 
@@ -653,7 +653,7 @@ namespace CodingRiver.UPilot
         private async Task SendResultOrError<T>(string id, string command, Task<T> task, CancellationToken token)
         {
             try { await _bridge.SendResultAsync(id, command, await task, token); }
-            catch (Exception ex) { await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"Console Capture 操作失败：{ex.Message}", token, command); }
+            catch (Exception ex) { await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"Console Capture 操作失败：{ex.Message}", token, command, errorDetail: null, exception: ex); }
         }
 
         internal static ConsoleCaptureResult StartCapture(ConsoleCaptureStartPayload payload)

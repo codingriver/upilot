@@ -69,7 +69,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"键盘事件执行失败：{ex.Message}", token, "keyboard.event");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"键盘事件执行失败：{ex.Message}", token, "keyboard.event", errorDetail: null, exception: ex);
             }
         }
 

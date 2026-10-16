@@ -1,9 +1,16 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -41,7 +48,22 @@ namespace CodingRiver.UPilot.Tests
         [TearDown]
         public void TearDown()
         {
+            Logger.CloseDiagnostics("maintenance-journal|" + _path);
+            if (_journal.Current != null) Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(_journal.Current));
             if (Directory.Exists(_root)) Directory.Delete(_root, true);
+        }
+
+        private void ExpectJournalFailure(string operation) =>
+            LogAssert.Expect(LogType.Error, new Regex("维护记录" + operation + "失败 path=" + Regex.Escape(_path)));
+
+        private static void ExpectTimeout(ServiceMaintenanceRecord record) =>
+            LogAssert.Expect(LogType.Error, new Regex("维护失败 maintenanceId=" + Regex.Escape(record.maintenanceId) + "[\\s\\S]*SERVICE_RESTART_TIMEOUT"));
+
+        private static string ReadGeneralLog()
+        {
+            using var stream = new FileStream(Logger.LogFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
         }
 
         // These synchronous tests swap only the in-memory journal, and restore every field in finally.
@@ -107,6 +129,7 @@ namespace CodingRiver.UPilot.Tests
         {
             Directory.CreateDirectory(_root);
             File.WriteAllText(_path, "{");
+            ExpectJournalFailure("read");
             _journal = new ServiceMaintenanceJournal(_path, () => _now);
             WithIsolatedRecovery((type, flags) =>
             {
@@ -183,6 +206,7 @@ namespace CodingRiver.UPilot.Tests
             var original = File.ReadAllBytes(_path);
             using (var held = new FileStream(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
+                ExpectJournalFailure("read");
                 _journal = new ServiceMaintenanceJournal(_path, () => _now);
                 Assert.That(_journal.LoadError, Is.Not.Empty, "The isolated file lock must cause a real read failure.");
                 WithIsolatedRecovery((type, flags) =>
@@ -325,6 +349,7 @@ namespace CodingRiver.UPilot.Tests
             record = _journal.Current;
             Assert.That(record.deadlineAtUtcMs, Is.EqualTo(1120000));
             _now = record.deadlineAtUtcMs;
+            ExpectTimeout(record);
             Assert.That(_journal.Expire(), Is.True);
             Assert.That(record.status, Is.EqualTo("timed_out"));
             Assert.That(record.failurePhase, Is.EqualTo("verifying"));
@@ -348,17 +373,21 @@ namespace CodingRiver.UPilot.Tests
         {
             Directory.CreateDirectory(_root);
             File.WriteAllText(_path, "{");
+            ExpectJournalFailure("read");
             var corrupt = new ServiceMaintenanceJournal(_path, () => _now);
             Assert.That(Assert.Throws<ServiceMaintenanceException>(() =>
                 corrupt.Accept(Request(), 120, 456, null)).Code, Is.EqualTo("SERVICE_RESTART_RECOVERY_REQUIRED"));
             var blockedPath = Path.Combine(_path, "cannot-be-created.json");
             var blocked = new ServiceMaintenanceJournal(blockedPath, () => _now);
+            LogAssert.Expect(LogType.Error, new Regex("维护记录write失败 path=" + Regex.Escape(blockedPath)));
             var accepted = blocked.Accept(Request(), 120, 456, null);
             Assert.That(blocked.Current, Is.SameAs(accepted));
             Assert.That(accepted.queueResetError, Is.Not.Empty);
             var calls = 0;
             Assert.That(blocked.Dispatch(() => { }, _ => calls++), Is.True);
             Assert.That(calls, Is.EqualTo(1));
+            LogAssert.Expect(LogType.Error, new Regex("维护记录write失败[\\s\\S]*合并重复日志 count=1"));
+            Logger.CloseDiagnostics("maintenance-journal|" + blockedPath);
         }
 
         [Test]
@@ -366,6 +395,7 @@ namespace CodingRiver.UPilot.Tests
         {
             Directory.CreateDirectory(_root);
             File.WriteAllText(_path, "{");
+            ExpectJournalFailure("read");
             var journal = new ServiceMaintenanceJournal(_path, () => _now);
             var record = journal.Accept(Request(), 120, 456, null, humanConfirmed: true);
             Assert.That(record.humanConfirmed, Is.True);
@@ -387,6 +417,7 @@ namespace CodingRiver.UPilot.Tests
             _journal.Accept(request, 120, 456, null);
             Assert.That(_journal.Dispatch(() => { }, _ => starts++), Is.False);
             _now = record.deadlineAtUtcMs;
+            ExpectTimeout(record);
             _journal.Expire();
             Assert.That(_journal.Dispatch(() => { }, _ => starts++), Is.False);
             Assert.That(starts, Is.EqualTo(1));
@@ -404,6 +435,7 @@ namespace CodingRiver.UPilot.Tests
                 _ => starts++));
             Assert.That(starts, Is.Zero);
             Assert.That(record.stopAttempted, Is.False);
+            ExpectTimeout(record);
             Assert.That(_journal.Dispatch(() => _now = record.deadlineAtUtcMs, _ => starts++), Is.False);
             Assert.That(starts, Is.Zero);
             Assert.That(record.status, Is.EqualTo("timed_out"));
@@ -417,6 +449,7 @@ namespace CodingRiver.UPilot.Tests
             File.Delete(_path);
             Directory.CreateDirectory(_path);
             var starts = 0;
+            ExpectJournalFailure("write");
             Assert.That(_journal.Dispatch(() => { }, _ => starts++), Is.True);
             Assert.That(starts, Is.EqualTo(1));
             Assert.That(record.queueResetError, Is.Not.Empty);
@@ -439,6 +472,7 @@ namespace CodingRiver.UPilot.Tests
             r = _journal.Current;
             Assert.That(r.deadlineAtUtcMs, Is.EqualTo(accepted + 30000));
             _now = accepted + 30000;
+            ExpectTimeout(r);
             Assert.That(_journal.Expire(), Is.True);
             Assert.That(_journal.Expire(), Is.False, "Finalization is once-only.");
             Assert.That(r.error, Does.Contain("health_query"));
@@ -459,8 +493,100 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(_journal.Current.deadlineAtUtcMs, Is.EqualTo(r.deadlineAtUtcMs));
             Assert.That(File.ReadAllBytes(_path), Is.EqualTo(bytes));
             _now = r.deadlineAtUtcMs;
+            ExpectTimeout(_journal.Current);
             Assert.That(_journal.Expire(), Is.True);
             Assert.That(_journal.Current.error, Does.Not.Contain("10 分钟"));
+        }
+
+        [Test]
+        public async Task CancelledMaintenanceRequestStaysCancelledWithoutLoggingOrDispatch()
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            Task pending = null;
+            WithIsolatedRecovery((type, flags) =>
+            {
+                // The test owns only an isolated control queue; no real Bridge constructor or transport runs.
+                var queue = new ConcurrentQueue<Action>();
+                var bridge = (UPilotBridge)FormatterServices.GetUninitializedObject(typeof(UPilotBridge));
+                typeof(UPilotBridge).GetField("_controlQueue", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(bridge, queue);
+                var context = SynchronizationContext.Current;
+                try
+                {
+                    SynchronizationContext.SetSynchronizationContext(null);
+                    pending = (Task)type.GetMethod("Handle", flags).Invoke(null,
+                        new object[] { bridge, "isolated-cancelled-maintenance", "{}", cancellation.Token });
+                }
+                finally { SynchronizationContext.SetSynchronizationContext(context); }
+                Assert.That(queue.TryDequeue(out var callback), Is.True);
+                callback();
+            });
+            try
+            {
+                await pending;
+                Assert.Fail("The caller must retain normal cancellation.");
+            }
+            catch (OperationCanceledException ex)
+            {
+                Assert.That(ex.CancellationToken, Is.EqualTo(cancellation.Token));
+            }
+            Assert.That(_journal.Current, Is.Null);
+            Assert.That(File.Exists(_path), Is.False);
+            LogAssert.NoUnexpectedReceived();
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void JournalWriteFailuresAreVisibleAndFlushOnRecoveryWithoutChangingMaintenance(bool console)
+        {
+            bool previousConsole = Logger.LogToUnityConsole;
+            var previousLevel = Logger.MinLevel;
+            try
+            {
+                Logger.LogToUnityConsole = console;
+                Logger.MinLevel = Logger.LogLevel.Info;
+                File.WriteAllText(_root, "parent directory is blocked by a file");
+                var request = Request();
+                ExpectJournalFailure("write");
+                var record = _journal.Accept(request, 120, 456, null);
+                _journal.Save();
+                LogAssert.NoUnexpectedReceived();
+                File.Delete(_root);
+                LogAssert.Expect(LogType.Error, new Regex("维护记录write失败[\\s\\S]*合并重复日志 count=1"));
+                _journal.Save();
+                var persisted = ReadGeneralLog();
+                Assert.That(persisted, Does.Contain(request.maintenanceId).And.Contain(_path));
+                Assert.That(persisted, Does.Contain("ServiceMaintenanceException").And.Contain("ServiceMaintenanceJournal.Write"));
+                Assert.That(record.status, Is.EqualTo("accepted"));
+                Assert.That(record.stopAttempted || record.startAttempted, Is.False);
+                _now = record.deadlineAtUtcMs;
+                ExpectTimeout(record);
+                Assert.That(_journal.Expire(), Is.True);
+                Assert.That(ReadGeneralLog(), Does.Contain("SERVICE_RESTART_TIMEOUT"));
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally { Logger.LogToUnityConsole = previousConsole; Logger.MinLevel = previousLevel; }
+        }
+
+        [Test]
+        public void MaintenanceFailureKeepsExceptionAndIdentityWithoutDispatchingServices()
+        {
+            _now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var record = _journal.Accept(Request(), 120, System.Diagnostics.Process.GetCurrentProcess().Id, null);
+            Exception failure;
+            try { throw new InvalidOperationException("isolated-maintenance-failure"); }
+            catch (Exception ex) { failure = ex; }
+            WithIsolatedRecovery((type, flags) =>
+            {
+                LogAssert.Expect(LogType.Error, new Regex("维护失败 maintenanceId=" + Regex.Escape(record.maintenanceId) + "[\\s\\S]*isolated-maintenance-failure"));
+                type.GetMethod("Fail", flags).Invoke(null, new object[] { "FIXTURE_FAILURE", failure.Message, failure, false });
+                type.GetMethod("Fail", flags).Invoke(null, new object[] { "FIXTURE_FAILURE", failure.Message, failure, false });
+                Assert.That(record.status, Is.EqualTo("failed"));
+                Assert.That(record.errorCode, Is.EqualTo("FIXTURE_FAILURE"));
+                Assert.That(record.stopAttempted || record.startAttempted, Is.False);
+                Assert.That(ReadGeneralLog(), Does.Contain(failure.ToString()).And.Contain(record.maintenanceId));
+                LogAssert.NoUnexpectedReceived();
+            });
         }
 
         [Test]

@@ -52,7 +52,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"执行拖放失败：{ex.Message}", token, "dragdrop.execute");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"执行拖放失败：{ex.Message}", token, "dragdrop.execute", errorDetail: null, exception: ex);
             }
         }
 

@@ -170,6 +170,12 @@ namespace CodingRiver.UPilot.Automation
             Result(json);
             return json;
         }
+        internal static string RestoreResultJson(string status, string code = "")
+        {
+            var json = JsonUtility.ToJson(new ResultWire { status = status, errorCode = code });
+            Restore(json, out _);
+            return json;
+        }
         internal static string ErrorJson(string message, string diagnostic = "") =>
             JsonUtility.ToJson(new ErrorWire { message = message ?? "", diagnostic = diagnostic ?? "" });
         internal static string ValidationErrorJson(string code, string message)

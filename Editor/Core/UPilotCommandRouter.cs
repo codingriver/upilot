@@ -65,12 +65,13 @@ namespace CodingRiver.UPilot
             }
             catch (OperationCanceledException)
             {
-                ctx?.Fail("CANCELLED", "操作已取消");
+                ctx?.Fail("CANCELLED", "操作已取消", emitDiagnostic: false);
                 throw;
             }
             catch (Exception ex)
             {
-                ctx?.Fail("EXCEPTION", ex.Message);
+                // The Bridge owns the visible exception response and its original stack.
+                ctx?.Fail("EXCEPTION", ex.Message, emitDiagnostic: false);
                 throw;
             }
             finally

@@ -118,8 +118,12 @@ upilot-mcp --transport http --http-port 8011 --port 8765
 | `--http-host` | `UPILOT_HTTP_HOST` | `127.0.0.1` | Streamable HTTP host。 |
 | `--http-port` | `UPILOT_HTTP_PORT` | `8011` | Streamable HTTP port。 |
 | `--label` | 无 | 当前目录名 | Unity 诊断中显示的标签。 |
-| `--log-file` | `UPILOT_LOG_FILE` | 未设置 | 可选日志文件路径。 |
+| `--log-file` | `UPILOT_LOG_FILE` | 未设置 | 日志逻辑基准路径；实际写入同目录的 `<文件名>-YYYY-MM-DD.log`。 |
 | `--log-level` | `UPILOT_LOG_LEVEL` | `DEBUG` | Python 日志级别。 |
+
+Unity 启动 Server 时使用 `--log-file <项目>/Logs/UPilot/mcp-server.log` 作为精确进程身份参数，实际文件为 `mcp-server-YYYY-MM-DD.log`。高级设置中的一个“日志保留天数”统一管理 Step、Unity 主日志、Server 及三类 MCP 调用日志，对应项目配置 `logging.retentionDays`，默认 3，范围 1–365。按本地自然日保留今天及前 N−1 天；首次、跨日及设置变化后的下一次写入清理，配置热加载，无需因修改天数重启。
+
+这些每日文件完整追加、不限大小、不截断持久化条目；MCP 专用调用日志保留原始参数/结果，记录关联的开始、结束、状态和耗时。旧固定文件及备份不自动迁移或删除；报告、采集、数据库、基线和用户导出不由此设置清理。写入/清理失败通过 stderr 输出 Error 和原异常，不重试业务调用。完整清单见 `Documentation~/LogInventoryAndRetention-20261015.md`。
 
 如果同时运行多个 Unity 项目，给每个项目分配唯一的 `--http-port` 与内部 `--port` 端口对，并使用不同的 MCP 注册名称。AI 客户端只配置对应的 HTTP `/mcp` URL。
 

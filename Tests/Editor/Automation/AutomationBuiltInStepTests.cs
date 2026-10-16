@@ -79,7 +79,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         public IEnumerator WaitCompletesWithoutBlockingEditor()
         {
             var path = Path.Combine(Application.dataPath, "../Library/UPilot/wait-test.json");
-            using var executor = new AutomationStepExecutor(new AutomationStepRegistry(), path);
+            using var executor = new AutomationStepExecutor(new AutomationStepRegistry(), path, failureDiagnostic: message => TestContext.WriteLine(message));
             executor.Start(Plan(Item("upilot.wait_seconds", "0.05")), "wait-test");
             int frames = 0;
             double deadline = EditorApplication.timeSinceStartup + 5;

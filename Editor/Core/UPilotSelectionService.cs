@@ -86,7 +86,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SELECTION_GET_FAILED", ex.Message, token, "selection.get");
+                await _bridge.SendErrorAsync(id, "SELECTION_GET_FAILED", ex.Message, token, "selection.get", errorDetail: null, exception: ex);
             }
         }
 
@@ -138,7 +138,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "SELECTION_SET_FAILED", ex.Message, token, "selection.set");
+                await _bridge.SendErrorAsync(id, "SELECTION_SET_FAILED", ex.Message, token, "selection.set", errorDetail: null, exception: ex);
             }
         }
 
@@ -179,7 +179,7 @@ namespace CodingRiver.UPilot
             catch (Exception ex)
             {
                 await _bridge.SendErrorAsync(id, "SELECTION_CLEAR_FAILED", ex.Message, token, "selection.clear",
-                    new ErrorDetailPayload { commandSubmitted = true, sideEffectsMayHaveOccurred = true });
+                    new ErrorDetailPayload { commandSubmitted = true, sideEffectsMayHaveOccurred = true }, exception: ex);
             }
         }
 

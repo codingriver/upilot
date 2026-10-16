@@ -52,6 +52,7 @@ namespace CodingRiver.UPilot.Automation
         public long finishedAtUtcMs;
         public string outcome;
         public string errorCode;
+        public string cleanupState;
         public string detail;
     }
 
@@ -118,6 +119,7 @@ namespace CodingRiver.UPilot.Automation
         public AutomationReportPhase[] phases = Array.Empty<AutomationReportPhase>();
         public AutomationReportCase[] cases = Array.Empty<AutomationReportCase>();
         public AutomationReportLogSummary logSummary;
+        public AutomationGizmosState gizmos;
         public AutomationReportArtifactReference[] artifacts = Array.Empty<AutomationReportArtifactReference>();
     }
 
@@ -474,6 +476,30 @@ namespace CodingRiver.UPilot.Automation
                 bytes = length,
                 sha256 = digest,
             };
+        }
+
+        internal static void PrepareArtifactDirectory(string directory)
+        {
+            string projectRoot = ProjectRoot();
+            directory = ResolveContainedDirectory(projectRoot, directory);
+            CheckParents();
+            Directory.CreateDirectory(directory);
+            CheckParents();
+            void CheckParents()
+            {
+                for (string current = directory; !string.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+                {
+                    try
+                    {
+                        var attributes = File.GetAttributes(current);
+                        if ((attributes & FileAttributes.ReparsePoint) != 0 || (attributes & FileAttributes.Directory) == 0)
+                            throw new IOException("Artifact directories cannot traverse files, symbolic links or junctions.");
+                    }
+                    catch (FileNotFoundException) { }
+                    catch (DirectoryNotFoundException) { }
+                    if (string.Equals(current, projectRoot, PathComparison)) break;
+                }
+            }
         }
 
         private static void RequireRegularArtifactPath(string projectRoot, string path)

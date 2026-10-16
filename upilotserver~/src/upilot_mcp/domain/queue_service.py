@@ -1,6 +1,8 @@
 """Finite, exact-target cleanup; deliberately not a scheduler or generic queue reset."""
 from __future__ import annotations
 
+from ..output_paths import CONSOLE_CAPTURES, output_path
+
 import asyncio
 import copy
 import hashlib
@@ -440,7 +442,7 @@ class QueueDomainService(QueueBulkMixin):
                 snapshot["_releaseEvidence"] = await self._queue_job_release_probe(kind, value)
             return snapshot
         if kind == "Capture":
-            root = Path(store.project_path) / "Log" / "UPilotConsole"
+            root = output_path(store.project_path, CONSOLE_CAPTURES)
             for path in root.glob("*/session.json"):
                 value = json.loads(path.read_text(encoding="utf-8-sig"))
                 if value.get("sessionId") == target:

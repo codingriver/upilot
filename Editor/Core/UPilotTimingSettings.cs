@@ -37,10 +37,13 @@ namespace CodingRiver.UPilot
         internal static int BridgeReconnectDelaySeconds { get => Read(nameof(BridgeReconnectDelaySeconds), 1, 1, 60); set => Save(nameof(BridgeReconnectDelaySeconds), value, 1, 60); }
         internal static int MainWindowRefreshMs { get => Read(nameof(MainWindowRefreshMs), 400, 100, 5000); set => Save(nameof(MainWindowRefreshMs), value, 100, 5000); }
         internal static int DebugWindowRefreshMs { get => Read(nameof(DebugWindowRefreshMs), 300, 100, 5000); set => Save(nameof(DebugWindowRefreshMs), value, 100, 5000); }
+        internal static int UpdateCenterPostOperationDelaySeconds { get => Read(nameof(UpdateCenterPostOperationDelaySeconds), 10, 1, 60); set => Save(nameof(UpdateCenterPostOperationDelaySeconds), value, 1, 60); }
+        internal static int ServiceStopObservationTimeoutSeconds { get => Read(nameof(ServiceStopObservationTimeoutSeconds), 30, 1, 600); set => Save(nameof(ServiceStopObservationTimeoutSeconds), value, 1, 600); }
+        internal static int ServiceStopCheckIntervalMs { get => Read(nameof(ServiceStopCheckIntervalMs), 100, 50, 1000); set => Save(nameof(ServiceStopCheckIntervalMs), value, 50, 1000); }
         internal static int StepWindowRefreshMs { get => Read(nameof(StepWindowRefreshMs), 1000, 100, 5000); set => Save(nameof(StepWindowRefreshMs), value, 100, 5000); }
         internal static IEnumerable<string> PreferenceKeys
         {
-            get { foreach (var name in new[] { nameof(WatchdogIntervalSeconds), nameof(ReloadIntervalSeconds), nameof(ReloadRoundTimeoutSeconds), nameof(ReloadTotalTimeoutSeconds), nameof(ReloadMaxAttempts), nameof(PackageUpdateRecoveryTimeoutSeconds), nameof(UpmRequestObservationTimeoutSeconds), nameof(UpmCompletionCheckIntervalMs), nameof(ProfilerCaptureDefaultDurationSeconds), nameof(WindowObservationTimeoutMs), nameof(ModalCheckIntervalMs), nameof(BridgeReconnectDelaySeconds), nameof(MainWindowRefreshMs), nameof(DebugWindowRefreshMs), nameof(StepWindowRefreshMs) }) yield return Key(name); }
+            get { foreach (var name in new[] { nameof(WatchdogIntervalSeconds), nameof(ReloadIntervalSeconds), nameof(ReloadRoundTimeoutSeconds), nameof(ReloadTotalTimeoutSeconds), nameof(ReloadMaxAttempts), nameof(PackageUpdateRecoveryTimeoutSeconds), nameof(UpmRequestObservationTimeoutSeconds), nameof(UpmCompletionCheckIntervalMs), nameof(ProfilerCaptureDefaultDurationSeconds), nameof(WindowObservationTimeoutMs), nameof(ModalCheckIntervalMs), nameof(BridgeReconnectDelaySeconds), nameof(MainWindowRefreshMs), nameof(DebugWindowRefreshMs), nameof(StepWindowRefreshMs), nameof(UpdateCenterPostOperationDelaySeconds), nameof(ServiceStopObservationTimeoutSeconds), nameof(ServiceStopCheckIntervalMs) }) yield return Key(name); }
         }
         internal static void ResetDefaults() { UPilotPreferences.DeleteKeys(PreferenceKeys); Changed?.Invoke(""); }
         internal static void PreferencesReset() => Changed?.Invoke("");

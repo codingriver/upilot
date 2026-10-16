@@ -47,7 +47,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             _now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _store = Path.Combine(Application.dataPath, "../Library/UPilot/StepTests/" + Guid.NewGuid().ToString("N") + ".json");
             _registry = Registry(Entry<Probe>("probe"), Entry<ConsoleCaptureStartStep>("upilot.console_capture_start"));
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
         }
         [TearDown] public void TearDown()
         {
@@ -109,7 +109,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         [Test] public void StopDuringRestoreFencesCallbackAndKeepsAdmissionClosedUntilItReturns()
         {
             Start(Item("probe", "success"), Item("probe", "following", "Finally")); _executor.Tick();
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             ReenterAt = "restore"; Reenter = () => {
                 Assert.That(_executor.StopImmediately(), Is.True);
                 Assert.Throws<InvalidOperationException>(() => _executor.Start(Plan(Item("probe")), "nested-run"));
@@ -157,7 +157,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(_executor.State.terminal, Is.True); Assert.That(_executor.Busy, Is.True);
             Assert.Throws<InvalidOperationException>(() => _executor.Start(Plan(Item("probe")), "rejected"));
             _now = stopped + 9000; _executor.Dispose();
-            _executor = new AutomationStepExecutor(_registry, _store, () => _now); _executor.RestoreStored();
+            _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message)); _executor.RestoreStored();
             Assert.That(Calls, Is.Empty); Assert.That(_executor.Busy, Is.True);
             Assert.That(_executor.StopImmediately(), Is.False); _executor.Tick();
             _now = stopped + 10000; _executor.Tick();
@@ -172,7 +172,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             Start(Item("probe", "wait")); Live.captureOwned = true; Live.captureStartIntent = true;
             _executor.StopImmediately(); Live.serviceLifecycleId = "old-lifetime";
             new AutomationStepRunStore(_store).Save(Live);
-            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now);
+            _executor.Dispose(); _executor = new AutomationStepExecutor(_registry, _store, () => _now, failureDiagnostic: message => TestContext.WriteLine(message));
             _executor.RestoreStored(); Pump(5);
             Assert.That(_executor.State, Is.Null); Assert.That(_executor.Busy, Is.False); Assert.That(Calls, Is.Empty);
         }

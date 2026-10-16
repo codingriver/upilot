@@ -4,6 +4,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
+using UnityEditor;
 
 namespace CodingRiver.UPilot.Automation
 {
@@ -11,6 +12,18 @@ namespace CodingRiver.UPilot.Automation
     internal sealed class AutomationStepRunStore
     {
         private readonly string _path;
+        [Serializable] private sealed class LegacyItem
+        {
+            public string instanceId, stepId, arguments, phase;
+            public double timeoutSeconds, pollIntervalSeconds, cleanupTimeoutSeconds;
+            public bool allowSkipped;
+        }
+        [Serializable] private sealed class LegacyPlan
+        {
+            public int version;
+            public LegacyItem[] steps;
+            public AutomationLogRule[] logPolicy;
+        }
         internal AutomationStepRunStore(string path) { _path = path; }
         internal static string EditorIdentity
         {
@@ -20,16 +33,50 @@ namespace CodingRiver.UPilot.Automation
                 return process.Id + ":" + process.StartTime.ToUniversalTime().Ticks;
             }
         }
-        internal static string Hash(AutomationStepPlan plan)
+        internal static string Hash(AutomationStepPlan plan, int gizmosPolicyVersion = 0)
         {
+            string json = JsonUtility.ToJson(plan);
+            if (gizmosPolicyVersion == 0)
+            {
+                // Preserve the exact pre-Gizmos projection for active and historical records.
+                json = JsonUtility.ToJson(new LegacyPlan
+                {
+                    version = plan.version, logPolicy = plan.logPolicy,
+                    steps = plan.steps.Select(item => item == null ? null : new LegacyItem
+                    {
+                        instanceId = item.instanceId, stepId = item.stepId, arguments = item.arguments, phase = item.phase,
+                        timeoutSeconds = item.timeoutSeconds, pollIntervalSeconds = item.pollIntervalSeconds,
+                        cleanupTimeoutSeconds = item.cleanupTimeoutSeconds, allowSkipped = item.allowSkipped,
+                    }).ToArray(),
+                });
+            }
+            else if (gizmosPolicyVersion != 1) throw new InvalidDataException("STEP_GIZMOS_POLICY_UNSUPPORTED");
             using var sha = SHA256.Create();
-            return string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(JsonUtility.ToJson(plan))).Select(b => b.ToString("x2")));
+            return string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(json)).Select(b => b.ToString("x2")));
         }
         internal static string HashText(string value)
         {
             using var sha = SHA256.Create();
             return string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(value)).Select(b => b.ToString("x2")));
         }
+        private string CompilationFenceKey(AutomationStepRun run) =>
+            "UPilot.Step.Compilation." + HashText(Path.GetFullPath(_path) + "\n" + run.runId);
+        internal void FenceCompilation(AutomationStepRun run) =>
+            SessionState.SetString(CompilationFenceKey(run), JsonUtility.ToJson(run));
+        internal AutomationStepRun CompilationFence(AutomationStepRun run)
+        {
+            string json = SessionState.GetString(CompilationFenceKey(run), "");
+            if (string.IsNullOrEmpty(json)) return null;
+            var fence = JsonUtility.FromJson<AutomationStepRun>(json);
+            if (fence == null || fence.runId != run.runId || fence.operationId != run.operationId
+                || fence.planHash != run.planHash || fence.serviceLifecycleId != run.serviceLifecycleId
+                || fence.editorIdentity != EditorIdentity || fence.editorIdentity != run.editorIdentity
+                || !fence.terminal || fence.status != "Failed" || fence.compilationStartedAtUtcMs <= 0
+                || fence.error?.code != "STEP_COMPILATION_STARTED")
+                throw new InvalidDataException("STEP_COMPILATION_FENCE_INVALID");
+            return fence;
+        }
+        internal void ClearCompilationFence(AutomationStepRun run) => SessionState.EraseString(CompilationFenceKey(run));
         private static void CheckDispositionPath(string path)
         {
             // A junction/symlink must not redirect the execution fence or its backup.
@@ -58,7 +105,7 @@ namespace CodingRiver.UPilot.Automation
             var d = run?.disposition;
             if (d == null || run.operationId != operationId || d.operationId != operationId || d.runId != run.runId
                 || string.IsNullOrEmpty(d.requestId) || run.status != "Released" || !run.terminal
-                || run.cleanupPending || run.recoveryRequired || run.planHash != Hash(run.plan)
+                || run.cleanupPending || run.recoveryRequired || run.planHash != Hash(run.plan, run.gizmosPolicyVersion)
                 || Path.GetFullPath(d.backupPath) != Path.GetFullPath(path + ".backup")
                 || !File.Exists(d.backupPath) || new FileInfo(d.backupPath).Length != d.backupBytes
                 || HashText(File.ReadAllText(d.backupPath)) != d.backupSha256)
@@ -132,7 +179,7 @@ namespace CodingRiver.UPilot.Automation
             if (!File.Exists(_path)) return null;
             var run = JsonUtility.FromJson<AutomationStepRun>(File.ReadAllText(_path));
             if (run == null || run.version != 1 || string.IsNullOrEmpty(run.runId)
-                || run.plan == null || run.planHash != Hash(run.plan) || run.steps.Count != run.plan.steps.Length
+                || run.plan == null || run.planHash != Hash(run.plan, run.gizmosPolicyVersion) || run.steps.Count != run.plan.steps.Length
                 || run.cursor < 0 || run.cursor > run.steps.Count)
                 throw new InvalidDataException("STEP_STORE_INVALID");
             var disposed = Disposed(run.operationId);

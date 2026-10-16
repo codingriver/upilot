@@ -59,7 +59,8 @@ namespace CodingRiver.UPilot
             }
         }
 
-        internal bool EndLifecyclePhase(long generation, string reason = "", bool timeout = false)
+        internal bool EndLifecyclePhase(long generation, string reason = "", bool timeout = false, bool emitDiagnostic = true,
+            Exception failureException = null)
         {
             lock (_statusLock)
             {
@@ -73,11 +74,12 @@ namespace CodingRiver.UPilot
                 {
                     _cachedStatus.ErrorMessage = reason;
                     _cachedStatus.StatusFailureStage = phase.ToString().ToLowerInvariant();
-                    _cachedStatus.FailureKind = McpStatusFailureKind.Transient;
-                    if (timeout)
-                        Logger.LogWarning("SERVER", $"生命周期终态超时 source=Unity客户端 PID={pid} operationId={operationId} phase={phase} elapsedMs={elapsed} reason={reason}");
-                    else
-                        UnityEngine.Debug.Log($"[UPilotMcpServerManager] 生命周期结束 source=Unity客户端 PID={pid} operationId={operationId} phase={phase} reason={reason}。");
+                    _cachedStatus.FailureKind = failureException == null
+                        ? McpStatusFailureKind.Transient : ClassifyStatusException(failureException);
+                    if (emitDiagnostic && timeout)
+                        Logger.ReportFailure("SERVER", $"生命周期终态超时 source=Unity客户端 PID={pid} operationId={operationId} phase={phase} elapsedMs={elapsed} reason={reason}", failureException);
+                    else if (emitDiagnostic)
+                        Logger.ReportFailure("SERVER", $"[UPilotMcpServerManager] 生命周期失败 source=Unity客户端 PID={pid} operationId={operationId} phase={phase} reason={reason}。", failureException);
                 }
                 NotifyStatusChanged();
                 return true;

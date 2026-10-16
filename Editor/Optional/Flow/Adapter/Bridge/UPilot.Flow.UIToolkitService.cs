@@ -63,7 +63,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"导出 UIToolkit 树失败：{ex.Message}", token, "uitoolkit.dump");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"导出 UIToolkit 树失败：{ex.Message}", token, "uitoolkit.dump", errorDetail: null, exception: ex);
             }
         }
 
@@ -93,7 +93,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"查询 UIToolkit 元素失败：{ex.Message}", token, "uitoolkit.query");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"查询 UIToolkit 元素失败：{ex.Message}", token, "uitoolkit.query", errorDetail: null, exception: ex);
             }
         }
 
@@ -134,7 +134,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"派发 UIToolkit 事件失败：{ex.Message}", token, "uitoolkit.event");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"派发 UIToolkit 事件失败：{ex.Message}", token, "uitoolkit.event", errorDetail: null, exception: ex);
             }
         }
 
@@ -299,7 +299,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"ScrollView 滚动失败：{ex.Message}", token, "uitoolkit.scroll");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"ScrollView 滚动失败：{ex.Message}", token, "uitoolkit.scroll", errorDetail: null, exception: ex);
             }
         }
 
@@ -372,7 +372,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"设置元素值失败：{ex.Message}", token, "uitoolkit.setValue");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"设置元素值失败：{ex.Message}", token, "uitoolkit.setValue", errorDetail: null, exception: ex);
             }
         }
 
@@ -442,7 +442,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"元素交互失败：{ex.Message}", token, "uitoolkit.interact");
+                await _bridge.SendErrorAsync(id, "INTERNAL_ERROR", $"元素交互失败：{ex.Message}", token, "uitoolkit.interact", errorDetail: null, exception: ex);
             }
         }
 

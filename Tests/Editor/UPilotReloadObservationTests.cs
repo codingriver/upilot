@@ -9,6 +9,7 @@ using System.Threading;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests
 {
@@ -64,6 +65,11 @@ namespace CodingRiver.UPilot.Tests
             Set(manager, "_launchProbeRunning", deadlineDuringRound);
             Assert.That(HasObserver(manager), Is.True);
 
+            var failureTitle = deadlineDuringRound ? "生命周期终态超时" : "[UPilotMcpServerManager] 生命周期失败";
+            var failureReason = deadlineDuringRound ? "reload_revalidation_timeout" : "reload_revalidation_attempts_exhausted";
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(
+                System.Text.RegularExpressions.Regex.Escape(failureTitle + " source=Unity客户端 PID=0 operationId=" + observation.observationId) +
+                (deadlineDuringRound ? @" phase=Verifying elapsedMs=\d+ reason=" : " phase=Verifying reason=") + failureReason + ":"));
             Call(manager, "ObserveLaunch");
 
             Assert.That(token.IsCancellationRequested, Is.True);

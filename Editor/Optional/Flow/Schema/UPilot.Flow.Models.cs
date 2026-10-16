@@ -195,8 +195,8 @@ namespace CodingRiver.UPilot.Flow
         public bool Headed = true;
         public int DefaultTimeoutMs = UPilotFlowSchema.DefaultStepTimeoutMs;
         public bool DebugOnFailure = true;
-        public string ReportOutputPath = "Reports";
-        public string ScreenshotPath = "Reports/Screenshots";
+        public string ReportOutputPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports);
+        public string ScreenshotPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports + "/Screenshots");
         public bool StopOnFirstFailure;
         public bool ContinueOnStepFailure;
         public bool ScreenshotOnFailure = true;
@@ -687,7 +687,7 @@ namespace CodingRiver.UPilot.Flow
         public string YamlPath;
         public string YamlDirectory;
         public bool Headed = true;
-        public string ReportPath = "Reports";
+        public string ReportPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowDefaultReports);
         public bool ScreenshotOnFailure = true;
         public string ScreenshotPath;
         public bool Nographics;

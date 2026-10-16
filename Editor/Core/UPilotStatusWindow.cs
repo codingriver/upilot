@@ -422,7 +422,21 @@ namespace CodingRiver.UPilot
                 DrawTimingValue("模态检查间隔（ms）", UPilotTimingSettings.ModalCheckIntervalMs, 50, Math.Min(1000, UPilotTimingSettings.WindowObservationTimeoutMs / 2), value => UPilotTimingSettings.ModalCheckIntervalMs = value);
                 DrawTimingValue("Bridge 重连等待（秒）", UPilotTimingSettings.BridgeReconnectDelaySeconds, 1, 60, value => UPilotTimingSettings.BridgeReconnectDelaySeconds = value);
                 DrawTimingValue("主窗口刷新（ms）", UPilotTimingSettings.MainWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.MainWindowRefreshMs = value);
-                DrawTimingValue("高级设置／快速调试刷新（ms）", UPilotTimingSettings.DebugWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.DebugWindowRefreshMs = value);
+                DrawTimingValue("高级设置／快速调试／更新中心刷新（ms）", UPilotTimingSettings.DebugWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.DebugWindowRefreshMs = value);
+                DrawTimingValue("更新完成后检查延迟（秒，默认 10）", UPilotTimingSettings.UpdateCenterPostOperationDelaySeconds, 1, 60, value => UPilotTimingSettings.UpdateCenterPostOperationDelaySeconds = value);
+                DrawTimingValue("停止服务观察期限（秒，默认 30）", UPilotTimingSettings.ServiceStopObservationTimeoutSeconds, 1, 600, value => UPilotTimingSettings.ServiceStopObservationTimeoutSeconds = value);
+                DrawTimingValue("停止完成检查间隔（ms，默认 100）", UPilotTimingSettings.ServiceStopCheckIntervalMs, 50, 1000, value => UPilotTimingSettings.ServiceStopCheckIntervalMs = value);
+                EditorGUILayout.LabelField("有限等待开始时固定参数；停止提前确认即结束，父操作期限优先。", EditorStyles.wordWrappedMiniLabel);
+                var stop = UPilotMcpServerManager.Instance.StopObservation;
+                if (stop != null)
+                {
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var elapsed = Math.Max(0, (stop.Active ? now : stop.endedAt) - stop.startedAt) / 1000d;
+                    var remaining = stop.Active ? Math.Max(0, stop.deadline - now) / 1000d : 0;
+                    EditorGUILayout.LabelField($"当前／最近停止：{stop.id} · {stop.origin} · {stop.status}", EditorStyles.wordWrappedMiniLabel);
+                    EditorGUILayout.LabelField($"本次冻结参数：{stop.timeoutSeconds}s / {stop.intervalMs}ms；有效预算 {(stop.deadline - stop.startedAt) / 1000d:F2}s；已用 {elapsed:F2}s；剩余 {remaining:F2}s", EditorStyles.wordWrappedMiniLabel);
+                    EditorGUILayout.LabelField($"进程退出：{stop.processesExited}；端口释放：{stop.portsAvailable}；结束原因：{stop.reason}", EditorStyles.wordWrappedMiniLabel);
+                }
                 DrawTimingValue("Step 管理窗口刷新（ms）", UPilotTimingSettings.StepWindowRefreshMs, 100, 5000, value => UPilotTimingSettings.StepWindowRefreshMs = value);
                 if (GUILayout.Button("恢复周期与超时默认值"))
                 {
@@ -687,7 +701,7 @@ namespace CodingRiver.UPilot
                     RunStatusAction("打开操作日志失败", () =>
                     {
                         tracker.RevealLogFile();
-                        ShowToast("已定位到 " + Logger.LogFilePath);
+                        if (File.Exists(Logger.LogFilePath)) ShowToast("已定位到 " + Logger.LogFilePath);
                     });
                 }
 
@@ -1415,7 +1429,7 @@ namespace CodingRiver.UPilot
 
                 var debugWire = bridge.DebugWireLogsEnabled;
                 var newDebugWire = EditorGUILayout.ToggleLeft(
-                    new GUIContent("调试通信日志", "记录 WebSocket SEND/RECV 及截断后的 payload；默认关闭。"),
+                    new GUIContent("调试通信日志", "记录 WebSocket SEND/RECV 完整 payload；默认关闭。"),
                     debugWire);
                 if (newDebugWire != debugWire)
                     bridge.DebugWireLogsEnabled = newDebugWire;
@@ -1436,17 +1450,26 @@ namespace CodingRiver.UPilot
 
                 var logToConsole = Logger.LogToUnityConsole;
                 var newLogToConsole = EditorGUILayout.ToggleLeft(
-                    new GUIContent("同步到 Unity Console", "关闭后仍会写入 UPilot 日志文件。"),
+                    new GUIContent("同步普通日志到 Unity Console", "控制普通信息日志的 Console 同步；警告、错误和异常不受此开关影响，日志文件照常写入。"),
                     logToConsole);
                 if (newLogToConsole != logToConsole)
                 {
                     Logger.SetLogToUnityConsole(newLogToConsole);
-                    ShowToast(newLogToConsole ? "已开启 Unity Console 日志输出" : "已关闭 Unity Console 日志输出");
+                    ShowToast(newLogToConsole ? "已开启普通日志同步到 Unity Console" : "已关闭普通日志同步；警告、错误和异常仍会输出");
                 }
 
-                EditorGUILayout.LabelField(
-                    $"已启用的日志始终写入文件；单文件 {Logger.MaxLogSizeBytes / (1024 * 1024)} MiB，保留 {Logger.MaxBackupFiles} 个备份（约 {(Logger.MaxBackupFiles + 1) * Logger.MaxLogSizeBytes / (1024 * 1024)} MiB）",
-                    EditorStyles.miniLabel);
+                var config = UPilotProjectConfig.Current;
+                config.logging ??= new UPilotLoggingConfig();
+                int days = UPilotLoggingConfig.Normalize(config.logging.retentionDays);
+                int newDays = Mathf.Clamp(EditorGUILayout.DelayedIntField(
+                    new GUIContent("日志保留天数", "所有按天保留的日志共用；1–365 天，默认 3 天。包含今天，设置变化后在各日志下一次写入时清理。"), days), 1, 365);
+                if (newDays != days)
+                {
+                    config.logging.retentionDays = newDays;
+                    UPilotProjectConfig.Save(config);
+                    ShowToast("所有按天日志保留天数已更新为 " + newDays + " 天");
+                }
+                EditorGUILayout.LabelField("按本地自然日保留；完整追加、不限大小；首次、跨日及设置变化后的写入触发清理。", EditorStyles.wordWrappedMiniLabel);
                 if (!string.IsNullOrEmpty(Logger.LastFileError))
                     EditorGUILayout.HelpBox("最近一次日志文件异常：" + Logger.LastFileError, MessageType.Warning);
             }
@@ -1950,7 +1973,7 @@ namespace CodingRiver.UPilot
             UPilotRestartDiagnosticView.DrawGateTable(current, true);
             EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Identity(current), EditorStyles.wordWrappedLabel);
             EditorGUILayout.LabelField(UPilotRestartDiagnosticView.Details(current), EditorStyles.wordWrappedLabel);
-            var serverLog = Path.Combine(UPilotProjectConfig.ProjectRoot, "log", "mcp-server.log");
+            var serverLog = UPilotMcpServerManager.ServerLogPath;
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (GUILayout.Button("复制当前诊断", GUILayout.Width(105)))
@@ -2025,7 +2048,7 @@ namespace CodingRiver.UPilot
                         RunStatusAction("打开 UPilot 日志失败", () =>
                         {
                             Logger.RevealLogFile();
-                            ShowToast("已定位到 " + Logger.LogFilePath);
+                            if (File.Exists(Logger.LogFilePath)) ShowToast("已定位到 " + Logger.LogFilePath);
                         });
                     }
                 }
@@ -2157,7 +2180,7 @@ namespace CodingRiver.UPilot
                         RunStatusAction("打开 UPilot 日志文件失败", () =>
                         {
                             Logger.RevealLogFile();
-                            ShowToast("已定位到 " + Logger.LogFilePath);
+                            if (File.Exists(Logger.LogFilePath)) ShowToast("已定位到 " + Logger.LogFilePath);
                         });
                     }
                 }
@@ -2184,7 +2207,7 @@ namespace CodingRiver.UPilot
                         RunStatusAction("打开 UPilot 日志文件失败", () =>
                         {
                             Logger.RevealLogFile();
-                            ShowToast("已定位到 " + Logger.LogFilePath);
+                            if (File.Exists(Logger.LogFilePath)) ShowToast("已定位到 " + Logger.LogFilePath);
                         });
                     }
 

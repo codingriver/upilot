@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -10,7 +10,7 @@ namespace CodingRiver.UPilot.Automation
     public sealed class AutomationStepException : Exception
     {
         public string Code { get; }
-        public AutomationStepException(string code, string message) : base(message) { Code = code; }
+        public AutomationStepException(string code, string message, Exception innerException = null) : base(message, innerException) { Code = code; }
     }
 
     [Serializable]
@@ -55,6 +55,7 @@ namespace CodingRiver.UPilot.Automation
         public double pollIntervalSeconds = -1;
         public double cleanupTimeoutSeconds = 10;
         public bool allowSkipped;
+        public AutomationStepGizmos gizmos;
     }
 
     [Serializable]
@@ -88,7 +89,11 @@ namespace CodingRiver.UPilot.Automation
         public long startedAtUtcMs;
         public long cleanupStartedAtUtcMs;
         public long finishedAtUtcMs;
+        [SerializeField] internal long executionLogCleanupFinishedAtUtcMs;
         public bool cancelSent;
+        public bool gizmosEnableAttempted;
+        public bool gizmosCloseAttempted;
+        public string[] gizmosWindowIds = Array.Empty<string>();
         // Unknown is intentional for old records: absence is not release evidence.
         public string cleanupState = "Unknown";
         public string cleanupRecoveryError = "";
@@ -118,6 +123,9 @@ namespace CodingRiver.UPilot.Automation
         public string operationId;
         public string editorIdentity;
         public string planHash;
+        // Zero preserves both the plan hash and execution semantics of older records.
+        public int gizmosPolicyVersion;
+        public AutomationGizmosState gizmosState;
         public AutomationStepPlan plan;
         public List<AutomationStepRecord> steps = new();
         public int cursor;
@@ -136,10 +144,16 @@ namespace CodingRiver.UPilot.Automation
         public bool cancelRequested;
         // Zero preserves the ordinary lifecycle for existing stored runs.
         public long immediateStopRequestedAtUtcMs;
+        public long compilationStartedAtUtcMs;
+        public string compilationPhase = "";
+        public string compilationInstanceId = "";
+        public string compilationReportState = "";
         public long startedAtUtcMs;
         public long finishedAtUtcMs;
         public long finalizationDeadlineUtcMs;
         public string serviceLifecycleId;
+        // Empty for legacy runs: historical tasks do not receive backfilled text logs.
+        [SerializeField] internal string executionLogTimeZoneId = "";
         public AutomationStepError error;
         public List<AutomationStepError> secondaryErrors = new();
         public string sharedCheckpointJson = "{}";

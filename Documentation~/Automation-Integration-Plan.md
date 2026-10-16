@@ -268,7 +268,7 @@ Operation 总预算至少覆盖各步骤执行/清理上限之和加 60 秒证�
 
 `Library/UPilot/step-run.json` 保存计划哈希、游标、步骤类型身份、Execute 意图和检查点。同进程 Domain Reload 调用 Restore；Server 重连只观察。Editor 进程重启、注册类型变化、存储损坏、恢复不支持时拒绝重放并要求人工处置。不会删除记录来绕过资源恢复门禁，也不自动清理未知 Capture。
 
-报告在 `Log/UPilotSteps/<runId>/events.jsonl` 和 `summary.json`；后者冻结，产物提供 bytes/SHA256。原始 Capture 引用附带固定 sequence 范围，最终原始文件哈希由拥有它的 Operation 收尾。
+报告在 `Logs/UPilot/Reports/Steps/<runId>/events.jsonl` 和 `summary.json`；后者冻结，产物提供 bytes/SHA256。原始 Capture 引用附带固定 sequence 范围，最终原始文件哈希由拥有它的 Operation 收尾。旧默认目录不扫描、不迁移、不回退读取；本节后续既有验收记录保留当时的真实产物路径。
 
 ### 9.6 验证与延期接入
 
@@ -571,3 +571,24 @@ Skill资源按权威源更新为AgentRules40/SkillPack44，source和四份instal
 - Operation-owned旧兼容调用组单轮成功，run=`03f4234cbb944cefb4e688fbef1ac954`，公开收集14文件并复核一致。本地兼容取消run=`b55c1f1c20164f2a9ea54e79f80bacc8`为Canceled/STEP_CANCELED、15文件核验；正常run=`53532aa838c14d419eb68818407d3c7c`为Succeeded、14文件核验。两次本地Capture均由项目观察器收尾，凭据清除且终态持久化；没有第二执行器或客户端逐步推进。
 - 本轮没有C#变更，复用13.1关联编译；未改模板、UPM依赖、包清单或PlayerSettings，未重启Unity。最后宿主EditMode/Ready、activeCapture=0。公开附件路径已获真实行为证据，但这不等于整个Server源码身份已完成认证。
 - 定向验收详情、请求身份、报告/截图/Capture哈希和剩余项目矩阵统一见`D:\MA\_AI_Docs\xclient\30_ENVIRONMENTS\xclient2\Automation\UPilotStepExecutorMigration.md`的15.4/15.15。包级真实symlink/junction拒绝夹具、项目异常恢复及实际无包编译仍未执行，不宣称全量或完整迁移通过。
+
+## 14. Step 实时执行日志
+
+所有通过校验并创建的新 Step 任务自动向 `Logs/UPilot/step-YYYY-MM-DD.log` 追加文本。同一本机自然日共用一份文件，跨午夜切换文件，每条携带 runId 和 operationId。写入器首次使用、日期切换以及统一保留设置变化后的首次写入清理过期文件；保留天数统一读取高级设置的 logging.retentionDays（默认 3，范围 1–365），按本地自然日包含今天计算；没有任务写入时不后台清理。仅清理严格匹配命名、日期过期的普通文件，保留其他文件、目录、链接和未来日期文件。不设大小上限；超过所设保留天数的任务，其早期记录同样可能过期。
+
+日志使用 UTF-8 无 BOM、LF、单行事件，逐事件追加并关闭文件，不额外强制刷盘。中文标签配固定英文事件名，动态字符串可逆转义，任务开始时写入含实际默认值的完整生效计划，参数不截断。步骤记录执行、Cleanup、框架资源收尾和最终结果，包含 Normal/Finally、跳过、失败、取消、超时、恢复、立即停止和服务硬停止。
+
+时间戳按任务启动时本机时区显示，带偏移并精确到毫秒；文件名和清理日期使用写入时的本机日期。耗时按 UTC 起止毫秒差计算，显示秒及三位小数，包含等待和同进程 Domain Reload。步骤分别列执行、业务 Cleanup 和总耗时；框架资源收尾另记节点并计入总耗时。未执行项不伪造起止时间，缺失或负时间差显示“未知”。
+
+任务结束事件在执行器收尾结束时写入，正常路径晚于报告提交；立即停止先记业务停止，等待原有有限资源释放尝试结束后再记任务结束，并保留未验证状态。同进程重载继续原身份且不重复开始/Execute；崩溃保留最后记录，不补写未知结束，也不从日志恢复历史任务。公共日文件是可变诊断输出，不注册为不可变任务附件，原 events/summary/report/timing 格式保持兼容。
+
+写入或过期清理失败不向业务执行器抛异常、不重放丢失事件；后续事件继续尝试。同类异常保留现有按任务去重，但首条必须以可见 Error/Exception 输出操作、路径和原异常堆栈，不能递归回写失败文件。本次用户明确替代此前 file-only 静默策略：这些真实错误不从 Console Policy 豁免，因此可能影响其判定。无需新增单独日志开关或 MCP 读取工具。
+
+### 14.1 定向验证（2026-10-15）
+
+- 规范工程 `D:\upilot\Tests~\UPilotTest`，Unity `6000.6.0a2`，Editor PID=127400。最终批次 `wb-ea0653bf-b8a9-4aa8-aadc-ced500da6a00`，created=1792051403745，compile=`5e31502c262f46128a9b505c203cf3cf`，verified=1792051424093，terminal/errorsVerified/correlationVerified=true，0 Error、4 条既有 Warning。结构化错误已读；该编译区间无持久 Console 边界（CONSOLE_EVIDENCE_NOT_FOUND），不能宣称完整编译 Console 证据，当前 Console Error 查询为空。
+- 最终 Task=`task-d024c115-c7c4-4e27-a14d-bff7f641f81d`，runGuid=`b8bd6642-7d32-4c1b-bd95-9a34c374441a`，171/171 通过，0 失败/跳过；resultAuthoritative/cleanupSucceeded/acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true。覆盖新增日志 23 项、执行器 89 项、立即停止 22 项、服务 12 项、报告 22 项、Logger 3 项；未运行全量 EditMode。
+- 验收报告 `Tests~/UPilotTest/Log/UPilotAcceptance/1792051458558_req-a0132214-3554-4d51-96e6-b7138b8a8b91/summary.json`，1187438 bytes，SHA256=`19f7328262ced0ce25b9e48e28e3af0ecc58312650110b70f519a77805bee2dd`。按最终 runGuid 查询 Error 为空，整体 Console 范围 coverage=complete。
+- 中间直接回归 148 项曾有 1 失败：OldFinalizationFailureDoesNotPreventNewExecutorCreation。原测试注入抛异常时钟，新增最终日志采样未隔离异常；已将整个日志收尾及开始/清理采样纳入尽力记录边界，保留原断言并补回归。失败报告保留在 `Tests~/UPilotTest/Log/UPilotAcceptance/1792050955642_req-e6cfaf1d-5359-4767-b448-8a5f99e09d44/summary.json`。另修正文件日期独立取实际写入时钟，延迟事件仍保留原事件时间，新增跨午夜文件与保留期用例。
+- 真实官方 Operation=`op-293a81f1-469f-43a4-a3db-04936c2c635e`，run=`4aac44253c39425fbc2bdb02975aab79`：完整 validate 后 start 一次，进入 PlayMode、等待 0.1 秒、Finally 返回 EditMode；Succeeded，businessTerminal/cleanupTerminal/editorTerminal=true，editorVerification=verified，unresolvedResources 为空。相同 Editor PID 下 domainGeneration 24→25。
+- 核对 `Logs/UPilot/step-2026-10-15.log` 中该任务 23 条记录：run.started/run.plan/run.finished 各 1 次，run.reloading/run.restoring 各 1 次，三个步骤各开始/结束 1 次，最终报告提交早于任务结束。执行器总耗时 15.518s，进入 PlayMode 的执行耗时 13.663s 包含重载等待。最终 EditMode/Ready、活动 Capture=0；没有重启服务或 Unity。真实硬停止、进程崩溃和真实符号链接/目录联接夹具未现场执行，硬停止日志和异常隔离已有隔离用例覆盖。

@@ -671,6 +671,27 @@ class WsOrchestratorServer(WsTransport):
         # Compilation -> reload belongs to the same compile, not a new wait/deadline.
         same_compile = bool(record and record.get("compile_id") and compile_id == record["compile_id"])
         same_reload = bool(record and record.get("reload_id") and reload_id == record["reload_id"])
+        if record and compile_id and not same_compile and authoritative and payload.get("isStale") is not True:
+            # A lost terminal event must not pin /health to an obsolete compile.
+            # Ordered Unity evidence may supersede that wait; it never verifies
+            # the old compile or changes its persisted identity/result.
+            started_at = max(int(payload.get(key) or 0) for key in (
+                "compileStartedAt", "lastCompileStartedAt", "lastCompileRequestedAt"))
+            verified_at = int(payload.get("lastCompileVerifiedAt") or 0)
+            if (phase in {"completed", "failed"} and payload.get("terminal") is True
+                    and payload.get("errorsVerified") is True
+                    and record["started_at_ms"] < started_at <= verified_at <= observed):
+                record.update(ended_at_ms=observed, superseded_by_compile_id=compile_id)
+                self._editor_lifecycle_recovery = record
+                self._editor_lifecycle = None
+                return
+            if (event in {"compile_queued", "compiling", "compile_started", "domain_reload_starting"}
+                    and phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"}
+                    and observed > record["started_at_ms"]
+                    and (not started_at or record["started_at_ms"] < started_at <= observed)):
+                # Follow the newer compile while keeping it non-ready until its
+                # own verified terminal arrives, even when isCompiling is false.
+                self._editor_lifecycle = self._editor_lifecycle_recovery = record = None
         if record and authoritative and (
                 (same_compile and phase in {"completed", "failed"} and payload.get("terminal") is True
                  and payload.get("errorsVerified") is True)

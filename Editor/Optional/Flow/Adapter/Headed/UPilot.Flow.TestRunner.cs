@@ -40,7 +40,7 @@ namespace CodingRiver.UPilot.Flow
     public sealed class TestRunnerViewState
     {
         public string TargetDirectory = "Assets/Examples/Yaml";
-        public string ReportPath = "Reports/TestRunner";
+        public string ReportPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowTestRunnerReports);
         public string SearchFilter = string.Empty;
         public bool Headed = true;
         public bool StopOnFirstFailure;
@@ -432,7 +432,7 @@ namespace CodingRiver.UPilot.Flow
 
             if (string.IsNullOrWhiteSpace(_state.ReportPath))
             {
-                _state.ReportPath = "Reports/TestRunner";
+                _state.ReportPath = UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowTestRunnerReports);
             }
 
             _overlayRenderer = new HighlightOverlayRenderer();
@@ -1855,7 +1855,7 @@ namespace CodingRiver.UPilot.Flow
 
             RefreshUi();
 
-            string reportRoot = string.IsNullOrWhiteSpace(_state.ReportPath) ? "Reports/TestRunner" : _state.ReportPath;
+            string reportRoot = string.IsNullOrWhiteSpace(_state.ReportPath) ? UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowTestRunnerReports) : _state.ReportPath;
             string screenshotRoot = Path.Combine(reportRoot, "Screenshots");
             var reportPaths = new ReportPathBuilder();
 
@@ -2218,7 +2218,7 @@ namespace CodingRiver.UPilot.Flow
         {
             if (string.IsNullOrWhiteSpace(path)) return path;
             string fullPath = Path.GetFullPath(path);
-            string projectRoot = UPilotFlowUtility.AppendDirectorySeparator(Path.GetFullPath(Directory.GetCurrentDirectory()));
+            string projectRoot = UPilotFlowUtility.AppendDirectorySeparator(UPilotProjectConfig.ProjectRoot);
             if (fullPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase))
                 return fullPath.Substring(projectRoot.Length).Replace('\\', '/');
             return fullPath;
@@ -2232,7 +2232,7 @@ namespace CodingRiver.UPilot.Flow
         public static void Load(TestRunnerViewState state)
         {
             state.TargetDirectory = EditorPrefs.GetString(Prefix + nameof(TestRunnerViewState.TargetDirectory), "Assets/Examples/Yaml");
-            state.ReportPath = EditorPrefs.GetString(Prefix + nameof(TestRunnerViewState.ReportPath), "Reports/TestRunner");
+            state.ReportPath = EditorPrefs.GetString(Prefix + nameof(TestRunnerViewState.ReportPath), UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowTestRunnerReports));
             state.SearchFilter = EditorPrefs.GetString(Prefix + nameof(TestRunnerViewState.SearchFilter), string.Empty);
             state.Headed = EditorPrefs.GetBool(Prefix + nameof(TestRunnerViewState.Headed), true);
             state.StopOnFirstFailure = EditorPrefs.GetBool(Prefix + nameof(TestRunnerViewState.StopOnFirstFailure), false);
@@ -2249,7 +2249,7 @@ namespace CodingRiver.UPilot.Flow
         public static void Save(TestRunnerViewState state)
         {
             EditorPrefs.SetString(Prefix + nameof(TestRunnerViewState.TargetDirectory), state.TargetDirectory ?? "Assets/Examples/Yaml");
-            EditorPrefs.SetString(Prefix + nameof(TestRunnerViewState.ReportPath), state.ReportPath ?? "Reports/TestRunner");
+            EditorPrefs.SetString(Prefix + nameof(TestRunnerViewState.ReportPath), state.ReportPath ?? UPilotOutputPaths.Resolve(UPilotOutputPaths.FlowTestRunnerReports));
             EditorPrefs.SetString(Prefix + nameof(TestRunnerViewState.SearchFilter), state.SearchFilter ?? string.Empty);
             EditorPrefs.SetBool(Prefix + nameof(TestRunnerViewState.Headed), state.Headed);
             EditorPrefs.SetBool(Prefix + nameof(TestRunnerViewState.StopOnFirstFailure), state.StopOnFirstFailure);

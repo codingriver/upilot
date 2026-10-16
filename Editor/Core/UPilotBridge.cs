@@ -265,13 +265,23 @@ namespace CodingRiver.UPilot
             _resettingWork = true;
             UPilotServiceLifetime.Advance(); // Fence callbacks before touching any owned resource.
             var errors = new System.Collections.Generic.List<string>();
-            void Reset(Action action) { try { action(); } catch (Exception ex) { errors.Add(ex.Message); } }
+            void Reset(Action action)
+            {
+                try { action(); }
+                catch (Exception ex)
+                {
+                    errors.Add(ex.Message);
+                    Logger.ReportFailure("SYSTEM", "UPilot activity reset failed", ex,
+                        scope: "bridge-reset", fingerprint: action.Method.Name);
+                }
+            }
             lock (_queueObservationLock)
             {
                 while (_mainThreadQueue.TryDequeue(out _)) { }
                 _trackedQueueActions.Clear();
             }
             Reset(() => UPilotUpmRequestObservation.ResetAll("service_reset"));
+            Reset(() => UPilotMcpServerManager.Instance.ResetStopObservation("service_reset"));
             Reset(() => UPilotOperationTracker.Instance.AbortActive());
             Reset(() => Automation.UPilotAutomationStepService.ResetActive());
             Reset(() => _testService?.ResetActive());
@@ -629,6 +639,7 @@ namespace CodingRiver.UPilot
 
         public void Stop()
         {
+            UPilotUnityConfiguration.ResetStartupDelay();
             var unityPid = Process.GetCurrentProcess().Id;
             Debug.Log($"[UPilotBridge] 请求关闭 Bridge；宿主 Unity PID={unityPid}；已启动={_started}；连接状态={_ws?.State}。");
             var wasAuthenticated = _isAuthenticated;
@@ -732,7 +743,7 @@ namespace CodingRiver.UPilot
         {
             while (_controlQueue.TryDequeue(out var control))
             {
-                try { control(); } catch (Exception ex) { Debug.LogError("[UPilot] Control failed: " + ex.Message); }
+                try { control(); } catch (Exception ex) { Logger.ReportFailure("SYSTEM", "Control failed", ex, fingerprint: "control"); }
             }
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _activeSceneName = SceneManager.GetActiveScene().name;
@@ -752,6 +763,10 @@ namespace CodingRiver.UPilot
                     _ = PublishExecutionStateAsync("play_mode_recovered", _cts.Token);
             }
 
+            UPilotUnityConfiguration.Update(_started && _isAuthenticated && _ws != null &&
+                _ws.State == WebSocketState.Open && !_admissionClosed && !_resettingWork &&
+                !_cachedIsCompiling && !_cachedIsUpdating, _ws);
+
             while (true)
             {
                 Action action;
@@ -761,7 +776,8 @@ namespace CodingRiver.UPilot
                     Volatile.Write(ref _executingQueueAction, action);
                 }
                 try { action(); }
-                catch (Exception ex) { Debug.LogError($"[UPilotBridge] main thread error: {ex}"); }
+                catch (OperationCanceledException ex) when (ex.CancellationToken.IsCancellationRequested) { }
+                catch (Exception ex) { Logger.ReportFailure("SYSTEM", "Bridge main thread error", ex); }
                 finally
                 {
                     lock (_queueObservationLock)
@@ -831,7 +847,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    ctx?.Fail("MAIN_THREAD_ERROR", ex.Message);
+                    ctx?.Fail("MAIN_THREAD_ERROR", ex.Message, emitDiagnostic: false);
                     throw;
                 }
             };
@@ -923,6 +939,7 @@ namespace CodingRiver.UPilot
                     }
 
                     _lastConnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    Logger.CloseDiagnostics("bridge-connection");
                     if (_connectFailureStreak > 0)
                     {
                         Logger.Log("NETWORK", $"WS 重连成功（曾失败 {_connectFailureStreak} 次）");
@@ -943,6 +960,9 @@ namespace CodingRiver.UPilot
 
                     var completedTask = await Task.WhenAny(recvTask, hbTask);
                     var disconnectReason = AnalyzeDisconnectReason(recvTask, hbTask, completedTask, cycleCts.Token);
+                    if (!token.IsCancellationRequested)
+                        Logger.ReportWarning("NETWORK", $"连接断开 endpoint={serverUrl} reason={disconnectReason}\n{completedTask.Exception}",
+                            scope: "bridge-connection", fingerprint: "disconnect|" + disconnectReason);
 
                     if (wasAuthenticated || _isAuthenticated)
                         tracker.RecordSystemEvent("sys.auth.lost", "认证丢失",
@@ -961,8 +981,8 @@ namespace CodingRiver.UPilot
                 catch (Exception ex)
                 {
                     _connectFailureStreak++;
-                    if (_verboseLogsEnabled)
-                        Logger.LogWarning("NETWORK", $"WS 连接失败（第 {_connectFailureStreak} 次）: {ex.Message}");
+                    Logger.ReportWarning("NETWORK", $"WS 连接失败: {ex}",
+                        scope: "bridge-connection", fingerprint: ex.GetType().FullName + "|" + ex.Message);
 
                     if (wasAuthenticated)
                         tracker.RecordSystemEvent("sys.auth.lost", "连接失败导致认证丢失",
@@ -1155,7 +1175,6 @@ namespace CodingRiver.UPilot
         private async Task HeartbeatLoopAsync(CancellationToken token)
         {
             int consecutiveFailures = 0;
-            int heartbeatCount = 0;
             while (!token.IsCancellationRequested && _ws?.State == WebSocketState.Open)
             {
                 try
@@ -1178,11 +1197,6 @@ namespace CodingRiver.UPilot
                     await SendJsonAsync(JsonUtility.ToJson(hb), token);
                     _lastHeartbeatSentAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     consecutiveFailures = 0;
-                    heartbeatCount++;
-                    if (_verboseLogsEnabled && (heartbeatCount == 1 || heartbeatCount % 5 == 0))
-                    {
-                        Logger.Log("NETWORK", $"Heartbeat OK (count={heartbeatCount})");
-                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -1191,11 +1205,9 @@ namespace CodingRiver.UPilot
                 catch (Exception ex)
                 {
                     consecutiveFailures++;
-                    if (_verboseLogsEnabled)
-                        Logger.LogWarning("NETWORK", $"Heartbeat send failed ({consecutiveFailures}): {ex.Message}");
                     if (consecutiveFailures >= 3)
                     {
-                        throw new Exception($"Heartbeat failed {consecutiveFailures} times consecutively, forcing reconnect");
+                        throw new Exception($"Heartbeat failed {consecutiveFailures} times consecutively, forcing reconnect", ex);
                     }
                 }
                 await _heartbeatIntervalChanged.WaitAsync(HeartbeatIntervalMs, token).ConfigureAwait(false);
@@ -1396,13 +1408,15 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogError("COMMAND", $"Unhandled command exception: {envelope.name} id={id} | {ex.Message}");
                 if (CommandResultAlreadyReported(id))
+                {
+                    Logger.ReportFailure("COMMAND", $"Post-result exception cmd={envelope.name} id={id}", ex, id);
                     return;
+                }
 
                 try
                 {
-                    await SendErrorAsync(id, "INTERNAL_ERROR", $"命令处理异常：{ex.Message}", token, envelope.name);
+                    await SendErrorAsync(id, "INTERNAL_ERROR", $"命令处理异常：{ex.Message}", token, envelope.name, errorDetail: null, exception: ex);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -1410,7 +1424,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception sendEx)
                 {
-                    Logger.LogWarning("COMMAND", $"Failed to report command exception: {envelope.name} id={id} | {sendEx.Message}");
+                    Logger.ReportFailure("COMMAND", $"Failed to report command exception: {envelope.name} id={id}", sendEx, id);
                 }
             }
         }
@@ -1559,7 +1573,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("UPilot.Flow", $"UPilot Flow MCP bridge is unavailable: {ex.Message}");
+                Logger.ReportWarning("FLOW", $"UPilot Flow MCP bridge is unavailable: {ex}");
             }
 
             _flowService = null;
@@ -1573,6 +1587,8 @@ namespace CodingRiver.UPilot
             var opCtx = UPilotOperationTracker.Instance.GetContext(id);
             var command = JsonUtility.FromJson<CompileRequestMessage>(json);
             var requestId = command?.payload?.requestId ?? string.Empty;
+            var diagnosticScope = "compile|" + (string.IsNullOrEmpty(command?.payload?.writeBatchId)
+                ? (string.IsNullOrEmpty(requestId) ? id : requestId) : command.payload.writeBatchId);
             Logger.Log("COMPILE", $"收到 compile.request: requestId={requestId} id={id}");
 
             // Fast-path: already compiling
@@ -1581,18 +1597,20 @@ namespace CodingRiver.UPilot
                 _compileService.ClearStaleCompileBusy(
                     "compile.request received while Unity is in PlayMode.",
                     ignoreEditorCompiling: true);
-                await SendErrorAsync(id, "EDITOR_IN_PLAY_MODE", "Unity 正在 PlayMode 或切换 PlayMode，不能触发脚本编译", token, "compile.request");
+                await SendErrorCoreAsync(id, "EDITOR_IN_PLAY_MODE", "Unity 正在 PlayMode 或切换 PlayMode，不能触发脚本编译", token, "compile.request", null, null, diagnosticScope);
                 return;
             }
 
             if (CurrentIsCompiling())
             {
-                await SendErrorAsync(id, "EDITOR_BUSY", "编译进行中，请稍后重试", token, "compile.request");
+                await SendErrorCoreAsync(id, "EDITOR_BUSY", "编译进行中，请稍后重试", token, "compile.request", null, null, diagnosticScope);
                 return;
             }
             opCtx?.Step("参数校验通过，准备触发编译");
 
             var startTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            string rejectedMode = null;
+            string startFailureCode = null;
             EnqueueTracked(id, () =>
             {
                 if (!_compileService.TryBeginCompile(
@@ -1601,6 +1619,8 @@ namespace CodingRiver.UPilot
                     command?.payload?.writeBatchCreatedAt ?? 0,
                     () => PublishExecutionStateBounded("compile_queued")))
                 {
+                    startFailureCode = _compileService.LastStartFailureCode;
+                    rejectedMode = UPilotPlayModeCompilePolicy.CurrentMode;
                     startTcs.TrySetResult(false);
                     return;
                 }
@@ -1611,17 +1631,19 @@ namespace CodingRiver.UPilot
             if (!compileStarted)
             {
                 var persistenceFailed = string.Equals(
-                    _compileService.LastStartFailureCode,
+                    startFailureCode,
                     "StatePersistenceFailed",
                     StringComparison.Ordinal);
-                await SendErrorAsync(
+                var playModeRejected = startFailureCode == "EditorInPlayMode";
+                await SendErrorCoreAsync(
                     id,
-                    persistenceFailed ? "STATE_PERSISTENCE_FAILED" : "EDITOR_BUSY",
-                    persistenceFailed ? "编译前状态持久化失败，未触发编译" : "编译进行中，请稍后重试",
+                    persistenceFailed ? "STATE_PERSISTENCE_FAILED" : playModeRejected ? "EDITOR_IN_PLAY_MODE" : "EDITOR_BUSY",
+                    persistenceFailed ? "编译前状态持久化失败，未触发编译" : playModeRejected ? $"Unity 正在播放、暂停或切换模式，未触发编译；observedMode={rejectedMode}" : "编译进行中，请稍后重试",
                     token,
-                    "compile.request");
+                    "compile.request", null, null, diagnosticScope);
                 return;
             }
+            Logger.CloseDiagnostics(diagnosticScope);
             Logger.Log("COMPILE", $"编译已触发，等待完成: requestId={requestId} timeout=120s");
 
             // compile.status / compile.started / compile.finished / compile.errors are pushed from
@@ -1633,7 +1655,7 @@ namespace CodingRiver.UPilot
             var winner = await Task.WhenAny(compileTask, timeoutTask);
             if (winner == timeoutTask)
             {
-                Logger.LogWarning("COMPILE", $"compile.request 超时 (120s): requestId={requestId}");
+
                 _compileService.ClearStaleCompileBusy("compile.request timed out before Unity reported compilation finished.");
                 await SendErrorAsync(id, "COMMAND_TIMEOUT", "编译超时", token, "compile.request");
                 return;
@@ -1745,7 +1767,7 @@ namespace CodingRiver.UPilot
 
             if (winner == delayTask)
             {
-                Logger.LogWarning("COMPILE", $"compile.wait 超时 ({timeoutMs}ms) id={id}");
+
                 await SendErrorAsync(id, "COMMAND_TIMEOUT", $"等待编译结束超时（{timeoutMs}ms）", token, "compile.wait");
                 return;
             }
@@ -2034,7 +2056,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[UPilot] 强制重启失败: {ex.Message}");
+                Logger.ReportFailure("SYSTEM", "强制重启失败", ex);
             }
         }
 
@@ -2153,10 +2175,18 @@ namespace CodingRiver.UPilot
             await SendErrorAsync(id, code, message, token, commandName, null);
         }
 
-        public async Task SendErrorAsync(string id, string code, string message, CancellationToken token,
-            string commandName, ErrorDetailPayload errorDetail)
+        public Task SendErrorAsync(string id, string code, string message, CancellationToken token,
+            string commandName, ErrorDetailPayload errorDetail) =>
+            SendErrorAsync(id, code, message, token, commandName, errorDetail, null);
+
+        public Task SendErrorAsync(string id, string code, string message, CancellationToken token,
+            string commandName, ErrorDetailPayload errorDetail, Exception exception)
+            => SendErrorCoreAsync(id, code, message, token, commandName, errorDetail, exception, null);
+
+        private async Task SendErrorCoreAsync(string id, string code, string message, CancellationToken token,
+            string commandName, ErrorDetailPayload errorDetail, Exception exception, string diagnosticScope)
         {
-            Logger.LogWarning("NETWORK", $"TX error [{code}] {Logger.TruncatePayload(message)}  cmd={commandName} id={id}");
+            ReportCommandError(id, commandName, code, message, exception, diagnosticScope);
             if (errorDetail != null)
             {
                 errorDetail.commandId = id;
@@ -2193,6 +2223,22 @@ namespace CodingRiver.UPilot
             }
             await SendJsonAsync(json, token);
             UPilotOperationTracker.Instance.GetContext(id)?.MarkReported(true);
+        }
+
+        internal static void ReportCommandError(string id, string commandName, string code, string message,
+            Exception exception = null, string diagnosticScope = null)
+        {
+            // Cancellation is a normal terminal result. Cleanup faults have their own error code.
+            if (code == "EXECUTION_CANCELLED" || code == "OPERATION_CANCELLED") return;
+            string context = $"[{code}] {message} cmd={commandName} id={id}";
+            bool expected = code == "INVALID_PARAMS" || code == "INVALID_PAYLOAD" || code == "EDITOR_BUSY" ||
+                code == "EDITOR_IN_PLAY_MODE" || code == "COMMAND_NOT_FOUND" || code == "TEST_SELECTORS_INVALID" || code == "UPILOT_RECONNECT_PENDING";
+            if (expected)
+                Logger.ReportWarning("COMMAND", context + (exception == null ? "" : "\n" + exception),
+                    scope: diagnosticScope ?? id,
+                    fingerprint: commandName + "|" + code + "|" + message);
+            else
+                Logger.ReportFailure("COMMAND", context, exception, id, terminal: true);
         }
 
         internal EditorContextPayload GetEditorExecutionContext(string source) =>
@@ -2333,7 +2379,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("SYSTEM", $"恢复 EditorExecutionState identity 失败: {ex.Message}");
+                Logger.ReportFailure("SYSTEM", "恢复 EditorExecutionState identity 失败", ex, fingerprint: "execution-state-restore");
             }
 
             if (string.IsNullOrEmpty(_producerEpoch))
@@ -2464,10 +2510,10 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("SYSTEM",
+                    Logger.ReportFailure("SYSTEM",
                         $"持久化 EditorExecutionState 失败: path={executionStatePath}; " +
                         $"sequence={payload.sequence}; transition={payload.transition}; " +
-                        $"attempts={ExecutionStatePersistenceAttempts}; {ex.Message}");
+                        $"attempts={ExecutionStatePersistenceAttempts}", ex, fingerprint: "execution-state-persist|" + executionStatePath);
                     return false;
                 }
                 finally
@@ -2482,10 +2528,10 @@ namespace CodingRiver.UPilot
                     }
                 }
 
-                Logger.LogWarning("SYSTEM",
+                Logger.ReportFailure("SYSTEM",
                     $"持久化 EditorExecutionState 失败: path={executionStatePath}; " +
                     $"sequence={payload.sequence}; transition={payload.transition}; " +
-                    $"attempts={ExecutionStatePersistenceAttempts}");
+                    $"attempts={ExecutionStatePersistenceAttempts}", fingerprint: "execution-state-persist|" + executionStatePath);
                 return false;
             }
         }
@@ -2515,7 +2561,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("NETWORK", $"Publish {transition} failed: {ex.Message}");
+                Logger.ReportFailure("NETWORK", $"Publish {transition} failed", ex, fingerprint: "execution-state-publish|" + transition);
                 return false;
             }
         }
@@ -2705,7 +2751,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("NETWORK", $"Send domain_reload.starting failed: {ex.Message}");
+                    Logger.ReportFailure("NETWORK", "Send domain_reload.starting failed", ex);
                 }
             }
         }
@@ -2887,7 +2933,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("COMPILE", $"Send {eventName} failed: {ex.Message}");
+                Logger.ReportFailure("COMPILE", $"Send {eventName} failed", ex, fingerprint: eventName);
             }
         }
 
@@ -2914,7 +2960,7 @@ namespace CodingRiver.UPilot
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("COMPILE", $"Send compile.errors failed: {ex.Message}");
+                Logger.ReportFailure("COMPILE", "Send compile.errors failed", ex);
             }
         }
 
@@ -2946,7 +2992,7 @@ namespace CodingRiver.UPilot
                 string.Equals(envelope.name, "session.heartbeat", StringComparison.OrdinalIgnoreCase)) return;
             if (string.Equals(envelope.name, "upilot_flow.results", StringComparison.OrdinalIgnoreCase)) return;
 
-            var payload = Logger.TruncatePayload(UPilotWireJson.StripEnvelopeForDisplay(json));
+            var payload = UPilotWireJson.StripEnvelopeForDisplay(json);
             Logger.LogNetwork("NETWORK",
                 $"sessionId={envelope.sessionId} | name={envelope.name} | type={envelope.type} | id={envelope.id} | {payload}",
                 isSend: false);
@@ -2961,7 +3007,7 @@ namespace CodingRiver.UPilot
             if (type == "heartbeat") return;
             if (string.Equals(envelope.name, "upilot_flow.results", StringComparison.OrdinalIgnoreCase)) return;
 
-            var payload = Logger.TruncatePayload(UPilotWireJson.StripEnvelopeForDisplay(json));
+            var payload = UPilotWireJson.StripEnvelopeForDisplay(json);
             Logger.LogNetwork("NETWORK",
                 $"sessionId={envelope.sessionId} | name={envelope.name} | type={envelope.type} | id={envelope.id} | {payload}",
                 isSend: true);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -16,6 +16,7 @@ namespace CodingRiver.UPilot.Tests.Automation
     public class UPilotAutomationStepServiceTests
     {
         private static readonly List<string> Calls = new();
+        private static Action OnConstruct;
         private static readonly Type Service = typeof(UPilotAutomationStepService);
         private static readonly FieldInfo ExecutorField = Field("s_executor");
         private static readonly FieldInfo RegistryField = Field("s_registry");
@@ -31,6 +32,7 @@ namespace CodingRiver.UPilot.Tests.Automation
 
         public sealed class Probe : AutomationStepBase
         {
+            public Probe() { var callback = OnConstruct; OnConstruct = null; callback?.Invoke(); }
             public override void Execute(string runId, string instanceId, string contextJson, string arguments)
             {
                 Calls.Add("execute:" + arguments);
@@ -57,18 +59,20 @@ namespace CodingRiver.UPilot.Tests.Automation
             Directory.CreateDirectory(_directory);
             _store = Path.Combine(_directory, "step-run.json");
             Calls.Clear();
+            OnConstruct = null;
             _isolated = true;
             var registry = Registry(Entry<Probe>("probe"));
             RegistryField.SetValue(null, registry);
             StoreField.SetValue(null, _store);
             ErrorField.SetValue(null, "");
-            ExecutorField.SetValue(null, new AutomationStepExecutor(registry, _store));
+            ExecutorField.SetValue(null, new AutomationStepExecutor(registry, _store, failureDiagnostic: message => TestContext.WriteLine(message)));
             Invoke("RefreshUpdateSubscription");
         }
 
         [TearDown]
         public void TearDown()
         {
+            OnConstruct = null;
             if (!_isolated) return;
             try { Executor?.Dispose(); }
             finally
@@ -101,6 +105,21 @@ namespace CodingRiver.UPilot.Tests.Automation
         }
         private static int UpdateSubscriptions => EditorApplication.update?.GetInvocationList().Count(callback =>
             callback.Method.DeclaringType == Service && callback.Method.Name == "Update") ?? 0;
+
+        [Test] public void CompilationDuringRestoreConstructionInterruptsTheUnpublishedExecutor()
+        {
+            Start(Item("probe", "wait"), Item("probe", "finally", "Finally")); Invoke("Update");
+            Executor.Dispose(); ExecutorField.SetValue(null, null);
+            OnConstruct = () => Invoke("OnCompilationStarted", new object());
+            UnityEngine.TestTools.LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("STEP_COMPILATION_STARTED"));
+            Invoke("Initialize"); Invoke("Update");
+            Assert.That(Calls, Is.EqualTo(new[] { "execute:wait" }));
+            Assert.That(Executor.State.status, Is.EqualTo("Failed"));
+            Assert.That(Executor.State.error.code, Is.EqualTo("STEP_COMPILATION_STARTED"));
+            Assert.That(Executor.State.compilationReportState, Is.EqualTo("Written"));
+            Assert.That(Field("s_initializingExecutor").GetValue(null), Is.Null);
+            Assert.That(Executor.Busy, Is.False);
+        }
 
         private static void AssertReadyIdle()
         {
@@ -203,7 +222,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             long now = AutomationStepJson.Now;
             Executor.Dispose();
             ExecutorField.SetValue(null, new AutomationStepExecutor((AutomationStepRegistry)RegistryField.GetValue(null),
-                _store, () => now));
+                _store, () => now, failureDiagnostic: message => TestContext.WriteLine(message)));
             var run = Start(Item("probe", "wait"));
             var live = (AutomationStepRun)typeof(AutomationStepExecutor).GetField("_run",
                 BindingFlags.Instance | BindingFlags.NonPublic).GetValue(Executor);
@@ -258,10 +277,13 @@ namespace CodingRiver.UPilot.Tests.Automation
             bool failClock = false;
             Executor.Dispose();
             ExecutorField.SetValue(null, new AutomationStepExecutor((AutomationStepRegistry)RegistryField.GetValue(null),
-                _store, () => failClock ? throw new InvalidOperationException("old finish failed") : AutomationStepJson.Now));
+                _store, () => failClock ? throw new InvalidOperationException("old finish failed") : AutomationStepJson.Now, failureDiagnostic: message => TestContext.WriteLine(message)));
             Start(Item("probe", "wait"));
             var previous = Executor;
             failClock = true;
+            // Interruption tracing and final log closure each encounter the injected clock fault.
+            UnityEngine.TestTools.LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("执行日志不完整[\\s\\S]*old finish failed"));
+            UnityEngine.TestTools.LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("执行日志不完整[\\s\\S]*old finish failed"));
             var error = Assert.Throws<AggregateException>(() => UPilotAutomationStepService.ResetActive());
             Assert.That(error.InnerExceptions.Any(ex => ex.Message == "old finish failed"), Is.True);
             Assert.That(Executor, Is.Not.SameAs(previous));
